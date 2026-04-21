@@ -388,6 +388,9 @@ impl CatCache {
             .extend(catalog.rewrite_rows().iter().cloned());
         cache.trigger_rows.extend(catalog.triggers.iter().cloned());
         cache
+            .policy_rows
+            .extend(catalog.policy_rows().iter().cloned());
+        cache
             .publication_rows
             .extend(catalog.publication_rows().iter().cloned());
         cache
@@ -401,6 +404,7 @@ impl CatCache {
         sort_pg_inherits_rows(&mut cache.inherit_rows);
         sort_pg_rewrite_rows(&mut cache.rewrite_rows);
         sort_pg_trigger_rows(&mut cache.trigger_rows);
+        sort_pg_policy_rows(&mut cache.policy_rows);
         sort_pg_publication_rows(&mut cache.publication_rows);
         sort_pg_publication_rel_rows(&mut cache.publication_rel_rows);
         sort_pg_publication_namespace_rows(&mut cache.publication_namespace_rows);
@@ -422,6 +426,7 @@ impl CatCache {
             rows.indexes,
             rows.rewrites,
             rows.triggers,
+            rows.policies,
             rows.publications,
             rows.publication_rels,
             rows.publication_namespaces,
@@ -462,6 +467,7 @@ impl CatCache {
         index_rows: Vec<PgIndexRow>,
         rewrite_rows: Vec<PgRewriteRow>,
         trigger_rows: Vec<PgTriggerRow>,
+        policy_rows: Vec<PgPolicyRow>,
         publication_rows: Vec<PgPublicationRow>,
         publication_rel_rows: Vec<PgPublicationRelRow>,
         publication_namespace_rows: Vec<PgPublicationNamespaceRow>,
@@ -532,6 +538,8 @@ impl CatCache {
         sort_pg_rewrite_rows(&mut cache.rewrite_rows);
         cache.trigger_rows = trigger_rows;
         sort_pg_trigger_rows(&mut cache.trigger_rows);
+        cache.policy_rows = policy_rows;
+        sort_pg_policy_rows(&mut cache.policy_rows);
         cache.publication_rows = publication_rows;
         sort_pg_publication_rows(&mut cache.publication_rows);
         cache.publication_rel_rows = publication_rel_rows;

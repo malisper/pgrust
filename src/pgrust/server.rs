@@ -18,7 +18,7 @@ mod tests {
     use std::os::unix::net::UnixStream;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
     static NEXT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
@@ -954,20 +954,24 @@ mod tests {
             &mut busy_stream,
             "select * from generate_series(1, 1000000000)",
         );
-        thread::sleep(Duration::from_millis(20));
 
-        send_query(
-            &mut admin_stream,
-            "select pid, datname, usename, state, query \
+        let query = "select pid, datname, usename, state, query \
              from pg_stat_activity \
-             where query = 'select * from generate_series(1, 1000000000)'",
-        );
-        let response = read_until_ready(&mut admin_stream, "pg_stat_activity");
-        let rows = response
-            .iter()
-            .filter(|(kind, _)| *kind == b'D')
-            .map(|(_, body)| data_row_values(body))
-            .collect::<Vec<_>>();
+             where query = 'select * from generate_series(1, 1000000000)'";
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let rows = loop {
+            send_query(&mut admin_stream, query);
+            let response = read_until_ready(&mut admin_stream, "pg_stat_activity");
+            let rows = response
+                .iter()
+                .filter(|(kind, _)| *kind == b'D')
+                .map(|(_, body)| data_row_values(body))
+                .collect::<Vec<_>>();
+            if !rows.is_empty() || Instant::now() >= deadline {
+                break rows;
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0][1], Some("postgres".into()));
         assert_eq!(rows[0][2], Some("postgres".into()));

@@ -469,7 +469,7 @@ impl Session {
         db.install_row_security_enabled(self.client_id, self.row_security_enabled());
         db.install_temp_backend_id(self.client_id, self.temp_backend_id);
         db.install_stats_state(self.client_id, Arc::clone(&self.stats_state));
-        self.execute_internal(db, sql)
+        stacker::grow(32 * 1024 * 1024, || self.execute_internal(db, sql))
     }
 
     fn execute_internal(&mut self, db: &Database, sql: &str) -> Result<StatementResult, ExecError> {

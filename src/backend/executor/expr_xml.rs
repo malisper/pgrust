@@ -56,7 +56,9 @@ fn parse_xml_decl_attributes(body: &str) -> Result<Vec<(String, String)>, String
             break;
         }
         let name_start = i;
-        while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || matches!(bytes[i], b'_' | b':' | b'-')) {
+        while i < bytes.len()
+            && (bytes[i].is_ascii_alphanumeric() || matches!(bytes[i], b'_' | b':' | b'-'))
+        {
             i += 1;
         }
         if i == name_start {
@@ -98,7 +100,9 @@ fn validate_xml_declaration(text: &str, option: XmlOptionSetting) -> Result<(), 
         .strip_prefix("<?xml")
         .and_then(|rest| rest.strip_suffix("?>"))
         .map(str::trim)
-        .ok_or_else(|| xml_validation_error_for_option(text, option, "malformed XML declaration".into()))?;
+        .ok_or_else(|| {
+            xml_validation_error_for_option(text, option, "malformed XML declaration".into())
+        })?;
     let attrs = parse_xml_decl_attributes(body)
         .map_err(|detail| xml_validation_error_for_option(text, option, detail))?;
     for (name, value) in attrs {

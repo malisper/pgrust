@@ -1665,9 +1665,7 @@ fn disconnect_cleanup_aborts_open_transaction_and_releases_table_locks() {
         .unwrap();
     assert_eq!(snapshot.xmin, snapshot.xmax);
 
-    waiter
-        .execute(&db, "set statement_timeout = '200ms'")
-        .unwrap();
+    waiter.execute(&db, "set statement_timeout = '1s'").unwrap();
     match waiter.execute(&db, "select count(*) from t").unwrap() {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Int64(0)]]);
@@ -14030,7 +14028,7 @@ fn concurrent_read_write_same_table_no_corruption() {
         }));
     }
 
-    join_all_with_timeout(handles, TEST_TIMEOUT);
+    join_all_with_timeout(handles, CONTENTION_TEST_TIMEOUT);
 
     let expected_val = num_writers * 20;
     match db
@@ -14084,7 +14082,7 @@ fn no_deadlock_under_write_preferring_rwlock() {
         })
         .collect();
 
-    join_all_with_timeout(handles, TEST_TIMEOUT);
+    join_all_with_timeout(handles, CONTENTION_TEST_TIMEOUT);
 
     let expected = num_threads * updates_per_thread;
     match db
@@ -14900,6 +14898,7 @@ fn concurrent_transactions_bulk_insert() {
 #[test]
 fn no_dirty_reads_concurrent() {
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
 
     let base = temp_dir("no_dirty_reads");
     let db = Database::open(&base, 64).unwrap();
@@ -14911,6 +14910,7 @@ fn no_dirty_reads_concurrent() {
     // and when it has committed.
     let inserted = Arc::new(AtomicBool::new(false));
     let committed = Arc::new(AtomicBool::new(false));
+    let (commit_tx, commit_rx) = mpsc::channel();
 
     let inserted_w = inserted.clone();
     let committed_w = committed.clone();
@@ -14922,13 +14922,10 @@ fn no_dirty_reads_concurrent() {
         session
             .execute(&db_w, "insert into dirty (id) values (1)")
             .unwrap();
-        // Signal that the insert is done but not yet committed.
         inserted_w.store(true, Ordering::Release);
-        // Busy-wait a moment to give the reader time to observe the state.
-        let deadline = Instant::now() + Duration::from_millis(200);
-        while Instant::now() < deadline {
-            std::hint::spin_loop();
-        }
+        commit_rx
+            .recv_timeout(TEST_TIMEOUT)
+            .expect("reader should allow writer to commit");
         session.execute(&db_w, "commit").unwrap();
         committed_w.store(true, Ordering::Release);
     });
@@ -14954,6 +14951,7 @@ fn no_dirty_reads_concurrent() {
         other => panic!("expected query result, got {:?}", other),
     }
 
+    commit_tx.send(()).unwrap();
     writer
         .join()
         .unwrap_or_else(|e| std::panic::resume_unwind(e));

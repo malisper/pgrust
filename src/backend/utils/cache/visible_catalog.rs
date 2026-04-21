@@ -14,8 +14,10 @@ use crate::include::catalog::{
     PgTypeRow, bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
     bootstrap_pg_language_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
     bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
+    synthetic_range_proc_rows_by_name,
 };
 use crate::pgrust::database::DatabaseStatsStore;
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone)]
 pub struct VisibleCatalog {
@@ -122,6 +124,20 @@ impl VisibleCatalog {
     }
 }
 
+fn dedup_proc_rows(rows: &mut Vec<PgProcRow>) {
+    let mut seen = BTreeSet::new();
+    rows.retain(|row| {
+        seen.insert((
+            row.proname.clone(),
+            row.prorettype,
+            row.proargtypes.clone(),
+            row.prokind,
+            row.proretset,
+            row.prosrc.clone(),
+        ))
+    });
+}
+
 impl CatalogLookup for VisibleCatalog {
     fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation> {
         self.relcache
@@ -193,11 +209,18 @@ impl CatalogLookup for VisibleCatalog {
 
     fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
         if let Some(catcache) = self.catcache.as_ref() {
-            return catcache
+            let mut rows = catcache
                 .proc_rows_by_name(name)
                 .into_iter()
                 .cloned()
-                .collect();
+                .collect::<Vec<_>>();
+            rows.extend(synthetic_range_proc_rows_by_name(
+                name,
+                &self.type_rows(),
+                &self.range_rows(),
+            ));
+            dedup_proc_rows(&mut rows);
+            return rows;
         }
 
         let normalized = normalize_name(name);
@@ -205,11 +228,12 @@ impl CatalogLookup for VisibleCatalog {
             .into_iter()
             .filter(|row| row.proname.eq_ignore_ascii_case(normalized))
             .collect();
-        rows.extend(crate::include::catalog::synthetic_range_proc_rows_by_name(
+        rows.extend(synthetic_range_proc_rows_by_name(
             name,
             &self.type_rows(),
             &self.range_rows(),
         ));
+        dedup_proc_rows(&mut rows);
         rows
     }
 
@@ -545,6 +569,7 @@ mod tests {
             base.index_rows(),
             base.rewrite_rows(),
             base.trigger_rows(),
+            base.policy_rows(),
             base.publication_rows(),
             base.publication_rel_rows(),
             base.publication_namespace_rows(),
@@ -578,7 +603,9 @@ mod tests {
         );
         let visible = VisibleCatalog::new(RelCache::default(), Some(filtered));
 
-        assert!(visible.proc_rows_by_name("lower").is_empty());
+        let lower_rows = visible.proc_rows_by_name("lower");
+        assert!(!lower_rows.is_empty());
+        assert!(lower_rows.iter().all(|row| row.prosrc == "range_lower"));
     }
 
     #[test]

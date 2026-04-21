@@ -745,24 +745,14 @@ fn rewrite_semantic_expr(
                 named_args: named_args
                     .into_iter()
                     .map(|arg| {
-                        rewrite_semantic_expr(
-                            arg,
-                            catalog,
-                            expanded_views,
-                            active_policy_relations,
-                        )
+                        rewrite_semantic_expr(arg, catalog, expanded_views, active_policy_relations)
                     })
                     .collect::<Result<Vec<_>, _>>()?,
                 arg_names,
                 args: args
                     .into_iter()
                     .map(|arg| {
-                        rewrite_semantic_expr(
-                            arg,
-                            catalog,
-                            expanded_views,
-                            active_policy_relations,
-                        )
+                        rewrite_semantic_expr(arg, catalog, expanded_views, active_policy_relations)
                     })
                     .collect::<Result<Vec<_>, _>>()?,
                 xml_option,

@@ -1084,6 +1084,9 @@ fn bind_insert_column_defaults(
                 };
                 return Ok(expr);
             }
+            if let Some(value) = column.missing_default_value.clone() {
+                return Ok(Expr::Const(value));
+            }
             column
                 .default_expr
                 .as_ref()

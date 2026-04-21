@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::catalog::catalog::scalar_type_for_sql_type;
-use crate::backend::parser::derive_literal_default_value;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::relcache::{IndexRelCacheEntry, RelCache, RelCacheEntry};
 use crate::include::access::tupdesc::AttributeDesc;
@@ -259,14 +258,6 @@ fn column_desc_from_file(column: ColumnDescFile) -> ColumnDesc {
         .default_expr
         .as_deref()
         .and_then(default_sequence_oid_from_default_expr);
-    let missing_default_value = if default_sequence_oid.is_some() {
-        None
-    } else {
-        column
-            .default_expr
-            .as_deref()
-            .and_then(|sql| derive_literal_default_value(sql, column.sql_type).ok())
-    };
     ColumnDesc {
         name: column.name,
         storage: column.storage,
@@ -286,6 +277,6 @@ fn column_desc_from_file(column: ColumnDescFile) -> ColumnDesc {
         attrdef_oid: column.attrdef_oid,
         default_expr: column.default_expr,
         default_sequence_oid,
-        missing_default_value,
+        missing_default_value: None,
     }
 }

@@ -94,8 +94,8 @@ pub(crate) use rules::{
 pub use scope::BoundRelation;
 use scope::*;
 pub(crate) use scope::{BoundScope, scope_for_relation, shift_scope_rtindexes};
-use std::collections::BTreeSet;
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::rc::Rc;
 use system_views::*;
 use window::*;

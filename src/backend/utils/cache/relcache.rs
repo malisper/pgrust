@@ -439,15 +439,9 @@ impl RelCache {
                             crate::pgrust::database::default_sequence_oid_from_default_expr(
                                 &attrdef.adbin,
                             );
-                        desc.missing_default_value = if desc.default_sequence_oid.is_some() {
-                            None
-                        } else {
-                            crate::backend::parser::derive_literal_default_value(
-                                &attrdef.adbin,
-                                desc.sql_type,
-                            )
-                            .ok()
-                        };
+                        // Avoid reparsing every catalog default during relcache rebuilds.
+                        // `missing_column_value` can still derive literal defaults lazily.
+                        desc.missing_default_value = None;
                     }
                     Ok(desc)
                 })
@@ -1020,6 +1014,7 @@ mod tests {
             rows.indexes,
             rows.rewrites,
             rows.triggers,
+            rows.policies,
             rows.publications,
             rows.publication_rels,
             rows.publication_namespaces,
