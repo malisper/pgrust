@@ -901,6 +901,9 @@ fn apply_implicit_sign(spec: &FormatSpec, rendered: &mut [String], negative: boo
     {
         return;
     }
+    if spec.fill_mode && !negative {
+        return;
+    }
     let Some(anchor_idx) = find_number_anchor(spec, rendered).or_else(|| {
         rendered
             .iter()
@@ -919,7 +922,7 @@ fn apply_implicit_sign(spec: &FormatSpec, rendered: &mut [String], negative: boo
 fn trim_fill_mode_fraction(spec: &FormatSpec, rendered: &mut [String], decimal_idx: usize) {
     let mut trimming = false;
     for idx in (decimal_idx + 1..spec.tokens.len()).rev() {
-        match spec.tokens[idx] {
+        match &spec.tokens[idx] {
             Token::Digit9 => {
                 if rendered[idx].is_empty() || rendered[idx] == "0" {
                     rendered[idx].clear();
@@ -947,7 +950,7 @@ fn trim_fill_mode_integer(spec: &FormatSpec, rendered: &mut [String], int_end: u
         return;
     };
     for idx in 0..anchor_idx {
-        match spec.tokens[idx] {
+        match &spec.tokens[idx] {
             Token::Digit9 | Token::Group => rendered[idx].clear(),
             Token::Literal(_) => {}
             Token::Digit0 | Token::Decimal | Token::Sign(_) => {}
@@ -959,14 +962,7 @@ fn trim_fill_mode_edges(spec: &FormatSpec, rendered: &mut [String]) {
     let mut start = 0usize;
     while start < rendered.len() {
         match &spec.tokens[start] {
-            Token::Literal(text) if !text.is_empty() => break,
-            Token::Literal(_) => {
-                if rendered[start].is_empty() {
-                    start += 1;
-                    continue;
-                }
-                break;
-            }
+            Token::Literal(_) => break,
             _ if rendered[start].is_empty() || rendered[start] == " " => {
                 rendered[start].clear();
                 start += 1;
@@ -979,14 +975,7 @@ fn trim_fill_mode_edges(spec: &FormatSpec, rendered: &mut [String]) {
     while end > start {
         let idx = end - 1;
         match &spec.tokens[idx] {
-            Token::Literal(text) if !text.is_empty() => break,
-            Token::Literal(_) => {
-                if rendered[idx].is_empty() {
-                    end -= 1;
-                    continue;
-                }
-                break;
-            }
+            Token::Literal(_) => break,
             _ if rendered[idx].is_empty() || rendered[idx] == " " => {
                 rendered[idx].clear();
                 end -= 1;
@@ -1212,35 +1201,6 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
         }
     };
 
-    for (idx, token) in spec.tokens.iter().enumerate() {
-        if let Token::Sign(kind) = token {
-            rendered[idx] = match kind {
-                SignKind::S if idx == 0 => {
-                    if spec.fill_mode {
-                        sign_text(*kind, negative).into()
-                    } else {
-                        " ".into()
-                    }
-                }
-                SignKind::Pl if negative => " ".into(),
-                _ => sign_text(*kind, negative).into(),
-            };
-        }
-    }
-
-    if !(spec.fill_mode && matches!(spec.tokens.first(), Some(Token::Sign(SignKind::S)))) {
-        move_s_sign_to_number(spec, &mut rendered, negative);
-    }
-    apply_implicit_sign(spec, &mut rendered, negative);
-    let mut out = rendered.concat();
-    if negative
-        && spec
-            .tokens
-            .iter()
-            .any(|token| matches!(token, Token::Sign(SignKind::Pl)))
-    {
-        out = format!("-{}", out.trim_start());
-    }
     if spec.fill_mode {
         if let Some(dot_idx) = decimal_idx {
             trim_fill_mode_fraction(spec, &mut rendered, dot_idx);
@@ -1273,12 +1233,35 @@ fn format_standard_numeric(value: &NumericValue, spec: &FormatSpec) -> String {
         }
         trim_fill_mode_integer(spec, &mut rendered, int_end);
         trim_fill_mode_edges(spec, &mut rendered);
-        out = rendered.concat();
-        if out.starts_with('.') || out.starts_with("-.") || out.starts_with("+.") {
-            let dot_idx = out.find('.').unwrap_or(0);
-            if dot_idx + 1 == out.len() {
-                out.insert(dot_idx, '0');
-            }
+    }
+
+    for (idx, token) in spec.tokens.iter().enumerate() {
+        if let Token::Sign(kind) = token {
+            rendered[idx] = match kind {
+                SignKind::S if idx == 0 => " ".into(),
+                SignKind::Mi if !negative && spec.fill_mode => String::new(),
+                SignKind::Pl if negative && spec.fill_mode => String::new(),
+                SignKind::Pl if negative => " ".into(),
+                _ => sign_text(*kind, negative).into(),
+            };
+        }
+    }
+
+    move_s_sign_to_number(spec, &mut rendered, negative);
+    apply_implicit_sign(spec, &mut rendered, negative);
+    let mut out = rendered.concat();
+    if negative
+        && spec
+            .tokens
+            .iter()
+            .any(|token| matches!(token, Token::Sign(SignKind::Pl)))
+    {
+        out = format!("-{}", out.trim_start());
+    }
+    if spec.fill_mode && (out.starts_with('.') || out.starts_with("-.") || out.starts_with("+.")) {
+        let dot_idx = out.find('.').unwrap_or(0);
+        if dot_idx + 1 == out.len() {
+            out.insert(dot_idx, '0');
         }
     }
     if spec.ordinal && !negative && frac_part.chars().all(|ch| ch == '0') && decimal_idx.is_none() {
@@ -1722,11 +1705,11 @@ mod tests {
         );
         assert_eq!(
             to_char_numeric(&NumericValue::from("0"), "FMS 9 9 9 . 9 9 9").unwrap(),
-            "+0 ."
+            "   +0 .   "
         );
         assert_eq!(
             to_char_numeric(&NumericValue::from("4.31"), "FMS 9 9 9 . 9 9 9").unwrap(),
-            "+4 . 3 1"
+            "   +4 . 3 1 "
         );
         assert_eq!(
             to_char_numeric(
@@ -1734,17 +1717,15 @@ mod tests {
                 "FMS 9 9 9 9 9 9 9 9 . 9 9"
             )
             .unwrap(),
-            "-8 3 0 2 8 4 8 5 ."
+            " -8 3 0 2 8 4 8 5 .  "
         );
         let wide_fms = to_char_numeric(
             &NumericValue::from("0"),
             "FMS 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 . 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9 9",
         )
         .unwrap();
-        assert_eq!(wide_fms.len(), 39);
-        assert_eq!(wide_fms.trim(), "+0 .");
-        assert!(wide_fms.starts_with("                 +0 ."));
-        assert!(wide_fms.ends_with("                 "));
+        assert_eq!(wide_fms.len(), 37);
+        assert_eq!(wide_fms, "                +0 .                 ");
     }
 
     #[test]

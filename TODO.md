@@ -500,7 +500,8 @@ Targeted reruns and notes:
   - [done] Finish numeric input validation parity in `expr_casts.rs`, including `pg_input_is_valid('1e400000', 'numeric')`, `pg_input_error_info(...)` detail/sqlstate fields, and spaced base-prefix literals that PostgreSQL accepts
   - [done] Restore PostgreSQL `DETAIL` text for numeric typmod overflow and infinity rejection paths in inserts and `pg_input_error_info(...)`
   - Add dedicated numeric-to-integer cast errors for `NaN` and `Infinity` instead of collapsing them into generic `smallint` / `integer` / `bigint out of range`
-  - Finish `to_char(numeric, ...)` parity in `expr_format.rs`, especially `FMS` formats, scientific-format hash width, and overflow/hash rendering for wide values and infinities
+  - [done] Match PostgreSQL `FM` / `FMS` numeric trimming, sign anchoring, and literal-space rendering in `expr_format.rs`
+  - Finish remaining `to_char(numeric, ...)` parity in `expr_format.rs`, especially scientific-format hash width and overflow/hash rendering for wide values and infinities
   - Finish `to_number(..., 'RN')` / Roman numeral parity, including the aggregate validation path that currently errors in the `bool_and(to_number(roman, 'RN') = i)` check
   - Fix numeric `power()` / `exp()` edge semantics so extreme underflows collapse to exact zero, `0 ^ 0` returns `1`, and negative-base exponent edge cases match PostgreSQL
   - [done] Preserve PostgreSQL `power()` display scale for special finite results like `0 ^ 4.2` and `1 ^ 4.2`, which should render with 16 fractional digits instead of bare `0` / `1`
