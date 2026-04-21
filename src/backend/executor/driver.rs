@@ -154,6 +154,7 @@ fn execute_statement_with_source(
         // until table reloptions are modeled for real.
         | Statement::AlterTableSet(_)
         | Statement::AlterTableSetRowSecurity(_)
+        | Statement::CreateStatistics(_)
         | Statement::CreatePolicy(_)
         | Statement::AlterPolicy(_)
         | Statement::DropPolicy(_) => Ok(StatementResult::AffectedRows(0)),

@@ -655,6 +655,14 @@ impl Session {
                     search_path.as_deref(),
                 )
             }
+            Statement::CreateStatistics(ref create_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_create_statistics_stmt_with_search_path(
+                    self.client_id,
+                    create_stmt,
+                    search_path.as_deref(),
+                )
+            }
             Statement::DropTrigger(ref drop_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_drop_trigger_stmt_with_search_path(
@@ -1798,6 +1806,18 @@ impl Session {
                     cid,
                     search_path.as_deref(),
                     maintenance_work_mem_kb,
+                    catalog_effects,
+                )
+            }
+            Statement::CreateStatistics(ref create_stmt) => {
+                let search_path = self.configured_search_path();
+                let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                db.execute_create_statistics_stmt_in_transaction_with_search_path(
+                    client_id,
+                    create_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
                     catalog_effects,
                 )
             }
