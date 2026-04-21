@@ -338,8 +338,11 @@ impl AccumState {
             (AggFunc::RangeIntersectAgg, _, _) => |state, values| {
                 if let AccumState::RangeIntersect { current } = state {
                     let value = values.first().unwrap_or(&Value::Null);
-                    *current = multirange_intersection_agg_transition(current.take(), value)
-                        .expect("range_intersect_agg inputs should be typechecked");
+                    *current = match value {
+                        Value::Range(_) => range_intersection_agg_transition(current.take(), value),
+                        _ => multirange_intersection_agg_transition(current.take(), value),
+                    }
+                    .expect("range_intersect_agg inputs should be typechecked");
                 }
                 Ok(())
             },

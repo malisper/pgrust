@@ -2374,6 +2374,49 @@ mod tests {
     }
 
     #[test]
+    fn resolve_function_call_prefers_range_lower_for_range_arguments() {
+        let resolved = resolve_function_call(
+            &Catalog::default(),
+            "lower",
+            &[SqlType::range(
+                crate::include::catalog::INT4RANGE_TYPE_OID,
+                crate::include::catalog::INT4_TYPE_OID,
+            )
+            .with_identity(crate::include::catalog::INT4RANGE_TYPE_OID, 0)
+            .with_range_metadata(
+                crate::include::catalog::INT4_TYPE_OID,
+                crate::include::catalog::INT4MULTIRANGE_TYPE_OID,
+                true,
+            )],
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(resolved.scalar_impl, Some(BuiltinScalarFunction::RangeLower));
+        assert_eq!(resolved.result_type, SqlType::new(SqlTypeKind::Int4));
+    }
+
+    #[test]
+    fn resolve_function_call_supports_range_merge_for_range_arguments() {
+        let range_type = SqlType::range(
+            crate::include::catalog::INT4RANGE_TYPE_OID,
+            crate::include::catalog::INT4_TYPE_OID,
+        )
+        .with_identity(crate::include::catalog::INT4RANGE_TYPE_OID, 0)
+        .with_range_metadata(
+            crate::include::catalog::INT4_TYPE_OID,
+            crate::include::catalog::INT4MULTIRANGE_TYPE_OID,
+            true,
+        );
+        let resolved =
+            resolve_function_call(&Catalog::default(), "range_merge", &[range_type, range_type], false)
+                .unwrap();
+
+        assert_eq!(resolved.scalar_impl, Some(BuiltinScalarFunction::RangeMerge));
+        assert_eq!(resolved.result_type, range_type);
+    }
+
+    #[test]
     fn resolve_function_call_infers_anyelement_result_from_array_argument() {
         let resolved = resolve_function_call(
             &Catalog::default(),

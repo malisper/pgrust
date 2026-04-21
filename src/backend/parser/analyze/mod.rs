@@ -94,6 +94,7 @@ pub(crate) use rules::{
 pub use scope::BoundRelation;
 use scope::*;
 pub(crate) use scope::{BoundScope, scope_for_relation, shift_scope_rtindexes};
+use std::collections::BTreeSet;
 use std::cell::RefCell;
 use std::rc::Rc;
 use system_views::*;
@@ -107,6 +108,20 @@ pub struct BoundIndexRelation {
     pub desc: RelationDesc,
     pub index_meta: crate::backend::utils::cache::relcache::IndexRelCacheEntry,
     pub index_exprs: Vec<Expr>,
+}
+
+fn dedup_proc_rows(rows: &mut Vec<PgProcRow>) {
+    let mut seen = BTreeSet::new();
+    rows.retain(|row| {
+        seen.insert((
+            row.proname.clone(),
+            row.prorettype,
+            row.proargtypes.clone(),
+            row.prokind,
+            row.proretset,
+            row.prosrc.clone(),
+        ))
+    });
 }
 
 pub(crate) fn bind_index_exprs(
@@ -254,6 +269,7 @@ pub trait CatalogLookup {
             &self.type_rows(),
             &self.range_rows(),
         ));
+        dedup_proc_rows(&mut rows);
         rows
     }
 
@@ -545,6 +561,7 @@ impl CatalogLookup for Catalog {
             &self.type_rows(),
             &self.range_rows(),
         ));
+        dedup_proc_rows(&mut rows);
         rows
     }
 
