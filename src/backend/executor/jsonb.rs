@@ -51,6 +51,7 @@ const NUMERIC_SHORT_DSCALE_MAX: u16 = NUMERIC_SHORT_DSCALE_MASK >> NUMERIC_SHORT
 const NBASE: u16 = 10000;
 const DEC_DIGITS: usize = 4;
 const APPROX_STACK_BYTES_PER_JSON_LEVEL: u32 = 100;
+const JSON_ERROR_CONTEXT_WINDOW: usize = 50;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum JsonbValue {
@@ -278,6 +279,45 @@ fn json_error_context(text: &str, line: usize, column: usize) -> Option<String> 
         snippet.push_str("...");
     }
     Some(format!("JSON data, line {line}: {snippet}"))
+}
+
+fn json_error_context_range(text: &str, start: usize, end: usize) -> Option<String> {
+    let chars = text.chars().collect::<Vec<_>>();
+    let start = start.min(chars.len());
+    let end = end.min(chars.len());
+
+    let mut line = 1usize;
+    let mut line_start = 0usize;
+    for (idx, ch) in chars.iter().enumerate().take(start) {
+        if *ch == '\n' {
+            line += 1;
+            line_start = idx + 1;
+        }
+    }
+
+    let line_end = chars[line_start..]
+        .iter()
+        .position(|ch| matches!(ch, '\n' | '\r'))
+        .map(|offset| line_start + offset)
+        .unwrap_or(chars.len());
+    let context_end = end.min(line_end);
+
+    let mut context_start = line_start;
+    while context_end.saturating_sub(context_start) >= JSON_ERROR_CONTEXT_WINDOW {
+        context_start += 1;
+    }
+    if context_start.saturating_sub(line_start) <= 3 {
+        context_start = line_start;
+    }
+
+    let prefix = if context_start > line_start { "..." } else { "" };
+    let suffix = if end < chars.len() && !matches!(chars[end], '\n' | '\r') {
+        "..."
+    } else {
+        ""
+    };
+    let snippet = chars[context_start..context_end].iter().collect::<String>();
+    Some(format!("JSON data, line {line}: {prefix}{snippet}{suffix}"))
 }
 
 #[derive(Debug)]
@@ -513,19 +553,21 @@ impl<'a> JsonDiagnosticParser<'a> {
     }
 
     fn error_unexpected_end(&self) -> JsonInputDiagnostic {
-        self.error_with_position("The input string ended unexpectedly.".into(), self.pos)
+        self.error_with_range("The input string ended unexpectedly.".into(), self.pos, self.pos)
     }
 
     fn error_invalid_escape(&self, escaped: char) -> JsonInputDiagnostic {
-        self.error_with_position(
+        self.error_with_range(
             format!("Escape sequence \"\\{escaped}\" is invalid."),
             self.pos.saturating_sub(1),
+            self.pos.saturating_add(1),
         )
     }
 
     fn error_unescaped_control(&self, ch: char) -> JsonInputDiagnostic {
-        self.error_with_position(
+        self.error_with_range(
             format!("Character with value 0x{:02x} must be escaped.", ch as u32),
+            self.pos,
             self.pos,
         )
     }
@@ -546,6 +588,7 @@ impl<'a> JsonDiagnosticParser<'a> {
 
     fn error_expected_found(&self, expected: &str) -> JsonInputDiagnostic {
         let token = self.current_token();
+        let (start, end) = self.current_token_range();
         let rendered = if expected == "end of input" {
             format!("Expected end of input, but found {token}.")
         } else if expected == "JSON value" {
@@ -553,7 +596,7 @@ impl<'a> JsonDiagnosticParser<'a> {
         } else {
             format!("Expected \"{expected}\", but found {token}.")
         };
-        self.error_with_position(rendered, self.pos)
+        self.error_with_range(rendered, start, end)
     }
 
     fn error_expected_one_of(&self, expected: &[&str]) -> JsonInputDiagnostic {
@@ -571,9 +614,11 @@ impl<'a> JsonDiagnosticParser<'a> {
                 .join(", "),
         };
         let token = self.current_token();
-        self.error_with_position(
+        let (start, end) = self.current_token_range();
+        self.error_with_range(
             format!("Expected {rendered_expected}, but found {token}."),
-            self.pos,
+            start,
+            end,
         )
     }
 
@@ -583,14 +628,15 @@ impl<'a> JsonDiagnosticParser<'a> {
 
     fn error_token_invalid_range(&self, start: usize, end: usize) -> JsonInputDiagnostic {
         let token = self.chars[start..end].iter().collect::<String>();
-        self.error_with_position(format!("Token \"{token}\" is invalid."), start)
+        self.error_with_range(format!("Token \"{token}\" is invalid."), start, end)
     }
 
-    fn error_with_position(&self, detail: String, pos: usize) -> JsonInputDiagnostic {
-        let (line, column) = self.line_col_at(pos);
+    fn error_with_range(&self, detail: String, start: usize, end: usize) -> JsonInputDiagnostic {
+        let (line, _column) = self.line_col_at(start);
         JsonInputDiagnostic {
             detail,
-            context: json_error_context(self.text, line, column)
+            context: json_error_context_range(self.text, start, end)
+                .or_else(|| json_error_context(self.text, line, 1))
                 .unwrap_or_else(|| format!("JSON data, line {line}: ")),
         }
     }
@@ -604,6 +650,16 @@ impl<'a> JsonDiagnosticParser<'a> {
                 format!("\"{token}\"")
             }
             None => "end of input".into(),
+        }
+    }
+
+    fn current_token_range(&self) -> (usize, usize) {
+        match self.peek() {
+            Some(ch) if is_json_delimiter(ch) && !ch.is_whitespace() => {
+                (self.pos, self.pos.saturating_add(1).min(self.chars.len()))
+            }
+            Some(_) => (self.pos, self.token_end(self.pos)),
+            None => (self.pos, self.pos),
         }
     }
 
@@ -1831,7 +1887,7 @@ mod tests {
     #[test]
     fn json_input_error_uses_postgres_style_detail_messages() {
         let cases = [
-            ("''", "Token \"'\" is invalid.", "JSON data, line 1: ''"),
+            ("''", "Token \"'\" is invalid.", "JSON data, line 1: '..."),
             (
                 "\"abc",
                 "Token \"\"abc\" is invalid.",
@@ -1845,7 +1901,7 @@ mod tests {
             (
                 "\"\\v\"",
                 "Escape sequence \"\\v\" is invalid.",
-                "JSON data, line 1: \"\\v\"",
+                "JSON data, line 1: \"\\v...",
             ),
             (
                 "[1,2,]",
@@ -1860,22 +1916,22 @@ mod tests {
             (
                 "{1:\"abc\"}",
                 "Expected string or \"}\", but found \"1\".",
-                "JSON data, line 1: {1:\"abc\"}",
+                "JSON data, line 1: {1...",
             ),
             (
                 "{\"abc\"=1}",
                 "Token \"=\" is invalid.",
-                "JSON data, line 1: {\"abc\"=1}",
+                "JSON data, line 1: {\"abc\"=...",
             ),
             (
                 "{\"abc\":1:2}",
                 "Expected \",\" or \"}\", but found \":\".",
-                "JSON data, line 1: {\"abc\":1:2}",
+                "JSON data, line 1: {\"abc\":1:...",
             ),
             (
                 "{\"abc\":1,3}",
                 "Expected string, but found \"3\".",
-                "JSON data, line 1: {\"abc\":1,3}",
+                "JSON data, line 1: {\"abc\":1,3...",
             ),
             (
                 "true false",
