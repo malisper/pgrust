@@ -1,5 +1,4 @@
 use crate::backend::executor::eval_expr;
-use crate::backend::executor::value_io::format_failing_row_detail;
 use crate::backend::parser::BoundRelationConstraints;
 use crate::backend::rewrite::RlsWriteCheck;
 use crate::include::nodes::datum::Value;
@@ -31,7 +30,6 @@ pub(crate) fn enforce_relation_constraints(
                 relation: relation_name.to_string(),
                 column: column.name.clone(),
                 constraint: constraint_name,
-                detail: Some(format_failing_row_detail(values, &ctx.datetime_config)),
             });
         }
     }
