@@ -100,7 +100,7 @@ impl fmt::Display for ParseError {
             ParseError::UnexpectedToken { actual, .. } => write!(f, "{actual}"),
             ParseError::InvalidInteger(value) => write!(f, "invalid integer: {value}"),
             ParseError::InvalidNumeric(value) => write!(f, "invalid numeric: {value}"),
-            ParseError::UnknownTable(name) => write!(f, "unknown table: {name}"),
+            ParseError::UnknownTable(name) => write!(f, "relation \"{name}\" does not exist"),
             ParseError::UnknownColumn(name) => {
                 if name.contains('.') {
                     write!(f, "column {name} does not exist")
@@ -249,6 +249,14 @@ mod tests {
         assert_eq!(
             ParseError::UnknownColumn("missing".into()).to_string(),
             "column \"missing\" does not exist"
+        );
+    }
+
+    #[test]
+    fn unknown_table_display_matches_postgres_shape() {
+        assert_eq!(
+            ParseError::UnknownTable("attmp".into()).to_string(),
+            "relation \"attmp\" does not exist"
         );
     }
 }
