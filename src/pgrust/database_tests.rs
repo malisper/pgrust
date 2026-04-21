@@ -7,16 +7,15 @@ use crate::backend::utils::misc::notices::{
     clear_notices as clear_backend_notices, take_notices as take_backend_notices,
 };
 use crate::include::catalog::{
-    FLOAT8_TYPE_OID, INT4RANGE_TYPE_OID, INT4_TYPE_OID, PG_CLASS_RELATION_OID,
+    FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, PG_CLASS_RELATION_OID,
     PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID,
 };
 use crate::include::nodes::parsenodes::MaintenanceTarget;
 use crate::include::nodes::primnodes::QueryColumn;
 use crate::pl::plpgsql::{clear_notices, take_notices};
 use std::collections::HashMap;
-use std::fs;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
 use std::time::{Duration, Instant};
@@ -180,7 +179,6 @@ fn analyze_executor_context(
         txn_waiter: Some(db.txn_waiter.clone()),
         sequences: Some(db.sequences.clone()),
         large_objects: Some(db.large_objects.clone()),
-        advisory_locks: db.advisory_locks.clone(),
         checkpoint_stats: db.checkpoint_stats_snapshot(),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         interrupts: db.interrupt_state(client_id),
@@ -188,11 +186,9 @@ fn analyze_executor_context(
         session_stats: db.session_stats_state(client_id),
         snapshot: db.txns.read().snapshot_for_command(xid, cid).unwrap(),
         client_id,
-        current_database_name: db.current_database_name(),
         session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
-        current_xid: xid,
-        statement_lock_scope_id: None,
+        active_role_oid: None,
         next_command_id: cid,
         default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
         timed: false,
@@ -1514,22 +1510,6 @@ fn relfilenode_for(db: &Database, client_id: u32, relname: &str) -> i64 {
     }
 }
 
-fn relation_oid_for(db: &Database, client_id: u32, relname: &str) -> i64 {
-    let rows = query_rows(
-        db,
-        client_id,
-        &format!("select oid from pg_class where relname = '{relname}'"),
-    );
-    match rows.as_slice() {
-        [row] => match row.first() {
-            Some(Value::Int32(value)) => i64::from(*value),
-            Some(Value::Int64(value)) => *value,
-            other => panic!("expected relation oid integer, got {:?}", other),
-        },
-        other => panic!("expected one relation oid row, got {:?}", other),
-    }
-}
-
 fn int_value(value: &Value) -> i64 {
     match value {
         Value::Int16(value) => i64::from(*value),
@@ -1551,26 +1531,6 @@ fn relation_locator_for(db: &Database, client_id: u32, relname: &str) -> crate::
         spc_oid: 0,
         db_oid: 1,
         rel_number: relfilenode_for(db, client_id, relname) as u32,
-    }
-}
-
-fn wait_for_pg_lock_row<F>(db: &Database, timeout: Duration, predicate: F) -> Vec<Value>
-where
-    F: Fn(&[Value]) -> bool,
-{
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(row) = db
-            .pg_locks_rows()
-            .into_iter()
-            .find(|row| predicate(row.as_slice()))
-        {
-            return row;
-        }
-        if Instant::now() >= deadline {
-            panic!("timed out waiting for pg_locks row");
-        }
-        thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -1713,521 +1673,6 @@ fn disconnect_cleanup_aborts_open_transaction_and_releases_table_locks() {
         }
         other => panic!("expected query result, got {other:?}"),
     }
-}
-
-#[test]
-fn advisory_session_and_transaction_locks_cleanup_and_encode_keys() {
-    let dir = temp_dir("advisory_session_xact_cleanup");
-    let db = Database::open(&dir, 64).unwrap();
-    let mut session = Session::new(1);
-
-    session
-        .execute(&db, "select pg_advisory_lock(4294967298)")
-        .unwrap();
-    assert_eq!(
-        session_query_rows(
-            &mut session,
-            &db,
-            "select classid, objid, objsubid, pid, mode, granted, fastpath \
-             from pg_locks where locktype = 'advisory'"
-        ),
-        vec![vec![
-            Value::Int64(1),
-            Value::Int64(2),
-            Value::Int16(1),
-            Value::Int32(1),
-            Value::Text("ExclusiveLock".into()),
-            Value::Bool(true),
-            Value::Bool(false),
-        ]]
-    );
-
-    session.execute(&db, "begin").unwrap();
-    session
-        .execute(&db, "select pg_advisory_xact_lock(11, 22)")
-        .unwrap();
-    assert_eq!(
-        session_query_rows(
-            &mut session,
-            &db,
-            "select classid, objid, objsubid, granted \
-             from pg_locks where locktype = 'advisory' order by objsubid, classid, objid"
-        ),
-        vec![
-            vec![
-                Value::Int64(1),
-                Value::Int64(2),
-                Value::Int16(1),
-                Value::Bool(true),
-            ],
-            vec![
-                Value::Int64(11),
-                Value::Int64(22),
-                Value::Int16(2),
-                Value::Bool(true),
-            ],
-        ]
-    );
-    assert_eq!(
-        session_query_rows(&mut session, &db, "select pg_advisory_unlock(11, 22)"),
-        vec![vec![Value::Bool(false)]]
-    );
-
-    session
-        .execute(&db, "select pg_advisory_unlock_all()")
-        .unwrap();
-    assert_eq!(
-        session_query_rows(
-            &mut session,
-            &db,
-            "select classid, objid, objsubid \
-             from pg_locks where locktype = 'advisory'"
-        ),
-        vec![vec![Value::Int64(11), Value::Int64(22), Value::Int16(2)]]
-    );
-
-    session.execute(&db, "commit").unwrap();
-    assert!(
-        session_query_rows(
-            &mut session,
-            &db,
-            "select locktype from pg_locks where locktype = 'advisory'"
-        )
-        .is_empty()
-    );
-
-    session.execute(&db, "select pg_advisory_lock(9)").unwrap();
-    session.execute(&db, "begin").unwrap();
-    session
-        .execute(&db, "select pg_advisory_xact_lock(10)")
-        .unwrap();
-    session.execute(&db, "rollback").unwrap();
-    assert_eq!(
-        session_query_rows(
-            &mut session,
-            &db,
-            "select classid, objid, objsubid \
-             from pg_locks where locktype = 'advisory'"
-        ),
-        vec![vec![Value::Int64(0), Value::Int64(9), Value::Int16(1)]]
-    );
-
-    session
-        .execute(&db, "select pg_advisory_unlock_all()")
-        .unwrap();
-    assert!(
-        session_query_rows(
-            &mut session,
-            &db,
-            "select locktype from pg_locks where locktype = 'advisory'"
-        )
-        .is_empty()
-    );
-}
-
-#[test]
-fn advisory_try_lock_shared_and_reentrant_counts_match_postgres() {
-    let dir = temp_dir("advisory_try_lock_shared_reentrant");
-    let db = Database::open(&dir, 64).unwrap();
-    let mut first = Session::new(1);
-    let mut second = Session::new(2);
-    let mut third = Session::new(3);
-
-    assert_eq!(
-        session_query_rows(&mut first, &db, "select pg_try_advisory_lock(7)"),
-        vec![vec![Value::Bool(true)]]
-    );
-    assert_eq!(
-        session_query_rows(&mut first, &db, "select pg_try_advisory_lock(7)"),
-        vec![vec![Value::Bool(true)]]
-    );
-    assert_eq!(
-        session_query_rows(&mut second, &db, "select pg_try_advisory_lock_shared(7)"),
-        vec![vec![Value::Bool(false)]]
-    );
-    assert_eq!(
-        session_query_rows(&mut first, &db, "select pg_advisory_unlock(7)"),
-        vec![vec![Value::Bool(true)]]
-    );
-    assert_eq!(
-        session_query_rows(&mut second, &db, "select pg_try_advisory_lock_shared(7)"),
-        vec![vec![Value::Bool(false)]]
-    );
-    assert_eq!(
-        session_query_rows(&mut first, &db, "select pg_advisory_unlock(7)"),
-        vec![vec![Value::Bool(true)]]
-    );
-
-    assert_eq!(
-        session_query_rows(&mut second, &db, "select pg_try_advisory_lock_shared(7)"),
-        vec![vec![Value::Bool(true)]]
-    );
-    assert_eq!(
-        session_query_rows(&mut third, &db, "select pg_try_advisory_lock_shared(7)"),
-        vec![vec![Value::Bool(true)]]
-    );
-    assert_eq!(
-        session_query_rows(&mut first, &db, "select pg_try_advisory_lock(7)"),
-        vec![vec![Value::Bool(false)]]
-    );
-
-    assert_eq!(
-        session_query_rows(&mut second, &db, "select pg_advisory_unlock_shared(7)"),
-        vec![vec![Value::Bool(true)]]
-    );
-    assert_eq!(
-        session_query_rows(&mut first, &db, "select pg_try_advisory_lock(7)"),
-        vec![vec![Value::Bool(false)]]
-    );
-    assert_eq!(
-        session_query_rows(&mut third, &db, "select pg_advisory_unlock_shared(7)"),
-        vec![vec![Value::Bool(true)]]
-    );
-    assert_eq!(
-        session_query_rows(&mut first, &db, "select pg_try_advisory_lock(7)"),
-        vec![vec![Value::Bool(true)]]
-    );
-    assert_eq!(
-        session_query_rows(&mut first, &db, "select pg_advisory_unlock(7)"),
-        vec![vec![Value::Bool(true)]]
-    );
-}
-
-#[test]
-fn advisory_lock_functions_return_null_for_null_inputs() {
-    let dir = temp_dir("advisory_lock_null_inputs");
-    let db = Database::open(&dir, 64).unwrap();
-    let mut session = Session::new(1);
-
-    assert_eq!(
-        session_query_rows(
-            &mut session,
-            &db,
-            "select \
-                pg_try_advisory_lock(null::bigint), \
-                pg_advisory_lock(null::bigint), \
-                pg_advisory_unlock(null::bigint), \
-                pg_try_advisory_xact_lock_shared(null::int4, 1)"
-        ),
-        vec![vec![Value::Null, Value::Null, Value::Null, Value::Null]]
-    );
-}
-
-#[test]
-fn statement_timeout_interrupts_waiting_advisory_lock() {
-    let dir = temp_dir("statement_timeout_waiting_advisory_lock");
-    let db = Database::open(&dir, 64).unwrap();
-    let mut holder = Session::new(1);
-    let mut waiter = Session::new(2);
-
-    holder.execute(&db, "select pg_advisory_lock(44)").unwrap();
-    waiter
-        .execute(&db, "set statement_timeout = '20ms'")
-        .unwrap();
-
-    let err = waiter
-        .execute(&db, "select pg_advisory_lock(44)")
-        .unwrap_err();
-    assert!(matches!(
-        err,
-        ExecError::Interrupted(
-            crate::backend::utils::misc::interrupts::InterruptReason::StatementTimeout
-        )
-    ));
-
-    holder
-        .execute(&db, "select pg_advisory_unlock(44)")
-        .unwrap();
-}
-
-#[test]
-fn advisory_waiters_appear_in_pg_locks_with_waitstart() {
-    use std::sync::mpsc;
-
-    let dir = temp_dir("advisory_waiters_pg_locks");
-    let db = Database::open(&dir, 64).unwrap();
-    let mut holder = Session::new(1);
-    let mut waiter = Session::new(2);
-
-    holder.execute(&db, "select pg_advisory_lock(55)").unwrap();
-    db.install_interrupt_state(2, waiter.interrupts());
-
-    let db2 = db.clone();
-    let (done_tx, done_rx) = mpsc::channel();
-    let worker = thread::spawn(move || {
-        done_tx
-            .send(waiter.execute(&db2, "select pg_advisory_xact_lock(55)"))
-            .unwrap();
-    });
-
-    let waiting_row = wait_for_pg_lock_row(&db, TEST_TIMEOUT, |row| {
-        matches!(row.first(), Some(Value::Text(locktype)) if locktype.as_str() == "advisory")
-            && row.get(11) == Some(&Value::Int32(2))
-            && row.get(13) == Some(&Value::Bool(false))
-    });
-    assert_eq!(waiting_row[12], Value::Text("ExclusiveLock".into()));
-    assert!(!matches!(waiting_row[15], Value::Null));
-    assert_eq!(
-        query_rows(
-            &db,
-            3,
-            "select pid, mode, granted, waitstart is not null \
-             from pg_locks where locktype = 'advisory' and pid = 2"
-        ),
-        vec![vec![
-            Value::Int32(2),
-            Value::Text("ExclusiveLock".into()),
-            Value::Bool(false),
-            Value::Bool(true),
-        ]]
-    );
-
-    holder
-        .execute(&db, "select pg_advisory_unlock(55)")
-        .unwrap();
-    match done_rx.recv_timeout(TEST_TIMEOUT).unwrap().unwrap() {
-        StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Null]]);
-        }
-        other => panic!("expected query result, got {other:?}"),
-    }
-    worker.join().unwrap();
-    assert!(
-        query_rows(
-            &db,
-            3,
-            "select locktype from pg_locks where locktype = 'advisory' and pid = 2"
-        )
-        .is_empty()
-    );
-}
-
-#[test]
-fn advisory_lock_waits_can_be_canceled_explicitly() {
-    use std::sync::mpsc;
-
-    let dir = temp_dir("advisory_cancel_wait");
-    let db = Database::open(&dir, 64).unwrap();
-    let mut holder = Session::new(1);
-    let mut waiter = Session::new(2);
-
-    holder.execute(&db, "select pg_advisory_lock(66)").unwrap();
-    db.install_interrupt_state(2, waiter.interrupts());
-
-    let db2 = db.clone();
-    let (done_tx, done_rx) = mpsc::channel();
-    let worker = thread::spawn(move || {
-        done_tx
-            .send(waiter.execute(&db2, "select pg_advisory_lock(66)"))
-            .unwrap();
-    });
-
-    wait_for_pg_lock_row(&db, TEST_TIMEOUT, |row| {
-        matches!(row.first(), Some(Value::Text(locktype)) if locktype.as_str() == "advisory")
-            && row.get(11) == Some(&Value::Int32(2))
-            && row.get(13) == Some(&Value::Bool(false))
-    });
-    db.interrupt_state(2)
-        .set_pending(crate::backend::utils::misc::interrupts::InterruptReason::QueryCancel);
-
-    let err = done_rx.recv_timeout(TEST_TIMEOUT).unwrap().unwrap_err();
-    assert!(matches!(
-        err,
-        ExecError::Interrupted(
-            crate::backend::utils::misc::interrupts::InterruptReason::QueryCancel
-        )
-    ));
-    holder
-        .execute(&db, "select pg_advisory_unlock(66)")
-        .unwrap();
-    worker.join().unwrap();
-}
-
-#[test]
-fn autocommit_xact_advisory_locks_release_after_statement_and_streaming_guard() {
-    let dir = temp_dir("autocommit_xact_advisory_locks");
-    let db = Database::open(&dir, 64).unwrap();
-    let mut session = Session::new(1);
-
-    session
-        .execute(&db, "select pg_advisory_xact_lock(77)")
-        .unwrap();
-    assert!(
-        query_rows(
-            &db,
-            2,
-            "select locktype from pg_locks where locktype = 'advisory' and pid = 1"
-        )
-        .is_empty()
-    );
-
-    let stmt = crate::backend::parser::parse_select("select pg_advisory_xact_lock(88), 1").unwrap();
-    let mut guard = session.execute_streaming(&db, &stmt).unwrap();
-    let slot = crate::backend::executor::exec_next(&mut guard.state, &mut guard.ctx)
-        .unwrap()
-        .expect("streaming row");
-    let values = slot.values().unwrap();
-    assert_eq!(values[1].to_owned_value(), Value::Int32(1));
-
-    assert_eq!(
-        query_rows(
-            &db,
-            2,
-            "select pid, granted from pg_locks where locktype = 'advisory' and pid = 1"
-        ),
-        vec![vec![Value::Int32(1), Value::Bool(true)]]
-    );
-
-    drop(guard);
-    assert!(
-        query_rows(
-            &db,
-            2,
-            "select locktype from pg_locks where locktype = 'advisory' and pid = 1"
-        )
-        .is_empty()
-    );
-}
-
-#[test]
-fn disconnect_cleanup_releases_advisory_locks() {
-    let dir = temp_dir("disconnect_cleanup_advisory_locks");
-    let db = Database::open(&dir, 64).unwrap();
-    let mut holder = Session::new(1);
-    let mut waiter = Session::new(2);
-
-    holder.execute(&db, "select pg_advisory_lock(91)").unwrap();
-    holder.execute(&db, "begin").unwrap();
-    holder
-        .execute(&db, "select pg_advisory_xact_lock(92)")
-        .unwrap();
-    assert_eq!(
-        query_rows(
-            &db,
-            3,
-            "select count(*) from pg_locks where locktype = 'advisory' and pid = 1"
-        ),
-        vec![vec![Value::Int64(2)]]
-    );
-
-    holder.cleanup_on_disconnect(&db);
-    assert!(
-        query_rows(
-            &db,
-            3,
-            "select locktype from pg_locks where locktype = 'advisory' and pid = 1"
-        )
-        .is_empty()
-    );
-
-    assert_eq!(
-        session_query_rows(&mut waiter, &db, "select pg_try_advisory_lock(91)"),
-        vec![vec![Value::Bool(true)]]
-    );
-    assert_eq!(
-        session_query_rows(&mut waiter, &db, "select pg_try_advisory_lock(92)"),
-        vec![vec![Value::Bool(true)]]
-    );
-}
-
-#[test]
-fn pg_locks_shows_granted_and_waiting_relation_locks() {
-    use std::sync::mpsc;
-
-    let dir = temp_dir("pg_locks_relation_rows");
-    let db = Database::open(&dir, 64).unwrap();
-    let mut holder = Session::new(1);
-
-    holder.execute(&db, "create table t (id int)").unwrap();
-    let relation_oid = relation_oid_for(&db, 1, "t");
-
-    holder.execute(&db, "begin").unwrap();
-    holder
-        .execute(&db, "comment on table t is 'held relation lock'")
-        .unwrap();
-
-    let db2 = db.clone();
-    let (done_tx, done_rx) = mpsc::channel();
-    let worker = thread::spawn(move || {
-        let mut waiter = Session::new(2);
-        done_tx
-            .send(waiter.execute(&db2, "select count(*) from t"))
-            .unwrap();
-    });
-
-    let waiting_row = wait_for_pg_lock_row(&db, TEST_TIMEOUT, |row| {
-        matches!(row.first(), Some(Value::Text(locktype)) if locktype.as_str() == "relation")
-            && row.get(2) == Some(&Value::Int64(relation_oid))
-            && row.get(11) == Some(&Value::Int32(2))
-            && row.get(13) == Some(&Value::Bool(false))
-    });
-    assert_eq!(waiting_row[12], Value::Text("AccessShareLock".into()));
-    assert!(!matches!(waiting_row[15], Value::Null));
-
-    let relation_rows = query_rows(
-        &db,
-        3,
-        &format!(
-            "select pid, mode, granted, waitstart is not null \
-             from pg_locks where locktype = 'relation' and relation = {relation_oid} \
-             order by pid, granted desc"
-        ),
-    );
-    assert!(relation_rows.contains(&vec![
-        Value::Int32(1),
-        Value::Text("AccessExclusiveLock".into()),
-        Value::Bool(true),
-        Value::Bool(false),
-    ]));
-    assert!(relation_rows.contains(&vec![
-        Value::Int32(2),
-        Value::Text("AccessShareLock".into()),
-        Value::Bool(false),
-        Value::Bool(true),
-    ]));
-
-    holder.execute(&db, "rollback").unwrap();
-    match done_rx.recv_timeout(TEST_TIMEOUT).unwrap().unwrap() {
-        StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Int64(0)]]);
-        }
-        other => panic!("expected query result, got {other:?}"),
-    }
-    worker.join().unwrap();
-}
-
-#[test]
-fn pg_locks_includes_advisory_rows_from_other_open_databases() {
-    let base = temp_dir("pg_locks_other_open_database");
-    let cluster = Cluster::open(&base, 16).unwrap();
-    let postgres = cluster.connect_database("postgres").unwrap();
-    let mut admin = Session::new(1);
-
-    admin
-        .execute(&postgres, "create database analytics")
-        .unwrap();
-    let analytics = cluster.connect_database("analytics").unwrap();
-    let mut analytics_session = Session::new(2);
-    analytics_session
-        .execute(&analytics, "select pg_advisory_lock(1234)")
-        .unwrap();
-
-    assert_eq!(
-        query_rows(
-            &postgres,
-            1,
-            "select \"database\", pid, mode, granted \
-             from pg_locks where locktype = 'advisory' and pid = 2"
-        ),
-        vec![vec![
-            Value::Int64(i64::from(analytics.database_oid)),
-            Value::Int32(2),
-            Value::Text("ExclusiveLock".into()),
-            Value::Bool(true),
-        ]]
-    );
-
-    analytics_session.cleanup_on_disconnect(&analytics);
 }
 
 #[test]
@@ -2710,9 +2155,11 @@ fn analyze_populates_pg_stats_view_and_anyarray_columns() {
          order by 1",
     );
     assert!(!histogram_dims.is_empty());
-    assert!(histogram_dims
-        .iter()
-        .all(|row| row.as_slice() == [Value::Int32(1)]));
+    assert!(
+        histogram_dims
+            .iter()
+            .all(|row| row.as_slice() == [Value::Int32(1)])
+    );
 }
 
 #[test]
@@ -3411,95 +2858,6 @@ fn explain_inherited_order_by_scan_does_not_panic() {
 }
 
 #[test]
-fn explain_update_accepts_inherited_update_statement() {
-    let dir = temp_dir("inheritance_explain_update");
-    let db = Database::open(&dir, 128).unwrap();
-
-    db.execute(
-        1,
-        "create table some_tab (f1 int, f2 int, f3 int, check (f1 < 10) no inherit)",
-    )
-    .unwrap();
-    db.execute(1, "create table some_tab_child () inherits(some_tab)")
-        .unwrap();
-    db.execute(
-        1,
-        "insert into some_tab_child select i, i + 1, 0 from generate_series(1, 1000) i",
-    )
-    .unwrap();
-    db.execute(1, "create index on some_tab_child(f1, f2)")
-        .unwrap();
-
-    let StatementResult::Query { rows, .. } = db
-        .execute(
-            1,
-            "explain (costs off) update some_tab set f3 = 11 where f1 = 12 and f2 = 13",
-        )
-        .unwrap()
-    else {
-        panic!("expected query result");
-    };
-    let lines = rows
-        .into_iter()
-        .map(|row| match row.first() {
-            Some(Value::Text(text)) => text.to_string(),
-            other => panic!("expected explain text row, got {:?}", other),
-        })
-        .collect::<Vec<_>>();
-
-    assert_eq!(lines.first().map(String::as_str), Some("Update on some_tab"));
-    assert!(
-        lines
-            .iter()
-            .any(|line| {
-                line.contains("Index Scan using") && line.contains("on some_tab_child some_tab_1")
-            }),
-        "expected EXPLAIN UPDATE to show inherited child index scan, got {lines:?}"
-    );
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("f1 =") && line.contains("12::integer") && line.contains("13::integer")),
-        "expected EXPLAIN UPDATE to show index quals, got {lines:?}"
-    );
-}
-
-#[test]
-fn explain_verbose_update_where_false_is_accepted() {
-    let dir = temp_dir("inheritance_explain_update_false");
-    let db = Database::open(&dir, 128).unwrap();
-
-    db.execute(1, "create table some_tab (a int, b int)").unwrap();
-    db.execute(1, "create table some_tab_child () inherits (some_tab)")
-        .unwrap();
-    db.execute(1, "insert into some_tab_child values (1, 2)")
-        .unwrap();
-
-    let StatementResult::Query { rows, .. } = db
-        .execute(
-            1,
-            "explain (verbose, costs off) update some_tab set a = a + 1 where false",
-        )
-        .unwrap()
-    else {
-        panic!("expected query result");
-    };
-    let lines = rows
-        .into_iter()
-        .map(|row| match row.first() {
-            Some(Value::Text(text)) => text.to_string(),
-            other => panic!("expected explain text row, got {:?}", other),
-        })
-        .collect::<Vec<_>>();
-
-    assert_eq!(lines.first().map(String::as_str), Some("Update on public.some_tab"));
-    assert!(
-        lines.iter().any(|line| line == "        One-Time Filter: false"),
-        "expected EXPLAIN VERBOSE UPDATE to show false one-time filter, got {lines:?}"
-    );
-}
-
-#[test]
 fn inherited_scan_tableoid_tracks_physical_child_relation() {
     let dir = temp_dir("inheritance_tableoid");
     let db = Database::open(&dir, 128).unwrap();
@@ -3545,35 +2903,6 @@ fn inherited_scan_tableoid_tracks_physical_child_relation() {
              order by p.a",
         ),
         vec![vec![Value::Text("parent_inh".into()), Value::Int32(1)]]
-    );
-}
-
-#[test]
-fn base_table_scan_exposes_ctid_system_column() {
-    let dir = temp_dir("scan_ctid");
-    let db = Database::open(&dir, 128).unwrap();
-    let mut session = Session::new(1);
-
-    session
-        .execute(&db, "create table ctid_tbl(a int4)")
-        .unwrap();
-    session
-        .execute(&db, "insert into ctid_tbl values (10), (20)")
-        .unwrap();
-
-    assert_eq!(
-        query_rows(&db, 1, "select ctid, a from ctid_tbl order by a"),
-        vec![
-            vec![Value::Text("(0,1)".into()), Value::Int32(10)],
-            vec![Value::Text("(0,2)".into()), Value::Int32(20)],
-        ]
-    );
-    assert_eq!(
-        query_rows(&db, 1, "select t.ctid, t.a from ctid_tbl t order by t.a"),
-        vec![
-            vec![Value::Text("(0,1)".into()), Value::Int32(10)],
-            vec![Value::Text("(0,2)".into()), Value::Int32(20)],
-        ]
     );
 }
 
@@ -3811,154 +3140,6 @@ fn nested_views_and_pg_views_work() {
                 Value::Text("second_view".into()),
                 Value::Text("postgres".into()),
                 Value::Text("select id from first_view".into()),
-            ],
-        ]
-    );
-}
-
-#[test]
-fn information_schema_view_metadata_tracks_updatable_views() {
-    let dir = temp_dir("info_schema_updatable_views");
-    let db = Database::open(&dir, 128).unwrap();
-    let mut session = Session::new(1);
-
-    session
-        .execute(&db, "create table base_tbl(a int primary key, b text)")
-        .unwrap();
-    session
-        .execute(
-            &db,
-            "create view ro_view1 as select distinct a, b from base_tbl",
-        )
-        .unwrap();
-    session
-        .execute(
-            &db,
-            "create view rw_view14 as select ctid, a, b from base_tbl",
-        )
-        .unwrap();
-    session
-        .execute(
-            &db,
-            "create view rw_view15 as select a, upper(b) from base_tbl",
-        )
-        .unwrap();
-    session
-        .execute(
-            &db,
-            "create view rw_view16 as select a, b, a as aa from base_tbl",
-        )
-        .unwrap();
-
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select table_name, is_insertable_into
-             from information_schema.tables
-             where table_name like 'r%view%'
-             order by table_name",
-        ),
-        vec![
-            vec![Value::Text("ro_view1".into()), Value::Text("NO".into())],
-            vec![Value::Text("rw_view14".into()), Value::Text("YES".into())],
-            vec![Value::Text("rw_view15".into()), Value::Text("YES".into())],
-            vec![Value::Text("rw_view16".into()), Value::Text("YES".into())],
-        ]
-    );
-
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select table_name, is_updatable, is_insertable_into
-             from information_schema.views
-             where table_name like 'r%view%'
-             order by table_name",
-        ),
-        vec![
-            vec![
-                Value::Text("ro_view1".into()),
-                Value::Text("NO".into()),
-                Value::Text("NO".into()),
-            ],
-            vec![
-                Value::Text("rw_view14".into()),
-                Value::Text("YES".into()),
-                Value::Text("YES".into()),
-            ],
-            vec![
-                Value::Text("rw_view15".into()),
-                Value::Text("YES".into()),
-                Value::Text("YES".into()),
-            ],
-            vec![
-                Value::Text("rw_view16".into()),
-                Value::Text("YES".into()),
-                Value::Text("YES".into()),
-            ],
-        ]
-    );
-
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select table_name, column_name, is_updatable
-             from information_schema.columns
-             where table_name like 'r%view%'
-             order by table_name, ordinal_position",
-        ),
-        vec![
-            vec![
-                Value::Text("ro_view1".into()),
-                Value::Text("a".into()),
-                Value::Text("NO".into()),
-            ],
-            vec![
-                Value::Text("ro_view1".into()),
-                Value::Text("b".into()),
-                Value::Text("NO".into()),
-            ],
-            vec![
-                Value::Text("rw_view14".into()),
-                Value::Text("ctid".into()),
-                Value::Text("NO".into()),
-            ],
-            vec![
-                Value::Text("rw_view14".into()),
-                Value::Text("a".into()),
-                Value::Text("YES".into()),
-            ],
-            vec![
-                Value::Text("rw_view14".into()),
-                Value::Text("b".into()),
-                Value::Text("YES".into()),
-            ],
-            vec![
-                Value::Text("rw_view15".into()),
-                Value::Text("a".into()),
-                Value::Text("YES".into()),
-            ],
-            vec![
-                Value::Text("rw_view15".into()),
-                Value::Text("upper".into()),
-                Value::Text("NO".into()),
-            ],
-            vec![
-                Value::Text("rw_view16".into()),
-                Value::Text("a".into()),
-                Value::Text("YES".into()),
-            ],
-            vec![
-                Value::Text("rw_view16".into()),
-                Value::Text("b".into()),
-                Value::Text("YES".into()),
-            ],
-            vec![
-                Value::Text("rw_view16".into()),
-                Value::Text("aa".into()),
-                Value::Text("YES".into()),
             ],
         ]
     );
@@ -4259,14 +3440,16 @@ fn committed_catalog_invalidation_evicts_other_sessions_without_global_reset() {
     let mut writer = Session::new(1);
     let mut reader = Session::new(2);
 
-    assert!(db
-        .lazy_catalog_lookup(1, None, None)
-        .lookup_any_relation("fanout_test")
-        .is_none());
-    assert!(db
-        .lazy_catalog_lookup(2, None, None)
-        .lookup_any_relation("fanout_test")
-        .is_none());
+    assert!(
+        db.lazy_catalog_lookup(1, None, None)
+            .lookup_any_relation("fanout_test")
+            .is_none()
+    );
+    assert!(
+        db.lazy_catalog_lookup(2, None, None)
+            .lookup_any_relation("fanout_test")
+            .is_none()
+    );
     {
         let states = db.backend_cache_states.read();
         let writer_state = states.get(&1).unwrap();
@@ -6212,10 +5395,7 @@ fn auto_view_errors_preserve_postgres_distinct_with_and_hint_text() {
     )
     .unwrap();
 
-    match db
-        .execute(1, "delete from distinct_view where id = 1")
-        .unwrap_err()
-    {
+    match db.execute(1, "delete from distinct_view where id = 1").unwrap_err() {
         ExecError::DetailedError {
             message,
             detail: Some(detail),
@@ -6235,10 +5415,7 @@ fn auto_view_errors_preserve_postgres_distinct_with_and_hint_text() {
         other => panic!("expected distinct view DML error, got {other:?}"),
     }
 
-    match db
-        .execute(1, "update with_view set name = 'beta' where id = 1")
-        .unwrap_err()
-    {
+    match db.execute(1, "update with_view set name = 'beta' where id = 1").unwrap_err() {
         ExecError::DetailedError {
             message,
             detail: Some(detail),
@@ -6246,10 +5423,7 @@ fn auto_view_errors_preserve_postgres_distinct_with_and_hint_text() {
             ..
         } => {
             assert_eq!(message, "cannot update view \"with_view\"");
-            assert_eq!(
-                detail,
-                "Views containing WITH are not automatically updatable."
-            );
+            assert_eq!(detail, "Views containing WITH are not automatically updatable.");
             assert_eq!(
                 hint,
                 "To enable updating the view, provide an INSTEAD OF UPDATE trigger or an unconditional ON UPDATE DO INSTEAD rule."
@@ -6630,213 +5804,6 @@ fn comment_on_missing_table_uses_table_does_not_exist_error() {
         }) if message == "relation \"attmp_wrong\" does not exist" && sqlstate == "42P01" => {}
         other => panic!("expected missing-table comment error, got {:?}", other),
     }
-}
-
-#[test]
-fn regtype_literal_cast_resolves_type_name() {
-    let base = temp_dir("regtype_literal_cast");
-    let db = Database::open(&base, 16).unwrap();
-
-    db.execute(1, "create table attmp_array (id int4)").unwrap();
-
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select typname from pg_type where oid = 'attmp_array[]'::regtype"
-        ),
-        vec![vec![Value::Text("_attmp_array".into())]]
-    );
-}
-
-#[test]
-fn alter_index_rename_supports_if_exists_and_rename() {
-    let base = temp_dir("alter_index_rename");
-    let db = Database::open(&base, 16).unwrap();
-
-    db.execute(1, "create table items (id int4)").unwrap();
-    db.execute(1, "create index items_idx on items (id)").unwrap();
-    db.execute(1, "alter index if exists missing_idx rename to items_idx_new")
-        .unwrap();
-    db.execute(1, "alter index items_idx rename to items_idx_new")
-        .unwrap();
-
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select relname from pg_class where relname = 'items_idx_new'"
-        ),
-        vec![vec![Value::Text("items_idx_new".into())]]
-    );
-}
-
-#[test]
-fn alter_index_rename_if_exists_missing_pushes_notice() {
-    let base = temp_dir("alter_index_rename_if_exists_missing");
-    let db = Database::open(&base, 16).unwrap();
-
-    clear_backend_notices();
-    db.execute(1, "alter index if exists missing_idx rename to items_idx_new")
-        .unwrap();
-
-    assert_eq!(
-        take_backend_notices().into_iter().collect::<Vec<_>>(),
-        vec![r#"relation "missing_idx" does not exist, skipping"#.to_string()]
-    );
-}
-
-#[test]
-fn alter_index_rename_if_exists_missing_in_transaction_pushes_notice() {
-    let base = temp_dir("alter_index_rename_if_exists_missing_txn");
-    let db = Database::open(&base, 16).unwrap();
-    let mut session = Session::new(1);
-
-    clear_backend_notices();
-    session.execute(&db, "begin").unwrap();
-    session
-        .execute(&db, "alter index if exists missing_idx rename to items_idx_new")
-        .unwrap();
-    session.execute(&db, "commit").unwrap();
-
-    assert_eq!(
-        take_backend_notices().into_iter().collect::<Vec<_>>(),
-        vec![r#"relation "missing_idx" does not exist, skipping"#.to_string()]
-    );
-}
-
-#[test]
-fn alter_table_inherit_validates_shape_and_constraints() {
-    let base = temp_dir("alter_table_inherit_validate");
-    let db = Database::open(&base, 16).unwrap();
-
-    db.execute(1, "create table parent_items (test2 int4)").unwrap();
-    db.execute(1, "create table child_items ()").unwrap();
-
-    match db.execute(1, "alter table child_items inherit parent_items") {
-        Err(ExecError::DetailedError { message, .. })
-            if message == "child table is missing column \"test2\"" => {}
-        other => panic!("expected missing-column inherit error, got {other:?}"),
-    }
-
-    db.execute(1, "drop table child_items").unwrap();
-    db.execute(1, "create table child_items (test2 bool)").unwrap();
-    match db.execute(1, "alter table child_items inherit parent_items") {
-        Err(ExecError::DetailedError { message, .. })
-            if message == "child table \"child_items\" has different type for column \"test2\"" => {}
-        other => panic!("expected type-mismatch inherit error, got {other:?}"),
-    }
-
-    db.execute(1, "drop table child_items").unwrap();
-    db.execute(1, "create table child_items (test2 int4)").unwrap();
-    db.execute(
-        1,
-        "alter table parent_items add constraint parent_items_check check (test2 > 0)",
-    )
-    .unwrap();
-    match db.execute(1, "alter table child_items inherit parent_items") {
-        Err(ExecError::DetailedError { message, .. })
-            if message == "child table is missing constraint \"parent_items_check\"" => {}
-        other => panic!("expected missing-constraint inherit error, got {other:?}"),
-    }
-}
-
-#[test]
-fn alter_table_inherit_supports_attach_duplicate_and_cycle_errors() {
-    let base = temp_dir("alter_table_inherit_attach");
-    let db = Database::open(&base, 16).unwrap();
-
-    db.execute(1, "create table atacc1 (test int4)").unwrap();
-    db.execute(1, "create table atacc2 (test2 int4)").unwrap();
-    db.execute(1, "create table atacc3 (test3 int4, test2 int4) inherits (atacc1)")
-        .unwrap();
-    db.execute(1, "alter table atacc2 add constraint foo check (test2 > 0)")
-        .unwrap();
-    db.execute(1, "insert into atacc3 (test2) values (4)").unwrap();
-    db.execute(1, "update atacc3 set test2 = 4 where test2 is null")
-        .unwrap();
-    db.execute(1, "alter table atacc3 add constraint foo check (test2 > 0)")
-        .unwrap();
-    db.execute(1, "alter table atacc3 inherit atacc2").unwrap();
-
-    assert_eq!(
-        query_rows(&db, 1, "select test2 from atacc2 order by test2"),
-        vec![vec![Value::Int32(4)]]
-    );
-
-    match db.execute(1, "alter table atacc3 inherit atacc2") {
-        Err(ExecError::DetailedError { message, .. })
-            if message == "relation \"atacc2\" would be inherited from more than once" => {}
-        other => panic!("expected duplicate-parent inherit error, got {other:?}"),
-    }
-
-    match db.execute(1, "alter table atacc2 inherit atacc3") {
-        Err(ExecError::DetailedError {
-            message, detail, ..
-        }) if message == "circular inheritance not allowed"
-            && detail == Some("\"atacc3\" is already a child of \"atacc2\".".into()) => {}
-        other => panic!("expected circular inherit error, got {other:?}"),
-    }
-
-    match db.execute(1, "alter table atacc2 inherit atacc2") {
-        Err(ExecError::DetailedError {
-            message, detail, ..
-        }) if message == "circular inheritance not allowed"
-            && detail == Some("\"atacc2\" is already a child of \"atacc2\".".into()) => {}
-        other => panic!("expected self-inherit error, got {other:?}"),
-    }
-}
-
-#[test]
-fn explain_inherited_append_uses_relation_names_and_sql_casts() {
-    let base = temp_dir("explain_inherited_append_format");
-    let db = Database::open(&base, 16).unwrap();
-
-    db.execute(1, "create table nv_parent (d date)").unwrap();
-    db.execute(1, "create table nv_child_2009 () inherits (nv_parent)")
-        .unwrap();
-    db.execute(1, "create table nv_child_2010 () inherits (nv_parent)")
-        .unwrap();
-    db.execute(1, "create table nv_child_2011 () inherits (nv_parent)")
-        .unwrap();
-
-    let rows = query_rows(
-        &db,
-        1,
-        "explain select * from nv_parent where d >= '2009-08-01'::date and d <= '2009-08-31'::date",
-    );
-    let rendered = rows
-        .into_iter()
-        .map(|row| match &row[0] {
-            Value::Text(text) => text.clone(),
-            other => panic!("expected explain text row, got {other:?}"),
-        })
-        .collect::<Vec<_>>();
-
-    assert!(rendered.iter().any(|line| line.contains("Append")));
-    assert!(rendered.iter().any(|line| line.contains("Seq Scan on nv_parent")));
-    assert!(
-        rendered
-            .iter()
-            .any(|line| line.contains("Seq Scan on nv_child_2009"))
-    );
-    assert!(
-        rendered
-            .iter()
-            .any(|line| line.contains("'2009-08-01'::date"))
-    );
-    assert!(
-        rendered.iter().all(|line| !line.contains("Projection")),
-        "expected inherited append explain to elide passthrough projections, got {rendered:?}"
-    );
-    assert!(
-        rendered.iter().all(|line| !line.contains("Cast(Const(")),
-        "expected sql-style cast rendering, got {rendered:?}"
-    );
-    assert!(
-        rendered.iter().all(|line| !line.contains("rel ")),
-        "expected relation names instead of relcache numbers, got {rendered:?}"
-    );
 }
 
 #[test]
@@ -7349,7 +6316,6 @@ fn alter_table_add_column_propagates_temp_not_null_constraints() {
             relation,
             column,
             constraint,
-            ..
         }) if relation == "child1" && column == "a1" && constraint == "parent1_a1_not_null" => {}
         other => panic!("expected propagated temp not-null violation, got {other:?}"),
     }
@@ -7428,7 +6394,6 @@ fn alter_table_add_column_temp_not_null_validates_inherited_child_rows() {
             relation,
             column,
             constraint,
-            ..
         }) if relation == "child1" && column == "a1" && constraint == "parent1_a1_not_null" => {}
         other => panic!("expected inherited child validation failure, got {other:?}"),
     }
@@ -7751,74 +6716,6 @@ fn alter_table_alter_column_type_allows_textlike_cast_without_using() {
         }
         other => panic!("expected query result, got {other:?}"),
     }
-}
-
-#[test]
-fn alter_table_alter_column_type_allows_foreign_key_columns() {
-    let base = temp_dir("alter_table_alter_column_type_foreign_key");
-    let db = Database::open(&base, 16).unwrap();
-
-    db.execute(
-        1,
-        "create table pktable (ptest1 int, ptest2 int, ptest3 text, primary key (ptest1, ptest2))",
-    )
-    .unwrap();
-    db.execute(
-        1,
-        "create table fktable (
-            ftest1 int,
-            ftest2 int,
-            ftest3 int,
-            constraint constrname foreign key (ftest1, ftest2)
-                references pktable match full on delete set null on update set null
-        )",
-    )
-    .unwrap();
-
-    db.execute(1, "insert into pktable values (1, 2, 'Test1')")
-        .unwrap();
-    db.execute(1, "insert into pktable values (2, 4, 'Test2')")
-        .unwrap();
-    db.execute(1, "insert into fktable values (1, 2, 4)")
-        .unwrap();
-    db.execute(1, "insert into fktable values (2, 4, 8)")
-        .unwrap();
-
-    db.execute(1, "alter table pktable alter column ptest1 type bigint")
-        .unwrap();
-    db.execute(1, "alter table fktable alter column ftest1 type bigint")
-        .unwrap();
-
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select ptest1, ptest2, ptest3 from pktable order by ptest2",
-        ),
-        vec![
-            vec![
-                Value::Int64(1),
-                Value::Int32(2),
-                Value::Text("Test1".into()),
-            ],
-            vec![
-                Value::Int64(2),
-                Value::Int32(4),
-                Value::Text("Test2".into()),
-            ],
-        ]
-    );
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select ftest1, ftest2, ftest3 from fktable order by ftest2",
-        ),
-        vec![
-            vec![Value::Int64(1), Value::Int32(2), Value::Int32(4)],
-            vec![Value::Int64(2), Value::Int32(4), Value::Int32(8)],
-        ]
-    );
 }
 
 #[test]
@@ -9114,7 +8011,6 @@ fn create_table_primary_key_and_unique_constraints_are_enforced_and_persisted() 
             relation,
             column,
             constraint,
-            ..
         }) if relation == "items" && column == "id" && constraint == "items_id_not_null" => {}
         other => panic!("expected primary-key NOT NULL rejection, got {other:?}"),
     }
@@ -9236,7 +8132,6 @@ fn create_table_table_level_primary_key_and_unique_constraints_work() {
             relation,
             column,
             constraint,
-            ..
         }) if relation == "memberships"
             && column == "tag"
             && constraint == "memberships_tag_not_null" => {}
@@ -9272,7 +8167,6 @@ fn create_table_check_and_named_not_null_constraints_are_enforced_and_persisted(
             relation,
             column,
             constraint,
-            ..
         }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
         other => panic!("expected named not-null violation, got {other:?}"),
     }
@@ -9330,7 +8224,6 @@ fn create_table_check_and_named_not_null_constraints_are_enforced_and_persisted(
             relation,
             column,
             constraint,
-            ..
         }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
         other => panic!("expected reopened named not-null violation, got {other:?}"),
     }
@@ -9446,9 +8339,11 @@ fn foreign_keys_support_match_full() {
             constraint, detail, ..
         }) => {
             assert_eq!(constraint, "children_parent_fk");
-            assert!(detail
-                .as_deref()
-                .is_some_and(|detail| detail.contains("MATCH FULL")));
+            assert!(
+                detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("MATCH FULL"))
+            );
         }
         other => panic!("expected MATCH FULL foreign-key violation, got {other:?}"),
     }
@@ -9519,9 +8414,11 @@ fn alter_table_add_foreign_key_supports_match_full() {
             constraint, detail, ..
         }) => {
             assert_eq!(constraint, "children_parent_fk");
-            assert!(detail
-                .as_deref()
-                .is_some_and(|detail| detail.contains("MATCH FULL")));
+            assert!(
+                detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("MATCH FULL"))
+            );
         }
         other => panic!("expected post-add MATCH FULL foreign-key violation, got {other:?}"),
     }
@@ -9963,7 +8860,6 @@ fn update_and_copy_from_enforce_check_and_not_null_constraints() {
             relation,
             column,
             constraint,
-            ..
         }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
         other => panic!("expected update not-null violation, got {other:?}"),
     }
@@ -9981,7 +8877,6 @@ fn update_and_copy_from_enforce_check_and_not_null_constraints() {
             relation,
             column,
             constraint,
-            ..
         }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
         other => panic!("expected copy not-null violation, got {other:?}"),
     }
@@ -10027,7 +8922,6 @@ fn prepared_insert_enforces_check_and_not_null_constraints() {
             relation,
             column,
             constraint,
-            ..
         }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
         other => panic!("expected prepared-insert not-null violation, got {other:?}"),
     }
@@ -10118,7 +9012,6 @@ fn alter_table_add_constraints_support_not_valid_and_validate() {
             relation,
             column,
             constraint,
-            ..
         }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
         other => panic!("expected ALTER TABLE NOT NULL violation, got {other:?}"),
     }
@@ -10159,7 +9052,6 @@ fn alter_table_add_constraints_support_not_valid_and_validate() {
             relation,
             column,
             constraint,
-            ..
         }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
         other => panic!("expected NOT NULL validate failure, got {other:?}"),
     }
@@ -10722,9 +9614,11 @@ fn alter_constraint_enforced_validates_match_full_existing_rows() {
             constraint, detail, ..
         }) => {
             assert_eq!(constraint, "children_parent_fk");
-            assert!(detail
-                .as_deref()
-                .is_some_and(|detail| detail.contains("MATCH FULL")));
+            assert!(
+                detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("MATCH FULL"))
+            );
         }
         other => panic!("expected ALTER CONSTRAINT ENFORCED MATCH FULL failure, got {other:?}"),
     }
@@ -11173,7 +10067,6 @@ fn alter_table_set_and_drop_not_null_updates_enforcement_and_catalog() {
             relation,
             column,
             constraint,
-            ..
         }) if relation == "items" && column == "note" && constraint == "items_note_not_null" => {}
         other => panic!("expected SET NOT NULL validation failure, got {other:?}"),
     }
@@ -11204,7 +10097,6 @@ fn alter_table_set_and_drop_not_null_updates_enforcement_and_catalog() {
             relation,
             column,
             constraint,
-            ..
         }) if relation == "items" && column == "note" && constraint == "items_note_not_null" => {}
         other => panic!("expected enforced SET NOT NULL violation, got {other:?}"),
     }
@@ -11437,7 +10329,6 @@ fn alter_table_rename_not_null_constraint_updates_column_enforcement() {
             relation,
             column,
             constraint,
-            ..
         }) if relation == "items" && column == "note" && constraint == "items_note_required" => {}
         other => panic!("expected renamed NOT NULL constraint violation, got {other:?}"),
     }
@@ -11506,7 +10397,6 @@ fn alter_table_drop_primary_key_removes_only_pk_owned_not_null_constraints() {
             relation,
             column,
             constraint,
-            ..
         }) if relation == "items" && column == "id" && constraint == "items_id_not_null" => {}
         other => panic!("expected user-owned NOT NULL to remain, got {other:?}"),
     }
@@ -12575,28 +11465,9 @@ fn set_local_time_zone_updates_timestamptz_json_output() {
         ),
         vec![vec![Value::Jsonb(
             crate::backend::executor::jsonb::parse_jsonb_text(
-                "\"2014-05-29T02:52:35.614298+10:30\"",
+                "\"2014-05-29 02:52:35.614298+10:30\"",
             )
             .unwrap()
-        )]]
-    );
-    assert_eq!(
-        session_query_rows(
-            &mut session,
-            &db,
-            "select to_jsonb(timestamp '2014-05-28 12:22:35.614298')",
-        ),
-        vec![vec![Value::Jsonb(
-            crate::backend::executor::jsonb::parse_jsonb_text(
-                "\"2014-05-28T12:22:35.614298\"",
-            )
-            .unwrap()
-        )]]
-    );
-    assert_eq!(
-        session_query_rows(&mut session, &db, "select to_jsonb(date '2014-05-28')"),
-        vec![vec![Value::Jsonb(
-            crate::backend::executor::jsonb::parse_jsonb_text("\"2014-05-28\"").unwrap()
         )]]
     );
 
@@ -13002,7 +11873,7 @@ fn checkpoint_updates_checkpointer_stats() {
 #[test]
 fn checkpoint_flushes_dirty_pages_and_clog_to_disk() {
     use crate::backend::access::transam::xact::{
-        TransactionManager, TransactionStatus, INVALID_TRANSACTION_ID,
+        INVALID_TRANSACTION_ID, TransactionManager, TransactionStatus,
     };
     use crate::backend::storage::smgr::ForkNumber;
 
@@ -13533,45 +12404,6 @@ fn lazy_index_catalog_helpers_resolve_am_and_opclass_metadata() {
         heap_rel.relation_oid,
     );
     assert_eq!(index_oids.len(), 1);
-}
-
-#[test]
-fn create_index_accepts_bpchar_typmods_with_bpchar_ops() {
-    let base = temp_dir("bpchar_typmod_index_opclass");
-    let db = Database::open(&base, 16).unwrap();
-
-    db.execute(1, "create table room(roomno char(8))").unwrap();
-    db.execute(
-        1,
-        "create unique index room_rno on room using btree (roomno bpchar_ops)",
-    )
-    .unwrap();
-
-    let rel = db
-        .lazy_catalog_lookup(1, None, None)
-        .lookup_any_relation("room")
-        .unwrap();
-    let index_oids = crate::backend::utils::cache::lsyscache::index_relation_oids_for_heap(
-        &db,
-        1,
-        None,
-        rel.relation_oid,
-    );
-    assert_eq!(index_oids.len(), 1);
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select indclass \
-             from pg_index \
-             where indexrelid = (select oid from pg_class where relname = 'room_rno')",
-        ),
-        vec![vec![Value::Text(
-            crate::include::catalog::BPCHAR_BTREE_OPCLASS_OID
-                .to_string()
-                .into()
-        )]]
-    );
 }
 
 #[test]
@@ -14279,13 +13111,14 @@ fn create_table_uses_pg_temp_search_path_for_unqualified_creation() {
         .unwrap();
 
     assert!(db.temp_entry(1, "tempy").is_some());
-    assert!(db
-        .catalog
-        .read()
-        .catalog_snapshot()
-        .unwrap()
-        .get("tempy")
-        .is_none());
+    assert!(
+        db.catalog
+            .read()
+            .catalog_snapshot()
+            .unwrap()
+            .get("tempy")
+            .is_none()
+    );
 }
 
 #[test]
@@ -16893,12 +15726,8 @@ fn create_alter_and_drop_policy_updates_pg_policy() {
 
 #[test]
 fn create_tablespace_adds_pg_tablespace_row() {
-    let dir = temp_dir("create_tablespace_adds_pg_tablespace_row");
-    let db = Database::open(&dir, 32).expect("open database");
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
-    session
-        .execute(&db, "set allow_in_place_tablespaces = true")
-        .unwrap();
 
     match session
         .execute(&db, "create tablespace regress_tblspace location ''")
@@ -16912,73 +15741,10 @@ fn create_tablespace_adds_pg_tablespace_row() {
         query_rows(
             &db,
             1,
-            "select oid, spcname from pg_tablespace where spcname = 'regress_tblspace'",
+            "select spcname from pg_tablespace where spcname = 'regress_tblspace'",
         ),
-        vec![vec![
-            Value::Int64(16384),
-            Value::Text("regress_tblspace".into()),
-        ]]
+        vec![vec![Value::Text("regress_tblspace".into())]]
     );
-    let tablespace_oid = match &query_rows(
-        &db,
-        1,
-        "select oid from pg_tablespace where spcname = 'regress_tblspace'",
-    )[0][0]
-    {
-        Value::Int64(oid) => *oid as u32,
-        other => panic!("expected oid row, got {other:?}"),
-    };
-    assert!(dir
-        .join("pg_tblspc")
-        .join(tablespace_oid.to_string())
-        .join("PG_18_202406281")
-        .is_dir());
-}
-
-#[test]
-fn create_tablespace_rejects_empty_location_without_guc() {
-    let dir = temp_dir("create_tablespace_rejects_empty_location_without_guc");
-    let db = Database::open(&dir, 32).expect("open database");
-    let mut session = Session::new(1);
-
-    let err = session
-        .execute(&db, "create tablespace regress_tblspace location ''")
-        .unwrap_err();
-    match err {
-        ExecError::DetailedError { message, .. } => {
-            assert_eq!(message, "tablespace location must be an absolute path");
-        }
-        other => panic!("expected detailed error, got {other:?}"),
-    }
-}
-
-#[test]
-fn create_tablespace_absolute_location_creates_symlinked_version_dir() {
-    let dir = temp_dir("create_tablespace_absolute_location");
-    let tablespace_dir = dir.join("external_tablespace");
-    fs::create_dir_all(&tablespace_dir).unwrap();
-
-    let db = Database::open(&dir, 32).expect("open database");
-    let mut session = Session::new(1);
-    let sql = format!(
-        "create tablespace regress_tblspace location '{}'",
-        tablespace_dir.display()
-    );
-
-    session.execute(&db, &sql).unwrap();
-
-    let tablespace_oid = match &query_rows(
-        &db,
-        1,
-        "select oid from pg_tablespace where spcname = 'regress_tblspace'",
-    )[0][0]
-    {
-        Value::Int64(oid) => *oid as u32,
-        other => panic!("expected oid row, got {other:?}"),
-    };
-    let link_path = dir.join("pg_tblspc").join(tablespace_oid.to_string());
-    assert!(link_path.exists());
-    assert!(tablespace_dir.join("PG_18_202406281").is_dir());
 }
 
 #[test]
@@ -17129,23 +15895,6 @@ fn pg_get_userbyid_returns_role_name() {
 }
 
 #[test]
-fn current_database_function_matches_pg_database_name() {
-    let dir = temp_dir("current_database_function");
-    let db = Database::open(&dir, 64).unwrap();
-
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select oid as datoid from pg_database where datname = current_database()"
-        ),
-        vec![vec![Value::Int64(i64::from(
-            crate::include::catalog::CURRENT_DATABASE_OID,
-        ))]]
-    );
-}
-
-#[test]
 fn pg_catalog_array_length_resolves_builtin_function() {
     let dir = temp_dir("pg_catalog_array_length");
     let db = Database::open(&dir, 64).unwrap();
@@ -17181,8 +15930,23 @@ fn session_user_and_current_role_are_sql_visible() {
 
     db.execute(1, "create role tenant login").unwrap();
     db.execute(1, "create role manager").unwrap();
+    db.execute(1, "create role auditor login").unwrap();
     db.execute(1, "grant manager to tenant").unwrap();
     db.execute(1, "set session authorization tenant").unwrap();
+
+    match db
+        .execute(
+            1,
+            "select session_user, current_role, current_user, current_setting('role') as role",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { column_names, .. } => assert_eq!(
+            column_names,
+            vec!["session_user", "current_role", "current_user", "role"]
+        ),
+        other => panic!("expected query result, got {other:?}"),
+    }
 
     assert_eq!(
         query_rows(&db, 1, "select session_user, current_user, current_role"),
@@ -17191,6 +15955,10 @@ fn session_user_and_current_role_are_sql_visible() {
             Value::Text("tenant".into()),
             Value::Text("tenant".into()),
         ]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select current_setting('role')"),
+        vec![vec![Value::Text("none".into())]]
     );
 
     db.execute(1, "set role manager").unwrap();
@@ -17202,6 +15970,16 @@ fn session_user_and_current_role_are_sql_visible() {
             Value::Text("manager".into()),
             Value::Text("manager".into()),
         ]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select current_setting('role')"),
+        vec![vec![Value::Text("manager".into())]]
+    );
+
+    db.execute(1, "reset role").unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select current_setting('role')"),
+        vec![vec![Value::Text("none".into())]]
     );
 }
 
@@ -17537,37 +16315,6 @@ fn update_triggers_honor_update_of_when_and_statement_firing() {
 }
 
 #[test]
-fn temp_trigger_function_is_resolved_from_temp_schema() {
-    let dir = temp_dir("temp_trigger_function_search_path");
-    let db = Database::open(&dir, 16).unwrap();
-    let mut session = Session::new(1);
-
-    session
-        .execute(&db, "create temp table items (id int4, note text)")
-        .unwrap();
-    session
-        .execute(
-            &db,
-            "create function temp_stmt_notice() returns trigger language plpgsql as $$ begin raise notice 'temp-stmt'; return null; end $$",
-        )
-        .unwrap();
-    session
-        .execute(
-            &db,
-            "create trigger items_stmt_before before update on items for each statement execute function temp_stmt_notice()",
-        )
-        .unwrap();
-
-    clear_backend_notices();
-    clear_notices();
-    session
-        .execute(&db, "update items set note = note where false")
-        .unwrap();
-
-    assert_eq!(take_notice_messages(), vec![String::from("temp-stmt")]);
-}
-
-#[test]
 fn delete_prepared_insert_and_copy_from_fire_triggers() {
     let dir = temp_dir("trigger_delete_prepared_copy");
     let db = Database::open(&dir, 64).unwrap();
@@ -17688,17 +16435,18 @@ fn create_type_exposes_catalog_rows_and_function_row_expansion() {
             vec![Value::Text("label".into())],
         ]
     );
-    assert!(db
-        .backend_catcache(1, None)
-        .unwrap()
-        .depend_rows()
-        .iter()
-        .any(|row| {
-            row.classid == PG_PROC_RELATION_OID
-                && row.objid == widget_proc.oid
-                && row.refclassid == PG_TYPE_RELATION_OID
-                && row.refobjid == widget_type.oid
-        }));
+    assert!(
+        db.backend_catcache(1, None)
+            .unwrap()
+            .depend_rows()
+            .iter()
+            .any(|row| {
+                row.classid == PG_PROC_RELATION_OID
+                    && row.objid == widget_proc.oid
+                    && row.refclassid == PG_TYPE_RELATION_OID
+                    && row.refobjid == widget_type.oid
+            })
+    );
     assert_eq!(
         query_rows(&db, 1, "select * from widget_rows(5)"),
         vec![vec![Value::Int32(5), Value::Text("widget".into())]]
@@ -17902,9 +16650,11 @@ fn create_type_nested_dependencies_and_named_composite_arrays_work() {
         }) => {
             assert_eq!(sqlstate, "2BP01");
             assert!(message.contains("cannot drop type complex"));
-            assert!(detail
-                .unwrap_or_default()
-                .contains("type holder depends on type complex"));
+            assert!(
+                detail
+                    .unwrap_or_default()
+                    .contains("type holder depends on type complex")
+            );
         }
         other => panic!("expected dependent-type drop restriction, got {other:?}"),
     }
@@ -17997,9 +16747,11 @@ fn drop_type_enforces_restrict_and_if_exists() {
         }) => {
             assert_eq!(sqlstate, "2BP01");
             assert!(message.contains("cannot drop type widget"));
-            assert!(detail
-                .unwrap_or_default()
-                .contains("function widget_rows depends on type widget"));
+            assert!(
+                detail
+                    .unwrap_or_default()
+                    .contains("function widget_rows depends on type widget")
+            );
         }
         other => panic!("expected dependent-function drop restriction, got {other:?}"),
     }
@@ -18036,9 +16788,11 @@ fn drop_enum_type_enforces_restrict_and_if_exists() {
         }) => {
             assert_eq!(sqlstate, "2BP01");
             assert!(message.contains("cannot drop type mood"));
-            assert!(detail
-                .unwrap_or_default()
-                .contains("table feelings depends on type mood"));
+            assert!(
+                detail
+                    .unwrap_or_default()
+                    .contains("table feelings depends on type mood")
+            );
         }
         other => panic!("expected dependent enum drop restriction, got {other:?}"),
     }
@@ -18078,9 +16832,11 @@ fn drop_range_type_enforces_restrict_and_if_exists() {
         }) => {
             assert_eq!(sqlstate, "2BP01");
             assert!(message.contains("cannot drop type float8range"));
-            assert!(detail
-                .unwrap_or_default()
-                .contains("table measurements depends on type float8range"));
+            assert!(
+                detail
+                    .unwrap_or_default()
+                    .contains("table measurements depends on type float8range")
+            );
         }
         other => panic!("expected dependent range drop restriction, got {other:?}"),
     }

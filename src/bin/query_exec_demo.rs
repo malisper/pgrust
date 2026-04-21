@@ -204,9 +204,6 @@ fn main() -> Result<(), ExecError> {
         txn_waiter: None,
         sequences: None,
         large_objects: None,
-        advisory_locks: Arc::new(
-            pgrust::backend::storage::lmgr::advisory::AdvisoryLockManager::new(),
-        ),
         checkpoint_stats:
             pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
         datetime_config: pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -215,11 +212,9 @@ fn main() -> Result<(), ExecError> {
         session_stats,
         snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID).unwrap(),
         client_id: 7,
-        current_database_name: pgrust::include::catalog::CURRENT_DATABASE_NAME.to_string(),
         session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
-        current_xid: INVALID_TRANSACTION_ID,
-        statement_lock_scope_id: None,
+        active_role_oid: None,
         next_command_id: 0,
         default_toast_compression: pgrust::include::access::htup::AttributeCompression::Pglz,
         expr_bindings: pgrust::backend::executor::ExprEvalBindings::default(),
