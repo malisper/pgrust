@@ -4170,7 +4170,10 @@ mod tests {
             &output,
             "privileges for membership of role user3 in role user1"
         ));
-        assert!(!output_contains_message(&output, "role \"user2\" does not exist"));
+        assert!(!output_contains_message(
+            &output,
+            "role \"user2\" does not exist"
+        ));
         assert!(
             !db.backend_catcache(2, None)
                 .unwrap()

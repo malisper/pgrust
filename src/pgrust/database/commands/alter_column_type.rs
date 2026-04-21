@@ -4,6 +4,9 @@ use crate::backend::commands::tablecmds::{collect_matching_rows_heap, maintain_i
 use crate::backend::executor::value_io::tuple_from_values;
 use crate::backend::executor::{ExecutorContext, RelationDesc, TupleSlot, eval_expr};
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
+use crate::backend::utils::cache::catcache::sql_type_oid;
+use crate::include::access::itemptr::ItemPointerData;
+use crate::include::catalog::{BTREE_AM_OID, PG_CATALOG_NAMESPACE_OID, default_btree_opclass_oid};
 use crate::pgrust::database::ddl::{
     lookup_heap_relation_for_alter_table, validate_alter_table_alter_column_type,
 };

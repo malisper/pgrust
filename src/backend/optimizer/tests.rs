@@ -1189,8 +1189,14 @@ fn planner_rewrites_simple_max_aggregate_into_limit_index_subplan() {
     )));
 
     let subplan = &planned.subplans[0];
-    assert!(plan_contains(subplan, |plan| matches!(plan, Plan::Limit { .. })));
-    assert!(plan_contains(subplan, |plan| matches!(plan, Plan::IndexScan { .. })));
+    assert!(plan_contains(subplan, |plan| matches!(
+        plan,
+        Plan::Limit { .. }
+    )));
+    assert!(plan_contains(subplan, |plan| matches!(
+        plan,
+        Plan::IndexScan { .. }
+    )));
     assert!(!plan_contains(subplan, |plan| matches!(
         plan,
         Plan::Aggregate { .. }
@@ -1218,18 +1224,22 @@ fn planner_rewrites_multiple_minmax_aggregates_into_multiple_subplans() {
             && !plan_contains(subplan, |plan| matches!(plan, Plan::Aggregate { .. }))
     }));
     assert!(planned.subplans.iter().any(|subplan| {
-        plan_contains(subplan, |plan| matches!(
-            plan,
-            Plan::IndexScan { direction, .. }
-                if *direction == crate::include::access::relscan::ScanDirection::Forward
-        ))
+        plan_contains(subplan, |plan| {
+            matches!(
+                plan,
+                Plan::IndexScan { direction, .. }
+                    if *direction == crate::include::access::relscan::ScanDirection::Forward
+            )
+        })
     }));
     assert!(planned.subplans.iter().any(|subplan| {
-        plan_contains(subplan, |plan| matches!(
-            plan,
-            Plan::IndexScan { direction, .. }
-                if *direction == crate::include::access::relscan::ScanDirection::Backward
-        ))
+        plan_contains(subplan, |plan| {
+            matches!(
+                plan,
+                Plan::IndexScan { direction, .. }
+                    if *direction == crate::include::access::relscan::ScanDirection::Backward
+            )
+        })
     }));
 }
 
@@ -1267,10 +1277,12 @@ fn planner_keeps_nested_sublink_max_as_aggregate() {
         analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
     let planned = super::planner(query, &catalog);
 
-    assert!(planned
-        .subplans
-        .iter()
-        .any(|subplan| plan_contains(subplan, |plan| matches!(plan, Plan::Aggregate { .. }))));
+    assert!(
+        planned
+            .subplans
+            .iter()
+            .any(|subplan| plan_contains(subplan, |plan| matches!(plan, Plan::Aggregate { .. })))
+    );
 }
 
 #[test]

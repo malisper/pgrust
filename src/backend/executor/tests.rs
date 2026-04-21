@@ -2488,7 +2488,14 @@ fn select_without_from_returns_constant_row() {
 fn select_array_literal_uses_array_column_name() {
     let base = temp_dir("select_array_literal_column_name");
     let txns = TransactionManager::new_durable(&base).unwrap();
-    match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select array[1,null,3]").unwrap() {
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select array[1,null,3]",
+    )
+    .unwrap()
+    {
         StatementResult::Query {
             column_names, rows, ..
         } => {
@@ -4183,15 +4190,13 @@ fn array_append_prepend_and_cat_match_postgres() {
             "select array_append(array[42], 6)",
         )
         .unwrap(),
-        vec![vec![Value::PgArray(
-            ArrayValue::from_dimensions(
-                vec![ArrayDimension {
-                    lower_bound: 1,
-                    length: 2,
-                }],
-                vec![Value::Int32(42), Value::Int32(6)],
-            ),
-        )]],
+        vec![vec![Value::PgArray(ArrayValue::from_dimensions(
+            vec![ArrayDimension {
+                lower_bound: 1,
+                length: 2,
+            }],
+            vec![Value::Int32(42), Value::Int32(6)],
+        ))]],
     );
 
     assert_query_rows(
@@ -4202,15 +4207,13 @@ fn array_append_prepend_and_cat_match_postgres() {
             "select array_prepend(6, array[42])",
         )
         .unwrap(),
-        vec![vec![Value::PgArray(
-            ArrayValue::from_dimensions(
-                vec![ArrayDimension {
-                    lower_bound: 1,
-                    length: 2,
-                }],
-                vec![Value::Int32(6), Value::Int32(42)],
-            ),
-        )]],
+        vec![vec![Value::PgArray(ArrayValue::from_dimensions(
+            vec![ArrayDimension {
+                lower_bound: 1,
+                length: 2,
+            }],
+            vec![Value::Int32(6), Value::Int32(42)],
+        ))]],
     );
 
     assert_query_rows(
@@ -4221,20 +4224,18 @@ fn array_append_prepend_and_cat_match_postgres() {
             "select array_cat(ARRAY[1,2], ARRAY[3,4])",
         )
         .unwrap(),
-        vec![vec![Value::PgArray(
-            ArrayValue::from_dimensions(
-                vec![ArrayDimension {
-                    lower_bound: 1,
-                    length: 4,
-                }],
-                vec![
-                    Value::Int32(1),
-                    Value::Int32(2),
-                    Value::Int32(3),
-                    Value::Int32(4),
-                ],
-            ),
-        )]],
+        vec![vec![Value::PgArray(ArrayValue::from_dimensions(
+            vec![ArrayDimension {
+                lower_bound: 1,
+                length: 4,
+            }],
+            vec![
+                Value::Int32(1),
+                Value::Int32(2),
+                Value::Int32(3),
+                Value::Int32(4),
+            ],
+        ))]],
     );
 
     assert_query_rows(
@@ -4245,28 +4246,26 @@ fn array_append_prepend_and_cat_match_postgres() {
             "select array_cat(ARRAY[1,2], ARRAY[[3,4],[5,6]])",
         )
         .unwrap(),
-        vec![vec![Value::PgArray(
-            ArrayValue::from_dimensions(
-                vec![
-                    ArrayDimension {
-                        lower_bound: 1,
-                        length: 3,
-                    },
-                    ArrayDimension {
-                        lower_bound: 1,
-                        length: 2,
-                    },
-                ],
-                vec![
-                    Value::Int32(1),
-                    Value::Int32(2),
-                    Value::Int32(3),
-                    Value::Int32(4),
-                    Value::Int32(5),
-                    Value::Int32(6),
-                ],
-            ),
-        )]],
+        vec![vec![Value::PgArray(ArrayValue::from_dimensions(
+            vec![
+                ArrayDimension {
+                    lower_bound: 1,
+                    length: 3,
+                },
+                ArrayDimension {
+                    lower_bound: 1,
+                    length: 2,
+                },
+            ],
+            vec![
+                Value::Int32(1),
+                Value::Int32(2),
+                Value::Int32(3),
+                Value::Int32(4),
+                Value::Int32(5),
+                Value::Int32(6),
+            ],
+        ))]],
     );
 
     assert_query_rows(
@@ -4277,28 +4276,26 @@ fn array_append_prepend_and_cat_match_postgres() {
             "select array_cat(ARRAY[[3,4],[5,6]], ARRAY[1,2])",
         )
         .unwrap(),
-        vec![vec![Value::PgArray(
-            ArrayValue::from_dimensions(
-                vec![
-                    ArrayDimension {
-                        lower_bound: 1,
-                        length: 3,
-                    },
-                    ArrayDimension {
-                        lower_bound: 1,
-                        length: 2,
-                    },
-                ],
-                vec![
-                    Value::Int32(3),
-                    Value::Int32(4),
-                    Value::Int32(5),
-                    Value::Int32(6),
-                    Value::Int32(1),
-                    Value::Int32(2),
-                ],
-            ),
-        )]],
+        vec![vec![Value::PgArray(ArrayValue::from_dimensions(
+            vec![
+                ArrayDimension {
+                    lower_bound: 1,
+                    length: 3,
+                },
+                ArrayDimension {
+                    lower_bound: 1,
+                    length: 2,
+                },
+            ],
+            vec![
+                Value::Int32(3),
+                Value::Int32(4),
+                Value::Int32(5),
+                Value::Int32(6),
+                Value::Int32(1),
+                Value::Int32(2),
+            ],
+        ))]],
     );
 }
 
@@ -12048,6 +12045,31 @@ fn jsonb_containment_operators_coerce_string_literals_to_jsonb() {
 }
 
 #[test]
+fn row_to_json_renders_regclass_fields_with_relation_names() {
+    let base = temp_dir("row_to_json_regclass");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select row_to_json(r) \
+         from (select relkind, oid::regclass as name from pg_class where relname = 'pg_class') r",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Json(
+                    "{\"relkind\":\"r\",\"name\":\"pg_class\"}".into()
+                )]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn jsonb_object_and_pretty_functions_work() {
     let base = temp_dir("jsonb_object_and_pretty");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -12121,6 +12143,59 @@ fn jsonb_object_accepts_text_array_literals() {
             );
         }
         other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn jsonb_object_matches_postgres_multidimensional_text_array_behavior() {
+    let base = temp_dir("jsonb_object_multidimensional_arrays");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_object('{{a,1},{b,2},{3,NULL},{\"d e f\",\"a b c\"}}')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Jsonb(
+                    crate::backend::executor::jsonb::parse_jsonb_text(
+                        "{\"3\":null,\"a\":\"1\",\"b\":\"2\",\"d e f\":\"a b c\"}"
+                    )
+                    .unwrap()
+                )]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    for (sql, message) in [
+        (
+            "select jsonb_object('{{a},{b}}')",
+            "array must have two columns",
+        ),
+        (
+            "select jsonb_object('{{a,b,c},{b,c,d}}')",
+            "array must have two columns",
+        ),
+        (
+            "select jsonb_object('{{{a,b},{c,d}},{{b,c},{d,e}}}')",
+            "wrong number of array subscripts",
+        ),
+        (
+            "select jsonb_object('{{a,1},{b,2}}', '{{a,1},{b,2}}')",
+            "wrong number of array subscripts",
+        ),
+    ] {
+        let err = run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::InvalidStorageValue { details, .. } if details == message
+        ));
     }
 }
 

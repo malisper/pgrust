@@ -184,7 +184,9 @@ fn format_failing_row_value(value: &Value, datetime_config: &DateTimeConfig) -> 
             render_datetime_value_text_with_config(value, datetime_config).unwrap_or_default()
         }
         Value::Range(_) => render_range_text(value).unwrap_or_default(),
-        Value::Multirange(_) => crate::backend::executor::render_multirange_text(value).unwrap_or_default(),
+        Value::Multirange(_) => {
+            crate::backend::executor::render_multirange_text(value).unwrap_or_default()
+        }
         Value::Bit(bits) => render_bit_text(bits),
         Value::Jsonb(bytes) => render_jsonb_bytes(bytes).unwrap_or_default(),
         Value::TsVector(vector) => crate::backend::executor::render_tsvector_text(vector),
@@ -250,6 +252,7 @@ fn sql_type_kind_tag(kind: SqlTypeKind) -> u8 {
         SqlTypeKind::Int8 => 6,
         SqlTypeKind::Name => 7,
         SqlTypeKind::Oid => 8,
+        SqlTypeKind::RegClass => 8,
         SqlTypeKind::RegType => 63,
         SqlTypeKind::RegRole => 55,
         SqlTypeKind::RegProcedure => 52,
@@ -1206,6 +1209,7 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
             if matches!(
                 column.sql_type.kind,
                 SqlTypeKind::Oid
+                    | SqlTypeKind::RegClass
                     | SqlTypeKind::Xid
                     | SqlTypeKind::RegConfig
                     | SqlTypeKind::RegDictionary
@@ -1558,7 +1562,10 @@ pub(crate) fn decode_value_with_toast(
             })?);
             if matches!(
                 column.sql_type.kind,
-                SqlTypeKind::Oid | SqlTypeKind::RegConfig | SqlTypeKind::RegDictionary
+                SqlTypeKind::Oid
+                    | SqlTypeKind::RegClass
+                    | SqlTypeKind::RegConfig
+                    | SqlTypeKind::RegDictionary
             ) {
                 Ok(Value::Int64(raw as u32 as i64))
             } else {

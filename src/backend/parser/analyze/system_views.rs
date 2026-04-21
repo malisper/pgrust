@@ -1,6 +1,6 @@
 use super::query::AnalyzedFrom;
 use super::*;
-use crate::backend::rewrite::{load_view_return_query, load_view_return_select, ViewDmlEvent};
+use crate::backend::rewrite::{ViewDmlEvent, load_view_return_query, load_view_return_select};
 use crate::include::nodes::parsenodes::{JoinTreeNode, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{attrno_index, is_system_attr};
 
