@@ -2857,6 +2857,95 @@ fn explain_inherited_order_by_scan_does_not_panic() {
 }
 
 #[test]
+fn explain_update_accepts_inherited_update_statement() {
+    let dir = temp_dir("inheritance_explain_update");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(
+        1,
+        "create table some_tab (f1 int, f2 int, f3 int, check (f1 < 10) no inherit)",
+    )
+    .unwrap();
+    db.execute(1, "create table some_tab_child () inherits(some_tab)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into some_tab_child select i, i + 1, 0 from generate_series(1, 1000) i",
+    )
+    .unwrap();
+    db.execute(1, "create index on some_tab_child(f1, f2)")
+        .unwrap();
+
+    let StatementResult::Query { rows, .. } = db
+        .execute(
+            1,
+            "explain (costs off) update some_tab set f3 = 11 where f1 = 12 and f2 = 13",
+        )
+        .unwrap()
+    else {
+        panic!("expected query result");
+    };
+    let lines = rows
+        .into_iter()
+        .map(|row| match row.first() {
+            Some(Value::Text(text)) => text.to_string(),
+            other => panic!("expected explain text row, got {:?}", other),
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(lines.first().map(String::as_str), Some("Update on some_tab"));
+    assert!(
+        lines
+            .iter()
+            .any(|line| {
+                line.contains("Index Scan using") && line.contains("on some_tab_child some_tab_1")
+            }),
+        "expected EXPLAIN UPDATE to show inherited child index scan, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("f1 =") && line.contains("12::integer") && line.contains("13::integer")),
+        "expected EXPLAIN UPDATE to show index quals, got {lines:?}"
+    );
+}
+
+#[test]
+fn explain_verbose_update_where_false_is_accepted() {
+    let dir = temp_dir("inheritance_explain_update_false");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(1, "create table some_tab (a int, b int)").unwrap();
+    db.execute(1, "create table some_tab_child () inherits (some_tab)")
+        .unwrap();
+    db.execute(1, "insert into some_tab_child values (1, 2)")
+        .unwrap();
+
+    let StatementResult::Query { rows, .. } = db
+        .execute(
+            1,
+            "explain (verbose, costs off) update some_tab set a = a + 1 where false",
+        )
+        .unwrap()
+    else {
+        panic!("expected query result");
+    };
+    let lines = rows
+        .into_iter()
+        .map(|row| match row.first() {
+            Some(Value::Text(text)) => text.to_string(),
+            other => panic!("expected explain text row, got {:?}", other),
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(lines.first().map(String::as_str), Some("Update on public.some_tab"));
+    assert!(
+        lines.iter().any(|line| line == "        One-Time Filter: false"),
+        "expected EXPLAIN VERBOSE UPDATE to show false one-time filter, got {lines:?}"
+    );
+}
+
+#[test]
 fn inherited_scan_tableoid_tracks_physical_child_relation() {
     let dir = temp_dir("inheritance_tableoid");
     let db = Database::open(&dir, 128).unwrap();
@@ -16314,6 +16403,37 @@ fn update_triggers_honor_update_of_when_and_statement_firing() {
             "stmt:AFTER:STATEMENT".to_string(),
         ]
     );
+}
+
+#[test]
+fn temp_trigger_function_is_resolved_from_temp_schema() {
+    let dir = temp_dir("temp_trigger_function_search_path");
+    let db = Database::open(&dir, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table items (id int4, note text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function temp_stmt_notice() returns trigger language plpgsql as $$ begin raise notice 'temp-stmt'; return null; end $$",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create trigger items_stmt_before before update on items for each statement execute function temp_stmt_notice()",
+        )
+        .unwrap();
+
+    clear_backend_notices();
+    clear_notices();
+    session
+        .execute(&db, "update items set note = note where false")
+        .unwrap();
+
+    assert_eq!(take_notice_messages(), vec![String::from("temp-stmt")]);
 }
 
 #[test]
