@@ -1320,65 +1320,73 @@ fn delete_returning_target_lists() {
 
 #[test]
 fn insert_on_conflict_returning_rows() {
-    let dir = temp_dir("insert_on_conflict_returning_rows");
-    let db = Database::open(&dir, 128).unwrap();
-    let mut session = Session::new(1);
+    std::thread::Builder::new()
+        .name("db-test-insert-on-conflict-returning".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let dir = temp_dir("insert_on_conflict_returning_rows");
+            let db = Database::open(&dir, 128).unwrap();
+            let mut session = Session::new(1);
 
-    session
-        .execute(
-            &db,
-            "create temp table upsert_returning_tbl (id int4 primary key, name text, note text)",
-        )
-        .unwrap();
+            session
+                .execute(
+                    &db,
+                    "create temp table upsert_returning_tbl (id int4 primary key, name text, note text)",
+                )
+                .unwrap();
 
-    assert_eq!(
-        session_query_rows(
-            &mut session,
-            &db,
-            "insert into upsert_returning_tbl values (1, 'alice', 'seed') returning id, name",
-        ),
-        vec![vec![Value::Int32(1), Value::Text("alice".into())]]
-    );
+            assert_eq!(
+                session_query_rows(
+                    &mut session,
+                    &db,
+                    "insert into upsert_returning_tbl values (1, 'alice', 'seed') returning id, name",
+                ),
+                vec![vec![Value::Int32(1), Value::Text("alice".into())]]
+            );
 
-    assert_eq!(
-        session_query_rows(
-            &mut session,
-            &db,
-            "insert into upsert_returning_tbl values (1, 'bob', 'beta') on conflict do nothing returning id, name",
-        ),
-        Vec::<Vec<Value>>::new()
-    );
+            assert_eq!(
+                session_query_rows(
+                    &mut session,
+                    &db,
+                    "insert into upsert_returning_tbl values (1, 'bob', 'beta') on conflict do nothing returning id, name",
+                ),
+                Vec::<Vec<Value>>::new()
+            );
 
-    assert_eq!(
-        session_query_rows(
-            &mut session,
-            &db,
-            "insert into upsert_returning_tbl values (1, 'carol', 'gamma') on conflict (id) do update set name = excluded.name, note = upsert_returning_tbl.note || excluded.note returning id, name, note",
-        ),
-        vec![vec![
-            Value::Int32(1),
-            Value::Text("carol".into()),
-            Value::Text("seedgamma".into()),
-        ]]
-    );
+            assert_eq!(
+                session_query_rows(
+                    &mut session,
+                    &db,
+                    "insert into upsert_returning_tbl values (1, 'carol', 'gamma') on conflict (id) do update set name = excluded.name, note = upsert_returning_tbl.note || excluded.note returning id, name, note",
+                ),
+                vec![vec![
+                    Value::Int32(1),
+                    Value::Text("carol".into()),
+                    Value::Text("seedgamma".into()),
+                ]]
+            );
 
-    assert_eq!(
-        session_query_rows(
-            &mut session,
-            &db,
-            "insert into upsert_returning_tbl values (1, 'dave', 'delta') on conflict (id) do update set name = excluded.name where false returning id, name",
-        ),
-        Vec::<Vec<Value>>::new()
-    );
+            assert_eq!(
+                session_query_rows(
+                    &mut session,
+                    &db,
+                    "insert into upsert_returning_tbl values (1, 'dave', 'delta') on conflict (id) do update set name = excluded.name where false returning id, name",
+                ),
+                Vec::<Vec<Value>>::new()
+            );
 
-    assert_eq!(
-        query_rows(&db, 1, "select id, name, note from upsert_returning_tbl"),
-        vec![vec![
-            Value::Int32(1),
-            Value::Text("carol".into()),
-            Value::Text("seedgamma".into()),
-        ]]
-    );
+            assert_eq!(
+                query_rows(&db, 1, "select id, name, note from upsert_returning_tbl"),
+                vec![vec![
+                    Value::Int32(1),
+                    Value::Text("carol".into()),
+                    Value::Text("seedgamma".into()),
+                ]]
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap()
 }
 
 #[test]

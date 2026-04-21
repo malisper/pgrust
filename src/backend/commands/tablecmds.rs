@@ -715,6 +715,7 @@ pub(crate) fn rollback_inserted_row(
     } else {
         None
     };
+    let delete_snapshot = ctx.txns.read().snapshot(xid)?;
     match heap_delete_with_waiter(
         &*ctx.pool,
         ctx.client_id,
@@ -722,7 +723,7 @@ pub(crate) fn rollback_inserted_row(
         &ctx.txns,
         xid,
         heap_tid,
-        &ctx.snapshot,
+        &delete_snapshot,
         None,
     ) {
         Ok(()) | Err(HeapError::TupleAlreadyModified(_)) => {}
