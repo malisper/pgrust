@@ -785,12 +785,20 @@ impl Database {
 fn map_role_catalog_error(err: crate::backend::catalog::CatalogError) -> ExecError {
     match err {
         crate::backend::catalog::CatalogError::UniqueViolation(message) => {
-            ExecError::Parse(role_management_error(message))
+            ExecError::Parse(role_management_error(rewrite_role_catalog_message(&message)))
         }
         crate::backend::catalog::CatalogError::UnknownTable(name) => ExecError::Parse(
             role_management_error(format!("role \"{name}\" does not exist")),
         ),
         other => ExecError::Parse(role_management_error(format!("{other:?}"))),
+    }
+}
+
+fn rewrite_role_catalog_message(message: &str) -> String {
+    if let Some(role_name) = message.strip_prefix("duplicate role name: ") {
+        format!("role \"{role_name}\" already exists")
+    } else {
+        message.to_string()
     }
 }
 
@@ -1033,6 +1041,7 @@ fn owned_object_drop_priority(kind: OwnedObjectKind) -> u8 {
 mod tests {
     use super::*;
     use crate::backend::catalog::role_memberships::memberships_for_member;
+    use crate::backend::catalog::CatalogError;
     use crate::backend::executor::StatementResult;
     use crate::backend::executor::Value;
     use crate::include::catalog::PgAuthIdRow;
@@ -1222,6 +1231,20 @@ mod tests {
                 .into_iter()
                 .all(|row| row.rolname != "app_owner")
         );
+    }
+
+    #[test]
+    fn duplicate_role_name_errors_use_postgres_wording() {
+        let err = map_role_catalog_error(CatalogError::UniqueViolation(
+            "duplicate role name: regress_priv_user5".into(),
+        ));
+        match err {
+            ExecError::Parse(parse_err) => assert_eq!(
+                parse_err,
+                role_management_error("role \"regress_priv_user5\" already exists")
+            ),
+            other => panic!("expected parse error, got {other:?}"),
+        }
     }
 
     #[test]
