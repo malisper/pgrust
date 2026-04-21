@@ -349,8 +349,6 @@ pub fn heap_scan_prepare_next_page<E: From<HeapError>>(
     txns: &std::sync::Arc<RwLock<TransactionManager>>,
     scan: &mut VisibleHeapScan,
 ) -> Result<Option<usize>, E> {
-    use crate::include::access::htup::INFOMASK_OFFSET;
-
     // Drop previous pin and advance to next block.
     if scan.pinned_buffer.is_some() {
         drop(scan.pinned_buffer.take());
@@ -374,7 +372,7 @@ pub fn heap_scan_prepare_next_page<E: From<HeapError>>(
             .map_err(|e| E::from(HeapError::Tuple(TupleError::from(e))))?;
 
         let mut ntup: u16 = 0;
-        let mut any_hints_written = false;
+        let mut pending_offsets = Vec::new();
 
         for off in 1..=max_offset {
             // Safe: off is in 1..=max_offset from page_get_max_offset_number.
@@ -391,26 +389,8 @@ pub fn heap_scan_prepare_next_page<E: From<HeapError>>(
             {
                 vis
             } else {
-                let (vis, hints) = {
-                    let txns_guard = txns.read();
-                    scan.snapshot
-                        .tuple_bytes_visible_with_hints(&txns_guard, tuple_bytes)
-                };
-                if hints != 0 {
-                    unsafe {
-                        let hint_off = item_id.lp_off as usize + INFOMASK_OFFSET;
-                        let page_ptr = page as *const Page as *mut u8;
-                        let current = u16::from_le_bytes([
-                            *page_ptr.add(hint_off),
-                            *page_ptr.add(hint_off + 1),
-                        ]);
-                        let updated = (current | hints).to_le_bytes();
-                        *page_ptr.add(hint_off) = updated[0];
-                        *page_ptr.add(hint_off + 1) = updated[1];
-                    }
-                    any_hints_written = true;
-                }
-                vis
+                pending_offsets.push((off, tuple_bytes.to_vec()));
+                continue;
             };
 
             if visible {
@@ -418,11 +398,17 @@ pub fn heap_scan_prepare_next_page<E: From<HeapError>>(
                 ntup += 1;
             }
         }
-
-        if any_hints_written {
-            pool.mark_buffer_dirty_hint(buffer_id);
-        }
         drop(guard);
+
+        if !pending_offsets.is_empty() {
+            let txns_guard = txns.read();
+            for (off, tuple_bytes) in pending_offsets {
+                if scan.snapshot.tuple_bytes_visible(&txns_guard, &tuple_bytes) {
+                    scan.vis_tuples[ntup as usize] = off;
+                    ntup += 1;
+                }
+            }
+        }
 
         scan.vis_count = ntup;
         scan.vis_index = 0;
