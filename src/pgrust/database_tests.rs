@@ -5297,6 +5297,64 @@ fn nested_views_with_user_rules_are_not_auto_updatable() {
 }
 
 #[test]
+fn auto_view_errors_preserve_postgres_distinct_with_and_hint_text() {
+    let base = temp_dir("auto_view_distinct_with_messages");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null, name text)")
+        .unwrap();
+    db.execute(1, "insert into items values (1, 'alpha')")
+        .unwrap();
+    db.execute(
+        1,
+        "create view distinct_view as select distinct id, name from items",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view with_view as with q as (select * from items) select * from q",
+    )
+    .unwrap();
+
+    match db.execute(1, "delete from distinct_view where id = 1").unwrap_err() {
+        ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            hint: Some(hint),
+            ..
+        } => {
+            assert_eq!(message, "cannot delete from view \"distinct_view\"");
+            assert_eq!(
+                detail,
+                "Views containing DISTINCT are not automatically updatable."
+            );
+            assert_eq!(
+                hint,
+                "To enable deleting from the view, provide an INSTEAD OF DELETE trigger or an unconditional ON DELETE DO INSTEAD rule."
+            );
+        }
+        other => panic!("expected distinct view DML error, got {other:?}"),
+    }
+
+    match db.execute(1, "update with_view set name = 'beta' where id = 1").unwrap_err() {
+        ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            hint: Some(hint),
+            ..
+        } => {
+            assert_eq!(message, "cannot update view \"with_view\"");
+            assert_eq!(detail, "Views containing WITH are not automatically updatable.");
+            assert_eq!(
+                hint,
+                "To enable updating the view, provide an INSTEAD OF UPDATE trigger or an unconditional ON UPDATE DO INSTEAD rule."
+            );
+        }
+        other => panic!("expected WITH view DML error, got {other:?}"),
+    }
+}
+
+#[test]
 fn view_dml_is_visible_within_transaction_after_create_view() {
     let base = temp_dir("auto_view_txn_visibility");
     let db = Database::open(&base, 32).unwrap();

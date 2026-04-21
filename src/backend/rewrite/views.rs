@@ -1,6 +1,6 @@
 use crate::backend::parser::analyze::analyze_select_query_with_outer;
 use crate::backend::parser::{CatalogLookup, ParseError, Statement};
-use crate::include::nodes::parsenodes::Query;
+use crate::include::nodes::parsenodes::{Query, SelectStatement};
 use crate::include::nodes::primnodes::RelationDesc;
 
 const RETURN_RULE_NAME: &str = "_RETURN";
@@ -65,6 +65,22 @@ pub(crate) fn load_view_return_query(
     catalog: &dyn CatalogLookup,
     expanded_views: &[u32],
 ) -> Result<Query, ParseError> {
+    let select = load_view_return_select(relation_oid, alias, catalog, expanded_views)?;
+    let mut next_views = expanded_views.to_vec();
+    next_views.push(relation_oid);
+    let (query, _) =
+        analyze_select_query_with_outer(&select, catalog, &[], None, &[], &next_views)?;
+    let display_name = view_display_name(relation_oid, alias);
+    validate_view_shape(&query, relation_desc, &display_name)?;
+    Ok(query)
+}
+
+pub(crate) fn load_view_return_select(
+    relation_oid: u32,
+    alias: Option<&str>,
+    catalog: &dyn CatalogLookup,
+    expanded_views: &[u32],
+) -> Result<SelectStatement, ParseError> {
     let display_name = view_display_name(relation_oid, alias);
     if expanded_views.contains(&relation_oid) {
         return Err(ParseError::RecursiveView(display_name));
@@ -80,12 +96,7 @@ pub(crate) fn load_view_return_query(
             actual: sql,
         });
     };
-    let mut next_views = expanded_views.to_vec();
-    next_views.push(relation_oid);
-    let (query, _) =
-        analyze_select_query_with_outer(&select, catalog, &[], None, &[], &next_views)?;
-    validate_view_shape(&query, relation_desc, &display_name)?;
-    Ok(query)
+    Ok(select)
 }
 
 pub(crate) fn rewrite_view_relation_query(
