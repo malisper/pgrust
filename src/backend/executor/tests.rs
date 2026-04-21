@@ -5716,6 +5716,66 @@ fn pg_input_error_info_reports_numeric_overflow() {
 }
 
 #[test]
+fn pg_input_error_info_reports_numeric_typmod_overflow_details() {
+    let base = temp_dir("pg_input_error_info_numeric_typmod");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select \
+                pg_input_is_valid('1234.567', 'numeric(8,4)'), \
+                pg_input_is_valid('1234.567', 'numeric(7,4)')",
+        )
+        .unwrap(),
+        vec![vec![Value::Bool(true), Value::Bool(false)]],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from pg_input_error_info('1234.567', 'numeric(7,4)')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("numeric field overflow".into()),
+            Value::Text(
+                "A field with precision 7, scale 4 must round to an absolute value less than 10^3."
+                    .into(),
+            ),
+            Value::Null,
+            Value::Text("22003".into()),
+        ]],
+    );
+}
+
+#[test]
+fn pg_input_error_info_rejects_numeric_prefixed_fractional_literal() {
+    let base = temp_dir("pg_input_error_info_numeric_prefixed_fraction");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from pg_input_error_info('0x1234.567', 'numeric')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("invalid input syntax for type numeric: \"0x1234.567\"".into()),
+            Value::Null,
+            Value::Null,
+            Value::Text("22P02".into()),
+        ]],
+    );
+}
+
+#[test]
 fn pg_input_error_info_reports_jsonb_structured_error_fields() {
     let base = temp_dir("pg_input_error_info_jsonb");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -6569,7 +6629,66 @@ fn numeric_cast_typmod_rejects_precision_overflow() {
         "select '1234.56'::numeric(5,2)",
     )
     .unwrap_err();
-    assert!(matches!(err, ExecError::NumericFieldOverflow));
+    match err {
+        ExecError::DetailedError {
+            message,
+            detail,
+            sqlstate,
+            ..
+        } => {
+            assert_eq!(message, "numeric field overflow");
+            assert_eq!(
+                detail.as_deref(),
+                Some(
+                    "A field with precision 5, scale 2 must round to an absolute value less than 10^3."
+                )
+            );
+            assert_eq!(sqlstate, "22003");
+        }
+        other => panic!("expected detailed numeric typmod error, got {other:?}"),
+    }
+}
+
+#[test]
+fn numeric_typmod_insert_errors_include_postgres_details() {
+    for (value_sql, expected_detail) in [
+        (
+            "'1.0'",
+            "A field with precision 4, scale 4 must round to an absolute value less than 1.",
+        ),
+        (
+            "'0.99995'",
+            "A field with precision 4, scale 4 must round to an absolute value less than 1.",
+        ),
+        (
+            "'Inf'",
+            "A field with precision 4, scale 4 cannot hold an infinite value.",
+        ),
+        (
+            "'-Inf'",
+            "A field with precision 4, scale 4 cannot hold an infinite value.",
+        ),
+    ] {
+        let value = Value::Text(value_sql.trim_matches('\'').into());
+        match expr_casts::cast_value(
+            value,
+            crate::backend::parser::SqlType::with_numeric_precision_scale(4, 4),
+        )
+        .unwrap_err()
+        {
+            ExecError::DetailedError {
+                message,
+                detail,
+                sqlstate,
+                ..
+            } => {
+                assert_eq!(message, "numeric field overflow");
+                assert_eq!(detail.as_deref(), Some(expected_detail));
+                assert_eq!(sqlstate, "22003");
+            }
+            other => panic!("expected detailed numeric typmod error, got {other:?}"),
+        }
+    }
 }
 
 #[test]
