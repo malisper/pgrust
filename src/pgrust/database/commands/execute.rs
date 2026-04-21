@@ -1017,6 +1017,11 @@ impl Database {
                 drop_stmt,
                 configured_search_path,
             ),
+            Statement::DropFunction(ref drop_stmt) => self.execute_drop_function_stmt_with_search_path(
+                client_id,
+                drop_stmt,
+                configured_search_path,
+            ),
             Statement::DropConversion(ref drop_stmt) => self
                 .execute_drop_conversion_stmt_with_search_path(
                     client_id,
