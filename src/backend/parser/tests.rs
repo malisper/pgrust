@@ -61,6 +61,20 @@ fn plain_inference_target(columns: &[&str]) -> OnConflictTarget {
     })
 }
 
+fn inference_target_with_predicate(columns: &[&str], predicate: SqlExpr) -> OnConflictTarget {
+    OnConflictTarget::Inference(OnConflictInferenceSpec {
+        elements: columns
+            .iter()
+            .map(|column| OnConflictInferenceElem {
+                expr: SqlExpr::Column((*column).into()),
+                collation: None,
+                opclass: None,
+            })
+            .collect(),
+        predicate: Some(predicate),
+    })
+}
+
 fn inference_column_names(target: &OnConflictTarget) -> Option<Vec<String>> {
     match target {
         OnConflictTarget::Inference(spec) if spec.predicate.is_none() => spec
@@ -430,6 +444,102 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
                 indoption: vec![0],
                 indexprs: None,
                 indpred: Some("(id > 0)".into()),
+            }),
+        },
+    );
+    catalog
+}
+
+fn catalog_with_people_expression_unique_index() -> Catalog {
+    let mut catalog = catalog();
+    let people = catalog.lookup_any_relation("people").unwrap();
+    catalog.insert(
+        "people_lower_name_key",
+        CatalogEntry {
+            rel: crate::RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: 15014,
+            },
+            relation_oid: 50014,
+            namespace_oid: 11,
+            owner_oid: BOOTSTRAP_SUPERUSER_OID,
+            row_type_oid: 60014,
+            array_type_oid: 0,
+            reltoastrelid: 0,
+            relpersistence: 'p',
+            relkind: 'i',
+            relhastriggers: false,
+            relhassubclass: false,
+            relispartition: false,
+            relrowsecurity: false,
+            relforcerowsecurity: false,
+            relpages: 0,
+            reltuples: 0.0,
+            desc: RelationDesc {
+                columns: vec![column_desc("lower", SqlType::new(SqlTypeKind::Text), false)],
+            },
+            index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
+                indrelid: people.relation_oid,
+                indisunique: true,
+                indisprimary: false,
+                indisvalid: true,
+                indisready: true,
+                indislive: true,
+                indkey: vec![0],
+                indclass: vec![crate::include::catalog::TEXT_BTREE_OPCLASS_OID],
+                indcollation: vec![0],
+                indoption: vec![0],
+                indexprs: Some(serde_json::to_string(&vec!["lower(name)"]).unwrap()),
+                indpred: None,
+            }),
+        },
+    );
+    catalog
+}
+
+fn catalog_with_people_name_c_collation_index() -> Catalog {
+    let mut catalog = catalog();
+    let people = catalog.lookup_any_relation("people").unwrap();
+    catalog.insert(
+        "people_name_c_key",
+        CatalogEntry {
+            rel: crate::RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: 15015,
+            },
+            relation_oid: 50015,
+            namespace_oid: 11,
+            owner_oid: BOOTSTRAP_SUPERUSER_OID,
+            row_type_oid: 60015,
+            array_type_oid: 0,
+            reltoastrelid: 0,
+            relpersistence: 'p',
+            relkind: 'i',
+            relhastriggers: false,
+            relhassubclass: false,
+            relispartition: false,
+            relrowsecurity: false,
+            relforcerowsecurity: false,
+            relpages: 0,
+            reltuples: 0.0,
+            desc: RelationDesc {
+                columns: vec![column_desc("name", SqlType::new(SqlTypeKind::Text), false)],
+            },
+            index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
+                indrelid: people.relation_oid,
+                indisunique: true,
+                indisprimary: false,
+                indisvalid: true,
+                indisready: true,
+                indislive: true,
+                indkey: vec![2],
+                indclass: vec![crate::include::catalog::TEXT_BTREE_OPCLASS_OID],
+                indcollation: vec![crate::include::catalog::C_COLLATION_OID],
+                indoption: vec![0],
+                indexprs: None,
+                indpred: None,
             }),
         },
     );
@@ -4832,30 +4942,76 @@ fn bind_insert_rejects_on_conflict_do_update_without_target() {
 }
 
 #[test]
-fn bind_insert_rejects_non_inferable_on_conflict_indexes() {
-    let partial_catalog = catalog_with_people_partial_unique_index();
-    let partial_stmt = people_insert_with_on_conflict(
-        Some(plain_inference_target(&["id"])),
-        crate::include::nodes::parsenodes::OnConflictAction::Nothing,
-        vec![],
-        None,
-    );
-    assert!(matches!(
-        stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || bind_insert(&partial_stmt, &partial_catalog)),
-        Err(ParseError::UnexpectedToken { actual, .. })
-            if actual
-                == "there is no unique or exclusion constraint matching the ON CONFLICT specification"
-    ));
+fn bind_insert_matches_partial_index_when_predicate_implies_index_predicate() {
+    std::thread::Builder::new()
+        .name("bind_insert_matches_partial_index_when_predicate_implies_index_predicate".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let partial_catalog = catalog_with_people_partial_unique_index();
+            let partial_stmt = people_insert_with_on_conflict(
+                Some(inference_target_with_predicate(
+                    &["id"],
+                    parse_expr("id > 0 and name = 'alice'").unwrap(),
+                )),
+                crate::include::nodes::parsenodes::OnConflictAction::Nothing,
+                vec![],
+                None,
+            );
+            let bound = bind_insert(&partial_stmt, &partial_catalog).unwrap();
+            let on_conflict = bound.on_conflict.expect("on conflict");
+            assert_eq!(on_conflict.arbiter_indexes.len(), 1);
+            assert_eq!(on_conflict.arbiter_indexes[0].name, "people_partial_key");
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]
-fn bind_insert_rejects_richer_on_conflict_inference_syntax() {
+fn bind_insert_rejects_partial_index_when_inference_predicate_is_missing_or_weaker() {
     std::thread::Builder::new()
-        .name("bind_insert_rejects_richer_on_conflict_inference_syntax".into())
+        .name("bind_insert_rejects_partial_index_when_inference_predicate_is_missing_or_weaker".into())
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
-            let catalog = catalog_with_people_primary_key();
+            let catalog = catalog_with_people_partial_unique_index();
 
+            let expression_stmt =
+                people_insert_with_on_conflict(Some(plain_inference_target(&["id"])), OnConflictAction::Nothing, vec![], None);
+            assert!(matches!(
+                bind_insert(&expression_stmt, &catalog),
+                Err(ParseError::UnexpectedToken { actual, .. })
+                    if actual
+                        == "there is no unique or exclusion constraint matching the ON CONFLICT specification"
+            ));
+
+            let weaker_stmt = people_insert_with_on_conflict(
+                Some(inference_target_with_predicate(
+                    &["id"],
+                    parse_expr("id > 1").unwrap(),
+                )),
+                OnConflictAction::Nothing,
+                vec![],
+                None,
+            );
+            assert!(matches!(
+                bind_insert(&weaker_stmt, &catalog),
+                Err(ParseError::UnexpectedToken { actual, .. })
+                    if actual
+                        == "there is no unique or exclusion constraint matching the ON CONFLICT specification"
+            ));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn bind_insert_matches_expression_and_collation_and_opclass_inference_targets() {
+    std::thread::Builder::new()
+        .name("bind_insert_matches_expression_and_collation_and_opclass_inference_targets".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let expression_catalog = catalog_with_people_expression_unique_index();
             let expression_stmt = people_insert_with_on_conflict(
                 Some(OnConflictTarget::Inference(OnConflictInferenceSpec {
                     elements: vec![OnConflictInferenceElem {
@@ -4869,16 +5025,21 @@ fn bind_insert_rejects_richer_on_conflict_inference_syntax() {
                 vec![],
                 None,
             );
-            assert!(matches!(
-                bind_insert(&expression_stmt, &catalog),
-                Err(ParseError::FeatureNotSupported(feature))
-                    if feature == "ON CONFLICT inference expressions"
-            ));
+            let expression_bound = bind_insert(&expression_stmt, &expression_catalog).unwrap();
+            assert_eq!(
+                expression_bound
+                    .on_conflict
+                    .expect("on conflict")
+                    .arbiter_indexes[0]
+                    .name,
+                "people_lower_name_key"
+            );
 
+            let collation_catalog = catalog_with_people_name_c_collation_index();
             let collation_stmt = people_insert_with_on_conflict(
                 Some(OnConflictTarget::Inference(OnConflictInferenceSpec {
                     elements: vec![OnConflictInferenceElem {
-                        expr: SqlExpr::Column("id".into()),
+                        expr: SqlExpr::Column("name".into()),
                         collation: Some("C".into()),
                         opclass: None,
                     }],
@@ -4888,11 +5049,15 @@ fn bind_insert_rejects_richer_on_conflict_inference_syntax() {
                 vec![],
                 None,
             );
-            assert!(matches!(
-                bind_insert(&collation_stmt, &catalog),
-                Err(ParseError::FeatureNotSupported(feature))
-                    if feature == "ON CONFLICT inference collation"
-            ));
+            let collation_bound = bind_insert(&collation_stmt, &collation_catalog).unwrap();
+            assert_eq!(
+                collation_bound
+                    .on_conflict
+                    .expect("on conflict")
+                    .arbiter_indexes[0]
+                    .name,
+                "people_name_c_key"
+            );
 
             let opclass_stmt = people_insert_with_on_conflict(
                 Some(OnConflictTarget::Inference(OnConflictInferenceSpec {
@@ -4907,29 +5072,87 @@ fn bind_insert_rejects_richer_on_conflict_inference_syntax() {
                 vec![],
                 None,
             );
-            assert!(matches!(
-                bind_insert(&opclass_stmt, &catalog),
-                Err(ParseError::FeatureNotSupported(feature))
-                    if feature == "ON CONFLICT inference operator class"
-            ));
+            let opclass_bound =
+                bind_insert(&opclass_stmt, &catalog_with_people_primary_key()).unwrap();
+            assert_eq!(
+                opclass_bound
+                    .on_conflict
+                    .expect("on conflict")
+                    .arbiter_indexes[0]
+                    .name,
+                "people_pkey"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
 
-            let predicate_stmt = people_insert_with_on_conflict(
+#[test]
+fn bind_insert_rejects_non_matching_expression_collation_and_opclass_targets() {
+    std::thread::Builder::new()
+        .name("bind_insert_rejects_non_matching_expression_collation_and_opclass_targets".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let expression_catalog = catalog_with_people_expression_unique_index();
+            let expression_stmt = people_insert_with_on_conflict(
                 Some(OnConflictTarget::Inference(OnConflictInferenceSpec {
                     elements: vec![OnConflictInferenceElem {
-                        expr: SqlExpr::Column("id".into()),
+                        expr: parse_expr("upper(name)").unwrap(),
                         collation: None,
                         opclass: None,
                     }],
-                    predicate: Some(parse_expr("id > 0").unwrap()),
+                    predicate: None,
                 })),
                 OnConflictAction::Nothing,
                 vec![],
                 None,
             );
             assert!(matches!(
-                bind_insert(&predicate_stmt, &catalog),
-                Err(ParseError::FeatureNotSupported(feature))
-                    if feature == "ON CONFLICT inference WHERE"
+                bind_insert(&expression_stmt, &expression_catalog),
+                Err(ParseError::UnexpectedToken { actual, .. })
+                    if actual
+                        == "there is no unique or exclusion constraint matching the ON CONFLICT specification"
+            ));
+
+            let collation_stmt = people_insert_with_on_conflict(
+                Some(OnConflictTarget::Inference(OnConflictInferenceSpec {
+                    elements: vec![OnConflictInferenceElem {
+                        expr: SqlExpr::Column("name".into()),
+                        collation: Some("POSIX".into()),
+                        opclass: None,
+                    }],
+                    predicate: None,
+                })),
+                OnConflictAction::Nothing,
+                vec![],
+                None,
+            );
+            assert!(matches!(
+                bind_insert(&collation_stmt, &catalog_with_people_name_c_collation_index()),
+                Err(ParseError::UnexpectedToken { actual, .. })
+                    if actual
+                        == "there is no unique or exclusion constraint matching the ON CONFLICT specification"
+            ));
+
+            let opclass_stmt = people_insert_with_on_conflict(
+                Some(OnConflictTarget::Inference(OnConflictInferenceSpec {
+                    elements: vec![OnConflictInferenceElem {
+                        expr: SqlExpr::Column("id".into()),
+                        collation: None,
+                        opclass: Some("int8_ops".into()),
+                    }],
+                    predicate: None,
+                })),
+                OnConflictAction::Nothing,
+                vec![],
+                None,
+            );
+            assert!(matches!(
+                bind_insert(&opclass_stmt, &catalog_with_people_primary_key()),
+                Err(ParseError::UnexpectedToken { actual, .. })
+                    if actual
+                        == "there is no unique or exclusion constraint matching the ON CONFLICT specification"
             ));
         })
         .unwrap()
