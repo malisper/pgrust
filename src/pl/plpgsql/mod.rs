@@ -143,6 +143,24 @@ mod tests {
     }
 
     #[test]
+    fn execute_do_accepts_top_level_end_semicolon() {
+        let stmt = DoStatement {
+            language: None,
+            code: "begin raise notice 'done'; end;".into(),
+        };
+
+        let result = execute_do(&stmt).unwrap();
+        assert_eq!(result, StatementResult::AffectedRows(0));
+        assert_eq!(
+            take_notices(),
+            vec![PlpgsqlNotice {
+                level: RaiseLevel::Notice,
+                message: "done".into(),
+            }]
+        );
+    }
+
+    #[test]
     fn parse_block_accepts_comments_in_declare_section() {
         let block = parse_block(
             r#"
@@ -164,5 +182,20 @@ mod tests {
             block.declarations[1].default_expr.as_deref(),
             Some("1.94947")
         );
+    }
+
+    #[test]
+    fn parse_block_accepts_top_level_end_semicolon() {
+        let block = parse_block(
+            r#"
+                begin
+                    null;
+                end;
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(block.declarations.len(), 0);
+        assert_eq!(block.statements.len(), 1);
     }
 }
