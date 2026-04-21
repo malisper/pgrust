@@ -84,6 +84,7 @@ pub fn execute_plan(plan: Plan, ctx: &mut ExecutorContext) -> Result<StatementRe
         create_query_desc(
             PlannedStmt {
                 command_type: crate::include::executor::execdesc::CommandType::Select,
+                depends_on_row_security: false,
                 plan_tree: plan,
                 subplans: Vec::new(),
                 ext_params: Vec::new(),

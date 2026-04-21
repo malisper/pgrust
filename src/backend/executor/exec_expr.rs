@@ -75,6 +75,7 @@ use super::pg_regex::{
 };
 pub(crate) use super::value_io::{format_array_text, format_array_value_text};
 use super::{ExecError, ExecutorContext, exec_next, executor_start};
+use crate::backend::catalog::roles::find_role_by_oid;
 use crate::backend::executor::jsonb::{
     JsonbValue, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any, jsonb_from_value,
 };
@@ -385,21 +386,16 @@ fn role_catalog(
         })
 }
 
-fn auth_role_name(ctx: &ExecutorContext, oid: u32) -> Result<Value, ExecError> {
-    let Some(role_name) = role_catalog(ctx)?
-        .authid_rows()
-        .into_iter()
-        .find(|row| row.oid == oid)
-        .map(|row| row.rolname)
-    else {
-        return Err(ExecError::DetailedError {
-            message: format!("cache lookup failed for role {oid}").into(),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        });
-    };
-    Ok(Value::Text(role_name.into()))
+fn auth_role_name(ctx: &ExecutorContext, role_oid: u32) -> Result<Value, ExecError> {
+    let catalog = role_catalog(ctx)?;
+    let rows = catalog.authid_rows();
+    let role = find_role_by_oid(&rows, role_oid).ok_or_else(|| ExecError::DetailedError {
+        message: format!("role with OID {role_oid} does not exist"),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    Ok(Value::Text(role.rolname.clone().into()))
 }
 
 fn quote_identifier_if_needed(identifier: &str) -> String {

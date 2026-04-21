@@ -54,6 +54,7 @@ pub struct ExecParamSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedStmt {
     pub command_type: CommandType,
+    pub depends_on_row_security: bool,
     pub plan_tree: Plan,
     pub subplans: Vec<Plan>,
     pub ext_params: Vec<ExecParamSource>,

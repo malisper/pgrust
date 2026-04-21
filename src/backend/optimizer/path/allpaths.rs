@@ -95,24 +95,41 @@ fn assign_base_restrictinfo(root: &mut PlannerInfo) {
         rel.baserestrictinfo.clear();
         rel.joininfo.clear();
     }
-    if has_outer_joins(root) {
-        return;
-    }
-    let Some(where_qual) = root.parse.where_qual.as_ref() else {
-        return;
-    };
-    for clause in flatten_and_conjuncts(where_qual) {
-        let restrict = joininfo::make_restrict_info(expand_join_rte_vars(root, clause));
-        if !is_pushable_base_clause(root, &restrict.required_relids) {
+    for (rtindex, rte) in root.parse.rtable.iter().enumerate() {
+        if !matches!(rte.kind, RangeTblEntryKind::Relation { .. }) {
             continue;
         }
-        let relid = restrict.required_relids[0];
-        if let Some(rel) = root
+        let relid = rtindex + 1;
+        let Some(rel) = root
             .simple_rel_array
             .get_mut(relid)
             .and_then(Option::as_mut)
-        {
-            rel.baserestrictinfo.push(restrict);
+        else {
+            continue;
+        };
+        rel.baserestrictinfo.extend(
+            rte.security_quals
+                .iter()
+                .cloned()
+                .map(joininfo::make_restrict_info),
+        );
+    }
+    if !has_outer_joins(root)
+        && let Some(where_qual) = root.parse.where_qual.as_ref()
+    {
+        for clause in flatten_and_conjuncts(where_qual) {
+            let restrict = joininfo::make_restrict_info(expand_join_rte_vars(root, clause));
+            if !is_pushable_base_clause(root, &restrict.required_relids) {
+                continue;
+            }
+            let relid = restrict.required_relids[0];
+            if let Some(rel) = root
+                .simple_rel_array
+                .get_mut(relid)
+                .and_then(Option::as_mut)
+            {
+                rel.baserestrictinfo.push(restrict);
+            }
         }
     }
 }

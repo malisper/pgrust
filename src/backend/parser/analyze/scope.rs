@@ -1570,7 +1570,7 @@ pub(super) fn lookup_relation(
     }
 }
 
-pub(super) fn scope_for_relation(relation_name: Option<&str>, desc: &RelationDesc) -> BoundScope {
+pub(crate) fn scope_for_relation(relation_name: Option<&str>, desc: &RelationDesc) -> BoundScope {
     BoundScope {
         desc: desc.clone(),
         output_exprs: default_scope_output_exprs(1, desc),
@@ -1611,7 +1611,7 @@ pub(super) fn scope_for_base_relation(relation_name: &str, desc: &RelationDesc) 
     scope
 }
 
-pub(super) fn shift_scope_rtindexes(mut scope: BoundScope, offset: usize) -> BoundScope {
+pub(crate) fn shift_scope_rtindexes(mut scope: BoundScope, offset: usize) -> BoundScope {
     if offset == 0 {
         return scope;
     }

@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, VecDeque};
 
 use crate::backend::catalog::CatalogError;
-use crate::include::catalog::PgAuthMembersRow;
+use crate::include::catalog::{PgAuthIdRow, PgAuthMembersRow};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewRoleMembership {
@@ -30,6 +30,42 @@ pub fn memberships_for_role(rows: &[PgAuthMembersRow], roleid: u32) -> Vec<PgAut
 pub fn has_admin_option(rows: &[PgAuthMembersRow], roleid: u32, member: u32) -> bool {
     rows.iter()
         .any(|row| row.roleid == roleid && row.member == member && row.admin_option)
+}
+
+pub fn has_membership_path(start_member: u32, target_role: u32, rows: &[PgAuthMembersRow]) -> bool {
+    let mut pending = VecDeque::from([start_member]);
+    let mut visited = BTreeSet::new();
+    while let Some(member) = pending.pop_front() {
+        if !visited.insert(member) {
+            continue;
+        }
+        for edge in rows.iter().filter(|row| row.member == member) {
+            if !edge.inherit_option {
+                continue;
+            }
+            if edge.roleid == target_role {
+                return true;
+            }
+            pending.push_back(edge.roleid);
+        }
+    }
+    false
+}
+
+pub fn has_effective_membership(
+    user_oid: u32,
+    target_role_oid: u32,
+    authid_rows: &[PgAuthIdRow],
+    auth_members_rows: &[PgAuthMembersRow],
+) -> bool {
+    if user_oid == target_role_oid {
+        return true;
+    }
+    authid_rows
+        .iter()
+        .find(|row| row.oid == user_oid)
+        .is_some_and(|row| row.rolsuper)
+        || has_membership_path(user_oid, target_role_oid, auth_members_rows)
 }
 
 pub fn would_create_membership_cycle(rows: &[PgAuthMembersRow], roleid: u32, member: u32) -> bool {

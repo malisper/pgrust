@@ -3,8 +3,9 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{AggFunc, Expr, Plan, RelationDesc, Value};
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, JSON_TYPE_OID, PUBLIC_NAMESPACE_OID, PgProcRow,
-    PgRewriteRow, PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_proc_rows, sort_pg_rewrite_rows,
+    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, JSON_TYPE_OID, PUBLIC_NAMESPACE_OID, PgAuthIdRow,
+    PgAuthMembersRow, PgClassRow, PgPolicyRow, PgProcRow, PgRewriteRow, PgTypeRow, PolicyCommand,
+    RECORD_TYPE_OID, bootstrap_pg_proc_rows, sort_pg_rewrite_rows,
 };
 use crate::include::nodes::parsenodes::{
     AliasColumnDef, AliasColumnSpec, ColumnConstraint, CompositeTypeAttributeDef,
@@ -216,6 +217,78 @@ fn catalog_with_jpop() -> Catalog {
     let mut catalog = catalog();
     catalog.insert("jpop", jpop_entry());
     catalog
+}
+
+struct RowSecurityTestCatalog {
+    base: Catalog,
+    current_user_oid: u32,
+    authid_rows: Vec<PgAuthIdRow>,
+}
+
+impl CatalogLookup for RowSecurityTestCatalog {
+    fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation> {
+        self.base.lookup_any_relation(name)
+    }
+
+    fn lookup_relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {
+        self.base.lookup_relation_by_oid(relation_oid)
+    }
+
+    fn relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {
+        self.base.relation_by_oid(relation_oid)
+    }
+
+    fn current_user_oid(&self) -> u32 {
+        self.current_user_oid
+    }
+
+    fn authid_rows(&self) -> Vec<PgAuthIdRow> {
+        self.authid_rows.clone()
+    }
+
+    fn auth_members_rows(&self) -> Vec<PgAuthMembersRow> {
+        self.base.auth_members_rows().to_vec()
+    }
+
+    fn rewrite_rows_for_relation(&self, relation_oid: u32) -> Vec<PgRewriteRow> {
+        self.base.rewrite_rows_for_relation(relation_oid).to_vec()
+    }
+
+    fn policy_rows_for_relation(&self, relation_oid: u32) -> Vec<PgPolicyRow> {
+        self.base.policy_rows_for_relation(relation_oid).to_vec()
+    }
+
+    fn class_row_by_oid(&self, relation_oid: u32) -> Option<PgClassRow> {
+        self.base.class_row_by_oid(relation_oid)
+    }
+}
+
+fn row_security_test_catalog(base: Catalog, current_user_oid: u32) -> RowSecurityTestCatalog {
+    let mut authid_rows = base.authid_rows().to_vec();
+    authid_rows.push(PgAuthIdRow {
+        oid: current_user_oid,
+        rolname: "app_user".into(),
+        rolsuper: false,
+        rolinherit: true,
+        rolcreaterole: false,
+        rolcreatedb: false,
+        rolcanlogin: true,
+        rolreplication: false,
+        rolbypassrls: false,
+        rolconnlimit: -1,
+    });
+    authid_rows.sort_by_key(|row| row.oid);
+    RowSecurityTestCatalog {
+        base,
+        current_user_oid,
+        authid_rows,
+    }
+}
+
+fn row_security_entry(rel_number: u32, desc: RelationDesc) -> CatalogEntry {
+    let mut entry = test_catalog_entry(rel_number, desc);
+    entry.relrowsecurity = true;
+    entry
 }
 
 struct OverrideFunctionCatalog {
@@ -819,6 +892,126 @@ fn rewrite_query_expands_view_relation_rtes() {
         rewritten.rtable[0].kind,
         RangeTblEntryKind::Subquery { .. }
     ));
+}
+
+#[test]
+fn rewrite_policy_subqueries_apply_nested_row_security() {
+    let mut base = Catalog::default();
+    base.insert(
+        "outer_t",
+        row_security_entry(
+            15100,
+            RelationDesc {
+                columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+            },
+        ),
+    );
+    base.insert(
+        "inner_t",
+        row_security_entry(
+            15101,
+            RelationDesc {
+                columns: vec![
+                    column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                    column_desc("owner_id", SqlType::new(SqlTypeKind::Int4), false),
+                ],
+            },
+        ),
+    );
+    let outer_oid = base.get("outer_t").unwrap().relation_oid;
+    let inner_oid = base.get("inner_t").unwrap().relation_oid;
+    base.add_policy_row(PgPolicyRow {
+        oid: 71000,
+        polname: "outer_exists_inner".into(),
+        polrelid: outer_oid,
+        polcmd: PolicyCommand::Select,
+        polpermissive: true,
+        polroles: vec![0],
+        polqual: Some("exists (select 1 from inner_t where inner_t.owner_id = outer_t.id)".into()),
+        polwithcheck: None,
+    });
+    base.add_policy_row(PgPolicyRow {
+        oid: 71001,
+        polname: "inner_visible".into(),
+        polrelid: inner_oid,
+        polcmd: PolicyCommand::Select,
+        polpermissive: true,
+        polroles: vec![0],
+        polqual: Some("owner_id = 7".into()),
+        polwithcheck: None,
+    });
+    let catalog = row_security_test_catalog(base, 71010);
+
+    let stmt = parse_select("select id from outer_t").unwrap();
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).unwrap();
+    let rewritten = crate::backend::rewrite::pg_rewrite_query(query, &catalog)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+
+    assert!(rewritten.depends_on_row_security);
+    let outer_rte = &rewritten.rtable[0];
+    let outer_security_qual = outer_rte
+        .security_quals
+        .first()
+        .expect("outer table should have a rewritten policy qual");
+    let subquery = match outer_security_qual {
+        Expr::SubLink(sublink) => &sublink.subselect,
+        other => panic!("expected policy EXISTS subquery, got {other:?}"),
+    };
+    assert!(subquery.depends_on_row_security);
+    let inner_rte = &subquery.rtable[0];
+    match &inner_rte.kind {
+        RangeTblEntryKind::Relation { relation_oid, .. } => assert_eq!(*relation_oid, inner_oid),
+        other => panic!("expected inner policy subquery relation RTE, got {other:?}"),
+    }
+    assert!(
+        !inner_rte.security_quals.is_empty(),
+        "inner policy subquery should inherit its own row-security quals"
+    );
+}
+
+#[test]
+fn rewrite_policy_subqueries_reject_infinite_policy_recursion() {
+    let mut base = Catalog::default();
+    base.insert(
+        "rtbl",
+        row_security_entry(
+            15102,
+            RelationDesc {
+                columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+            },
+        ),
+    );
+    let relation_oid = base.get("rtbl").unwrap().relation_oid;
+    base.add_policy_row(PgPolicyRow {
+        oid: 71002,
+        polname: "recursive_policy".into(),
+        polrelid: relation_oid,
+        polcmd: PolicyCommand::Select,
+        polpermissive: true,
+        polroles: vec![0],
+        polqual: Some("exists (select 1 from rtbl inner_rtbl)".into()),
+        polwithcheck: None,
+    });
+    let catalog = row_security_test_catalog(base, 71011);
+
+    let stmt = parse_select("select id from rtbl").unwrap();
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).unwrap();
+    let err = crate::backend::rewrite::pg_rewrite_query(query, &catalog).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            ParseError::DetailedError {
+                sqlstate,
+                message,
+                ..
+            } if *sqlstate == "42P17"
+                && message == "infinite recursion detected in policy for relation \"rtbl\""
+        ),
+        "unexpected recursion error: {err:?}"
+    );
 }
 
 #[test]
