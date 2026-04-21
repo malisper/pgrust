@@ -21,6 +21,7 @@ use crate::backend::parser::{
     SelectStatement, Statement, bind_delete, bind_insert, bind_insert_prepared, bind_update,
     plan_merge,
 };
+use crate::backend::rewrite::relation_has_row_security;
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
 use crate::backend::utils::cache::inval::CatalogInvalidation;
 use crate::backend::utils::cache::lsyscache::LazyCatalogLookup;
@@ -257,7 +258,15 @@ impl Session {
         )
     }
 
+    pub(crate) fn row_security_enabled(&self) -> bool {
+        self.gucs
+            .get("row_security")
+            .map(|value| parse_bool_guc(value).unwrap_or(true))
+            .unwrap_or(true)
+    }
+
     pub(crate) fn catalog_lookup<'a>(&self, db: &'a Database) -> LazyCatalogLookup<'a> {
+        db.install_row_security_enabled(self.client_id, self.row_security_enabled());
         let search_path = self.configured_search_path();
         db.lazy_catalog_lookup(
             self.client_id,
@@ -274,6 +283,7 @@ impl Session {
         xid: TransactionId,
         cid: u32,
     ) -> LazyCatalogLookup<'a> {
+        db.install_row_security_enabled(self.client_id, self.row_security_enabled());
         let search_path = self.configured_search_path();
         db.lazy_catalog_lookup(self.client_id, Some((xid, cid)), search_path.as_deref())
     }
@@ -452,6 +462,7 @@ impl Session {
     pub fn execute(&mut self, db: &Database, sql: &str) -> Result<StatementResult, ExecError> {
         let _interrupt_guard = self.statement_interrupt_guard()?;
         db.install_auth_state(self.client_id, self.auth.clone());
+        db.install_row_security_enabled(self.client_id, self.row_security_enabled());
         db.install_temp_backend_id(self.client_id, self.temp_backend_id);
         db.install_stats_state(self.client_id, Arc::clone(&self.stats_state));
         self.execute_internal(db, sql)
@@ -2774,7 +2785,7 @@ impl Session {
 
     fn apply_set(
         &mut self,
-        _db: &Database,
+        db: &Database,
         stmt: &crate::backend::parser::SetStatement,
     ) -> Result<StatementResult, ExecError> {
         let name = normalize_guc_name(&stmt.name);
@@ -2787,12 +2798,16 @@ impl Session {
             return Err(ExecError::Parse(ParseError::CantChangeRuntimeParam(name)));
         }
         self.apply_guc_value(&stmt.name, &stmt.value)?;
+        if name == "row_security" {
+            db.install_row_security_enabled(self.client_id, self.row_security_enabled());
+            db.plan_cache.invalidate_all();
+        }
         Ok(StatementResult::AffectedRows(0))
     }
 
     fn apply_reset(
         &mut self,
-        _db: &Database,
+        db: &Database,
         stmt: &crate::backend::parser::ResetStatement,
     ) -> Result<StatementResult, ExecError> {
         if let Some(name) = &stmt.name {
@@ -2821,6 +2836,10 @@ impl Session {
                 _ => {}
             }
             self.gucs.remove(&normalized);
+            if normalized == "row_security" {
+                db.install_row_security_enabled(self.client_id, self.row_security_enabled());
+                db.plan_cache.invalidate_all();
+            }
         } else {
             self.gucs.clear();
             self.guc_reset_datestyle();
@@ -2828,6 +2847,8 @@ impl Session {
             self.stats_state
                 .write()
                 .set_fetch_consistency(StatsFetchConsistency::Cache);
+            db.install_row_security_enabled(self.client_id, true);
+            db.plan_cache.invalidate_all();
         }
         Ok(StatementResult::AffectedRows(0))
     }
@@ -2982,6 +3003,11 @@ impl Session {
                     .write()
                     .set_track_functions(track_functions);
             }
+            "row_security" => {
+                parse_bool_guc(value).ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
+                })?;
+            }
             _ => {}
         }
         self.gucs.insert(normalized, value.to_string());
@@ -3104,6 +3130,11 @@ impl Session {
                 let entry = catalog.lookup_any_relation(table_name).ok_or_else(|| {
                     ExecError::Parse(ParseError::UnknownTable(table_name.to_string()))
                 })?;
+                if relation_has_row_security(entry.relation_oid, &catalog) {
+                    return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+                        "COPY FROM is not yet supported on tables with row-level security".into(),
+                    )));
+                }
                 let toast_index = entry.toast.and_then(|toast| {
                     catalog
                         .index_relations_for_heap(toast.relation_oid)
@@ -3278,6 +3309,7 @@ impl Session {
                 toast_index.as_ref(),
                 &desc,
                 &relation_constraints,
+                &[],
                 &indexes,
                 &parsed_rows,
                 &mut ctx,
@@ -3385,6 +3417,14 @@ fn parse_statement_timeout(value: &str) -> Result<Option<Duration>, ExecError> {
         )));
     }
     Ok(Some(Duration::from_millis(millis.ceil() as u64)))
+}
+
+fn parse_bool_guc(value: &str) -> Option<bool> {
+    match normalize_guc_name(value).as_str() {
+        "on" | "true" | "yes" | "1" => Some(true),
+        "off" | "false" | "no" | "0" => Some(false),
+        _ => None,
+    }
 }
 
 fn parse_max_stack_depth(value: &str) -> Result<u32, ExecError> {

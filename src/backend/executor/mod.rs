@@ -111,7 +111,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 use std::sync::Arc;
 
-pub(crate) use constraints::enforce_relation_constraints;
+pub(crate) use constraints::{enforce_relation_constraints, enforce_row_security_write_checks};
 pub(crate) use expr_ops::compare_order_values;
 use expr_ops::parse_numeric_text;
 pub(crate) use foreign_keys::{

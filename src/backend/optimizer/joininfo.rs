@@ -690,6 +690,7 @@ mod tests {
     fn query_for_jointree(jointree: JoinTreeNode, rtable: Vec<RangeTblEntry>) -> Query {
         Query {
             command_type: CommandType::Select,
+            depends_on_row_security: false,
             rtable,
             jointree: Some(jointree),
             target_list: vec![TargetEntry::new(
@@ -724,6 +725,7 @@ mod tests {
                 columns: Vec::new(),
             },
             inh: false,
+            security_quals: Vec::new(),
             kind: RangeTblEntryKind::Result,
         }
     }

@@ -3,7 +3,9 @@ use super::query::rewrite_local_vars_for_output_exprs;
 use super::*;
 use crate::backend::rewrite::{
     ViewDmlEvent, ViewDmlRewriteError, resolve_auto_updatable_view_target,
+    RlsWriteCheck, build_target_relation_row_security, relation_has_row_security,
 };
+use crate::include::catalog::PolicyCommand;
 use crate::include::nodes::primnodes::JoinType;
 use crate::include::nodes::primnodes::{SELF_ITEM_POINTER_ATTR_NO, TargetEntry, Var};
 
@@ -24,6 +26,7 @@ pub struct BoundInsertStatement {
     pub source: BoundInsertSource,
     pub on_conflict: Option<BoundOnConflictClause>,
     pub returning: Vec<TargetEntry>,
+    pub(crate) rls_write_checks: Vec<RlsWriteCheck>,
     pub subplans: Vec<Plan>,
 }
 
@@ -67,6 +70,7 @@ pub struct BoundUpdateTarget {
     pub indexes: Vec<BoundIndexRelation>,
     pub assignments: Vec<BoundAssignment>,
     pub predicate: Option<Expr>,
+    pub(crate) rls_write_checks: Vec<RlsWriteCheck>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,6 +198,12 @@ fn merge_join_type(clauses: &[MergeWhenClause]) -> JoinType {
         (false, true) => JoinType::Right,
         (true, true) => JoinType::Full,
     }
+}
+
+fn unsupported_with_row_security(feature: &str) -> ParseError {
+    ParseError::FeatureNotSupportedMessage(format!(
+        "{feature} is not yet supported on tables with row-level security"
+    ))
 }
 
 fn merge_visible_insert_targets(
@@ -403,6 +413,9 @@ pub fn plan_merge(
         &[],
     )?;
     let entry = lookup_relation(catalog, &stmt.target_table)?;
+    if relation_has_row_security(entry.relation_oid, catalog) {
+        return Err(unsupported_with_row_security("MERGE"));
+    }
     let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, &local_ctes)?;
     let target_relation_name = merge_target_relation_name(stmt);
     let explain_target_name = merge_explain_target_name(stmt);
@@ -641,6 +654,7 @@ fn build_update_target(
     parent_desc: &RelationDesc,
     parent_assignments: &[BoundAssignment],
     parent_predicate: Option<&Expr>,
+    parent_rls_write_checks: &[RlsWriteCheck],
     child: &BoundRelation,
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundUpdateTarget, ParseError> {
@@ -671,6 +685,14 @@ fn build_update_target(
             })
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
+    let rls_write_checks = parent_rls_write_checks
+        .iter()
+        .map(|check| RlsWriteCheck {
+            expr: rewrite_local_vars_for_output_exprs(check.expr.clone(), 1, &translation_exprs),
+            policy_name: check.policy_name.clone(),
+            source: check.source,
+        })
+        .collect();
 
     Ok(BoundUpdateTarget {
         relation_name: relation_name.clone(),
@@ -695,6 +717,7 @@ fn build_update_target(
         indexes,
         assignments,
         predicate,
+        rls_write_checks,
     })
 }
 
@@ -812,6 +835,7 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
         source: stmt.source,
         on_conflict: None,
         returning: stmt.returning,
+        rls_write_checks: stmt.rls_write_checks,
         subplans: stmt.subplans,
     })
 }
@@ -882,6 +906,7 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
                 &resolved.base_relation.desc,
                 &assignments,
                 predicate.as_ref(),
+                &target.rls_write_checks,
                 &child,
                 catalog,
             )
@@ -1074,6 +1099,9 @@ pub fn bind_insert_prepared(
     catalog: &dyn CatalogLookup,
 ) -> Result<PreparedInsert, ParseError> {
     let entry = lookup_relation(catalog, table_name)?;
+    if relation_has_row_security(entry.relation_oid, catalog) {
+        return Err(unsupported_with_row_security("prepared INSERT"));
+    }
     let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, &[])?;
 
     let target_columns = if let Some(columns) = columns {
@@ -1143,7 +1171,24 @@ pub(crate) fn bind_insert_with_outer_scopes(
         &[],
     )?;
     let entry = lookup_modify_relation(catalog, &stmt.table_name)?;
+    if stmt.on_conflict.as_ref().is_some_and(|clause| {
+        clause.action == crate::include::nodes::parsenodes::OnConflictAction::Update
+    }) && relation_has_row_security(entry.relation_oid, catalog)
+    {
+        return Err(unsupported_with_row_security(
+            "INSERT ... ON CONFLICT DO UPDATE",
+        ));
+    }
     let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, &local_ctes)?;
+    let target_rls = build_target_relation_row_security(
+        &stmt.table_name,
+        entry.relation_oid,
+        &entry.desc,
+        PolicyCommand::Insert,
+        false,
+        false,
+        catalog,
+    )?;
     let visible_target_name = stmt.table_alias.as_deref().unwrap_or(&stmt.table_name);
     let target_scope = scope_for_relation(Some(visible_target_name), &entry.desc);
     let expr_scope = empty_scope();
@@ -1291,6 +1336,7 @@ pub(crate) fn bind_insert_with_outer_scopes(
             })
             .transpose()?,
         returning,
+        rls_write_checks: target_rls.write_checks,
         subplans: Vec::new(),
     })
 }
@@ -1327,6 +1373,23 @@ pub(crate) fn bind_update_with_outer_scopes(
         .transpose()?;
     let returning =
         bind_returning_targets(&stmt.returning, &scope, catalog, outer_scopes, &local_ctes)?;
+    let target_rls = build_target_relation_row_security(
+        &stmt.table_name,
+        entry.relation_oid,
+        &entry.desc,
+        PolicyCommand::Update,
+        // :HACK: pgrust always materializes old target rows through one path today,
+        // so first-pass UPDATE RLS also requires SELECT visibility on the target.
+        true,
+        false,
+        catalog,
+    )?;
+    let predicate = match (predicate, target_rls.visibility_qual) {
+        (Some(predicate), Some(visibility_qual)) => Some(Expr::and(predicate, visibility_qual)),
+        (Some(predicate), None) => Some(predicate),
+        (None, Some(visibility_qual)) => Some(visibility_qual),
+        (None, None) => None,
+    };
     let assignments = stmt
         .assignments
         .iter()
@@ -1367,6 +1430,7 @@ pub(crate) fn bind_update_with_outer_scopes(
             &entry.desc,
             &assignments,
             predicate.as_ref(),
+            &target_rls.write_checks,
             &child,
             catalog,
         )
@@ -1475,6 +1539,23 @@ pub(crate) fn bind_delete_with_outer_scopes(
         .transpose()?;
     let returning =
         bind_returning_targets(&stmt.returning, &scope, catalog, outer_scopes, &local_ctes)?;
+    let target_rls = build_target_relation_row_security(
+        &stmt.table_name,
+        entry.relation_oid,
+        &entry.desc,
+        PolicyCommand::Delete,
+        // :HACK: pgrust always materializes old target rows through one path today,
+        // so first-pass DELETE RLS also requires SELECT visibility on the target.
+        true,
+        false,
+        catalog,
+    )?;
+    let predicate = match (predicate, target_rls.visibility_qual) {
+        (Some(predicate), Some(visibility_qual)) => Some(Expr::and(predicate, visibility_qual)),
+        (Some(predicate), None) => Some(predicate),
+        (None, Some(visibility_qual)) => Some(visibility_qual),
+        (None, None) => None,
+    };
 
     let targets = if stmt.only {
         vec![entry.relation_oid]

@@ -33,6 +33,7 @@ use crate::include::catalog::{
     bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
     bootstrap_pg_language_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
     bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
+    PgAuthIdRow, PgAuthMembersRow,
     proc_oid_for_builtin_aggregate_function, range_type_ref_for_sql_type, relkind_is_analyzable,
 };
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
@@ -60,6 +61,7 @@ pub(crate) use constraints::*;
 pub(crate) use constraints::{BoundReferencedByForeignKey, BoundRelationConstraints};
 pub use create_table::*;
 pub use create_table_inherits::*;
+pub(crate) use expr::bind_expr_with_outer_and_ctes;
 use expr::*;
 use functions::*;
 use geometry::*;
@@ -89,6 +91,7 @@ pub(crate) use rules::{
 };
 pub use scope::BoundRelation;
 use scope::*;
+pub(crate) use scope::{BoundScope, scope_for_relation, shift_scope_rtindexes};
 use std::cell::RefCell;
 use std::rc::Rc;
 use system_views::*;
@@ -194,6 +197,26 @@ pub trait CatalogLookup {
 
     fn relation_by_oid(&self, _relation_oid: u32) -> Option<BoundRelation> {
         None
+    }
+
+    fn current_user_oid(&self) -> u32 {
+        BOOTSTRAP_SUPERUSER_OID
+    }
+
+    fn session_user_oid(&self) -> u32 {
+        BOOTSTRAP_SUPERUSER_OID
+    }
+
+    fn authid_rows(&self) -> Vec<PgAuthIdRow> {
+        Vec::new()
+    }
+
+    fn auth_members_rows(&self) -> Vec<PgAuthMembersRow> {
+        Vec::new()
+    }
+
+    fn row_security_enabled(&self) -> bool {
+        true
     }
 
     fn current_relation_pages(&self, _relation_oid: u32) -> Option<u32> {
@@ -461,6 +484,14 @@ impl CatalogLookup for Catalog {
         relcache
             .get_by_oid(relation_oid)
             .map(|entry| bound_relation_from_relcache_entry(&relcache, entry))
+    }
+
+    fn authid_rows(&self) -> Vec<PgAuthIdRow> {
+        CatCache::from_catalog(self).authid_rows()
+    }
+
+    fn auth_members_rows(&self) -> Vec<PgAuthMembersRow> {
+        CatCache::from_catalog(self).auth_members_rows()
     }
 
     fn index_relations_for_heap(&self, relation_oid: u32) -> Vec<BoundIndexRelation> {
@@ -1439,6 +1470,7 @@ fn bind_ctes(
                     cte_id,
                     plan: Query {
                         command_type: crate::include::executor::execdesc::CommandType::Select,
+                        depends_on_row_security: false,
                         rtable: worktable_plan.rtable.clone(),
                         jointree: worktable_plan.jointree.clone(),
                         target_list: identity_target_list(
@@ -1507,6 +1539,7 @@ fn bind_ctes(
                 (
                     Query {
                         command_type: crate::include::executor::execdesc::CommandType::Select,
+                        depends_on_row_security: false,
                         rtable: recursive_plan.rtable,
                         jointree: recursive_plan.jointree,
                         target_list,
@@ -2363,6 +2396,7 @@ fn bind_values_query_with_outer(
     Ok((
         Query {
             command_type: crate::include::executor::execdesc::CommandType::Select,
+            depends_on_row_security: false,
             rtable,
             jointree,
             target_list,
@@ -2846,6 +2880,7 @@ fn bind_select_query_with_outer(
 
             let query = Query {
                 command_type: crate::include::executor::execdesc::CommandType::Select,
+                depends_on_row_security: false,
                 rtable: base.rtable,
                 jointree: base.jointree,
                 target_list,
@@ -2912,6 +2947,7 @@ fn bind_select_query_with_outer(
 
                 let query = Query {
                     command_type: crate::include::executor::execdesc::CommandType::Select,
+                    depends_on_row_security: false,
                     rtable: base.rtable,
                     jointree: base.jointree,
                     target_list,
@@ -2961,6 +2997,7 @@ fn bind_select_query_with_outer(
                 let target_list = normalize_target_list(final_targets);
                 let query = Query {
                     command_type: crate::include::executor::execdesc::CommandType::Select,
+                    depends_on_row_security: false,
                     rtable: base.rtable,
                     jointree: base.jointree,
                     target_list,
@@ -3011,6 +3048,7 @@ fn apply_select_distinct(query: Query, distinct: bool) -> Query {
 
     Query {
         command_type: crate::include::executor::execdesc::CommandType::Select,
+        depends_on_row_security: false,
         rtable: Vec::new(),
         jointree: None,
         target_list,
@@ -3162,6 +3200,7 @@ fn bind_set_operation_query_with_outer(
     Ok((
         Query {
             command_type: crate::include::executor::execdesc::CommandType::Select,
+            depends_on_row_security: false,
             rtable: Vec::new(),
             jointree: None,
             target_list,
