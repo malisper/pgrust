@@ -6031,7 +6031,7 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
         return Ok(constraint);
     }
 
-    let attributes = build_constraint_attributes(pair.clone());
+    let attributes = build_constraint_attributes(pair.clone())?;
     match rule {
         Rule::primary_key_table_constraint => {
             let body = pair
@@ -6123,7 +6123,20 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
     }
 }
 
-fn build_constraint_attributes(pair: Pair<'_, Rule>) -> ConstraintAttributes {
+fn set_enforced_attribute(
+    enforced: &mut Option<bool>,
+    value: bool,
+) -> Result<(), ParseError> {
+    if enforced.is_some() {
+        return Err(ParseError::FeatureNotSupportedMessage(
+            "multiple ENFORCED/NOT ENFORCED clauses not allowed".into(),
+        ));
+    }
+    *enforced = Some(value);
+    Ok(())
+}
+
+fn build_constraint_attributes(pair: Pair<'_, Rule>) -> Result<ConstraintAttributes, ParseError> {
     let mut attributes = ConstraintAttributes::default();
     for part in pair.into_inner() {
         if part.as_rule() != Rule::constraint_attribute {
@@ -6144,12 +6157,16 @@ fn build_constraint_attributes(pair: Pair<'_, Rule>) -> ConstraintAttributes {
             Rule::initially_immediate_constraint_attribute => {
                 attributes.initially_deferred = Some(false)
             }
-            Rule::enforced_constraint_attribute => attributes.enforced = Some(true),
-            Rule::not_enforced_constraint_attribute => attributes.enforced = Some(false),
+            Rule::enforced_constraint_attribute => {
+                set_enforced_attribute(&mut attributes.enforced, true)?
+            }
+            Rule::not_enforced_constraint_attribute => {
+                set_enforced_attribute(&mut attributes.enforced, false)?
+            }
             _ => {}
         }
     }
-    attributes
+    Ok(attributes)
 }
 
 fn set_table_constraint_name(constraint: &mut TableConstraint, name: String) {
@@ -6185,7 +6202,7 @@ fn build_column_constraint(pair: Pair<'_, Rule>) -> Result<ColumnConstraint, Par
         return Ok(constraint);
     }
 
-    let attributes = build_constraint_attributes(pair.clone());
+    let attributes = build_constraint_attributes(pair.clone())?;
     match rule {
         Rule::not_null_column_constraint => Ok(ColumnConstraint::NotNull { attributes }),
         Rule::check_column_constraint => {
@@ -7570,8 +7587,12 @@ fn build_alter_table_alter_constraint(
                         Rule::initially_immediate_constraint_attribute => {
                             initially_deferred = Some(false)
                         }
-                        Rule::enforced_constraint_attribute => enforced = Some(true),
-                        Rule::not_enforced_constraint_attribute => enforced = Some(false),
+                        Rule::enforced_constraint_attribute => {
+                            set_enforced_attribute(&mut enforced, true)?
+                        }
+                        Rule::not_enforced_constraint_attribute => {
+                            set_enforced_attribute(&mut enforced, false)?
+                        }
                         _ => {}
                     }
                 }
