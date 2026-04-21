@@ -14,6 +14,7 @@ use crate::include::catalog::{
     bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
     bootstrap_pg_language_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
     bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
+    PgAuthMembersRow,
 };
 use crate::pgrust::database::DatabaseStatsStore;
 
@@ -103,6 +104,13 @@ impl VisibleCatalog {
             .map(|catcache| catcache.proc_rows())
             .unwrap_or_else(crate::include::catalog::bootstrap_pg_proc_rows)
     }
+
+    pub fn auth_members_rows(&self) -> Vec<PgAuthMembersRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| catcache.auth_members_rows())
+            .unwrap_or_default()
+    }
 }
 
 impl CatalogLookup for VisibleCatalog {
@@ -156,6 +164,22 @@ impl CatalogLookup for VisibleCatalog {
                 })
             })
             .collect()
+    }
+
+    fn current_user_oid(&self) -> u32 {
+        BOOTSTRAP_SUPERUSER_OID
+    }
+
+    fn session_user_oid(&self) -> u32 {
+        BOOTSTRAP_SUPERUSER_OID
+    }
+
+    fn authid_rows(&self) -> Vec<PgAuthIdRow> {
+        VisibleCatalog::authid_rows(self)
+    }
+
+    fn auth_members_rows(&self) -> Vec<PgAuthMembersRow> {
+        VisibleCatalog::auth_members_rows(self)
     }
 
     fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {

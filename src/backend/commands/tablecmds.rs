@@ -26,6 +26,7 @@ use crate::backend::parser::{
     ParseError, SelectStatement, SqlType, SqlTypeKind, Statement, TruncateTableStatement,
     VacuumStatement, bind_create_table, bind_referenced_by_foreign_keys, bind_scalar_expr_in_scope,
 };
+use crate::backend::rewrite::RlsWriteCheck;
 use crate::backend::rewrite::pg_rewrite_query;
 use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::storage::smgr::StorageManager;
@@ -129,6 +130,14 @@ fn finalize_bound_insert(
             ..target
         })
         .collect();
+    stmt.rls_write_checks = stmt
+        .rls_write_checks
+        .into_iter()
+        .map(|check| RlsWriteCheck {
+            expr: finalize_expr_subqueries(check.expr, catalog, &mut subplans),
+            ..check
+        })
+        .collect();
     stmt.subplans = subplans;
     stmt
 }
@@ -173,6 +182,14 @@ fn finalize_bound_update(
             predicate: target
                 .predicate
                 .map(|expr| finalize_expr_subqueries(expr, catalog, &mut subplans)),
+            rls_write_checks: target
+                .rls_write_checks
+                .into_iter()
+                .map(|check| RlsWriteCheck {
+                    expr: finalize_expr_subqueries(check.expr, catalog, &mut subplans),
+                    ..check
+                })
+                .collect(),
             ..target
         })
         .collect();
@@ -679,11 +696,19 @@ pub(crate) fn write_insert_heap_row(
     toast_index: Option<&BoundIndexRelation>,
     desc: &RelationDesc,
     relation_constraints: &BoundRelationConstraints,
+    rls_write_checks: &[RlsWriteCheck],
     values: &[Value],
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<ItemPointerData, ExecError> {
+    crate::backend::executor::enforce_row_security_write_checks(
+        relation_name,
+        desc,
+        rls_write_checks,
+        values,
+        ctx,
+    )?;
     crate::backend::executor::enforce_relation_constraints(
         relation_name,
         desc,
@@ -741,6 +766,7 @@ pub(crate) fn write_updated_row(
     toast_index: Option<&BoundIndexRelation>,
     desc: &RelationDesc,
     relation_constraints: &BoundRelationConstraints,
+    rls_write_checks: &[RlsWriteCheck],
     referenced_by_foreign_keys: &[BoundReferencedByForeignKey],
     indexes: &[BoundIndexRelation],
     current_tid: ItemPointerData,
@@ -760,6 +786,13 @@ pub(crate) fn write_updated_row(
     } else {
         None
     };
+    crate::backend::executor::enforce_row_security_write_checks(
+        relation_name,
+        desc,
+        rls_write_checks,
+        current_values,
+        ctx,
+    )?;
     crate::backend::executor::enforce_relation_constraints(
         relation_name,
         desc,
@@ -1223,6 +1256,7 @@ fn apply_referential_action_to_rows(
                     toast_index.as_ref(),
                     &constraint.child_desc,
                     &relation_constraints,
+                    &[],
                     &referenced_by_foreign_keys,
                     &indexes,
                     tid,
@@ -1622,6 +1656,7 @@ pub fn execute_insert(
                 stmt.toast_index.as_ref(),
                 &stmt.desc,
                 &stmt.relation_constraints,
+                &stmt.rls_write_checks,
                 &stmt.indexes,
                 &values,
                 ctx,
@@ -1759,6 +1794,7 @@ fn execute_merge_insert_action(
         stmt.toast_index.as_ref(),
         &stmt.desc,
         &stmt.relation_constraints,
+        &[],
         &stmt.indexes,
         &[row_values],
         ctx,
@@ -2907,6 +2943,7 @@ pub(crate) fn execute_insert_rows(
     toast_index: Option<&BoundIndexRelation>,
     desc: &RelationDesc,
     relation_constraints: &BoundRelationConstraints,
+    rls_write_checks: &[RlsWriteCheck],
     indexes: &[BoundIndexRelation],
     rows: &[Vec<Value>],
     ctx: &mut ExecutorContext,
@@ -2946,6 +2983,7 @@ pub(crate) fn execute_insert_rows(
             toast_index,
             desc,
             relation_constraints,
+            rls_write_checks,
             &values,
             ctx,
             xid,
@@ -2965,7 +3003,7 @@ pub(crate) fn execute_insert_rows(
     Ok(inserted_rows)
 }
 
-pub fn execute_insert_values(
+pub(crate) fn execute_insert_values(
     relation_name: &str,
     relation_oid: u32,
     rel: crate::backend::storage::smgr::RelFileLocator,
@@ -2973,6 +3011,7 @@ pub fn execute_insert_values(
     toast_index: Option<&BoundIndexRelation>,
     desc: &RelationDesc,
     relation_constraints: &BoundRelationConstraints,
+    rls_write_checks: &[RlsWriteCheck],
     indexes: &[BoundIndexRelation],
     rows: &[Vec<Value>],
     ctx: &mut ExecutorContext,
@@ -2987,6 +3026,7 @@ pub fn execute_insert_values(
         toast_index,
         desc,
         relation_constraints,
+        rls_write_checks,
         indexes,
         rows,
         ctx,
@@ -3048,6 +3088,7 @@ pub fn execute_prepared_insert_row(
         prepared.toast_index.as_ref(),
         &prepared.desc,
         &prepared.relation_constraints,
+        &[],
         &values,
         ctx,
         xid,
@@ -3186,6 +3227,7 @@ pub fn execute_update_with_waiter(
                         target.toast_index.as_ref(),
                         &target.desc,
                         &target.relation_constraints,
+                        &target.rls_write_checks,
                         &target.referenced_by_foreign_keys,
                         &target.indexes,
                         current_tid,
@@ -3561,6 +3603,13 @@ pub(crate) fn apply_base_update_row(
     loop {
         ctx.check_for_interrupts()?;
         let old_tuple = heap_fetch(&*ctx.pool, ctx.client_id, target.rel, current_tid)?;
+        crate::backend::executor::enforce_row_security_write_checks(
+            &target.relation_name,
+            &target.desc,
+            &target.rls_write_checks,
+            &current_values,
+            ctx,
+        )?;
         crate::backend::executor::enforce_relation_constraints(
             &target.relation_name,
             &target.desc,

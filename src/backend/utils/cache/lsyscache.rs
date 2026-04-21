@@ -22,6 +22,7 @@ use crate::include::catalog::{
     PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgClassRow, PgCollationRow, PgConstraintRow,
     PgIndexRow, PgInheritsRow, PgLanguageRow, PgOpclassRow, PgOpfamilyRow, PgProcRow, PgRewriteRow,
     PgStatisticRow, PgTriggerRow, PgTypeRow,
+    PgAuthIdRow, PgAuthMembersRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::pgrust::database::{
@@ -748,6 +749,32 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             relkind: entry.relkind,
             desc: entry.desc.clone(),
         })
+    }
+
+    fn current_user_oid(&self) -> u32 {
+        self.db.auth_state(self.client_id).current_user_oid()
+    }
+
+    fn session_user_oid(&self) -> u32 {
+        self.db.auth_state(self.client_id).session_user_oid()
+    }
+
+    fn authid_rows(&self) -> Vec<PgAuthIdRow> {
+        self.db
+            .auth_catalog(self.client_id, self.txn_ctx)
+            .map(|catalog| catalog.roles().to_vec())
+            .unwrap_or_default()
+    }
+
+    fn auth_members_rows(&self) -> Vec<PgAuthMembersRow> {
+        self.db
+            .auth_catalog(self.client_id, self.txn_ctx)
+            .map(|catalog| catalog.memberships().to_vec())
+            .unwrap_or_default()
+    }
+
+    fn row_security_enabled(&self) -> bool {
+        self.db.row_security_enabled(self.client_id)
     }
 
     fn current_relation_pages(&self, relation_oid: u32) -> Option<u32> {

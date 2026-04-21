@@ -65,6 +65,12 @@ pub enum ParseError {
     NoSchemaSelectedForCreate,
     FeatureNotSupported(String),
     FeatureNotSupportedMessage(String),
+    DetailedError {
+        message: String,
+        detail: Option<String>,
+        hint: Option<String>,
+        sqlstate: &'static str,
+    },
     InvalidRecursion(String),
     WrongObjectType {
         name: String,
@@ -178,6 +184,7 @@ impl fmt::Display for ParseError {
                 write!(f, "feature not supported: {feature}")
             }
             ParseError::FeatureNotSupportedMessage(message) => write!(f, "{message}"),
+            ParseError::DetailedError { message, .. } => write!(f, "{message}"),
             ParseError::InvalidRecursion(message) => {
                 write!(f, "{message}")
             }
@@ -319,6 +326,7 @@ pub struct UnsupportedStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Query {
     pub command_type: CommandType,
+    pub depends_on_row_security: bool,
     pub rtable: Vec<RangeTblEntry>,
     pub jointree: Option<JoinTreeNode>,
     pub target_list: Vec<TargetEntry>,
@@ -360,6 +368,7 @@ pub struct RangeTblEntry {
     pub alias: Option<String>,
     pub desc: RelationDesc,
     pub inh: bool,
+    pub security_quals: Vec<Expr>,
     pub kind: RangeTblEntryKind,
 }
 

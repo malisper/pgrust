@@ -1,5 +1,6 @@
 use crate::backend::executor::eval_expr;
 use crate::backend::parser::BoundRelationConstraints;
+use crate::backend::rewrite::RlsWriteCheck;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::TupleSlot;
 use crate::include::nodes::primnodes::RelationDesc;
@@ -54,6 +55,69 @@ pub(crate) fn enforce_relation_constraints(
                         "constraint \"{}\" on relation \"{}\" produced a non-boolean value",
                         check.constraint_name, relation_name
                     )),
+                    hint: None,
+                    sqlstate: "42804",
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) fn enforce_row_security_write_checks(
+    relation_name: &str,
+    _desc: &RelationDesc,
+    checks: &[RlsWriteCheck],
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    if checks.is_empty() {
+        return Ok(());
+    }
+
+    let mut slot = TupleSlot::virtual_row(values.to_vec());
+    for check in checks {
+        match eval_expr(&check.expr, &mut slot, ctx)? {
+            Value::Null | Value::Bool(true) => {}
+            Value::Bool(false) => {
+                return Err(ExecError::DetailedError {
+                    message: check
+                        .policy_name
+                        .as_ref()
+                        .map(|policy_name| {
+                            format!(
+                                "new row violates row-level security policy \"{policy_name}\" for table \"{relation_name}\""
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            format!(
+                                "new row violates row-level security policy for table \"{relation_name}\""
+                            )
+                        }),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42501",
+                });
+            }
+            _ => {
+                return Err(ExecError::DetailedError {
+                    message: "row-level security policy expression must return boolean".into(),
+                    detail: Some(
+                        check
+                            .policy_name
+                            .as_ref()
+                            .map(|policy_name| {
+                                format!(
+                                    "policy \"{policy_name}\" on relation \"{relation_name}\" produced a non-boolean value"
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                format!(
+                                    "row-level security policy on relation \"{relation_name}\" produced a non-boolean value"
+                                )
+                            }),
+                    ),
                     hint: None,
                     sqlstate: "42804",
                 });
