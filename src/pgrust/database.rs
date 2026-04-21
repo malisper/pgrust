@@ -40,13 +40,13 @@ use crate::backend::parser::Statement;
 use crate::backend::parser::{
     AlterSequenceStatement, AlterTableAddColumnStatement, AlterTableDropColumnStatement,
     AlterTableRenameColumnStatement, AlterTableRenameStatement, AnalyzeStatement, CatalogLookup,
-    CommentOnDomainStatement, CommentOnTableStatement, CreateCompositeTypeStatement,
-    CreateDomainStatement, CreateIndexStatement, CreateSchemaStatement, CreateSequenceStatement,
-    CreateTableAsStatement, CreateTableStatement, CreateViewStatement, DropDomainStatement,
-    DropSequenceStatement, DropViewStatement, OnCommitAction, ParseError, SqlType, SqlTypeKind,
-    TablePersistence, bind_delete, bind_insert, bind_update, create_relation_desc,
-    lower_create_table_with_catalog, normalize_create_table_as_name, normalize_create_table_name,
-    normalize_create_view_name,
+    CommentOnConstraintStatement, CommentOnDomainStatement, CommentOnTableStatement,
+    CreateCompositeTypeStatement, CreateDomainStatement, CreateIndexStatement,
+    CreateSchemaStatement, CreateSequenceStatement, CreateTableAsStatement, CreateTableStatement,
+    CreateViewStatement, DropDomainStatement, DropSequenceStatement, DropViewStatement,
+    OnCommitAction, ParseError, SqlType, SqlTypeKind, TablePersistence, bind_delete, bind_insert,
+    bind_update, create_relation_desc, lower_create_table_with_catalog,
+    normalize_create_table_as_name, normalize_create_table_name, normalize_create_view_name,
 };
 use crate::backend::storage::lmgr::{
     TableLockManager, TableLockMode, lock_relations_interruptible, lock_tables_interruptible,

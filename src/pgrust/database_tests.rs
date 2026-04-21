@@ -4439,6 +4439,84 @@ fn comment_on_table_upserts_and_clears_pg_description() {
 }
 
 #[test]
+fn comment_on_constraint_upserts_and_clears_pg_description() {
+    let base = temp_dir("comment_on_constraint");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table items (id int4 constraint items_id_positive check (id > 0))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "comment on constraint items_id_positive on items is 'hello world'",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select d.description \
+             from pg_description d \
+             join pg_constraint c on c.oid = d.objoid \
+             where c.conname = 'items_id_positive' and d.classoid = 2606 and d.objsubid = 0"
+        ),
+        vec![vec![Value::Text("hello world".into())]]
+    );
+
+    db.execute(
+        1,
+        "comment on constraint items_id_positive on items is 'second comment'",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select d.description \
+             from pg_description d \
+             join pg_constraint c on c.oid = d.objoid \
+             where c.conname = 'items_id_positive' and d.classoid = 2606 and d.objsubid = 0"
+        ),
+        vec![vec![Value::Text("second comment".into())]]
+    );
+
+    db.execute(
+        1,
+        "comment on constraint items_id_positive on items is null",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) \
+             from pg_description d \
+             join pg_constraint c on c.oid = d.objoid \
+             where c.conname = 'items_id_positive' and d.classoid = 2606 and d.objsubid = 0"
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn comment_on_missing_constraint_reports_table_name() {
+    let base = temp_dir("comment_on_missing_constraint");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4)").unwrap();
+
+    match db.execute(1, "comment on constraint missing on items is 'nope'") {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
+            if expected == "existing table constraint"
+                && actual == "constraint \"missing\" for table \"items\" does not exist" => {}
+        other => panic!("expected missing constraint error, got {:?}", other),
+    }
+}
+
+#[test]
 fn create_comment_and_drop_rule_updates_catalogs() {
     let base = temp_dir("rule_catalog_rows");
     let db = Database::open(&base, 16).unwrap();
