@@ -192,23 +192,19 @@ impl CatalogLookup for VisibleCatalog {
     }
 
     fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
-        let mut rows = self
-            .catcache
-            .as_ref()
-            .map(|catcache| {
-                catcache
-                    .proc_rows_by_name(name)
-                    .into_iter()
-                    .cloned()
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_else(|| {
-                let normalized = normalize_name(name);
-                bootstrap_pg_proc_rows()
-                    .into_iter()
-                    .filter(|row| row.proname.eq_ignore_ascii_case(normalized))
-                    .collect()
-            });
+        if let Some(catcache) = self.catcache.as_ref() {
+            return catcache
+                .proc_rows_by_name(name)
+                .into_iter()
+                .cloned()
+                .collect();
+        }
+
+        let normalized = normalize_name(name);
+        let mut rows: Vec<_> = bootstrap_pg_proc_rows()
+            .into_iter()
+            .filter(|row| row.proname.eq_ignore_ascii_case(normalized))
+            .collect();
         rows.extend(crate::include::catalog::synthetic_range_proc_rows_by_name(
             name,
             &self.type_rows(),

@@ -4172,6 +4172,7 @@ mod tests {
         handle_connection_with_io(Cursor::new(input), &mut output, &cluster, 41).unwrap();
 
         assert!(cluster.shared().session_activity.read().is_empty());
+        assert!(!db.table_locks.has_locks_for_client(41));
         let snapshot = db
             .txns
             .read()
@@ -4180,7 +4181,7 @@ mod tests {
         assert_eq!(snapshot.xmin, snapshot.xmax);
 
         waiter
-            .execute(&db, "set statement_timeout = '200ms'")
+            .execute(&db, "set statement_timeout = '1s'")
             .unwrap();
         match waiter.execute(&db, "select count(*) from widgets").unwrap() {
             StatementResult::Query { rows, .. } => {
