@@ -12109,6 +12109,7 @@ fn trim_like_and_regexp_string_functions_work() {
                 trim(trailing 'x' from 'abcxxx'), \
                 'hawkeye' like 'h%eye', \
                 'hawkeye' ilike 'H%', \
+                'ro_view1' like E'r_\\\\_view%', \
                 'h%' like 'h#%' escape '#', \
                 regexp_like('Steven', '^Ste(v|ph)en$'), \
                 regexp_replace('AAA aaa', 'A+', 'Z', 'gi')",
@@ -12121,6 +12122,7 @@ fn trim_like_and_regexp_string_functions_work() {
                 vec![vec![
                     Value::Text("abc".into()),
                     Value::Text("abc".into()),
+                    Value::Bool(true),
                     Value::Bool(true),
                     Value::Bool(true),
                     Value::Bool(true),
