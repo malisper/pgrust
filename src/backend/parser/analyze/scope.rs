@@ -133,6 +133,9 @@ pub(super) fn bind_values_rows(
         let mut common = None;
         let mut common_expr: Option<&SqlExpr> = None;
         for row in rows {
+            if matches!(row[col_idx], SqlExpr::Const(Value::Null)) {
+                continue;
+            }
             let inferred = infer_sql_expr_type_with_ctes(
                 &row[col_idx],
                 &empty,
