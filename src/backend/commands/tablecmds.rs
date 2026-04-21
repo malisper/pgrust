@@ -9,9 +9,9 @@ use crate::backend::access::heap::heapam::{
     heap_scan_prepare_next_page, heap_update_with_waiter,
 };
 use crate::backend::access::heap::heaptoast::{
-    StoredToastValue, cleanup_new_toast_value, delete_external_from_tuple, encoded_pointer_bytes,
-    store_external_value,
+    StoredToastValue, cleanup_new_toast_value, delete_external_from_tuple,
 };
+use crate::backend::access::table::toast_helper::toast_tuple_values_for_write;
 use crate::backend::access::index::indexam;
 use crate::backend::access::transam::xact::CommandId;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
@@ -639,38 +639,13 @@ pub(crate) fn toast_tuple_for_write(
 ) -> Result<(HeapTuple, Vec<StoredToastValue>), ExecError> {
     let mut tuple_values = encode_tuple_values(desc, values)?;
     let attr_descs = desc.attribute_descs();
-    let mut tuple = HeapTuple::from_values(&attr_descs, &tuple_values)?;
     let Some(toast) = toast else {
+        let tuple = HeapTuple::from_values(&attr_descs, &tuple_values)?;
         return Ok((tuple, Vec::new()));
     };
-
-    let mut stored = Vec::new();
-    while tuple.serialized_len() > MAX_HEAP_TUPLE_SIZE {
-        let Some((attno, data)) = desc
-            .columns
-            .iter()
-            .enumerate()
-            .filter_map(|(index, column)| match &tuple_values[index] {
-                TupleValue::Bytes(bytes)
-                    if column.storage.attlen == -1
-                        && column.storage.attstorage
-                            != crate::include::access::htup::AttributeStorage::Plain
-                        && !is_ondisk_toast_pointer(bytes) =>
-                {
-                    Some((index, bytes.clone()))
-                }
-                _ => None,
-            })
-            .max_by_key(|(_, bytes)| bytes.len())
-        else {
-            break;
-        };
-
-        let toasted = store_external_value(ctx, toast, toast_index, &data, xid, cid)?;
-        tuple_values[attno] = TupleValue::Bytes(encoded_pointer_bytes(toasted.pointer));
-        tuple = HeapTuple::from_values(&attr_descs, &tuple_values)?;
-        stored.push(toasted);
-    }
+    let stored =
+        toast_tuple_values_for_write(desc, &mut tuple_values, toast, toast_index, ctx, xid, cid)?;
+    let tuple = HeapTuple::from_values(&attr_descs, &tuple_values)?;
     Ok((tuple, stored))
 }
 

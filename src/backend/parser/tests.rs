@@ -1,7 +1,7 @@
 use super::*;
 use crate::backend::catalog::catalog::column_desc;
-use crate::backend::executor::{Expr, Plan, RelationDesc, Value};
-use crate::include::access::htup::{AttributeAlign, AttributeStorage};
+use crate::backend::executor::{AggFunc, Expr, Plan, RelationDesc, Value};
+use crate::include::access::htup::{AttributeAlign, AttributeCompression, AttributeStorage};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, JSON_TYPE_OID, PUBLIC_NAMESPACE_OID, PgAuthIdRow,
     PgAuthMembersRow, PgClassRow, PgPolicyRow, PgProcRow, PgRewriteRow, PgTypeRow, PolicyCommand,
@@ -1817,6 +1817,45 @@ fn parse_alter_table_set_statement() {
             table_name: "attmp".into(),
             column_name: "i".into(),
             statistics_target: 150,
+        })
+    );
+
+    let stmt = parse_statement("alter table attmp alter column note set compression pglz").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAlterColumnCompression(AlterTableAlterColumnCompressionStatement {
+            if_exists: false,
+            only: false,
+            table_name: "attmp".into(),
+            column_name: "note".into(),
+            compression: AttributeCompression::Pglz,
+        })
+    );
+
+    let stmt = parse_statement(
+        "alter table if exists only attmp alter column note set compression default",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAlterColumnCompression(AlterTableAlterColumnCompressionStatement {
+            if_exists: true,
+            only: true,
+            table_name: "attmp".into(),
+            column_name: "note".into(),
+            compression: AttributeCompression::Default,
+        })
+    );
+
+    let stmt = parse_statement("alter table attmp alter note set compression lz4").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAlterColumnCompression(AlterTableAlterColumnCompressionStatement {
+            if_exists: false,
+            only: false,
+            table_name: "attmp".into(),
+            column_name: "note".into(),
+            compression: AttributeCompression::Lz4,
         })
     );
 

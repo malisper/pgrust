@@ -35,9 +35,6 @@ pub(crate) mod value_io;
 mod window;
 pub(crate) mod expr {
     pub(crate) use super::exec_expr::*;
-    pub(crate) use super::expr_compile::{
-        CompiledPredicate, compile_predicate, compile_predicate_with_decoder,
-    };
 }
 pub(crate) mod node_types {
     pub(crate) use crate::include::nodes::datum::*;
@@ -180,6 +177,7 @@ pub struct ExecutorContext {
     pub session_user_oid: u32,
     pub current_user_oid: u32,
     pub next_command_id: CommandId,
+    pub default_toast_compression: crate::include::access::htup::AttributeCompression,
     pub expr_bindings: ExprEvalBindings,
     pub case_test_values: Vec<Value>,
     pub system_bindings: Vec<SystemVarBinding>,

@@ -3792,6 +3792,11 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_alter_column_default_stmt => Ok(Statement::AlterTableAlterColumnDefault(
             build_alter_table_alter_column_default(inner)?,
         )),
+        Rule::alter_table_alter_column_compression_stmt => Ok(
+            Statement::AlterTableAlterColumnCompression(
+                build_alter_table_alter_column_compression(inner)?,
+            ),
+        ),
         Rule::alter_table_alter_column_storage_stmt => Ok(Statement::AlterTableAlterColumnStorage(
             build_alter_table_alter_column_storage(inner)?,
         )),
@@ -7793,6 +7798,53 @@ fn build_alter_table_alter_column_storage(
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         column_name: column_name.ok_or(ParseError::UnexpectedEof)?,
         storage: storage.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_alter_table_alter_column_compression(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableAlterColumnCompressionStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
+    let mut table_name = None;
+    let mut column_name = None;
+    let mut compression = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::identifier if column_name.is_none() => column_name = Some(build_identifier(part)),
+            Rule::identifier => {
+                compression = Some(match build_identifier(part).to_ascii_lowercase().as_str() {
+                    "default" => crate::include::access::htup::AttributeCompression::Default,
+                    "pglz" => crate::include::access::htup::AttributeCompression::Pglz,
+                    "lz4" => crate::include::access::htup::AttributeCompression::Lz4,
+                    actual => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "DEFAULT, PGLZ, or LZ4",
+                            actual: actual.to_string(),
+                        });
+                    }
+                });
+            }
+            Rule::kw_default => {
+                compression = Some(crate::include::access::htup::AttributeCompression::Default);
+            }
+            _ => {}
+        }
+    }
+    Ok(AlterTableAlterColumnCompressionStatement {
+        if_exists,
+        only,
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        column_name: column_name.ok_or(ParseError::UnexpectedEof)?,
+        compression: compression.ok_or(ParseError::UnexpectedEof)?,
     })
 }
 

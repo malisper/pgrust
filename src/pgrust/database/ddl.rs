@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use super::{CatalogTxnContext, ClientId, Database};
+use crate::backend::access::common::toast_compression::ensure_attribute_compression_supported;
 use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{ColumnDesc, ExecError, Expr, RelationDesc};
@@ -13,7 +14,7 @@ use crate::backend::parser::{
 use crate::backend::utils::cache::syscache::{
     ensure_class_rows, ensure_depend_rows, ensure_namespace_rows, ensure_rewrite_rows,
 };
-use crate::include::access::htup::AttributeStorage;
+use crate::include::access::htup::{AttributeCompression, AttributeStorage};
 use crate::include::catalog::{
     CONSTRAINT_FOREIGN, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_CATALOG_NAMESPACE_OID,
     PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TYPE_RELATION_OID,
@@ -777,6 +778,47 @@ pub(super) fn validate_alter_table_alter_column_storage(
     }
 
     Ok((column.name.clone(), storage))
+}
+
+pub(super) fn validate_alter_table_alter_column_compression(
+    desc: &RelationDesc,
+    column_name: &str,
+    compression: AttributeCompression,
+) -> Result<(String, AttributeCompression), ExecError> {
+    if is_system_column_name(column_name) {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "user column name for ALTER COLUMN SET COMPRESSION",
+            actual: column_name.to_string(),
+        }));
+    }
+    let column = desc
+        .columns
+        .iter()
+        .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
+        .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.to_string())))?;
+
+    ensure_attribute_compression_supported(compression)?;
+
+    let type_default = column_desc(
+        "attcompression_check",
+        column.sql_type,
+        column.storage.nullable,
+    )
+    .storage
+    .attstorage;
+    if compression != AttributeCompression::Default && type_default == AttributeStorage::Plain {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "column data type {} does not support compression",
+                format_sql_type_name(column.sql_type)
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+
+    Ok((column.name.clone(), compression))
 }
 
 pub(super) fn validate_alter_table_alter_column_statistics(

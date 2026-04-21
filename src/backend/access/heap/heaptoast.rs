@@ -8,18 +8,25 @@ use crate::backend::access::transam::xact::{CommandId, TransactionId};
 use crate::backend::executor::value_io::tuple_from_values;
 use crate::backend::executor::{ExecError, ExecutorContext, RelationDesc, Value};
 use crate::backend::parser::BoundIndexRelation;
+use crate::include::access::toast_compression::ToastCompressionId;
 use crate::include::access::detoast::decode_ondisk_toast_pointer;
 use crate::include::access::htup::{HeapTuple, ItemPointerData};
 use crate::include::nodes::primnodes::ToastRelationRef;
 use crate::include::varatt::{
-    VARHDRSZ, VarattExternal, encode_ondisk_toast_pointer,
-    varatt_external_set_size_and_compression_method,
+    VarattExternal, encode_ondisk_toast_pointer, varatt_external_set_size_and_compression_method,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StoredToastValue {
     pub(crate) pointer: VarattExternal,
     pub(crate) chunk_tids: Vec<ItemPointerData>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExternalToastValueInput {
+    pub(crate) data: Vec<u8>,
+    pub(crate) rawsize: i32,
+    pub(crate) compression_id: ToastCompressionId,
 }
 
 fn toast_relation_desc() -> RelationDesc {
@@ -69,7 +76,7 @@ pub(crate) fn store_external_value(
     ctx: &mut ExecutorContext,
     toast: ToastRelationRef,
     toast_index: Option<&BoundIndexRelation>,
-    data: &[u8],
+    value: &ExternalToastValueInput,
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<StoredToastValue, ExecError> {
@@ -77,7 +84,7 @@ pub(crate) fn store_external_value(
     let value_id = next_toast_value_id(ctx, toast)?;
     let mut chunk_tids = Vec::new();
 
-    for (chunk_seq, chunk) in data.chunks(TOAST_MAX_CHUNK_SIZE).enumerate() {
+    for (chunk_seq, chunk) in value.data.chunks(TOAST_MAX_CHUNK_SIZE).enumerate() {
         let row = vec![
             Value::Int64(i64::from(value_id)),
             Value::Int32(chunk_seq as i32),
@@ -119,8 +126,15 @@ pub(crate) fn store_external_value(
 
     Ok(StoredToastValue {
         pointer: VarattExternal {
-            va_rawsize: i32::try_from(data.len().saturating_add(VARHDRSZ)).unwrap_or(i32::MAX),
-            va_extinfo: varatt_external_set_size_and_compression_method(data.len() as u32, 0),
+            va_rawsize: value.rawsize,
+            va_extinfo: if value.compression_id == ToastCompressionId::Invalid {
+                value.data.len() as u32
+            } else {
+                varatt_external_set_size_and_compression_method(
+                    value.data.len() as u32,
+                    value.compression_id as u32,
+                )
+            },
             va_valueid: value_id,
             va_toastrelid: toast.relation_oid,
         },
