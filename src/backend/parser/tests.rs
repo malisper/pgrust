@@ -1115,6 +1115,28 @@ fn parse_alter_table_constraint_statements() {
         })
     );
 
+    let stmt = parse_statement(
+        "alter table pets add foreign key (owner_id, owner_name) references people(id, name) match full",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAddConstraint(AlterTableAddConstraintStatement {
+            if_exists: false,
+            only: false,
+            table_name: "pets".into(),
+            constraint: TableConstraint::ForeignKey {
+                attributes: attrs(),
+                columns: vec!["owner_id".into(), "owner_name".into()],
+                referenced_table: "people".into(),
+                referenced_columns: Some(vec!["id".into(), "name".into()]),
+                match_type: ForeignKeyMatchType::Full,
+                on_delete: ForeignKeyAction::NoAction,
+                on_update: ForeignKeyAction::NoAction,
+            },
+        })
+    );
+
     let stmt = parse_statement("alter table items drop constraint items_id_check").unwrap();
     assert_eq!(
         stmt,
