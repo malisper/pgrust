@@ -10168,6 +10168,111 @@ fn window_ntile_rejects_nonpositive_bucket_count() {
 }
 
 #[test]
+fn window_value_functions_follow_default_frame_semantics() {
+    let base = temp_dir("window_value_default_frame");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name, note) values
+            (1, 'alice', 'x'),
+            (2, 'bob', 'x'),
+            (3, 'carol', 'y'),
+            (4, 'dave', 'x')",
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select id,
+                first_value(id) over (partition by note order by id),
+                last_value(id) over (partition by note order by id),
+                nth_value(id, 2) over (partition by note order by id),
+                nth_value(id, null) over (partition by note order by id)
+         from people
+         order by id",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![
+                        Value::Int32(1),
+                        Value::Int32(1),
+                        Value::Int32(1),
+                        Value::Null,
+                        Value::Null,
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Int32(1),
+                        Value::Int32(2),
+                        Value::Int32(2),
+                        Value::Null,
+                    ],
+                    vec![
+                        Value::Int32(3),
+                        Value::Int32(3),
+                        Value::Int32(3),
+                        Value::Null,
+                        Value::Null,
+                    ],
+                    vec![
+                        Value::Int32(4),
+                        Value::Int32(1),
+                        Value::Int32(4),
+                        Value::Int32(2),
+                        Value::Null,
+                    ],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn window_nth_value_rejects_nonpositive_offset() {
+    let base = temp_dir("window_nth_value_invalid_offset");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name, note) values
+            (1, 'alice', 'x'),
+            (2, 'bob', 'y')",
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select nth_value(id, 0) over (order by id) from people",
+    )
+    .unwrap_err()
+    {
+        ExecError::DetailedError {
+            message, sqlstate, ..
+        } => {
+            assert_eq!(message, "argument of nth_value must be greater than zero");
+            assert_eq!(sqlstate, "22023");
+        }
+        other => panic!("expected detailed error, got {other:?}"),
+    }
+}
+
+#[test]
 fn window_ntile_supports_join_bucket_expression() {
     let base = temp_dir("window_ntile_join_bucket_expression");
     let mut txns = TransactionManager::new_durable(&base).unwrap();
