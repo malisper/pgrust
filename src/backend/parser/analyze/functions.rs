@@ -2392,7 +2392,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(resolved.scalar_impl, Some(BuiltinScalarFunction::RangeLower));
+        assert_eq!(
+            resolved.scalar_impl,
+            Some(BuiltinScalarFunction::RangeLower)
+        );
         assert_eq!(resolved.result_type, SqlType::new(SqlTypeKind::Int4));
     }
 
@@ -2408,11 +2411,18 @@ mod tests {
             crate::include::catalog::INT4MULTIRANGE_TYPE_OID,
             true,
         );
-        let resolved =
-            resolve_function_call(&Catalog::default(), "range_merge", &[range_type, range_type], false)
-                .unwrap();
+        let resolved = resolve_function_call(
+            &Catalog::default(),
+            "range_merge",
+            &[range_type, range_type],
+            false,
+        )
+        .unwrap();
 
-        assert_eq!(resolved.scalar_impl, Some(BuiltinScalarFunction::RangeMerge));
+        assert_eq!(
+            resolved.scalar_impl,
+            Some(BuiltinScalarFunction::RangeMerge)
+        );
         assert_eq!(resolved.result_type, range_type);
     }
 

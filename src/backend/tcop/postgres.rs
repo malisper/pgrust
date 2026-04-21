@@ -4180,9 +4180,7 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.xmin, snapshot.xmax);
 
-        waiter
-            .execute(&db, "set statement_timeout = '1s'")
-            .unwrap();
+        waiter.execute(&db, "set statement_timeout = '1s'").unwrap();
         match waiter.execute(&db, "select count(*) from widgets").unwrap() {
             StatementResult::Query { rows, .. } => {
                 assert_eq!(rows, vec![vec![Value::Int64(0)]]);

@@ -23,6 +23,7 @@ fn merge_catcaches(shared: CatCache, local: CatCache) -> CatCache {
         local.index_rows(),
         local.rewrite_rows(),
         local.trigger_rows(),
+        local.policy_rows(),
         local.publication_rows(),
         local.publication_rel_rows(),
         local.publication_namespace_rows(),

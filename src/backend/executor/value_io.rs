@@ -1428,16 +1428,21 @@ pub(crate) fn decode_value_with_toast(
     let Some(bytes) = bytes else {
         return Ok(Value::Null);
     };
-    let owned = if crate::include::access::detoast::is_ondisk_toast_pointer(bytes) {
-        let toast = toast.ok_or_else(|| ExecError::InvalidStorageValue {
-            column: column.name.clone(),
-            details: "toast pointer found without toast relation context".into(),
-        })?;
-        Some(crate::backend::access::common::detoast::detoast_value_bytes(toast, bytes)?)
-    } else if crate::include::access::detoast::is_compressed_inline_datum(bytes) {
-        Some(
-            crate::backend::access::common::toast_compression::decompress_inline_datum(bytes)
-                .map_err(|err| match err {
+    let owned = if column.storage.attlen == -1 {
+        if bytes.len() == crate::include::varatt::TOAST_POINTER_SIZE
+            && crate::include::access::detoast::is_ondisk_toast_pointer(bytes)
+        {
+            let toast = toast.ok_or_else(|| ExecError::InvalidStorageValue {
+                column: column.name.clone(),
+                details: "toast pointer found without toast relation context".into(),
+            })?;
+            Some(crate::backend::access::common::detoast::detoast_value_bytes(toast, bytes)?)
+        } else if crate::include::varatt::compressed_inline_total_size(bytes) == Some(bytes.len())
+            && crate::include::access::detoast::is_compressed_inline_datum(bytes)
+        {
+            Some(
+                crate::backend::access::common::toast_compression::decompress_inline_datum(bytes)
+                    .map_err(|err| match err {
                     ExecError::InvalidStorageValue { details, .. } => {
                         ExecError::InvalidStorageValue {
                             column: column.name.clone(),
@@ -1446,7 +1451,10 @@ pub(crate) fn decode_value_with_toast(
                     }
                     other => other,
                 })?,
-        )
+            )
+        } else {
+            None
+        }
     } else {
         None
     };
