@@ -2543,6 +2543,8 @@ pub(super) fn bind_scalar_function_call(
         | BuiltinScalarFunction::RangeMerge => {
             let fallback_declared = if !declared_arg_types.is_empty() {
                 declared_arg_types.to_vec()
+            } else if matches!(func, BuiltinScalarFunction::RangeConstructor) && args.is_empty() {
+                Vec::new()
             } else if matches!(func, BuiltinScalarFunction::RangeConstructor) {
                 let range_type = result_type
                     .and_then(range_type_ref_for_sql_type)

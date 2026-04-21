@@ -4,29 +4,39 @@ use crate::backend::parser::SqlType;
 use crate::backend::parser::SqlTypeKind;
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
-    ANYARRAYOID, BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID,
-    BOOTSTRAP_SUPERUSER_OID, BOX_TYPE_OID, BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID,
-    BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID, CIRCLE_TYPE_OID, DATE_ARRAY_TYPE_OID, DATE_TYPE_OID,
-    DATERANGE_TYPE_OID, FDW_HANDLER_TYPE_OID, FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID,
-    FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INT2_ARRAY_TYPE_OID, INT2_TYPE_OID,
-    INT2VECTOR_TYPE_OID, INT4_ARRAY_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID,
-    INT8_ARRAY_TYPE_OID, INT8_TYPE_OID, INT8RANGE_TYPE_OID, INTERNAL_CHAR_ARRAY_TYPE_OID,
-    INTERNAL_CHAR_TYPE_OID, INTERVAL_ARRAY_TYPE_OID, INTERVAL_TYPE_OID, JSON_ARRAY_TYPE_OID,
-    JSON_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID, JSONPATH_ARRAY_TYPE_OID,
-    JSONPATH_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID, MONEY_ARRAY_TYPE_OID, MONEY_TYPE_OID,
-    NAME_ARRAY_TYPE_OID, NAME_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID,
-    NUMRANGE_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID, OIDVECTOR_TYPE_OID, PATH_TYPE_OID,
-    PG_ATTRIBUTE_RELATION_OID, PG_ATTRIBUTE_ROWTYPE_OID, PG_CATALOG_NAMESPACE_OID,
-    PG_CLASS_RELATION_OID, PG_CLASS_ROWTYPE_OID, PG_DATABASE_RELATION_OID, PG_DATABASE_ROWTYPE_OID,
-    PG_NAMESPACE_RELATION_OID, PG_NAMESPACE_ROWTYPE_OID, PG_NODE_TREE_TYPE_OID,
-    PG_PROC_RELATION_OID, PG_PROC_ROWTYPE_OID, PG_TYPE_RELATION_OID, PG_TYPE_ROWTYPE_OID,
-    POINT_TYPE_OID, POLYGON_TYPE_OID, RECORD_ARRAY_TYPE_OID, RECORD_TYPE_OID,
-    REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID,
-    REGDICTIONARY_TYPE_OID, REGPROCEDURE_ARRAY_TYPE_OID, REGPROCEDURE_TYPE_OID, REGROLE_TYPE_OID,
-    TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIME_ARRAY_TYPE_OID,
-    TIME_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_ARRAY_TYPE_OID,
+    ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLEOID,
+    ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYMULTIRANGEOID, ANYRANGEOID, BIT_ARRAY_TYPE_OID,
+    BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID, BOX_TYPE_OID,
+    BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID, BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID,
+    CIRCLE_TYPE_OID, DATEMULTIRANGE_ARRAY_TYPE_OID, DATEMULTIRANGE_TYPE_OID,
+    DATERANGE_ARRAY_TYPE_OID, DATE_ARRAY_TYPE_OID, DATE_TYPE_OID, DATERANGE_TYPE_OID,
+    FDW_HANDLER_TYPE_OID, FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_ARRAY_TYPE_OID,
+    FLOAT8_TYPE_OID,
+    INT2_ARRAY_TYPE_OID, INT2_TYPE_OID, INT2VECTOR_TYPE_OID, INT4MULTIRANGE_ARRAY_TYPE_OID,
+    INT4MULTIRANGE_TYPE_OID, INT4RANGE_ARRAY_TYPE_OID, INT4_ARRAY_TYPE_OID, INT4_TYPE_OID,
+    INT4RANGE_TYPE_OID, INT8MULTIRANGE_ARRAY_TYPE_OID, INT8MULTIRANGE_TYPE_OID,
+    INT8RANGE_ARRAY_TYPE_OID, INT8_ARRAY_TYPE_OID, INT8_TYPE_OID, INT8RANGE_TYPE_OID,
+    INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID, INTERVAL_ARRAY_TYPE_OID,
+    INTERVAL_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID,
+    JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID,
+    MONEY_ARRAY_TYPE_OID, MONEY_TYPE_OID, NAME_ARRAY_TYPE_OID, NAME_TYPE_OID,
+    NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, NUMMULTIRANGE_ARRAY_TYPE_OID,
+    NUMMULTIRANGE_TYPE_OID, NUMRANGE_ARRAY_TYPE_OID, NUMRANGE_TYPE_OID, OID_ARRAY_TYPE_OID,
+    OID_TYPE_OID,
+    OIDVECTOR_TYPE_OID, PATH_TYPE_OID, PG_ATTRIBUTE_RELATION_OID, PG_ATTRIBUTE_ROWTYPE_OID,
+    PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_CLASS_ROWTYPE_OID,
+    PG_DATABASE_RELATION_OID, PG_DATABASE_ROWTYPE_OID, PG_NAMESPACE_RELATION_OID,
+    PG_NAMESPACE_ROWTYPE_OID, PG_NODE_TREE_TYPE_OID, PG_PROC_RELATION_OID, PG_PROC_ROWTYPE_OID,
+    PG_TYPE_RELATION_OID, PG_TYPE_ROWTYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID,
+    RECORD_ARRAY_TYPE_OID, RECORD_TYPE_OID, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID,
+    REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, REGPROCEDURE_ARRAY_TYPE_OID,
+    REGPROCEDURE_TYPE_OID, REGROLE_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
+    TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIME_ARRAY_TYPE_OID, TIME_TYPE_OID,
+    TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_ARRAY_TYPE_OID,
     TIMESTAMPTZ_TYPE_OID, TIMETZ_ARRAY_TYPE_OID, TIMETZ_TYPE_OID, TRIGGER_TYPE_OID,
-    TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID,
+    TSMULTIRANGE_ARRAY_TYPE_OID, TSMULTIRANGE_TYPE_OID, TSQUERY_ARRAY_TYPE_OID,
+    TSQUERY_TYPE_OID, TSRANGE_ARRAY_TYPE_OID, TSRANGE_TYPE_OID, TSTZMULTIRANGE_ARRAY_TYPE_OID,
+    TSTZMULTIRANGE_TYPE_OID, TSTZRANGE_ARRAY_TYPE_OID, TSTZRANGE_TYPE_OID,
     TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID,
     VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, VOID_TYPE_OID, XID_ARRAY_TYPE_OID, XID_TYPE_OID,
 };
@@ -65,7 +75,34 @@ pub fn pg_type_desc() -> RelationDesc {
 
 pub fn builtin_type_rows() -> Vec<PgTypeRow> {
     let mut rows = vec![
+        builtin_type_row("anyelement", ANYELEMENTOID, SqlType::new(SqlTypeKind::AnyElement)),
         builtin_type_row("anyarray", ANYARRAYOID, SqlType::new(SqlTypeKind::AnyArray)),
+        builtin_type_row("anyrange", ANYRANGEOID, SqlType::new(SqlTypeKind::AnyRange)),
+        builtin_type_row(
+            "anymultirange",
+            ANYMULTIRANGEOID,
+            SqlType::new(SqlTypeKind::AnyMultirange),
+        ),
+        builtin_type_row(
+            "anycompatible",
+            ANYCOMPATIBLEOID,
+            SqlType::new(SqlTypeKind::AnyCompatible),
+        ),
+        builtin_type_row(
+            "anycompatiblearray",
+            ANYCOMPATIBLEARRAYOID,
+            SqlType::new(SqlTypeKind::AnyCompatibleArray),
+        ),
+        builtin_type_row(
+            "anycompatiblerange",
+            ANYCOMPATIBLERANGEOID,
+            SqlType::new(SqlTypeKind::AnyCompatibleRange),
+        ),
+        builtin_type_row(
+            "anycompatiblemultirange",
+            ANYCOMPATIBLEMULTIRANGEOID,
+            SqlType::new(SqlTypeKind::AnyCompatibleMultirange),
+        ),
         builtin_type_row("record", RECORD_TYPE_OID, SqlType::record(RECORD_TYPE_OID)),
         builtin_type_row(
             "_record",
@@ -238,7 +275,20 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             SqlType::array_of(SqlType::new(SqlTypeKind::Char)),
         ),
         builtin_type_row("date", DATE_TYPE_OID, SqlType::new(SqlTypeKind::Date)),
-        builtin_range_type_row("daterange", DATERANGE_TYPE_OID, DATE_TYPE_OID, true),
+        builtin_range_type_row(
+            "daterange",
+            DATERANGE_TYPE_OID,
+            DATE_TYPE_OID,
+            DATEMULTIRANGE_TYPE_OID,
+            true,
+        ),
+        builtin_multirange_type_row(
+            "datemultirange",
+            DATEMULTIRANGE_TYPE_OID,
+            DATERANGE_TYPE_OID,
+            DATE_TYPE_OID,
+            true,
+        ),
         builtin_type_row(
             "_date",
             DATE_ARRAY_TYPE_OID,
@@ -261,7 +311,20 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             TIMESTAMP_TYPE_OID,
             SqlType::new(SqlTypeKind::Timestamp),
         ),
-        builtin_range_type_row("tsrange", TSRANGE_TYPE_OID, TIMESTAMP_TYPE_OID, false),
+        builtin_range_type_row(
+            "tsrange",
+            TSRANGE_TYPE_OID,
+            TIMESTAMP_TYPE_OID,
+            TSMULTIRANGE_TYPE_OID,
+            false,
+        ),
+        builtin_multirange_type_row(
+            "tsmultirange",
+            TSMULTIRANGE_TYPE_OID,
+            TSRANGE_TYPE_OID,
+            TIMESTAMP_TYPE_OID,
+            false,
+        ),
         builtin_type_row(
             "_timestamp",
             TIMESTAMP_ARRAY_TYPE_OID,
@@ -272,7 +335,20 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             TIMESTAMPTZ_TYPE_OID,
             SqlType::new(SqlTypeKind::TimestampTz),
         ),
-        builtin_range_type_row("tstzrange", TSTZRANGE_TYPE_OID, TIMESTAMPTZ_TYPE_OID, false),
+        builtin_range_type_row(
+            "tstzrange",
+            TSTZRANGE_TYPE_OID,
+            TIMESTAMPTZ_TYPE_OID,
+            TSTZMULTIRANGE_TYPE_OID,
+            false,
+        ),
+        builtin_multirange_type_row(
+            "tstzmultirange",
+            TSTZMULTIRANGE_TYPE_OID,
+            TSTZRANGE_TYPE_OID,
+            TIMESTAMPTZ_TYPE_OID,
+            false,
+        ),
         builtin_type_row(
             "_timestamptz",
             TIMESTAMPTZ_ARRAY_TYPE_OID,
@@ -293,14 +369,53 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             NUMERIC_TYPE_OID,
             SqlType::new(SqlTypeKind::Numeric),
         ),
-        builtin_range_type_row("numrange", NUMRANGE_TYPE_OID, NUMERIC_TYPE_OID, false),
+        builtin_range_type_row(
+            "numrange",
+            NUMRANGE_TYPE_OID,
+            NUMERIC_TYPE_OID,
+            NUMMULTIRANGE_TYPE_OID,
+            false,
+        ),
+        builtin_multirange_type_row(
+            "nummultirange",
+            NUMMULTIRANGE_TYPE_OID,
+            NUMRANGE_TYPE_OID,
+            NUMERIC_TYPE_OID,
+            false,
+        ),
         builtin_type_row(
             "_numeric",
             NUMERIC_ARRAY_TYPE_OID,
             SqlType::array_of(SqlType::new(SqlTypeKind::Numeric)),
         ),
-        builtin_range_type_row("int4range", INT4RANGE_TYPE_OID, INT4_TYPE_OID, true),
-        builtin_range_type_row("int8range", INT8RANGE_TYPE_OID, INT8_TYPE_OID, true),
+        builtin_range_type_row(
+            "int4range",
+            INT4RANGE_TYPE_OID,
+            INT4_TYPE_OID,
+            INT4MULTIRANGE_TYPE_OID,
+            true,
+        ),
+        builtin_multirange_type_row(
+            "int4multirange",
+            INT4MULTIRANGE_TYPE_OID,
+            INT4RANGE_TYPE_OID,
+            INT4_TYPE_OID,
+            true,
+        ),
+        builtin_range_type_row(
+            "int8range",
+            INT8RANGE_TYPE_OID,
+            INT8_TYPE_OID,
+            INT8MULTIRANGE_TYPE_OID,
+            true,
+        ),
+        builtin_multirange_type_row(
+            "int8multirange",
+            INT8MULTIRANGE_TYPE_OID,
+            INT8RANGE_TYPE_OID,
+            INT8_TYPE_OID,
+            true,
+        ),
         builtin_type_row("json", JSON_TYPE_OID, SqlType::new(SqlTypeKind::Json)),
         builtin_type_row(
             "_json",
@@ -369,6 +484,114 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             SqlType::array_of(SqlType::new(SqlTypeKind::JsonPath)),
         ),
     ];
+    rows.extend([
+        builtin_type_row(
+            "_int4range",
+            INT4RANGE_ARRAY_TYPE_OID,
+            SqlType::array_of(
+                SqlType::range(INT4RANGE_TYPE_OID, INT4_TYPE_OID)
+                    .with_range_metadata(INT4_TYPE_OID, INT4MULTIRANGE_TYPE_OID, true),
+            ),
+        ),
+        builtin_type_row(
+            "_numrange",
+            NUMRANGE_ARRAY_TYPE_OID,
+            SqlType::array_of(
+                SqlType::range(NUMRANGE_TYPE_OID, NUMERIC_TYPE_OID)
+                    .with_range_metadata(NUMERIC_TYPE_OID, NUMMULTIRANGE_TYPE_OID, false),
+            ),
+        ),
+        builtin_type_row(
+            "_tsrange",
+            TSRANGE_ARRAY_TYPE_OID,
+            SqlType::array_of(
+                SqlType::range(TSRANGE_TYPE_OID, TIMESTAMP_TYPE_OID)
+                    .with_range_metadata(TIMESTAMP_TYPE_OID, TSMULTIRANGE_TYPE_OID, false),
+            ),
+        ),
+        builtin_type_row(
+            "_tstzrange",
+            TSTZRANGE_ARRAY_TYPE_OID,
+            SqlType::array_of(
+                SqlType::range(TSTZRANGE_TYPE_OID, TIMESTAMPTZ_TYPE_OID)
+                    .with_range_metadata(TIMESTAMPTZ_TYPE_OID, TSTZMULTIRANGE_TYPE_OID, false),
+            ),
+        ),
+        builtin_type_row(
+            "_daterange",
+            DATERANGE_ARRAY_TYPE_OID,
+            SqlType::array_of(
+                SqlType::range(DATERANGE_TYPE_OID, DATE_TYPE_OID)
+                    .with_range_metadata(DATE_TYPE_OID, DATEMULTIRANGE_TYPE_OID, true),
+            ),
+        ),
+        builtin_type_row(
+            "_int8range",
+            INT8RANGE_ARRAY_TYPE_OID,
+            SqlType::array_of(
+                SqlType::range(INT8RANGE_TYPE_OID, INT8_TYPE_OID)
+                    .with_range_metadata(INT8_TYPE_OID, INT8MULTIRANGE_TYPE_OID, true),
+            ),
+        ),
+        builtin_type_row(
+            "_int4multirange",
+            INT4MULTIRANGE_ARRAY_TYPE_OID,
+            SqlType::array_of(
+                SqlType::multirange(INT4MULTIRANGE_TYPE_OID, INT4RANGE_TYPE_OID)
+                    .with_range_metadata(INT4_TYPE_OID, INT4MULTIRANGE_TYPE_OID, true)
+                    .with_multirange_range_oid(INT4RANGE_TYPE_OID),
+            ),
+        ),
+        builtin_type_row(
+            "_nummultirange",
+            NUMMULTIRANGE_ARRAY_TYPE_OID,
+            SqlType::array_of(
+                SqlType::multirange(NUMMULTIRANGE_TYPE_OID, NUMRANGE_TYPE_OID)
+                    .with_range_metadata(NUMERIC_TYPE_OID, NUMMULTIRANGE_TYPE_OID, false)
+                    .with_multirange_range_oid(NUMRANGE_TYPE_OID),
+            ),
+        ),
+        builtin_type_row(
+            "_tsmultirange",
+            TSMULTIRANGE_ARRAY_TYPE_OID,
+            SqlType::array_of(
+                SqlType::multirange(TSMULTIRANGE_TYPE_OID, TSRANGE_TYPE_OID)
+                    .with_range_metadata(TIMESTAMP_TYPE_OID, TSMULTIRANGE_TYPE_OID, false)
+                    .with_multirange_range_oid(TSRANGE_TYPE_OID),
+            ),
+        ),
+        builtin_type_row(
+            "_tstzmultirange",
+            TSTZMULTIRANGE_ARRAY_TYPE_OID,
+            SqlType::array_of(
+                SqlType::multirange(TSTZMULTIRANGE_TYPE_OID, TSTZRANGE_TYPE_OID)
+                    .with_range_metadata(
+                        TIMESTAMPTZ_TYPE_OID,
+                        TSTZMULTIRANGE_TYPE_OID,
+                        false,
+                    )
+                    .with_multirange_range_oid(TSTZRANGE_TYPE_OID),
+            ),
+        ),
+        builtin_type_row(
+            "_datemultirange",
+            DATEMULTIRANGE_ARRAY_TYPE_OID,
+            SqlType::array_of(
+                SqlType::multirange(DATEMULTIRANGE_TYPE_OID, DATERANGE_TYPE_OID)
+                    .with_range_metadata(DATE_TYPE_OID, DATEMULTIRANGE_TYPE_OID, true)
+                    .with_multirange_range_oid(DATERANGE_TYPE_OID),
+            ),
+        ),
+        builtin_type_row(
+            "_int8multirange",
+            INT8MULTIRANGE_ARRAY_TYPE_OID,
+            SqlType::array_of(
+                SqlType::multirange(INT8MULTIRANGE_TYPE_OID, INT8RANGE_TYPE_OID)
+                    .with_range_metadata(INT8_TYPE_OID, INT8MULTIRANGE_TYPE_OID, true)
+                    .with_multirange_range_oid(INT8RANGE_TYPE_OID),
+            ),
+        ),
+    ]);
     annotate_array_type_links(&mut rows);
     rows
 }
@@ -459,11 +682,33 @@ fn fixed_builtin_type_row(
     }
 }
 
-fn builtin_range_type_row(name: &str, oid: u32, subtype_oid: u32, discrete: bool) -> PgTypeRow {
+fn builtin_range_type_row(
+    name: &str,
+    oid: u32,
+    subtype_oid: u32,
+    multirange_oid: u32,
+    discrete: bool,
+) -> PgTypeRow {
     builtin_type_row(
         name,
         oid,
-        SqlType::range(oid, subtype_oid).with_range_metadata(subtype_oid, 0, discrete),
+        SqlType::range(oid, subtype_oid).with_range_metadata(subtype_oid, multirange_oid, discrete),
+    )
+}
+
+fn builtin_multirange_type_row(
+    name: &str,
+    oid: u32,
+    range_oid: u32,
+    subtype_oid: u32,
+    discrete: bool,
+) -> PgTypeRow {
+    builtin_type_row(
+        name,
+        oid,
+        SqlType::multirange(oid, range_oid)
+            .with_range_metadata(subtype_oid, oid, discrete)
+            .with_multirange_range_oid(range_oid),
     )
 }
 
@@ -681,5 +926,62 @@ mod tests {
             row.sql_type,
             SqlType::named_composite(PG_CLASS_ROWTYPE_OID, PG_CLASS_RELATION_OID)
         );
+    }
+
+    #[test]
+    fn builtin_range_types_expose_array_links() {
+        let rows = builtin_type_rows();
+        for (range_oid, range_name, array_oid, array_name) in [
+            (
+                INT4RANGE_TYPE_OID,
+                "int4range",
+                INT4RANGE_ARRAY_TYPE_OID,
+                "_int4range",
+            ),
+            (
+                NUMRANGE_TYPE_OID,
+                "numrange",
+                NUMRANGE_ARRAY_TYPE_OID,
+                "_numrange",
+            ),
+            (
+                TSRANGE_TYPE_OID,
+                "tsrange",
+                TSRANGE_ARRAY_TYPE_OID,
+                "_tsrange",
+            ),
+            (
+                TSTZRANGE_TYPE_OID,
+                "tstzrange",
+                TSTZRANGE_ARRAY_TYPE_OID,
+                "_tstzrange",
+            ),
+            (
+                DATERANGE_TYPE_OID,
+                "daterange",
+                DATERANGE_ARRAY_TYPE_OID,
+                "_daterange",
+            ),
+            (
+                INT8RANGE_TYPE_OID,
+                "int8range",
+                INT8RANGE_ARRAY_TYPE_OID,
+                "_int8range",
+            ),
+        ] {
+            let range_row = rows
+                .iter()
+                .find(|row| row.oid == range_oid)
+                .unwrap_or_else(|| panic!("missing builtin range type row for {range_name}"));
+            let array_row = rows
+                .iter()
+                .find(|row| row.oid == array_oid)
+                .unwrap_or_else(|| panic!("missing builtin range array type row for {array_name}"));
+
+            assert_eq!(range_row.typname, range_name);
+            assert_eq!(range_row.typarray, array_oid);
+            assert_eq!(array_row.typname, array_name);
+            assert_eq!(array_row.typelem, range_oid);
+        }
     }
 }

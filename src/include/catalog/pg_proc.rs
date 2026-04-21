@@ -11,6 +11,7 @@ use crate::include::catalog::{
     PG_LANGUAGE_INTERNAL_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, RECORD_TYPE_OID,
     TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TSQUERY_TYPE_OID,
     TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID,
+    aggregate_func_for_dynamic_range_proc_oid,
 };
 use crate::include::nodes::primnodes::{AggFunc, BuiltinScalarFunction, BuiltinWindowFunction};
 use std::sync::OnceLock;
@@ -2618,6 +2619,7 @@ pub fn builtin_aggregate_function_for_proc_oid(oid: u32) -> Option<AggFunc> {
         .into_iter()
         .find(|row| row.oid == oid && row.prokind == 'a')
         .and_then(|row| aggregate_func_for_proname(&row.proname))
+        .or_else(|| aggregate_func_for_dynamic_range_proc_oid(oid))
         .or_else(|| {
             synthetic_aggregate_proc_oids()
                 .iter()
@@ -2710,6 +2712,8 @@ fn synthetic_aggregate_proc_oids() -> &'static Vec<(AggFunc, u32)> {
             AggFunc::JsonbAgg,
             AggFunc::JsonObjectAgg,
             AggFunc::JsonbObjectAgg,
+            AggFunc::RangeAgg,
+            AggFunc::RangeIntersectAgg,
         ]
         .into_iter()
         .enumerate()
@@ -2758,6 +2762,7 @@ fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
         "jsonb_agg" => Some(AggFunc::JsonbAgg),
         "json_object_agg" => Some(AggFunc::JsonObjectAgg),
         "jsonb_object_agg" => Some(AggFunc::JsonbObjectAgg),
+        "range_agg" => Some(AggFunc::RangeAgg),
         "range_intersect_agg" => Some(AggFunc::RangeIntersectAgg),
         _ => None,
     }

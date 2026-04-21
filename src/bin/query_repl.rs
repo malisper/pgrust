@@ -156,6 +156,9 @@ fn render_value(value: &Value) -> String {
         Value::Jsonb(v) => format!("{:?}", v),
         Value::JsonPath(v) => v.to_string(),
         Value::Range(_) => pgrust::backend::executor::render_range_text(value).unwrap_or_default(),
+        Value::Multirange(_) => {
+            pgrust::backend::executor::render_multirange_text(value).unwrap_or_default()
+        }
         Value::Point(_)
         | Value::Lseg(_)
         | Value::Path(_)

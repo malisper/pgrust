@@ -2235,6 +2235,7 @@ fn parse_create_range_type_statement(
     let mut subtype = None;
     let mut subtype_diff = None;
     let mut collation = None;
+    let mut multirange_type_name = None;
     for item in split_top_level_items(input, ',')? {
         let item = item.trim();
         if item.is_empty() {
@@ -2273,6 +2274,16 @@ fn parse_create_range_type_statement(
                 }
                 collation = Some(name);
             }
+            "multirange_type_name" => {
+                let (name, rest) = parse_sql_identifier(value)?;
+                if !rest.trim().is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "multirange type name",
+                        actual: value.into(),
+                    });
+                }
+                multirange_type_name = Some(name);
+            }
             _ => {
                 return Err(ParseError::FeatureNotSupported(format!(
                     "CREATE TYPE AS RANGE option {option_name} is not supported yet"
@@ -2289,6 +2300,7 @@ fn parse_create_range_type_statement(
         })?,
         subtype_diff,
         collation,
+        multirange_type_name,
     })
 }
 
@@ -6797,6 +6809,13 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
 
 fn sql_type_output_name(ty: SqlType) -> &'static str {
     match ty.kind {
+        SqlTypeKind::AnyElement => "anyelement",
+        SqlTypeKind::AnyRange => "anyrange",
+        SqlTypeKind::AnyMultirange => "anymultirange",
+        SqlTypeKind::AnyCompatible => "anycompatible",
+        SqlTypeKind::AnyCompatibleArray => "anycompatiblearray",
+        SqlTypeKind::AnyCompatibleRange => "anycompatiblerange",
+        SqlTypeKind::AnyCompatibleMultirange => "anycompatiblemultirange",
         SqlTypeKind::Record => "record",
         SqlTypeKind::Composite => "record",
         SqlTypeKind::Trigger => "trigger",
@@ -6836,6 +6855,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::RegConfig => "regconfig",
         SqlTypeKind::RegDictionary => "regdictionary",
         SqlTypeKind::AnyArray => "anyarray",
+        SqlTypeKind::Multirange => "multirange",
         SqlTypeKind::Text => "text",
         SqlTypeKind::Bytea => "bytea",
         SqlTypeKind::Bool => "bool",
@@ -8721,6 +8741,7 @@ fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     Rule::kw_jsonb_agg => AggFunc::JsonbAgg,
                     Rule::kw_json_object_agg => AggFunc::JsonObjectAgg,
                     Rule::kw_jsonb_object_agg => AggFunc::JsonbObjectAgg,
+                    Rule::kw_range_agg => AggFunc::RangeAgg,
                     Rule::kw_range_intersect_agg => AggFunc::RangeIntersectAgg,
                     _ => {
                         return Err(ParseError::UnexpectedToken {

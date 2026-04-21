@@ -4,7 +4,7 @@ pub use crate::backend::catalog::state::{
 use crate::backend::executor::{ColumnDesc, RelationDesc, ScalarType};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::access::htup::{AttributeAlign, AttributeCompression, AttributeStorage};
-use crate::include::catalog::range_type_ref_for_sql_type;
+use crate::include::catalog::{multirange_type_ref_for_sql_type, range_type_ref_for_sql_type};
 
 pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -> ColumnDesc {
     let name = name.into();
@@ -29,6 +29,7 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         ScalarType::Polygon => (-1, AttributeAlign::Int),
         ScalarType::Circle => (24, AttributeAlign::Double),
         ScalarType::Range(_) => (-1, AttributeAlign::Int),
+        ScalarType::Multirange(_) => (-1, AttributeAlign::Int),
         ScalarType::Float32 => (4, AttributeAlign::Int),
         ScalarType::Float64 => (8, AttributeAlign::Double),
         ScalarType::Numeric => (-1, AttributeAlign::Int),
@@ -81,13 +82,23 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
     if sql_type.is_range() {
         return AttributeStorage::Extended;
     }
+    if sql_type.is_multirange() {
+        return AttributeStorage::Extended;
+    }
 
     match sql_type.kind {
-        SqlTypeKind::AnyArray => AttributeStorage::Extended,
+        SqlTypeKind::AnyArray
+        | SqlTypeKind::AnyMultirange
+        | SqlTypeKind::AnyCompatibleArray
+        | SqlTypeKind::AnyCompatibleRange
+        | SqlTypeKind::AnyCompatibleMultirange => AttributeStorage::Extended,
         SqlTypeKind::Name
         | SqlTypeKind::Void
         | SqlTypeKind::Trigger
         | SqlTypeKind::FdwHandler
+        | SqlTypeKind::AnyElement
+        | SqlTypeKind::AnyRange
+        | SqlTypeKind::AnyCompatible
         | SqlTypeKind::Int2Vector
         | SqlTypeKind::OidVector
         | SqlTypeKind::Date
@@ -140,6 +151,7 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         | SqlTypeKind::DateRange
         | SqlTypeKind::TimestampRange
         | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
+        SqlTypeKind::Multirange => unreachable!("multirange handled above"),
     }
 }
 
@@ -170,8 +182,19 @@ pub(crate) fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
     if let Some(range_type) = range_type_ref_for_sql_type(sql_type) {
         return ScalarType::Range(range_type);
     }
+    if let Some(multirange_type) = multirange_type_ref_for_sql_type(sql_type) {
+        return ScalarType::Multirange(multirange_type);
+    }
     match sql_type.kind {
-        SqlTypeKind::AnyArray => ScalarType::Array(Box::new(ScalarType::Text)),
+        SqlTypeKind::AnyArray | SqlTypeKind::AnyCompatibleArray => {
+            ScalarType::Array(Box::new(ScalarType::Text))
+        }
+        SqlTypeKind::AnyElement
+        | SqlTypeKind::AnyRange
+        | SqlTypeKind::AnyMultirange
+        | SqlTypeKind::AnyCompatible
+        | SqlTypeKind::AnyCompatibleRange
+        | SqlTypeKind::AnyCompatibleMultirange => ScalarType::Text,
         SqlTypeKind::Void => ScalarType::Text,
         SqlTypeKind::Trigger => ScalarType::Text,
         SqlTypeKind::FdwHandler => ScalarType::Text,
@@ -209,6 +232,7 @@ pub(crate) fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         | SqlTypeKind::DateRange
         | SqlTypeKind::TimestampRange
         | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
+        SqlTypeKind::Multirange => unreachable!("multirange handled above"),
         SqlTypeKind::Json => ScalarType::Json,
         SqlTypeKind::Jsonb => ScalarType::Jsonb,
         SqlTypeKind::JsonPath => ScalarType::JsonPath,

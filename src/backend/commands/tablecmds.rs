@@ -2209,8 +2209,24 @@ fn sql_type_display_name(ty: SqlType) -> String {
             base.to_string()
         };
     }
+    if ty.is_multirange() {
+        let base =
+            crate::include::catalog::builtin_multirange_name_for_sql_type(ty).unwrap_or("multirange");
+        return if ty.is_array {
+            format!("{base}[]")
+        } else {
+            base.to_string()
+        };
+    }
     let base = match ty.kind {
+        SqlTypeKind::AnyElement => "anyelement",
         SqlTypeKind::AnyArray => "anyarray",
+        SqlTypeKind::AnyRange => "anyrange",
+        SqlTypeKind::AnyMultirange => "anymultirange",
+        SqlTypeKind::AnyCompatible => "anycompatible",
+        SqlTypeKind::AnyCompatibleArray => "anycompatiblearray",
+        SqlTypeKind::AnyCompatibleRange => "anycompatiblerange",
+        SqlTypeKind::AnyCompatibleMultirange => "anycompatiblemultirange",
         SqlTypeKind::Record | SqlTypeKind::Composite => "record",
         SqlTypeKind::Void => "void",
         SqlTypeKind::Trigger => "trigger",
@@ -2266,6 +2282,7 @@ fn sql_type_display_name(ty: SqlType) -> String {
         | SqlTypeKind::DateRange
         | SqlTypeKind::TimestampRange
         | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
+        SqlTypeKind::Multirange => unreachable!("multirange handled above"),
     };
 
     if ty.is_array {

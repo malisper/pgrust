@@ -1,6 +1,9 @@
 use super::*;
 use crate::include::catalog::bootstrap_pg_cast_rows;
-use crate::include::catalog::{builtin_range_name_for_sql_type, range_type_ref_for_sql_type};
+use crate::include::catalog::{
+    builtin_multirange_name_for_sql_type, builtin_range_name_for_sql_type,
+    multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+};
 
 pub(super) fn coerce_bound_expr(expr: Expr, from: SqlType, to: SqlType) -> Expr {
     if from == to {
@@ -132,9 +135,18 @@ pub(super) fn resolve_generate_series_common_type(
 pub(super) fn sql_type_name(ty: SqlType) -> String {
     let base = if ty.is_range() {
         builtin_range_name_for_sql_type(ty).unwrap_or("range")
+    } else if ty.is_multirange() {
+        builtin_multirange_name_for_sql_type(ty).unwrap_or("multirange")
     } else {
         match ty.kind {
+            SqlTypeKind::AnyElement => "anyelement",
             SqlTypeKind::AnyArray => "anyarray",
+            SqlTypeKind::AnyRange => "anyrange",
+            SqlTypeKind::AnyMultirange => "anymultirange",
+            SqlTypeKind::AnyCompatible => "anycompatible",
+            SqlTypeKind::AnyCompatibleArray => "anycompatiblearray",
+            SqlTypeKind::AnyCompatibleRange => "anycompatiblerange",
+            SqlTypeKind::AnyCompatibleMultirange => "anycompatiblemultirange",
             SqlTypeKind::Record => "record",
             SqlTypeKind::Composite => "record",
             SqlTypeKind::Trigger => "trigger",
@@ -191,6 +203,7 @@ pub(super) fn sql_type_name(ty: SqlType) -> String {
             | SqlTypeKind::DateRange
             | SqlTypeKind::TimestampRange
             | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
+            SqlTypeKind::Multirange => unreachable!("multirange handled above"),
         }
     };
     if ty.is_array {
