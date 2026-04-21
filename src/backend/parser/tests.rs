@@ -10,8 +10,9 @@ use crate::include::nodes::parsenodes::{
     AliasColumnDef, AliasColumnSpec, ColumnConstraint, CompositeTypeAttributeDef,
     CreateCompositeTypeStatement, CreateTriggerStatement, CreateTypeStatement,
     DropTriggerStatement, DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, IndexColumnDef,
-    InsertSource, InsertStatement, JoinTreeNode, RangeTblEntryKind, RawTypeName, TableConstraint,
-    TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerTiming,
+    InsertSource, InsertStatement, JoinTreeNode, RangeTblEntryKind, RawTypeName,
+    RawWindowFrameBound, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel,
+    TriggerTiming, WindowFrameMode,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -645,7 +646,7 @@ fn visible_catalog_without_text_input_cast(
                 !(row.castsource == crate::include::catalog::TEXT_TYPE_OID
                     && row.casttarget == target_oid
                     && row.castmethod == 'i')
-        })
+            })
             .collect(),
         base.collation_rows(),
         base.foreign_data_wrapper_rows(),
@@ -1555,8 +1556,7 @@ fn parse_policy_statements() {
         })
     );
 
-    let stmt =
-        parse_statement("alter policy p1 on items rename to p2").unwrap();
+    let stmt = parse_statement("alter policy p1 on items rename to p2").unwrap();
     assert_eq!(
         stmt,
         Statement::AlterPolicy(AlterPolicyStatement {
@@ -1578,10 +1578,8 @@ fn parse_policy_statements() {
         })
     );
 
-    let stmt = parse_statement(
-        "create policy p3 on items as permissive\n    using (a > 2);\n",
-    )
-    .unwrap();
+    let stmt =
+        parse_statement("create policy p3 on items as permissive\n    using (a > 2);\n").unwrap();
     assert_eq!(
         stmt,
         Statement::CreatePolicy(CreatePolicyStatement {
@@ -1802,10 +1800,9 @@ fn parse_create_group_statement() {
 
 #[test]
 fn parse_create_group_membership_options() {
-    let stmt = parse_statement(
-        "create group regress_group with admin regress_admin user regress_member",
-    )
-    .unwrap();
+    let stmt =
+        parse_statement("create group regress_group with admin regress_admin user regress_member")
+            .unwrap();
     assert_eq!(
         stmt,
         Statement::CreateRole(CreateRoleStatement {
@@ -3281,8 +3278,7 @@ fn parse_typed_string_literal_expression() {
 
 #[test]
 fn parse_timestamptz_typed_string_literal_with_text_cast() {
-    let stmt =
-        parse_select("select timestamptz '2024-01-02 03:04:05+00'::text").unwrap();
+    let stmt = parse_select("select timestamptz '2024-01-02 03:04:05+00'::text").unwrap();
     match &stmt.targets[0].expr {
         SqlExpr::Cast(inner, ty) => {
             assert_eq!(*ty, SqlType::new(SqlTypeKind::Text));
@@ -6156,8 +6152,14 @@ fn parse_foreign_data_wrapper_statements() {
         panic!("expected create foreign data wrapper");
     };
     assert_eq!(create.fdw_name, "foo");
-    assert_eq!(create.handler_name.as_deref(), Some("pg_rust_test_fdw_handler"));
-    assert_eq!(create.validator_name.as_deref(), Some("postgresql_fdw_validator"));
+    assert_eq!(
+        create.handler_name.as_deref(),
+        Some("pg_rust_test_fdw_handler")
+    );
+    assert_eq!(
+        create.validator_name.as_deref(),
+        Some("postgresql_fdw_validator")
+    );
     assert_eq!(
         create.options,
         vec![
@@ -6686,12 +6688,14 @@ fn parse_window_calls_capture_over_clause() {
                 name: window_name,
                 partition_by,
                 order_by,
+                frame,
             }),
             ..
         } if name == "row_number"
             && window_name.is_none()
             && partition_by.is_empty()
             && order_by.is_empty()
+            && frame.is_none()
     ));
     assert!(matches!(
         &stmt.targets[1].expr,
@@ -6701,16 +6705,17 @@ fn parse_window_calls_capture_over_clause() {
                 name: window_name,
                 partition_by,
                 order_by,
+                frame,
             }),
             ..
-        } if window_name.is_none() && partition_by.len() == 1 && order_by.len() == 1
+        } if window_name.is_none() && partition_by.len() == 1 && order_by.len() == 1 && frame.is_none()
     ));
 }
 
 #[test]
 fn parse_named_window_clause_and_reference() {
-    let stmt = parse_select("select row_number() over w from people window w as (order by id)")
-        .unwrap();
+    let stmt =
+        parse_select("select row_number() over w from people window w as (order by id)").unwrap();
     assert_eq!(stmt.window_clauses.len(), 1);
     assert_eq!(stmt.window_clauses[0].name, "w");
     assert!(stmt.window_clauses[0].spec.partition_by.is_empty());
@@ -6723,12 +6728,39 @@ fn parse_named_window_clause_and_reference() {
                 name: Some(window_name),
                 partition_by,
                 order_by,
+                frame,
             }),
             ..
         } if name == "row_number"
             && window_name == "w"
             && partition_by.is_empty()
             && order_by.is_empty()
+            && frame.is_none()
+    ));
+}
+
+#[test]
+fn parse_window_frame_clause_and_inherited_reference() {
+    let stmt = parse_select(
+        "select sum(id) over (w rows between 1 preceding and current row) from people window w as (partition by name order by id)",
+    )
+    .unwrap();
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::AggCall {
+            over: Some(RawWindowSpec {
+                name: Some(window_name),
+                partition_by,
+                order_by,
+                frame: Some(frame),
+            }),
+            ..
+        } if window_name == "w"
+            && partition_by.is_empty()
+            && order_by.is_empty()
+            && frame.mode == WindowFrameMode::Rows
+            && matches!(frame.start_bound, RawWindowFrameBound::OffsetPreceding(_))
+            && matches!(frame.end_bound, RawWindowFrameBound::CurrentRow)
     ));
 }
 
@@ -6877,8 +6909,8 @@ fn build_plan_with_window_function_uses_windowagg() {
 
 #[test]
 fn build_plan_with_named_window_clause_uses_windowagg() {
-    let stmt = parse_select("select row_number() over w from people window w as (order by id)")
-        .unwrap();
+    let stmt =
+        parse_select("select row_number() over w from people window w as (order by id)").unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
     match plan {
         Plan::Projection { input, .. } => match *input {
@@ -7125,7 +7157,7 @@ fn window_function_rejected_in_where_group_by_and_having() {
 }
 
 #[test]
-fn named_window_errors_and_frames_are_rejected() {
+fn named_window_errors_and_frame_rules_are_enforced() {
     let stmt = parse_select("select row_number() over missing from people").unwrap();
     assert!(matches!(
         build_plan(&stmt, &catalog()),
@@ -7137,10 +7169,23 @@ fn named_window_errors_and_frames_are_rejected() {
         build_plan(&stmt, &catalog()),
         Err(ParseError::WindowingError(message)) if message == "window \"w\" is already defined"
     ));
-    assert!(parse_select(
-        "select row_number() over (order by id rows between unbounded preceding and current row) from people"
+    let stmt = parse_select(
+        "select sum(id) over (w rows between current row and unbounded following) from people window w as (order by id rows between unbounded preceding and current row)",
     )
-    .is_err());
+    .unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::WindowingError(message))
+            if message == "cannot copy window \"w\" because it has a frame clause"
+    ));
+    let stmt = parse_select(
+        "select sum(id) over (groups between 1 preceding and 1 following) from people",
+    )
+    .unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::WindowingError(message)) if message == "GROUPS mode requires an ORDER BY clause"
+    ));
 }
 
 #[test]
