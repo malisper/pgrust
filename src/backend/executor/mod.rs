@@ -122,8 +122,8 @@ pub(crate) use constraints::{enforce_relation_constraints, enforce_row_security_
 pub(crate) use expr_ops::compare_order_values;
 use expr_ops::parse_numeric_text;
 pub(crate) use foreign_keys::{
-    enforce_inbound_foreign_keys_on_delete, enforce_inbound_foreign_keys_on_update,
-    enforce_outbound_foreign_keys,
+    enforce_inbound_foreign_key_reference, enforce_inbound_foreign_keys_on_delete,
+    enforce_inbound_foreign_keys_on_update, enforce_outbound_foreign_keys,
 };
 
 #[derive(Debug, Clone, Default)]
