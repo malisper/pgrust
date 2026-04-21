@@ -16,8 +16,9 @@ use super::super::pathnodes::{next_synthetic_slot_id, window_output_columns};
 use super::super::root;
 use super::super::upperrels;
 use super::super::util::{
-    annotate_targets_for_input, build_aggregate_output_columns, pathkeys_to_order_items,
-    projection_is_identity, required_query_pathkeys_for_path, required_query_pathkeys_for_rel,
+    annotate_targets_for_input, build_aggregate_output_columns, pathkeys_are_fully_identified,
+    pathkeys_to_order_items, projection_is_identity, required_query_pathkeys_for_path,
+    required_query_pathkeys_for_rel,
 };
 use super::super::{expand_join_rte_vars, optimize_path};
 
@@ -44,6 +45,7 @@ pub(super) fn make_pathtarget_projection_rel(
         rel.add_path(optimize_path(
             Path::Projection {
                 plan_info: PlanEstimate::default(),
+                pathtarget: PathTarget::from_target_list(&targets),
                 slot_id,
                 input: Box::new(path),
                 targets: targets.clone(),
@@ -108,6 +110,7 @@ fn make_aggregate_rel(
         rel.add_path(optimize_path(
             Path::Aggregate {
                 plan_info: PlanEstimate::default(),
+                pathtarget: root.grouped_target.clone(),
                 slot_id,
                 input: Box::new(path),
                 group_by: group_by.clone(),
@@ -138,6 +141,7 @@ fn make_filter_rel(
         rel.add_path(optimize_path(
             Path::Filter {
                 plan_info: PlanEstimate::default(),
+                pathtarget: path.semantic_output_target(),
                 input: Box::new(path),
                 predicate: predicate.clone(),
             },
@@ -153,6 +157,20 @@ fn has_windowing(root: &PlannerInfo) -> bool {
 }
 
 fn expand_window_clause(root: &PlannerInfo, clause: &WindowClause) -> WindowClause {
+    let expand_frame_bound = |bound: crate::include::nodes::primnodes::WindowFrameBound| match bound
+    {
+        crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(expr) => {
+            crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(
+                expand_join_rte_vars(root, expr),
+            )
+        }
+        crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(expr) => {
+            crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(
+                expand_join_rte_vars(root, expr),
+            )
+        }
+        other => other,
+    };
     WindowClause {
         spec: crate::include::nodes::primnodes::WindowSpec {
             partition_by: clause
@@ -172,7 +190,11 @@ fn expand_window_clause(root: &PlannerInfo, clause: &WindowClause) -> WindowClau
                     ..item
                 })
                 .collect(),
-            frame: clause.spec.frame.clone(),
+            frame: crate::include::nodes::primnodes::WindowFrame {
+                mode: clause.spec.frame.mode,
+                start_bound: expand_frame_bound(clause.spec.frame.start_bound.clone()),
+                end_bound: expand_frame_bound(clause.spec.frame.end_bound.clone()),
+            },
         },
         functions: clause
             .functions
@@ -278,6 +300,7 @@ fn make_window_rel(
             optimize_path(
                 Path::OrderBy {
                     plan_info: PlanEstimate::default(),
+                    pathtarget: path.semantic_output_target(),
                     items: pathkeys_to_order_items(&required_pathkeys),
                     input: Box::new(path),
                 },
@@ -289,6 +312,7 @@ fn make_window_rel(
         rel.add_path(optimize_path(
             Path::WindowAgg {
                 plan_info: PlanEstimate::default(),
+                pathtarget: rel.reltarget.clone(),
                 slot_id,
                 output_columns: window_output_columns(&path, &clause),
                 input: Box::new(path),
@@ -324,6 +348,7 @@ fn make_project_set_rel(
         rel.add_path(optimize_path(
             Path::ProjectSet {
                 plan_info: PlanEstimate::default(),
+                pathtarget: rel.reltarget.clone(),
                 slot_id,
                 input: Box::new(path),
                 targets: targets.to_vec(),
@@ -429,8 +454,12 @@ fn make_ordered_rel(
         .pathlist
         .iter()
         .filter(|path| {
-            let required = required_query_pathkeys_for_path(root, path);
-            bestpath::pathkeys_satisfy(&path.pathkeys(), &required)
+            if pathkeys_are_fully_identified(&root.query_pathkeys) {
+                bestpath::pathkeys_satisfy(&path.pathkeys(), &root.query_pathkeys)
+            } else {
+                let required = required_query_pathkeys_for_path(root, path);
+                bestpath::pathkeys_satisfy(&path.pathkeys(), &required)
+            }
         })
         .min_by(|left, right| {
             left.plan_info()
@@ -448,6 +477,7 @@ fn make_ordered_rel(
             rel.add_path(optimize_path(
                 Path::OrderBy {
                     plan_info: PlanEstimate::default(),
+                    pathtarget: path.semantic_output_target(),
                     items: pathkeys_to_order_items(&required_pathkeys),
                     input: Box::new(path.clone()),
                 },
@@ -478,6 +508,7 @@ fn make_limit_rel(
         rel.add_path(optimize_path(
             Path::Limit {
                 plan_info: PlanEstimate::default(),
+                pathtarget: path.semantic_output_target(),
                 input: Box::new(path),
                 limit,
                 offset,
@@ -517,6 +548,7 @@ fn make_projection_rel(
         rel.add_path(optimize_path(
             Path::Projection {
                 plan_info: PlanEstimate::default(),
+                pathtarget: PathTarget::from_target_list(&targets),
                 slot_id,
                 input: Box::new(path),
                 targets,
@@ -655,6 +687,7 @@ fn standard_planner_with_param_base(
         .cloned()
         .unwrap_or(Path::Result {
             plan_info: PlanEstimate::default(),
+            pathtarget: PathTarget::new(Vec::new()),
         });
     let (plan_tree, ext_params, next_param_id) =
         create_plan_with_param_base(&root, best_path, catalog, &mut glob.subplans, next_param_id);

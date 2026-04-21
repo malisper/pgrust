@@ -7,7 +7,6 @@ use crate::backend::optimizer::{AccessCandidate, IndexPathSpec, RelationStats};
 use crate::backend::parser::BoundIndexRelation;
 use crate::backend::parser::CatalogLookup;
 use crate::include::nodes::pathnodes::{Path, PlannerInfo, RelOptInfo, RestrictInfo};
-use crate::include::nodes::plannodes::PlanEstimate;
 use crate::include::nodes::primnodes::ToastRelationRef;
 use crate::include::nodes::primnodes::{Expr, JoinType, OrderByEntry, QueryColumn, RelationDesc};
 
@@ -25,15 +24,6 @@ pub(super) fn residual_where_qual(root: &PlannerInfo) -> Option<Expr> {
 
 pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
     costsize::optimize_path(plan, catalog)
-}
-
-pub(super) fn rewrite_join_input_expr(
-    root: Option<&PlannerInfo>,
-    expr: Expr,
-    path: &Path,
-    layout: &[Expr],
-) -> Expr {
-    costsize::rewrite_join_input_expr(root, expr, path, layout)
 }
 
 pub(super) fn flatten_and_conjuncts(expr: &Expr) -> Vec<Expr> {
@@ -122,6 +112,8 @@ pub(super) fn build_join_paths_with_root(
     right_relids: &[usize],
     kind: JoinType,
     restrict_clauses: Vec<RestrictInfo>,
+    pathtarget: crate::include::nodes::pathnodes::PathTarget,
+    output_columns: Vec<QueryColumn>,
 ) -> Vec<Path> {
     costsize::build_join_paths_with_root(
         root,
@@ -131,6 +123,8 @@ pub(super) fn build_join_paths_with_root(
         right_relids,
         kind,
         restrict_clauses,
+        pathtarget,
+        output_columns,
     )
 }
 
@@ -141,6 +135,8 @@ pub(super) fn build_join_paths(
     right_relids: &[usize],
     kind: JoinType,
     restrict_clauses: Vec<RestrictInfo>,
+    pathtarget: crate::include::nodes::pathnodes::PathTarget,
+    output_columns: Vec<QueryColumn>,
 ) -> Vec<Path> {
     costsize::build_join_paths(
         left,
@@ -149,24 +145,8 @@ pub(super) fn build_join_paths(
         right_relids,
         kind,
         restrict_clauses,
-    )
-}
-
-pub(super) fn restore_join_output_order(
-    root: Option<&PlannerInfo>,
-    join: Path,
-    left_columns: &[QueryColumn],
-    right_columns: &[QueryColumn],
-    left_vars: &[Expr],
-    right_vars: &[Expr],
-) -> Path {
-    costsize::restore_join_output_order(
-        root,
-        join,
-        left_columns,
-        right_columns,
-        left_vars,
-        right_vars,
+        pathtarget,
+        output_columns,
     )
 }
 
@@ -176,16 +156,6 @@ pub(super) fn extract_hash_join_clauses(
     right_relids: &[usize],
 ) -> Option<crate::backend::optimizer::HashJoinClauses> {
     costsize::extract_hash_join_clauses(restrict_clauses, left_relids, right_relids)
-}
-
-pub(super) fn rewrite_semantic_expr_for_join_inputs(
-    root: Option<&PlannerInfo>,
-    expr: Expr,
-    left: &Path,
-    right: &Path,
-    join_layout: &[Expr],
-) -> Expr {
-    costsize::rewrite_semantic_expr_for_join_inputs(root, expr, left, right, join_layout)
 }
 
 pub(super) fn build_index_path_spec(

@@ -258,27 +258,13 @@ fn flatten_join_alias_vars(root: &PlannerInfo, expr: Expr) -> Expr {
     joininfo::flatten_join_alias_vars(root, expr)
 }
 
+#[cfg(test)]
+fn make_restrict_info(clause: Expr) -> RestrictInfo {
+    joininfo::make_restrict_info(clause)
+}
+
 fn aggregate_group_by(path: &Path) -> Option<&[Expr]> {
     util::aggregate_group_by(path)
-}
-
-fn rewrite_join_input_expr(
-    root: Option<&PlannerInfo>,
-    expr: Expr,
-    path: &Path,
-    layout: &[Expr],
-) -> Expr {
-    path::rewrite_join_input_expr(root, expr, path, layout)
-}
-
-fn rewrite_semantic_expr_for_join_inputs(
-    root: Option<&PlannerInfo>,
-    expr: Expr,
-    left: &Path,
-    right: &Path,
-    join_layout: &[Expr],
-) -> Expr {
-    path::rewrite_semantic_expr_for_join_inputs(root, expr, left, right, join_layout)
 }
 
 fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
@@ -313,6 +299,12 @@ fn build_join_paths(
     kind: JoinType,
     restrict_clauses: Vec<RestrictInfo>,
 ) -> Vec<Path> {
+    let mut output_columns = left.columns();
+    output_columns.extend(right.columns());
+    let mut exprs = left.semantic_output_target().exprs;
+    exprs.extend(right.semantic_output_target().exprs);
+    let mut sortgrouprefs = left.semantic_output_target().sortgrouprefs;
+    sortgrouprefs.extend(right.semantic_output_target().sortgrouprefs);
     path::build_join_paths(
         left,
         right,
@@ -320,6 +312,8 @@ fn build_join_paths(
         right_relids,
         kind,
         restrict_clauses,
+        crate::include::nodes::pathnodes::PathTarget::with_sortgrouprefs(exprs, sortgrouprefs),
+        output_columns,
     )
 }
 
