@@ -11469,6 +11469,88 @@ fn row_to_json_supports_qualified_star_inside_row_constructor() {
 }
 
 #[test]
+fn jsonb_agg_supports_whole_row_alias_arguments() {
+    let base = temp_dir("jsonb_agg_whole_row_alias");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "SELECT jsonb_agg(q) \
+         FROM (SELECT $$a$$ || x AS b, \
+                      y AS c, \
+                      ARRAY[ROW(x.*, ARRAY[1,2,3]), ROW(y.*, ARRAY[4,5,6])] AS z \
+               FROM generate_series(1,2) x, \
+                    generate_series(4,5) y) q",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Jsonb(
+                    crate::backend::executor::jsonb::parse_jsonb_text(
+                        "[{\"b\": \"a1\", \"c\": 4, \"z\": [{\"f1\": 1, \"f2\": [1, 2, 3]}, {\"f1\": 4, \"f2\": [4, 5, 6]}]}, \
+                          {\"b\": \"a1\", \"c\": 5, \"z\": [{\"f1\": 1, \"f2\": [1, 2, 3]}, {\"f1\": 5, \"f2\": [4, 5, 6]}]}, \
+                          {\"b\": \"a2\", \"c\": 4, \"z\": [{\"f1\": 2, \"f2\": [1, 2, 3]}, {\"f1\": 4, \"f2\": [4, 5, 6]}]}, \
+                          {\"b\": \"a2\", \"c\": 5, \"z\": [{\"f1\": 2, \"f2\": [1, 2, 3]}, {\"f1\": 5, \"f2\": [4, 5, 6]}]}]"
+                    )
+                    .unwrap()
+                )]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_agg(q order by x, y) \
+         from (values (1, 'txt1'), (2, 'txt2'), (3, 'txt3')) as q(x, y)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Jsonb(
+                    crate::backend::executor::jsonb::parse_jsonb_text(
+                        "[{\"x\": 1, \"y\": \"txt1\"}, {\"x\": 2, \"y\": \"txt2\"}, {\"x\": 3, \"y\": \"txt3\"}]"
+                    )
+                    .unwrap()
+                )]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_agg(q order by x nulls first, y) \
+         from (values (null::int, 'txt1'), (2, 'txt2'), (3, 'txt3')) as q(x, y)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Jsonb(
+                    crate::backend::executor::jsonb::parse_jsonb_text(
+                        "[{\"x\": null, \"y\": \"txt1\"}, {\"x\": 2, \"y\": \"txt2\"}, {\"x\": 3, \"y\": \"txt3\"}]"
+                    )
+                    .unwrap()
+                )]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
 fn json_strip_nulls_functions_work() {
     let base = temp_dir("json_strip_nulls");
     let txns = TransactionManager::new_durable(&base).unwrap();
