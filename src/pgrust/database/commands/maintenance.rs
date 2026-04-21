@@ -255,7 +255,23 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &comment_stmt.table_name)?;
+        let relation = match catalog.lookup_any_relation(&comment_stmt.table_name) {
+            Some(entry) if entry.relkind == 'r' => entry,
+            Some(_) => {
+                return Err(ExecError::Parse(ParseError::WrongObjectType {
+                    name: comment_stmt.table_name.clone(),
+                    expected: "table",
+                }));
+            }
+            None => {
+                return Err(ExecError::DetailedError {
+                    message: format!("relation \"{}\" does not exist", comment_stmt.table_name),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42P01",
+                });
+            }
+        };
         self.table_locks.lock_table_interruptible(
             relation.rel,
             TableLockMode::AccessExclusive,

@@ -5657,6 +5657,19 @@ fn comment_on_temp_table_is_unsupported() {
 }
 
 #[test]
+fn comment_on_missing_table_uses_table_does_not_exist_error() {
+    let base = temp_dir("comment_on_missing_table");
+    let db = Database::open(&base, 16).unwrap();
+
+    match db.execute(1, "comment on table attmp_wrong is 'table comment'") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message == "relation \"attmp_wrong\" does not exist" && sqlstate == "42P01" => {}
+        other => panic!("expected missing-table comment error, got {:?}", other),
+    }
+}
+
+#[test]
 fn alter_table_add_column_reads_old_rows_with_null_or_default() {
     let base = temp_dir("alter_table_add_column_reads_old_rows");
     let db = Database::open(&base, 16).unwrap();
