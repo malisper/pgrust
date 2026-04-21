@@ -67,7 +67,7 @@ const PG_POLICY_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_POLICY_RELID_NAME_INDEX_KEYS: [i16; 2] = [3, 2];
 const PG_AM_NAME_INDEX_KEYS: [i16; 1] = [2];
 const PG_AM_OID_INDEX_KEYS: [i16; 1] = [1];
-const PG_AMOP_FAM_STRAT_INDEX_KEYS: [i16; 4] = [2, 3, 4, 5];
+const PG_AMOP_FAM_STRAT_INDEX_KEYS: [i16; 5] = [2, 3, 4, 5, 6];
 const PG_AMOP_OPR_FAM_INDEX_KEYS: [i16; 3] = [7, 6, 2];
 const PG_AMOP_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_AMPROC_FAM_PROC_INDEX_KEYS: [i16; 4] = [2, 3, 4, 5];
@@ -139,6 +139,13 @@ const OID_OID_OID_INT2_OPCLASS_4: [u32; 4] = [
     OID_BTREE_OPCLASS_OID,
     OID_BTREE_OPCLASS_OID,
     INT2_BTREE_OPCLASS_OID,
+];
+const OID_OID_OID_INT2_CHAR_OPCLASS_5: [u32; 5] = [
+    OID_BTREE_OPCLASS_OID,
+    OID_BTREE_OPCLASS_OID,
+    OID_BTREE_OPCLASS_OID,
+    INT2_BTREE_OPCLASS_OID,
+    CHAR_BTREE_OPCLASS_OID,
 ];
 const OID_INT2_BOOL_OPCLASS_3: [u32; 3] = [
     OID_BTREE_OPCLASS_OID,
@@ -577,7 +584,7 @@ pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 67] = [
         heap_kind: BootstrapCatalogKind::PgAmop,
         unique: true,
         key_attnums: &PG_AMOP_FAM_STRAT_INDEX_KEYS,
-        opclass_oids: &OID_OID_OID_INT2_OPCLASS_4,
+        opclass_oids: &OID_OID_OID_INT2_CHAR_OPCLASS_5,
     },
     CatalogIndexDescriptor {
         relation_oid: 2654,

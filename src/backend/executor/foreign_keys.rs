@@ -229,7 +229,9 @@ fn index_has_visible_row(
         index_desc: index.desc.clone(),
         index_meta: index.index_meta.clone(),
         key_data: build_equality_scan_keys(key_values),
+        order_by_data: Vec::new(),
         direction: crate::include::access::relscan::ScanDirection::Forward,
+        want_itup: false,
     };
     let mut scan = indexam::index_beginscan(&begin, index.index_meta.am_oid).map_err(|err| {
         ExecError::DetailedError {

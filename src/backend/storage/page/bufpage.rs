@@ -261,6 +261,85 @@ pub fn page_add_item(page: &mut [u8; BLCKSZ], item: &[u8]) -> Result<OffsetNumbe
     Ok(offset)
 }
 
+pub fn page_mark_item_dead(page: &mut [u8; BLCKSZ], offset: OffsetNumber) -> Result<(), PageError> {
+    let header = page_header(page)?;
+    let mut item_id = page_get_item_id(page, offset)?;
+    if !item_id.has_storage() {
+        return Err(PageError::InvalidItemId);
+    }
+    item_id.lp_flags = ItemIdFlags::Dead;
+    write_item_id(page, offset, item_id, header.pd_lower);
+    Ok(())
+}
+
+pub fn page_remove_item(page: &mut [u8; BLCKSZ], offset: OffsetNumber) -> Result<(), PageError> {
+    let header = page_header(page)?;
+    page_get_item_id(page, offset)?;
+    write_item_id(page, offset, ItemIdData::unused(), header.pd_lower);
+    page_repair_fragmentation(page)
+}
+
+pub fn page_repair_fragmentation(page: &mut [u8; BLCKSZ]) -> Result<(), PageError> {
+    let mut header = page_header(page)?;
+    let max_offset = page_get_max_offset_number(page)?;
+    let base_lower = max_align(SIZE_OF_PAGE_HEADER_DATA);
+    let original = *page;
+
+    let mut item_ids = Vec::with_capacity(max_offset as usize);
+    let mut payloads = Vec::with_capacity(max_offset as usize);
+    let mut highest_used = 0usize;
+    for offset in 1..=max_offset {
+        let item_id = page_get_item_id(&original, offset)?;
+        if item_id.lp_flags != ItemIdFlags::Unused {
+            highest_used = offset as usize;
+        }
+        let payload = if item_id.has_storage() {
+            let start = usize::from(item_id.lp_off);
+            let end = start.saturating_add(usize::from(item_id.lp_len));
+            if end > usize::from(header.pd_special) || end > BLCKSZ {
+                return Err(PageError::CorruptHeader);
+            }
+            Some(original[start..end].to_vec())
+        } else {
+            None
+        };
+        item_ids.push(item_id);
+        payloads.push(payload);
+    }
+
+    page[base_lower..usize::from(header.pd_special)].fill(0);
+    let mut new_upper = usize::from(header.pd_special);
+    for offset in 1..=max_offset {
+        let index = usize::from(offset - 1);
+        let mut item_id = item_ids[index];
+        if item_id.lp_flags == ItemIdFlags::Unused {
+            item_id = ItemIdData::unused();
+        } else if let Some(bytes) = payloads[index].as_ref() {
+            let aligned_len = max_align(bytes.len());
+            new_upper = new_upper.saturating_sub(aligned_len);
+            page[new_upper..new_upper + bytes.len()].copy_from_slice(bytes);
+            for byte in &mut page[new_upper + bytes.len()..new_upper + aligned_len] {
+                *byte = 0;
+            }
+            item_id.lp_off = new_upper as u16;
+            item_id.lp_len = bytes.len() as u16;
+        }
+        if usize::from(offset) <= highest_used {
+            write_item_id(page, offset, item_id, header.pd_lower);
+        }
+    }
+
+    let old_lower = usize::from(header.pd_lower);
+    let new_lower = base_lower + highest_used * ITEM_ID_SIZE;
+    if new_lower < old_lower {
+        page[new_lower..old_lower].fill(0);
+    }
+    header.pd_lower = new_lower as u16;
+    header.pd_upper = new_upper as u16;
+    write_page_header(page, header);
+    Ok(())
+}
+
 pub fn page_special(page: &[u8; BLCKSZ]) -> Result<&[u8], PageError> {
     let header = page_header(page)?;
     Ok(&page[usize::from(header.pd_special)..BLCKSZ])
@@ -344,5 +423,24 @@ mod tests {
         assert_eq!(item_id.lp_flags, ItemIdFlags::Normal);
         assert_eq!(usize::from(item_id.lp_len), data.len());
         assert_eq!(usize::from(item_id.lp_off), BLCKSZ - max_align(data.len()));
+    }
+
+    #[test]
+    fn page_remove_item_compacts_remaining_tuples() {
+        let mut page = [0u8; BLCKSZ];
+        page_init(&mut page, 0);
+        let first = page_add_item(&mut page, b"first").unwrap();
+        let second = page_add_item(&mut page, b"second").unwrap();
+        let third = page_add_item(&mut page, b"third").unwrap();
+
+        page_remove_item(&mut page, second).unwrap();
+
+        assert_eq!(page_get_max_offset_number(&page).unwrap(), third);
+        assert_eq!(page_get_item(&page, first).unwrap(), b"first");
+        assert_eq!(page_get_item(&page, third).unwrap(), b"third");
+        assert!(matches!(
+            page_get_item(&page, second),
+            Err(PageError::InvalidItemId)
+        ));
     }
 }

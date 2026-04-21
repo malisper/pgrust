@@ -1431,6 +1431,7 @@ impl IndexScanOpaqueExt for IndexScanOpaque {
     fn as_btree_mut(&mut self) -> Option<&mut BtIndexScanOpaque> {
         match self {
             IndexScanOpaque::Btree(state) => Some(state),
+            IndexScanOpaque::Gist(_) => None,
             IndexScanOpaque::None => None,
         }
     }
@@ -1472,6 +1473,7 @@ fn btgettuple(scan: &mut IndexScanDesc) -> Result<bool, CatalogError> {
     loop {
         let needs_load = match &scan.opaque {
             IndexScanOpaque::Btree(state) => state.current_items.is_empty(),
+            IndexScanOpaque::Gist(_) => true,
             IndexScanOpaque::None => true,
         };
         if needs_load {

@@ -498,7 +498,7 @@ pub(crate) fn empty_range(range_type: RangeTypeRef) -> RangeValue {
     }
 }
 
-fn range_contains_range(left: &RangeValue, right: &RangeValue) -> bool {
+pub(crate) fn range_contains_range(left: &RangeValue, right: &RangeValue) -> bool {
     if right.empty {
         return true;
     }
@@ -509,7 +509,7 @@ fn range_contains_range(left: &RangeValue, right: &RangeValue) -> bool {
         && compare_upper_bounds(left.upper.as_ref(), right.upper.as_ref()) != Ordering::Less
 }
 
-fn range_contains_element(range: &RangeValue, value: &Value) -> Result<bool, ExecError> {
+pub(crate) fn range_contains_element(range: &RangeValue, value: &Value) -> Result<bool, ExecError> {
     ensure_range_subtype(range, value)?;
     if range.empty {
         return Ok(false);
@@ -531,7 +531,7 @@ fn range_contains_element(range: &RangeValue, value: &Value) -> Result<bool, Exe
     Ok(true)
 }
 
-fn range_overlap(left: &RangeValue, right: &RangeValue) -> bool {
+pub(crate) fn range_overlap(left: &RangeValue, right: &RangeValue) -> bool {
     if left.empty || right.empty {
         return false;
     }
@@ -539,7 +539,7 @@ fn range_overlap(left: &RangeValue, right: &RangeValue) -> bool {
         && cmp_upper_to_lower(right.upper.as_ref(), left.lower.as_ref()) != Ordering::Less
 }
 
-fn range_adjacent(left: &RangeValue, right: &RangeValue) -> bool {
+pub(crate) fn range_adjacent(left: &RangeValue, right: &RangeValue) -> bool {
     if left.empty || right.empty {
         return false;
     }
@@ -547,13 +547,13 @@ fn range_adjacent(left: &RangeValue, right: &RangeValue) -> bool {
         || bounds_adjacent(right.upper.as_ref(), left.lower.as_ref())
 }
 
-fn range_strict_left(left: &RangeValue, right: &RangeValue) -> bool {
+pub(crate) fn range_strict_left(left: &RangeValue, right: &RangeValue) -> bool {
     !left.empty
         && !right.empty
         && cmp_upper_to_lower(left.upper.as_ref(), right.lower.as_ref()) == Ordering::Less
 }
 
-fn range_strict_right(left: &RangeValue, right: &RangeValue) -> bool {
+pub(crate) fn range_strict_right(left: &RangeValue, right: &RangeValue) -> bool {
     range_strict_left(right, left)
 }
 
@@ -566,7 +566,7 @@ fn range_intersection(left: &RangeValue, right: &RangeValue) -> RangeValue {
     normalize_range(left.range_type, lower, upper).unwrap_or_else(|_| empty_range(left.range_type))
 }
 
-fn range_merge(left: &RangeValue, right: &RangeValue) -> RangeValue {
+pub(crate) fn range_merge(left: &RangeValue, right: &RangeValue) -> RangeValue {
     if left.empty {
         return right.clone();
     }
@@ -581,7 +581,7 @@ fn range_merge(left: &RangeValue, right: &RangeValue) -> RangeValue {
     }
 }
 
-fn range_union(left: &RangeValue, right: &RangeValue) -> Result<RangeValue, ExecError> {
+pub(crate) fn range_union(left: &RangeValue, right: &RangeValue) -> Result<RangeValue, ExecError> {
     if !range_overlap(left, right) && !range_adjacent(left, right) {
         return Err(ExecError::DetailedError {
             message: "result of range union would not be contiguous".into(),
@@ -685,7 +685,10 @@ fn max_upper_bound(left: Option<&RangeBound>, right: Option<&RangeBound>) -> Opt
     }
 }
 
-fn compare_lower_bounds(left: Option<&RangeBound>, right: Option<&RangeBound>) -> Ordering {
+pub(crate) fn compare_lower_bounds(
+    left: Option<&RangeBound>,
+    right: Option<&RangeBound>,
+) -> Ordering {
     match (left, right) {
         (None, None) => Ordering::Equal,
         (None, Some(_)) => Ordering::Less,
@@ -703,7 +706,10 @@ fn compare_lower_bounds(left: Option<&RangeBound>, right: Option<&RangeBound>) -
     }
 }
 
-fn compare_upper_bounds(left: Option<&RangeBound>, right: Option<&RangeBound>) -> Ordering {
+pub(crate) fn compare_upper_bounds(
+    left: Option<&RangeBound>,
+    right: Option<&RangeBound>,
+) -> Ordering {
     match (left, right) {
         (None, None) => Ordering::Equal,
         (None, Some(_)) => Ordering::Greater,
@@ -752,7 +758,7 @@ fn bounds_adjacent(upper: Option<&RangeBound>, lower: Option<&RangeBound>) -> bo
     }
 }
 
-fn compare_scalar_values(left: &Value, right: &Value) -> Ordering {
+pub(crate) fn compare_scalar_values(left: &Value, right: &Value) -> Ordering {
     compare_order_values(left, right, Some(false), false)
 }
 

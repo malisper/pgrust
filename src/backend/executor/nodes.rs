@@ -707,10 +707,12 @@ impl PlanNode for IndexScanState {
                 snapshot: ctx.snapshot.clone(),
                 heap_relation: self.rel,
                 index_relation: self.index_rel,
-                index_desc: (*self.desc).clone(),
+                index_desc: (*self.index_desc).clone(),
                 index_meta: self.index_meta.clone(),
                 key_data: self.keys.clone(),
+                order_by_data: self.order_by_keys.clone(),
                 direction: self.direction,
+                want_itup: false,
             };
             self.scan = Some(
                 indexam::index_beginscan(&begin, self.am_oid).map_err(|err| {

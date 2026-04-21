@@ -9,11 +9,31 @@ use crate::backend::catalog::catalog::{Catalog, CatalogEntry, column_desc};
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::SqlType;
 use crate::backend::storage::smgr::RelFileLocator;
-use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name};
+use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name, sql_type_oid};
 use crate::include::catalog::{
-    CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, PG_CATALOG_NAMESPACE_OID, PG_CONSTRAINT_RELATION_OID,
-    bootstrap_catalog_kinds, relam_for_relkind, system_catalog_index_by_oid,
+    ANYOID, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, PG_CATALOG_NAMESPACE_OID,
+    PG_CONSTRAINT_RELATION_OID, bootstrap_catalog_kinds, relam_for_relkind,
+    system_catalog_index_by_oid,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexAmOpEntry {
+    pub strategy: i16,
+    pub purpose: char,
+    pub lefttype: u32,
+    pub righttype: u32,
+    pub operator_oid: u32,
+    pub operator_proc_oid: u32,
+    pub sortfamily_oid: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexAmProcEntry {
+    pub procnum: i16,
+    pub lefttype: u32,
+    pub righttype: u32,
+    pub proc_oid: u32,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexRelCacheEntry {
@@ -40,8 +60,252 @@ pub struct IndexRelCacheEntry {
     pub indoption: Vec<i16>,
     pub opfamily_oids: Vec<u32>,
     pub opcintype_oids: Vec<u32>,
+    pub opckeytype_oids: Vec<u32>,
+    pub amop_entries: Vec<Vec<IndexAmOpEntry>>,
+    pub amproc_entries: Vec<Vec<IndexAmProcEntry>>,
     pub indexprs: Option<String>,
     pub indpred: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ResolvedIndexSupportMetadata {
+    opfamily_oids: Vec<u32>,
+    opcintype_oids: Vec<u32>,
+    opckeytype_oids: Vec<u32>,
+    amop_entries: Vec<Vec<IndexAmOpEntry>>,
+    amproc_entries: Vec<Vec<IndexAmProcEntry>>,
+}
+
+#[derive(Debug, Clone)]
+struct IndexSupportLookup {
+    am_rows: Vec<crate::include::catalog::PgAmRow>,
+    opclass_rows: Vec<crate::include::catalog::PgOpclassRow>,
+    amop_rows: Vec<crate::include::catalog::PgAmopRow>,
+    amproc_rows: Vec<crate::include::catalog::PgAmprocRow>,
+    operator_rows: Vec<crate::include::catalog::PgOperatorRow>,
+}
+
+impl IndexSupportLookup {
+    fn from_catcache(catcache: &CatCache) -> Self {
+        Self {
+            am_rows: catcache.am_rows(),
+            opclass_rows: catcache.opclass_rows(),
+            amop_rows: catcache.amop_rows(),
+            amproc_rows: catcache.amproc_rows(),
+            operator_rows: catcache.operator_rows(),
+        }
+    }
+
+    fn am_handler_oid(&self, am_oid: u32) -> Option<u32> {
+        self.am_rows
+            .iter()
+            .find(|am| am.oid == am_oid)
+            .map(|am| am.amhandler)
+    }
+
+    fn resolve(&self, indclass: &[u32]) -> ResolvedIndexSupportMetadata {
+        let resolved_opclasses = indclass
+            .iter()
+            .filter_map(|oid| self.opclass_rows.iter().find(|row| row.oid == *oid))
+            .collect::<Vec<_>>();
+        let opfamily_oids = resolved_opclasses
+            .iter()
+            .map(|row| row.opcfamily)
+            .collect::<Vec<_>>();
+        let opcintype_oids = resolved_opclasses
+            .iter()
+            .map(|row| row.opcintype)
+            .collect::<Vec<_>>();
+        let opckeytype_oids = resolved_opclasses
+            .iter()
+            .map(|row| row.opckeytype)
+            .collect::<Vec<_>>();
+        let amop_entries = opfamily_oids
+            .iter()
+            .map(|family_oid| {
+                self.amop_rows
+                    .iter()
+                    .filter(|row| row.amopfamily == *family_oid)
+                    .map(|row| IndexAmOpEntry {
+                        strategy: row.amopstrategy,
+                        purpose: row.amoppurpose,
+                        lefttype: row.amoplefttype,
+                        righttype: row.amoprighttype,
+                        operator_oid: row.amopopr,
+                        operator_proc_oid: self
+                            .operator_rows
+                            .iter()
+                            .find(|operator| operator.oid == row.amopopr)
+                            .map(|operator| operator.oprcode)
+                            .unwrap_or(0),
+                        sortfamily_oid: row.amopsortfamily,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let amproc_entries = opfamily_oids
+            .iter()
+            .map(|family_oid| {
+                self.amproc_rows
+                    .iter()
+                    .filter(|row| row.amprocfamily == *family_oid)
+                    .map(|row| IndexAmProcEntry {
+                        procnum: row.amprocnum,
+                        lefttype: row.amproclefttype,
+                        righttype: row.amprocrighttype,
+                        proc_oid: row.amproc,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        ResolvedIndexSupportMetadata {
+            opfamily_oids,
+            opcintype_oids,
+            opckeytype_oids,
+            amop_entries,
+            amproc_entries,
+        }
+    }
+}
+
+impl IndexRelCacheEntry {
+    fn indexed_operand_type_oid(&self, desc: &RelationDesc, column_index: usize) -> Option<u32> {
+        self.opckeytype_oids
+            .get(column_index)
+            .copied()
+            .filter(|oid| *oid != 0)
+            .or_else(|| {
+                desc.columns
+                    .get(column_index)
+                    .map(|column| sql_type_oid(column.sql_type))
+            })
+    }
+
+    fn type_match_score(
+        entry_lefttype: u32,
+        entry_righttype: u32,
+        left_type_oid: Option<u32>,
+        right_type_oid: Option<u32>,
+    ) -> Option<u8> {
+        fn component_score(entry_type: u32, actual_type: Option<u32>) -> Option<u8> {
+            match actual_type {
+                None => Some(0),
+                Some(actual) if entry_type == actual => Some(2),
+                Some(_) if entry_type == ANYOID => Some(1),
+                Some(_) => None,
+            }
+        }
+
+        Some(
+            component_score(entry_lefttype, left_type_oid)?
+                + component_score(entry_righttype, right_type_oid)?,
+        )
+    }
+
+    pub fn amproc_oid(
+        &self,
+        desc: &RelationDesc,
+        column_index: usize,
+        procnum: i16,
+    ) -> Option<u32> {
+        let operand_type_oid = self.indexed_operand_type_oid(desc, column_index);
+        let mut best: Option<(u8, u32)> = None;
+        for entry in self.amproc_entries.get(column_index)?.iter() {
+            if entry.procnum != procnum {
+                continue;
+            }
+            let Some(score) = Self::type_match_score(
+                entry.lefttype,
+                entry.righttype,
+                operand_type_oid,
+                operand_type_oid,
+            ) else {
+                continue;
+            };
+            if best.is_none_or(|(best_score, _)| score > best_score) {
+                best = Some((score, entry.proc_oid));
+            }
+        }
+        best.map(|(_, proc_oid)| proc_oid)
+    }
+
+    pub fn amop_strategy_for_operator(
+        &self,
+        desc: &RelationDesc,
+        column_index: usize,
+        operator_oid: u32,
+        right_type_oid: Option<u32>,
+    ) -> Option<u16> {
+        self.amop_strategy_matching(desc, column_index, right_type_oid, Some('s'), |entry| {
+            entry.operator_oid == operator_oid
+        })
+    }
+
+    pub fn amop_ordering_strategy_for_operator(
+        &self,
+        desc: &RelationDesc,
+        column_index: usize,
+        operator_oid: u32,
+        right_type_oid: Option<u32>,
+    ) -> Option<u16> {
+        self.amop_strategy_matching(desc, column_index, right_type_oid, Some('o'), |entry| {
+            entry.operator_oid == operator_oid
+        })
+    }
+
+    pub fn amop_strategy_for_proc(
+        &self,
+        desc: &RelationDesc,
+        column_index: usize,
+        operator_proc_oid: u32,
+        right_type_oid: Option<u32>,
+    ) -> Option<u16> {
+        self.amop_strategy_matching(desc, column_index, right_type_oid, Some('s'), |entry| {
+            entry.operator_proc_oid == operator_proc_oid
+        })
+    }
+
+    pub fn amop_ordering_strategy_for_proc(
+        &self,
+        desc: &RelationDesc,
+        column_index: usize,
+        operator_proc_oid: u32,
+        right_type_oid: Option<u32>,
+    ) -> Option<u16> {
+        self.amop_strategy_matching(desc, column_index, right_type_oid, Some('o'), |entry| {
+            entry.operator_proc_oid == operator_proc_oid
+        })
+    }
+
+    fn amop_strategy_matching(
+        &self,
+        desc: &RelationDesc,
+        column_index: usize,
+        right_type_oid: Option<u32>,
+        purpose: Option<char>,
+        predicate: impl Fn(&IndexAmOpEntry) -> bool,
+    ) -> Option<u16> {
+        let left_type_oid = self.indexed_operand_type_oid(desc, column_index);
+        let mut best: Option<(u8, i16)> = None;
+        for entry in self.amop_entries.get(column_index)?.iter() {
+            if purpose.is_some_and(|purpose| entry.purpose != purpose) || !predicate(entry) {
+                continue;
+            }
+            let Some(score) = Self::type_match_score(
+                entry.lefttype,
+                entry.righttype,
+                left_type_oid,
+                right_type_oid,
+            ) else {
+                continue;
+            };
+            if best.is_none_or(|(best_score, _)| score > best_score) {
+                best = Some((score, entry.strategy));
+            }
+        }
+        best.and_then(|(_, strategy)| u16::try_from(strategy).ok())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,14 +335,15 @@ pub struct RelCache {
 impl RelCache {
     pub fn from_catalog(catalog: &Catalog) -> Self {
         let mut cache = Self::default();
+        let catcache = CatCache::from_catalog(catalog);
+        let support_lookup = IndexSupportLookup::from_catcache(&catcache);
         for (name, entry) in catalog.entries() {
+            let relcache_entry = from_catalog_entry(entry, &support_lookup);
             cache.by_name.insert(
                 normalize_catalog_name(name).to_ascii_lowercase(),
-                from_catalog_entry(entry),
+                relcache_entry.clone(),
             );
-            cache
-                .by_oid
-                .insert(entry.relation_oid, from_catalog_entry(entry));
+            cache.by_oid.insert(entry.relation_oid, relcache_entry);
         }
         cache
     }
@@ -97,6 +362,8 @@ impl RelCache {
         current_db_oid: u32,
     ) -> Result<Self, CatalogError> {
         let mut cache = Self::default();
+        let support_lookup = IndexSupportLookup::from_catcache(catcache);
+        let index_rows = catcache.index_rows();
         let not_null_constraints = catcache
             .constraint_rows()
             .into_iter()
@@ -210,10 +477,7 @@ impl RelCache {
                 relforcerowsecurity: class.relforcerowsecurity,
                 desc: RelationDesc { columns },
                 index: class.relkind.eq(&'i').then(|| {
-                    let Some(index) = catcache
-                        .index_rows()
-                        .into_iter()
-                        .find(|row| row.indexrelid == class.oid)
+                    let Some(index) = index_rows.iter().find(|row| row.indexrelid == class.oid)
                     else {
                         return IndexRelCacheEntry {
                             indexrelid: class.oid,
@@ -232,27 +496,22 @@ impl RelCache {
                             indislive: false,
                             indisreplident: false,
                             am_oid: class.relam,
-                            am_handler_oid: catcache
-                                .am_rows()
-                                .into_iter()
-                                .find(|am| am.oid == class.relam)
-                                .map(|am| am.amhandler),
+                            am_handler_oid: support_lookup.am_handler_oid(class.relam),
                             indkey: Vec::new(),
                             indclass: Vec::new(),
                             indcollation: Vec::new(),
                             indoption: Vec::new(),
                             opfamily_oids: Vec::new(),
                             opcintype_oids: Vec::new(),
+                            opckeytype_oids: Vec::new(),
+                            amop_entries: Vec::new(),
+                            amproc_entries: Vec::new(),
                             indexprs: None,
                             indpred: None,
                         };
                     };
                     let indclass = index.indclass.clone();
-                    let opclass_rows = catcache.opclass_rows();
-                    let resolved_opclasses = indclass
-                        .iter()
-                        .filter_map(|oid| opclass_rows.iter().find(|row| row.oid == *oid))
-                        .collect::<Vec<_>>();
+                    let support = support_lookup.resolve(&indclass);
                     IndexRelCacheEntry {
                         indexrelid: class.oid,
                         indrelid: index.indrelid,
@@ -270,20 +529,16 @@ impl RelCache {
                         indislive: index.indislive,
                         indisreplident: index.indisreplident,
                         am_oid: class.relam,
-                        am_handler_oid: catcache
-                            .am_rows()
-                            .into_iter()
-                            .find(|am| am.oid == class.relam)
-                            .map(|am| am.amhandler),
+                        am_handler_oid: support_lookup.am_handler_oid(class.relam),
                         indkey: index.indkey.clone(),
                         indclass,
                         indcollation: index.indcollation.clone(),
                         indoption: index.indoption.clone(),
-                        opfamily_oids: resolved_opclasses.iter().map(|row| row.opcfamily).collect(),
-                        opcintype_oids: resolved_opclasses
-                            .iter()
-                            .map(|row| row.opcintype)
-                            .collect(),
+                        opfamily_oids: support.opfamily_oids,
+                        opcintype_oids: support.opcintype_oids,
+                        opckeytype_oids: support.opckeytype_oids,
+                        amop_entries: support.amop_entries,
+                        amproc_entries: support.amproc_entries,
                         indexprs: index.indexprs.clone(),
                         indpred: index.indpred.clone(),
                     }
@@ -388,7 +643,7 @@ fn relation_locator_for_class_row(
     }
 }
 
-fn from_catalog_entry(entry: &CatalogEntry) -> RelCacheEntry {
+fn from_catalog_entry(entry: &CatalogEntry, support_lookup: &IndexSupportLookup) -> RelCacheEntry {
     RelCacheEntry {
         rel: entry.rel,
         relation_oid: entry.relation_oid,
@@ -403,32 +658,38 @@ fn from_catalog_entry(entry: &CatalogEntry) -> RelCacheEntry {
         relrowsecurity: entry.relrowsecurity,
         relforcerowsecurity: entry.relforcerowsecurity,
         desc: entry.desc.clone(),
-        index: entry.index_meta.as_ref().map(|index| IndexRelCacheEntry {
-            indexrelid: entry.relation_oid,
-            indrelid: index.indrelid,
-            indnatts: index.indkey.len() as i16,
-            indnkeyatts: index.indkey.len() as i16,
-            indisunique: index.indisunique,
-            indnullsnotdistinct: false,
-            indisprimary: index.indisprimary,
-            indisexclusion: false,
-            indimmediate: true,
-            indisclustered: false,
-            indisvalid: index.indisvalid,
-            indcheckxmin: false,
-            indisready: index.indisready,
-            indislive: index.indislive,
-            indisreplident: false,
-            am_oid: relam_for_relkind(entry.relkind),
-            am_handler_oid: None,
-            indkey: index.indkey.clone(),
-            indclass: index.indclass.clone(),
-            indcollation: index.indcollation.clone(),
-            indoption: index.indoption.clone(),
-            opfamily_oids: Vec::new(),
-            opcintype_oids: Vec::new(),
-            indexprs: index.indexprs.clone(),
-            indpred: index.indpred.clone(),
+        index: entry.index_meta.as_ref().map(|index| {
+            let support = support_lookup.resolve(&index.indclass);
+            IndexRelCacheEntry {
+                indexrelid: entry.relation_oid,
+                indrelid: index.indrelid,
+                indnatts: index.indkey.len() as i16,
+                indnkeyatts: index.indkey.len() as i16,
+                indisunique: index.indisunique,
+                indnullsnotdistinct: false,
+                indisprimary: index.indisprimary,
+                indisexclusion: false,
+                indimmediate: true,
+                indisclustered: false,
+                indisvalid: index.indisvalid,
+                indcheckxmin: false,
+                indisready: index.indisready,
+                indislive: index.indislive,
+                indisreplident: false,
+                am_oid: entry.am_oid,
+                am_handler_oid: support_lookup.am_handler_oid(entry.am_oid),
+                indkey: index.indkey.clone(),
+                indclass: index.indclass.clone(),
+                indcollation: index.indcollation.clone(),
+                indoption: index.indoption.clone(),
+                opfamily_oids: support.opfamily_oids,
+                opcintype_oids: support.opcintype_oids,
+                opckeytype_oids: support.opckeytype_oids,
+                amop_entries: support.amop_entries,
+                amproc_entries: support.amproc_entries,
+                indexprs: index.indexprs.clone(),
+                indpred: index.indpred.clone(),
+            }
         }),
     }
 }
@@ -437,9 +698,15 @@ fn from_catalog_entry(entry: &CatalogEntry) -> RelCacheEntry {
 mod tests {
     use super::*;
     use crate::backend::catalog::CatalogStore;
-    use crate::backend::catalog::catalog::column_desc;
+    use crate::backend::catalog::catalog::{CatalogIndexBuildOptions, column_desc};
     use crate::backend::executor::RelationDesc;
     use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::access::gist::GIST_CONSISTENT_PROC;
+    use crate::include::catalog::{
+        BOX_GIST_OPCLASS_OID, BOX_TYPE_OID, GIST_AM_OID, GIST_BOX_CONSISTENT_PROC_OID,
+        INT4_TYPE_OID, INT4RANGE_TYPE_OID, RANGE_GIST_CONSISTENT_PROC_OID, RANGE_GIST_OPCLASS_OID,
+        bootstrap_pg_operator_rows,
+    };
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -478,6 +745,187 @@ mod tests {
                 .get_by_oid(entry.relation_oid)
                 .map(|entry| entry.rel.rel_number),
             Some(entry.rel.rel_number)
+        );
+    }
+
+    #[test]
+    fn relcache_from_catalog_populates_gist_support_metadata() {
+        let mut catalog = Catalog::default();
+        let table = catalog
+            .create_table(
+                "boxes",
+                RelationDesc {
+                    columns: vec![column_desc("b", SqlType::new(SqlTypeKind::Box), true)],
+                },
+            )
+            .unwrap();
+
+        catalog
+            .create_index_for_relation_with_options(
+                "boxes_b_gist",
+                table.relation_oid,
+                false,
+                &["b".into()],
+                &CatalogIndexBuildOptions {
+                    am_oid: GIST_AM_OID,
+                    indclass: vec![BOX_GIST_OPCLASS_OID],
+                    indcollation: vec![0],
+                    indoption: vec![0],
+                },
+            )
+            .unwrap();
+
+        let cache = RelCache::from_catalog(&catalog);
+        let index = cache
+            .get_by_name("boxes_b_gist")
+            .and_then(|entry| entry.index.as_ref())
+            .expect("GiST index entry should be present");
+
+        assert_eq!(index.am_oid, GIST_AM_OID);
+        assert!(index.am_handler_oid.is_some());
+        assert_eq!(
+            index.amproc_oid(
+                &cache.get_by_name("boxes_b_gist").unwrap().desc,
+                0,
+                GIST_CONSISTENT_PROC
+            ),
+            Some(GIST_BOX_CONSISTENT_PROC_OID)
+        );
+        assert!(!index.amop_entries.is_empty());
+    }
+
+    #[test]
+    fn relcache_range_strategy_lookup_uses_argument_type() {
+        let support_lookup =
+            IndexSupportLookup::from_catcache(&CatCache::from_catalog(&Catalog::default()));
+        let support = support_lookup.resolve(&[RANGE_GIST_OPCLASS_OID]);
+        let desc = RelationDesc {
+            columns: vec![column_desc(
+                "span",
+                SqlType::new(SqlTypeKind::Int4Range),
+                true,
+            )],
+        };
+        let index = IndexRelCacheEntry {
+            indexrelid: 42,
+            indrelid: 41,
+            indnatts: 1,
+            indnkeyatts: 1,
+            indisunique: false,
+            indnullsnotdistinct: false,
+            indisprimary: false,
+            indisexclusion: false,
+            indimmediate: false,
+            indisclustered: false,
+            indisvalid: true,
+            indcheckxmin: false,
+            indisready: true,
+            indislive: true,
+            indisreplident: false,
+            am_oid: GIST_AM_OID,
+            am_handler_oid: support_lookup.am_handler_oid(GIST_AM_OID),
+            indkey: vec![1],
+            indclass: vec![RANGE_GIST_OPCLASS_OID],
+            indcollation: vec![0],
+            indoption: vec![0],
+            opfamily_oids: support.opfamily_oids,
+            opcintype_oids: support.opcintype_oids,
+            opckeytype_oids: support.opckeytype_oids,
+            amop_entries: support.amop_entries,
+            amproc_entries: support.amproc_entries,
+            indexprs: None,
+            indpred: None,
+        };
+        let contains_proc_oid = bootstrap_pg_operator_rows()
+            .into_iter()
+            .find(|row| {
+                row.oprname == "@>"
+                    && row.oprleft == INT4RANGE_TYPE_OID
+                    && row.oprright == INT4RANGE_TYPE_OID
+            })
+            .map(|row| row.oprcode)
+            .expect("int4range contains operator proc oid");
+
+        assert_eq!(
+            index.amproc_oid(&desc, 0, GIST_CONSISTENT_PROC),
+            Some(RANGE_GIST_CONSISTENT_PROC_OID)
+        );
+        assert_eq!(
+            index.amop_strategy_for_proc(&desc, 0, contains_proc_oid, Some(INT4RANGE_TYPE_OID),),
+            Some(7)
+        );
+        assert_eq!(
+            index.amop_strategy_for_proc(&desc, 0, contains_proc_oid, Some(INT4_TYPE_OID),),
+            Some(16)
+        );
+    }
+
+    #[test]
+    fn relcache_distinguishes_gist_search_and_ordering_rows() {
+        let support_lookup =
+            IndexSupportLookup::from_catcache(&CatCache::from_catalog(&Catalog::default()));
+        let support = support_lookup.resolve(&[BOX_GIST_OPCLASS_OID]);
+        let desc = RelationDesc {
+            columns: vec![column_desc("b", SqlType::new(SqlTypeKind::Box), true)],
+        };
+        let index = IndexRelCacheEntry {
+            indexrelid: 52,
+            indrelid: 51,
+            indnatts: 1,
+            indnkeyatts: 1,
+            indisunique: false,
+            indnullsnotdistinct: false,
+            indisprimary: false,
+            indisexclusion: false,
+            indimmediate: false,
+            indisclustered: false,
+            indisvalid: true,
+            indcheckxmin: false,
+            indisready: true,
+            indislive: true,
+            indisreplident: false,
+            am_oid: GIST_AM_OID,
+            am_handler_oid: support_lookup.am_handler_oid(GIST_AM_OID),
+            indkey: vec![1],
+            indclass: vec![BOX_GIST_OPCLASS_OID],
+            indcollation: vec![0],
+            indoption: vec![0],
+            opfamily_oids: support.opfamily_oids,
+            opcintype_oids: support.opcintype_oids,
+            opckeytype_oids: support.opckeytype_oids,
+            amop_entries: support.amop_entries,
+            amproc_entries: support.amproc_entries,
+            indexprs: None,
+            indpred: None,
+        };
+        let distance_operator = bootstrap_pg_operator_rows()
+            .into_iter()
+            .find(|row| {
+                row.oprname == "<->" && row.oprleft == BOX_TYPE_OID && row.oprright == BOX_TYPE_OID
+            })
+            .expect("box distance operator row");
+
+        assert_eq!(
+            index.amop_strategy_for_operator(&desc, 0, distance_operator.oid, Some(BOX_TYPE_OID)),
+            None
+        );
+        assert_eq!(
+            index.amop_ordering_strategy_for_operator(
+                &desc,
+                0,
+                distance_operator.oid,
+                Some(BOX_TYPE_OID),
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            index.amop_ordering_strategy_for_proc(
+                &desc,
+                0,
+                distance_operator.oprcode,
+                Some(BOX_TYPE_OID),
+            ),
+            Some(1)
         );
     }
 

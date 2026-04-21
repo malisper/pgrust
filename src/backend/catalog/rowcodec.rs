@@ -245,6 +245,13 @@ pub(crate) fn parse_indkey(indkey: &str) -> Vec<i16> {
         .collect()
 }
 
+pub(crate) fn parse_oidvector(values: &str) -> Vec<u32> {
+    values
+        .split_ascii_whitespace()
+        .filter_map(|value| value.parse::<u32>().ok())
+        .collect()
+}
+
 pub(crate) fn namespace_row_from_values(
     values: Vec<Value>,
 ) -> Result<PgNamespaceRow, CatalogError> {
@@ -766,14 +773,8 @@ pub(crate) fn pg_index_row_from_values(values: Vec<Value>) -> Result<PgIndexRow,
         indislive: expect_bool(&values[13])?,
         indisreplident: expect_bool(&values[14])?,
         indkey: parse_indkey(&expect_text(&values[15])?),
-        indcollation: parse_indkey(&expect_text(&values[16])?)
-            .into_iter()
-            .map(|value| value as u32)
-            .collect(),
-        indclass: parse_indkey(&expect_text(&values[17])?)
-            .into_iter()
-            .map(|value| value as u32)
-            .collect(),
+        indcollation: parse_oidvector(&expect_text(&values[16])?),
+        indclass: parse_oidvector(&expect_text(&values[17])?),
         indoption: parse_indkey(&expect_text(&values[18])?),
         indexprs: expect_nullable_text(&values[19])?,
         indpred: expect_nullable_text(&values[20])?,

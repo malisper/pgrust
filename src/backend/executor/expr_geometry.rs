@@ -1764,11 +1764,11 @@ fn box_center(geo_box: &GeoBox) -> GeoPoint {
     }
 }
 
-fn box_area(geo_box: &GeoBox) -> f64 {
+pub(crate) fn box_area(geo_box: &GeoBox) -> f64 {
     (geo_box.high.x - geo_box.low.x).abs() * (geo_box.high.y - geo_box.low.y).abs()
 }
 
-fn bound_box(left: &GeoBox, right: &GeoBox) -> GeoBox {
+pub(crate) fn bound_box(left: &GeoBox, right: &GeoBox) -> GeoBox {
     GeoBox {
         high: GeoPoint {
             x: left.high.x.max(right.high.x),
@@ -1781,25 +1781,25 @@ fn bound_box(left: &GeoBox, right: &GeoBox) -> GeoBox {
     }
 }
 
-fn box_same(left: &GeoBox, right: &GeoBox) -> bool {
+pub(crate) fn box_same(left: &GeoBox, right: &GeoBox) -> bool {
     point_same(&left.high, &right.high) && point_same(&left.low, &right.low)
 }
 
-fn box_overlap(left: &GeoBox, right: &GeoBox) -> bool {
+pub(crate) fn box_overlap(left: &GeoBox, right: &GeoBox) -> bool {
     fp_le(left.low.x, right.high.x)
         && fp_le(right.low.x, left.high.x)
         && fp_le(left.low.y, right.high.y)
         && fp_le(right.low.y, left.high.y)
 }
 
-fn box_contains_box(outer: &GeoBox, inner: &GeoBox) -> bool {
+pub(crate) fn box_contains_box(outer: &GeoBox, inner: &GeoBox) -> bool {
     fp_ge(outer.high.x, inner.high.x)
         && fp_le(outer.low.x, inner.low.x)
         && fp_ge(outer.high.y, inner.high.y)
         && fp_le(outer.low.y, inner.low.y)
 }
 
-fn box_contains_point(geo_box: &GeoBox, point: &GeoPoint) -> bool {
+pub(crate) fn box_contains_point(geo_box: &GeoBox, point: &GeoPoint) -> bool {
     geo_box.high.x >= point.x
         && geo_box.low.x <= point.x
         && geo_box.high.y >= point.y
@@ -2449,7 +2449,7 @@ fn lseg_box_distance(lseg: &GeoLseg, geo_box: &GeoBox) -> f64 {
     best
 }
 
-fn box_box_distance(left: &GeoBox, right: &GeoBox) -> f64 {
+pub(crate) fn box_box_distance(left: &GeoBox, right: &GeoBox) -> f64 {
     if box_overlap(left, right) {
         return 0.0;
     }

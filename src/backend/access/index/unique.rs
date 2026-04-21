@@ -44,7 +44,9 @@ pub fn probe_unique_conflict(
                     argument: value.clone(),
                 })
                 .collect(),
+            order_by_data: Vec::new(),
             direction: ScanDirection::Forward,
+            want_itup: false,
         };
         let mut scan = indexam::index_beginscan(&begin, ctx.index_meta.am_oid)?;
         let mut wait_for_xid = None;
