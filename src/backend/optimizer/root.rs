@@ -1,11 +1,18 @@
+use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
+use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{PathTarget, PlannerInfo, RelOptInfo};
 use crate::include::nodes::primnodes::{
-    Aggref, Expr, ProjectSetTarget, SetReturningCall, TargetEntry, Var,
+    AggAccum, AggFunc, Aggref, Expr, ProjectSetTarget, SetReturningCall, SortGroupClause,
+    SubLink, SubLinkType, TargetEntry, Var, is_system_attr,
 };
 
 use super::joininfo::build_special_join_info;
 use super::pathnodes::expr_sql_type;
+
+pub(super) fn prepare_query_for_planning(query: Query) -> Query {
+    rewrite_minmax_aggregate_query(query)
+}
 
 impl PlannerInfo {
     pub fn new(parse: Query) -> Self {
@@ -55,6 +62,650 @@ impl PlannerInfo {
             final_rel: None,
             parse,
         }
+    }
+}
+
+fn rewrite_minmax_aggregate_query(query: Query) -> Query {
+    if !query.group_by.is_empty()
+        || query.having_qual.is_some()
+        || !query.window_clauses.is_empty()
+        || query.project_set.is_some()
+        || query.recursive_union.is_some()
+        || query.set_operation.is_some()
+        || query.accumulators.is_empty()
+    {
+        return query;
+    }
+
+    let Some(rewritten_aggs) = query
+        .accumulators
+        .iter()
+        .map(|accum| build_minmax_sublink(&query, accum))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return query;
+    };
+
+    let target_list = query
+        .target_list
+        .iter()
+        .cloned()
+        .map(|mut target| {
+            target.expr = rewrite_minmax_aggrefs(target.expr, &rewritten_aggs);
+            target
+        })
+        .collect::<Vec<_>>();
+
+    if target_list
+        .iter()
+        .any(|target| expr_contains_local_var_outside_subquery(&target.expr))
+    {
+        return query;
+    }
+
+    Query {
+        command_type: query.command_type,
+        depends_on_row_security: query.depends_on_row_security,
+        rtable: Vec::new(),
+        jointree: None,
+        target_list,
+        where_qual: None,
+        group_by: Vec::new(),
+        accumulators: Vec::new(),
+        window_clauses: Vec::new(),
+        having_qual: None,
+        // Ungrouped aggregate queries always produce at most one row, so any
+        // outer ORDER BY is semantically redundant after the rewrite.
+        sort_clause: Vec::new(),
+        limit_count: query.limit_count,
+        limit_offset: query.limit_offset,
+        project_set: None,
+        recursive_union: None,
+        set_operation: None,
+    }
+}
+
+fn build_minmax_sublink(query: &Query, accum: &AggAccum) -> Option<Expr> {
+    let func = builtin_aggregate_function_for_proc_oid(accum.aggfnoid)?;
+    let descending = match func {
+        AggFunc::Min => false,
+        AggFunc::Max => true,
+        _ => return None,
+    };
+    if accum.agg_variadic || accum.distinct || !accum.order_by.is_empty() || accum.filter.is_some()
+    {
+        return None;
+    }
+    let [arg] = accum.args.as_slice() else {
+        return None;
+    };
+    if !is_minmax_indexable_arg(arg) {
+        return None;
+    }
+    if query
+        .where_qual
+        .as_ref()
+        .is_some_and(expr_contains_sublink_for_minmax_rewrite)
+    {
+        return None;
+    }
+
+    let target = TargetEntry::new("?column?", arg.clone(), accum.sql_type, 1).with_sort_group_ref(1);
+    let sort_clause = vec![SortGroupClause {
+        expr: arg.clone(),
+        tle_sort_group_ref: 1,
+        descending,
+        nulls_first: None,
+    }];
+    let where_qual = combine_quals([
+        query
+            .where_qual
+            .clone()
+            .map(raise_outer_varlevels_for_minmax_rewrite),
+        accum.filter.clone(),
+        Some(Expr::IsNotNull(Box::new(arg.clone()))),
+    ]);
+    let subselect = Query {
+        command_type: CommandType::Select,
+        depends_on_row_security: query.depends_on_row_security,
+        rtable: query.rtable.clone(),
+        jointree: query.jointree.clone(),
+        target_list: vec![target],
+        where_qual,
+        group_by: Vec::new(),
+        accumulators: Vec::new(),
+        window_clauses: Vec::new(),
+        having_qual: None,
+        sort_clause,
+        limit_count: Some(1),
+        limit_offset: 0,
+        project_set: None,
+        recursive_union: None,
+        set_operation: None,
+    };
+    Some(Expr::SubLink(Box::new(SubLink {
+        sublink_type: SubLinkType::ExprSubLink,
+        testexpr: None,
+        subselect: Box::new(subselect),
+    })))
+}
+
+fn is_minmax_indexable_arg(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Var(var) if var.varlevelsup == 0 && !is_system_attr(var.varattno)
+    )
+}
+
+fn raise_outer_varlevels_for_minmax_rewrite(expr: Expr) -> Expr {
+    match expr {
+        Expr::Var(mut var) if var.varlevelsup > 0 => {
+            var.varlevelsup += 1;
+            Expr::Var(var)
+        }
+        Expr::Op(op) => Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {
+            args: op
+                .args
+                .into_iter()
+                .map(raise_outer_varlevels_for_minmax_rewrite)
+                .collect(),
+            ..*op
+        })),
+        Expr::Bool(bool_expr) => Expr::Bool(Box::new(crate::include::nodes::primnodes::BoolExpr {
+            args: bool_expr
+                .args
+                .into_iter()
+                .map(raise_outer_varlevels_for_minmax_rewrite)
+                .collect(),
+            ..*bool_expr
+        })),
+        Expr::Func(func) => Expr::Func(Box::new(crate::include::nodes::primnodes::FuncExpr {
+            args: func
+                .args
+                .into_iter()
+                .map(raise_outer_varlevels_for_minmax_rewrite)
+                .collect(),
+            ..*func
+        })),
+        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(
+            crate::include::nodes::primnodes::ScalarArrayOpExpr {
+                left: Box::new(raise_outer_varlevels_for_minmax_rewrite(*saop.left)),
+                right: Box::new(raise_outer_varlevels_for_minmax_rewrite(*saop.right)),
+                ..*saop
+            },
+        )),
+        Expr::Cast(inner, ty) => Expr::Cast(
+            Box::new(raise_outer_varlevels_for_minmax_rewrite(*inner)),
+            ty,
+        ),
+        Expr::Coalesce(left, right) => Expr::Coalesce(
+            Box::new(raise_outer_varlevels_for_minmax_rewrite(*left)),
+            Box::new(raise_outer_varlevels_for_minmax_rewrite(*right)),
+        ),
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(raise_outer_varlevels_for_minmax_rewrite(
+            *inner,
+        ))),
+        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(
+            raise_outer_varlevels_for_minmax_rewrite(*inner),
+        )),
+        Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
+            Box::new(raise_outer_varlevels_for_minmax_rewrite(*left)),
+            Box::new(raise_outer_varlevels_for_minmax_rewrite(*right)),
+        ),
+        Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
+            Box::new(raise_outer_varlevels_for_minmax_rewrite(*left)),
+            Box::new(raise_outer_varlevels_for_minmax_rewrite(*right)),
+        ),
+        other => other,
+    }
+}
+
+fn expr_contains_sublink_for_minmax_rewrite(expr: &Expr) -> bool {
+    match expr {
+        Expr::SubLink(_) | Expr::SubPlan(_) => true,
+        Expr::Aggref(aggref) => {
+            aggref
+                .args
+                .iter()
+                .any(expr_contains_sublink_for_minmax_rewrite)
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(expr_contains_sublink_for_minmax_rewrite)
+        }
+        Expr::WindowFunc(window_func) => {
+            window_func
+                .args
+                .iter()
+                .any(expr_contains_sublink_for_minmax_rewrite)
+        }
+        Expr::Op(op) => op.args.iter().any(expr_contains_sublink_for_minmax_rewrite),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(expr_contains_sublink_for_minmax_rewrite),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_some_and(expr_contains_sublink_for_minmax_rewrite)
+                || case_expr.args.iter().any(|arm| {
+                    expr_contains_sublink_for_minmax_rewrite(&arm.expr)
+                        || expr_contains_sublink_for_minmax_rewrite(&arm.result)
+                })
+                || expr_contains_sublink_for_minmax_rewrite(&case_expr.defresult)
+        }
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .any(expr_contains_sublink_for_minmax_rewrite),
+        Expr::ScalarArrayOp(saop) => {
+            expr_contains_sublink_for_minmax_rewrite(&saop.left)
+                || expr_contains_sublink_for_minmax_rewrite(&saop.right)
+        }
+        Expr::Cast(inner, _)
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => expr_contains_sublink_for_minmax_rewrite(inner),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_sublink_for_minmax_rewrite(expr)
+                || expr_contains_sublink_for_minmax_rewrite(pattern)
+                || escape
+                    .as_deref()
+                    .is_some_and(expr_contains_sublink_for_minmax_rewrite)
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_contains_sublink_for_minmax_rewrite(left)
+                || expr_contains_sublink_for_minmax_rewrite(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .any(expr_contains_sublink_for_minmax_rewrite),
+        Expr::Row { fields, .. } => fields.iter().any(|(_, expr)| {
+            expr_contains_sublink_for_minmax_rewrite(expr)
+        }),
+        Expr::FieldSelect { expr, .. } => expr_contains_sublink_for_minmax_rewrite(expr),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_sublink_for_minmax_rewrite(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(expr_contains_sublink_for_minmax_rewrite)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(expr_contains_sublink_for_minmax_rewrite)
+                })
+        }
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .any(expr_contains_sublink_for_minmax_rewrite),
+        Expr::Param(_)
+        | Expr::Var(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+    }
+}
+
+fn combine_quals<const N: usize>(quals: [Option<Expr>; N]) -> Option<Expr> {
+    super::path::and_exprs(quals.into_iter().flatten().collect())
+}
+
+fn rewrite_minmax_aggrefs(expr: Expr, rewritten_aggs: &[Expr]) -> Expr {
+    match expr {
+        Expr::Aggref(aggref) => rewritten_aggs
+            .get(aggref.aggno)
+            .cloned()
+            .unwrap_or(Expr::Aggref(aggref)),
+        Expr::WindowFunc(window_func) => {
+            Expr::WindowFunc(Box::new(crate::include::nodes::primnodes::WindowFuncExpr {
+                kind: match window_func.kind {
+                    crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) => {
+                        crate::include::nodes::primnodes::WindowFuncKind::Aggregate(Aggref {
+                            args: aggref
+                                .args
+                                .into_iter()
+                                .map(|arg| rewrite_minmax_aggrefs(arg, rewritten_aggs))
+                                .collect(),
+                            aggorder: aggref
+                                .aggorder
+                                .into_iter()
+                                .map(|item| crate::include::nodes::primnodes::OrderByEntry {
+                                    expr: rewrite_minmax_aggrefs(item.expr, rewritten_aggs),
+                                    ..item
+                                })
+                                .collect(),
+                            aggfilter: aggref
+                                .aggfilter
+                                .map(|expr| rewrite_minmax_aggrefs(expr, rewritten_aggs)),
+                            ..aggref
+                        })
+                    }
+                    crate::include::nodes::primnodes::WindowFuncKind::Builtin(kind) => {
+                        crate::include::nodes::primnodes::WindowFuncKind::Builtin(kind)
+                    }
+                },
+                args: window_func
+                    .args
+                    .into_iter()
+                    .map(|arg| rewrite_minmax_aggrefs(arg, rewritten_aggs))
+                    .collect(),
+                ..*window_func
+            }))
+        }
+        Expr::Op(op) => Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {
+            args: op
+                .args
+                .into_iter()
+                .map(|arg| rewrite_minmax_aggrefs(arg, rewritten_aggs))
+                .collect(),
+            ..*op
+        })),
+        Expr::Bool(bool_expr) => Expr::Bool(Box::new(crate::include::nodes::primnodes::BoolExpr {
+            args: bool_expr
+                .args
+                .into_iter()
+                .map(|arg| rewrite_minmax_aggrefs(arg, rewritten_aggs))
+                .collect(),
+            ..*bool_expr
+        })),
+        Expr::Case(case_expr) => Expr::Case(Box::new(crate::include::nodes::primnodes::CaseExpr {
+            arg: case_expr
+                .arg
+                .map(|expr| Box::new(rewrite_minmax_aggrefs(*expr, rewritten_aggs))),
+            args: case_expr
+                .args
+                .into_iter()
+                .map(|arm| crate::include::nodes::primnodes::CaseWhen {
+                    expr: rewrite_minmax_aggrefs(arm.expr, rewritten_aggs),
+                    result: rewrite_minmax_aggrefs(arm.result, rewritten_aggs),
+                })
+                .collect(),
+            defresult: Box::new(rewrite_minmax_aggrefs(
+                *case_expr.defresult,
+                rewritten_aggs,
+            )),
+            ..*case_expr
+        })),
+        Expr::Func(func) => Expr::Func(Box::new(crate::include::nodes::primnodes::FuncExpr {
+            args: func
+                .args
+                .into_iter()
+                .map(|arg| rewrite_minmax_aggrefs(arg, rewritten_aggs))
+                .collect(),
+            ..*func
+        })),
+        Expr::SubLink(sublink) => Expr::SubLink(Box::new(SubLink {
+            testexpr: sublink
+                .testexpr
+                .map(|expr| Box::new(rewrite_minmax_aggrefs(*expr, rewritten_aggs))),
+            ..*sublink
+        })),
+        Expr::SubPlan(subplan) => Expr::SubPlan(Box::new(crate::include::nodes::primnodes::SubPlan {
+            testexpr: subplan
+                .testexpr
+                .map(|expr| Box::new(rewrite_minmax_aggrefs(*expr, rewritten_aggs))),
+            args: subplan
+                .args
+                .into_iter()
+                .map(|arg| rewrite_minmax_aggrefs(arg, rewritten_aggs))
+                .collect(),
+            ..*subplan
+        })),
+        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(
+            crate::include::nodes::primnodes::ScalarArrayOpExpr {
+                left: Box::new(rewrite_minmax_aggrefs(*saop.left, rewritten_aggs)),
+                right: Box::new(rewrite_minmax_aggrefs(*saop.right, rewritten_aggs)),
+                ..*saop
+            },
+        )),
+        Expr::Xml(xml) => Expr::Xml(Box::new(crate::include::nodes::primnodes::XmlExpr {
+            named_args: xml
+                .named_args
+                .into_iter()
+                .map(|arg| rewrite_minmax_aggrefs(arg, rewritten_aggs))
+                .collect(),
+            args: xml
+                .args
+                .into_iter()
+                .map(|arg| rewrite_minmax_aggrefs(arg, rewritten_aggs))
+                .collect(),
+            ..*xml
+        })),
+        Expr::Cast(inner, ty) => {
+            Expr::Cast(Box::new(rewrite_minmax_aggrefs(*inner, rewritten_aggs)), ty)
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            case_insensitive,
+            negated,
+        } => Expr::Like {
+            expr: Box::new(rewrite_minmax_aggrefs(*expr, rewritten_aggs)),
+            pattern: Box::new(rewrite_minmax_aggrefs(*pattern, rewritten_aggs)),
+            escape: escape.map(|expr| Box::new(rewrite_minmax_aggrefs(*expr, rewritten_aggs))),
+            case_insensitive,
+            negated,
+        },
+        Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            negated,
+        } => Expr::Similar {
+            expr: Box::new(rewrite_minmax_aggrefs(*expr, rewritten_aggs)),
+            pattern: Box::new(rewrite_minmax_aggrefs(*pattern, rewritten_aggs)),
+            escape: escape.map(|expr| Box::new(rewrite_minmax_aggrefs(*expr, rewritten_aggs))),
+            negated,
+        },
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(rewrite_minmax_aggrefs(
+            *inner,
+            rewritten_aggs,
+        ))),
+        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(rewrite_minmax_aggrefs(
+            *inner,
+            rewritten_aggs,
+        ))),
+        Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
+            Box::new(rewrite_minmax_aggrefs(*left, rewritten_aggs)),
+            Box::new(rewrite_minmax_aggrefs(*right, rewritten_aggs)),
+        ),
+        Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
+            Box::new(rewrite_minmax_aggrefs(*left, rewritten_aggs)),
+            Box::new(rewrite_minmax_aggrefs(*right, rewritten_aggs)),
+        ),
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => Expr::ArrayLiteral {
+            elements: elements
+                .into_iter()
+                .map(|element| rewrite_minmax_aggrefs(element, rewritten_aggs))
+                .collect(),
+            array_type,
+        },
+        Expr::Row { descriptor, fields } => Expr::Row {
+            descriptor,
+            fields: fields
+                .into_iter()
+                .map(|(name, expr)| (name, rewrite_minmax_aggrefs(expr, rewritten_aggs)))
+                .collect(),
+        },
+        Expr::FieldSelect {
+            expr,
+            field,
+            field_type,
+        } => Expr::FieldSelect {
+            expr: Box::new(rewrite_minmax_aggrefs(*expr, rewritten_aggs)),
+            field,
+            field_type,
+        },
+        Expr::Coalesce(left, right) => Expr::Coalesce(
+            Box::new(rewrite_minmax_aggrefs(*left, rewritten_aggs)),
+            Box::new(rewrite_minmax_aggrefs(*right, rewritten_aggs)),
+        ),
+        Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
+            array: Box::new(rewrite_minmax_aggrefs(*array, rewritten_aggs)),
+            subscripts: subscripts
+                .into_iter()
+                .map(|subscript| crate::include::nodes::primnodes::ExprArraySubscript {
+                    is_slice: subscript.is_slice,
+                    lower: subscript
+                        .lower
+                        .map(|expr| rewrite_minmax_aggrefs(expr, rewritten_aggs)),
+                    upper: subscript
+                        .upper
+                        .map(|expr| rewrite_minmax_aggrefs(expr, rewritten_aggs)),
+                })
+                .collect(),
+        },
+        other => other,
+    }
+}
+
+fn expr_contains_local_var_outside_subquery(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(var) => var.varlevelsup == 0,
+        Expr::Aggref(aggref) => {
+            aggref.args.iter().any(expr_contains_local_var_outside_subquery)
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(expr_contains_local_var_outside_subquery)
+        }
+        Expr::WindowFunc(window_func) => {
+            window_func
+                .args
+                .iter()
+                .any(expr_contains_local_var_outside_subquery)
+                || match &window_func.kind {
+                    crate::include::nodes::primnodes::WindowFuncKind::Aggregate(aggref) => aggref
+                        .aggfilter
+                        .as_ref()
+                        .is_some_and(expr_contains_local_var_outside_subquery),
+                    crate::include::nodes::primnodes::WindowFuncKind::Builtin(_) => false,
+                }
+        }
+        Expr::Op(op) => op.args.iter().any(expr_contains_local_var_outside_subquery),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(expr_contains_local_var_outside_subquery),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_some_and(expr_contains_local_var_outside_subquery)
+                || case_expr.args.iter().any(|arm| {
+                    expr_contains_local_var_outside_subquery(&arm.expr)
+                        || expr_contains_local_var_outside_subquery(&arm.result)
+                })
+                || expr_contains_local_var_outside_subquery(&case_expr.defresult)
+        }
+        Expr::Func(func) => func.args.iter().any(expr_contains_local_var_outside_subquery),
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_deref()
+            .is_some_and(expr_contains_local_var_outside_subquery),
+        Expr::SubPlan(subplan) => {
+            subplan
+                .testexpr
+                .as_deref()
+                .is_some_and(expr_contains_local_var_outside_subquery)
+                || subplan
+                    .args
+                    .iter()
+                    .any(expr_contains_local_var_outside_subquery)
+        }
+        Expr::ScalarArrayOp(saop) => {
+            expr_contains_local_var_outside_subquery(&saop.left)
+                || expr_contains_local_var_outside_subquery(&saop.right)
+        }
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .any(expr_contains_local_var_outside_subquery),
+        Expr::Cast(inner, _) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+            expr_contains_local_var_outside_subquery(inner)
+        }
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_local_var_outside_subquery(expr)
+                || expr_contains_local_var_outside_subquery(pattern)
+                || escape
+                    .as_deref()
+                    .is_some_and(expr_contains_local_var_outside_subquery)
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_contains_local_var_outside_subquery(left)
+                || expr_contains_local_var_outside_subquery(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => {
+            elements.iter().any(expr_contains_local_var_outside_subquery)
+        }
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_contains_local_var_outside_subquery(expr)),
+        Expr::FieldSelect { expr, .. } => expr_contains_local_var_outside_subquery(expr),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_local_var_outside_subquery(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(expr_contains_local_var_outside_subquery)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(expr_contains_local_var_outside_subquery)
+                })
+        }
+        Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
     }
 }
 
