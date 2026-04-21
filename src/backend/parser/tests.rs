@@ -133,6 +133,8 @@ fn test_catalog_entry(rel_number: u32, desc: RelationDesc) -> CatalogEntry {
         relhastriggers: false,
         relhassubclass: false,
         relispartition: false,
+        relrowsecurity: false,
+        relforcerowsecurity: false,
         relpages: 0,
         reltuples: 0.0,
         desc,
@@ -183,6 +185,8 @@ fn people_view_entry() -> CatalogEntry {
         relhastriggers: false,
         relhassubclass: false,
         relispartition: false,
+        relrowsecurity: false,
+        relforcerowsecurity: false,
         relpages: 0,
         reltuples: 0.0,
         desc: RelationDesc {
@@ -293,6 +297,8 @@ fn catalog_with_people_id_index() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
+            relrowsecurity: false,
+            relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
             desc: RelationDesc {
@@ -338,6 +344,8 @@ fn catalog_with_people_primary_key() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
+            relrowsecurity: false,
+            relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
             desc: RelationDesc {
@@ -416,6 +424,8 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
+            relrowsecurity: false,
+            relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
             desc: RelationDesc {
@@ -566,6 +576,8 @@ fn catalog_with_text_parent_primary_key() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
+            relrowsecurity: false,
+            relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
             desc: RelationDesc {
@@ -609,6 +621,7 @@ fn visible_catalog_without_text_input_cast(
         base.index_rows(),
         base.rewrite_rows(),
         base.trigger_rows(),
+        base.policy_rows(),
         base.am_rows(),
         base.amop_rows(),
         base.amproc_rows(),
@@ -635,6 +648,7 @@ fn visible_catalog_without_text_input_cast(
             })
             .collect(),
         base.collation_rows(),
+        base.foreign_data_wrapper_rows(),
         base.database_rows(),
         base.tablespace_rows(),
         base.statistic_rows(),
@@ -661,6 +675,7 @@ fn visible_catalog_without_operator(
         base.index_rows(),
         base.rewrite_rows(),
         base.trigger_rows(),
+        base.policy_rows(),
         base.am_rows(),
         base.amop_rows(),
         base.amproc_rows(),
@@ -685,6 +700,7 @@ fn visible_catalog_without_operator(
         base.aggregate_rows(),
         base.cast_rows(),
         base.collation_rows(),
+        base.foreign_data_wrapper_rows(),
         base.database_rows(),
         base.tablespace_rows(),
         base.statistic_rows(),
@@ -1501,8 +1517,8 @@ fn parse_alter_table_set_statement() {
 
 #[test]
 fn parse_alter_table_no_inherit_statement() {
-    let stmt = parse_statement("alter table if exists only child_items no inherit parent_items")
-        .unwrap();
+    let stmt =
+        parse_statement("alter table if exists only child_items no inherit parent_items").unwrap();
     assert_eq!(
         stmt,
         Statement::AlterTableNoInherit(AlterTableNoInheritStatement {
@@ -1578,8 +1594,7 @@ fn parse_policy_statements() {
         })
     );
 
-    let stmt =
-        parse_statement("alter policy p1 on items rename to p2").unwrap();
+    let stmt = parse_statement("alter policy p1 on items rename to p2").unwrap();
     assert_eq!(
         stmt,
         Statement::AlterPolicy(AlterPolicyStatement {
@@ -1601,10 +1616,8 @@ fn parse_policy_statements() {
         })
     );
 
-    let stmt = parse_statement(
-        "create policy p3 on items as permissive\n    using (a > 2);\n",
-    )
-    .unwrap();
+    let stmt =
+        parse_statement("create policy p3 on items as permissive\n    using (a > 2);\n").unwrap();
     assert_eq!(
         stmt,
         Statement::CreatePolicy(CreatePolicyStatement {
@@ -1825,10 +1838,9 @@ fn parse_create_group_statement() {
 
 #[test]
 fn parse_create_group_membership_options() {
-    let stmt = parse_statement(
-        "create group regress_group with admin regress_admin user regress_member",
-    )
-    .unwrap();
+    let stmt =
+        parse_statement("create group regress_group with admin regress_admin user regress_member")
+            .unwrap();
     assert_eq!(
         stmt,
         Statement::CreateRole(CreateRoleStatement {
@@ -4521,10 +4533,10 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("create temp table tempy(id) as select 1").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { table_name, column_names, persistence: TablePersistence::Temporary, .. }) if table_name == "tempy" && column_names == vec!["id"])
     );
     assert!(
-        matches!(parse_statement("drop table widgets").unwrap(), Statement::DropTable(DropTableStatement { if_exists: false, table_names }) if table_names == vec!["widgets"])
+        matches!(parse_statement("drop table widgets").unwrap(), Statement::DropTable(DropTableStatement { if_exists: false, table_names, cascade: false }) if table_names == vec!["widgets"])
     );
     assert!(
-        matches!(parse_statement("drop table if exists pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers").unwrap(), Statement::DropTable(DropTableStatement { if_exists: true, table_names }) if table_names == vec!["pgbench_accounts", "pgbench_branches", "pgbench_history", "pgbench_tellers"])
+        matches!(parse_statement("drop table if exists pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers").unwrap(), Statement::DropTable(DropTableStatement { if_exists: true, table_names, cascade: false }) if table_names == vec!["pgbench_accounts", "pgbench_branches", "pgbench_history", "pgbench_tellers"])
     );
     assert!(
         matches!(parse_statement("drop index tenant_idx").unwrap(), Statement::DropIndex(DropIndexStatement { if_exists: false, index_names }) if index_names == vec!["tenant_idx"])
@@ -4707,6 +4719,7 @@ fn parse_create_rule_single_action() {
                         SqlExpr::Column("new.id".into()),
                     ]]),
                     on_conflict: None,
+                    returning: vec![],
                 }),
                 sql: "insert into pets values (new.id, new.id)".into(),
             }],
@@ -4887,6 +4900,7 @@ fn people_insert_with_on_conflict(
             assignments,
             where_clause,
         }),
+        returning: vec![],
     }
 }
 
@@ -5989,7 +6003,7 @@ fn lower_create_table_rejects_unsupported_constraint_attributes() {
     let Statement::CreateTable(ct) = stmt else {
         panic!("expected create table");
     };
-    let lowered = lower_create_table(&ct, &catalog_with_people_id_name_unique_index()).unwrap();
+    let lowered = lower_create_table(&ct, &catalog_with_people_primary_key()).unwrap();
     assert_eq!(lowered.foreign_key_actions.len(), 1);
     assert!(lowered.foreign_key_actions[0].not_valid);
 }
@@ -6020,7 +6034,7 @@ fn lower_create_table_resolves_foreign_keys_against_primary_keys() {
     let Statement::CreateTable(ct) = stmt else {
         panic!("expected create table");
     };
-    let lowered = lower_create_table(&ct, &catalog_with_people_id_name_unique_index()).unwrap();
+    let lowered = lower_create_table(&ct, &catalog_with_people_primary_key()).unwrap();
     assert_eq!(lowered.foreign_key_actions.len(), 1);
     let foreign_key = &lowered.foreign_key_actions[0];
     assert_eq!(foreign_key.constraint_name, "pets_owner_id_fkey");
@@ -6601,22 +6615,27 @@ fn parse_window_calls_capture_over_clause() {
         SqlExpr::FuncCall {
             name,
             over: Some(RawWindowSpec {
+                name: window_name,
                 partition_by,
                 order_by,
             }),
             ..
-        } if name == "row_number" && partition_by.is_empty() && order_by.is_empty()
+        } if name == "row_number"
+            && window_name.is_none()
+            && partition_by.is_empty()
+            && order_by.is_empty()
     ));
     assert!(matches!(
         &stmt.targets[1].expr,
         SqlExpr::AggCall {
             func: AggFunc::Sum,
             over: Some(RawWindowSpec {
+                name: window_name,
                 partition_by,
                 order_by,
             }),
             ..
-        } if partition_by.len() == 1 && order_by.len() == 1
+        } if window_name.is_none() && partition_by.len() == 1 && order_by.len() == 1
     ));
 }
 
@@ -6996,7 +7015,7 @@ fn window_function_rejected_in_where_group_by_and_having() {
 
 #[test]
 fn window_aliases_and_frames_are_rejected() {
-    assert!(parse_select("select row_number() over w from people window w as ()").is_err());
+    assert!(parse_select("select row_number() over w from people window w as ()").is_ok());
     assert!(parse_select(
         "select row_number() over (order by id rows between unbounded preceding and current row) from people"
     )

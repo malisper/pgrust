@@ -8,12 +8,12 @@ use crate::backend::utils::cache::system_views::{
     build_pg_views_rows,
 };
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAuthIdRow, PgCastRow, PgClassRow,
-    PgCollationRow, PgConstraintRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgOpclassRow,
-    PgOperatorRow, PgPolicyRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow,
-    PgTriggerRow, PgTypeRow, bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows,
-    bootstrap_pg_collation_rows, bootstrap_pg_language_rows, bootstrap_pg_opclass_rows,
-    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
+    BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAuthIdRow, PgCastRow, PgClassRow, PgCollationRow,
+    PgConstraintRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgOpclassRow, PgOperatorRow,
+    PgPolicyRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow, PgTriggerRow, PgTypeRow,
+    bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
+    bootstrap_pg_language_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
+    bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
 };
 use crate::pgrust::database::DatabaseStatsStore;
 

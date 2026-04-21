@@ -57,7 +57,8 @@ fn ensure_function_signature_exists(
     signature: &str,
 ) -> Result<(), ExecError> {
     let catalog = db.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
-    let (proc_name, arg_names) = parse_granted_function_signature(signature).map_err(ExecError::Parse)?;
+    let (proc_name, arg_names) =
+        parse_granted_function_signature(signature).map_err(ExecError::Parse)?;
     let (schema_name, base_name) = proc_name
         .rsplit_once('.')
         .map(|(schema, name)| (Some(schema.trim().to_ascii_lowercase()), name.trim()))
@@ -86,12 +87,15 @@ fn ensure_function_signature_exists(
         None => None,
     };
     let normalized_name = base_name.trim_matches('"').to_ascii_lowercase();
-    let exists = catalog.proc_rows_by_name(&normalized_name).into_iter().any(|row| {
-        parse_proc_argtype_oids(&row.proargtypes) == Some(desired_arg_oids.clone())
-            && schema_oid
-                .map(|schema_oid| row.pronamespace == schema_oid)
-                .unwrap_or(true)
-    });
+    let exists = catalog
+        .proc_rows_by_name(&normalized_name)
+        .into_iter()
+        .any(|row| {
+            parse_proc_argtype_oids(&row.proargtypes) == Some(desired_arg_oids.clone())
+                && schema_oid
+                    .map(|schema_oid| row.pronamespace == schema_oid)
+                    .unwrap_or(true)
+        });
     if exists {
         Ok(())
     } else {

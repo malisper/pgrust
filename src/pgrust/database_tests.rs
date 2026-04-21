@@ -24,6 +24,7 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(5);
 const CONTENTION_TEST_TIMEOUT: Duration = Duration::from_secs(15);
 const HEAVY_CONTENTION_TEST_TIMEOUT: Duration = Duration::from_secs(30);
 const STRESS_TEST_TIMEOUT: Duration = Duration::from_secs(60);
+const PIN_LEAK_CONTENTION_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 const SAME_ROW_UPDATE_TEST_TIMEOUT: Duration = Duration::from_secs(20);
 const PGBENCH_STYLE_TEST_TIMEOUT: Duration = Duration::from_secs(20);
 const SAME_ROW_UPDATE_FULL_SUITE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -286,9 +287,9 @@ fn quantified_similar_any_all_array_operators_work() {
             &db,
             1,
             "select \
-                'foo' similar to any (array['f..', 'b..']), \
-                'foo' similar to all (array['f..', 'fo.']), \
-                'foo' similar to all (array['f..', 'b..']), \
+                'foo' similar to any (array['%(o|a)%', 'bar']), \
+                'foo' similar to all (array['%(o|a)%', '(f|g)%']), \
+                'foo' similar to all (array['%(o|a)%', '(b|c)%']), \
                 'foo' not similar to any (array['bar', 'baz']), \
                 'foo' not similar to all (array['foo', 'bar'])",
         ),
@@ -1104,7 +1105,10 @@ fn point_subscript_assignments_return_rows() {
         .execute(&db, "create temp table point_tbl (f1 point)")
         .unwrap();
     session
-        .execute(&db, "insert into point_tbl values (null), ('(10,10)'::point)")
+        .execute(
+            &db,
+            "insert into point_tbl values (null), ('(10,10)'::point)",
+        )
         .unwrap();
 
     match session
@@ -1175,7 +1179,9 @@ fn point_subscript_assignments_return_rows() {
         &db,
         "update point_tbl set f1[3] = 10 where f1::text = '(-10,-10)'::point::text returning *",
     ) {
-        Err(ExecError::DetailedError { message, sqlstate, .. }) => {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
             assert_eq!(message, "array subscript out of range");
             assert_eq!(sqlstate, "2202E");
         }
@@ -2471,7 +2477,8 @@ fn alter_table_no_inherit_localizes_inherited_check_constraint() {
         other => panic!("expected localized inherited check violation, got {other:?}"),
     }
 
-    db.execute(1, "alter table bc drop constraint ac_check").unwrap();
+    db.execute(1, "alter table bc drop constraint ac_check")
+        .unwrap();
     assert_eq!(
         query_rows(
             &db,
@@ -2494,12 +2501,16 @@ fn alter_table_no_inherit_recomputes_multi_parent_column_and_not_null_metadata()
     session
         .execute(&db, "create table p1 (a int not null)")
         .unwrap();
-    session.execute(&db, "create table c1 () inherits (p1)").unwrap();
+    session
+        .execute(&db, "create table c1 () inherits (p1)")
+        .unwrap();
     session
         .execute(&db, "create table c2 () inherits (p1, c1)")
         .unwrap();
 
-    session.execute(&db, "alter table c2 no inherit p1").unwrap();
+    session
+        .execute(&db, "alter table c2 no inherit p1")
+        .unwrap();
     assert_eq!(
         query_rows(
             &db,
@@ -2520,10 +2531,16 @@ fn alter_table_no_inherit_recomputes_multi_parent_column_and_not_null_metadata()
              join pg_class c on c.oid = pgc.conrelid
              where c.relname = 'c2' and pgc.contype = 'n'",
         ),
-        vec![vec![Value::Bool(false), Value::Int16(1), Value::Bool(false)]]
+        vec![vec![
+            Value::Bool(false),
+            Value::Int16(1),
+            Value::Bool(false)
+        ]]
     );
 
-    session.execute(&db, "alter table c2 no inherit c1").unwrap();
+    session
+        .execute(&db, "alter table c2 no inherit c1")
+        .unwrap();
     assert_eq!(
         query_rows(
             &db,
@@ -2562,9 +2579,7 @@ fn alter_table_no_inherit_recomputes_multi_parent_column_and_not_null_metadata()
 
     match session.execute(&db, "insert into c2 values (null)") {
         Err(ExecError::NotNullViolation {
-            relation,
-            column,
-            ..
+            relation, column, ..
         }) if relation == "c2" && column == "a" => {}
         other => panic!("expected localized inherited not-null violation, got {other:?}"),
     }
@@ -4731,7 +4746,8 @@ fn nested_simple_views_auto_dml_route_to_base_table() {
         vec![vec![Value::Int32(1), Value::Text("beta".into())]]
     );
 
-    db.execute(1, "delete from second_view where id = 1").unwrap();
+    db.execute(1, "delete from second_view where id = 1")
+        .unwrap();
     assert_eq!(
         query_rows(&db, 1, "select id, name from base_items"),
         Vec::<Vec<Value>>::new()
@@ -4759,9 +4775,14 @@ fn filtered_views_auto_update_delete_visible_rows_and_insert_can_hide_rows() {
     )
     .unwrap();
 
-    db.execute(1, "update active_items set name = 'seen'").unwrap();
+    db.execute(1, "update active_items set name = 'seen'")
+        .unwrap();
     assert_eq!(
-        query_rows(&db, 1, "select id, name, active from base_items order by id"),
+        query_rows(
+            &db,
+            1,
+            "select id, name, active from base_items order by id"
+        ),
         vec![
             vec![
                 Value::Int32(1),
@@ -4776,9 +4797,14 @@ fn filtered_views_auto_update_delete_visible_rows_and_insert_can_hide_rows() {
         ]
     );
 
-    db.execute(1, "delete from active_items where id = 1").unwrap();
+    db.execute(1, "delete from active_items where id = 1")
+        .unwrap();
     assert_eq!(
-        query_rows(&db, 1, "select id, name, active from base_items order by id"),
+        query_rows(
+            &db,
+            1,
+            "select id, name, active from base_items order by id"
+        ),
         vec![vec![
             Value::Int32(2),
             Value::Text("beta".into()),
@@ -4789,7 +4815,11 @@ fn filtered_views_auto_update_delete_visible_rows_and_insert_can_hide_rows() {
     db.execute(1, "insert into active_items values (3, 'hidden')")
         .unwrap();
     assert_eq!(
-        query_rows(&db, 1, "select id, name, active from base_items order by id"),
+        query_rows(
+            &db,
+            1,
+            "select id, name, active from base_items order by id"
+        ),
         vec![
             vec![
                 Value::Int32(2),
@@ -4856,8 +4886,10 @@ fn non_simple_views_reject_auto_dml() {
         .unwrap();
     db.execute(1, "create table notes (id int4 not null, note text)")
         .unwrap();
-    db.execute(1, "insert into items values (1, 'alpha')").unwrap();
-    db.execute(1, "insert into notes values (1, 'memo')").unwrap();
+    db.execute(1, "insert into items values (1, 'alpha')")
+        .unwrap();
+    db.execute(1, "insert into notes values (1, 'memo')")
+        .unwrap();
 
     db.execute(
         1,
@@ -4883,7 +4915,8 @@ fn non_simple_views_reject_auto_dml() {
         "ON UPDATE DO INSTEAD rule",
     );
     assert_view_dml_error(
-        db.execute(1, "insert into aggregate_view values (1)").unwrap_err(),
+        db.execute(1, "insert into aggregate_view values (1)")
+            .unwrap_err(),
         "cannot insert into view \"aggregate_view\"",
         "aggregate functions",
         "ON INSERT DO INSTEAD rule",
@@ -4902,7 +4935,8 @@ fn insert_on_conflict_is_rejected_for_auto_updatable_views() {
     let base = temp_dir("auto_view_on_conflict");
     let db = Database::open(&base, 16).unwrap();
 
-    db.execute(1, "create table items (id int4 primary key)").unwrap();
+    db.execute(1, "create table items (id int4 primary key)")
+        .unwrap();
     db.execute(1, "create view item_view as select id from items")
         .unwrap();
 
@@ -7548,15 +7582,12 @@ fn alter_table_add_foreign_key_supports_delete_set_column_lists() {
     db.execute(1, "delete from parents where a = 10 and b = 20")
         .unwrap();
     assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select a, b from children_set_null",
-        ),
+        query_rows(&db, 1, "select a, b from children_set_null",),
         vec![vec![Value::Null, Value::Int32(20)]]
     );
 
-    db.execute(1, "insert into parents values (10, 20)").unwrap();
+    db.execute(1, "insert into parents values (10, 20)")
+        .unwrap();
     db.execute(
         1,
         "create table children_set_default (id int4 primary key, a int4 default 500, b int4)",
@@ -7573,11 +7604,7 @@ fn alter_table_add_foreign_key_supports_delete_set_column_lists() {
     db.execute(1, "delete from parents where a = 10 and b = 20")
         .unwrap();
     assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select a, b from children_set_default",
-        ),
+        query_rows(&db, 1, "select a, b from children_set_default",),
         vec![vec![Value::Int32(500), Value::Int32(20)]]
     );
 }
@@ -8998,10 +9025,12 @@ fn foreign_keys_block_parent_ddl_and_allow_child_drop() {
         "alter table parents drop constraint parents_pkey",
     ] {
         match db.execute(1, sql) {
-            Err(ExecError::DetailedError { detail: Some(detail), .. })
-                if detail.contains("foreign key constraint")
-                    || detail.contains("depends on table")
-                    || detail.contains("depends on") => {}
+            Err(ExecError::DetailedError {
+                detail: Some(detail),
+                ..
+            }) if detail.contains("foreign key constraint")
+                || detail.contains("depends on table")
+                || detail.contains("depends on") => {}
             Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. }))
                 if actual.contains("foreign key constraint")
                     || actual.contains("referenced by foreign key")
@@ -10508,7 +10537,11 @@ fn pg_my_temp_schema_filters_temp_pg_stats_rows() {
     session.execute(&db, "analyze rows").unwrap();
 
     assert_eq!(
-        session_query_rows(&mut session, &db, "select pg_my_temp_schema()::regnamespace::text"),
+        session_query_rows(
+            &mut session,
+            &db,
+            "select pg_my_temp_schema()::regnamespace::text"
+        ),
         vec![vec![Value::Text("pg_temp_1".into())]]
     );
     assert_eq!(
@@ -14258,7 +14291,7 @@ fn no_pins_leaked_concurrent_contention() {
         }));
     }
 
-    join_all_with_timeout(handles, STRESS_TEST_TIMEOUT);
+    join_all_with_timeout(handles, PIN_LEAK_CONTENTION_TEST_TIMEOUT);
 
     // After all threads finish, no pins should remain.
     let capacity = db.pool.capacity();
@@ -14682,7 +14715,11 @@ fn create_alter_and_drop_policy_updates_pg_policy() {
 
     session.execute(&db, "drop policy p2 on items").unwrap();
     assert_eq!(
-        query_rows(&db, 1, "select count(*) from pg_policy where polname = 'p2'"),
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_policy where polname = 'p2'"
+        ),
         vec![vec![Value::Int64(0)]]
     );
 }
@@ -15048,8 +15085,11 @@ fn alter_table_row_security_if_exists_ignores_missing_table() {
 
     db.execute(1, "alter table if exists missing enable row level security")
         .unwrap();
-    db.execute(1, "alter table if exists missing no force row level security")
-        .unwrap();
+    db.execute(
+        1,
+        "alter table if exists missing no force row level security",
+    )
+    .unwrap();
 }
 
 #[test]

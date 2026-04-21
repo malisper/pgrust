@@ -52,11 +52,7 @@ pub fn pg_policy_desc() -> RelationDesc {
             column_desc("oid", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("polname", SqlType::new(SqlTypeKind::Name), false),
             column_desc("polrelid", SqlType::new(SqlTypeKind::Oid), false),
-            column_desc(
-                "polcmd",
-                SqlType::new(SqlTypeKind::InternalChar),
-                false,
-            ),
+            column_desc("polcmd", SqlType::new(SqlTypeKind::InternalChar), false),
             column_desc("polpermissive", SqlType::new(SqlTypeKind::Bool), false),
             column_desc(
                 "polroles",

@@ -393,7 +393,8 @@ impl AccumState {
                         items.push(
                             jsonb_from_value(
                                 value,
-                                &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+                                &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(
+                                ),
                             )
                             .unwrap_or(JsonbValue::Null),
                         );

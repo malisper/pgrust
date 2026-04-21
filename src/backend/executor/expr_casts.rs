@@ -1378,7 +1378,8 @@ pub(crate) fn cast_value_with_config(
                 ..
             } => Ok(Value::Int64(v as i64)),
             SqlType {
-                kind: SqlTypeKind::Oid
+                kind:
+                    SqlTypeKind::Oid
                     | SqlTypeKind::RegRole
                     | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid,
@@ -1492,7 +1493,8 @@ pub(crate) fn cast_value_with_config(
                 ..
             } => Ok(Value::Int64(v as i64)),
             SqlType {
-                kind: SqlTypeKind::Oid
+                kind:
+                    SqlTypeKind::Oid
                     | SqlTypeKind::RegRole
                     | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid,
@@ -1985,7 +1987,8 @@ pub(crate) fn cast_value_with_config(
                 ..
             } => Ok(Value::Int64(v)),
             SqlType {
-                kind: SqlTypeKind::Oid
+                kind:
+                    SqlTypeKind::Oid
                     | SqlTypeKind::RegRole
                     | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid,
@@ -2162,7 +2165,8 @@ pub(crate) fn cast_value_with_config(
                 ..
             } => cast_float_to_int(v, ty),
             SqlType {
-                kind: SqlTypeKind::Oid
+                kind:
+                    SqlTypeKind::Oid
                     | SqlTypeKind::RegRole
                     | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid,
@@ -2344,9 +2348,7 @@ pub(super) fn cast_text_value_with_config(
         SqlTypeKind::RegRole
         | SqlTypeKind::RegProcedure
         | SqlTypeKind::RegConfig
-        | SqlTypeKind::RegDictionary => {
-            cast_text_to_oid(text)
-        }
+        | SqlTypeKind::RegDictionary => cast_text_to_oid(text),
         SqlTypeKind::Tid => Ok(Value::Text(CompactString::from_owned(
             canonicalize_tid_text(text)?,
         ))),
@@ -2495,11 +2497,13 @@ pub(super) fn cast_numeric_value(
                 .map(Value::Int64)
                 .ok_or(ExecError::Int8OutOfRange),
         },
-        SqlTypeKind::Oid | SqlTypeKind::RegRole | SqlTypeKind::RegProcedure | SqlTypeKind::Xid => value
-            .round_to_scale(0)
-            .and_then(|rounded| rounded.render().parse::<u32>().ok())
-            .and_then(|rounded| Some(Value::Int64(rounded as i64)))
-            .ok_or(ExecError::OidOutOfRange),
+        SqlTypeKind::Oid | SqlTypeKind::RegRole | SqlTypeKind::RegProcedure | SqlTypeKind::Xid => {
+            value
+                .round_to_scale(0)
+                .and_then(|rounded| rounded.render().parse::<u32>().ok())
+                .and_then(|rounded| Some(Value::Int64(rounded as i64)))
+                .ok_or(ExecError::OidOutOfRange)
+        }
         SqlTypeKind::Bool => Err(ExecError::TypeMismatch {
             op: "::bool",
             left: Value::Numeric(value),

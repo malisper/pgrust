@@ -43,7 +43,13 @@ impl Database {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let relation = lookup_heap_relation_for_ddl(&catalog, &stmt.table_name)?;
         ensure_relation_owner(self, client_id, &relation, &stmt.table_name)?;
-        validate_policy_stmt(&catalog, &relation.desc, &stmt.table_name, stmt.using_expr.as_ref(), stmt.with_check_expr.as_ref())?;
+        validate_policy_stmt(
+            &catalog,
+            &relation.desc,
+            &stmt.table_name,
+            stmt.using_expr.as_ref(),
+            stmt.with_check_expr.as_ref(),
+        )?;
 
         if catalog
             .policy_rows_for_relation(relation.relation_oid)
@@ -151,7 +157,13 @@ impl Database {
                 with_check_expr,
                 with_check_sql,
             } => {
-                validate_policy_stmt(&catalog, &relation.desc, &stmt.table_name, using_expr.as_ref(), with_check_expr.as_ref())?;
+                validate_policy_stmt(
+                    &catalog,
+                    &relation.desc,
+                    &stmt.table_name,
+                    using_expr.as_ref(),
+                    with_check_expr.as_ref(),
+                )?;
                 PgPolicyRow {
                     polroles: role_names
                         .as_ref()
@@ -265,12 +277,12 @@ fn resolve_policy_roles(
     client_id: ClientId,
     role_names: &[String],
 ) -> Result<Vec<u32>, ExecError> {
-    let auth_catalog = db.auth_catalog(client_id, None).map_err(|err| ExecError::Parse(
-        ParseError::UnexpectedToken {
+    let auth_catalog = db.auth_catalog(client_id, None).map_err(|err| {
+        ExecError::Parse(ParseError::UnexpectedToken {
             expected: "authorization catalog",
             actual: format!("{err:?}"),
-        },
-    ))?;
+        })
+    })?;
     role_names
         .iter()
         .map(|role_name| {

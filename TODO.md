@@ -12,8 +12,6 @@ Counts from `/tmp/pgrust_regress_after_sequence_fix` on 2026-04-18 using the def
 
 Targeted reruns and notes:
 
-- [done] restored accidentally reverted auth-expression/compiler definitions after the `perf-optimization` rebase (`Expr::CurrentUser`, `Expr::SessionUser`, `Expr::CurrentRole`, `BuiltinScalarFunction::RegRoleToText`) and updated stale executor test fixtures so `cargo check` and `cargo check --tests` build cleanly again
-
 - numeric.sql: 945/1057
 - numeric.sql first mismatch is still unordered `VALUES`/cross-join row order; remaining substantive mismatches are numeric input/typmod parity, numeric-to-int cast errors for `NaN`/`Infinity`, `to_char` / `to_number` / Roman formatting, numeric `power()` / `exp()` underflow and edge cases, `generate_series(numeric, ...)` error text, numeric `variance`, numeric `gcd` / `lcm` scale and overflow behavior, and `\d` numeric typmod rendering
 

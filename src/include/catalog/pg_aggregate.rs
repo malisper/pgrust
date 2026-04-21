@@ -33,11 +33,7 @@ pub fn pg_aggregate_desc() -> RelationDesc {
     RelationDesc {
         columns: vec![
             column_desc("aggfnoid", SqlType::new(SqlTypeKind::Oid), false),
-            column_desc(
-                "aggkind",
-                SqlType::new(SqlTypeKind::InternalChar),
-                false,
-            ),
+            column_desc("aggkind", SqlType::new(SqlTypeKind::InternalChar), false),
             column_desc("aggnumdirectargs", SqlType::new(SqlTypeKind::Int2), false),
             column_desc("aggtransfn", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("aggfinalfn", SqlType::new(SqlTypeKind::Oid), false),

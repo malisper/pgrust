@@ -10,8 +10,7 @@ use crate::backend::catalog::persistence::{
 };
 use crate::backend::catalog::pg_constraint::{derived_pg_constraint_rows, sort_pg_constraint_rows};
 use crate::backend::catalog::pg_depend::{
-    derived_pg_depend_rows, foreign_key_constraint_depend_rows,
-    foreign_data_wrapper_depend_rows,
+    derived_pg_depend_rows, foreign_data_wrapper_depend_rows, foreign_key_constraint_depend_rows,
     index_backed_constraint_depend_rows, inheritance_depend_rows,
     primary_key_owned_not_null_depend_rows, proc_depend_rows, relation_constraint_depend_rows,
     relation_rule_depend_rows, sort_pg_depend_rows, trigger_depend_rows, view_rewrite_depend_rows,
@@ -38,11 +37,10 @@ use crate::include::catalog::{
     PG_AM_RELATION_OID, PG_AMOP_RELATION_OID, PG_AMPROC_RELATION_OID, PG_AUTHID_RELATION_OID,
     PG_CLASS_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_NAMESPACE_RELATION_OID,
     PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_OPFAMILY_RELATION_OID,
-    PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TYPE_RELATION_OID, PgAmopRow,
-    PgAmprocRow, PgAttributeRow, PgAttrdefRow, PgClassRow, PgConstraintRow, PgDatabaseRow,
-    PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow, PgInheritsRow, PgNamespaceRow,
-    PgOpclassRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow,
-    relkind_has_storage,
+    PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TYPE_RELATION_OID, PgAmopRow, PgAmprocRow,
+    PgAttrdefRow, PgAttributeRow, PgClassRow, PgConstraintRow, PgDatabaseRow, PgDependRow,
+    PgDescriptionRow, PgForeignDataWrapperRow, PgInheritsRow, PgNamespaceRow, PgOpclassRow,
+    PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow, relkind_has_storage,
 };
 use crate::include::nodes::datum::Value;
 
@@ -1527,9 +1525,14 @@ impl CatalogStore {
     ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
         let catcache = visible_catalog_caches_for_ctx(self, ctx)?.0;
         let old_visible = policy_row_visible(&catcache, old_row.polrelid, &old_row.polname)?;
-        if catcache.policy_rows_for_relation(row.polrelid).iter().any(|existing| {
-            existing.oid != old_visible.oid && existing.polname.eq_ignore_ascii_case(&row.polname)
-        }) {
+        if catcache
+            .policy_rows_for_relation(row.polrelid)
+            .iter()
+            .any(|existing| {
+                existing.oid != old_visible.oid
+                    && existing.polname.eq_ignore_ascii_case(&row.polname)
+            })
+        {
             return Err(CatalogError::UniqueViolation(
                 "pg_policy_polrelid_polname_index".into(),
             ));
@@ -1743,8 +1746,8 @@ impl CatalogStore {
                 inherited_parent_column_match_count(&current_parent_relations, &column.name);
             let remaining_parent_match_count =
                 inherited_parent_column_match_count(&remaining_parent_relations, &column.name);
-            let had_local_column_definition = column.attislocal
-                && column.attinhcount == current_parent_match_count as i16;
+            let had_local_column_definition =
+                column.attislocal && column.attinhcount == current_parent_match_count as i16;
             column.attinhcount = remaining_parent_match_count as i16;
             column.attislocal = had_local_column_definition || remaining_parent_match_count == 0;
 
@@ -1782,8 +1785,8 @@ impl CatalogStore {
                         &remaining_parent_relations,
                         &row,
                     );
-                    let had_local_definition = row.conislocal
-                        && row.coninhcount == current_parent_match_count as i16;
+                    let had_local_definition =
+                        row.conislocal && row.coninhcount == current_parent_match_count as i16;
                     row.coninhcount = remaining_parent_match_count as i16;
                     row.conislocal = had_local_definition || remaining_parent_match_count == 0;
                     if !had_local_definition {
@@ -1804,8 +1807,8 @@ impl CatalogStore {
         new_constraints.extend(preserved_constraints);
         sort_pg_constraint_rows(&mut new_constraints);
 
-        let new_attributes = rows_for_new_relation_entry(&catcache, &child_name, &new_child_entry)?
-            .attributes;
+        let new_attributes =
+            rows_for_new_relation_entry(&catcache, &child_name, &new_child_entry)?.attributes;
         let old_attributes = catcache
             .attributes_by_relid(relation_oid)
             .unwrap_or(&[])
@@ -4142,9 +4145,11 @@ fn inherited_parent_column_match_count(parents: &[RelCacheEntry], column_name: &
     parents
         .iter()
         .filter(|parent| {
-            parent.desc.columns.iter().any(|column| {
-                !column.dropped && column.name.eq_ignore_ascii_case(column_name)
-            })
+            parent
+                .desc
+                .columns
+                .iter()
+                .any(|column| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
         })
         .count()
 }
