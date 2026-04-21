@@ -8774,6 +8774,88 @@ fn build_agg_filter_clause(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> 
     build_expr(expr)
 }
 
+fn build_window_frame_bound(pair: Pair<'_, Rule>) -> Result<RawWindowFrameBound, ParseError> {
+    let pair_text = pair.as_str().to_string();
+    let mut expr = None;
+    let mut saw_unbounded = false;
+    let mut saw_current = false;
+    let mut saw_preceding = false;
+    let mut saw_following = false;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::expr => expr = Some(build_expr(part)?),
+            Rule::kw_unbounded => saw_unbounded = true,
+            Rule::kw_current => saw_current = true,
+            Rule::kw_preceding => saw_preceding = true,
+            Rule::kw_following => saw_following = true,
+            _ => {}
+        }
+    }
+    match (
+        saw_unbounded,
+        saw_current,
+        saw_preceding,
+        saw_following,
+        expr,
+    ) {
+        (true, false, true, false, None) => Ok(RawWindowFrameBound::UnboundedPreceding),
+        (true, false, false, true, None) => Ok(RawWindowFrameBound::UnboundedFollowing),
+        (false, true, false, false, None) => Ok(RawWindowFrameBound::CurrentRow),
+        (false, false, true, false, Some(expr)) => {
+            Ok(RawWindowFrameBound::OffsetPreceding(Box::new(expr)))
+        }
+        (false, false, false, true, Some(expr)) => {
+            Ok(RawWindowFrameBound::OffsetFollowing(Box::new(expr)))
+        }
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "window frame bound",
+            actual: pair_text,
+        }),
+    }
+}
+
+fn build_window_frame_clause(pair: Pair<'_, Rule>) -> Result<RawWindowFrame, ParseError> {
+    let pair_text = pair.as_str().to_string();
+    let mut mode = None;
+    let mut bounds = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::kw_rows => mode = Some(WindowFrameMode::Rows),
+            Rule::kw_range => mode = Some(WindowFrameMode::Range),
+            Rule::kw_groups => mode = Some(WindowFrameMode::Groups),
+            Rule::window_frame_bound => bounds.push(build_window_frame_bound(part)?),
+            Rule::window_frame_between => {
+                for inner in part.into_inner() {
+                    if inner.as_rule() == Rule::window_frame_bound {
+                        bounds.push(build_window_frame_bound(inner)?);
+                    }
+                }
+            }
+            Rule::window_frame_exclusion => {
+                return Err(ParseError::FeatureNotSupported(
+                    "window frame exclusion".into(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    let (start_bound, end_bound) = match bounds.as_slice() {
+        [start] => (start.clone(), RawWindowFrameBound::CurrentRow),
+        [start, end] => (start.clone(), end.clone()),
+        _ => {
+            return Err(ParseError::UnexpectedToken {
+                expected: "window frame clause",
+                actual: pair_text,
+            });
+        }
+    };
+    Ok(RawWindowFrame {
+        mode: mode.ok_or(ParseError::UnexpectedEof)?,
+        start_bound,
+        end_bound,
+    })
+}
+
 fn build_over_clause(pair: Pair<'_, Rule>) -> Result<RawWindowSpec, ParseError> {
     let mut name = None;
     let mut spec = None;
@@ -8781,11 +8863,6 @@ fn build_over_clause(pair: Pair<'_, Rule>) -> Result<RawWindowSpec, ParseError> 
         match part.as_rule() {
             Rule::identifier => name = Some(build_identifier(part)),
             Rule::raw_window_spec => spec = Some(build_raw_window_spec(part)?),
-            Rule::unsupported_window_frame => {
-                return Err(ParseError::FeatureNotSupported(
-                    "window frame clauses".into(),
-                ));
-            }
             _ => {}
         }
     }
@@ -8794,12 +8871,14 @@ fn build_over_clause(pair: Pair<'_, Rule>) -> Result<RawWindowSpec, ParseError> 
             name: Some(name),
             partition_by: Vec::new(),
             order_by: Vec::new(),
+            frame: None,
         });
     }
     Ok(spec.unwrap_or(RawWindowSpec {
         name: None,
         partition_by: Vec::new(),
         order_by: Vec::new(),
+        frame: None,
     }))
 }
 
@@ -8817,11 +8896,6 @@ fn build_window_definition(pair: Pair<'_, Rule>) -> Result<RawWindowClause, Pars
         match part.as_rule() {
             Rule::identifier => name = Some(build_identifier(part)),
             Rule::raw_window_spec => spec = Some(build_raw_window_spec(part)?),
-            Rule::unsupported_window_frame => {
-                return Err(ParseError::FeatureNotSupported(
-                    "window frame clauses".into(),
-                ));
-            }
             _ => {}
         }
     }
@@ -8831,15 +8905,19 @@ fn build_window_definition(pair: Pair<'_, Rule>) -> Result<RawWindowClause, Pars
             name: None,
             partition_by: Vec::new(),
             order_by: Vec::new(),
+            frame: None,
         }),
     })
 }
 
 fn build_raw_window_spec(pair: Pair<'_, Rule>) -> Result<RawWindowSpec, ParseError> {
+    let mut name = None;
     let mut partition_by = Vec::new();
     let mut order_by = Vec::new();
+    let mut frame = None;
     for part in pair.into_inner() {
         match part.as_rule() {
+            Rule::identifier => name = Some(build_identifier(part)),
             Rule::window_partition_by_clause => {
                 partition_by = part
                     .into_inner()
@@ -8854,13 +8932,15 @@ fn build_raw_window_spec(pair: Pair<'_, Rule>) -> Result<RawWindowSpec, ParseErr
                     .map(build_order_by_item)
                     .collect::<Result<Vec<_>, _>>()?;
             }
+            Rule::window_frame_clause => frame = Some(Box::new(build_window_frame_clause(part)?)),
             _ => {}
         }
     }
     Ok(RawWindowSpec {
-        name: None,
+        name,
         partition_by,
         order_by,
+        frame,
     })
 }
 

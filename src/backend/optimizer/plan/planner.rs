@@ -172,6 +172,7 @@ fn expand_window_clause(root: &PlannerInfo, clause: &WindowClause) -> WindowClau
                     ..item
                 })
                 .collect(),
+            frame: clause.spec.frame.clone(),
         },
         functions: clause
             .functions

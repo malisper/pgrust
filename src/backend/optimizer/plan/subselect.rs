@@ -772,6 +772,14 @@ fn rebase_window_clause_subplan_ids(
                     ..item
                 })
                 .collect(),
+            frame: crate::include::nodes::primnodes::WindowFrame {
+                mode: clause.spec.frame.mode,
+                start_bound: rebase_window_frame_bound_subplan_ids(
+                    clause.spec.frame.start_bound,
+                    base,
+                ),
+                end_bound: rebase_window_frame_bound_subplan_ids(clause.spec.frame.end_bound, base),
+            },
         },
         functions: clause
             .functions
@@ -800,6 +808,25 @@ fn rebase_window_clause_subplan_ids(
                 ..func
             })
             .collect(),
+    }
+}
+
+fn rebase_window_frame_bound_subplan_ids(
+    bound: crate::include::nodes::primnodes::WindowFrameBound,
+    base: usize,
+) -> crate::include::nodes::primnodes::WindowFrameBound {
+    match bound {
+        crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(expr) => {
+            crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(
+                rebase_expr_subplan_ids(expr, base),
+            )
+        }
+        crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(expr) => {
+            crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(
+                rebase_expr_subplan_ids(expr, base),
+            )
+        }
+        other => other,
     }
 }
 
@@ -1304,6 +1331,19 @@ pub(super) fn finalize_plan_subqueries(
                                     ..item
                                 })
                                 .collect(),
+                            frame: crate::include::nodes::primnodes::WindowFrame {
+                                mode: clause.spec.frame.mode,
+                                start_bound: finalize_window_frame_bound_subqueries(
+                                    clause.spec.frame.start_bound,
+                                    catalog,
+                                    subplans,
+                                ),
+                                end_bound: finalize_window_frame_bound_subqueries(
+                                    clause.spec.frame.end_bound,
+                                    catalog,
+                                    subplans,
+                                ),
+                            },
                         },
                         functions:
                             clause
@@ -1435,5 +1475,25 @@ pub(super) fn finalize_plan_subqueries(
                 })
                 .collect(),
         },
+    }
+}
+
+fn finalize_window_frame_bound_subqueries(
+    bound: crate::include::nodes::primnodes::WindowFrameBound,
+    catalog: &dyn CatalogLookup,
+    subplans: &mut Vec<Plan>,
+) -> crate::include::nodes::primnodes::WindowFrameBound {
+    match bound {
+        crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(expr) => {
+            crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(
+                finalize_expr_subqueries(expr, catalog, subplans),
+            )
+        }
+        crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(expr) => {
+            crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(
+                finalize_expr_subqueries(expr, catalog, subplans),
+            )
+        }
+        other => other,
     }
 }
