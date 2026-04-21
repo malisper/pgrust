@@ -217,6 +217,12 @@ impl Database {
                     configured_search_path,
                     65_536,
                 ),
+            Statement::CreateStatistics(ref create_stmt) => self
+                .execute_create_statistics_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterTableOwner(ref alter_stmt) => self
                 .execute_alter_table_owner_stmt_with_search_path(
                     client_id,
