@@ -297,6 +297,7 @@ pub enum Statement {
     ResetRole(ResetRoleStatement),
     SetSessionAuthorization(SetSessionAuthorizationStatement),
     ResetSessionAuthorization(ResetSessionAuthorizationStatement),
+    DropOwned(DropOwnedStatement),
     ReassignOwned(ReassignOwnedStatement),
     TruncateTable(TruncateTableStatement),
     Vacuum(VacuumStatement),
@@ -1508,6 +1509,12 @@ pub enum RoleGrantorSpec {
 pub struct ReassignOwnedStatement {
     pub old_roles: Vec<String>,
     pub new_role: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropOwnedStatement {
+    pub role_names: Vec<String>,
+    pub cascade: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

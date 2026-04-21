@@ -2177,6 +2177,16 @@ impl Session {
             Statement::RevokeRoleMembership(ref revoke_stmt) => {
                 db.execute_revoke_role_membership_stmt(client_id, revoke_stmt)
             }
+            Statement::DropOwned(ref drop_stmt) => {
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_drop_owned_stmt_in_transaction(
+                    client_id,
+                    drop_stmt,
+                    xid,
+                    cid,
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::ReassignOwned(ref reassign_stmt) => {
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_reassign_owned_stmt_in_transaction(

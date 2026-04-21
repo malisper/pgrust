@@ -378,6 +378,9 @@ impl Database {
             Statement::RevokeRoleMembership(ref revoke_stmt) => {
                 self.execute_revoke_role_membership_stmt(client_id, revoke_stmt)
             }
+            Statement::DropOwned(ref drop_stmt) => {
+                self.execute_drop_owned_stmt(client_id, drop_stmt)
+            }
             Statement::ReassignOwned(ref reassign_stmt) => {
                 self.execute_reassign_owned_stmt(client_id, reassign_stmt)
             }

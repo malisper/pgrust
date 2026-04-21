@@ -3451,6 +3451,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             inner.as_str(),
         )?)),
         Rule::drop_schema_stmt => Ok(Statement::DropSchema(build_drop_schema(inner)?)),
+        Rule::drop_owned_stmt => Ok(Statement::DropOwned(build_drop_owned(inner)?)),
         Rule::reassign_owned_stmt => Ok(Statement::ReassignOwned(build_reassign_owned(inner)?)),
         Rule::truncate_table_stmt => Ok(Statement::TruncateTable(build_truncate_table(inner)?)),
         Rule::vacuum_stmt => Ok(Statement::Vacuum(build_vacuum(inner)?)),
@@ -6502,6 +6503,26 @@ fn build_reassign_owned(pair: Pair<'_, Rule>) -> Result<ReassignOwnedStatement, 
     Ok(ReassignOwnedStatement {
         old_roles,
         new_role: new_role.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_drop_owned(pair: Pair<'_, Rule>) -> Result<DropOwnedStatement, ParseError> {
+    let mut role_names = Vec::new();
+    let mut cascade = false;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::ident_list => role_names.extend(part.into_inner().map(build_identifier)),
+            Rule::identifier => role_names.push(build_identifier(part)),
+            Rule::drop_behavior => cascade = part.as_str().eq_ignore_ascii_case("cascade"),
+            _ => {}
+        }
+    }
+    if role_names.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    Ok(DropOwnedStatement {
+        role_names,
+        cascade,
     })
 }
 

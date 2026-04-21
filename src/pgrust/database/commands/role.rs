@@ -6,7 +6,7 @@ use crate::backend::commands::rolecmds::{
 };
 use crate::backend::parser::{
     AlterRoleAction, AlterRoleStatement, CommentOnRoleStatement, CreateRoleStatement,
-    DropRoleStatement, ReassignOwnedStatement,
+    DropOwnedStatement, DropRoleStatement, ReassignOwnedStatement,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -523,6 +523,160 @@ impl Database {
         result
     }
 
+    pub(crate) fn execute_drop_owned_stmt(
+        &self,
+        client_id: ClientId,
+        stmt: &DropOwnedStatement,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_drop_owned_stmt_in_transaction(
+            client_id,
+            stmt,
+            xid,
+            0,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_drop_owned_stmt_in_transaction(
+        &self,
+        client_id: ClientId,
+        stmt: &DropOwnedStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let auth = self.auth_state(client_id);
+        let auth_catalog = self
+            .txn_auth_catalog(client_id, xid, cid)
+            .map_err(map_role_catalog_error)?;
+        let roles = stmt
+            .role_names
+            .iter()
+            .map(|role_name| lookup_role(&auth_catalog, role_name))
+            .collect::<Result<Vec<_>, _>>()?;
+        for role in &roles {
+            if !auth.has_effective_membership(role.oid, &auth_catalog) {
+                return Err(ExecError::DetailedError {
+                    message: "permission denied to drop objects".into(),
+                    detail: Some(format!(
+                        "Only roles with privileges of role \"{}\" may drop objects owned by it.",
+                        role.rolname
+                    )),
+                    hint: None,
+                    sqlstate: "42501",
+                });
+            }
+        }
+
+        let role_oids = roles.iter().map(|role| role.oid).collect::<BTreeSet<_>>();
+        let role_oid_list = role_oids.iter().copied().collect::<Vec<_>>();
+        let mut owned_objects =
+            owned_objects_for_roles(self, client_id, Some((xid, cid)), &role_oid_list)?;
+        owned_objects.sort_by(|left, right| {
+            owned_object_drop_priority(left.relkind)
+                .cmp(&owned_object_drop_priority(right.relkind))
+                .then(left.name.cmp(&right.name))
+                .then(left.relkind.cmp(&right.relkind))
+        });
+
+        let interrupts = self.interrupt_state(client_id);
+        let mut current_cid = cid;
+        for object in owned_objects {
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: current_cid,
+                client_id,
+                waiter: Some(self.txn_waiter.clone()),
+                interrupts: interrupts.clone(),
+            };
+            let effect = match object.relkind {
+                'v' => self
+                    .catalog
+                    .write()
+                    .drop_view_by_oid_mvcc(object.relation_oid, &ctx)
+                    .map(|(_, effect)| effect),
+                'i' => self
+                    .catalog
+                    .write()
+                    .drop_relation_entry_by_oid_mvcc(object.relation_oid, &ctx)
+                    .map(|(_, effect)| effect),
+                _ => self
+                    .catalog
+                    .write()
+                    .drop_relation_by_oid_mvcc(object.relation_oid, &ctx)
+                    .map(|(_, effect)| effect),
+            }
+            .map_err(map_role_catalog_error)?;
+            if object.relkind != 'v' {
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
+            }
+            if object.relkind == 'r' {
+                self.session_stats_state(client_id)
+                    .write()
+                    .note_relation_drop(object.relation_oid, &self.stats);
+            }
+            catalog_effects.push(effect);
+            current_cid = current_cid.saturating_add(1);
+        }
+
+        let auth_catalog = self
+            .txn_auth_catalog(client_id, xid, current_cid)
+            .map_err(map_role_catalog_error)?;
+        let mut owned_memberships = auth_catalog
+            .memberships()
+            .iter()
+            .filter(|row| {
+                role_oids.contains(&row.roleid)
+                    || role_oids.contains(&row.member)
+                    || role_oids.contains(&row.grantor)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        owned_memberships.sort_by_key(|row| (row.roleid, row.member, row.grantor));
+        for membership in owned_memberships {
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: current_cid,
+                client_id,
+                waiter: None,
+                interrupts: interrupts.clone(),
+            };
+            let (_, effect) = self
+                .shared_catalog
+                .write()
+                .revoke_role_membership_mvcc(
+                    membership.roleid,
+                    membership.member,
+                    membership.grantor,
+                    &ctx,
+                )
+                .map_err(map_role_catalog_error)?;
+            catalog_effects.push(effect);
+            current_cid = current_cid.saturating_add(1);
+        }
+
+        // :HACK: DROP OWNED currently covers pgrust's tracked shared-role dependencies
+        // (relation ownership, pg_auth_members rows, and database CREATE grants). Full
+        // PostgreSQL-style shared dependency traversal should replace this with a single
+        // dependency-driven path that also handles schemas, functions, and ACL entries.
+        let _ = stmt.cascade;
+        self.database_create_grants.write().retain(|grant| {
+            !role_oids.contains(&grant.grantee_oid) && !role_oids.contains(&grant.grantor_oid)
+        });
+
+        Ok(StatementResult::AffectedRows(0))
+    }
+
     pub(crate) fn execute_reassign_owned_stmt_in_transaction(
         &self,
         client_id: ClientId,
@@ -758,6 +912,7 @@ impl OwnedObject {
         match self.relkind {
             'v' => "view",
             'i' => "index",
+            'S' => "sequence",
             _ => "table",
         }
     }
@@ -789,7 +944,7 @@ fn owned_objects_for_roles(
         .into_iter()
         .filter(|row| role_oids.contains(&row.relowner))
         .filter(|row| row.relpersistence != 't')
-        .filter(|row| matches!(row.relkind, 'r' | 'v' | 'i'))
+        .filter(|row| matches!(row.relkind, 'r' | 'v' | 'i' | 'S'))
         .map(|row| OwnedObject {
             relation_oid: row.oid,
             relkind: row.relkind,
@@ -805,6 +960,14 @@ fn owned_objects_for_roles(
             .then(left.relkind.cmp(&right.relkind))
     });
     Ok(objects)
+}
+
+fn owned_object_drop_priority(relkind: char) -> u8 {
+    match relkind {
+        'v' => 0,
+        'i' => 1,
+        _ => 2,
+    }
 }
 
 #[cfg(test)]
@@ -896,6 +1059,14 @@ mod tests {
             .find(|row| row.relname == relname)
             .map(|row| row.oid)
             .unwrap()
+    }
+
+    fn relation_exists(db: &Database, relname: &str) -> bool {
+        db.backend_catcache(1, None)
+            .unwrap()
+            .class_rows()
+            .into_iter()
+            .any(|row| row.relname == relname)
     }
 
     fn set_relation_owner(db: &Database, relation_name: &str, owner_role: &str) {
@@ -1462,6 +1633,129 @@ mod tests {
 
         assert_eq!(
             superuser.execute(&db, "drop role tenant2").unwrap(),
+            StatementResult::AffectedRows(0)
+        );
+    }
+
+    #[test]
+    fn drop_owned_requires_privileges_of_target_role() {
+        let base = temp_dir("drop_owned_permissions");
+        let db = Database::open(&base, 16).unwrap();
+        let mut superuser = Session::new(1);
+        superuser.execute(&db, "create role owner_role").unwrap();
+        superuser.execute(&db, "create role limited_admin").unwrap();
+
+        let mut limited = Session::new(2);
+        limited.set_session_authorization_oid(role_oid(&db, "limited_admin"));
+
+        let err = limited
+            .execute(&db, "drop owned by owner_role")
+            .unwrap_err();
+        match err {
+            ExecError::DetailedError {
+                message, detail, ..
+            } => {
+                assert_eq!(message, "permission denied to drop objects");
+                assert_eq!(
+                    detail.as_deref(),
+                    Some(
+                        "Only roles with privileges of role \"owner_role\" may drop objects owned by it."
+                    )
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn drop_owned_removes_tracked_role_dependencies() {
+        let base = temp_dir("drop_owned_dependencies");
+        let db = Database::open(&base, 16).unwrap();
+        let mut superuser = Session::new(1);
+        superuser.execute(&db, "create role tenant").unwrap();
+        superuser.execute(&db, "create role parent").unwrap();
+        superuser.execute(&db, "create role grantee").unwrap();
+        superuser.execute(&db, "create role db_grantee").unwrap();
+
+        superuser
+            .execute(&db, "create table tenant_table (id int4)")
+            .unwrap();
+        superuser
+            .execute(
+                &db,
+                "create view tenant_view as select id from tenant_table",
+            )
+            .unwrap();
+        superuser
+            .execute(&db, "create sequence tenant_seq")
+            .unwrap();
+        set_relation_owner(&db, "tenant_table", "tenant");
+        set_relation_owner(&db, "tenant_view", "tenant");
+        set_relation_owner(&db, "tenant_seq", "tenant");
+
+        superuser
+            .execute(&db, "grant parent to tenant with admin option")
+            .unwrap();
+        superuser
+            .execute(&db, "grant parent to grantee granted by tenant")
+            .unwrap();
+        superuser
+            .execute(
+                &db,
+                "grant create on database regression to tenant with grant option",
+            )
+            .unwrap();
+
+        let mut tenant_session = Session::new(3);
+        tenant_session.set_session_authorization_oid(role_oid(&db, "tenant"));
+        tenant_session
+            .execute(&db, "grant create on database regression to db_grantee")
+            .unwrap();
+
+        let err = superuser.execute(&db, "drop role tenant").unwrap_err();
+        match err {
+            ExecError::DetailedError {
+                message, detail, ..
+            } => {
+                assert_eq!(
+                    message,
+                    "role \"tenant\" cannot be dropped because some objects depend on it"
+                );
+                let detail = detail.unwrap();
+                assert!(detail.contains("owner of table tenant_table"));
+                assert!(detail.contains("owner of view tenant_view"));
+                assert!(detail.contains("owner of sequence tenant_seq"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        superuser.execute(&db, "drop owned by tenant").unwrap();
+
+        assert!(!relation_exists(&db, "tenant_table"));
+        assert!(!relation_exists(&db, "tenant_view"));
+        assert!(!relation_exists(&db, "tenant_seq"));
+
+        let tenant_oid = role_oid(&db, "tenant");
+        assert!(
+            !db.backend_catcache(1, None)
+                .unwrap()
+                .auth_members_rows()
+                .into_iter()
+                .any(|row| {
+                    row.roleid == tenant_oid
+                        || row.member == tenant_oid
+                        || row.grantor == tenant_oid
+                })
+        );
+        assert!(
+            db.database_create_grants
+                .read()
+                .iter()
+                .all(|grant| grant.grantee_oid != tenant_oid && grant.grantor_oid != tenant_oid)
+        );
+
+        assert_eq!(
+            superuser.execute(&db, "drop role tenant").unwrap(),
             StatementResult::AffectedRows(0)
         );
     }

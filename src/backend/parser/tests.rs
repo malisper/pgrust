@@ -2235,6 +2235,27 @@ fn parse_revoke_role_membership_granted_by_statement() {
 }
 
 #[test]
+fn parse_revoke_role_membership_admin_option_granted_by_cascade_statement() {
+    let stmt = parse_statement(
+        "revoke admin option for regress_tenant2 from regress_createrole granted by regress_admin cascade",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::RevokeRoleMembership(RevokeRoleMembershipStatement {
+            role_names: vec!["regress_tenant2".into()],
+            grantee_names: vec!["regress_createrole".into()],
+            revoke_membership: false,
+            admin_option: true,
+            inherit_option: false,
+            set_option: false,
+            cascade: true,
+            granted_by: Some(RoleGrantorSpec::RoleName("regress_admin".into())),
+        })
+    );
+}
+
+#[test]
 fn parse_plain_revoke_role_membership_granted_by_cascade_statement() {
     let stmt = parse_statement(
         "revoke regress_tenant2 from regress_createrole granted by regress_admin cascade",
@@ -2251,6 +2272,30 @@ fn parse_plain_revoke_role_membership_granted_by_cascade_statement() {
             set_option: false,
             cascade: true,
             granted_by: Some(RoleGrantorSpec::RoleName("regress_admin".into())),
+        })
+    );
+}
+
+#[test]
+fn parse_drop_owned_statement() {
+    let stmt = parse_statement("drop owned by regress_tenant, regress_tenant2").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::DropOwned(DropOwnedStatement {
+            role_names: vec!["regress_tenant".into(), "regress_tenant2".into()],
+            cascade: false,
+        })
+    );
+}
+
+#[test]
+fn parse_drop_owned_cascade_statement() {
+    let stmt = parse_statement("drop owned by regress_tenant cascade").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::DropOwned(DropOwnedStatement {
+            role_names: vec!["regress_tenant".into()],
+            cascade: true,
         })
     );
 }
@@ -6171,7 +6216,6 @@ fn parse_create_drop_and_comment_on_conversion_statements() {
     assert_eq!(comment.comment.as_deref(), Some("hello"));
 }
 
-#[test]
 fn parse_create_and_drop_type_statements() {
     let Statement::CreateType(CreateTypeStatement::Composite(CreateCompositeTypeStatement {
         schema_name,
@@ -6639,7 +6683,6 @@ fn parse_window_calls_capture_over_clause() {
     ));
 }
 
-#[test]
 fn parse_select_target_with_bare_alias() {
     let stmt = parse_select("select id user_id from people").unwrap();
     assert_eq!(stmt.targets.len(), 1);
@@ -6782,7 +6825,6 @@ fn build_plan_with_window_function_uses_windowagg() {
     }
 }
 
-#[test]
 fn ungrouped_column_rejected_at_plan_time() {
     let stmt = parse_select("select name, count(*) from people").unwrap();
     assert!(matches!(
