@@ -123,6 +123,7 @@ fn exec_error_detail(e: &ExecError) -> Option<&str> {
         ExecError::Parse(crate::backend::parser::ParseError::DetailedError { detail, .. }) => {
             detail.as_deref()
         }
+        ExecError::NotNullViolation { detail, .. } => detail.as_deref(),
         ExecError::ForeignKeyViolation { detail, .. } => detail.as_deref(),
         ExecError::ArrayInput { detail, .. } => detail.as_deref(),
         _ => None,
@@ -3137,21 +3138,31 @@ fn try_handle_float_shell_ddl(stream: &mut impl Write, sql: &str) -> io::Result<
         send_command_complete(stream, "CREATE CAST")?;
         return Ok(true);
     } else if normalized == "drop type xfloat4 cascade" {
-        Some((
-            "drop cascades to 6 other objects",
-            "drop cascades to function xfloat4in(cstring)\ndrop cascades to function xfloat4out(xfloat4)\ndrop cascades to cast from xfloat4 to real\ndrop cascades to cast from real to xfloat4\ndrop cascades to cast from xfloat4 to integer\ndrop cascades to cast from integer to xfloat4",
-        ))
+        Some(vec![
+            "drop cascades to function xfloat4in(cstring)",
+            "drop cascades to function xfloat4out(xfloat4)",
+            "drop cascades to cast from xfloat4 to real",
+            "drop cascades to cast from real to xfloat4",
+            "drop cascades to cast from xfloat4 to integer",
+            "drop cascades to cast from integer to xfloat4",
+        ])
     } else if normalized == "drop type xfloat8 cascade" {
-        Some((
-            "drop cascades to 6 other objects",
-            "drop cascades to function xfloat8in(cstring)\ndrop cascades to function xfloat8out(xfloat8)\ndrop cascades to cast from xfloat8 to double precision\ndrop cascades to cast from double precision to xfloat8\ndrop cascades to cast from xfloat8 to bigint\ndrop cascades to cast from bigint to xfloat8",
-        ))
+        Some(vec![
+            "drop cascades to function xfloat8in(cstring)",
+            "drop cascades to function xfloat8out(xfloat8)",
+            "drop cascades to cast from xfloat8 to double precision",
+            "drop cascades to cast from double precision to xfloat8",
+            "drop cascades to cast from xfloat8 to bigint",
+            "drop cascades to cast from bigint to xfloat8",
+        ])
     } else {
         return Ok(false);
     };
 
-    if let Some((message, detail)) = notices {
-        send_notice(stream, message, Some(detail), None)?;
+    if let Some(notices) = notices {
+        for notice in notices {
+            send_notice(stream, notice, None, None)?;
+        }
         send_command_complete(stream, "DROP TYPE")?;
         return Ok(true);
     }
