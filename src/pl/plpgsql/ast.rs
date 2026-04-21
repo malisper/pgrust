@@ -2,7 +2,7 @@ use crate::backend::parser::SqlType;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
-    pub declarations: Vec<VarDecl>,
+    pub declarations: Vec<Decl>,
     pub statements: Vec<Stmt>,
 }
 
@@ -11,6 +11,18 @@ pub struct VarDecl {
     pub name: String,
     pub ty: SqlType,
     pub default_expr: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AliasDecl {
+    pub name: String,
+    pub param_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Decl {
+    Var(VarDecl),
+    Alias(AliasDecl),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,5 +76,11 @@ pub enum Stmt {
     ReturnQuery {
         sql: String,
         kind: ReturnQueryKind,
+    },
+    Perform {
+        sql: String,
+    },
+    ExecSql {
+        sql: String,
     },
 }

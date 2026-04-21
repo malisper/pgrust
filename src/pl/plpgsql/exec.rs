@@ -4,10 +4,12 @@ use crate::backend::executor::{
     ArrayDimension, ArrayValue, ExecError, ExecutorContext, Expr, RelationDesc, StatementResult,
     TupleSlot, Value, cast_value, eval_expr, eval_plpgsql_expr, execute_planned_stmt,
 };
+use crate::backend::commands::tablecmds::{execute_delete, execute_insert, execute_update};
 use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, TriggerLevel, TriggerTiming,
 };
 use crate::include::catalog::TEXT_TYPE_OID;
+use crate::include::nodes::datum::{RecordDescriptor, RecordValue};
 use crate::include::nodes::primnodes::QueryColumn;
 
 use super::ast::RaiseLevel;
@@ -233,6 +235,7 @@ pub fn execute_user_defined_trigger_function(
         scalar_return: None,
         trigger_return: None,
     };
+    state.values[compiled.found_slot] = Value::Bool(false);
     seed_trigger_state(bindings, call, &mut state);
     let _ = exec_function_block(&compiled.body, &compiled, None, &mut state, ctx)?;
     state.trigger_return.ok_or_else(|| {
@@ -316,6 +319,7 @@ fn execute_compiled_function(
         scalar_return: None,
         trigger_return: None,
     };
+    state.values[compiled.found_slot] = Value::Bool(false);
     for (slot_def, arg_value) in compiled.parameter_slots.iter().zip(arg_values.iter()) {
         state.values[slot_def.slot] = cast_value(arg_value.clone(), slot_def.ty)?;
     }
@@ -461,9 +465,14 @@ fn exec_do_stmt(stmt: &CompiledStmt, values: &mut [Value]) -> Result<(), ExecErr
         | CompiledStmt::ReturnTriggerRow { .. }
         | CompiledStmt::ReturnTriggerNull
         | CompiledStmt::ReturnTriggerNoValue
-        | CompiledStmt::ReturnQuery { .. } => {
+        | CompiledStmt::ReturnQuery { .. }
+        | CompiledStmt::Perform { .. }
+        | CompiledStmt::SelectInto { .. }
+        | CompiledStmt::ExecInsert { .. }
+        | CompiledStmt::ExecUpdate { .. }
+        | CompiledStmt::ExecDelete { .. } => {
             Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                "RETURN statements are only supported inside CREATE FUNCTION".into(),
+                "statement is only supported inside CREATE FUNCTION".into(),
             )))
         }
     }
@@ -607,6 +616,30 @@ fn exec_function_stmt(
             exec_function_return_query(plan, compiled, expected_record_shape, state, ctx)?;
             Ok(FunctionControl::Continue)
         }
+        CompiledStmt::Perform { plan } => {
+            exec_function_perform(plan, compiled, state, ctx)?;
+            Ok(FunctionControl::Continue)
+        }
+        CompiledStmt::SelectInto {
+            plan,
+            target_slot,
+            target_ty,
+        } => {
+            exec_function_select_into(plan, *target_slot, *target_ty, compiled, state, ctx)?;
+            Ok(FunctionControl::Continue)
+        }
+        CompiledStmt::ExecInsert { stmt } => {
+            exec_function_insert(stmt, compiled, state, ctx)?;
+            Ok(FunctionControl::Continue)
+        }
+        CompiledStmt::ExecUpdate { stmt } => {
+            exec_function_update(stmt, compiled, state, ctx)?;
+            Ok(FunctionControl::Continue)
+        }
+        CompiledStmt::ExecDelete { stmt } => {
+            exec_function_delete(stmt, compiled, state, ctx)?;
+            Ok(FunctionControl::Continue)
+        }
     }
 }
 
@@ -738,6 +771,177 @@ fn exec_function_return_query(
     }
     Ok(())
 }
+
+fn exec_function_perform(
+    plan: &crate::include::nodes::plannodes::PlannedStmt,
+    compiled: &CompiledFunction,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let rows = execute_function_query_rows(plan, compiled, state, ctx)?;
+    state.values[compiled.found_slot] = Value::Bool(!rows.is_empty());
+    Ok(())
+}
+
+fn exec_function_select_into(
+    plan: &crate::include::nodes::plannodes::PlannedStmt,
+    target_slot: usize,
+    target_ty: SqlType,
+    compiled: &CompiledFunction,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let rows = execute_function_query_rows(plan, compiled, state, ctx)?;
+    let Some(row) = rows.first() else {
+        state.values[target_slot] = Value::Null;
+        state.values[compiled.found_slot] = Value::Bool(false);
+        return Ok(());
+    };
+
+    state.values[target_slot] = if matches!(target_ty.kind, SqlTypeKind::Record | SqlTypeKind::Composite)
+    {
+        Value::Record(RecordValue::from_descriptor(
+            RecordDescriptor::anonymous(
+                plan.columns()
+                    .into_iter()
+                    .map(|column| (column.name, column.sql_type))
+                    .collect(),
+                -1,
+            ),
+            row.clone(),
+        ))
+    } else {
+        let value = row.first().cloned().unwrap_or(Value::Null);
+        cast_value(value, target_ty)?
+    };
+    state.values[compiled.found_slot] = Value::Bool(true);
+    Ok(())
+}
+
+fn exec_function_insert(
+    stmt: &crate::backend::parser::BoundInsertStatement,
+    compiled: &CompiledFunction,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let catalog = ctx.catalog.clone().ok_or_else(|| {
+        function_runtime_error(
+            "user-defined functions require executor catalog context",
+            None,
+            "0A000",
+        )
+    })?;
+    ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
+    let result = execute_insert(
+        stmt.clone(),
+        &catalog,
+        ctx,
+        ctx.current_xid,
+        ctx.next_command_id,
+    );
+    ctx.expr_bindings.outer_tuple = None;
+    let result = result?;
+    state.values[compiled.found_slot] = Value::Bool(statement_result_changed_rows(&result));
+    Ok(())
+}
+
+fn exec_function_update(
+    stmt: &crate::backend::parser::BoundUpdateStatement,
+    compiled: &CompiledFunction,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let catalog = ctx.catalog.clone().ok_or_else(|| {
+        function_runtime_error(
+            "user-defined functions require executor catalog context",
+            None,
+            "0A000",
+        )
+    })?;
+    ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
+    let result = execute_update(
+        stmt.clone(),
+        &catalog,
+        ctx,
+        ctx.current_xid,
+        ctx.next_command_id,
+    );
+    ctx.expr_bindings.outer_tuple = None;
+    let result = result?;
+    state.values[compiled.found_slot] = Value::Bool(statement_result_changed_rows(&result));
+    Ok(())
+}
+
+fn exec_function_delete(
+    stmt: &crate::backend::parser::BoundDeleteStatement,
+    compiled: &CompiledFunction,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let catalog = ctx.catalog.clone().ok_or_else(|| {
+        function_runtime_error(
+            "user-defined functions require executor catalog context",
+            None,
+            "0A000",
+        )
+    })?;
+    ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
+    let result = execute_delete(stmt.clone(), &catalog, ctx, ctx.current_xid);
+    ctx.expr_bindings.outer_tuple = None;
+    let result = result?;
+    state.values[compiled.found_slot] = Value::Bool(statement_result_changed_rows(&result));
+    Ok(())
+}
+
+fn execute_function_query_rows(
+    plan: &crate::include::nodes::plannodes::PlannedStmt,
+    compiled: &CompiledFunction,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Vec<Value>>, ExecError> {
+    ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
+    let result = execute_planned_stmt(plan.clone(), ctx);
+    ctx.expr_bindings.outer_tuple = None;
+    let StatementResult::Query { rows, .. } = result? else {
+        return Err(function_runtime_error(
+            "PL/pgSQL SQL statement did not produce rows",
+            None,
+            "XX000",
+        ));
+    };
+    Ok(rows)
+}
+
+fn function_outer_tuple(compiled: &CompiledFunction, state: &FunctionState) -> Vec<Value> {
+    let mut values = state.values.clone();
+    if let FunctionReturnContract::Trigger { bindings } = &compiled.return_contract {
+        values.push(trigger_relation_record_value(&bindings.new_row, state));
+        values.push(trigger_relation_record_value(&bindings.old_row, state));
+    }
+    values
+}
+
+fn trigger_relation_record_value(
+    relation: &super::compile::CompiledTriggerRelation,
+    state: &FunctionState,
+) -> Value {
+    Value::Record(RecordValue::anonymous(
+        relation
+            .slots
+            .iter()
+            .zip(relation.field_names.iter())
+            .map(|(slot, name)| (name.clone(), state.values[*slot].clone()))
+            .collect(),
+    ))
+}
+
+fn statement_result_changed_rows(result: &StatementResult) -> bool {
+    match result {
+        StatementResult::AffectedRows(rows) => *rows > 0,
+        StatementResult::Query { rows, .. } => !rows.is_empty(),
+    }
+}
+
 
 fn current_output_row(
     compiled: &CompiledFunction,
@@ -1033,8 +1237,14 @@ mod tests {
     #[test]
     fn seed_trigger_state_uses_zero_based_tg_argv() {
         let bindings = CompiledTriggerBindings {
-            new_row: CompiledTriggerRelation { slots: vec![] },
-            old_row: CompiledTriggerRelation { slots: vec![] },
+            new_row: CompiledTriggerRelation {
+                slots: vec![],
+                field_names: vec![],
+            },
+            old_row: CompiledTriggerRelation {
+                slots: vec![],
+                field_names: vec![],
+            },
             tg_name_slot: 0,
             tg_op_slot: 1,
             tg_when_slot: 2,
@@ -1086,8 +1296,14 @@ mod tests {
     #[test]
     fn seed_trigger_state_uses_empty_array_for_no_trigger_args() {
         let bindings = CompiledTriggerBindings {
-            new_row: CompiledTriggerRelation { slots: vec![] },
-            old_row: CompiledTriggerRelation { slots: vec![] },
+            new_row: CompiledTriggerRelation {
+                slots: vec![],
+                field_names: vec![],
+            },
+            old_row: CompiledTriggerRelation {
+                slots: vec![],
+                field_names: vec![],
+            },
             tg_name_slot: 0,
             tg_op_slot: 1,
             tg_when_slot: 2,

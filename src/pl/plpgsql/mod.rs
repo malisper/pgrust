@@ -175,11 +175,17 @@ mod tests {
         .unwrap();
 
         assert_eq!(block.declarations.len(), 2);
-        assert_eq!(block.declarations[0].name, "n");
-        assert_eq!(block.declarations[0].default_expr.as_deref(), Some("1000"));
-        assert_eq!(block.declarations[1].name, "c");
+        let Decl::Var(n_decl) = &block.declarations[0] else {
+            panic!("expected variable declaration");
+        };
+        let Decl::Var(c_decl) = &block.declarations[1] else {
+            panic!("expected variable declaration");
+        };
+        assert_eq!(n_decl.name, "n");
+        assert_eq!(n_decl.default_expr.as_deref(), Some("1000"));
+        assert_eq!(c_decl.name, "c");
         assert_eq!(
-            block.declarations[1].default_expr.as_deref(),
+            c_decl.default_expr.as_deref(),
             Some("1.94947")
         );
     }
