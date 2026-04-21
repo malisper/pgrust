@@ -19,9 +19,9 @@ use crate::backend::utils::cache::system_views::{
 };
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
-    PgAmRow, PgAmopRow, PgAmprocRow, PgClassRow, PgCollationRow, PgConstraintRow, PgIndexRow,
-    PgInheritsRow, PgLanguageRow, PgOpclassRow, PgOpfamilyRow, PgProcRow, PgRewriteRow,
-    PgStatisticRow, PgTriggerRow, PgTypeRow,
+    PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgClassRow, PgCollationRow,
+    PgConstraintRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgOpclassRow, PgOpfamilyRow,
+    PgProcRow, PgRewriteRow, PgStatisticRow, PgTriggerRow, PgTypeRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::pgrust::database::{
@@ -189,6 +189,18 @@ fn proc_rows_by_name(
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+fn aggregate_row_by_fnoid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    aggfnoid: u32,
+) -> Option<PgAggregateRow> {
+    backend_catcache(db, client_id, txn_ctx)
+        .ok()?
+        .aggregate_by_fnoid(aggfnoid)
+        .cloned()
 }
 
 fn language_row_by_oid(
@@ -749,6 +761,10 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
                 &self.range_rows(),
             )
         })
+    }
+
+    fn aggregate_by_fnoid(&self, aggfnoid: u32) -> Option<PgAggregateRow> {
+        aggregate_row_by_fnoid(self.db, self.client_id, self.txn_ctx, aggfnoid)
     }
 
     fn type_rows(&self) -> Vec<PgTypeRow> {

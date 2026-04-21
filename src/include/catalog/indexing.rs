@@ -27,6 +27,7 @@ const PG_TYPE_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_TYPE_TYPNAME_NSP_INDEX_KEYS: [i16; 2] = [2, 3];
 const PG_PROC_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_PROC_PRONAME_ARGS_NSP_INDEX_KEYS: [i16; 3] = [2, 20, 3];
+const PG_AGGREGATE_FNOID_INDEX_KEYS: [i16; 1] = [1];
 const PG_LANGUAGE_NAME_INDEX_KEYS: [i16; 1] = [2];
 const PG_LANGUAGE_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_TS_DICT_DICTNAME_INDEX_KEYS: [i16; 2] = [2, 3];
@@ -145,7 +146,7 @@ const OID_INT2_BOOL_OPCLASS_3: [u32; 3] = [
     BOOL_BTREE_OPCLASS_OID,
 ];
 
-pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 66] = [
+pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 67] = [
     CatalogIndexDescriptor {
         relation_oid: 2684,
         relation_name: "pg_namespace_nspname_index",
@@ -249,6 +250,14 @@ pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 66] = [
         unique: true,
         key_attnums: &PG_PROC_PRONAME_ARGS_NSP_INDEX_KEYS,
         opclass_oids: &NAME_OIDVECTOR_OID_OPCLASS_3,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 2650,
+        relation_name: "pg_aggregate_fnoid_index",
+        heap_kind: BootstrapCatalogKind::PgAggregate,
+        unique: true,
+        key_attnums: &PG_AGGREGATE_FNOID_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_1,
     },
     CatalogIndexDescriptor {
         relation_oid: 2681,
@@ -692,4 +701,17 @@ pub fn system_catalog_index_by_oid(relation_oid: u32) -> Option<&'static Catalog
     SYSTEM_CATALOG_INDEXES
         .iter()
         .find(|descriptor| descriptor.relation_oid == relation_oid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_catalog_indexes_include_pg_aggregate_fnoid_index() {
+        let descriptor = system_catalog_index_by_oid(2650).expect("pg_aggregate_fnoid_index");
+        assert_eq!(descriptor.relation_name, "pg_aggregate_fnoid_index");
+        assert_eq!(descriptor.heap_kind, BootstrapCatalogKind::PgAggregate);
+        assert!(descriptor.unique);
+    }
 }
