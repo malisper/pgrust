@@ -753,6 +753,7 @@ impl Catalog {
         confupdtype: char,
         confdeltype: char,
         confmatchtype: char,
+        confdelsetcols: Option<&[i16]>,
     ) -> Result<PgConstraintRow, CatalogError> {
         let table = self
             .get_by_oid(relation_oid)
@@ -810,7 +811,7 @@ impl Catalog {
             conpfeqop: equality_ops.clone(),
             conppeqop: equality_ops.clone(),
             conffeqop: equality_ops,
-            confdelsetcols: None,
+            confdelsetcols: confdelsetcols.map(<[i16]>::to_vec),
             conexclop: None,
             conbin: None,
             conislocal: true,
