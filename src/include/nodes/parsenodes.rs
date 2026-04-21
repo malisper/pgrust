@@ -285,6 +285,7 @@ pub enum Statement {
     CreateView(CreateViewStatement),
     CreateRule(CreateRuleStatement),
     CreatePolicy(CreatePolicyStatement),
+    CreateStatistics(CreateStatisticsStatement),
     CreateForeignDataWrapper(CreateForeignDataWrapperStatement),
     CreateIndex(CreateIndexStatement),
     CreateOperatorClass(CreateOperatorClassStatement),
@@ -1206,6 +1207,15 @@ pub struct CreatePolicyStatement {
     pub using_sql: Option<String>,
     pub with_check_expr: Option<SqlExpr>,
     pub with_check_sql: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateStatisticsStatement {
+    pub if_not_exists: bool,
+    pub statistics_name: String,
+    pub kinds: Vec<String>,
+    pub targets: Vec<String>,
+    pub from_clause: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

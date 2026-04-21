@@ -482,6 +482,7 @@ fn run_statement(
         | Statement::CreateTrigger(_)
         | Statement::DropTrigger(_)
         | Statement::AlterTableSet(_)
+        | Statement::CreateStatistics(_)
         | Statement::AlterTableAddColumn(_)
         | Statement::AlterTableAddConstraint(_)
         | Statement::AlterTableDropConstraint(_)

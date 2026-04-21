@@ -104,6 +104,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_policy_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_statistics_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_alter_table_add_unnamed_foreign_key_statement(&sql, options)? {
         return Ok(stmt);
     }
@@ -190,6 +193,16 @@ fn try_parse_policy_statement(sql: &str) -> Result<Option<Statement>, ParseError
     }
     if lowered.starts_with("drop policy ") {
         return build_drop_policy_statement(trimmed).map(|stmt| Some(Statement::DropPolicy(stmt)));
+    }
+    Ok(None)
+}
+
+fn try_parse_statistics_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("create statistics ") {
+        return build_create_statistics_statement(trimmed)
+            .map(|stmt| Some(Statement::CreateStatistics(stmt)));
     }
     Ok(None)
 }
@@ -394,6 +407,77 @@ fn build_drop_publication_statement(sql: &str) -> Result<DropPublicationStatemen
         if_exists,
         publication_names,
         cascade,
+    })
+}
+
+fn build_create_statistics_statement(sql: &str) -> Result<CreateStatisticsStatement, ParseError> {
+    let mut rest = sql
+        .get("create statistics".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let mut if_not_exists = false;
+    if let Some(next) = consume_keywords(rest, &["if", "not", "exists"]) {
+        if_not_exists = true;
+        rest = next;
+    }
+    let (parts, next) = parse_qualified_identifier_parts(rest)?;
+    let statistics_name = match parts.as_slice() {
+        [name] => name.clone(),
+        [schema, name] => format!("{schema}.{name}"),
+        _ => return Err(ParseError::UnsupportedQualifiedName(parts.join("."))),
+    };
+    rest = next.trim_start();
+
+    let mut kinds = Vec::new();
+    if rest.starts_with('(') {
+        let (body, next) = take_parenthesized_segment(rest)?;
+        kinds = split_top_level_items(&body, ',')?
+            .into_iter()
+            .map(|item| normalize_simple_identifier(&item))
+            .collect::<Result<Vec<_>, _>>()?;
+        rest = next.trim_start();
+    }
+
+    if !keyword_at_start(rest, "on") {
+        let token = if keyword_at_start(rest, "from") {
+            "FROM"
+        } else {
+            ";"
+        };
+        return Err(ParseError::UnexpectedToken {
+            expected: "CREATE STATISTICS name ON target_list FROM relation",
+            actual: format!("syntax error at or near \"{token}\""),
+        });
+    }
+    rest = consume_keyword(rest, "on").trim_start();
+
+    let from_idx = find_next_top_level_keyword(rest, &["from"]).ok_or_else(|| {
+        ParseError::UnexpectedToken {
+            expected: "CREATE STATISTICS ... FROM relation",
+            actual: "syntax error at or near \";\"".into(),
+        }
+    })?;
+    let targets_sql = rest[..from_idx].trim();
+    if targets_sql.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "statistics target list",
+            actual: "syntax error at or near \"FROM\"".into(),
+        });
+    }
+    let targets = split_top_level_items(targets_sql, ',')?;
+    rest = consume_keyword(rest[from_idx..].trim_start(), "from").trim_start();
+    if rest.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "relation name",
+            actual: "syntax error at or near \";\"".into(),
+        });
+    }
+    Ok(CreateStatisticsStatement {
+        if_not_exists,
+        statistics_name,
+        kinds,
+        targets,
+        from_clause: rest.trim().to_string(),
     })
 }
 

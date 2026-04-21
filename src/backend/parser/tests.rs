@@ -1565,6 +1565,24 @@ fn parse_comment_on_rule_statement() {
 }
 
 #[test]
+fn parse_create_statistics_statement() {
+    let stmt = parse_statement(
+        "create statistics if not exists public.tst (ndistinct, dependencies) on a, (b + 1) from items",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateStatistics(CreateStatisticsStatement {
+            if_not_exists: true,
+            statistics_name: "public.tst".into(),
+            kinds: vec!["ndistinct".into(), "dependencies".into()],
+            targets: vec!["a".into(), "(b + 1)".into()],
+            from_clause: "items".into(),
+        })
+    );
+}
+
+#[test]
 fn parse_create_index_with_method_and_ordering() {
     let stmt = parse_statement(
         "create index num_exp_add_idx on num_exp_add using btree (id1 desc nulls first, id2 asc)",
