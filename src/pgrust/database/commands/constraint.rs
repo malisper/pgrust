@@ -1,7 +1,6 @@
 use super::super::*;
 use crate::backend::commands::tablecmds::collect_matching_rows_heap;
 use crate::backend::executor::{ExecutorContext, eval_expr};
-use crate::backend::executor::value_io::format_failing_row_detail;
 use crate::backend::parser::{
     BoundCheckConstraint, BoundForeignKeyConstraint, ForeignKeyConstraintAction,
 };
@@ -50,7 +49,6 @@ fn ddl_executor_context(
         txn_waiter: Some(db.txn_waiter.clone()),
         sequences: Some(db.sequences.clone()),
         large_objects: Some(db.large_objects.clone()),
-        advisory_locks: Arc::clone(&db.advisory_locks),
         checkpoint_stats: db.checkpoint_stats_snapshot(),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         interrupts,
@@ -58,11 +56,9 @@ fn ddl_executor_context(
         session_stats: db.session_stats_state(client_id),
         snapshot,
         client_id,
-        current_database_name: db.current_database_name(),
         session_user_oid: db.auth_state(client_id).session_user_oid(),
         current_user_oid: db.auth_state(client_id).current_user_oid(),
-        current_xid: xid,
-        statement_lock_scope_id: None,
+        active_role_oid: db.auth_state(client_id).active_role_oid(),
         next_command_id: cid,
         default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -102,7 +98,6 @@ pub(super) fn validate_not_null_rows(
                 relation: relation_name.to_string(),
                 column: column_name,
                 constraint: constraint_name.to_string(),
-                detail: Some(format_failing_row_detail(&values, &ctx.datetime_config)),
             });
         }
     }

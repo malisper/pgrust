@@ -229,9 +229,6 @@ mod tests {
             large_objects: Some(Arc::new(
                 crate::pgrust::database::LargeObjectRuntime::new_ephemeral(),
             )),
-            advisory_locks: Arc::new(
-                crate::backend::storage::lmgr::advisory::AdvisoryLockManager::new(),
-            ),
             checkpoint_stats:
                 crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -244,11 +241,9 @@ mod tests {
             )),
             snapshot,
             client_id: 0,
-            current_database_name: crate::include::catalog::CURRENT_DATABASE_NAME.to_string(),
             session_user_oid: BOOTSTRAP_SUPERUSER_OID,
             current_user_oid: BOOTSTRAP_SUPERUSER_OID,
-            current_xid: INVALID_TRANSACTION_ID,
-            statement_lock_scope_id: None,
+            active_role_oid: None,
             next_command_id: 0,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),

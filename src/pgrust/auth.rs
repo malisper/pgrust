@@ -44,6 +44,7 @@ pub struct AuthState {
     authenticated_user_oid: u32,
     session_user_oid: u32,
     current_user_oid: u32,
+    active_role_oid: Option<u32>,
 }
 
 impl Default for AuthState {
@@ -52,6 +53,7 @@ impl Default for AuthState {
             authenticated_user_oid: BOOTSTRAP_SUPERUSER_OID,
             session_user_oid: BOOTSTRAP_SUPERUSER_OID,
             current_user_oid: BOOTSTRAP_SUPERUSER_OID,
+            active_role_oid: None,
         }
     }
 }
@@ -69,28 +71,37 @@ impl AuthState {
         self.current_user_oid
     }
 
+    pub fn active_role_oid(&self) -> Option<u32> {
+        self.active_role_oid
+    }
+
     pub fn assume_authenticated_user(&mut self, role_oid: u32) {
         self.authenticated_user_oid = role_oid;
         self.session_user_oid = role_oid;
         self.current_user_oid = role_oid;
+        self.active_role_oid = None;
     }
 
     pub fn set_session_authorization(&mut self, role_oid: u32) {
         self.session_user_oid = role_oid;
         self.current_user_oid = role_oid;
+        self.active_role_oid = None;
     }
 
     pub fn reset_session_authorization(&mut self) {
         self.session_user_oid = self.authenticated_user_oid;
         self.current_user_oid = self.authenticated_user_oid;
+        self.active_role_oid = None;
     }
 
     pub fn set_role(&mut self, role_oid: u32) {
         self.current_user_oid = role_oid;
+        self.active_role_oid = Some(role_oid);
     }
 
     pub fn reset_role(&mut self) {
         self.current_user_oid = self.session_user_oid;
+        self.active_role_oid = None;
     }
 
     pub fn can_set_session_authorization(&self, target_oid: u32, catalog: &AuthCatalog) -> bool {
