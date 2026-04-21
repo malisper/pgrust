@@ -4,12 +4,12 @@ use crate::backend::catalog::catalog::{Catalog, CatalogEntry};
 use crate::backend::parser::SqlType;
 use crate::backend::utils::cache::catcache::{CatCache, sql_type_oid};
 use crate::include::catalog::{
-    BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
-    PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
-    PgDatabaseRow, PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow, PgIndexRow,
-    PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
-    PgPolicyRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow,
-    PgTsConfigMapRow,
+    BootstrapCatalogKind, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
+    PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
+    PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow,
+    PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
+    PgOpfamilyRow, PgPolicyRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow,
+    PgTriggerRow, PgTsConfigMapRow,
     PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
     composite_array_type_row, composite_type_row,
 };
@@ -44,6 +44,7 @@ pub(crate) struct PhysicalCatalogRows {
     pub opclasses: Vec<PgOpclassRow>,
     pub opfamilies: Vec<PgOpfamilyRow>,
     pub procs: Vec<PgProcRow>,
+    pub aggregates: Vec<PgAggregateRow>,
     pub casts: Vec<PgCastRow>,
     pub collations: Vec<PgCollationRow>,
     pub databases: Vec<PgDatabaseRow>,
@@ -174,6 +175,7 @@ pub(crate) fn extend_physical_catalog_rows(
     target.opclasses.extend(source.opclasses);
     target.opfamilies.extend(source.opfamilies);
     target.procs.extend(source.procs);
+    target.aggregates.extend(source.aggregates);
     target.casts.extend(source.casts);
     target.collations.extend(source.collations);
     target.databases.extend(source.databases);
@@ -212,6 +214,7 @@ pub(crate) fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> Physic
         opclasses: catcache.opclass_rows(),
         opfamilies: catcache.opfamily_rows(),
         procs: catcache.proc_rows(),
+        aggregates: catcache.aggregate_rows(),
         casts: catcache.cast_rows(),
         collations: catcache.collation_rows(),
         databases: catcache.database_rows(),

@@ -638,6 +638,7 @@ fn visible_catalog_without_text_input_cast(
         base.opclass_rows(),
         base.opfamily_rows(),
         base.proc_rows(),
+        base.aggregate_rows(),
         base.cast_rows()
             .into_iter()
             .filter(|row| {
@@ -696,6 +697,7 @@ fn visible_catalog_without_operator(
         base.opclass_rows(),
         base.opfamily_rows(),
         base.proc_rows(),
+        base.aggregate_rows(),
         base.cast_rows(),
         base.collation_rows(),
         base.foreign_data_wrapper_rows(),

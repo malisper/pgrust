@@ -5,6 +5,7 @@ use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::catalog::Catalog;
 use crate::backend::catalog::loader::load_physical_catalog_rows;
 use crate::backend::catalog::pg_am::sort_pg_am_rows;
+use crate::backend::catalog::pg_aggregate::sort_pg_aggregate_rows;
 use crate::backend::catalog::pg_amop::sort_pg_amop_rows;
 use crate::backend::catalog::pg_amproc::sort_pg_amproc_rows;
 use crate::backend::catalog::pg_attrdef::sort_pg_attrdef_rows;
@@ -43,27 +44,28 @@ use crate::include::catalog::{
     INTERVAL_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID,
     JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID, MONEY_ARRAY_TYPE_OID,
     MONEY_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
-    PATH_TYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
-    PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
-    PgConstraintRow, PgDatabaseRow, PgDependRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
-    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPolicyRow, PgProcRow,
-    PgRewriteRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow,
-    PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
+    PATH_TYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, PgAggregateRow, PgAmRow, PgAmopRow,
+    PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow,
+    PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgIndexRow,
+    PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
+    PgPolicyRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow,
+    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
     REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID,
     REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
     TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
     TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID,
     VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
     XID_ARRAY_TYPE_OID, XID_TYPE_OID, PgForeignDataWrapperRow, bootstrap_composite_type_rows,
-    bootstrap_pg_am_rows, bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows,
-    bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows, bootstrap_pg_cast_rows,
-    bootstrap_pg_collation_rows, bootstrap_pg_constraint_rows, bootstrap_pg_database_rows,
-    bootstrap_pg_foreign_data_wrapper_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
-    bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_opfamily_rows,
-    bootstrap_pg_proc_rows, bootstrap_pg_tablespace_rows, bootstrap_pg_ts_config_map_rows,
-    bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows, bootstrap_pg_ts_parser_rows,
-    bootstrap_pg_ts_template_rows, builtin_type_rows, composite_array_type_row,
-    composite_type_row, range_type_ref_for_sql_type, sort_pg_rewrite_rows,
+    bootstrap_pg_aggregate_rows, bootstrap_pg_am_rows, bootstrap_pg_amop_rows,
+    bootstrap_pg_amproc_rows, bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows,
+    bootstrap_pg_cast_rows, bootstrap_pg_collation_rows, bootstrap_pg_constraint_rows,
+    bootstrap_pg_database_rows, bootstrap_pg_foreign_data_wrapper_rows, bootstrap_pg_language_rows,
+    bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
+    bootstrap_pg_opfamily_rows, bootstrap_pg_proc_rows, bootstrap_pg_tablespace_rows,
+    bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows,
+    bootstrap_pg_ts_parser_rows, bootstrap_pg_ts_template_rows, builtin_type_rows,
+    composite_array_type_row, composite_type_row, range_type_ref_for_sql_type,
+    sort_pg_rewrite_rows,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -97,6 +99,7 @@ pub struct CatCache {
     opclass_rows: Vec<PgOpclassRow>,
     opfamily_rows: Vec<PgOpfamilyRow>,
     proc_rows: Vec<PgProcRow>,
+    aggregates_by_fnoid: BTreeMap<u32, PgAggregateRow>,
     cast_rows: Vec<PgCastRow>,
     collation_rows: Vec<PgCollationRow>,
     database_rows: Vec<PgDatabaseRow>,
@@ -191,6 +194,9 @@ impl CatCache {
         sort_pg_opfamily_rows(&mut cache.opfamily_rows);
         cache.proc_rows.extend(bootstrap_pg_proc_rows());
         sort_pg_proc_rows(&mut cache.proc_rows);
+        for row in bootstrap_pg_aggregate_rows() {
+            cache.aggregates_by_fnoid.insert(row.aggfnoid, row);
+        }
         cache.cast_rows.extend(bootstrap_pg_cast_rows());
         sort_pg_cast_rows(&mut cache.cast_rows);
         cache.collation_rows.extend(bootstrap_pg_collation_rows());
@@ -410,6 +416,7 @@ impl CatCache {
             rows.opclasses,
             rows.opfamilies,
             rows.procs,
+            rows.aggregates,
             rows.casts,
             rows.collations,
             rows.foreign_data_wrappers,
@@ -447,6 +454,7 @@ impl CatCache {
         opclass_rows: Vec<PgOpclassRow>,
         opfamily_rows: Vec<PgOpfamilyRow>,
         proc_rows: Vec<PgProcRow>,
+        aggregate_rows: Vec<PgAggregateRow>,
         cast_rows: Vec<PgCastRow>,
         collation_rows: Vec<PgCollationRow>,
         foreign_data_wrapper_rows: Vec<PgForeignDataWrapperRow>,
@@ -531,6 +539,11 @@ impl CatCache {
         sort_pg_opfamily_rows(&mut cache.opfamily_rows);
         cache.proc_rows = proc_rows;
         sort_pg_proc_rows(&mut cache.proc_rows);
+        let mut aggregate_rows = aggregate_rows;
+        sort_pg_aggregate_rows(&mut aggregate_rows);
+        for row in aggregate_rows {
+            cache.aggregates_by_fnoid.insert(row.aggfnoid, row);
+        }
         cache.cast_rows = cast_rows;
         sort_pg_cast_rows(&mut cache.cast_rows);
         cache.collation_rows = collation_rows;
@@ -736,6 +749,14 @@ impl CatCache {
 
     pub fn proc_rows(&self) -> Vec<PgProcRow> {
         self.proc_rows.clone()
+    }
+
+    pub fn aggregate_rows(&self) -> Vec<PgAggregateRow> {
+        self.aggregates_by_fnoid.values().cloned().collect()
+    }
+
+    pub fn aggregate_by_fnoid(&self, aggfnoid: u32) -> Option<&PgAggregateRow> {
+        self.aggregates_by_fnoid.get(&aggfnoid)
     }
 
     pub fn proc_by_oid(&self, oid: u32) -> Option<&PgProcRow> {
@@ -1414,6 +1435,10 @@ mod tests {
             cache
                 .proc_rows_by_name("pg_catalog.no_such_proc")
                 .is_empty()
+        );
+        assert_eq!(
+            cache.aggregate_by_fnoid(6219).map(|row| row.aggfnoid),
+            Some(6219)
         );
     }
 }

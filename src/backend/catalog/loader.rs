@@ -14,7 +14,8 @@ use crate::backend::catalog::catalog::{
 use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::catalog::pg_depend::derived_pg_depend_rows;
 use crate::backend::catalog::rowcodec::{
-    namespace_row_from_values, pg_am_row_from_values, pg_amop_row_from_values,
+    namespace_row_from_values, pg_aggregate_row_from_values, pg_am_row_from_values,
+    pg_amop_row_from_values,
     pg_amproc_row_from_values, pg_attrdef_row_from_values, pg_attribute_row_from_values,
     pg_auth_members_row_from_values, pg_authid_row_from_values, pg_cast_row_from_values,
     pg_class_row_from_values, pg_collation_row_from_values, pg_constraint_row_from_values,
@@ -38,9 +39,9 @@ use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator
 use crate::include::catalog::{
     BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
     PgClassRow, PgCollationRow, PgConstraintRow, PgIndexRow, PgNamespaceRow, PgOpclassRow,
-    PgOpfamilyRow, PgTypeRow, bootstrap_catalog_kinds, bootstrap_pg_auth_members_rows,
-    bootstrap_pg_authid_rows, bootstrap_pg_database_rows, bootstrap_pg_tablespace_rows,
-    bootstrap_relation_desc, system_catalog_index_by_oid,
+    PgOpfamilyRow, PgTypeRow, bootstrap_catalog_kinds, bootstrap_pg_aggregate_rows,
+    bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows, bootstrap_pg_database_rows,
+    bootstrap_pg_tablespace_rows, bootstrap_relation_desc, system_catalog_index_by_oid,
 };
 use crate::include::nodes::datum::Value;
 
@@ -136,6 +137,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
     let constraint_rows = rows.constraints;
     let _operator_rows = rows.operators;
     let _proc_rows = rows.procs;
+    let _aggregate_rows = rows.aggregates;
     let _cast_rows = rows.casts;
     let _collation_rows = rows.collations;
     let database_rows = rows.databases;
@@ -615,6 +617,12 @@ fn append_catalog_kind_rows(
                 .map(pg_proc_row_from_values)
                 .collect::<Result<Vec<_>, _>>()?;
         }
+        BootstrapCatalogKind::PgAggregate => {
+            rows.aggregates = values
+                .into_iter()
+                .map(pg_aggregate_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
         BootstrapCatalogKind::PgTsParser => {
             rows.ts_parsers = values
                 .into_iter()
@@ -816,6 +824,10 @@ fn restore_missing_first_class_catalog_rows_scoped(
     missing_constraint: bool,
     missing_depend: bool,
 ) -> Result<(), CatalogError> {
+    if rows.aggregates.is_empty() {
+        rows.aggregates = bootstrap_pg_aggregate_rows();
+    }
+
     if missing_constraint {
         let catalog = catalog_from_physical_rows_scoped(base_dir, rows.clone(), db_oid)?;
         rows.constraints = catalog
@@ -985,6 +997,9 @@ fn load_physical_catalog_rows_legacy(base_dir: &Path) -> Result<PhysicalCatalogR
             }
             if kind == BootstrapCatalogKind::PgProc {
                 missing_proc = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgAggregate {
                 continue;
             }
             if kind == BootstrapCatalogKind::PgCollation {
@@ -1195,6 +1210,18 @@ fn load_physical_catalog_rows_legacy(base_dir: &Path) -> Result<PhysicalCatalogR
         .map(pg_proc_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
+    let aggregate_rows = if rels.contains_key(&BootstrapCatalogKind::PgAggregate) {
+        scan_catalog_relation(
+            &pool,
+            rels[&BootstrapCatalogKind::PgAggregate],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgAggregate),
+        )?
+        .into_iter()
+        .map(pg_aggregate_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
     let collation_rows = if missing_collation {
         Vec::new()
     } else {
@@ -1397,6 +1424,7 @@ fn load_physical_catalog_rows_legacy(base_dir: &Path) -> Result<PhysicalCatalogR
         opclasses: opclass_rows,
         opfamilies: opfamily_rows,
         procs: proc_rows,
+        aggregates: aggregate_rows,
         casts: cast_rows,
         collations: collation_rows,
         databases: database_rows,
@@ -1536,6 +1564,9 @@ fn load_physical_catalog_rows_visible_legacy(
             }
             if kind == BootstrapCatalogKind::PgProc {
                 missing_proc = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgAggregate {
                 continue;
             }
             if kind == BootstrapCatalogKind::PgCollation {
@@ -1793,6 +1824,21 @@ fn load_physical_catalog_rows_visible_legacy(
         .map(pg_proc_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
+    let aggregate_rows = if rels.contains_key(&BootstrapCatalogKind::PgAggregate) {
+        scan_catalog_relation_visible(
+            pool,
+            txns,
+            snapshot,
+            client_id,
+            rels[&BootstrapCatalogKind::PgAggregate],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgAggregate),
+        )?
+        .into_iter()
+        .map(pg_aggregate_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
     let collation_rows = if missing_collation {
         Vec::new()
     } else {
@@ -2043,6 +2089,7 @@ fn load_physical_catalog_rows_visible_legacy(
         opclasses: opclass_rows,
         opfamilies: opfamily_rows,
         procs: proc_rows,
+        aggregates: aggregate_rows,
         casts: cast_rows,
         collations: collation_rows,
         databases: database_rows,
