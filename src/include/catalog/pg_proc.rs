@@ -77,6 +77,19 @@ pub const JSONB_CONTAINED_PROC_OID: u32 = 4045;
 pub const JSONB_EXISTS_PROC_OID: u32 = 4046;
 pub const JSONB_EXISTS_ANY_PROC_OID: u32 = 4047;
 pub const JSONB_EXISTS_ALL_PROC_OID: u32 = 4048;
+pub const GIST_BOX_CONSISTENT_PROC_OID: u32 = 2578;
+pub const GIST_BOX_PENALTY_PROC_OID: u32 = 2581;
+pub const GIST_BOX_PICKSPLIT_PROC_OID: u32 = 2582;
+pub const GIST_BOX_UNION_PROC_OID: u32 = 2583;
+pub const GIST_BOX_SAME_PROC_OID: u32 = 2584;
+pub const RANGE_GIST_CONSISTENT_PROC_OID: u32 = 3875;
+pub const RANGE_GIST_UNION_PROC_OID: u32 = 3876;
+pub const RANGE_GIST_PENALTY_PROC_OID: u32 = 3879;
+pub const RANGE_GIST_PICKSPLIT_PROC_OID: u32 = 3880;
+pub const RANGE_GIST_SAME_PROC_OID: u32 = 3881;
+pub const GIST_BOX_DISTANCE_PROC_OID: u32 = 3998;
+pub const GIST_TRANSLATE_CMPTYPE_COMMON_PROC_OID: u32 = 6347;
+pub const RANGE_SORTSUPPORT_PROC_OID: u32 = 6391;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PgProcRow {
@@ -2608,6 +2621,7 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
     ];
     rows.extend(geometry_proc_rows());
     rows.extend(range_proc_rows());
+    rows.extend(gist_support_proc_rows());
     rows
 }
 
@@ -4045,6 +4059,185 @@ fn range_proc_rows() -> Vec<PgProcRow> {
         }
     }
     rows
+}
+
+fn gist_support_proc_rows() -> Vec<PgProcRow> {
+    vec![
+        proc_row(
+            GIST_BOX_CONSISTENT_PROC_OID,
+            "gist_box_consistent",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[
+                INTERNAL_TYPE_OID,
+                BOX_TYPE_OID,
+                INT2_TYPE_OID,
+                OID_TYPE_OID,
+                INTERNAL_TYPE_OID,
+            ]),
+            "gist_box_consistent",
+            5,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            GIST_BOX_PENALTY_PROC_OID,
+            "gist_box_penalty",
+            INTERNAL_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "gist_box_penalty",
+            3,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            GIST_BOX_PICKSPLIT_PROC_OID,
+            "gist_box_picksplit",
+            INTERNAL_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "gist_box_picksplit",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            GIST_BOX_UNION_PROC_OID,
+            "gist_box_union",
+            BOX_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "gist_box_union",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            GIST_BOX_SAME_PROC_OID,
+            "gist_box_same",
+            INTERNAL_TYPE_OID,
+            &oid_argtypes(&[BOX_TYPE_OID, BOX_TYPE_OID, INTERNAL_TYPE_OID]),
+            "gist_box_same",
+            3,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            GIST_BOX_DISTANCE_PROC_OID,
+            "gist_box_distance",
+            FLOAT8_TYPE_OID,
+            &oid_argtypes(&[
+                INTERNAL_TYPE_OID,
+                BOX_TYPE_OID,
+                INT2_TYPE_OID,
+                OID_TYPE_OID,
+                INTERNAL_TYPE_OID,
+            ]),
+            "gist_box_distance",
+            5,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            RANGE_GIST_CONSISTENT_PROC_OID,
+            "range_gist_consistent",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[
+                INTERNAL_TYPE_OID,
+                INT4RANGE_TYPE_OID,
+                INT2_TYPE_OID,
+                OID_TYPE_OID,
+                INTERNAL_TYPE_OID,
+            ]),
+            "range_gist_consistent",
+            5,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            RANGE_GIST_UNION_PROC_OID,
+            "range_gist_union",
+            INT4RANGE_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "range_gist_union",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            RANGE_GIST_PENALTY_PROC_OID,
+            "range_gist_penalty",
+            INTERNAL_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "range_gist_penalty",
+            3,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            RANGE_GIST_PICKSPLIT_PROC_OID,
+            "range_gist_picksplit",
+            INTERNAL_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "range_gist_picksplit",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            RANGE_GIST_SAME_PROC_OID,
+            "range_gist_same",
+            INTERNAL_TYPE_OID,
+            &oid_argtypes(&[INT4RANGE_TYPE_OID, INT4RANGE_TYPE_OID, INTERNAL_TYPE_OID]),
+            "range_gist_same",
+            3,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            RANGE_SORTSUPPORT_PROC_OID,
+            "range_sortsupport",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID]),
+            "range_sortsupport",
+            1,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            GIST_TRANSLATE_CMPTYPE_COMMON_PROC_OID,
+            "gist_translate_cmptype_common",
+            INT2_TYPE_OID,
+            &oid_argtypes(&[INT4_TYPE_OID]),
+            "gist_translate_cmptype_common",
+            1,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+    ]
 }
 
 fn geometry_operator_proc_rows() -> Vec<PgProcRow> {

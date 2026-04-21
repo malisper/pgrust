@@ -60,6 +60,7 @@ pub fn system_catalog_index_entry_for_db(
         reltoastrelid: 0,
         relpersistence: 'p',
         relkind: 'i',
+        am_oid: BTREE_AM_OID,
         relhassubclass: false,
         relhastriggers: false,
         relispartition: false,
@@ -161,6 +162,9 @@ pub fn system_catalog_index_relcache(
         indoption: meta.indoption,
         opfamily_oids: Vec::new(),
         opcintype_oids: Vec::new(),
+        opckeytype_oids: Vec::new(),
+        amop_entries: Vec::new(),
+        amproc_entries: Vec::new(),
         indexprs: None,
         indpred: None,
     }
@@ -225,6 +229,7 @@ pub fn rebuild_system_catalog_indexes_in_pool_for_db(
             index_desc: system_catalog_index_desc(*descriptor),
             index_meta: system_catalog_index_relcache(*descriptor),
             maintenance_work_mem_kb: 65_536,
+            expr_eval: None,
         };
         index_build_stub(&build_ctx, BTREE_AM_OID).map_err(|err| {
             CatalogError::Io(format!(
@@ -327,7 +332,9 @@ pub fn probe_system_catalog_rows_visible_in_db(
         index_desc,
         index_meta,
         key_data,
+        order_by_data: Vec::new(),
         direction: ScanDirection::Forward,
+        want_itup: false,
     };
     let mut scan = index_beginscan(&scan_ctx, BTREE_AM_OID)?;
     let mut rows = Vec::new();

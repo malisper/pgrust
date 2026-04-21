@@ -363,6 +363,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                 reltoastrelid: row.reltoastrelid,
                 relpersistence: row.relpersistence,
                 relkind: row.relkind,
+                am_oid: row.relam,
                 relhassubclass: row.relhassubclass,
                 relhastriggers: row.relhastriggers,
                 relispartition: row.relispartition,

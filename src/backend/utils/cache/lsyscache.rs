@@ -343,14 +343,24 @@ pub fn default_opclass_for_am_and_type(
         return Some(row.clone());
     }
     let input_type = type_row_by_oid(db, client_id, txn_ctx, input_type_oid)?;
-    if !input_type.sql_type.is_multirange() {
-        return None;
+    if input_type.sql_type.is_multirange() {
+        return opclasses.into_iter().find(|row| {
+            row.opcmethod == am_oid
+                && row.opcdefault
+                && row.opcintype == crate::include::catalog::ANYMULTIRANGEOID
+        });
     }
-    opclasses.into_iter().find(|row| {
-        row.opcmethod == am_oid
-            && row.opcdefault
-            && row.opcintype == crate::include::catalog::ANYMULTIRANGEOID
+    (am_oid == crate::include::catalog::GIST_AM_OID
+        && crate::include::catalog::builtin_range_rows()
+            .iter()
+            .any(|row| row.rngtypid == input_type_oid))
+    .then(|| {
+        opclasses
+            .iter()
+            .find(|row| row.oid == crate::include::catalog::RANGE_GIST_OPCLASS_OID)
+            .cloned()
     })
+    .flatten()
 }
 
 pub fn opfamily_row_by_oid(

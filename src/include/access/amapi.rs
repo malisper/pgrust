@@ -6,12 +6,15 @@ use crate::backend::catalog::CatalogError;
 use crate::backend::executor::RelationDesc;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::RelFileLocator;
+use crate::backend::utils::activity::{DatabaseStatsStore, SessionStatsState};
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
+use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
+use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::relscan::{IndexScanDesc, ScanDirection};
 use crate::include::access::scankey::ScanKeyData;
-use crate::pgrust::database::TransactionWaiter;
+use crate::pgrust::database::{LargeObjectRuntime, SequenceRuntime, TransactionWaiter};
 use crate::{BufferPool, ClientId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -29,6 +32,19 @@ pub struct IndexBulkDeleteResult {
 }
 
 #[derive(Clone)]
+pub struct IndexBuildExprContext {
+    pub txn_waiter: Option<Arc<TransactionWaiter>>,
+    pub sequences: Option<Arc<SequenceRuntime>>,
+    pub large_objects: Option<Arc<LargeObjectRuntime>>,
+    pub datetime_config: DateTimeConfig,
+    pub stats: Arc<parking_lot::RwLock<DatabaseStatsStore>>,
+    pub session_stats: Arc<parking_lot::RwLock<SessionStatsState>>,
+    pub session_user_oid: u32,
+    pub current_user_oid: u32,
+    pub visible_catalog: Option<VisibleCatalog>,
+}
+
+#[derive(Clone)]
 pub struct IndexBuildContext {
     pub pool: Arc<BufferPool<SmgrStorageBackend>>,
     pub txns: Arc<parking_lot::RwLock<TransactionManager>>,
@@ -42,6 +58,7 @@ pub struct IndexBuildContext {
     pub index_desc: RelationDesc,
     pub index_meta: IndexRelCacheEntry,
     pub maintenance_work_mem_kb: usize,
+    pub expr_eval: Option<IndexBuildExprContext>,
 }
 
 #[derive(Clone)]
@@ -81,7 +98,9 @@ pub struct IndexBeginScanContext {
     pub index_desc: RelationDesc,
     pub index_meta: IndexRelCacheEntry,
     pub key_data: Vec<ScanKeyData>,
+    pub order_by_data: Vec<ScanKeyData>,
     pub direction: ScanDirection,
+    pub want_itup: bool,
 }
 
 #[derive(Clone)]

@@ -939,7 +939,9 @@ fn collect_matching_rows_index(
         index_desc: index.desc.clone(),
         index_meta: index.index_meta.clone(),
         key_data: keys.to_vec(),
+        order_by_data: Vec::new(),
         direction: crate::include::access::relscan::ScanDirection::Forward,
+        want_itup: false,
     };
     let mut scan = indexam::index_beginscan(&begin, index.index_meta.am_oid).map_err(|err| {
         ExecError::Parse(ParseError::UnexpectedToken {
