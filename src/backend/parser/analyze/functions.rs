@@ -722,6 +722,9 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::ArrayFill => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::StringToArray
             | BuiltinScalarFunction::ArrayToString
+            | BuiltinScalarFunction::ArrayAppend
+            | BuiltinScalarFunction::ArrayPrepend
+            | BuiltinScalarFunction::ArrayCat
             | BuiltinScalarFunction::ArrayPosition
             | BuiltinScalarFunction::ArraySort => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::ArrayPositions | BuiltinScalarFunction::ArrayRemove => {
@@ -1537,6 +1540,9 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("array_to_string", BuiltinScalarFunction::ArrayToString),
         ("array_length", BuiltinScalarFunction::ArrayLength),
         ("cardinality", BuiltinScalarFunction::Cardinality),
+        ("array_append", BuiltinScalarFunction::ArrayAppend),
+        ("array_prepend", BuiltinScalarFunction::ArrayPrepend),
+        ("array_cat", BuiltinScalarFunction::ArrayCat),
         ("array_position", BuiltinScalarFunction::ArrayPosition),
         ("array_positions", BuiltinScalarFunction::ArrayPositions),
         ("array_remove", BuiltinScalarFunction::ArrayRemove),

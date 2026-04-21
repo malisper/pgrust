@@ -574,6 +574,51 @@ pub(super) fn eval_cardinality_function(values: &[Value]) -> Result<Value, ExecE
     }
 }
 
+pub(super) fn eval_array_append_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] => Ok(Value::Null),
+        [array, element] => append_array_value(array, element, false),
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "array_append(array, element)",
+            actual: format!("ArrayAppend({} args)", values.len()),
+        })),
+    }
+}
+
+pub(super) fn eval_array_prepend_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [_, Value::Null] => Ok(Value::Null),
+        [element, array] => append_array_value(array, element, true),
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "array_prepend(element, array)",
+            actual: format!("ArrayPrepend({} args)", values.len()),
+        })),
+    }
+}
+
+pub(super) fn eval_array_cat_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [left, right] => {
+            let left_array = normalize_array_value(left).ok_or_else(|| ExecError::TypeMismatch {
+                op: "array_cat",
+                left: left.clone(),
+                right: right.clone(),
+            })?;
+            let right_array = normalize_array_value(right).ok_or_else(|| ExecError::TypeMismatch {
+                op: "array_cat",
+                left: left.clone(),
+                right: right.clone(),
+            })?;
+            Ok(Value::PgArray(concatenate_arrays(left_array, right_array)?))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "array_cat(left, right)",
+            actual: format!("ArrayCat({} args)", values.len()),
+        })),
+    }
+}
+
 pub(super) fn eval_array_position_function(values: &[Value]) -> Result<Value, ExecError> {
     match values {
         [Value::Null, _] | [Value::Null, _, _] => Ok(Value::Null),
@@ -610,15 +655,12 @@ fn array_position_value(
         return Ok(Value::Null);
     };
     if array.ndim() > 1 {
-        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "one-dimensional array",
-            actual: if all {
-                "array_positions"
-            } else {
-                "array_position"
-            }
-            .into(),
-        }));
+        return Err(ExecError::DetailedError {
+            message: "searching for elements in multidimensional arrays is not supported".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
     }
     let lower_bound = array.lower_bound(0).unwrap_or(1);
     let start = start.unwrap_or(lower_bound);
@@ -656,6 +698,105 @@ fn array_position_value(
     } else {
         Ok(Value::Null)
     }
+}
+
+fn append_array_value(array: &Value, element: &Value, prepend: bool) -> Result<Value, ExecError> {
+    let Some(array) = normalize_array_value(array) else {
+        return Ok(Value::Null);
+    };
+    let element_type_oid = array.element_type_oid;
+    if array.ndim() == 0 {
+        let mut result = ArrayValue::from_1d(vec![element.clone()]);
+        if let Some(element_type_oid) = element_type_oid {
+            result = result.with_element_type_oid(element_type_oid);
+        }
+        return Ok(Value::PgArray(result));
+    }
+
+    let mut result = if let Some(element_array) = normalize_array_value(element) {
+        concatenate_rank_mismatched_arrays(array, element_array, prepend)?
+    } else {
+        if array.ndim() != 1 {
+            return incompatible_array_concat_error();
+        }
+        let mut elements = array.elements.clone();
+        if prepend {
+            elements.insert(0, element.clone());
+        } else {
+            elements.push(element.clone());
+        }
+        let mut dimensions = array.dimensions.clone();
+        dimensions[0].length += 1;
+        ArrayValue::from_dimensions(dimensions, elements)
+    };
+    if let Some(element_type_oid) = element_type_oid {
+        result = result.with_element_type_oid(element_type_oid);
+    }
+    Ok(Value::PgArray(result))
+}
+
+fn concatenate_arrays(left: ArrayValue, right: ArrayValue) -> Result<ArrayValue, ExecError> {
+    if left.ndim() == 0 {
+        return Ok(right);
+    }
+    if right.ndim() == 0 {
+        return Ok(left);
+    }
+    if left.ndim() == right.ndim() {
+        if left.dimensions[1..] != right.dimensions[1..] {
+            return incompatible_array_concat_error();
+        }
+        let mut dimensions = left.dimensions.clone();
+        dimensions[0].length += right.dimensions[0].length;
+        let mut elements = left.elements;
+        elements.extend(right.elements);
+        return Ok(ArrayValue {
+            element_type_oid: left.element_type_oid.or(right.element_type_oid),
+            dimensions,
+            elements,
+        });
+    }
+    if left.ndim() + 1 == right.ndim() {
+        return concatenate_rank_mismatched_arrays(right, left, true);
+    }
+    if right.ndim() + 1 == left.ndim() {
+        return concatenate_rank_mismatched_arrays(left, right, false);
+    }
+    incompatible_array_concat_error()
+}
+
+fn concatenate_rank_mismatched_arrays(
+    outer: ArrayValue,
+    inner: ArrayValue,
+    prepend: bool,
+) -> Result<ArrayValue, ExecError> {
+    if outer.ndim() != inner.ndim() + 1 || outer.dimensions[1..] != inner.dimensions[..] {
+        return incompatible_array_concat_error();
+    }
+    let mut dimensions = outer.dimensions.clone();
+    dimensions[0].length += 1;
+    let mut elements = Vec::with_capacity(outer.elements.len() + inner.elements.len());
+    if prepend {
+        elements.extend(inner.elements);
+        elements.extend(outer.elements);
+    } else {
+        elements.extend(outer.elements);
+        elements.extend(inner.elements);
+    }
+    Ok(ArrayValue {
+        element_type_oid: outer.element_type_oid.or(inner.element_type_oid),
+        dimensions,
+        elements,
+    })
+}
+
+fn incompatible_array_concat_error<T>() -> Result<T, ExecError> {
+    Err(ExecError::DetailedError {
+        message: "cannot concatenate incompatible arrays".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "2202E",
+    })
 }
 
 pub(super) fn eval_array_remove_function(values: &[Value]) -> Result<Value, ExecError> {
