@@ -23,8 +23,8 @@ use crate::backend::parser::{
     rewrite_bound_insert_auto_view_target, rewrite_bound_update_auto_view_target,
     validate_rule_definition,
 };
-use crate::backend::rewrite::{ViewDmlEvent, ViewDmlRewriteError};
 use crate::backend::rewrite::split_stored_rule_action_sql;
+use crate::backend::rewrite::{ViewDmlEvent, ViewDmlRewriteError};
 use crate::backend::storage::lmgr::TableLockMode;
 use crate::include::catalog::PgRewriteRow;
 use crate::include::nodes::primnodes::{QueryColumn, RelationDesc, TargetEntry};

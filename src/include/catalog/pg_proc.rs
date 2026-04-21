@@ -1365,11 +1365,7 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             7002,
             "float8_regr_accum",
             FLOAT8_ARRAY_TYPE_OID,
-            &oid_argtypes(&[
-                FLOAT8_ARRAY_TYPE_OID,
-                FLOAT8_TYPE_OID,
-                FLOAT8_TYPE_OID,
-            ]),
+            &oid_argtypes(&[FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, FLOAT8_TYPE_OID]),
             "float8_regr_accum",
             3,
             false,
@@ -3110,6 +3106,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("replace", BuiltinScalarFunction::Replace),
         ("split_part", BuiltinScalarFunction::SplitPart),
         ("translate", BuiltinScalarFunction::Translate),
+        ("regrole_to_text", BuiltinScalarFunction::RegRoleToText),
+        ("regroleout", BuiltinScalarFunction::RegRoleToText),
         ("ascii", BuiltinScalarFunction::Ascii),
         ("chr", BuiltinScalarFunction::Chr),
         ("quote_literal", BuiltinScalarFunction::QuoteLiteral),
@@ -3180,7 +3178,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("float8_accum", BuiltinScalarFunction::Float8Accum),
         ("float8_combine", BuiltinScalarFunction::Float8Combine),
         ("float8_regr_accum", BuiltinScalarFunction::Float8RegrAccum),
-        ("float8_regr_combine", BuiltinScalarFunction::Float8RegrCombine),
+        (
+            "float8_regr_combine",
+            BuiltinScalarFunction::Float8RegrCombine,
+        ),
         ("erf", BuiltinScalarFunction::Erf),
         ("erfc", BuiltinScalarFunction::Erfc),
         ("gamma", BuiltinScalarFunction::Gamma),
@@ -6165,6 +6166,13 @@ mod tests {
                     .expect("synthetic oid")
             ),
             Some(BuiltinScalarFunction::ArrayToJson)
+        );
+        assert_eq!(
+            builtin_scalar_function_for_proc_oid(
+                proc_oid_for_builtin_scalar_function(BuiltinScalarFunction::RegRoleToText)
+                    .expect("synthetic oid")
+            ),
+            Some(BuiltinScalarFunction::RegRoleToText)
         );
     }
 

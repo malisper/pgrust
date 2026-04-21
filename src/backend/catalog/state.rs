@@ -292,7 +292,8 @@ impl Catalog {
         let start = self
             .policies
             .partition_point(|row| row.polrelid < relation_oid);
-        let end = start + self.policies[start..].partition_point(|row| row.polrelid == relation_oid);
+        let end =
+            start + self.policies[start..].partition_point(|row| row.polrelid == relation_oid);
         &self.policies[start..end]
     }
 

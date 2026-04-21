@@ -2718,7 +2718,9 @@ impl PlanNode for ProjectSetState {
                 let mut max_rows = 0usize;
                 for target in &self.targets {
                     if let crate::include::nodes::primnodes::ProjectSetTarget::Set {
-                        call, column_index, ..
+                        call,
+                        column_index,
+                        ..
                     } = target
                     {
                         set_outer_expr_bindings(

@@ -24,8 +24,7 @@ use crate::backend::parser::{
     BoundRelationConstraints, BoundUpdateStatement, BoundUpdateTarget, Catalog, CatalogLookup,
     DropTableStatement, ExplainStatement, ForeignKeyAction, MaintenanceTarget, MergeStatement,
     ParseError, SelectStatement, SqlType, SqlTypeKind, Statement, TruncateTableStatement,
-    VacuumStatement, bind_create_table, bind_referenced_by_foreign_keys,
-    bind_scalar_expr_in_scope,
+    VacuumStatement, bind_create_table, bind_referenced_by_foreign_keys, bind_scalar_expr_in_scope,
 };
 use crate::backend::rewrite::pg_rewrite_query;
 use crate::backend::storage::smgr::ForkNumber;
@@ -1003,7 +1002,10 @@ fn first_toast_index(
     toast: Option<ToastRelationRef>,
 ) -> Option<BoundIndexRelation> {
     let toast = toast?;
-    catalog.index_relations_for_heap(toast.relation_oid).into_iter().next()
+    catalog
+        .index_relations_for_heap(toast.relation_oid)
+        .into_iter()
+        .next()
 }
 
 fn build_equality_scan_keys(
@@ -1012,11 +1014,13 @@ fn build_equality_scan_keys(
     key_values
         .iter()
         .enumerate()
-        .map(|(index, value)| crate::include::access::scankey::ScanKeyData {
-            attribute_number: index.saturating_add(1) as i16,
-            strategy: 3,
-            argument: value.to_owned_value(),
-        })
+        .map(
+            |(index, value)| crate::include::access::scankey::ScanKeyData {
+                attribute_number: index.saturating_add(1) as i16,
+                strategy: 3,
+                argument: value.to_owned_value(),
+            },
+        )
         .collect()
 }
 
@@ -1048,12 +1052,15 @@ fn relation_write_state_for_foreign_key(
     ),
     ExecError,
 > {
-    let catalog = ctx.catalog.as_ref().ok_or_else(|| ExecError::DetailedError {
-        message: "foreign key action failed".into(),
-        detail: Some("executor context missing visible catalog".into()),
-        hint: None,
-        sqlstate: "XX000",
-    })?;
+    let catalog = ctx
+        .catalog
+        .as_ref()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "foreign key action failed".into(),
+            detail: Some("executor context missing visible catalog".into()),
+            hint: None,
+            sqlstate: "XX000",
+        })?;
     // :HACK: Recursive referential actions only need the child table's local
     // row-shape checks plus its inbound FK graph. Rebinding outbound FKs from
     // the catalog here is brittle today because some FK rows don't round-trip
@@ -1065,12 +1072,15 @@ fn relation_write_state_for_foreign_key(
             .iter()
             .enumerate()
             .filter_map(|(column_index, column)| {
-                column.not_null_constraint_name.as_ref().map(|constraint_name| {
-                    crate::backend::parser::BoundNotNullConstraint {
-                        column_index,
-                        constraint_name: constraint_name.clone(),
-                    }
-                })
+                column
+                    .not_null_constraint_name
+                    .as_ref()
+                    .map(
+                        |constraint_name| crate::backend::parser::BoundNotNullConstraint {
+                            column_index,
+                            constraint_name: constraint_name.clone(),
+                        },
+                    )
             })
             .collect(),
         checks: Vec::new(),
@@ -1130,12 +1140,15 @@ fn evaluate_default_value(
     let Some(default_sql) = desc.columns[column_index].default_expr.as_deref() else {
         return Ok(Value::Null);
     };
-    let catalog = ctx.catalog.as_ref().ok_or_else(|| ExecError::DetailedError {
-        message: "foreign key action failed".into(),
-        detail: Some("executor context missing visible catalog".into()),
-        hint: None,
-        sqlstate: "XX000",
-    })?;
+    let catalog = ctx
+        .catalog
+        .as_ref()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: "foreign key action failed".into(),
+            detail: Some("executor context missing visible catalog".into()),
+            hint: None,
+            sqlstate: "XX000",
+        })?;
     let parsed = crate::backend::parser::parse_expr(default_sql).map_err(ExecError::Parse)?;
     let (bound, _) = bind_scalar_expr_in_scope(&parsed, &[], catalog).map_err(ExecError::Parse)?;
     let mut slot = TupleSlot::virtual_row(vec![Value::Null; desc.columns.len()]);
@@ -1166,11 +1179,14 @@ fn apply_referential_action_to_rows(
     for (tid, current_values) in rows {
         ctx.check_for_interrupts()?;
         match action {
-            ForeignKeyAction::Cascade | ForeignKeyAction::SetNull | ForeignKeyAction::SetDefault => {
+            ForeignKeyAction::Cascade
+            | ForeignKeyAction::SetNull
+            | ForeignKeyAction::SetDefault => {
                 let mut updated_values = current_values.clone();
                 match action {
                     ForeignKeyAction::Cascade => {
-                        for (position, column_index) in constraint.child_column_indexes.iter().enumerate()
+                        for (position, column_index) in
+                            constraint.child_column_indexes.iter().enumerate()
                         {
                             updated_values[*column_index] = replacement_key_values
                                 .and_then(|values| values.get(position))
@@ -1185,9 +1201,11 @@ fn apply_referential_action_to_rows(
                         for column_index in target_columns {
                             updated_values[*column_index] = match action {
                                 ForeignKeyAction::SetNull => Value::Null,
-                                ForeignKeyAction::SetDefault => {
-                                    evaluate_default_value(&constraint.child_desc, *column_index, ctx)?
-                                }
+                                ForeignKeyAction::SetDefault => evaluate_default_value(
+                                    &constraint.child_desc,
+                                    *column_index,
+                                    ctx,
+                                )?,
                                 ForeignKeyAction::NoAction
                                 | ForeignKeyAction::Restrict
                                 | ForeignKeyAction::Cascade => unreachable!(),
@@ -1236,7 +1254,11 @@ fn apply_inbound_foreign_key_actions_on_update(
 ) -> Result<(), ExecError> {
     for constraint in constraints {
         if !constraint.enforced
-            || !key_columns_changed(previous_values, values, &constraint.referenced_column_indexes)
+            || !key_columns_changed(
+                previous_values,
+                values,
+                &constraint.referenced_column_indexes,
+            )
         {
             continue;
         }
@@ -1337,7 +1359,10 @@ fn apply_inbound_foreign_key_actions_on_delete(
                         relkind: 'r',
                         toast: constraint.child_toast,
                         desc: constraint.child_desc.clone(),
-                        referenced_by_foreign_keys: relation_write_state_for_foreign_key(constraint, ctx)?.1,
+                        referenced_by_foreign_keys: relation_write_state_for_foreign_key(
+                            constraint, ctx,
+                        )?
+                        .1,
                         row_source: BoundModifyRowSource::Heap,
                         predicate: None,
                     };
@@ -2139,7 +2164,8 @@ pub(crate) fn apply_assignment_target(
         .collect::<Result<Vec<_>, ExecError>>()?;
     let current = values[target.column_index].clone();
     let column_type = desc.columns[target.column_index].sql_type;
-    values[target.column_index] = if column_type.kind == SqlTypeKind::Point && !column_type.is_array {
+    values[target.column_index] = if column_type.kind == SqlTypeKind::Point && !column_type.is_array
+    {
         assign_point_value(current, &resolved, value)?
     } else {
         assign_array_value(current, &resolved, value)?
@@ -2934,23 +2960,21 @@ pub fn execute_insert_values(
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<usize, ExecError> {
-    Ok(
-        execute_insert_rows(
-            relation_name,
-            relation_oid,
-            rel,
-            toast,
-            toast_index,
-            desc,
-            relation_constraints,
-            indexes,
-            rows,
-            ctx,
-            xid,
-            cid,
-        )?
-        .len(),
-    )
+    Ok(execute_insert_rows(
+        relation_name,
+        relation_oid,
+        rel,
+        toast,
+        toast_index,
+        desc,
+        relation_constraints,
+        indexes,
+        rows,
+        ctx,
+        xid,
+        cid,
+    )?
+    .len())
 }
 
 /// Execute a single-row insert from a prepared insert plan and parameter values.
@@ -3165,8 +3189,11 @@ pub fn execute_update_with_waiter(
                                 )?;
                             }
                             if !stmt.returning.is_empty() {
-                                returned_rows
-                                    .push(project_returning_row(&stmt.returning, &triggered_values, ctx)?);
+                                returned_rows.push(project_returning_row(
+                                    &stmt.returning,
+                                    &triggered_values,
+                                    ctx,
+                                )?);
                             }
                             affected_rows += 1;
                             break;
@@ -3364,8 +3391,11 @@ pub fn execute_delete_with_waiter(
                                 triggers.after_row_delete(&current_values, ctx)?;
                             }
                             if !stmt.returning.is_empty() {
-                                returned_rows
-                                    .push(project_returning_row(&stmt.returning, &current_values, ctx)?);
+                                returned_rows.push(project_returning_row(
+                                    &stmt.returning,
+                                    &current_values,
+                                    ctx,
+                                )?);
                             }
                             affected_rows += 1;
                             break;

@@ -3688,6 +3688,8 @@ fn pg_attribute_exposes_bootstrap_columns() {
             vec![Value::Text("relhassubclass".into())],
             vec![Value::Text("relhastriggers".into())],
             vec![Value::Text("relispartition".into())],
+            vec![Value::Text("relrowsecurity".into())],
+            vec![Value::Text("relforcerowsecurity".into())],
             vec![Value::Text("relnatts".into())],
             vec![Value::Text("relpages".into())],
             vec![Value::Text("reltuples".into())],
@@ -13638,15 +13640,26 @@ fn jsonb_array_length_and_each_errors_match_postgres() {
         "select jsonb_array_length('{\"f1\":1,\"f2\":[5,6]}')",
     )
     .unwrap_err();
-    assert_eq!(format_exec_error(&err), "cannot get array length of a non-array");
+    assert_eq!(
+        format_exec_error(&err),
+        "cannot get array length of a non-array"
+    );
     assert!(matches!(
         err,
         ExecError::DetailedError { sqlstate, .. } if sqlstate == "22023"
     ));
 
-    let err = run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select jsonb_array_length('4')")
-        .unwrap_err();
-    assert_eq!(format_exec_error(&err), "cannot get array length of a scalar");
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_array_length('4')",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "cannot get array length of a scalar"
+    );
     assert!(matches!(
         err,
         ExecError::DetailedError { sqlstate, .. } if sqlstate == "22023"
@@ -13659,7 +13672,10 @@ fn jsonb_array_length_and_each_errors_match_postgres() {
         "select * from jsonb_each('[]')",
     )
     .unwrap_err();
-    assert_eq!(format_exec_error(&err), "cannot call jsonb_each on a non-object");
+    assert_eq!(
+        format_exec_error(&err),
+        "cannot call jsonb_each on a non-object"
+    );
     assert!(matches!(
         err,
         ExecError::DetailedError { sqlstate, .. } if sqlstate == "22023"
@@ -14700,7 +14716,18 @@ fn numeric_typmod_accepts_zero_in_full_scale_columns() {
         "select '1.0'::numeric(4,4)",
     )
     .unwrap_err();
-    assert!(matches!(err, ExecError::NumericFieldOverflow));
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        } if message == "numeric field overflow"
+            && detail
+                == "A field with precision 4, scale 4 must round to an absolute value less than 1."
+            && sqlstate == "22003"
+    ));
 }
 
 #[test]

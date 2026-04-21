@@ -9,8 +9,8 @@ use crate::backend::executor::exec_expr::format_array_text;
 use crate::backend::executor::render_bit_text;
 use crate::backend::executor::render_datetime_value_text;
 use crate::backend::executor::render_datetime_value_text_with_config;
-use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::libpq::pqformat::format_bytea_text;
+use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::nodes::datetime::{DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT};
 use crate::include::nodes::execnodes::{NumericValue, Value};
 use crate::pgrust::compact_string::CompactString;
@@ -755,7 +755,10 @@ pub(crate) fn jsonb_from_value(
             record
                 .iter()
                 .map(|(field, value)| {
-                    Ok((field.name.clone(), jsonb_from_value(value, datetime_config)?))
+                    Ok((
+                        field.name.clone(),
+                        jsonb_from_value(value, datetime_config)?,
+                    ))
                 })
                 .collect::<Result<Vec<_>, ExecError>>()?,
         ),
@@ -976,12 +979,7 @@ pub(crate) fn jsonb_exists_all(value: &JsonbValue, keys: &[String]) -> bool {
 pub(crate) fn jsonb_object_from_pairs(pairs: &[(String, Value)]) -> Result<JsonbValue, ExecError> {
     let items = pairs
         .iter()
-        .map(|(k, v)| {
-            Ok((
-                k.clone(),
-                jsonb_from_value(v, &DateTimeConfig::default())?,
-            ))
-        })
+        .map(|(k, v)| Ok((k.clone(), jsonb_from_value(v, &DateTimeConfig::default())?)))
         .collect::<Result<Vec<_>, ExecError>>()?;
     Ok(JsonbValue::Object(canonicalize_object_pairs(items)))
 }

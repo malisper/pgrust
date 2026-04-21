@@ -15,19 +15,17 @@ use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::catalog::pg_depend::derived_pg_depend_rows;
 use crate::backend::catalog::rowcodec::{
     namespace_row_from_values, pg_aggregate_row_from_values, pg_am_row_from_values,
-    pg_amop_row_from_values,
-    pg_amproc_row_from_values, pg_attrdef_row_from_values, pg_attribute_row_from_values,
-    pg_auth_members_row_from_values, pg_authid_row_from_values, pg_cast_row_from_values,
-    pg_class_row_from_values, pg_collation_row_from_values, pg_constraint_row_from_values,
-    pg_database_row_from_values, pg_depend_row_from_values, pg_description_row_from_values,
-    pg_foreign_data_wrapper_row_from_values, pg_index_row_from_values,
-    pg_inherits_row_from_values, pg_language_row_from_values, pg_opclass_row_from_values,
-    pg_operator_row_from_values, pg_opfamily_row_from_values, pg_policy_row_from_values,
-    pg_proc_row_from_values, pg_rewrite_row_from_values, pg_statistic_row_from_values,
-    pg_tablespace_row_from_values, pg_trigger_row_from_values,
-    pg_ts_config_map_row_from_values, pg_ts_config_row_from_values,
-    pg_ts_dict_row_from_values, pg_ts_parser_row_from_values, pg_ts_template_row_from_values,
-    pg_type_row_from_values,
+    pg_amop_row_from_values, pg_amproc_row_from_values, pg_attrdef_row_from_values,
+    pg_attribute_row_from_values, pg_auth_members_row_from_values, pg_authid_row_from_values,
+    pg_cast_row_from_values, pg_class_row_from_values, pg_collation_row_from_values,
+    pg_constraint_row_from_values, pg_database_row_from_values, pg_depend_row_from_values,
+    pg_description_row_from_values, pg_foreign_data_wrapper_row_from_values,
+    pg_index_row_from_values, pg_inherits_row_from_values, pg_language_row_from_values,
+    pg_opclass_row_from_values, pg_operator_row_from_values, pg_opfamily_row_from_values,
+    pg_policy_row_from_values, pg_proc_row_from_values, pg_rewrite_row_from_values,
+    pg_statistic_row_from_values, pg_tablespace_row_from_values, pg_trigger_row_from_values,
+    pg_ts_config_map_row_from_values, pg_ts_config_row_from_values, pg_ts_dict_row_from_values,
+    pg_ts_parser_row_from_values, pg_ts_template_row_from_values, pg_type_row_from_values,
 };
 use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::executor::RelationDesc;

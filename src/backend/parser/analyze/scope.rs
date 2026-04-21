@@ -1253,13 +1253,25 @@ fn bind_json_table_function_args(
     };
     args.iter()
         .map(|arg| {
-            let raw_arg_type =
-                infer_sql_expr_type_with_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes);
+            let raw_arg_type = infer_sql_expr_type_with_ctes(
+                arg,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             let resolved_arg_type = target_type
                 .map(|target| coerce_unknown_string_literal_type(arg, raw_arg_type, target))
                 .unwrap_or(raw_arg_type);
-            let bound =
-                bind_expr_with_outer_and_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+            let bound = bind_expr_with_outer_and_ctes(
+                arg,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?;
             Ok(match target_type {
                 Some(target) if resolved_arg_type == target && raw_arg_type != target => {
                     coerce_bound_expr(bound, raw_arg_type, target)
