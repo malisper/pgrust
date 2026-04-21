@@ -24,8 +24,8 @@ use crate::backend::parser::{
     BoundRelationConstraints, BoundUpdateStatement, BoundUpdateTarget, Catalog, CatalogLookup,
     DropTableStatement, ExplainStatement, ForeignKeyAction, MaintenanceTarget, MergeStatement,
     ParseError, SelectStatement, SqlType, SqlTypeKind, Statement, TruncateTableStatement,
-    UpdateStatement, bind_update,
-    VacuumStatement, bind_create_table, bind_referenced_by_foreign_keys, bind_scalar_expr_in_scope,
+    UpdateStatement, VacuumStatement, bind_create_table, bind_referenced_by_foreign_keys,
+    bind_scalar_expr_in_scope, bind_update,
 };
 use crate::backend::rewrite::RlsWriteCheck;
 use crate::backend::rewrite::pg_rewrite_query;
@@ -504,7 +504,10 @@ fn explain_update_lines(
             return lines;
         }
         push_explain_line(
-            &format!("        ->  {}", explain_update_scan_label(target, alias.as_deref())),
+            &format!(
+                "        ->  {}",
+                explain_update_scan_label(target, alias.as_deref())
+            ),
             crate::include::nodes::plannodes::PlanEstimate::default(),
             show_costs,
             &mut lines,
@@ -543,8 +546,14 @@ fn explain_update_scan_target<'a>(
 ) -> Option<&'a BoundUpdateTarget> {
     targets
         .iter()
-        .find(|target| target.relation_name != base_name && !is_const_false(target.predicate.as_ref()))
-        .or_else(|| targets.iter().find(|target| !is_const_false(target.predicate.as_ref())))
+        .find(|target| {
+            target.relation_name != base_name && !is_const_false(target.predicate.as_ref())
+        })
+        .or_else(|| {
+            targets
+                .iter()
+                .find(|target| !is_const_false(target.predicate.as_ref()))
+        })
         .or_else(|| targets.first())
 }
 
@@ -594,7 +603,10 @@ fn explain_update_scan_label(target: &BoundUpdateTarget, alias: Option<&str>) ->
                 "Index Scan using {} on {} {alias}",
                 index.name, target.relation_name
             ),
-            None => format!("Index Scan using {} on {}", index.name, target.relation_name),
+            None => format!(
+                "Index Scan using {} on {}",
+                index.name, target.relation_name
+            ),
         },
     }
 }
@@ -607,7 +619,9 @@ fn explain_update_index_cond(target: &BoundUpdateTarget) -> Option<String> {
         .iter()
         .filter_map(|key| {
             let index_attno = usize::try_from(key.attribute_number).ok()?.checked_sub(1)?;
-            let heap_attno = usize::try_from(*index.index_meta.indkey.get(index_attno)?).ok()?.checked_sub(1)?;
+            let heap_attno = usize::try_from(*index.index_meta.indkey.get(index_attno)?)
+                .ok()?
+                .checked_sub(1)?;
             let column_name = target.desc.columns.get(heap_attno)?.name.clone();
             Some(format!(
                 "({column_name} {} {})",
@@ -2462,6 +2476,7 @@ fn sql_type_display_name(ty: SqlType) -> String {
         SqlTypeKind::Int8 => "bigint",
         SqlTypeKind::Name => "name",
         SqlTypeKind::Oid => "oid",
+        SqlTypeKind::RegClass => "regclass",
         SqlTypeKind::RegType => "regtype",
         SqlTypeKind::RegRole => "regrole",
         SqlTypeKind::RegProcedure => "regprocedure",

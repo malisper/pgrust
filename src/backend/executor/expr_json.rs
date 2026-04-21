@@ -297,6 +297,7 @@ pub(crate) fn eval_json_builtin_function(
     values: &[Value],
     func_variadic: bool,
     datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
+    catalog: Option<&crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
 ) -> Option<Result<Value, ExecError>> {
     let eval = || -> Result<Value, ExecError> {
         match func {
@@ -306,6 +307,7 @@ pub(crate) fn eval_json_builtin_function(
                     &value,
                     false,
                     datetime_config,
+                    catalog,
                 ))))
             }
             BuiltinScalarFunction::ToJsonb => {
@@ -328,6 +330,7 @@ pub(crate) fn eval_json_builtin_function(
                     &value,
                     pretty,
                     datetime_config,
+                    catalog,
                 ))))
             }
             BuiltinScalarFunction::RowToJson => {
@@ -343,6 +346,7 @@ pub(crate) fn eval_json_builtin_function(
                     &value,
                     pretty,
                     datetime_config,
+                    catalog,
                 ))))
             }
             BuiltinScalarFunction::JsonBuildArray => {
@@ -1313,6 +1317,7 @@ fn render_json_builder_array(values: &[Value]) -> String {
             value,
             false,
             &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            None,
         ));
     }
     out.push(']');
@@ -1371,7 +1376,7 @@ fn render_json_object_function(values: &[Value]) -> Result<String, ExecError> {
 fn render_jsonb_object_function(values: &[Value]) -> Result<JsonbValue, ExecError> {
     match values {
         [single] => {
-            let items = array_values_for_json_object(single, "jsonb_object")?;
+            let items = jsonb_object_one_arg_items(single)?;
             if items.iter().all(|item| matches!(item, Value::Array(_))) {
                 let mut pairs = Vec::with_capacity(items.len());
                 for item in items {
@@ -1409,8 +1414,8 @@ fn render_jsonb_object_function(values: &[Value]) -> Result<JsonbValue, ExecErro
             jsonb_object_from_pairs(&pairs)
         }
         [keys, vals] => {
-            let keys = array_values_for_json_object(keys, "jsonb_object")?;
-            let vals = array_values_for_json_object(vals, "jsonb_object")?;
+            let keys = jsonb_object_two_arg_items(keys)?;
+            let vals = jsonb_object_two_arg_items(vals)?;
             if keys.len() != vals.len() {
                 return Err(ExecError::InvalidStorageValue {
                     column: "jsonb".into(),
@@ -1428,6 +1433,47 @@ fn render_jsonb_object_function(values: &[Value]) -> Result<JsonbValue, ExecErro
             column: "jsonb".into(),
             details: "jsonb_object expects one or two array arguments".into(),
         }),
+    }
+}
+
+fn jsonb_object_one_arg_items(value: &Value) -> Result<Vec<Value>, ExecError> {
+    match value {
+        Value::PgArray(array) => match array.ndim() {
+            0 => Ok(Vec::new()),
+            1 => {
+                if array.elements.len() % 2 != 0 {
+                    return Err(ExecError::InvalidStorageValue {
+                        column: "jsonb".into(),
+                        details: "array must have even number of elements".into(),
+                    });
+                }
+                Ok(array.elements.clone())
+            }
+            2 => {
+                if array.dimensions[1].length != 2 {
+                    return Err(ExecError::InvalidStorageValue {
+                        column: "jsonb".into(),
+                        details: "array must have two columns".into(),
+                    });
+                }
+                Ok(array.elements.clone())
+            }
+            _ => Err(ExecError::InvalidStorageValue {
+                column: "jsonb".into(),
+                details: "wrong number of array subscripts".into(),
+            }),
+        },
+        other => array_values_for_json_object(other, "jsonb_object"),
+    }
+}
+
+fn jsonb_object_two_arg_items(value: &Value) -> Result<Vec<Value>, ExecError> {
+    match value {
+        Value::PgArray(array) if array.ndim() > 1 => Err(ExecError::InvalidStorageValue {
+            column: "jsonb".into(),
+            details: "wrong number of array subscripts".into(),
+        }),
+        other => array_values_for_json_object(other, "jsonb_object"),
     }
 }
 
@@ -1469,6 +1515,7 @@ fn render_json_pairs(pairs: &[(String, Value)]) -> String {
             value,
             false,
             &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            None,
         ));
     }
     out.push('}');
@@ -2785,18 +2832,21 @@ fn value_to_json_text(
     value: &Value,
     pretty: bool,
     datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
+    catalog: Option<&crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
 ) -> String {
     if pretty {
-        let json = value_to_json_serde_with_config(value, datetime_config);
+        let rendered = render_json_value_text_with_config(value, datetime_config, catalog);
+        let json = parse_json_text(&rendered).unwrap_or(SerdeJsonValue::Null);
         serde_json::to_string_pretty(&json).unwrap()
     } else {
-        render_json_value_text_with_config(value, datetime_config)
+        render_json_value_text_with_config(value, datetime_config, catalog)
     }
 }
 
 fn render_json_value_text_with_config(
     value: &Value,
     datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
+    catalog: Option<&crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
 ) -> String {
     match value {
         Value::Null => "null".into(),
@@ -2865,7 +2915,11 @@ fn render_json_value_text_with_config(
                 if idx > 0 {
                     out.push(',');
                 }
-                out.push_str(&render_json_value_text_with_config(item, datetime_config));
+                out.push_str(&render_json_value_text_with_config(
+                    item,
+                    datetime_config,
+                    catalog,
+                ));
             }
             out.push(']');
             out
@@ -2878,7 +2932,12 @@ fn render_json_value_text_with_config(
                 }
                 out.push_str(&serde_json::to_string(&field.name).unwrap());
                 out.push(':');
-                out.push_str(&render_json_value_text_with_config(item, datetime_config));
+                out.push_str(&render_json_field_value_text(
+                    item,
+                    field.sql_type,
+                    datetime_config,
+                    catalog,
+                ));
             }
             out.push('}');
             out
@@ -2889,11 +2948,60 @@ fn render_json_value_text_with_config(
                 if idx > 0 {
                     out.push(',');
                 }
-                out.push_str(&render_json_value_text_with_config(item, datetime_config));
+                out.push_str(&render_json_value_text_with_config(
+                    item,
+                    datetime_config,
+                    catalog,
+                ));
             }
             out.push(']');
             out
         }
+    }
+}
+
+fn render_json_field_value_text(
+    value: &Value,
+    sql_type: SqlType,
+    datetime_config: &crate::backend::utils::misc::guc_datetime::DateTimeConfig,
+    catalog: Option<&crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
+) -> String {
+    if sql_type.kind == SqlTypeKind::RegClass && !sql_type.is_array {
+        if let Some(relation_name) = regclass_name_for_value(value, catalog) {
+            return serde_json::to_string(&relation_name).unwrap();
+        }
+        return serde_json::to_string(&oid_value_to_string(value)).unwrap();
+    }
+    render_json_value_text_with_config(value, datetime_config, catalog)
+}
+
+fn regclass_name_for_value(
+    value: &Value,
+    catalog: Option<&crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
+) -> Option<String> {
+    let oid = match value {
+        Value::Int32(v) => u32::try_from(*v).ok()?,
+        Value::Int64(v) => u32::try_from(*v).ok()?,
+        _ => return None,
+    };
+    let catalog = catalog?;
+    catalog
+        .relcache()
+        .entries()
+        .find_map(|(name, entry)| (entry.relation_oid == oid).then_some(name))
+        .map(|name| {
+            name.rsplit_once('.')
+                .map(|(_, relname)| relname)
+                .unwrap_or(name)
+                .to_string()
+        })
+}
+
+fn oid_value_to_string(value: &Value) -> String {
+    match value {
+        Value::Int32(v) => (*v as u32).to_string(),
+        Value::Int64(v) => (*v as u32).to_string(),
+        _ => value.as_text().unwrap_or_default().to_string(),
     }
 }
 
