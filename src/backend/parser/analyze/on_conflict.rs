@@ -1,8 +1,9 @@
 use super::query::rewrite_local_vars_for_output_exprs;
 use super::*;
 use crate::include::catalog::BTREE_AM_OID;
+use crate::include::nodes::primnodes::{BoolExprType, OpExprKind};
 use crate::include::nodes::parsenodes::{
-    OnConflictAction, OnConflictClause, OnConflictInferenceSpec, OnConflictTarget, SqlExpr,
+    OnConflictAction, OnConflictClause, OnConflictTarget,
 };
 use crate::include::nodes::primnodes::{INNER_VAR, OUTER_VAR, Var, user_attrno};
 
@@ -119,18 +120,36 @@ fn resolve_arbiter_indexes(
         )),
         Some(OnConflictTarget::Inference(spec)) => {
             let scope = scope_for_relation(Some(relation_name), desc);
-            let requested = normalize_attnums(
-                &supported_inference_columns(spec)?
-                    .iter()
-                    .map(|column| {
-                        let index = resolve_column(&scope, column)?;
-                        Ok((index + 1) as i16)
-                    })
-                    .collect::<Result<Vec<_>, ParseError>>()?,
-            );
+            let requested = spec
+                .elements
+                .iter()
+                .map(|element| bind_inference_element(element, &scope, catalog))
+                .collect::<Result<Vec<_>, _>>()?;
+            let requested_predicate = spec
+                .predicate
+                .as_ref()
+                .map(|predicate| bind_expr_with_outer_and_ctes(
+                    predicate,
+                    &scope,
+                    catalog,
+                    &[],
+                    None,
+                    &[],
+                ))
+                .transpose()?;
             let matches = inferable_unique_indexes(&catalog.index_relations_for_heap(relation_oid))
                 .into_iter()
-                .filter(|index| normalize_attnums(&index.index_meta.indkey) == requested)
+                .filter(|index| {
+                    index_matches_inference(
+                        index,
+                        &requested,
+                        requested_predicate.as_ref(),
+                        relation_name,
+                        desc,
+                        catalog,
+                    )
+                    .unwrap_or(false)
+                })
                 .collect::<Vec<_>>();
             if matches.is_empty() {
                 return Err(ParseError::UnexpectedToken {
@@ -174,34 +193,11 @@ fn resolve_arbiter_indexes(
     }
 }
 
-fn supported_inference_columns(spec: &OnConflictInferenceSpec) -> Result<Vec<String>, ParseError> {
-    if spec.predicate.is_some() {
-        return Err(ParseError::FeatureNotSupported(
-            "ON CONFLICT inference WHERE".into(),
-        ));
-    }
-
-    spec.elements
-        .iter()
-        .map(|element| {
-            if element.collation.is_some() {
-                return Err(ParseError::FeatureNotSupported(
-                    "ON CONFLICT inference collation".into(),
-                ));
-            }
-            if element.opclass.is_some() {
-                return Err(ParseError::FeatureNotSupported(
-                    "ON CONFLICT inference operator class".into(),
-                ));
-            }
-            match &element.expr {
-                SqlExpr::Column(name) => Ok(name.clone()),
-                _ => Err(ParseError::FeatureNotSupported(
-                    "ON CONFLICT inference expressions".into(),
-                )),
-            }
-        })
-        .collect()
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BoundInferenceElement {
+    expr: Expr,
+    opclass_oid: Option<u32>,
+    collation_oid: Option<u32>,
 }
 
 fn inferable_unique_indexes(indexes: &[BoundIndexRelation]) -> Vec<BoundIndexRelation> {
@@ -212,30 +208,219 @@ fn inferable_unique_indexes(indexes: &[BoundIndexRelation]) -> Vec<BoundIndexRel
                 && index.index_meta.indisvalid
                 && index.index_meta.indisready
                 && index.index_meta.am_oid == BTREE_AM_OID
-                && index
-                    .index_meta
-                    .indpred
-                    .as_deref()
-                    .map(str::trim)
-                    .unwrap_or("")
-                    .is_empty()
-                && index
-                    .index_meta
-                    .indexprs
-                    .as_deref()
-                    .map(str::trim)
-                    .unwrap_or("")
-                    .is_empty()
         })
         .cloned()
         .collect()
 }
 
-fn normalize_attnums(attnums: &[i16]) -> Vec<i16> {
-    let mut out = attnums.to_vec();
-    out.sort_unstable();
-    out.dedup();
-    out
+fn bind_inference_element(
+    element: &crate::include::nodes::parsenodes::OnConflictInferenceElem,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+) -> Result<BoundInferenceElement, ParseError> {
+    let expr = bind_expr_with_outer_and_ctes(&element.expr, scope, catalog, &[], None, &[])?;
+    let expr_type = infer_sql_expr_type_with_ctes(&element.expr, scope, catalog, &[], None, &[]);
+    Ok(BoundInferenceElement {
+        expr,
+        opclass_oid: element
+            .opclass
+            .as_ref()
+            .map(|name| resolve_opclass_oid(name, expr_type, catalog))
+            .transpose()?,
+        collation_oid: element
+            .collation
+            .as_ref()
+            .map(|name| resolve_collation_oid(name, catalog))
+            .transpose()?,
+    })
+}
+
+fn resolve_opclass_oid(
+    name: &str,
+    _expr_type: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> Result<u32, ParseError> {
+    let normalized = normalize_lookup_name(name);
+    catalog
+        .opclass_rows()
+        .into_iter()
+        .find(|row| row.opcmethod == BTREE_AM_OID && row.opcname.eq_ignore_ascii_case(normalized))
+        .map(|row| row.oid)
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "known btree operator class",
+            actual: name.to_string(),
+        })
+}
+
+fn resolve_collation_oid(name: &str, catalog: &dyn CatalogLookup) -> Result<u32, ParseError> {
+    let normalized = normalize_lookup_name(name);
+    catalog
+        .collation_rows()
+        .into_iter()
+        .find(|row| row.collname.eq_ignore_ascii_case(normalized))
+        .map(|row| row.oid)
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "known collation",
+            actual: name.to_string(),
+        })
+}
+
+fn index_matches_inference(
+    index: &BoundIndexRelation,
+    requested: &[BoundInferenceElement],
+    requested_predicate: Option<&Expr>,
+    relation_name: &str,
+    desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<bool, ParseError> {
+    let key_count = index.index_meta.indnkeyatts.max(0) as usize;
+    let indexed_elements = index_key_elements(index, key_count, relation_name, desc, catalog)?;
+    if requested.is_empty() || indexed_elements.is_empty() {
+        return Ok(false);
+    }
+    if !requested
+        .iter()
+        .all(|element| indexed_elements.iter().any(|candidate| inference_element_matches(element, candidate)))
+    {
+        return Ok(false);
+    }
+    if !indexed_elements
+        .iter()
+        .all(|candidate| requested.iter().any(|element| inference_element_matches(element, candidate)))
+    {
+        return Ok(false);
+    }
+    index_predicate_matches(index, requested_predicate, relation_name, desc, catalog)
+}
+
+fn index_key_elements(
+    index: &BoundIndexRelation,
+    key_count: usize,
+    relation_name: &str,
+    desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<BoundInferenceElement>, ParseError> {
+    let mut expr_index = 0usize;
+    let mut elements = Vec::with_capacity(key_count);
+    for position in 0..key_count {
+        let attnum = *index.index_meta.indkey.get(position).unwrap_or(&0);
+        let expr = if attnum > 0 {
+            let column_index = column_index_for_attnum(desc, attnum)?;
+            bind_relation_expr(
+                &desc.columns[column_index].name,
+                Some(relation_name),
+                desc,
+                catalog,
+            )?
+        } else {
+            let expr = index
+                .index_exprs
+                .get(expr_index)
+                .cloned()
+                .ok_or_else(|| ParseError::UnexpectedToken {
+                    expected: "bound index expression",
+                    actual: "index expression metadata mismatch".into(),
+                })?;
+            expr_index += 1;
+            expr
+        };
+        elements.push(BoundInferenceElement {
+            expr,
+            opclass_oid: index.index_meta.indclass.get(position).copied().filter(|oid| *oid != 0),
+            collation_oid: index
+                .index_meta
+                .indcollation
+                .get(position)
+                .copied()
+                .filter(|oid| *oid != 0),
+        });
+    }
+    Ok(elements)
+}
+
+fn inference_element_matches(
+    requested: &BoundInferenceElement,
+    indexed: &BoundInferenceElement,
+) -> bool {
+    requested.expr == indexed.expr
+        && requested
+            .opclass_oid
+            .is_none_or(|opclass_oid| indexed.opclass_oid == Some(opclass_oid))
+        && requested
+            .collation_oid
+            .is_none_or(|collation_oid| indexed.collation_oid == Some(collation_oid))
+}
+
+fn index_predicate_matches(
+    index: &BoundIndexRelation,
+    requested_predicate: Option<&Expr>,
+    relation_name: &str,
+    desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<bool, ParseError> {
+    let Some(predicate_sql) = index.index_meta.indpred.as_deref().map(str::trim) else {
+        return Ok(requested_predicate.is_none());
+    };
+    if predicate_sql.is_empty() {
+        return Ok(requested_predicate.is_none());
+    }
+    let Some(requested_predicate) = requested_predicate else {
+        return Ok(false);
+    };
+    let index_predicate = bind_relation_expr(predicate_sql, Some(relation_name), desc, catalog)?;
+    let index_conjuncts = flatten_and_clauses(&index_predicate);
+    let requested_conjuncts = flatten_and_clauses(requested_predicate);
+    Ok(index_conjuncts
+        .iter()
+        .all(|conjunct| requested_conjuncts.contains(conjunct)))
+}
+
+fn flatten_and_clauses(expr: &Expr) -> Vec<Expr> {
+    match expr {
+        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::And => bool_expr
+            .args
+            .iter()
+            .flat_map(flatten_and_clauses)
+            .collect(),
+        Expr::Op(op)
+            if op.op == OpExprKind::Eq
+                || op.op == OpExprKind::NotEq
+                || op.op == OpExprKind::Lt
+                || op.op == OpExprKind::LtEq
+                || op.op == OpExprKind::Gt
+                || op.op == OpExprKind::GtEq =>
+        {
+            vec![expr.clone()]
+        }
+        _ => vec![expr.clone()],
+    }
+}
+
+fn normalize_lookup_name(name: &str) -> &str {
+    name.strip_prefix("pg_catalog.").unwrap_or(name)
+}
+
+fn column_index_for_attnum(desc: &RelationDesc, attnum: i16) -> Result<usize, ParseError> {
+    if attnum <= 0 {
+        return Err(ParseError::UnexpectedToken {
+            expected: "user column attribute number",
+            actual: attnum.to_string(),
+        });
+    }
+    let column_index = (attnum - 1) as usize;
+    let Some(column) = desc.columns.get(column_index) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "valid column attribute number",
+            actual: attnum.to_string(),
+        });
+    };
+    if column.dropped {
+        return Err(ParseError::UnexpectedToken {
+            expected: "non-dropped column attribute number",
+            actual: attnum.to_string(),
+        });
+    }
+    Ok(column_index)
 }
 
 fn executor_output_exprs(desc: &RelationDesc, varno: usize) -> Vec<Expr> {

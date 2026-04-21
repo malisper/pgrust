@@ -8,10 +8,11 @@ use crate::backend::utils::cache::system_views::{
     build_pg_views_rows,
 };
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PgAuthIdRow, PgCastRow, PgClassRow, PgConstraintRow, PgIndexRow,
-    PgInheritsRow, PgLanguageRow, PgOperatorRow, PgPolicyRow, PgProcRow, PgRangeRow,
-    PgRewriteRow, PgStatisticRow, PgTriggerRow, PgTypeRow, bootstrap_pg_cast_rows,
-    bootstrap_pg_language_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
+    BOOTSTRAP_SUPERUSER_OID, PgAuthIdRow, PgCastRow, PgClassRow, PgCollationRow,
+    PgConstraintRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgOpclassRow, PgOperatorRow,
+    PgPolicyRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow, PgTriggerRow, PgTypeRow,
+    bootstrap_pg_cast_rows, bootstrap_pg_collation_rows, bootstrap_pg_language_rows,
+    bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
     builtin_range_rows, builtin_type_rows,
 };
 use crate::pgrust::database::DatabaseStatsStore;
@@ -162,6 +163,20 @@ impl CatalogLookup for VisibleCatalog {
                     &self.range_rows(),
                 )
             })
+    }
+
+    fn opclass_rows(&self) -> Vec<PgOpclassRow> {
+        self.catcache
+            .as_ref()
+            .map(CatCache::opclass_rows)
+            .unwrap_or_else(bootstrap_pg_opclass_rows)
+    }
+
+    fn collation_rows(&self) -> Vec<PgCollationRow> {
+        self.catcache
+            .as_ref()
+            .map(CatCache::collation_rows)
+            .unwrap_or_else(|| bootstrap_pg_collation_rows().to_vec())
     }
 
     fn operator_by_name_left_right(
