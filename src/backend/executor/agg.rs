@@ -34,6 +34,14 @@ pub(crate) enum AccumState {
     AnyValue {
         value: Option<Value>,
     },
+    BoolAnd {
+        seen_nonnull: bool,
+        value: bool,
+    },
+    BoolOr {
+        seen_nonnull: bool,
+        value: bool,
+    },
     CountDistinct {
         seen: HashSet<Value>,
     },
@@ -95,6 +103,14 @@ impl AccumState {
             },
             (AggFunc::Count, false) => AccumState::Count { count: 0 },
             (AggFunc::AnyValue, _) => AccumState::AnyValue { value: None },
+            (AggFunc::BoolAnd, _) => AccumState::BoolAnd {
+                seen_nonnull: false,
+                value: true,
+            },
+            (AggFunc::BoolOr, _) => AccumState::BoolOr {
+                seen_nonnull: false,
+                value: false,
+            },
             (AggFunc::Sum, _) => AccumState::Sum {
                 sum: None,
                 result_type: sql_type,
@@ -201,6 +217,40 @@ impl AccumState {
                     let value = values.first().unwrap_or(&Value::Null);
                     if current.is_none() && !matches!(value, Value::Null) {
                         *current = Some(value.to_owned_value());
+                    }
+                }
+                Ok(())
+            },
+            (AggFunc::BoolAnd, _, _) => |state, values| {
+                if let AccumState::BoolAnd {
+                    seen_nonnull,
+                    value,
+                } = state
+                {
+                    match values.first().unwrap_or(&Value::Null) {
+                        Value::Bool(next) => {
+                            *seen_nonnull = true;
+                            *value &= *next;
+                        }
+                        Value::Null => {}
+                        _ => {}
+                    }
+                }
+                Ok(())
+            },
+            (AggFunc::BoolOr, _, _) => |state, values| {
+                if let AccumState::BoolOr {
+                    seen_nonnull,
+                    value,
+                } = state
+                {
+                    match values.first().unwrap_or(&Value::Null) {
+                        Value::Bool(next) => {
+                            *seen_nonnull = true;
+                            *value |= *next;
+                        }
+                        Value::Null => {}
+                        _ => {}
                     }
                 }
                 Ok(())
@@ -380,6 +430,20 @@ impl AccumState {
             AccumState::Count { count } => Value::Int64(*count),
             AccumState::CountDistinct { seen } => Value::Int64(seen.len() as i64),
             AccumState::AnyValue { value } => value.clone().unwrap_or(Value::Null),
+            AccumState::BoolAnd { seen_nonnull, value } => {
+                if *seen_nonnull {
+                    Value::Bool(*value)
+                } else {
+                    Value::Null
+                }
+            }
+            AccumState::BoolOr { seen_nonnull, value } => {
+                if *seen_nonnull {
+                    Value::Bool(*value)
+                } else {
+                    Value::Null
+                }
+            }
             AccumState::Sum { sum, result_type } => match sum {
                 Some(NumericAccum::Int(v)) if matches!(result_type.kind, SqlTypeKind::Money) => {
                     Value::Money(*v)

@@ -959,6 +959,8 @@ pub(super) fn validate_aggregate_arity(func: AggFunc, args: &[SqlExpr]) -> Resul
             | AggFunc::VarSamp
             | AggFunc::StddevPop
             | AggFunc::StddevSamp
+            | AggFunc::BoolAnd
+            | AggFunc::BoolOr
             | AggFunc::Min
             | AggFunc::Max
             | AggFunc::ArrayAgg
@@ -2311,6 +2313,8 @@ fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
         "var_pop" => Some(AggFunc::VarPop),
         "stddev" | "stddev_samp" => Some(AggFunc::StddevSamp),
         "stddev_pop" => Some(AggFunc::StddevPop),
+        "bool_and" | "every" => Some(AggFunc::BoolAnd),
+        "bool_or" => Some(AggFunc::BoolOr),
         "min" => Some(AggFunc::Min),
         "max" => Some(AggFunc::Max),
         "string_agg" => Some(AggFunc::StringAgg),
