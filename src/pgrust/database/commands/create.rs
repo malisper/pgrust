@@ -304,6 +304,10 @@ impl Database {
             let local_attnums = column_attnums_for_names(&relation.desc, &action.columns);
             let referenced_attnums =
                 column_attnums_for_names(&referenced_relation.desc, &action.referenced_columns);
+            let delete_set_attnums = action
+                .on_delete_set_columns
+                .as_deref()
+                .map(|columns| column_attnums_for_names(&relation.desc, columns));
             let constraint_ctx = CatalogWriteContext {
                 pool: self.pool.clone(),
                 txns: self.txns.clone(),
@@ -328,6 +332,7 @@ impl Database {
                     foreign_key_action_code(action.on_update),
                     foreign_key_action_code(action.on_delete),
                     foreign_key_match_code(action.match_type),
+                    delete_set_attnums.as_deref(),
                     &constraint_ctx,
                 )
                 .map_err(map_catalog_error)?;

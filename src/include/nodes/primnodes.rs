@@ -379,6 +379,7 @@ pub enum BuiltinScalarFunction {
     Replace,
     SplitPart,
     Translate,
+    RegRoleToText,
     BpcharToText,
     Position,
     Substring,
@@ -998,6 +999,9 @@ pub enum Expr {
         subscripts: Vec<ExprArraySubscript>,
     },
     Random,
+    CurrentUser,
+    SessionUser,
+    CurrentRole,
     CurrentDate,
     CurrentTime {
         precision: Option<i32>,
@@ -1320,6 +1324,9 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
             ))
         }
         Expr::SubPlan(subplan) => subplan.first_col_type,
+        Expr::CurrentUser | Expr::SessionUser | Expr::CurrentRole => {
+            Some(SqlType::new(SqlTypeKind::Name))
+        }
         Expr::Like { .. }
         | Expr::Similar { .. }
         | Expr::ArraySubscript { .. }

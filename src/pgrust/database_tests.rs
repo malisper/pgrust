@@ -7334,6 +7334,69 @@ fn foreign_keys_apply_referential_actions() {
 }
 
 #[test]
+fn alter_table_add_foreign_key_supports_delete_set_column_lists() {
+    let base = temp_dir("alter_table_add_fk_delete_set_columns");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table parents (a int4, b int4, primary key (a, b))",
+    )
+    .unwrap();
+    db.execute(1, "insert into parents values (10, 20), (500, 20)")
+        .unwrap();
+
+    db.execute(
+        1,
+        "create table children_set_null (id int4 primary key, a int4, b int4)",
+    )
+    .unwrap();
+    db.execute(1, "insert into children_set_null values (1, 10, 20)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table children_set_null add foreign key (a, b) references parents(a, b) on delete set null (a)",
+    )
+    .unwrap();
+
+    db.execute(1, "delete from parents where a = 10 and b = 20")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select a, b from children_set_null",
+        ),
+        vec![vec![Value::Null, Value::Int32(20)]]
+    );
+
+    db.execute(1, "insert into parents values (10, 20)").unwrap();
+    db.execute(
+        1,
+        "create table children_set_default (id int4 primary key, a int4 default 500, b int4)",
+    )
+    .unwrap();
+    db.execute(1, "insert into children_set_default values (1, 10, 20)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table children_set_default add foreign key (a, b) references parents(a, b) on delete set default (a)",
+    )
+    .unwrap();
+
+    db.execute(1, "delete from parents where a = 10 and b = 20")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select a, b from children_set_default",
+        ),
+        vec![vec![Value::Int32(500), Value::Int32(20)]]
+    );
+}
+
+#[test]
 fn create_table_serial_creates_sequence_defaults_and_persists_state() {
     let base = temp_dir("create_table_serial_defaults");
     let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
@@ -8187,6 +8250,104 @@ fn foreign_keys_support_not_enforced_and_alter_enforced_state() {
 
     db.execute(1, "insert into children values (2, 99)")
         .unwrap();
+}
+
+#[test]
+fn alter_constraint_not_enforced_preserves_deferrability_flags() {
+    let base = temp_dir("fk_alter_constraint_not_enforced_preserves_deferrability");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table parents (id int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table children (id int4 primary key, parent_id int4)",
+    )
+    .unwrap();
+    db.execute(1, "insert into children values (1, 42)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table children add constraint children_parent_fk foreign key (parent_id) references parents(id) not valid not enforced",
+    )
+    .unwrap();
+
+    db.execute(
+        1,
+        "alter table children alter constraint children_parent_fk deferrable initially deferred",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select condeferrable, condeferred, conenforced, convalidated from pg_constraint where conname = 'children_parent_fk'",
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(false),
+        ]]
+    );
+
+    db.execute(
+        1,
+        "alter table children alter constraint children_parent_fk enforced",
+    )
+    .unwrap_err();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select condeferrable, condeferred, conenforced, convalidated from pg_constraint where conname = 'children_parent_fk'",
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(false),
+        ]]
+    );
+
+    db.execute(1, "insert into parents values (42)").unwrap();
+    db.execute(
+        1,
+        "alter table children alter constraint children_parent_fk enforced",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select condeferrable, condeferred, conenforced, convalidated from pg_constraint where conname = 'children_parent_fk'",
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true),
+        ]]
+    );
+
+    db.execute(
+        1,
+        "alter table children alter constraint children_parent_fk not enforced",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select condeferrable, condeferred, conenforced, convalidated from pg_constraint where conname = 'children_parent_fk'",
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(false),
+        ]]
+    );
 }
 
 #[test]

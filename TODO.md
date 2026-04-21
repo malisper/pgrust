@@ -28,7 +28,7 @@ Targeted reruns and notes:
   - `ALTER TABLE ... INHERIT`
   - multi-action `ALTER TABLE` statements
   - [done] `ALTER TABLE ... ADD FOREIGN KEY (...) REFERENCES ...` without `ADD CONSTRAINT name`
-  - `ALTER TABLE ... ALTER CONSTRAINT` support beyond deferrability-only changes, including `ENFORCED` / `NOT ENFORCED`
+  - [done] `ALTER TABLE ... ALTER CONSTRAINT` support beyond deferrability-only changes, including `ENFORCED` / `NOT ENFORCED`
   - `ALTER TABLE ... ALTER COLUMN ... SET/DROP DEFAULT`
   - `ALTER TABLE ... ALTER COLUMN ... SET STORAGE`
   - `ALTER TABLE ... ALTER COLUMN ... SET STATISTICS`
@@ -153,14 +153,14 @@ Targeted reruns and notes:
 - float4.sql: 79/100
 - float8.sql: 145/184
 - foreign_data.sql: 83/540
-- foreign_key.sql: 467/1252
+- foreign_key.sql: 478/1252
   - upstream `foreign_key.sql` now starts with unsupported FK surface, so the first create-table failures cascade into most later `unknown table: fktable` mismatches
   - foreign keys with `MATCH FULL`
   - foreign keys with `NOT VALID`
   - foreign keys with `ENFORCED` / `NOT ENFORCED`
   - foreign keys with `ON DELETE` / `ON UPDATE` actions beyond `NO ACTION` and `RESTRICT`
   - [done] `ALTER TABLE ... ADD FOREIGN KEY (...) REFERENCES ...` without `ADD CONSTRAINT name`
-  - `ALTER TABLE ... ALTER CONSTRAINT ... ENFORCED|NOT ENFORCED`
+  - [done] `ALTER TABLE ... ALTER CONSTRAINT ... ENFORCED|NOT ENFORCED`
   - `COMMENT ON CONSTRAINT`
   - `DROP TABLE ... CASCADE`
   - `ALTER TABLE ... ALTER COLUMN TYPE` when dependent indexes/constraints exist
