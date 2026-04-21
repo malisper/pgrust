@@ -8,7 +8,7 @@ use crate::backend::executor::ExecError;
 use crate::backend::executor::exec_expr::format_array_text;
 use crate::backend::executor::render_bit_text;
 use crate::backend::executor::render_datetime_value_text;
-use crate::backend::executor::render_datetime_value_text_with_config;
+use crate::backend::executor::expr_datetime::render_json_datetime_value_text_with_config;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::nodes::datetime::{DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT};
@@ -788,7 +788,7 @@ pub(crate) fn jsonb_from_value(
         | Value::TimeTz(_)
         | Value::Timestamp(_)
         | Value::TimestampTz(_) => JsonbValue::String(
-            render_datetime_value_text_with_config(value, datetime_config)
+            render_json_datetime_value_text_with_config(value, datetime_config)
                 .expect("datetime values render"),
         ),
         Value::Point(_)

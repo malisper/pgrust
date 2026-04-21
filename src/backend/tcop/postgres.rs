@@ -218,7 +218,10 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return None;
             }
         }
-        ExecError::JsonInput { raw_input, .. } => raw_input.as_str(),
+        ExecError::JsonInput { raw_input, .. } => {
+            return find_json_literal_position(sql, raw_input)
+                .or_else(|| sql.find(raw_input).map(|index| index + 1));
+        }
         ExecError::XmlInput { raw_input, .. } => raw_input.as_str(),
         _ => return None,
     };
@@ -226,6 +229,51 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         let needle = format!("'{}'", value.replace('\'', "''"));
         sql.rfind(&needle).map(|index| index + 1)
     })
+}
+
+fn find_json_literal_position(sql: &str, raw_input: &str) -> Option<usize> {
+    let escaped_literal = format!("'{}'", raw_input.replace('\'', "''"));
+    if let Some(index) = sql.find(&escaped_literal) {
+        return Some(index + 1);
+    }
+    find_dollar_quoted_literal_position(sql, raw_input)
+}
+
+fn find_dollar_quoted_literal_position(sql: &str, raw_input: &str) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut start = 0usize;
+    while start < bytes.len() {
+        if bytes[start] != b'$' {
+            start += 1;
+            continue;
+        }
+
+        let mut tag_end = start + 1;
+        while tag_end < bytes.len() && bytes[tag_end] != b'$' {
+            let ch = bytes[tag_end] as char;
+            if !(ch.is_ascii_alphanumeric() || ch == '_') {
+                break;
+            }
+            tag_end += 1;
+        }
+        if tag_end >= bytes.len() || bytes[tag_end] != b'$' {
+            start += 1;
+            continue;
+        }
+
+        let delimiter = &sql[start..=tag_end];
+        let body_start = tag_end + 1;
+        let Some(relative_end) = sql[body_start..].find(delimiter) else {
+            start += 1;
+            continue;
+        };
+        let body_end = body_start + relative_end;
+        if &sql[body_start..body_end] == raw_input {
+            return Some(start + 1);
+        }
+        start = body_end + delimiter.len();
+    }
+    None
 }
 
 fn extract_quoted_error_value(message: &str) -> Option<&str> {
@@ -5154,6 +5202,34 @@ mod tests {
         };
 
         assert_eq!(exec_error_position(sql, &err), Some(22));
+    }
+
+    #[test]
+    fn exec_error_position_points_at_single_quoted_json_literal_start() {
+        let sql = "SELECT '\"abc'::jsonb;";
+        let err = ExecError::JsonInput {
+            raw_input: "\"abc".into(),
+            message: "invalid input syntax for type json".into(),
+            detail: Some("Token \"\"abc\" is invalid.".into()),
+            context: Some("JSON data, line 1: \"abc".into()),
+            sqlstate: "22P02",
+        };
+
+        assert_eq!(exec_error_position(sql, &err), Some(8));
+    }
+
+    #[test]
+    fn exec_error_position_points_at_dollar_quoted_json_literal_start() {
+        let sql = "SELECT $$''$$::jsonb;";
+        let err = ExecError::JsonInput {
+            raw_input: "''".into(),
+            message: "invalid input syntax for type json".into(),
+            detail: Some("Token \"'\" is invalid.".into()),
+            context: Some("JSON data, line 1: '...".into()),
+            sqlstate: "22P02",
+        };
+
+        assert_eq!(exec_error_position(sql, &err), Some(8));
     }
 
     #[test]
