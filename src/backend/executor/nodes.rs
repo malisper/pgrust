@@ -8,7 +8,7 @@ use crate::backend::commands::explain::format_explain_lines_with_costs;
 use crate::backend::executor::exec_expr::{compare_order_by_keys, eval_expr};
 use crate::backend::executor::pg_regex::explain_similar_pattern;
 use crate::backend::executor::srf::{
-    eval_scalar_set_returning_call, eval_set_returning_call, set_returning_call_label,
+    eval_project_set_returning_call, eval_set_returning_call, set_returning_call_label,
 };
 use crate::backend::executor::value_io::{decode_value_with_toast, missing_column_value};
 use crate::backend::executor::window::execute_window_clause;
@@ -2718,7 +2718,7 @@ impl PlanNode for ProjectSetState {
                 let mut max_rows = 0usize;
                 for target in &self.targets {
                     if let crate::include::nodes::primnodes::ProjectSetTarget::Set {
-                        call, ..
+                        call, column_index, ..
                     } = target
                     {
                         set_outer_expr_bindings(
@@ -2726,7 +2726,12 @@ impl PlanNode for ProjectSetState {
                             materialized.tts_values.clone(),
                             self.input.current_system_bindings(),
                         );
-                        let rows = eval_scalar_set_returning_call(call, &mut materialized, ctx)?;
+                        let rows = eval_project_set_returning_call(
+                            call,
+                            *column_index,
+                            &mut materialized,
+                            ctx,
+                        )?;
                         max_rows = max_rows.max(rows.len());
                         srf_rows.push(rows);
                     }

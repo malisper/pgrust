@@ -1,8 +1,9 @@
 use super::expr_json::{eval_json_record_set_returning_function, eval_json_table_function};
 use super::pg_regex::{eval_regexp_matches_rows, eval_regexp_split_to_table_rows};
 use super::{ExecError, ExecutorContext, Expr, SetReturningCall, TupleSlot, Value, eval_expr};
+use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::backend::parser::SqlTypeKind;
-use crate::include::nodes::datum::NumericValue;
+use crate::include::nodes::datum::{NumericValue, RecordValue};
 use crate::pl::plpgsql::execute_user_defined_set_returning_function;
 
 pub(crate) fn eval_set_returning_call(
@@ -56,22 +57,35 @@ pub(crate) fn eval_set_returning_call(
     }
 }
 
-pub(crate) fn eval_scalar_set_returning_call(
+pub(crate) fn eval_project_set_returning_call(
     call: &SetReturningCall,
+    column_index: usize,
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<Value>, ExecError> {
-    if call.output_columns().len() != 1 {
-        return Err(ExecError::RaiseException(
-            "set-returning function returning record called in context that cannot accept type record"
-                .into(),
-        ));
-    }
+    let record_descriptor = (column_index == 0 && call.output_columns().len() > 1).then(|| {
+        assign_anonymous_record_descriptor(
+            call.output_columns()
+                .iter()
+                .map(|column| (column.name.clone(), column.sql_type))
+                .collect(),
+        )
+    });
     Ok(eval_set_returning_call(call, slot, ctx)?
         .into_iter()
         .map(|mut row| {
             Value::materialize_all(&mut row.tts_values);
-            row.tts_values.into_iter().next().unwrap_or(Value::Null)
+            match (column_index, record_descriptor.as_ref()) {
+                (0, Some(descriptor)) => {
+                    Value::Record(RecordValue::from_descriptor(descriptor.clone(), row.tts_values))
+                }
+                (0, None) => row.tts_values.into_iter().next().unwrap_or(Value::Null),
+                (index, _) => row
+                    .tts_values
+                    .get(index.saturating_sub(1))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            }
         })
         .collect())
 }

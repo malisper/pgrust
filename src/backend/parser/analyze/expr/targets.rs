@@ -1,11 +1,34 @@
 use super::*;
-use crate::backend::utils::record::lookup_anonymous_record_descriptor;
+use crate::backend::utils::record::{
+    assign_anonymous_record_descriptor, lookup_anonymous_record_descriptor,
+};
 pub(crate) enum BoundSelectTargets {
     Plain(Vec<TargetEntry>),
     WithProjectSet {
         project_targets: Vec<ProjectSetTarget>,
         final_targets: Vec<TargetEntry>,
     },
+}
+
+#[derive(Clone)]
+enum TopLevelSelectSrfTarget {
+    Call {
+        name: String,
+        args: Vec<SqlFunctionArg>,
+        func_variadic: bool,
+    },
+    FieldSelect {
+        name: String,
+        args: Vec<SqlFunctionArg>,
+        func_variadic: bool,
+        field: String,
+    },
+}
+
+struct BoundSelectListSrfTarget {
+    call: SetReturningCall,
+    sql_type: SqlType,
+    column_index: usize,
 }
 
 fn input_resno_for_scope_expr(scope: &BoundScope, expr: &Expr) -> Option<usize> {
@@ -78,7 +101,7 @@ pub(crate) fn bind_select_targets(
     let base_width = scope.columns.len();
 
     for item in targets {
-        if let Some((name, args, func_variadic)) = top_level_set_returning_call(
+        if let Some(target) = top_level_set_returning_target(
             &item.expr,
             scope,
             catalog,
@@ -86,10 +109,8 @@ pub(crate) fn bind_select_targets(
             grouped_outer,
             ctes,
         ) {
-            let (call, sql_type) = bind_select_list_srf_call(
-                &name,
-                &args,
-                func_variadic,
+            let bound_target = bind_select_list_srf_target(
+                &target,
                 scope,
                 catalog,
                 outer_scopes,
@@ -99,15 +120,15 @@ pub(crate) fn bind_select_targets(
             let output_name = item.output_name.clone();
             project_targets.push(ProjectSetTarget::Set {
                 name: output_name.clone(),
-                call,
-                sql_type,
-                column_index: 0,
+                call: bound_target.call,
+                sql_type: bound_target.sql_type,
+                column_index: bound_target.column_index,
             });
             final_targets.push(
                 TargetEntry::new(
                     output_name,
                     Expr::Const(Value::Null),
-                    sql_type,
+                    bound_target.sql_type,
                     final_targets.len() + 1,
                 )
                 .with_input_resno(base_width + srf_index + 1),
@@ -223,7 +244,7 @@ fn bind_plain_select_targets(
 
 #[derive(Default)]
 struct TargetSrfInfo {
-    top_level: Option<(String, Vec<SqlFunctionArg>, bool)>,
+    top_level: Option<TopLevelSelectSrfTarget>,
     has_nested: bool,
 }
 
@@ -235,52 +256,41 @@ fn classify_select_target_srf(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> TargetSrfInfo {
-    match expr {
-        SqlExpr::FuncCall {
-            name,
-            args,
-            func_variadic,
-            ..
-        } if func_call_is_set_returning(
-            name,
-            args,
-            *func_variadic,
+    if let Some(target) = top_level_set_returning_target(
+        expr,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    ) {
+        TargetSrfInfo {
+            top_level: Some(target),
+            has_nested: false,
+        }
+    } else {
+        let mut info = TargetSrfInfo::default();
+        visit_nested_srfs(
+            expr,
+            &mut info,
             scope,
             catalog,
             outer_scopes,
             grouped_outer,
             ctes,
-        ) =>
-        {
-            TargetSrfInfo {
-                top_level: Some((name.clone(), args.clone(), *func_variadic)),
-                has_nested: false,
-            }
-        }
-        _ => {
-            let mut info = TargetSrfInfo::default();
-            visit_nested_srfs(
-                expr,
-                &mut info,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            );
-            info
-        }
+        );
+        info
     }
 }
 
-fn top_level_set_returning_call(
+fn top_level_set_returning_target(
     expr: &SqlExpr,
     scope: &BoundScope,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
-) -> Option<(String, Vec<SqlFunctionArg>, bool)> {
+) -> Option<TopLevelSelectSrfTarget> {
     match expr {
         SqlExpr::FuncCall {
             name,
@@ -298,10 +308,100 @@ fn top_level_set_returning_call(
             ctes,
         ) =>
         {
-            Some((name.clone(), args.clone(), *func_variadic))
+            Some(TopLevelSelectSrfTarget::Call {
+                name: name.clone(),
+                args: args.clone(),
+                func_variadic: *func_variadic,
+            })
+        }
+        SqlExpr::FieldSelect { expr, field } => match expr.as_ref() {
+            SqlExpr::FuncCall {
+                name,
+                args,
+                func_variadic,
+                ..
+            } if func_call_is_set_returning(
+                name,
+                args,
+                *func_variadic,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) =>
+            {
+                Some(TopLevelSelectSrfTarget::FieldSelect {
+                    name: name.clone(),
+                    args: args.clone(),
+                    func_variadic: *func_variadic,
+                    field: field.clone(),
+                })
+            }
+            _ => None,
         }
         _ => None,
     }
+}
+
+fn bind_select_list_srf_target(
+    target: &TopLevelSelectSrfTarget,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<BoundSelectListSrfTarget, ParseError> {
+    let (name, args, func_variadic, projected_field) = match target {
+        TopLevelSelectSrfTarget::Call {
+            name,
+            args,
+            func_variadic,
+        } => (name.as_str(), args.as_slice(), *func_variadic, None),
+        TopLevelSelectSrfTarget::FieldSelect {
+            name,
+            args,
+            func_variadic,
+            field,
+        } => (name.as_str(), args.as_slice(), *func_variadic, Some(field.as_str())),
+    };
+    let call = bind_select_list_srf_call(
+        name,
+        args,
+        func_variadic,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    let output_columns = call.output_columns();
+    let (sql_type, column_index) = match projected_field {
+        Some(field) => output_columns
+            .iter()
+            .enumerate()
+            .find(|(_, column)| column.name.eq_ignore_ascii_case(field))
+            .map(|(index, column)| (column.sql_type, index + 1))
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "record field",
+                actual: format!("field selection .{field}"),
+            })?,
+        None if output_columns.len() == 1 => (output_columns[0].sql_type, 1),
+        None => {
+            let descriptor = assign_anonymous_record_descriptor(
+                output_columns
+                    .iter()
+                    .map(|column| (column.name.clone(), column.sql_type))
+                    .collect(),
+            );
+            (descriptor.sql_type(), 0)
+        }
+    };
+    Ok(BoundSelectListSrfTarget {
+        call,
+        sql_type,
+        column_index,
+    })
 }
 
 fn visit_nested_srfs(
@@ -715,8 +815,6 @@ fn visit_nested_srfs(
         | SqlExpr::Random
         | SqlExpr::CurrentDate
         | SqlExpr::CurrentUser
-        | SqlExpr::SessionUser
-        | SqlExpr::CurrentRole
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }
         | SqlExpr::LocalTime { .. }
@@ -765,7 +863,7 @@ fn bind_select_list_srf_call(
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
-) -> Result<(SetReturningCall, SqlType), ParseError> {
+) -> Result<SetReturningCall, ParseError> {
     let args = lower_named_table_function_args(name, args)?;
     let actual_types = args
         .iter()
@@ -852,21 +950,18 @@ fn bind_select_list_srf_call(
                     _ => Expr::Const(Value::Int32(1)),
                 }
             };
-            Ok((
-                SetReturningCall::GenerateSeries {
-                    func_oid: resolved_proc_oid,
-                    func_variadic: resolved_func_variadic,
-                    start: coerce_bound_expr(start, start_type, common),
-                    stop: coerce_bound_expr(stop, stop_type, common),
-                    step,
-                    output: QueryColumn {
-                        name: "generate_series".into(),
-                        sql_type: common,
-                        wire_type_oid: None,
-                    },
+            Ok(SetReturningCall::GenerateSeries {
+                func_oid: resolved_proc_oid,
+                func_variadic: resolved_func_variadic,
+                start: coerce_bound_expr(start, start_type, common),
+                stop: coerce_bound_expr(stop, stop_type, common),
+                step,
+                output: QueryColumn {
+                    name: "generate_series".into(),
+                    sql_type: common,
+                    wire_type_oid: None,
                 },
-                common,
-            ))
+            })
         }
         "unnest" => {
             if args.is_empty() {
@@ -924,33 +1019,37 @@ fn bind_select_list_srf_call(
                     actual: name.to_string(),
                 });
             }
-            Ok((
-                SetReturningCall::Unnest {
-                    func_oid: resolved_proc_oid,
-                    func_variadic: resolved_func_variadic,
-                    args: bound_args,
-                    output_columns: output_columns.clone(),
-                },
-                output_columns[0].sql_type,
-            ))
+            Ok(SetReturningCall::Unnest {
+                func_oid: resolved_proc_oid,
+                func_variadic: resolved_func_variadic,
+                args: bound_args,
+                output_columns,
+            })
         }
         other => {
             if let Some(kind) = resolve_json_table_function(other) {
-                let bound_args = args
-                    .iter()
-                    .map(|arg| {
-                        bind_expr_with_outer_and_ctes(
-                            arg,
-                            scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer,
-                            ctes,
-                        )
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
+                let bound_args = bind_json_table_srf_args(
+                    kind,
+                    &args,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?;
                 let output_columns = match kind {
                     JsonTableFunction::ObjectKeys => vec![QueryColumn::text("json_object_keys")],
+                    JsonTableFunction::Each => vec![
+                        QueryColumn::text("key"),
+                        QueryColumn {
+                            name: "value".into(),
+                            sql_type: SqlType::new(SqlTypeKind::Json),
+                            wire_type_oid: None,
+                        },
+                    ],
+                    JsonTableFunction::EachText => {
+                        vec![QueryColumn::text("key"), QueryColumn::text("value")]
+                    }
                     JsonTableFunction::ArrayElements => vec![QueryColumn {
                         name: "json_array_elements".into(),
                         sql_type: SqlType::new(SqlTypeKind::Json),
@@ -967,6 +1066,17 @@ fn bind_select_list_srf_call(
                     JsonTableFunction::JsonbObjectKeys => {
                         vec![QueryColumn::text("jsonb_object_keys")]
                     }
+                    JsonTableFunction::JsonbEach => vec![
+                        QueryColumn::text("key"),
+                        QueryColumn {
+                            name: "value".into(),
+                            sql_type: SqlType::new(SqlTypeKind::Jsonb),
+                            wire_type_oid: None,
+                        },
+                    ],
+                    JsonTableFunction::JsonbEachText => {
+                        vec![QueryColumn::text("key"), QueryColumn::text("value")]
+                    }
                     JsonTableFunction::JsonbArrayElements => vec![QueryColumn {
                         name: "jsonb_array_elements".into(),
                         sql_type: SqlType::new(SqlTypeKind::Jsonb),
@@ -975,26 +1085,14 @@ fn bind_select_list_srf_call(
                     JsonTableFunction::JsonbArrayElementsText => {
                         vec![QueryColumn::text("jsonb_array_elements_text")]
                     }
-                    JsonTableFunction::Each
-                    | JsonTableFunction::EachText
-                    | JsonTableFunction::JsonbEach
-                    | JsonTableFunction::JsonbEachText => {
-                        return Err(ParseError::UnexpectedToken {
-                            expected: "scalar-output set-returning function in select list",
-                            actual: other.to_string(),
-                        });
-                    }
                 };
-                Ok((
-                    SetReturningCall::JsonTableFunction {
-                        func_oid: resolved_proc_oid,
-                        func_variadic: resolved_func_variadic,
-                        kind,
-                        args: bound_args,
-                        output_columns: output_columns.clone(),
-                    },
-                    output_columns[0].sql_type,
-                ))
+                Ok(SetReturningCall::JsonTableFunction {
+                    func_oid: resolved_proc_oid,
+                    func_variadic: resolved_func_variadic,
+                    kind,
+                    args: bound_args,
+                    output_columns,
+                })
             } else if let Some(kind) = resolve_json_record_function(other) {
                 if !kind.is_set_returning() {
                     return Err(ParseError::UnexpectedToken {
@@ -1031,17 +1129,14 @@ fn bind_select_list_srf_call(
                         actual: other.to_string(),
                     });
                 }
-                Ok((
-                    SetReturningCall::JsonRecordFunction {
-                        func_oid: resolved.proc_oid,
-                        func_variadic: resolved.func_variadic,
-                        kind,
-                        args: bound_args,
-                        output_columns: output_columns.clone(),
-                        record_type: Some(resolved.result_type),
-                    },
-                    output_columns[0].sql_type,
-                ))
+                Ok(SetReturningCall::JsonRecordFunction {
+                    func_oid: resolved.proc_oid,
+                    func_variadic: resolved.func_variadic,
+                    kind,
+                    args: bound_args,
+                    output_columns,
+                    record_type: Some(resolved.result_type),
+                })
             } else {
                 if let Some(kind) = resolve_regex_table_function(other) {
                     let bound_args = args
@@ -1069,16 +1164,13 @@ fn bind_select_list_srf_call(
                             vec![QueryColumn::text("regexp_split_to_table")]
                         }
                     };
-                    Ok((
-                        SetReturningCall::RegexTableFunction {
-                            func_oid: resolved_proc_oid,
-                            func_variadic: resolved_func_variadic,
-                            kind,
-                            args: bound_args,
-                            output_columns: output_columns.clone(),
-                        },
-                        output_columns[0].sql_type,
-                    ))
+                    Ok(SetReturningCall::RegexTableFunction {
+                        func_oid: resolved_proc_oid,
+                        func_variadic: resolved_func_variadic,
+                        kind,
+                        args: bound_args,
+                        output_columns,
+                    })
                 } else if let Some(resolved) = resolved.as_ref() {
                     if resolved.prokind != 'f' || !resolved.proretset {
                         return Err(ParseError::UnexpectedToken {
@@ -1106,15 +1198,12 @@ fn bind_select_list_srf_call(
                         sql_type: resolved.result_type,
                         wire_type_oid: None,
                     }];
-                    Ok((
-                        SetReturningCall::UserDefined {
-                            proc_oid: resolved.proc_oid,
-                            func_variadic: resolved.func_variadic,
-                            args: bound_args,
-                            output_columns: output_columns.clone(),
-                        },
-                        output_columns[0].sql_type,
-                    ))
+                    Ok(SetReturningCall::UserDefined {
+                        proc_oid: resolved.proc_oid,
+                        func_variadic: resolved.func_variadic,
+                        args: bound_args,
+                        output_columns,
+                    })
                 } else {
                     Err(ParseError::UnexpectedToken {
                         expected: "supported set-returning function",
@@ -1124,6 +1213,41 @@ fn bind_select_list_srf_call(
             }
         }
     }
+}
+
+fn bind_json_table_srf_args(
+    kind: JsonTableFunction,
+    args: &[SqlExpr],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Vec<Expr>, ParseError> {
+    let target_type = match kind {
+        JsonTableFunction::JsonbEach | JsonTableFunction::JsonbEachText => {
+            Some(SqlType::new(SqlTypeKind::Jsonb))
+        }
+        _ => None,
+    };
+    args.iter()
+        .map(|arg| {
+            let raw_arg_type =
+                infer_sql_expr_type_with_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes);
+            let resolved_arg_type = target_type
+                .map(|target| coerce_unknown_string_literal_type(arg, raw_arg_type, target))
+                .unwrap_or(raw_arg_type);
+            let bound =
+                bind_expr_with_outer_and_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+            Ok(match target_type {
+                Some(target) if resolved_arg_type == target && raw_arg_type != target => {
+                    coerce_bound_expr(bound, raw_arg_type, target)
+                }
+                None => bound,
+                Some(_) => bound,
+            })
+        })
+        .collect()
 }
 
 fn bind_user_defined_srf_args(

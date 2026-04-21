@@ -17,14 +17,12 @@ Targeted reruns and notes:
 
 - advisory_lock.sql: 8/38
 - aggregates.sql: 149/583
-  - [done] `VALUES` mixed-`NULL` type reconciliation now skips bare `NULL` when selecting a common column type, which unblocks `any_value` cases like `VALUES (NULL), (1), (2)`
-  - [done] direct regression helper functions `float8_accum`, `float8_regr_accum`, `float8_combine`, and `float8_regr_combine`
 - alter_generic.sql: 65/333
 - alter_operator.sql: 7/65
 - alter_table.sql: 476/1683
   - [done] expression indexes and `ALTER INDEX` operations used by `alter_table.sql`
   - partitioned tables, including `PARTITION OF`, `ATTACH PARTITION`, and `DETACH PARTITION`
-  - [done] `SET ROLE` / `RESET ROLE`
+  - `SET ROLE` / `RESET ROLE`
   - `ALTER VIEW` forms exercised by `alter_table.sql`
   - [done] `ALTER TABLE ... NO INHERIT`
   - `ALTER TABLE ... INHERIT`
@@ -44,7 +42,7 @@ Targeted reruns and notes:
   - `ALTER TABLE IF EXISTS ...` variants beyond current support
   - `CHECK ... NO INHERIT`
   - `CHECK ENFORCED` / `NOT ENFORCED`
-  - [done] foreign keys with `MATCH FULL`
+  - foreign keys with `MATCH FULL`
   - foreign keys with `NOT VALID`
   - foreign keys with `ENFORCED` / `NOT ENFORCED`
   - deferrable foreign keys
@@ -59,7 +57,7 @@ Targeted reruns and notes:
   - enum creation forms required by `alter_table.sql`
   - domain constraints/defaults required by `alter_table.sql`
   - `CREATE OR REPLACE FUNCTION`
-  - [done] `DROP TABLE ... CASCADE` for ordinary, inherited, and temporary tables
+  - `DROP TABLE ... CASCADE`
   - `DROP TYPE ... CASCADE`
   - `CREATE TEMP TABLE ... PARTITION BY ...`
   - `regtype` support
@@ -83,9 +81,7 @@ Targeted reruns and notes:
   - [done] support `CREATE TEMP TABLE` column definitions with fixed-length array syntax like `integer ARRAY[4]`
   - [done] support deeper array constructors and nested `ARRAY[...]` expressions in `SELECT` targets and `INSERT` values
   - [done] support `ARRAY(SELECT ...)` forms used later in `arrays.sql`
-  - [done] support general `RETURNING` target lists for `INSERT` and `UPDATE`, not just `RETURNING *`
-  - [done] support `DELETE ... RETURNING` target lists
-  - [done] implement missing array builtins exercised by `arrays.sql` such as `array_append`, `array_prepend`, and `array_cat`
+  - implement missing array builtins exercised by `arrays.sql` such as `array_append`, `array_prepend`, and `array_cat`
   - support row/composite array expressions and comparisons, including `ARRAY(SELECT ...)` and `array_agg(record) || array_agg(record)`
 - async.sql: 0/11
 - bit.sql: 132/132
@@ -159,14 +155,14 @@ Targeted reruns and notes:
 - foreign_data.sql: 83/540
 - foreign_key.sql: 467/1252
   - upstream `foreign_key.sql` now starts with unsupported FK surface, so the first create-table failures cascade into most later `unknown table: fktable` mismatches
-  - [done] foreign keys with `MATCH FULL`
+  - foreign keys with `MATCH FULL`
   - foreign keys with `NOT VALID`
   - foreign keys with `ENFORCED` / `NOT ENFORCED`
   - foreign keys with `ON DELETE` / `ON UPDATE` actions beyond `NO ACTION` and `RESTRICT`
   - [done] `ALTER TABLE ... ADD FOREIGN KEY (...) REFERENCES ...` without `ADD CONSTRAINT name`
   - `ALTER TABLE ... ALTER CONSTRAINT ... ENFORCED|NOT ENFORCED`
   - `COMMENT ON CONSTRAINT`
-  - [done] `DROP TABLE ... CASCADE` for ordinary, inherited, and temporary tables
+  - `DROP TABLE ... CASCADE`
   - `ALTER TABLE ... ALTER COLUMN TYPE` when dependent indexes/constraints exist
 - functional_deps.sql: 0/40
 - generated_stored.sql: 2/131
@@ -214,6 +210,7 @@ Targeted reruns and notes:
   - [done] jsonb containment and existence builtin semantics (`@>`, `<@`, `?`, `?|`, `?&`, helper funcs)
   - [done] coerce unknown/text JSON literals to `jsonb` for `@>` / `<@` so operator semantics match `jsonb_contains` / `jsonb_contained`
   - [done] jsonb object/key construction semantics and SQL-visible errors (`jsonb_object_keys`, `jsonb_build_object`, `jsonb_object`, `jsonb_object_agg`)
+  - [done] analyzer-side coercion and select-list SRF lowering for `jsonb_array_length`, `jsonb_each`, and `jsonb_each_text`, including PostgreSQL-style SQL-visible errors and `(jsonb_each(...)).key` projection
   - jsonb subscripting semantics
   - record-expansion semantics for `jsonb_to_record` / `jsonb_populate_record`
 - jsonb_jsonpath.sql: 552/830
@@ -288,14 +285,14 @@ Targeted reruns and notes:
 - replica_identity.sql: 13/66
 - returning.sql: 21/150
 - roleattributes.sql: 32/80
-- rowsecurity.sql: 392/774
+- rowsecurity.sql: 293/774
 - rowsecurity.sql: support `DROP SCHEMA ... CASCADE`
 - rowsecurity.sql: support `GRANT SELECT ON <table> ...`
 - rowsecurity.sql: support `GRANT EXECUTE ON FUNCTION ...`
 - rowsecurity.sql: honor non-`public` visible schemas for unqualified `CREATE FUNCTION`
-- [done] rowsecurity.sql: support `CREATE POLICY`
-- [done] rowsecurity.sql: support `ALTER POLICY`
-- [done] rowsecurity.sql: support `DROP POLICY`
+- rowsecurity.sql: support `CREATE POLICY`
+- rowsecurity.sql: support `ALTER POLICY`
+- rowsecurity.sql: support `DROP POLICY`
 - rowsecurity.sql: support `ALTER TABLE ... ENABLE ROW LEVEL SECURITY`
 - rowsecurity.sql: expose `pg_policies`
 - rowsecurity.sql: improve `psql` describe handling for row-security metadata
@@ -387,9 +384,8 @@ Targeted reruns and notes:
   - [done] accept PostgreSQL-style mixed set-operation chains such as `SELECT 1 UNION SELECT 2 UNION ALL SELECT 2` instead of rejecting them in the parser
   - [done] support `SELECT DISTINCT` in set-operation inputs such as `EXCEPT ALL SELECT DISTINCT ...`
   - [done] match PostgreSQL's `FOR NO KEY UPDATE` set-operation error text instead of routing it through the generic unsupported-feature wrapper
-  - [done] investigate why bootstrap fixture tables from `scripts/test_setup_pgrust.sql` like `float8_tbl`, `int8_tbl`, and `tenk1` are not consistently resolvable during regression runs; current false failures were stale `RESULTS_DIR` output reuse when bootstrap aborted before rewriting `output/test_setup_pgrust.out`
+  - investigate why bootstrap fixture tables from `scripts/test_setup_pgrust.sql` like `float8_tbl`, `int8_tbl`, and `tenk1` are not consistently resolvable during regression runs
 - updatable_views.sql: 130/1139
-  - [done] add PostgreSQL-style automatic `INSERT` / `UPDATE` / `DELETE` support for simple nested pass-through views, including filtered views, renamed columns, base defaults for hidden columns, and same-transaction `CREATE VIEW` visibility
 - update.sql: 72/300
 - uuid.sql: 0/63
 - vacuum.sql: 135/328
@@ -418,7 +414,7 @@ Targeted reruns and notes:
 - record-expansion semantics for `jsonb_to_record` / `jsonb_populate_record`
 
 - partitioned tables, including `PARTITION OF`, `ATTACH PARTITION`, and `DETACH PARTITION`
-- [done] `SET ROLE` / `RESET ROLE`
+- `SET ROLE` / `RESET ROLE`
 - `ALTER VIEW` forms exercised by `alter_table.sql`
 - [done] `ALTER TABLE ... NO INHERIT`
 - `ALTER TABLE ... INHERIT`
@@ -437,7 +433,7 @@ Targeted reruns and notes:
 - `ALTER TABLE IF EXISTS ...` variants beyond current support
 - `CHECK ... NO INHERIT`
 - `CHECK ENFORCED` / `NOT ENFORCED`
-- [done] foreign keys with `MATCH FULL`
+- foreign keys with `MATCH FULL`
 - deferrable foreign keys
 - `COMMENT ON COLUMN`
 - `COMMENT ON INDEX`
@@ -449,7 +445,7 @@ Targeted reruns and notes:
 - enum creation forms required by `alter_table.sql`
 - domain constraints/defaults required by `alter_table.sql`
 - `CREATE OR REPLACE FUNCTION`
-- [done] `DROP TABLE ... CASCADE` for ordinary, inherited, and temporary tables
+- `DROP TABLE ... CASCADE`
 - `DROP TYPE ... CASCADE`
 - `CREATE TEMP TABLE ... PARTITION BY ...`
 - `regtype` support
@@ -508,7 +504,6 @@ Targeted reruns and notes:
   - Finish `to_char(numeric, ...)` parity in `expr_format.rs`, especially `FMS` formats, scientific-format hash width, and overflow/hash rendering for wide values and infinities
   - Finish `to_number(..., 'RN')` / Roman numeral parity, including the aggregate validation path that currently errors in the `bool_and(to_number(roman, 'RN') = i)` check
   - Fix numeric `power()` / `exp()` edge semantics so extreme underflows collapse to exact zero, `0 ^ 0` returns `1`, and negative-base exponent edge cases match PostgreSQL
-  - [done] Preserve PostgreSQL `power()` display scale for special finite results like `0 ^ 4.2` and `1 ^ 4.2`, which should render with 16 fractional digits instead of bare `0` / `1`
   - Align numeric `generate_series(...)` error text with PostgreSQL for `NaN` / infinity step values
   - Remove extra `CONTEXT` lines from builtin `log()` errors in this regression
   - Fix numeric `variance` aggregation on tiny values; PostgreSQL returns `12e-1000` in the scaled test where pgrust currently returns `0`
@@ -517,14 +512,14 @@ Targeted reruns and notes:
 - [x] Preserve numeric display scale in `generate_series(numeric, ...)` so rows like `0.0, 1.0, 2.0, 3.0, 4.0` do not degrade into integer-looking outputs after the first increment
 - [x] Fix `width_bucket(float8, low, high, count)` boundary behavior for huge ranges; current float math can round into bucket `count + 1` or the wrong descending bucket near the upper edge
 - [x] Mixed set-operation chains: accept PostgreSQL-style left-associative chains such as `SELECT 1 UNION SELECT 2 UNION ALL SELECT 2` instead of rejecting them in the parser.
-- [done] Shared regression fixture visibility: investigate why bootstrap tables from `scripts/test_setup_pgrust.sql` like `float8_tbl`, `int8_tbl`, and `tenk1` are not consistently resolvable during regression runs; root cause was stale regression output reuse after bootstrap/startup failures, not missing bootstrap schemas.
+- Shared regression fixture visibility: investigate why bootstrap tables from `scripts/test_setup_pgrust.sql` like `float8_tbl`, `int8_tbl`, and `tenk1` are not consistently resolvable during regression runs.
 - privileges.sql parity:
   - [done] expose privilege-related system catalogs in SQL, including `pg_auth_members` and `pg_largeobject_metadata`
   - [done] implement `lo_create` / `lo_unlink` and surface `pg_largeobject_metadata` rows from runtime state
   - [done] add parser/analyzer support for role membership `GRANTED BY`
   - add parser/analyzer/executor support for `CASCADE` in role membership revokes
-  - [done] implement `SET ROLE` and `RESET ROLE`
-  - [done] implement SQL-visible `session_user`, `current_user`, and `current_role` semantics used by the regression
+  - implement `SET ROLE` and `RESET ROLE`
+  - implement SQL-visible `session_user`, `current_user`, and `current_role` semantics used by the regression
   - add parser/executor support for `DROP OWNED`
   - [done] add parser support for `DROP USER`, `CREATE GROUP`, and `ALTER GROUP`
   - make role membership grant/revoke execution honor explicit grantors and dependent membership chains

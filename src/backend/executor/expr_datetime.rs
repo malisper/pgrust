@@ -1,12 +1,13 @@
-use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+use crate::backend::utils::misc::guc_datetime::{DateOrder, DateStyleFormat, DateTimeConfig};
 use crate::backend::utils::time::date::{format_date_text, format_time_text, format_timetz_text};
 use crate::backend::utils::time::datetime::{
-    current_postgres_timestamp_usecs, timestamp_parts_from_usecs, timezone_offset_seconds,
-    today_pg_days,
+    current_postgres_timestamp_usecs, format_time_usecs, timestamp_parts_from_usecs,
+    timezone_offset_seconds, today_pg_days, ymd_from_days,
 };
 use crate::backend::utils::time::timestamp::{format_timestamp_text, format_timestamptz_text};
 use crate::include::nodes::datetime::{
-    TimeADT, TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_DAY,
+    DATEVAL_NOBEGIN, DATEVAL_NOEND, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeADT, TimeTzADT,
+    TimestampADT, TimestampTzADT, USECS_PER_DAY,
 };
 use crate::include::nodes::datum::Value;
 
@@ -26,6 +27,100 @@ pub fn render_datetime_value_text_with_config(
 
 pub fn render_datetime_value_text(value: &Value) -> Option<String> {
     render_datetime_value_text_with_config(value, &DateTimeConfig::default())
+}
+
+fn json_datetime_config(config: &DateTimeConfig) -> DateTimeConfig {
+    DateTimeConfig {
+        date_style_format: DateStyleFormat::Iso,
+        date_order: DateOrder::Ymd,
+        time_zone: config.time_zone.clone(),
+        max_stack_depth_kb: config.max_stack_depth_kb,
+    }
+}
+
+fn render_json_date_component(pg_days: i32) -> (String, bool) {
+    let (mut year, month, day) = ymd_from_days(pg_days);
+    let bc = year <= 0;
+    if bc {
+        year = 1 - year;
+    }
+    (format!("{year:04}-{month:02}-{day:02}"), bc)
+}
+
+fn render_json_offset(offset_seconds: i32) -> String {
+    let sign = if offset_seconds < 0 { '-' } else { '+' };
+    let mut remaining = offset_seconds.abs();
+    let hour = remaining / 3600;
+    remaining %= 3600;
+    let minute = remaining / 60;
+    let second = remaining % 60;
+    if second != 0 {
+        format!("{sign}{hour:02}:{minute:02}:{second:02}")
+    } else {
+        format!("{sign}{hour:02}:{minute:02}")
+    }
+}
+
+fn render_json_timestamp_parts(days: i32, time_usecs: i64, offset_seconds: Option<i32>) -> String {
+    let (date, bc) = render_json_date_component(days);
+    let mut out = format!("{date}T{}", format_time_usecs(time_usecs));
+    if let Some(offset_seconds) = offset_seconds {
+        out.push_str(&render_json_offset(offset_seconds));
+    }
+    if bc {
+        out.push_str(" BC");
+    }
+    out
+}
+
+pub(crate) fn render_json_datetime_value_text_with_config(
+    value: &Value,
+    config: &DateTimeConfig,
+) -> Option<String> {
+    let json_config = json_datetime_config(config);
+    match value {
+        Value::Date(v) => {
+            if v.0 == DATEVAL_NOEND || v.0 == DATEVAL_NOBEGIN {
+                Some(format_date_text(*v, &json_config))
+            } else {
+                let (date, bc) = render_json_date_component(v.0);
+                Some(if bc { format!("{date} BC") } else { date })
+            }
+        }
+        Value::Time(v) => Some(format_time_text(*v, &json_config)),
+        Value::TimeTz(v) => Some(format!(
+            "{}{}",
+            format_time_text(v.time, &json_config),
+            render_json_offset(v.offset_seconds)
+        )),
+        Value::Timestamp(v) => {
+            if v.0 == TIMESTAMP_NOEND || v.0 == TIMESTAMP_NOBEGIN {
+                Some(format_timestamp_text(*v, &json_config))
+            } else {
+                let (days, time_usecs) = timestamp_parts_from_usecs(v.0);
+                Some(render_json_timestamp_parts(days, time_usecs, None))
+            }
+        }
+        Value::TimestampTz(v) => {
+            if v.0 == TIMESTAMP_NOEND || v.0 == TIMESTAMP_NOBEGIN {
+                Some(format_timestamptz_text(*v, &json_config))
+            } else {
+                let offset_seconds = timezone_offset_seconds(config);
+                let adjusted = v.0 + i64::from(offset_seconds) * 1_000_000;
+                let (days, time_usecs) = timestamp_parts_from_usecs(adjusted);
+                Some(render_json_timestamp_parts(
+                    days,
+                    time_usecs,
+                    Some(offset_seconds),
+                ))
+            }
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn render_json_datetime_value_text(value: &Value) -> Option<String> {
+    render_json_datetime_value_text_with_config(value, &DateTimeConfig::default())
 }
 
 fn rounded_usecs(value: i64, precision: Option<i32>) -> i64 {
