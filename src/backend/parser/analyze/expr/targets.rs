@@ -290,22 +290,29 @@ fn top_level_set_returning_target(
         SqlExpr::FuncCall {
             name,
             args,
+            order_by,
+            distinct,
             func_variadic,
+            filter,
+            over,
             ..
         } if func_call_is_set_returning(
             name,
-            args,
+            args.args(),
             *func_variadic,
             scope,
             catalog,
             outer_scopes,
             grouped_outer,
             ctes,
-        ) =>
+        ) && order_by.is_empty()
+            && !*distinct
+            && filter.is_none()
+            && over.is_none() =>
         {
             Some(TopLevelSelectSrfTarget::Call {
                 name: name.clone(),
-                args: args.clone(),
+                args: args.args().to_vec(),
                 func_variadic: *func_variadic,
             })
         }
@@ -313,22 +320,29 @@ fn top_level_set_returning_target(
             SqlExpr::FuncCall {
                 name,
                 args,
+                order_by,
+                distinct,
                 func_variadic,
+                filter,
+                over,
                 ..
             } if func_call_is_set_returning(
                 name,
-                args,
+                args.args(),
                 *func_variadic,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
                 ctes,
-            ) =>
+            ) && order_by.is_empty()
+                && !*distinct
+                && filter.is_none()
+                && over.is_none() =>
             {
                 Some(TopLevelSelectSrfTarget::FieldSelect {
                     name: name.clone(),
-                    args: args.clone(),
+                    args: args.args().to_vec(),
                     func_variadic: *func_variadic,
                     field: field.clone(),
                 })
@@ -417,24 +431,54 @@ fn visit_nested_srfs(
         SqlExpr::FuncCall {
             name,
             args,
+            order_by,
+            distinct,
             func_variadic,
+            filter,
+            over,
             ..
         } => {
             if func_call_is_set_returning(
                 name,
-                args,
+                args.args(),
                 *func_variadic,
                 scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
                 ctes,
-            ) {
+            ) && order_by.is_empty()
+                && !*distinct
+                && filter.is_none()
+                && over.is_none()
+            {
                 info.has_nested = true;
             }
-            for arg in args {
+            for arg in args.args() {
                 visit_nested_srfs(
                     &arg.value,
+                    info,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+            }
+            for item in order_by {
+                visit_nested_srfs(
+                    &item.expr,
+                    info,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+            }
+            if let Some(filter) = filter.as_deref() {
+                visit_nested_srfs(
+                    filter,
                     info,
                     scope,
                     catalog,
@@ -715,46 +759,6 @@ fn visit_nested_srfs(
             for item in items {
                 visit_nested_srfs(
                     item,
-                    info,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                );
-            }
-        }
-        SqlExpr::AggCall {
-            args,
-            order_by,
-            filter,
-            ..
-        } => {
-            for arg in args {
-                visit_nested_srfs(
-                    &arg.value,
-                    info,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                );
-            }
-            for item in order_by {
-                visit_nested_srfs(
-                    &item.expr,
-                    info,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                );
-            }
-            if let Some(filter) = filter.as_deref() {
-                visit_nested_srfs(
-                    filter,
                     info,
                     scope,
                     catalog,

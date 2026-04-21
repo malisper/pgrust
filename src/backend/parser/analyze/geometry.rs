@@ -386,7 +386,7 @@ pub(super) fn infer_geometry_special_expr_type_with_ctes(
 
 pub(super) fn infer_geometry_function_return_type_with_ctes(
     func: BuiltinScalarFunction,
-    args: &[SqlFunctionArg],
+    args: &SqlCallArgs,
     scope: &BoundScope,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],

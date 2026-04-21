@@ -1727,36 +1727,6 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 Expr::op_auto(OpExprKind::ArrayOverlap, vec![left_expr, right_expr])
             }
         }
-        SqlExpr::AggCall {
-            func,
-            args,
-            order_by,
-            distinct,
-            func_variadic,
-            filter,
-            over,
-        } => {
-            if let Some(raw_over) = over {
-                return bind_window_agg_call(
-                    *func,
-                    args,
-                    order_by,
-                    *distinct,
-                    *func_variadic,
-                    filter.as_deref(),
-                    raw_over,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                );
-            }
-            return Err(ParseError::UnexpectedToken {
-                expected: "non-aggregate expression",
-                actual: "aggregate function".into(),
-            });
-        }
         SqlExpr::ScalarSubquery(select) => {
             bind_scalar_subquery_expr(select, scope, catalog, outer_scopes, ctes)?
         }
@@ -1973,13 +1943,39 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
         SqlExpr::FuncCall {
             name,
             args,
+            order_by,
+            distinct,
             func_variadic,
+            filter,
             over,
         } => {
+            let args_list = args.args();
+            if let Some(func) = resolve_builtin_aggregate(name) {
+                if let Some(raw_over) = over {
+                    return bind_window_agg_call(
+                        func,
+                        args_list,
+                        order_by,
+                        *distinct,
+                        *func_variadic,
+                        filter.as_deref(),
+                        raw_over,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    );
+                }
+                return Err(ParseError::UnexpectedToken {
+                    expected: "non-aggregate expression",
+                    actual: "aggregate function".into(),
+                });
+            }
             if let Some(raw_over) = over {
                 return bind_window_func_call(
                     name,
-                    args,
+                    args_list,
                     *func_variadic,
                     raw_over,
                     scope,
@@ -1992,7 +1988,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             if name.eq_ignore_ascii_case("row_to_json") {
                 return bind_row_to_json_call(
                     name,
-                    args,
+                    args_list,
                     *func_variadic,
                     scope,
                     catalog,
@@ -2002,18 +1998,38 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 );
             }
             if name.eq_ignore_ascii_case("coalesce") {
-                return bind_coalesce_call(args, scope, catalog, outer_scopes, grouped_outer, ctes);
+                return bind_coalesce_call(
+                    args_list,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
             }
             if name.eq_ignore_ascii_case("nullif") {
-                return bind_nullif_call(args, scope, catalog, outer_scopes, grouped_outer, ctes);
+                return bind_nullif_call(
+                    args_list,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+            }
+            if !order_by.is_empty() || *distinct || filter.is_some() || args.is_star() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "supported scalar function",
+                    actual: name.clone(),
+                });
             }
             if !*func_variadic
                 && let Some(target_type) = resolve_function_cast_type(catalog, name)
-                && args.len() == 1
-                && args.iter().all(|arg| arg.name.is_none())
+                && args_list.len() == 1
+                && args_list.iter().all(|arg| arg.name.is_none())
             {
                 let arg_type = infer_sql_expr_type_with_ctes(
-                    &args[0].value,
+                    &args_list[0].value,
                     scope,
                     catalog,
                     outer_scopes,
@@ -2021,7 +2037,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     ctes,
                 );
                 let bound_arg = bind_expr_with_outer_and_ctes(
-                    &args[0].value,
+                    &args_list[0].value,
                     scope,
                     catalog,
                     outer_scopes,
@@ -2038,7 +2054,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     },
                 ));
             }
-            let actual_types = args
+            let actual_types = args_list
                 .iter()
                 .map(|arg| {
                     infer_sql_expr_type_with_ctes(
@@ -2052,12 +2068,12 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 })
                 .collect::<Vec<_>>();
             let mut resolution_types = actual_types.clone();
-            if matches!(args.len(), 3)
+            if matches!(args_list.len(), 3)
                 && !*func_variadic
                 && (name.eq_ignore_ascii_case("lag") || name.eq_ignore_ascii_case("lead"))
             {
                 let common_type = infer_common_scalar_expr_type_with_ctes(
-                    &[args[0].value.clone(), args[2].value.clone()],
+                    &[args_list[0].value.clone(), args_list[2].value.clone()],
                     scope,
                     catalog,
                     outer_scopes,
@@ -2081,7 +2097,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     });
                 }
                 if let Some(func) = resolved.scalar_impl {
-                    let lowered_args = lower_named_scalar_function_args(func, args)?;
+                    let lowered_args = lower_named_scalar_function_args(func, args_list)?;
                     return bind_scalar_function_call(
                         func,
                         resolved.proc_oid,
@@ -2102,7 +2118,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     resolved.proc_oid,
                     resolved.result_type,
                     &resolved.declared_arg_types,
-                    args,
+                    args_list,
                     scope,
                     catalog,
                     outer_scopes,
@@ -2115,7 +2131,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     expected: "supported builtin function",
                     actual: name.clone(),
                 })?;
-            let lowered_args = lower_named_scalar_function_args(legacy_func, args)?;
+            let lowered_args = lower_named_scalar_function_args(legacy_func, args_list)?;
             let actual_types = lowered_args
                 .iter()
                 .map(|arg| {

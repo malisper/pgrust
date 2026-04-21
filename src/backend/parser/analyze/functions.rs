@@ -151,6 +151,10 @@ pub(super) fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunctio
         .copied()
 }
 
+pub(super) fn resolve_builtin_aggregate(name: &str) -> Option<AggFunc> {
+    aggregate_func_for_proname(name)
+}
+
 pub(super) fn resolve_function_cast_type(
     catalog: &dyn CatalogLookup,
     name: &str,

@@ -7,7 +7,7 @@ use super::comments::{
     normalize_string_continuation_preserving_layout, strip_sql_comments_preserving_layout,
 };
 use super::parsenodes::*;
-use crate::backend::executor::{AggFunc, Value};
+use crate::backend::executor::Value;
 use crate::include::catalog::PolicyCommand;
 use crate::include::nodes::datum::BitString;
 
@@ -7213,10 +7213,21 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
             _ => raw_type_output_name(ty).to_string(),
         },
         SqlExpr::Row(_) => "row".to_string(),
-        SqlExpr::AggCall { func, .. } => func.name().to_string(),
         SqlExpr::Random => "random".to_string(),
         SqlExpr::FuncCall { name, .. } => name.clone(),
         _ => "?column?".to_string(),
+    }
+}
+
+fn simple_func_call(name: impl Into<String>, args: Vec<SqlFunctionArg>) -> SqlExpr {
+    SqlExpr::FuncCall {
+        name: name.into(),
+        args: SqlCallArgs::Args(args),
+        order_by: Vec::new(),
+        distinct: false,
+        func_variadic: false,
+        filter: None,
+        over: None,
     }
 }
 
@@ -8471,31 +8482,25 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     expr: Box::new(expr),
                 })
             } else if raw.starts_with("||/") {
-                Ok(SqlExpr::FuncCall {
-                    name: "cbrt".into(),
-                    args: vec![SqlFunctionArg::positional(expr)],
-                    func_variadic: false,
-                    over: None,
-                })
+                Ok(simple_func_call(
+                    "cbrt",
+                    vec![SqlFunctionArg::positional(expr)],
+                ))
             } else if raw.starts_with("!!") {
                 Ok(SqlExpr::PrefixOperator {
                     op: "!!".into(),
                     expr: Box::new(expr),
                 })
             } else if raw.starts_with("|/") {
-                Ok(SqlExpr::FuncCall {
-                    name: "sqrt".into(),
-                    args: vec![SqlFunctionArg::positional(expr)],
-                    func_variadic: false,
-                    over: None,
-                })
+                Ok(simple_func_call(
+                    "sqrt",
+                    vec![SqlFunctionArg::positional(expr)],
+                ))
             } else if raw.starts_with('@') {
-                Ok(SqlExpr::FuncCall {
-                    name: "abs".into(),
-                    args: vec![SqlFunctionArg::positional(expr)],
-                    func_variadic: false,
-                    over: None,
-                })
+                Ok(simple_func_call(
+                    "abs",
+                    vec![SqlFunctionArg::positional(expr)],
+                ))
             } else if raw.starts_with('~') {
                 Ok(SqlExpr::BitNot(Box::new(expr)))
             } else {
@@ -8803,31 +8808,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 .transpose()?
                 .unwrap_or_default(),
         )),
-        Rule::agg_call => build_agg_call(pair),
-        Rule::func_call => {
-            let mut inner = pair.into_inner();
-            let name = build_identifier(inner.next().ok_or(ParseError::UnexpectedEof)?);
-            let mut parsed_args = ParsedFunctionArgs::default();
-            let mut over = None;
-            for part in inner {
-                match part.as_rule() {
-                    Rule::function_arg_list => parsed_args = build_function_arg_list(part)?,
-                    Rule::over_clause => over = Some(build_over_clause(part)?),
-                    _ => {}
-                }
-            }
-            let args = parsed_args.args;
-            if name.eq_ignore_ascii_case("random") && args.is_empty() {
-                Ok(SqlExpr::Random)
-            } else {
-                Ok(SqlExpr::FuncCall {
-                    name,
-                    args,
-                    func_variadic: parsed_args.func_variadic,
-                    over,
-                })
-            }
-        }
+        Rule::func_call => build_func_call(pair),
         Rule::qualified_star => Ok(SqlExpr::Column(pair.as_str().to_string())),
         Rule::position_expr => {
             let mut args = pair
@@ -8835,9 +8816,9 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 .filter(|part| part.as_rule() != Rule::kw_in);
             let needle = build_expr(args.next().ok_or(ParseError::UnexpectedEof)?)?;
             let haystack = build_expr(args.next().ok_or(ParseError::UnexpectedEof)?)?;
-            Ok(SqlExpr::FuncCall {
-                name: "position".into(),
-                args: vec![
+            Ok(simple_func_call(
+                "position",
+                vec![
                     SqlFunctionArg {
                         name: None,
                         value: needle,
@@ -8847,9 +8828,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                         value: haystack,
                     },
                 ],
-                func_variadic: false,
-                over: None,
-            })
+            ))
         }
         Rule::substring_expr => {
             let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
@@ -8873,12 +8852,10 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     if let Some(len) = inner.next() {
                         args.push(build_expr(len)?);
                     }
-                    Ok(SqlExpr::FuncCall {
-                        name: "substring".into(),
-                        args: args.into_iter().map(SqlFunctionArg::positional).collect(),
-                        func_variadic: false,
-                        over: None,
-                    })
+                    Ok(simple_func_call(
+                        "substring",
+                        args.into_iter().map(SqlFunctionArg::positional).collect(),
+                    ))
                 }
                 Rule::substring_for_expr => {
                     let mut inner = inner
@@ -8892,15 +8869,13 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                             .trim(),
                     )?;
                     let len = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
-                    Ok(SqlExpr::FuncCall {
-                        name: "substring".into(),
-                        args: vec![value, SqlExpr::IntegerLiteral("1".into()), len]
+                    Ok(simple_func_call(
+                        "substring",
+                        vec![value, SqlExpr::IntegerLiteral("1".into()), len]
                             .into_iter()
                             .map(SqlFunctionArg::positional)
                             .collect(),
-                        func_variadic: false,
-                        over: None,
-                    })
+                    ))
                 }
                 Rule::substring_similar_expr => {
                     let mut inner = inner.into_inner().filter(|part| {
@@ -8931,12 +8906,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                             .ok_or(ParseError::UnexpectedEof)?;
                         args.push(SqlFunctionArg::positional(build_expr(expr)?));
                     }
-                    Ok(SqlExpr::FuncCall {
-                        name: "similar_substring".into(),
-                        args,
-                        func_variadic: false,
-                        over: None,
-                    })
+                    Ok(simple_func_call("similar_substring", args))
                 }
                 _ => Err(ParseError::UnexpectedToken {
                     expected: "substring expression",
@@ -8970,15 +8940,13 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     _ => {}
                 }
             }
-            Ok(SqlExpr::FuncCall {
-                name: "date_part".into(),
-                args: vec![
+            Ok(simple_func_call(
+                "date_part",
+                vec![
                     SqlFunctionArg::positional(field.ok_or(ParseError::UnexpectedEof)?),
                     SqlFunctionArg::positional(value.ok_or(ParseError::UnexpectedEof)?),
                 ],
-                func_variadic: false,
-                over: None,
-            })
+            ))
         }
         Rule::overlay_expr => {
             let mut inner = pair.into_inner().filter(|part| {
@@ -9011,12 +8979,10 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             if let Some(len) = inner.next() {
                 args.push(build_expr(len)?);
             }
-            Ok(SqlExpr::FuncCall {
-                name: "overlay".into(),
-                args: args.into_iter().map(SqlFunctionArg::positional).collect(),
-                func_variadic: false,
-                over: None,
-            })
+            Ok(simple_func_call(
+                "overlay",
+                args.into_iter().map(SqlFunctionArg::positional).collect(),
+            ))
         }
         Rule::trim_expr => build_trim_expr(pair),
         Rule::typed_string_literal => {
@@ -9132,8 +9098,22 @@ fn build_array_literal_elements(pair: Pair<'_, Rule>) -> Result<Vec<SqlExpr>, Pa
         .collect()
 }
 
-fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
-    let mut func = None;
+fn build_func_call_name(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
+    match pair.as_rule() {
+        Rule::func_call_name => {
+            build_func_call_name(pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?)
+        }
+        Rule::identifier => Ok(build_identifier(pair)),
+        Rule::agg_func => Ok(pair.as_str().to_ascii_lowercase()),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "function name",
+            actual: pair.as_str().into(),
+        }),
+    }
+}
+
+fn build_func_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let mut name = None;
     let mut parsed_args = ParsedFunctionArgs::default();
     let mut order_by = Vec::new();
     let mut is_star = false;
@@ -9142,33 +9122,7 @@ fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
     let mut over = None;
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::agg_func => {
-                let inner = part.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
-                func = Some(match inner.as_rule() {
-                    Rule::kw_count => AggFunc::Count,
-                    Rule::kw_any_value => AggFunc::AnyValue,
-                    Rule::kw_sum => AggFunc::Sum,
-                    Rule::kw_avg => AggFunc::Avg,
-                    Rule::kw_variance => AggFunc::Variance,
-                    Rule::kw_stddev => AggFunc::Stddev,
-                    Rule::kw_min => AggFunc::Min,
-                    Rule::kw_max => AggFunc::Max,
-                    Rule::kw_string_agg => AggFunc::StringAgg,
-                    Rule::kw_array_agg => AggFunc::ArrayAgg,
-                    Rule::kw_json_agg => AggFunc::JsonAgg,
-                    Rule::kw_jsonb_agg => AggFunc::JsonbAgg,
-                    Rule::kw_json_object_agg => AggFunc::JsonObjectAgg,
-                    Rule::kw_jsonb_object_agg => AggFunc::JsonbObjectAgg,
-                    Rule::kw_range_agg => AggFunc::RangeAgg,
-                    Rule::kw_range_intersect_agg => AggFunc::RangeIntersectAgg,
-                    _ => {
-                        return Err(ParseError::UnexpectedToken {
-                            expected: "aggregate function",
-                            actual: inner.as_str().into(),
-                        });
-                    }
-                });
-            }
+            Rule::func_call_name => name = Some(build_func_call_name(part)?),
             Rule::agg_distinct => distinct = true,
             Rule::star => is_star = true,
             Rule::function_arg_list => {
@@ -9190,13 +9144,24 @@ fn build_agg_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             _ => {}
         }
     }
-    Ok(SqlExpr::AggCall {
-        func: func.ok_or(ParseError::UnexpectedEof)?,
-        args: if is_star {
-            Vec::new()
-        } else {
-            parsed_args.args
-        },
+    let name = name.ok_or(ParseError::UnexpectedEof)?;
+    let args = if is_star {
+        SqlCallArgs::Star
+    } else {
+        SqlCallArgs::Args(parsed_args.args)
+    };
+    if name.eq_ignore_ascii_case("random")
+        && matches!(&args, SqlCallArgs::Args(args) if args.is_empty())
+        && order_by.is_empty()
+        && !distinct
+        && filter.is_none()
+        && over.is_none()
+    {
+        return Ok(SqlExpr::Random);
+    }
+    Ok(SqlExpr::FuncCall {
+        name,
+        args,
         order_by,
         distinct,
         func_variadic: !is_star && parsed_args.func_variadic,
@@ -9740,17 +9705,14 @@ fn build_trim_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
     if let Some(chars) = trim_chars {
         args.push(SqlFunctionArg::positional(chars));
     }
-    Ok(SqlExpr::FuncCall {
-        name: match direction.to_ascii_lowercase().as_str() {
+    Ok(simple_func_call(
+        match direction.to_ascii_lowercase().as_str() {
             "leading" => "ltrim",
             "trailing" => "rtrim",
             _ => "btrim",
-        }
-        .into(),
+        },
         args,
-        func_variadic: false,
-        over: None,
-    })
+    ))
 }
 
 fn build_case_when(pair: Pair<'_, Rule>) -> Result<SqlCaseWhen, ParseError> {
@@ -9851,15 +9813,13 @@ fn fold_infix(
                 "#" => SqlExpr::BitXor(Box::new(expr), Box::new(rhs)),
                 _ => unreachable!(),
             },
-            Rule::pow_op => SqlExpr::FuncCall {
-                name: "power".into(),
-                args: vec![
+            Rule::pow_op => simple_func_call(
+                "power",
+                vec![
                     SqlFunctionArg::positional(expr),
                     SqlFunctionArg::positional(rhs),
                 ],
-                func_variadic: false,
-                over: None,
-            },
+            ),
             Rule::shift_op => match op.as_str() {
                 "<<" => SqlExpr::Shl(Box::new(expr), Box::new(rhs)),
                 ">>" => SqlExpr::Shr(Box::new(expr), Box::new(rhs)),
