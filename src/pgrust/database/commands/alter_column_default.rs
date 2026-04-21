@@ -89,17 +89,36 @@ impl Database {
             waiter: None,
             interrupts,
         };
+        let default_expr_sql = plan.default_expr_sql.clone();
+        let default_sequence_oid = plan.default_sequence_oid;
         let effect = self
             .catalog
             .write()
             .alter_table_set_column_default_mvcc(
                 relation.relation_oid,
                 &plan.column_name,
-                plan.default_expr_sql,
-                plan.default_sequence_oid,
+                default_expr_sql.clone(),
+                default_sequence_oid,
                 &ctx,
             )
             .map_err(map_catalog_error)?;
+        if relation.relpersistence == 't' {
+            let mut temp_desc = relation.desc.clone();
+            let column = temp_desc
+                .columns
+                .iter_mut()
+                .find(|column| column.name.eq_ignore_ascii_case(&plan.column_name))
+                .ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnknownColumn(plan.column_name.clone()))
+                })?;
+            column.default_expr = default_expr_sql;
+            column.default_sequence_oid = default_sequence_oid;
+            if column.default_expr.is_none() {
+                column.attrdef_oid = None;
+                column.missing_default_value = None;
+            }
+            self.replace_temp_entry_desc(client_id, relation.relation_oid, temp_desc)?;
+        }
         catalog_effects.push(effect);
         Ok(StatementResult::AffectedRows(0))
     }

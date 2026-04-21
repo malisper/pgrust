@@ -7,6 +7,7 @@ use crate::backend::access::heap::heapam::{
     heap_scan_page_next_tuple, heap_scan_prepare_next_page,
 };
 use crate::backend::access::index::indexam;
+use crate::backend::access::transam::xact::{CommandId, Snapshot};
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
 use crate::backend::parser::{
     BoundForeignKeyConstraint, BoundReferencedByForeignKey, ForeignKeyMatchType,
@@ -155,6 +156,25 @@ pub(crate) fn enforce_inbound_foreign_keys_on_delete(
     Ok(())
 }
 
+pub(crate) fn enforce_inbound_foreign_key_reference(
+    relation_name: &str,
+    constraint: &BoundReferencedByForeignKey,
+    key_values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    if key_values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(());
+    }
+    if child_row_exists(constraint, key_values, ctx)? {
+        return Err(inbound_foreign_key_violation(
+            relation_name,
+            constraint,
+            key_values,
+        ));
+    }
+    Ok(())
+}
+
 fn enforce_inbound_foreign_key(
     relation_name: &str,
     constraint: &BoundReferencedByForeignKey,
@@ -162,25 +182,27 @@ fn enforce_inbound_foreign_key(
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     let key_values = extract_key_values(values, &constraint.referenced_column_indexes);
-    if key_values.iter().any(|value| matches!(value, Value::Null)) {
-        return Ok(());
+    enforce_inbound_foreign_key_reference(relation_name, constraint, &key_values, ctx)
+}
+
+fn inbound_foreign_key_violation(
+    relation_name: &str,
+    constraint: &BoundReferencedByForeignKey,
+    key_values: &[Value],
+) -> ExecError {
+    ExecError::ForeignKeyViolation {
+        constraint: constraint.constraint_name.clone(),
+        message: format!(
+            "update or delete on table \"{relation_name}\" violates foreign key constraint \"{}\" on table \"{}\"",
+            constraint.constraint_name, constraint.child_relation_name
+        ),
+        detail: Some(format!(
+            "Key ({})=({}) is still referenced from table \"{}\".",
+            constraint.referenced_column_names.join(", "),
+            render_key_values(key_values),
+            constraint.child_relation_name
+        )),
     }
-    if child_row_exists(constraint, &key_values, ctx)? {
-        return Err(ExecError::ForeignKeyViolation {
-            constraint: constraint.constraint_name.clone(),
-            message: format!(
-                "update or delete on table \"{relation_name}\" violates foreign key constraint \"{}\" on table \"{}\"",
-                constraint.constraint_name, constraint.child_relation_name
-            ),
-            detail: Some(format!(
-                "Key ({})=({}) is still referenced from table \"{}\".",
-                constraint.referenced_column_names.join(", "),
-                render_key_values(&key_values),
-                constraint.child_relation_name
-            )),
-        });
-    }
-    Ok(())
 }
 
 fn referenced_key_exists(
@@ -188,10 +210,13 @@ fn referenced_key_exists(
     key_values: &[Value],
     ctx: &mut ExecutorContext,
 ) -> Result<bool, ExecError> {
+    let mut snapshot = ctx.snapshot.clone();
+    snapshot.current_cid = CommandId::MAX;
     index_has_visible_row(
         constraint.referenced_rel,
         &constraint.referenced_index,
         key_values,
+        &snapshot,
         ctx,
     )
 }
@@ -201,8 +226,10 @@ fn child_row_exists(
     key_values: &[Value],
     ctx: &mut ExecutorContext,
 ) -> Result<bool, ExecError> {
+    let mut snapshot = ctx.snapshot.clone();
+    snapshot.current_cid = CommandId::MAX;
     if let Some(index) = &constraint.child_index {
-        return index_has_visible_row(constraint.child_rel, index, key_values, ctx);
+        return index_has_visible_row(constraint.child_rel, index, key_values, &snapshot, ctx);
     }
     heap_has_matching_row(
         constraint.child_rel,
@@ -210,6 +237,7 @@ fn child_row_exists(
         &constraint.child_desc,
         &constraint.child_column_indexes,
         key_values,
+        &snapshot,
         ctx,
     )
 }
@@ -218,12 +246,13 @@ fn index_has_visible_row(
     heap_rel: crate::backend::storage::smgr::RelFileLocator,
     index: &crate::backend::parser::BoundIndexRelation,
     key_values: &[Value],
+    snapshot: &Snapshot,
     ctx: &mut ExecutorContext,
 ) -> Result<bool, ExecError> {
     let begin = crate::include::access::amapi::IndexBeginScanContext {
         pool: ctx.pool.clone(),
         client_id: ctx.client_id,
-        snapshot: ctx.snapshot.clone(),
+        snapshot: snapshot.clone(),
         heap_relation: heap_rel,
         index_relation: index.rel,
         index_desc: index.desc.clone(),
@@ -267,7 +296,7 @@ fn index_has_visible_row(
             heap_rel,
             tid,
             &ctx.txns,
-            &ctx.snapshot,
+            snapshot,
         )?
         .is_some()
         {
@@ -292,9 +321,10 @@ fn heap_has_matching_row(
     desc: &crate::backend::executor::RelationDesc,
     key_indexes: &[usize],
     key_values: &[Value],
+    snapshot: &Snapshot,
     ctx: &mut ExecutorContext,
 ) -> Result<bool, ExecError> {
-    let mut scan = heap_scan_begin_visible(&ctx.pool, ctx.client_id, rel, ctx.snapshot.clone())?;
+    let mut scan = heap_scan_begin_visible(&ctx.pool, ctx.client_id, rel, snapshot.clone())?;
     let desc = Rc::new(desc.clone());
     let attr_descs: Rc<[_]> = desc.attribute_descs().into();
     let decoder = Rc::new(CompiledTupleDecoder::compile(&desc, &attr_descs));
