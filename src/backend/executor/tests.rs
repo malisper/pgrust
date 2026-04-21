@@ -3133,6 +3133,88 @@ fn bool_and_every_and_bool_or_match_pg_null_semantics() {
 }
 
 #[test]
+fn regression_aggregates_match_pg_formulas() {
+    let base = temp_dir("regr_aggs");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select regr_count(y, x), regr_sxx(y, x), regr_syy(y, x), regr_sxy(y, x), \
+         regr_avgx(y, x), regr_avgy(y, x), regr_r2(y, x), regr_slope(y, x), \
+         regr_intercept(y, x), covar_pop(y, x), covar_samp(y, x), corr(y, x) \
+         from (values (2.0::float8, 1.0::float8), (4.0::float8, 2.0::float8), \
+         (6.0::float8, 3.0::float8), (null::float8, 4.0::float8)) as t(y, x)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(
+                column_names,
+                vec![
+                    "regr_count",
+                    "regr_sxx",
+                    "regr_syy",
+                    "regr_sxy",
+                    "regr_avgx",
+                    "regr_avgy",
+                    "regr_r2",
+                    "regr_slope",
+                    "regr_intercept",
+                    "covar_pop",
+                    "covar_samp",
+                    "corr",
+                ]
+            );
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Int64(3),
+                    Value::Float64(2.0),
+                    Value::Float64(8.0),
+                    Value::Float64(4.0),
+                    Value::Float64(2.0),
+                    Value::Float64(4.0),
+                    Value::Float64(1.0),
+                    Value::Float64(2.0),
+                    Value::Float64(0.0),
+                    Value::Float64(4.0 / 3.0),
+                    Value::Float64(2.0),
+                    Value::Float64(1.0),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn covariance_single_row_pg_edge_cases_match() {
+    let base = temp_dir("covar_single_row");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select covar_pop(1::float8, 2::float8), covar_samp(3::float8, 4::float8), \
+         covar_pop(1::float8, 'inf'::float8), covar_pop(1::float8, 'nan'::float8)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0], Value::Float64(0.0));
+            assert_eq!(rows[0][1], Value::Null);
+            assert!(matches!(rows[0][2], Value::Float64(v) if v.is_nan()));
+            assert!(matches!(rows[0][3], Value::Float64(v) if v.is_nan()));
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn string_agg_skips_null_values() {
     let base = temp_dir("string_agg_text");
     let mut txns = TransactionManager::new_durable(&base).unwrap();

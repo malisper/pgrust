@@ -187,6 +187,18 @@ fn resolve_aggregate_call(
             | AggFunc::VarSamp
             | AggFunc::StddevPop
             | AggFunc::StddevSamp
+            | AggFunc::RegrCount
+            | AggFunc::RegrSxx
+            | AggFunc::RegrSyy
+            | AggFunc::RegrSxy
+            | AggFunc::RegrAvgX
+            | AggFunc::RegrAvgY
+            | AggFunc::RegrR2
+            | AggFunc::RegrSlope
+            | AggFunc::RegrIntercept
+            | AggFunc::CovarPop
+            | AggFunc::CovarSamp
+            | AggFunc::Corr
             | AggFunc::BoolAnd
             | AggFunc::BoolOr
     ) {

@@ -537,6 +537,18 @@ pub(super) fn aggregate_sql_type(func: AggFunc, arg_type: Option<SqlType>) -> Sq
                 None => SqlType::new(Numeric),
             }
         }
+        AggFunc::RegrCount => SqlType::new(Int8),
+        AggFunc::RegrSxx
+        | AggFunc::RegrSyy
+        | AggFunc::RegrSxy
+        | AggFunc::RegrAvgX
+        | AggFunc::RegrAvgY
+        | AggFunc::RegrR2
+        | AggFunc::RegrSlope
+        | AggFunc::RegrIntercept
+        | AggFunc::CovarPop
+        | AggFunc::CovarSamp
+        | AggFunc::Corr => SqlType::new(Float8),
         AggFunc::BoolAnd | AggFunc::BoolOr => SqlType::new(Bool),
         AggFunc::AnyValue => arg_type.unwrap_or(SqlType::new(Text)),
         AggFunc::ArrayAgg => arg_type
