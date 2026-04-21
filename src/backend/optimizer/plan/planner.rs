@@ -661,6 +661,7 @@ fn standard_planner_with_param_base(
     (
         PlannedStmt {
             command_type,
+            depends_on_row_security: root.parse.depends_on_row_security,
             plan_tree,
             subplans: glob.subplans,
             ext_params,

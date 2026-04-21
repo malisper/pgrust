@@ -35,6 +35,7 @@ impl Database {
         let mut next = auth.clone();
         next.set_session_authorization(target.oid);
         self.install_auth_state(client_id, next.clone());
+        self.plan_cache.invalidate_all();
         Ok(next)
     }
 
@@ -46,6 +47,7 @@ impl Database {
         let mut next = self.auth_state(client_id);
         next.reset_session_authorization();
         self.install_auth_state(client_id, next.clone());
+        self.plan_cache.invalidate_all();
         Ok(next)
     }
 
@@ -58,6 +60,7 @@ impl Database {
         let Some(role_name) = stmt.role_name.as_ref() else {
             next.reset_role();
             self.install_auth_state(client_id, next.clone());
+            self.plan_cache.invalidate_all();
             return Ok(next);
         };
         let auth_catalog = self
@@ -79,6 +82,7 @@ impl Database {
         }
         next.set_role(target.oid);
         self.install_auth_state(client_id, next.clone());
+        self.plan_cache.invalidate_all();
         Ok(next)
     }
 
@@ -90,6 +94,7 @@ impl Database {
         let mut next = self.auth_state(client_id);
         next.reset_role();
         self.install_auth_state(client_id, next.clone());
+        self.plan_cache.invalidate_all();
         Ok(next)
     }
 }

@@ -66,7 +66,7 @@ impl PlanCache {
             plan: None,
             query_desc: None,
         });
-        if entry.query_desc.is_none() {
+        if !query_desc.planned_stmt.depends_on_row_security && entry.query_desc.is_none() {
             entry.query_desc = Some(query_desc.clone());
         }
         Ok(query_desc)
@@ -103,7 +103,11 @@ impl PlanCache {
             plan: None,
             query_desc: None,
         });
-        if plan.is_some() && entry.plan.is_none() {
+        if plan
+            .as_ref()
+            .is_some_and(|planned| !planned.depends_on_row_security)
+            && entry.plan.is_none()
+        {
             entry.plan = plan.clone();
         }
         Ok(plan.unwrap_or_else(|| unreachable!("get_planned_stmt called for non-SELECT")))

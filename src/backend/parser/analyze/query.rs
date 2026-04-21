@@ -93,6 +93,7 @@ impl AnalyzedFrom {
                 alias: Some(relation_name),
                 desc,
                 inh,
+                security_quals: Vec::new(),
                 kind: RangeTblEntryKind::Relation {
                     rel,
                     relation_oid,
@@ -118,6 +119,7 @@ impl AnalyzedFrom {
                 alias: None,
                 desc,
                 inh: false,
+                security_quals: Vec::new(),
                 kind: RangeTblEntryKind::Values {
                     rows,
                     output_columns: output_columns.clone(),
@@ -142,6 +144,7 @@ impl AnalyzedFrom {
                 alias: None,
                 desc,
                 inh: false,
+                security_quals: Vec::new(),
                 kind: RangeTblEntryKind::Function { call },
             }],
             jointree: Some(JoinTreeNode::RangeTblRef(1)),
@@ -162,6 +165,7 @@ impl AnalyzedFrom {
                 alias: None,
                 desc,
                 inh: false,
+                security_quals: Vec::new(),
                 kind: RangeTblEntryKind::WorkTable { worktable_id },
             }],
             jointree: Some(JoinTreeNode::RangeTblRef(1)),
@@ -183,6 +187,7 @@ impl AnalyzedFrom {
                 alias: None,
                 desc,
                 inh: false,
+                security_quals: Vec::new(),
                 kind: RangeTblEntryKind::Cte {
                     cte_id,
                     query: Box::new(query),
@@ -207,6 +212,7 @@ impl AnalyzedFrom {
                 alias: None,
                 desc,
                 inh: false,
+                security_quals: Vec::new(),
                 kind: RangeTblEntryKind::Subquery {
                     query: Box::new(query),
                 },
@@ -271,6 +277,7 @@ impl AnalyzedFrom {
             alias: None,
             desc,
             inh: false,
+            security_quals: Vec::new(),
             kind: RangeTblEntryKind::Join {
                 jointype: kind,
                 joinmergedcols,
@@ -338,6 +345,7 @@ pub(super) fn query_from_from_projection(input: AnalyzedFrom, targets: Vec<Targe
     });
     Query {
         command_type: CommandType::Select,
+        depends_on_row_security: false,
         rtable,
         jointree,
         target_list,
@@ -378,7 +386,13 @@ fn shift_rte_rtindexes(entry: RangeTblEntry, offset: usize) -> RangeTblEntry {
     if offset == 0 {
         return entry;
     }
+    let security_quals = entry
+        .security_quals
+        .into_iter()
+        .map(|expr| shift_expr_rtindexes(expr, offset))
+        .collect();
     RangeTblEntry {
+        security_quals,
         kind: match entry.kind {
             RangeTblEntryKind::Join {
                 jointype,
@@ -402,7 +416,7 @@ fn shift_rte_rtindexes(entry: RangeTblEntry, offset: usize) -> RangeTblEntry {
     }
 }
 
-pub(super) fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
+pub(crate) fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
     match expr {
         Expr::Op(op) => Expr::Op(Box::new(OpExpr {
             args: op

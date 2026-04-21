@@ -1314,6 +1314,7 @@ impl Database {
             &desc,
             &crate::backend::parser::BoundRelationConstraints::default(),
             &[],
+            &[],
             &rows,
             &mut insert_ctx,
             xid,

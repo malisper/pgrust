@@ -184,6 +184,7 @@ pub struct Database {
     pub(crate) backend_cache_states: Arc<RwLock<HashMap<ClientId, BackendCacheState>>>,
     pub(crate) session_interrupt_states: Arc<RwLock<HashMap<ClientId, Arc<InterruptState>>>>,
     pub(crate) session_auth_states: Arc<RwLock<HashMap<ClientId, AuthState>>>,
+    pub(crate) session_row_security_states: Arc<RwLock<HashMap<ClientId, bool>>>,
     pub(crate) session_stats_states: Arc<RwLock<HashMap<ClientId, Arc<RwLock<SessionStatsState>>>>>,
     pub(crate) session_temp_backend_ids: Arc<RwLock<HashMap<ClientId, TempBackendId>>>,
     pub(crate) database_create_grants: Arc<RwLock<Vec<DatabaseCreateGrant>>>,
@@ -358,6 +359,20 @@ impl Database {
         self.session_auth_states.write().insert(client_id, auth);
     }
 
+    pub(crate) fn install_row_security_enabled(&self, client_id: ClientId, enabled: bool) {
+        self.session_row_security_states
+            .write()
+            .insert(client_id, enabled);
+    }
+
+    pub(crate) fn row_security_enabled(&self, client_id: ClientId) -> bool {
+        self.session_row_security_states
+            .read()
+            .get(&client_id)
+            .copied()
+            .unwrap_or(true)
+    }
+
     pub(crate) fn install_stats_state(
         &self,
         client_id: ClientId,
@@ -396,6 +411,10 @@ impl Database {
 
     pub(crate) fn clear_auth_state(&self, client_id: ClientId) {
         self.session_auth_states.write().remove(&client_id);
+    }
+
+    pub(crate) fn clear_row_security_enabled(&self, client_id: ClientId) {
+        self.session_row_security_states.write().remove(&client_id);
     }
 
     pub(crate) fn session_stats_state(
@@ -723,6 +742,7 @@ impl Database {
     pub(crate) fn clear_interrupt_state(&self, client_id: ClientId) {
         self.session_interrupt_states.write().remove(&client_id);
         self.clear_auth_state(client_id);
+        self.clear_row_security_enabled(client_id);
         self.clear_stats_state(client_id);
         self.sequences.clear_currvals_for_client(client_id);
     }

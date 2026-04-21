@@ -1,5 +1,8 @@
 use crate::backend::catalog::CatalogError;
+use crate::backend::catalog::role_memberships::has_effective_membership;
 use crate::include::catalog::{BOOTSTRAP_SUPERUSER_OID, PgAuthIdRow};
+
+const PUBLIC_ROLE_OID: u32 = 0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoleAttributes {
@@ -42,6 +45,22 @@ pub fn find_role_by_name<'a>(rows: &'a [PgAuthIdRow], role_name: &str) -> Option
 
 pub fn find_role_by_oid(rows: &[PgAuthIdRow], oid: u32) -> Option<&PgAuthIdRow> {
     rows.iter().find(|row| row.oid == oid)
+}
+
+pub fn has_bypassrls_privilege(user_oid: u32, rows: &[PgAuthIdRow]) -> bool {
+    find_role_by_oid(rows, user_oid).is_some_and(|row| row.rolsuper || row.rolbypassrls)
+}
+
+pub fn policy_applies_to_role(
+    policy_roles: &[u32],
+    user_oid: u32,
+    authid_rows: &[PgAuthIdRow],
+    auth_members_rows: &[crate::include::catalog::PgAuthMembersRow],
+) -> bool {
+    policy_roles.iter().any(|role_oid| {
+        *role_oid == PUBLIC_ROLE_OID
+            || has_effective_membership(user_oid, *role_oid, authid_rows, auth_members_rows)
+    })
 }
 
 pub fn create_role(
