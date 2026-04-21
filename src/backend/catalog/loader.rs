@@ -335,6 +335,9 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                     desc.not_null_constraint_oid = Some(constraint.oid);
                     desc.not_null_constraint_name = Some(constraint.conname.clone());
                     desc.not_null_constraint_validated = constraint.convalidated;
+                    desc.not_null_constraint_is_local = constraint.conislocal;
+                    desc.not_null_constraint_inhcount = constraint.coninhcount;
+                    desc.not_null_constraint_no_inherit = constraint.connoinherit;
                 }
                 Ok(desc)
             })

@@ -26,7 +26,8 @@ Targeted reruns and notes:
   - partitioned tables, including `PARTITION OF`, `ATTACH PARTITION`, and `DETACH PARTITION`
   - [done] `SET ROLE` / `RESET ROLE`
   - `ALTER VIEW` forms exercised by `alter_table.sql`
-  - `ALTER TABLE` `NO INHERIT` / `INHERIT`
+  - [done] `ALTER TABLE ... NO INHERIT`
+  - `ALTER TABLE ... INHERIT`
   - multi-action `ALTER TABLE` statements
   - [done] `ALTER TABLE ... ADD FOREIGN KEY (...) REFERENCES ...` without `ADD CONSTRAINT name`
   - `ALTER TABLE ... ALTER CONSTRAINT` support beyond deferrability-only changes, including `ENFORCED` / `NOT ENFORCED`
@@ -187,12 +188,13 @@ Targeted reruns and notes:
 - indirect_toast.sql: 12/30
 - inet.sql: 6/116
 - infinite_recurse.sql: 1/3
-- inherit.sql: 361/884
+- inherit.sql: 366/884
   - [done] Emit the duplicate inherited-column merge notice PostgreSQL expects for `CREATE TABLE ... INHERITS (...)` with multiple parent definitions of the same column
   - Preserve PostgreSQL inheritance traversal order for inherited scans and inherited `UPDATE`/`DELETE` target expansion instead of sorting `find_all_inheritors()` output by OID
+  - [done] `ALTER TABLE ... NO INHERIT`, including inherited column / `CHECK` / `NOT NULL` bookkeeping and temp-table relcache updates
   - [done] temp `ALTER TABLE ... ADD COLUMN` inheritance propagation, including propagated defaults and merged `attinhcount`/notice handling for multi-parent temp children
   - [done] temp `ALTER TABLE ... ADD COLUMN` inline `NOT NULL` / `CHECK` propagation, including inherited child-row validation and propagated child constraint enforcement
-  - Large remaining failure buckets are unsupported inheritance-adjacent features: `CHECK ... NO INHERIT`, partitioned-table DDL/attach, `ALTER TABLE ... NO INHERIT`, inherited constraint display via `pg_get_expr`, and some table `GRANT`/`REVOKE` parsing
+  - Large remaining failure buckets are unsupported inheritance-adjacent features: `CHECK ... NO INHERIT`, `NOT NULL ... NO INHERIT`, partitioned-table DDL/attach, inherited constraint display via `pg_get_expr`, and some table `GRANT`/`REVOKE` parsing
 - init_privs.sql: 0/4
 - insert.sql: 54/390
 - insert_conflict.sql: 104/266
@@ -418,7 +420,8 @@ Targeted reruns and notes:
 - partitioned tables, including `PARTITION OF`, `ATTACH PARTITION`, and `DETACH PARTITION`
 - [done] `SET ROLE` / `RESET ROLE`
 - `ALTER VIEW` forms exercised by `alter_table.sql`
-- `ALTER TABLE` `NO INHERIT` / `INHERIT`
+- [done] `ALTER TABLE ... NO INHERIT`
+- `ALTER TABLE ... INHERIT`
 - multi-action `ALTER TABLE` statements
 - `ALTER TABLE ... ALTER CONSTRAINT` deferrability changes
 - `ALTER TABLE ... ALTER COLUMN ... SET/DROP DEFAULT`

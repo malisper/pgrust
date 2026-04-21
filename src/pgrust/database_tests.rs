@@ -2404,6 +2404,173 @@ fn dropping_inherited_child_removes_pg_inherits_rows() {
 }
 
 #[test]
+fn alter_table_no_inherit_localizes_inherited_check_constraint() {
+    let dir = temp_dir("alter_table_no_inherit_check");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(1, "create table ac (aa int)").unwrap();
+    db.execute(
+        1,
+        "alter table ac add constraint ac_check check (aa is not null)",
+    )
+    .unwrap();
+    db.execute(1, "create table bc () inherits (ac)").unwrap();
+
+    assert_eq!(
+        int_value(
+            &query_rows(
+                &db,
+                1,
+                "select count(*)
+                 from pg_inherits i
+                 join pg_class c on c.oid = i.inhrelid
+                 join pg_class p on p.oid = i.inhparent
+                 where c.relname = 'bc' and p.relname = 'ac'",
+            )[0][0],
+        ),
+        1
+    );
+
+    db.execute(1, "alter table bc no inherit ac").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, conislocal, coninhcount
+             from pg_constraint c
+             join pg_class r on r.oid = c.conrelid
+             where r.relname = 'bc'
+             order by conname",
+        ),
+        vec![vec![
+            Value::Text("ac_check".into()),
+            Value::Bool(true),
+            Value::Int16(0),
+        ]]
+    );
+    assert_eq!(
+        int_value(
+            &query_rows(
+                &db,
+                1,
+                "select count(*)
+                 from pg_inherits i
+                 join pg_class c on c.oid = i.inhrelid
+                 where c.relname = 'bc'",
+            )[0][0],
+        ),
+        0
+    );
+
+    match db.execute(1, "insert into bc values (null)") {
+        Err(ExecError::CheckViolation {
+            relation,
+            constraint,
+        }) if relation == "bc" && constraint == "ac_check" => {}
+        other => panic!("expected localized inherited check violation, got {other:?}"),
+    }
+
+    db.execute(1, "alter table bc drop constraint ac_check").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname
+             from pg_constraint c
+             join pg_class r on r.oid = c.conrelid
+             where r.relname = 'bc'",
+        ),
+        Vec::<Vec<Value>>::new()
+    );
+}
+
+#[test]
+fn alter_table_no_inherit_recomputes_multi_parent_column_and_not_null_metadata() {
+    let dir = temp_dir("alter_table_no_inherit_multi_parent");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table p1 (a int not null)")
+        .unwrap();
+    session.execute(&db, "create table c1 () inherits (p1)").unwrap();
+    session
+        .execute(&db, "create table c2 () inherits (p1, c1)")
+        .unwrap();
+
+    session.execute(&db, "alter table c2 no inherit p1").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select attinhcount, attislocal
+             from pg_attribute a
+             join pg_class c on c.oid = a.attrelid
+             where c.relname = 'c2' and a.attname = 'a'",
+        ),
+        vec![vec![Value::Int16(1), Value::Bool(false)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conislocal, coninhcount, connoinherit
+             from pg_constraint pgc
+             join pg_class c on c.oid = pgc.conrelid
+             where c.relname = 'c2' and pgc.contype = 'n'",
+        ),
+        vec![vec![Value::Bool(false), Value::Int16(1), Value::Bool(false)]]
+    );
+
+    session.execute(&db, "alter table c2 no inherit c1").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select attinhcount, attislocal
+             from pg_attribute a
+             join pg_class c on c.oid = a.attrelid
+             where c.relname = 'c2' and a.attname = 'a'",
+        ),
+        vec![vec![Value::Int16(0), Value::Bool(true)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conislocal, coninhcount, connoinherit
+             from pg_constraint pgc
+             join pg_class c on c.oid = pgc.conrelid
+             where c.relname = 'c2' and pgc.contype = 'n'",
+        ),
+        vec![vec![Value::Bool(true), Value::Int16(0), Value::Bool(false)]]
+    );
+    assert_eq!(
+        int_value(
+            &query_rows(
+                &db,
+                1,
+                "select count(*)
+                 from pg_inherits i
+                 join pg_class c on c.oid = i.inhrelid
+                 where c.relname = 'c2'",
+            )[0][0],
+        ),
+        0
+    );
+
+    match session.execute(&db, "insert into c2 values (null)") {
+        Err(ExecError::NotNullViolation {
+            relation,
+            column,
+            ..
+        }) if relation == "c2" && column == "a" => {}
+        other => panic!("expected localized inherited not-null violation, got {other:?}"),
+    }
+}
+
+#[test]
 fn check_constraint_no_inherit_sets_pg_constraint_flag() {
     let dir = temp_dir("check_no_inherit_flag");
     let db = Database::open(&dir, 128).unwrap();
