@@ -187,6 +187,8 @@ fn resolve_aggregate_call(
             | AggFunc::VarSamp
             | AggFunc::StddevPop
             | AggFunc::StddevSamp
+            | AggFunc::BoolAnd
+            | AggFunc::BoolOr
     ) {
         return None;
     }

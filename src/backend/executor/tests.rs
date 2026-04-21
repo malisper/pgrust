@@ -3017,6 +3017,49 @@ fn variance_and_stddev_aliases_use_sample_semantics() {
 }
 
 #[test]
+fn bool_and_every_and_bool_or_match_pg_null_semantics() {
+    let base = temp_dir("bool_aggs");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select bool_and(v), every(v), bool_or(v) from (values (true), (null), (false)) as t(v)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["bool_and", "every", "bool_or"]);
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Bool(false),
+                    Value::Bool(false),
+                    Value::Bool(true)
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select bool_and(v), bool_or(v) from (values (null), (null)) as t(v)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Null, Value::Null]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn string_agg_skips_null_values() {
     let base = temp_dir("string_agg_text");
     let mut txns = TransactionManager::new_durable(&base).unwrap();
