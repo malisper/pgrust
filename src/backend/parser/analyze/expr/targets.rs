@@ -989,13 +989,19 @@ fn bind_select_list_srf_call(
                     grouped_outer,
                     ctes,
                 );
-                if !arg_type.is_array {
+                if !arg_type.is_array && !arg_type.is_multirange() {
                     return Err(ParseError::UnexpectedToken {
-                        expected: "array argument to unnest",
+                        expected: "array or multirange argument to unnest",
                         actual: format!("{arg:?}"),
                     });
                 }
-                let element_type = arg_type.element_type();
+                let element_type = if arg_type.is_multirange() {
+                    crate::include::catalog::range_type_ref_for_multirange_sql_type(arg_type)
+                        .map(|range_type| range_type.sql_type)
+                        .unwrap_or(SqlType::new(SqlTypeKind::Text))
+                } else {
+                    arg_type.element_type()
+                };
                 let column_name = if idx == 0 {
                     "unnest".to_string()
                 } else {

@@ -899,6 +899,9 @@ fn render_raise_value(value: &Value) -> String {
                 .unwrap_or_default()
         }
         Value::Range(_) => crate::backend::executor::render_range_text(value).unwrap_or_default(),
+        Value::Multirange(_) => {
+            crate::backend::executor::render_multirange_text(value).unwrap_or_default()
+        }
         Value::Array(values) => {
             let elems = values.iter().map(render_raise_value).collect::<Vec<_>>();
             format!("{{{}}}", elems.join(","))

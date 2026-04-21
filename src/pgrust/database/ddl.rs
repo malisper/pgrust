@@ -580,8 +580,19 @@ pub(super) fn format_sql_type_name(sql_type: SqlType) -> &'static str {
     if sql_type.is_range() {
         return builtin_range_name_for_sql_type(sql_type).unwrap_or("range");
     }
+    if sql_type.is_multirange() {
+        return crate::include::catalog::builtin_multirange_name_for_sql_type(sql_type)
+            .unwrap_or("multirange");
+    }
     match sql_type.kind {
+        SqlTypeKind::AnyElement => "anyelement",
         SqlTypeKind::AnyArray => "anyarray",
+        SqlTypeKind::AnyRange => "anyrange",
+        SqlTypeKind::AnyMultirange => "anymultirange",
+        SqlTypeKind::AnyCompatible => "anycompatible",
+        SqlTypeKind::AnyCompatibleArray => "anycompatiblearray",
+        SqlTypeKind::AnyCompatibleRange => "anycompatiblerange",
+        SqlTypeKind::AnyCompatibleMultirange => "anycompatiblemultirange",
         SqlTypeKind::Record | SqlTypeKind::Composite => "record",
         SqlTypeKind::Trigger => "trigger",
         SqlTypeKind::Void => "void",
@@ -637,6 +648,7 @@ pub(super) fn format_sql_type_name(sql_type: SqlType) -> &'static str {
         | SqlTypeKind::DateRange
         | SqlTypeKind::TimestampRange
         | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
+        SqlTypeKind::Multirange => unreachable!("multirange handled above"),
     }
 }
 

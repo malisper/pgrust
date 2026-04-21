@@ -3,6 +3,7 @@ use std::cmp::Ordering;
 use super::ExecError;
 use super::expr_casts::cast_value;
 use super::expr_datetime::render_datetime_value_text;
+use super::expr_multirange::eval_multirange_function;
 use super::expr_ops::compare_order_values;
 use super::node_types::{BuiltinScalarFunction, RangeBound, RangeTypeRef, RangeValue, Value};
 use crate::backend::parser::{SqlType, SqlTypeKind};
@@ -10,7 +11,7 @@ use crate::include::catalog::{
     DATE_TYPE_OID, DATERANGE_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID,
     INT8RANGE_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID, RangeCanonicalization,
     TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID,
-    builtin_range_name_for_sql_type, range_type_ref_for_sql_type,
+    range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datetime::DateADT;
 
@@ -28,39 +29,83 @@ pub(crate) fn parse_range_text(text: &str, ty: SqlType) -> Result<Value, ExecErr
             right: Value::Null,
         });
     };
-    let trimmed = text.trim();
-    if trimmed.eq_ignore_ascii_case("empty") {
+    let mut idx = 0usize;
+    skip_ascii_whitespace(text, &mut idx);
+    if starts_with_keyword(&text[idx..], "empty") {
+        idx += "empty".len();
+        skip_ascii_whitespace(text, &mut idx);
+        if idx != text.len() {
+            return Err(malformed_range_literal(
+                text,
+                "Junk after \"empty\" key word.",
+            ));
+        }
         return Ok(Value::Range(empty_range(range_type)));
     }
-    if trimmed.len() < 2 {
-        return Err(invalid_range_input(range_type, text));
-    }
-    let lower_ch = trimmed.as_bytes()[0] as char;
-    let upper_ch = trimmed.as_bytes()[trimmed.len() - 1] as char;
-    if !matches!(lower_ch, '[' | '(') || !matches!(upper_ch, ']' | ')') {
-        return Err(invalid_range_input(range_type, text));
-    }
-    let (lower_raw, upper_raw) =
-        split_range_body(&trimmed[1..trimmed.len() - 1], range_type, text)?;
-    let lower = if lower_raw.is_empty() {
-        None
-    } else {
-        Some(parse_range_bound_text(lower_raw, range_type.subtype)?)
+    let lower_inc = match char_at(text, idx) {
+        Some('[') => {
+            idx += 1;
+            true
+        }
+        Some('(') => {
+            idx += 1;
+            false
+        }
+        _ => {
+            return Err(malformed_range_literal(
+                text,
+                "Missing left parenthesis or bracket.",
+            ));
+        }
     };
-    let upper = if upper_raw.is_empty() {
+    let (lower_raw, lower_infinite, next_idx) = parse_range_bound(text, idx)?;
+    idx = next_idx;
+    if !matches!(char_at(text, idx), Some(',')) {
+        return Err(malformed_range_literal(
+            text,
+            "Missing comma after lower bound.",
+        ));
+    }
+    idx += 1;
+    let (upper_raw, upper_infinite, next_idx) = parse_range_bound(text, idx)?;
+    idx = next_idx;
+    let upper_inc = match char_at(text, idx) {
+        Some(']') => {
+            idx += 1;
+            true
+        }
+        Some(')') => {
+            idx += 1;
+            false
+        }
+        _ => return Err(malformed_range_literal(text, "Too many commas.")),
+    };
+    skip_ascii_whitespace(text, &mut idx);
+    if idx != text.len() {
+        return Err(malformed_range_literal(
+            text,
+            "Junk after right parenthesis or bracket.",
+        ));
+    }
+    let lower = if lower_infinite {
         None
     } else {
-        Some(parse_range_bound_text(upper_raw, range_type.subtype)?)
+        Some(parse_range_bound_text(lower_raw.as_deref().unwrap_or_default(), range_type.subtype)?)
+    };
+    let upper = if upper_infinite {
+        None
+    } else {
+        Some(parse_range_bound_text(upper_raw.as_deref().unwrap_or_default(), range_type.subtype)?)
     };
     Ok(Value::Range(normalize_range(
         range_type,
         lower.map(|value| RangeBound {
             value: Box::new(value),
-            inclusive: lower_ch == '[',
+            inclusive: lower_inc,
         }),
         upper.map(|value| RangeBound {
             value: Box::new(value),
-            inclusive: upper_ch == ']',
+            inclusive: upper_inc,
         }),
     )?))
 }
@@ -191,8 +236,16 @@ pub(crate) fn eval_range_function(
     func: BuiltinScalarFunction,
     values: &[Value],
     result_type: Option<SqlType>,
+    func_variadic: bool,
 ) -> Option<Result<Value, ExecError>> {
     use BuiltinScalarFunction::*;
+
+    if (result_type.is_some_and(SqlType::is_multirange)
+        || values.iter().any(|value| matches!(value, Value::Multirange(_))))
+        && let Some(result) = eval_multirange_function(func, values, result_type, func_variadic)
+    {
+        return Some(result);
+    }
 
     let result = match func {
         RangeConstructor => eval_range_constructor(values, result_type),
@@ -498,7 +551,7 @@ pub(crate) fn empty_range(range_type: RangeTypeRef) -> RangeValue {
     }
 }
 
-fn range_contains_range(left: &RangeValue, right: &RangeValue) -> bool {
+pub(crate) fn range_contains_range(left: &RangeValue, right: &RangeValue) -> bool {
     if right.empty {
         return true;
     }
@@ -509,7 +562,7 @@ fn range_contains_range(left: &RangeValue, right: &RangeValue) -> bool {
         && compare_upper_bounds(left.upper.as_ref(), right.upper.as_ref()) != Ordering::Less
 }
 
-fn range_contains_element(range: &RangeValue, value: &Value) -> Result<bool, ExecError> {
+pub(crate) fn range_contains_element(range: &RangeValue, value: &Value) -> Result<bool, ExecError> {
     ensure_range_subtype(range, value)?;
     if range.empty {
         return Ok(false);
@@ -531,7 +584,7 @@ fn range_contains_element(range: &RangeValue, value: &Value) -> Result<bool, Exe
     Ok(true)
 }
 
-fn range_overlap(left: &RangeValue, right: &RangeValue) -> bool {
+pub(crate) fn range_overlap(left: &RangeValue, right: &RangeValue) -> bool {
     if left.empty || right.empty {
         return false;
     }
@@ -539,7 +592,7 @@ fn range_overlap(left: &RangeValue, right: &RangeValue) -> bool {
         && cmp_upper_to_lower(right.upper.as_ref(), left.lower.as_ref()) != Ordering::Less
 }
 
-fn range_adjacent(left: &RangeValue, right: &RangeValue) -> bool {
+pub(crate) fn range_adjacent(left: &RangeValue, right: &RangeValue) -> bool {
     if left.empty || right.empty {
         return false;
     }
@@ -547,17 +600,29 @@ fn range_adjacent(left: &RangeValue, right: &RangeValue) -> bool {
         || bounds_adjacent(right.upper.as_ref(), left.lower.as_ref())
 }
 
-fn range_strict_left(left: &RangeValue, right: &RangeValue) -> bool {
+pub(crate) fn range_strict_left(left: &RangeValue, right: &RangeValue) -> bool {
     !left.empty
         && !right.empty
         && cmp_upper_to_lower(left.upper.as_ref(), right.lower.as_ref()) == Ordering::Less
 }
 
-fn range_strict_right(left: &RangeValue, right: &RangeValue) -> bool {
+pub(crate) fn range_strict_right(left: &RangeValue, right: &RangeValue) -> bool {
     range_strict_left(right, left)
 }
 
-fn range_intersection(left: &RangeValue, right: &RangeValue) -> RangeValue {
+pub(crate) fn range_over_left_bounds(left: &RangeValue, right: &RangeValue) -> bool {
+    !left.empty
+        && !right.empty
+        && compare_upper_bounds(left.upper.as_ref(), right.upper.as_ref()) != Ordering::Greater
+}
+
+pub(crate) fn range_over_right_bounds(left: &RangeValue, right: &RangeValue) -> bool {
+    !left.empty
+        && !right.empty
+        && compare_lower_bounds(left.lower.as_ref(), right.lower.as_ref()) != Ordering::Less
+}
+
+pub(crate) fn range_intersection(left: &RangeValue, right: &RangeValue) -> RangeValue {
     if !range_overlap(left, right) {
         return empty_range(left.range_type);
     }
@@ -566,7 +631,7 @@ fn range_intersection(left: &RangeValue, right: &RangeValue) -> RangeValue {
     normalize_range(left.range_type, lower, upper).unwrap_or_else(|_| empty_range(left.range_type))
 }
 
-fn range_merge(left: &RangeValue, right: &RangeValue) -> RangeValue {
+pub(crate) fn range_merge(left: &RangeValue, right: &RangeValue) -> RangeValue {
     if left.empty {
         return right.clone();
     }
@@ -593,12 +658,15 @@ fn range_union(left: &RangeValue, right: &RangeValue) -> Result<RangeValue, Exec
     Ok(range_merge(left, right))
 }
 
-fn range_difference(left: &RangeValue, right: &RangeValue) -> Result<RangeValue, ExecError> {
+pub(crate) fn range_difference_segments(
+    left: &RangeValue,
+    right: &RangeValue,
+) -> Result<Vec<RangeValue>, ExecError> {
     if left.empty || right.empty || !range_overlap(left, right) {
-        return Ok(left.clone());
+        return Ok(vec![left.clone()]);
     }
     if range_contains_range(right, left) {
-        return Ok(empty_range(left.range_type));
+        return Ok(Vec::new());
     }
     let left_piece =
         if compare_lower_bounds(left.lower.as_ref(), right.lower.as_ref()) == Ordering::Less {
@@ -620,27 +688,25 @@ fn range_difference(left: &RangeValue, right: &RangeValue) -> Result<RangeValue,
         } else {
             None
         };
-    let left_non_empty = left_piece.as_ref().is_some_and(|range| !range.empty);
-    let right_non_empty = right_piece.as_ref().is_some_and(|range| !range.empty);
-    if left_non_empty && right_non_empty {
-        return Err(ExecError::DetailedError {
+    Ok([left_piece, right_piece]
+        .into_iter()
+        .flatten()
+        .filter(|range| !range.empty)
+        .collect())
+}
+
+fn range_difference(left: &RangeValue, right: &RangeValue) -> Result<RangeValue, ExecError> {
+    let mut segments = range_difference_segments(left, right)?;
+    match segments.len() {
+        0 => Ok(empty_range(left.range_type)),
+        1 => Ok(segments.pop().expect("single difference segment")),
+        _ => Err(ExecError::DetailedError {
             message: "result of range difference would not be contiguous".into(),
             detail: None,
             hint: None,
             sqlstate: "22000",
-        });
+        }),
     }
-    if let Some(range) = left_piece
-        && !range.empty
-    {
-        return Ok(range);
-    }
-    if let Some(range) = right_piece
-        && !range.empty
-    {
-        return Ok(range);
-    }
-    Ok(empty_range(left.range_type))
 }
 
 fn toggle_lower_to_upper_bound(bound: &RangeBound) -> RangeBound {
@@ -897,51 +963,8 @@ fn decode_bound_value(range_type: RangeTypeRef, bytes: &[u8]) -> Result<Value, E
     cast_value(Value::Text(text.into()), range_type.subtype)
 }
 
-fn split_range_body<'a>(
-    body: &'a str,
-    range_type: RangeTypeRef,
-    original: &str,
-) -> Result<(&'a str, &'a str), ExecError> {
-    let bytes = body.as_bytes();
-    let mut idx = 0usize;
-    let mut in_quotes = false;
-    while idx < bytes.len() {
-        match bytes[idx] as char {
-            '\\' => idx += 2,
-            '"' => {
-                in_quotes = !in_quotes;
-                idx += 1;
-            }
-            ',' if !in_quotes => return Ok((&body[..idx], &body[idx + 1..])),
-            _ => idx += 1,
-        }
-    }
-    Err(invalid_range_input(range_type, original))
-}
-
 fn parse_range_bound_text(text: &str, subtype: SqlType) -> Result<Value, ExecError> {
-    let decoded = decode_range_bound_text(text);
-    cast_value(Value::Text(decoded.into()), subtype)
-}
-
-fn decode_range_bound_text(text: &str) -> String {
-    let trimmed = text.trim();
-    if !trimmed.starts_with('"') {
-        return trimmed.to_string();
-    }
-    let inner = &trimmed[1..trimmed.len().saturating_sub(1)];
-    let mut out = String::with_capacity(inner.len());
-    let mut chars = inner.chars();
-    while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            if let Some(next) = chars.next() {
-                out.push(next);
-            }
-        } else {
-            out.push(ch);
-        }
-    }
-    out
+    cast_value(Value::Text(text.into()), subtype)
 }
 
 fn render_bound_text(value: &Value) -> String {
@@ -960,7 +983,13 @@ fn render_bound_text(value: &Value) -> String {
         other => other.as_text().unwrap_or_default().to_string(),
     };
     if needs_range_quotes(&raw) {
-        let escaped = raw.replace('\\', "\\\\").replace('"', "\\\"");
+        let mut escaped = String::with_capacity(raw.len());
+        for ch in raw.chars() {
+            if matches!(ch, '"' | '\\') {
+                escaped.push(ch);
+            }
+            escaped.push(ch);
+        }
         format!("\"{escaped}\"")
     } else {
         raw
@@ -996,11 +1025,70 @@ fn parse_range_flags(value: &Value) -> Result<(bool, bool), ExecError> {
     }
 }
 
-fn invalid_range_input(range_type: RangeTypeRef, value: &str) -> ExecError {
-    ExecError::InvalidRangeInput {
-        ty: builtin_range_name_for_sql_type(range_type.sql_type).unwrap_or("range"),
-        value: value.to_string(),
+fn parse_range_bound(
+    original: &str,
+    mut idx: usize,
+) -> Result<(Option<String>, bool, usize), ExecError> {
+    match char_at(original, idx) {
+        Some(',' | ')' | ']') => return Ok((None, true, idx)),
+        None => return Err(malformed_range_literal(original, "Unexpected end of input.")),
+        _ => {}
     }
+
+    let mut in_quotes = false;
+    let mut out = String::new();
+    while let Some(ch) = char_at(original, idx) {
+        if !in_quotes && matches!(ch, ',' | ')' | ']') {
+            return Ok((Some(out), false, idx));
+        }
+        idx += ch.len_utf8();
+        match ch {
+            '\\' => {
+                let Some(escaped) = char_at(original, idx) else {
+                    return Err(malformed_range_literal(original, "Unexpected end of input."));
+                };
+                out.push(escaped);
+                idx += escaped.len_utf8();
+            }
+            '"' => {
+                if !in_quotes {
+                    in_quotes = true;
+                } else if matches!(char_at(original, idx), Some('"')) {
+                    out.push('"');
+                    idx += 1;
+                } else {
+                    in_quotes = false;
+                }
+            }
+            other => out.push(other),
+        }
+    }
+
+    Err(malformed_range_literal(original, "Unexpected end of input."))
+}
+
+fn malformed_range_literal(value: &str, detail: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("malformed range literal: \"{value}\""),
+        detail: Some(detail.into()),
+        hint: None,
+        sqlstate: "22P02",
+    }
+}
+
+fn starts_with_keyword(text: &str, keyword: &str) -> bool {
+    text.get(..keyword.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(keyword))
+}
+
+fn skip_ascii_whitespace(text: &str, idx: &mut usize) {
+    while *idx < text.len() && text.as_bytes()[*idx].is_ascii_whitespace() {
+        *idx += 1;
+    }
+}
+
+fn char_at(text: &str, idx: usize) -> Option<char> {
+    text.get(idx..)?.chars().next()
 }
 
 fn range_bounds_error(_range_type: RangeTypeRef) -> ExecError {
@@ -1092,6 +1180,35 @@ mod tests {
             render_range_text(&value).unwrap(),
             "[\"2000-01-01 00:00:00\",\"2000-01-02 00:00:00\")"
         );
+    }
+
+    #[test]
+    fn parse_range_rejects_extra_comma() {
+        let err = parse_range_text("(,,1)", SqlType::new(SqlTypeKind::Int4Range)).unwrap_err();
+        match err {
+            ExecError::DetailedError {
+                message, detail, ..
+            } => {
+                assert_eq!(message, "malformed range literal: \"(,,1)\"");
+                assert_eq!(detail.as_deref(), Some("Too many commas."));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_bound_text_doubles_quotes_and_backslashes() {
+        let rendered = render_bound_text(&Value::Text(" a \" \\ ".into()));
+        assert_eq!(rendered, "\" a \"\" \\\\ \"");
+    }
+
+    #[test]
+    fn parse_range_bound_preserves_doubled_quotes_and_backslashes() {
+        let (bound, infinite, idx) =
+            parse_range_bound("(\" a \"\" \\\\ \",)", 1).expect("bound parse");
+        assert!(!infinite);
+        assert_eq!(bound.as_deref(), Some(" a \" \\ "));
+        assert_eq!(idx, "(\" a \"\" \\\\ \",)".len() - 2);
     }
 
     #[test]

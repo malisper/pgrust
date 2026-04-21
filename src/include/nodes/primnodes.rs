@@ -5,7 +5,7 @@ use crate::include::catalog::{
     RECORD_TYPE_OID, builtin_scalar_function_for_proc_oid, builtin_window_function_for_proc_oid,
     proc_oid_for_builtin_scalar_function, proc_oid_for_builtin_window_function,
 };
-use crate::include::nodes::datum::{RangeTypeRef, RecordDescriptor, Value};
+use crate::include::nodes::datum::{MultirangeTypeRef, RangeTypeRef, RecordDescriptor, Value};
 use crate::include::nodes::parsenodes::Query;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +29,7 @@ pub enum ScalarType {
     Polygon,
     Circle,
     Range(RangeTypeRef),
+    Multirange(MultirangeTypeRef),
     Float32,
     Float64,
     Numeric,
@@ -189,6 +190,7 @@ pub enum AggFunc {
     JsonbAgg,
     JsonObjectAgg,
     JsonbObjectAgg,
+    RangeAgg,
     RangeIntersectAgg,
 }
 
@@ -208,6 +210,7 @@ impl AggFunc {
             AggFunc::JsonbAgg => "jsonb_agg",
             AggFunc::JsonObjectAgg => "json_object_agg",
             AggFunc::JsonbObjectAgg => "jsonb_object_agg",
+            AggFunc::RangeAgg => "range_agg",
             AggFunc::RangeIntersectAgg => "range_intersect_agg",
         }
     }

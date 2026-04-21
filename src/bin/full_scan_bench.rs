@@ -294,6 +294,11 @@ fn value_checksum(value: &Value) -> i64 {
             .bytes()
             .map(i64::from)
             .sum(),
+        Value::Multirange(_) => pgrust::backend::executor::render_multirange_text(value)
+            .unwrap_or_default()
+            .bytes()
+            .map(i64::from)
+            .sum(),
         Value::Point(_)
         | Value::Lseg(_)
         | Value::Path(_)

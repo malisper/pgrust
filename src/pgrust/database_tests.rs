@@ -11453,6 +11453,51 @@ fn lazy_index_catalog_helpers_resolve_am_and_opclass_metadata() {
 }
 
 #[test]
+fn btree_index_supports_builtin_nummultirange_keys() {
+    let base = temp_dir("btree_nummultirange_keys");
+    let db = Database::open(&base, 16).unwrap();
+
+    let btree =
+        crate::backend::utils::cache::lsyscache::access_method_row_by_name(&db, 1, None, "btree")
+            .unwrap();
+    let multirange_opclass = crate::backend::utils::cache::lsyscache::default_opclass_for_am_and_type(
+        &db,
+        1,
+        None,
+        btree.oid,
+        crate::include::catalog::NUMMULTIRANGE_TYPE_OID,
+    )
+    .unwrap();
+    assert_eq!(
+        multirange_opclass.oid,
+        crate::include::catalog::MULTIRANGE_BTREE_OPCLASS_OID
+    );
+
+    db.execute(1, "create table mr_items(nmr nummultirange)")
+        .unwrap();
+    db.execute(1, "create index mr_items_idx on mr_items (nmr)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into mr_items values (nummultirange(variadic '{}'::numrange[])), ('{[1.0,2.0)}')",
+    )
+    .unwrap();
+
+    match db
+        .execute(
+            1,
+            "select nmr::text from mr_items where nmr = '{}'::nummultirange order by nmr",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("{}".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn create_operator_class_persists_catalog_rows() {
     let base = temp_dir("create_operator_class_rows");
     let db = Database::open(&base, 16).unwrap();

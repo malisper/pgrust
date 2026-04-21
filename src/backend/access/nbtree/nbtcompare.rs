@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 
+use crate::backend::executor::compare_multirange_values;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::nodes::datum::Value;
 
@@ -25,6 +26,7 @@ pub fn compare_bt_values(left: &Value, right: &Value) -> Ordering {
             .bytes
             .cmp(&b.bytes)
             .then_with(|| a.bit_len.cmp(&b.bit_len)),
+        (Value::Multirange(a), Value::Multirange(b)) => compare_multirange_values(a, b),
         (Value::Numeric(a), Value::Numeric(b)) => a.render().cmp(&b.render()),
         (Value::Float64(a), Value::Float64(b)) => a.total_cmp(b),
         _ => Ordering::Equal,

@@ -353,6 +353,7 @@ fn validate_binary_output_type(sql_type: SqlType) -> Result<(), ExecError> {
                 | SqlTypeKind::TimestampTz
                 | SqlTypeKind::Record
                 | SqlTypeKind::Composite
+                | SqlTypeKind::Multirange
         )
     };
     if supported {
@@ -384,6 +385,17 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         {
             return (array_row.oid as i32, -1, -1);
         }
+        if col.sql_type.type_oid != 0 && matches!(col.sql_type.kind, SqlTypeKind::Multirange) {
+            return (col.sql_type.type_oid as i32, -1, -1);
+        }
+        if let Some(multirange_type) =
+            crate::include::catalog::multirange_type_ref_for_sql_type(col.sql_type)
+            && let Some(array_row) = builtin_type_rows()
+                .into_iter()
+                .find(|row| row.typelem == multirange_type.type_oid())
+        {
+            return (array_row.oid as i32, -1, -1);
+        }
     }
     if matches!(
         col.sql_type.kind,
@@ -395,6 +407,11 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
     if let Some(range_type) = range_type_ref_for_sql_type(col.sql_type) {
         return (range_type.type_oid() as i32, -1, col.sql_type.typmod);
     }
+    if let Some(multirange_type) =
+        crate::include::catalog::multirange_type_ref_for_sql_type(col.sql_type)
+    {
+        return (multirange_type.type_oid() as i32, -1, col.sql_type.typmod);
+    }
     if !col.sql_type.is_array && col.sql_type.type_oid != 0 {
         return (col.sql_type.type_oid as i32, -1, col.sql_type.typmod);
     }
@@ -404,6 +421,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Int4 => 1007,
             SqlTypeKind::Int8 => 1016,
             SqlTypeKind::Range => col.sql_type.type_oid as i32,
+            SqlTypeKind::Multirange => col.sql_type.type_oid as i32,
             SqlTypeKind::Void => unreachable!("void arrays are unsupported"),
             SqlTypeKind::FdwHandler => unreachable!("fdw_handler arrays are unsupported"),
             SqlTypeKind::Oid => 1028,
@@ -449,6 +467,15 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             | SqlTypeKind::PgNodeTree => 1009,
             SqlTypeKind::Bool => 1000,
             SqlTypeKind::Varchar => 1015,
+            SqlTypeKind::AnyElement
+            | SqlTypeKind::AnyRange
+            | SqlTypeKind::AnyMultirange
+            | SqlTypeKind::AnyCompatible
+            | SqlTypeKind::AnyCompatibleArray
+            | SqlTypeKind::AnyCompatibleRange
+            | SqlTypeKind::AnyCompatibleMultirange => {
+                unreachable!("polymorphic pseudo-types are not concrete SQL array types")
+            }
             SqlTypeKind::AnyArray => unreachable!("anyarray is not a concrete SQL array type"),
             SqlTypeKind::Trigger => unreachable!("trigger arrays are unsupported"),
             SqlTypeKind::Record | SqlTypeKind::Composite => {
@@ -464,7 +491,20 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         return (oid, -1, -1);
     }
     match col.sql_type.kind {
+        SqlTypeKind::AnyElement => (crate::include::catalog::ANYELEMENTOID as i32, 4, -1),
         SqlTypeKind::AnyArray => (2277, -1, -1),
+        SqlTypeKind::AnyRange => (crate::include::catalog::ANYRANGEOID as i32, -1, -1),
+        SqlTypeKind::AnyMultirange => (crate::include::catalog::ANYMULTIRANGEOID as i32, -1, -1),
+        SqlTypeKind::AnyCompatible => (crate::include::catalog::ANYCOMPATIBLEOID as i32, 4, -1),
+        SqlTypeKind::AnyCompatibleArray => {
+            (crate::include::catalog::ANYCOMPATIBLEARRAYOID as i32, -1, -1)
+        }
+        SqlTypeKind::AnyCompatibleRange => {
+            (crate::include::catalog::ANYCOMPATIBLERANGEOID as i32, -1, -1)
+        }
+        SqlTypeKind::AnyCompatibleMultirange => {
+            (crate::include::catalog::ANYCOMPATIBLEMULTIRANGEOID as i32, -1, -1)
+        }
         SqlTypeKind::Trigger => (TRIGGER_TYPE_OID as i32, -1, -1),
         SqlTypeKind::FdwHandler => (crate::include::catalog::FDW_HANDLER_TYPE_OID as i32, 4, -1),
         SqlTypeKind::Record | SqlTypeKind::Composite => {
@@ -522,6 +562,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         | SqlTypeKind::DateRange
         | SqlTypeKind::TimestampRange
         | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
+        SqlTypeKind::Multirange => unreachable!("multirange handled above"),
     }
 }
 
@@ -608,6 +649,12 @@ pub(crate) fn send_typed_data_row(
             }
             Value::Range(_) => {
                 let rendered = render_range_text(val).unwrap_or_default();
+                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
+                buf.extend_from_slice(rendered.as_bytes());
+            }
+            Value::Multirange(_) => {
+                let rendered = crate::backend::executor::render_multirange_text(val)
+                    .unwrap_or_default();
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }

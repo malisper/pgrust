@@ -488,37 +488,77 @@ impl Database {
             stmt,
             configured_search_path,
         )?;
+        let search_path = self.effective_search_path(client_id, configured_search_path);
+        let base_type_rows = self
+            .backend_catcache(client_id, Some((xid, cid)))
+            .map_err(|err| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "catalog lookup",
+                    actual: format!("{err:?}"),
+                })
+            })?
+            .type_rows();
+        let enum_type_rows = self.enum_type_rows_for_search_path(&search_path);
+        let range_type_snapshot = self.range_types.read().clone();
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let subtype = resolve_raw_type_name(&stmt.subtype, &catalog).map_err(ExecError::Parse)?;
         let subtype_oid = catalog
             .type_oid_for_sql_type(subtype)
             .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(stmt.type_name.clone())))?;
         let subtype = subtype.with_identity(subtype_oid, subtype.typrelid);
-        if catalog.type_rows().into_iter().any(|row| {
-            row.typelem == 0
-                && row.typnamespace == namespace_oid
-                && row.typname.eq_ignore_ascii_case(&object_name)
-        }) {
+        drop(catalog);
+        if type_name_exists_in_rows(&base_type_rows, namespace_oid, &object_name)
+            || type_name_exists_in_rows(&enum_type_rows, namespace_oid, &object_name)
+            || range_type_name_exists_in_snapshot(&range_type_snapshot, namespace_oid, &object_name)
+        {
             return Err(type_already_exists_error(&range_type_display_name(stmt)));
         }
+        let multirange_name = stmt
+            .multirange_type_name
+            .clone()
+            .unwrap_or_else(|| default_multirange_type_name(&object_name));
+        if type_name_exists_in_rows(&base_type_rows, namespace_oid, &multirange_name)
+            || type_name_exists_in_rows(&enum_type_rows, namespace_oid, &multirange_name)
+            || range_type_or_multirange_name_exists_in_snapshot(
+                &range_type_snapshot,
+                namespace_oid,
+                &multirange_name,
+            )
+        {
+            return Err(multirange_type_already_exists_error(
+                &range_type_display_name(stmt),
+                &multirange_name,
+            ));
+        }
+        let oid = self.next_dynamic_type_oid(None, Some(&range_type_snapshot))?;
+
         let mut range_types = self.range_types.write();
         if range_types.contains_key(&normalized) {
             return Err(type_already_exists_error(&range_type_display_name(stmt)));
         }
         if range_types.values().any(|entry| {
-            entry.namespace_oid == namespace_oid && entry.name.eq_ignore_ascii_case(&object_name)
+            entry.namespace_oid == namespace_oid
+                && (entry.name.eq_ignore_ascii_case(&object_name)
+                    || entry.name.eq_ignore_ascii_case(&multirange_name)
+                    || entry.multirange_name.eq_ignore_ascii_case(&multirange_name))
         }) {
-            return Err(type_already_exists_error(&range_type_display_name(stmt)));
+            return Err(multirange_type_already_exists_error(
+                &range_type_display_name(stmt),
+                &multirange_name,
+            ));
         }
-
-        let oid = self.next_dynamic_type_oid(None, Some(&range_types))?;
         let array_oid = oid.saturating_add(1);
+        let multirange_oid = oid.saturating_add(2);
+        let multirange_array_oid = oid.saturating_add(3);
         range_types.insert(
             normalized,
             RangeTypeEntry {
                 oid,
                 array_oid,
+                multirange_oid,
+                multirange_array_oid,
                 name: object_name,
+                multirange_name,
                 namespace_oid,
                 subtype,
                 subtype_diff: stmt.subtype_diff.clone(),
@@ -586,7 +626,7 @@ impl Database {
         existing_range_types: Option<&std::collections::BTreeMap<String, RangeTypeEntry>>,
     ) -> Result<u32, ExecError> {
         let next_catalog_oid = {
-            let catalog = self.catalog.write();
+            let catalog = self.catalog.read();
             let snapshot = catalog.catalog_snapshot().map_err(map_catalog_error)?;
             snapshot.next_oid()
         };
@@ -617,7 +657,7 @@ impl Database {
                 existing_range_types
                     .into_iter()
                     .flat_map(|range_types| range_types.values())
-                    .map(|entry| entry.array_oid.saturating_add(1)),
+                    .map(|entry| entry.multirange_array_oid.saturating_add(1)),
             )
             .chain(
                 existing_range_types
@@ -627,7 +667,7 @@ impl Database {
                     .flat_map(|range_types| {
                         range_types
                             .values()
-                            .map(|entry| entry.array_oid.saturating_add(1))
+                            .map(|entry| entry.multirange_array_oid.saturating_add(1))
                             .collect::<Vec<_>>()
                     }),
             )
@@ -659,11 +699,73 @@ fn range_type_display_name(stmt: &CreateRangeTypeStatement) -> String {
     }
 }
 
+fn default_multirange_type_name(range_type_name: &str) -> String {
+    let lower = range_type_name.to_ascii_lowercase();
+    if let Some(start) = lower.find("range") {
+        let end = start + "range".len();
+        format!(
+            "{}multirange{}",
+            &range_type_name[..start],
+            &range_type_name[end..]
+        )
+    } else {
+        format!("{range_type_name}_multirange")
+    }
+}
+
+fn type_name_exists_in_rows(
+    rows: &[crate::include::catalog::PgTypeRow],
+    namespace_oid: u32,
+    name: &str,
+) -> bool {
+    rows.iter().any(|row| {
+        row.typelem == 0
+            && row.typnamespace == namespace_oid
+            && row.typname.eq_ignore_ascii_case(name)
+    })
+}
+
+fn range_type_name_exists_in_snapshot(
+    range_types: &std::collections::BTreeMap<String, RangeTypeEntry>,
+    namespace_oid: u32,
+    name: &str,
+) -> bool {
+    range_types.values().any(|entry| {
+        entry.namespace_oid == namespace_oid && entry.name.eq_ignore_ascii_case(name)
+    })
+}
+
+fn range_type_or_multirange_name_exists_in_snapshot(
+    range_types: &std::collections::BTreeMap<String, RangeTypeEntry>,
+    namespace_oid: u32,
+    name: &str,
+) -> bool {
+    range_types.values().any(|entry| {
+        entry.namespace_oid == namespace_oid
+            && (entry.name.eq_ignore_ascii_case(name)
+                || entry.multirange_name.eq_ignore_ascii_case(name))
+    })
+}
+
 fn type_already_exists_error(type_name: &str) -> ExecError {
     ExecError::DetailedError {
         message: format!("type \"{type_name}\" already exists"),
         detail: None,
         hint: None,
+        sqlstate: "42710",
+    }
+}
+
+fn multirange_type_already_exists_error(range_name: &str, multirange_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("type \"{multirange_name}\" already exists"),
+        detail: Some(format!(
+            "Automatic creation of multirange type for range type \"{range_name}\" failed."
+        )),
+        hint: Some(
+            "Choose a different type name, or supply a multirange type name with multirange_type_name."
+                .into(),
+        ),
         sqlstate: "42710",
     }
 }

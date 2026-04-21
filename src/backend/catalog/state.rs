@@ -2112,7 +2112,17 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
         if sql_type.element_type().is_range() {
             return "unsupported array";
         }
+        if sql_type.element_type().is_multirange() {
+            return "unsupported array";
+        }
         return match sql_type.kind {
+            SqlTypeKind::AnyElement
+            | SqlTypeKind::AnyRange
+            | SqlTypeKind::AnyMultirange
+            | SqlTypeKind::AnyCompatible
+            | SqlTypeKind::AnyCompatibleArray
+            | SqlTypeKind::AnyCompatibleRange
+            | SqlTypeKind::AnyCompatibleMultirange => "unsupported array",
             SqlTypeKind::AnyArray => "anyarray",
             SqlTypeKind::Record => "unsupported array",
             SqlTypeKind::Composite => "_record",
@@ -2170,15 +2180,27 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
             | SqlTypeKind::DateRange
             | SqlTypeKind::TimestampRange
             | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
+            SqlTypeKind::Multirange => unreachable!("multirange handled above"),
         };
     }
 
     if sql_type.is_range() {
         return builtin_range_name_for_sql_type(sql_type).unwrap_or("range");
     }
+    if sql_type.is_multirange() {
+        return crate::include::catalog::builtin_multirange_name_for_sql_type(sql_type)
+            .unwrap_or("multirange");
+    }
 
     match sql_type.kind {
+        SqlTypeKind::AnyElement => "anyelement",
         SqlTypeKind::AnyArray => "anyarray",
+        SqlTypeKind::AnyRange => "anyrange",
+        SqlTypeKind::AnyMultirange => "anymultirange",
+        SqlTypeKind::AnyCompatible => "anycompatible",
+        SqlTypeKind::AnyCompatibleArray => "anycompatiblearray",
+        SqlTypeKind::AnyCompatibleRange => "anycompatiblerange",
+        SqlTypeKind::AnyCompatibleMultirange => "anycompatiblemultirange",
         SqlTypeKind::Record => "record",
         SqlTypeKind::Composite => "record",
         SqlTypeKind::Void => "void",
@@ -2235,6 +2257,7 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
         | SqlTypeKind::DateRange
         | SqlTypeKind::TimestampRange
         | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
+        SqlTypeKind::Multirange => unreachable!("multirange handled above"),
     }
 }
 

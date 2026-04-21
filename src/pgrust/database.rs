@@ -249,7 +249,10 @@ pub(crate) struct EnumTypeEntry {
 pub(crate) struct RangeTypeEntry {
     pub oid: u32,
     pub array_oid: u32,
+    pub multirange_oid: u32,
+    pub multirange_array_oid: u32,
     pub name: String,
+    pub multirange_name: String,
     pub namespace_oid: u32,
     pub subtype: SqlType,
     pub subtype_diff: Option<String>,
@@ -623,7 +626,10 @@ impl Database {
                     SqlTypeKind::Int4 | SqlTypeKind::Int8 | SqlTypeKind::Date
                 );
                 let base_sql_type = SqlType::range(entry.oid, entry.subtype.type_oid)
-                    .with_range_metadata(entry.subtype.type_oid, 0, discrete);
+                    .with_range_metadata(entry.subtype.type_oid, entry.multirange_oid, discrete);
+                let multirange_sql_type = SqlType::multirange(entry.multirange_oid, entry.oid)
+                    .with_range_metadata(entry.subtype.type_oid, entry.multirange_oid, discrete)
+                    .with_multirange_range_oid(entry.oid);
                 [
                     PgTypeRow {
                         oid: entry.oid,
@@ -651,6 +657,32 @@ impl Database {
                         typarray: 0,
                         sql_type: SqlType::array_of(base_sql_type),
                     },
+                    PgTypeRow {
+                        oid: entry.multirange_oid,
+                        typname: entry.multirange_name.clone(),
+                        typnamespace: entry.namespace_oid,
+                        typowner: BOOTSTRAP_SUPERUSER_OID,
+                        typlen: -1,
+                        typalign: AttributeAlign::Int,
+                        typstorage: AttributeStorage::Extended,
+                        typrelid: 0,
+                        typelem: 0,
+                        typarray: entry.multirange_array_oid,
+                        sql_type: multirange_sql_type,
+                    },
+                    PgTypeRow {
+                        oid: entry.multirange_array_oid,
+                        typname: format!("_{}", entry.multirange_name),
+                        typnamespace: entry.namespace_oid,
+                        typowner: BOOTSTRAP_SUPERUSER_OID,
+                        typlen: -1,
+                        typalign: AttributeAlign::Int,
+                        typstorage: AttributeStorage::Extended,
+                        typrelid: 0,
+                        typelem: entry.multirange_oid,
+                        typarray: 0,
+                        sql_type: SqlType::array_of(multirange_sql_type),
+                    },
                 ]
             })
             .collect::<Vec<_>>();
@@ -674,6 +706,7 @@ impl Database {
             .map(|entry| PgRangeRow {
                 rngtypid: entry.oid,
                 rngsubtype: entry.subtype.type_oid,
+                rngmultitypid: entry.multirange_oid,
                 rngcollation: 0,
                 rngcanonical: None,
                 rngsubdiff: entry.subtype_diff.clone(),

@@ -747,6 +747,9 @@ pub(crate) fn jsonb_from_value(
         Value::Range(_) => JsonbValue::String(
             crate::backend::executor::render_range_text(value).unwrap_or_default(),
         ),
+        Value::Multirange(_) => JsonbValue::String(
+            crate::backend::executor::render_multirange_text(value).unwrap_or_default(),
+        ),
         Value::TsVector(v) => JsonbValue::String(crate::backend::executor::render_tsvector_text(v)),
         Value::TsQuery(v) => JsonbValue::String(crate::backend::executor::render_tsquery_text(v)),
         Value::Json(text) => JsonbValue::from_serde(parse_json_text_input(text.as_str())?)?,
@@ -1027,6 +1030,9 @@ pub(crate) fn jsonb_builder_key(value: &Value) -> Result<String, ExecError> {
         Value::Range(_) => {
             Ok(crate::backend::executor::render_range_text(value).unwrap_or_default())
         }
+        Value::Multirange(_) => Ok(
+            crate::backend::executor::render_multirange_text(value).unwrap_or_default(),
+        ),
         Value::TsVector(v) => Ok(crate::backend::executor::render_tsvector_text(v)),
         Value::TsQuery(v) => Ok(crate::backend::executor::render_tsquery_text(v)),
         Value::Array(items) => Ok(format_array_text(items)),
