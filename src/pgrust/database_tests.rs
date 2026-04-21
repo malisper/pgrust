@@ -2320,7 +2320,7 @@ fn inheritance_multi_parent_create_and_drop_clean_up_catalog_rows() {
         .execute(&db, "create table d (dd text) inherits (b, c, a)")
         .unwrap();
     assert_eq!(
-        take_backend_notices().into_iter().collect::<Vec<_>>(),
+        take_notice_messages(),
         vec![
             r#"merging multiple inherited definitions of column "aa""#.to_string(),
             r#"merging multiple inherited definitions of column "aa""#.to_string(),
@@ -6446,7 +6446,7 @@ fn alter_table_add_column_merges_temp_multi_parent_child_metadata() {
         .execute(&db, "alter table pp1 add column a2 int4")
         .unwrap();
     assert_eq!(
-        take_backend_notices().into_iter().collect::<Vec<_>>(),
+        take_notice_messages(),
         vec![r#"merging definition of column "a2" for child "cc2""#.to_string()]
     );
 
