@@ -874,6 +874,29 @@ fn evaluate_aggregate_window(
         return Ok(vec![state.finalize(); partition_rows.len()]);
     }
 
+    // PostgreSQL advances aggregate state incrementally for nonshrinking frames.
+    // Match that behavior for prefix-style frames so running totals do not
+    // devolve into per-row full-frame rescans.
+    if frame_uses_prefix_accumulation(clause, partition_rows, ctx, aggref)? {
+        let mut values = Vec::with_capacity(partition_rows.len());
+        let mut state = AccumState::new(func, aggref.aggdistinct, aggref.aggtype);
+        let mut advanced_end = 0usize;
+        for row_index in 0..partition_rows.len() {
+            let (_, frame_end) = evaluate_window_frame(ctx, clause, partition_rows, row_index)?;
+            while advanced_end < frame_end {
+                advance_window_aggregate(
+                    ctx,
+                    &mut state,
+                    &mut partition_rows[advanced_end].row,
+                    aggref,
+                )?;
+                advanced_end += 1;
+            }
+            values.push(state.finalize());
+        }
+        return Ok(values);
+    }
+
     let mut values = Vec::with_capacity(partition_rows.len());
     for row_index in 0..partition_rows.len() {
         let (frame_start, frame_end) =
@@ -885,6 +908,43 @@ fn evaluate_aggregate_window(
         values.push(state.finalize());
     }
     Ok(values)
+}
+
+fn frame_uses_prefix_accumulation(
+    clause: &WindowClause,
+    partition_rows: &mut [PreparedWindowRow],
+    ctx: &mut ExecutorContext,
+    _aggref: &crate::include::nodes::primnodes::Aggref,
+) -> Result<bool, ExecError> {
+    let frame = &clause.spec.frame;
+    if !matches!(frame.start_bound, WindowFrameBound::UnboundedPreceding) {
+        return Ok(false);
+    }
+    if partition_rows.is_empty() {
+        return Ok(true);
+    }
+
+    match (&frame.mode, &frame.end_bound) {
+        (WindowFrameMode::Rows, WindowFrameBound::CurrentRow)
+        | (WindowFrameMode::Groups, WindowFrameBound::CurrentRow)
+        | (WindowFrameMode::Range, WindowFrameBound::CurrentRow) => {}
+        (WindowFrameMode::Rows, WindowFrameBound::OffsetFollowing(_))
+        | (WindowFrameMode::Groups, WindowFrameBound::OffsetFollowing(_))
+        | (WindowFrameMode::Range, WindowFrameBound::OffsetFollowing(_)) => {}
+        _ => return Ok(false),
+    }
+
+    let mut previous_end = 0usize;
+    for row_index in 0..partition_rows.len() {
+        let (frame_start, frame_end) =
+            evaluate_window_frame(ctx, clause, partition_rows, row_index)?;
+        if frame_start != 0 || frame_end < previous_end {
+            return Ok(false);
+        }
+        previous_end = frame_end;
+    }
+
+    Ok(true)
 }
 
 pub(crate) fn execute_window_clause(

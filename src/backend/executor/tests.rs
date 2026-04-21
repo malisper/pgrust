@@ -10738,6 +10738,51 @@ fn window_aggregate_supports_partitioning_and_running_totals() {
 }
 
 #[test]
+fn window_duplicate_running_aggregates_in_subquery_match() {
+    let base = temp_dir("window_duplicate_running_aggregates_in_subquery_match");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    let mut values = String::new();
+    for id in 1..=200 {
+        if !values.is_empty() {
+            values.push_str(", ");
+        }
+        let note = if id % 2 == 0 { "x" } else { "y" };
+        values.push_str(&format!("({id}, 'p{id}', '{note}')"));
+    }
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        &format!("insert into people (id, name, note) values {values}"),
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select *
+         from (
+             select count(*) over (partition by id % 4 order by id % 10) +
+                        sum(id) over (partition by note order by id % 10) as total,
+                    count(*) over (partition by id % 4 order by id % 10) as fourcount,
+                    sum(id) over (partition by note order by id % 10) as notesum
+             from people
+         ) s
+         where total <> fourcount + notesum",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert!(rows.is_empty(), "unexpected rows: {rows:?}")
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn explain_shows_windowagg_node_details() {
     let base = temp_dir("explain_windowagg");
     let txns = TransactionManager::new_durable(&base).unwrap();
