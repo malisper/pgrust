@@ -8624,6 +8624,72 @@ fn parse_insert_alias_and_begin_isolation_level() {
 }
 
 #[test]
+fn parse_dml_returning_targets() {
+    assert!(matches!(
+        parse_statement("insert into people (id) values (1) returning *").unwrap(),
+        Statement::Insert(InsertStatement {
+            table_name,
+            returning,
+            ..
+        }) if table_name == "people"
+            && returning == vec![SelectItem {
+                output_name: "*".into(),
+                expr: SqlExpr::Column("*".into()),
+            }]
+    ));
+
+    assert!(matches!(
+        parse_statement("update people set name = 'alice' returning id, upper(name) as upper_name")
+            .unwrap(),
+        Statement::Update(UpdateStatement {
+            table_name,
+            returning,
+            ..
+        }) if table_name == "people"
+            && returning == vec![
+                SelectItem {
+                    output_name: "id".into(),
+                    expr: SqlExpr::Column("id".into()),
+                },
+                SelectItem {
+                    output_name: "upper_name".into(),
+                    expr: SqlExpr::FuncCall {
+                        name: "upper".into(),
+                        args: vec![SqlFunctionArg::positional(SqlExpr::Column("name".into()))],
+                        func_variadic: false,
+                        over: None,
+                    },
+                },
+            ]
+    ));
+
+    assert!(matches!(
+        parse_statement("delete from people where id = 1 returning id, upper(name) as upper_name")
+            .unwrap(),
+        Statement::Delete(DeleteStatement {
+            table_name,
+            returning,
+            ..
+        }) if table_name == "people"
+            && returning == vec![
+                SelectItem {
+                    output_name: "id".into(),
+                    expr: SqlExpr::Column("id".into()),
+                },
+                SelectItem {
+                    output_name: "upper_name".into(),
+                    expr: SqlExpr::FuncCall {
+                        name: "upper".into(),
+                        args: vec![SqlFunctionArg::positional(SqlExpr::Column("name".into()))],
+                        func_variadic: false,
+                        over: None,
+                    },
+                },
+            ]
+    ));
+}
+
+#[test]
 fn parse_create_table_column_defaults() {
     let stmt = parse_statement(
         "create table bit_defaults (b1 bit(4) default '1001', b2 bit varying(5) default B'0101')",

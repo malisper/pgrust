@@ -4833,6 +4833,81 @@ fn simple_view_auto_dml_routes_to_base_table() {
 }
 
 #[test]
+fn auto_view_dml_returning_uses_view_projection() {
+    let base = temp_dir("auto_view_dml_returning");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table people (id int4 not null, given_name text, tenant text default 'main' not null)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view public_people as select id as person_id, given_name as display_name from people",
+    )
+    .unwrap();
+
+    match db
+        .execute(1, "insert into public_people values (1, 'Ada') returning *")
+        .unwrap()
+    {
+        StatementResult::Query { columns, rows, .. } => {
+            assert_eq!(
+                columns
+                    .iter()
+                    .map(|column| column.name.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["person_id", "display_name"]
+            );
+            assert_eq!(rows, vec![vec![Value::Int32(1), Value::Text("Ada".into())]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+
+    match db
+        .execute(
+            1,
+            "update public_people set display_name = 'Grace' where person_id = 1 returning person_id, display_name || '!' as emphasized_name",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int32(1), Value::Text("Grace!".into())]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+
+    match db
+        .execute(
+            1,
+            "delete from public_people where person_id = 1 returning display_name, person_id",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Text("Grace".into()), Value::Int32(1)]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id, given_name, tenant from people order by id",
+        ),
+        Vec::<Vec<Value>>::new()
+    );
+}
+
+#[test]
 fn nested_simple_views_auto_dml_route_to_base_table() {
     let base = temp_dir("auto_nested_view_dml");
     let db = Database::open(&base, 16).unwrap();
@@ -4862,6 +4937,79 @@ fn nested_simple_views_auto_dml_route_to_base_table() {
 
     db.execute(1, "delete from second_view where id = 1")
         .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select id, name from base_items"),
+        Vec::<Vec<Value>>::new()
+    );
+}
+
+#[test]
+fn nested_simple_views_auto_dml_returning_route_to_base_table() {
+    let base = temp_dir("auto_nested_view_dml_returning");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table base_items (id int4 not null, name text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create view first_view as select id as inner_id, name as inner_name from base_items",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view second_view as select inner_id as outer_id, inner_name as outer_name from first_view",
+    )
+    .unwrap();
+
+    match db
+        .execute(1, "insert into second_view values (1, 'alpha') returning *")
+        .unwrap()
+    {
+        StatementResult::Query { columns, rows, .. } => {
+            assert_eq!(
+                columns
+                    .iter()
+                    .map(|column| column.name.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["outer_id", "outer_name"]
+            );
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int32(1), Value::Text("alpha".into())]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+
+    match db
+        .execute(
+            1,
+            "update second_view set outer_name = 'beta' where outer_id = 1 returning outer_name",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("beta".into())]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+
+    match db
+        .execute(
+            1,
+            "delete from second_view where outer_id = 1 returning outer_id, outer_name || '!' as emphasized_name",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int32(1), Value::Text("beta!".into())]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+
     assert_eq!(
         query_rows(&db, 1, "select id, name from base_items"),
         Vec::<Vec<Value>>::new()
