@@ -12,6 +12,7 @@ use crate::backend::catalog::roles::{
     drop_roles as drop_role_rows, rename_role as rename_role_row,
 };
 use crate::backend::catalog::rows::PhysicalCatalogRows;
+use crate::backend::utils::cache::catcache::CatCache;
 use crate::include::catalog::{BootstrapCatalogKind, PgAuthIdRow, PgAuthMembersRow};
 
 #[cfg(test)]
@@ -23,6 +24,21 @@ fn role_catalog_effect(kinds: &[BootstrapCatalogKind]) -> CatalogMutationEffect 
         touched_catalogs: kinds.to_vec(),
         ..CatalogMutationEffect::default()
     }
+}
+
+fn visible_role_catcache_for_ctx(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+) -> Result<CatCache, CatalogError> {
+    // Read the visible role rows without carrying the txns read lock into the
+    // later MVCC insert/delete helpers, which may need to reacquire it.
+    let snapshot = ctx
+        .txns
+        .read()
+        .snapshot_for_command(ctx.xid, ctx.cid)
+        .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+    let txns = ctx.txns.read();
+    store.catcache_with_snapshot(&ctx.pool, &txns, &snapshot, ctx.client_id)
 }
 
 impl CatalogStore {
@@ -452,13 +468,7 @@ impl CatalogStore {
         attrs: &RoleAttributes,
         ctx: &CatalogWriteContext,
     ) -> Result<(PgAuthIdRow, CatalogMutationEffect), CatalogError> {
-        let snapshot = ctx
-            .txns
-            .read()
-            .snapshot_for_command(ctx.xid, ctx.cid)
-            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
-        let txns = ctx.txns.read();
-        let catcache = self.catcache_with_snapshot(&ctx.pool, &txns, &snapshot, ctx.client_id)?;
+        let catcache = visible_role_catcache_for_ctx(self, ctx)?;
         let mut authids = catcache.authid_rows();
         let mut next_oid = self.allocate_next_oid(0)?;
         let row = create_role_row(&mut authids, &mut next_oid, role_name, attrs)?;
@@ -477,13 +487,7 @@ impl CatalogStore {
         new_name: &str,
         ctx: &CatalogWriteContext,
     ) -> Result<(PgAuthIdRow, CatalogMutationEffect), CatalogError> {
-        let snapshot = ctx
-            .txns
-            .read()
-            .snapshot_for_command(ctx.xid, ctx.cid)
-            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
-        let txns = ctx.txns.read();
-        let catcache = self.catcache_with_snapshot(&ctx.pool, &txns, &snapshot, ctx.client_id)?;
+        let catcache = visible_role_catcache_for_ctx(self, ctx)?;
         let mut authids = catcache.authid_rows();
         let old_row = authids
             .iter()
@@ -519,13 +523,7 @@ impl CatalogStore {
         attrs: &RoleAttributes,
         ctx: &CatalogWriteContext,
     ) -> Result<(PgAuthIdRow, CatalogMutationEffect), CatalogError> {
-        let snapshot = ctx
-            .txns
-            .read()
-            .snapshot_for_command(ctx.xid, ctx.cid)
-            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
-        let txns = ctx.txns.read();
-        let catcache = self.catcache_with_snapshot(&ctx.pool, &txns, &snapshot, ctx.client_id)?;
+        let catcache = visible_role_catcache_for_ctx(self, ctx)?;
         let mut authids = catcache.authid_rows();
         let old_row = authids
             .iter()
@@ -560,13 +558,7 @@ impl CatalogStore {
         role_name: &str,
         ctx: &CatalogWriteContext,
     ) -> Result<(PgAuthIdRow, CatalogMutationEffect), CatalogError> {
-        let snapshot = ctx
-            .txns
-            .read()
-            .snapshot_for_command(ctx.xid, ctx.cid)
-            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
-        let txns = ctx.txns.read();
-        let catcache = self.catcache_with_snapshot(&ctx.pool, &txns, &snapshot, ctx.client_id)?;
+        let catcache = visible_role_catcache_for_ctx(self, ctx)?;
         let mut authids = catcache.authid_rows();
         let auth_members = catcache.auth_members_rows();
         let removed = drop_role_rows(&mut authids, &[role_name.to_string()])?;
@@ -605,13 +597,7 @@ impl CatalogStore {
         membership: &NewRoleMembership,
         ctx: &CatalogWriteContext,
     ) -> Result<(PgAuthMembersRow, CatalogMutationEffect), CatalogError> {
-        let snapshot = ctx
-            .txns
-            .read()
-            .snapshot_for_command(ctx.xid, ctx.cid)
-            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
-        let txns = ctx.txns.read();
-        let catcache = self.catcache_with_snapshot(&ctx.pool, &txns, &snapshot, ctx.client_id)?;
+        let catcache = visible_role_catcache_for_ctx(self, ctx)?;
         let mut auth_members = catcache.auth_members_rows();
         let mut next_oid = self.allocate_next_oid(0)?;
         let row = grant_role_membership_row(&mut auth_members, &mut next_oid, membership)?;
@@ -638,13 +624,7 @@ impl CatalogStore {
         set_option: bool,
         ctx: &CatalogWriteContext,
     ) -> Result<(PgAuthMembersRow, CatalogMutationEffect), CatalogError> {
-        let snapshot = ctx
-            .txns
-            .read()
-            .snapshot_for_command(ctx.xid, ctx.cid)
-            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
-        let txns = ctx.txns.read();
-        let catcache = self.catcache_with_snapshot(&ctx.pool, &txns, &snapshot, ctx.client_id)?;
+        let catcache = visible_role_catcache_for_ctx(self, ctx)?;
         let mut auth_members = catcache.auth_members_rows();
         let old_row = auth_members
             .iter()
@@ -689,13 +669,7 @@ impl CatalogStore {
         grantor: u32,
         ctx: &CatalogWriteContext,
     ) -> Result<(PgAuthMembersRow, CatalogMutationEffect), CatalogError> {
-        let snapshot = ctx
-            .txns
-            .read()
-            .snapshot_for_command(ctx.xid, ctx.cid)
-            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
-        let txns = ctx.txns.read();
-        let catcache = self.catcache_with_snapshot(&ctx.pool, &txns, &snapshot, ctx.client_id)?;
+        let catcache = visible_role_catcache_for_ctx(self, ctx)?;
         let mut auth_members = catcache.auth_members_rows();
         let row = delete_role_membership_row(&mut auth_members, roleid, member, grantor)?;
         let kinds = [BootstrapCatalogKind::PgAuthMembers];
