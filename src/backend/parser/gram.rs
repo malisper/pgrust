@@ -7055,6 +7055,25 @@ fn build_reference_action_clause(
                         expected: "ON UPDATE action",
                         actual: text.to_string(),
                     })?;
+            let action_name = action.split('(').next().unwrap_or(action).trim();
+            if action_name != action.trim() {
+                let action = build_reference_action_text(action_name)?;
+                let action_name = match action {
+                    ForeignKeyAction::SetNull => "SET NULL",
+                    ForeignKeyAction::SetDefault => "SET DEFAULT",
+                    ForeignKeyAction::NoAction
+                    | ForeignKeyAction::Restrict
+                    | ForeignKeyAction::Cascade => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "ON UPDATE action",
+                            actual: text.to_string(),
+                        });
+                    }
+                };
+                return Err(ParseError::FeatureNotSupportedMessage(format!(
+                    "a column list with {action_name} is only supported for ON DELETE actions"
+                )));
+            }
             Ok((false, build_reference_action_text(action.trim())?, None))
         }
         _ => Err(ParseError::UnexpectedToken {
