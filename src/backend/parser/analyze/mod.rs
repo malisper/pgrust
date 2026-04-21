@@ -53,7 +53,7 @@ static NEXT_WORKTABLE_ID: AtomicUsize = AtomicUsize::new(1);
 static NEXT_CTE_ID: AtomicUsize = AtomicUsize::new(1);
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{
-    build_pg_rules_rows, build_pg_stats_rows, build_pg_views_rows,
+    build_pg_locks_rows, build_pg_rules_rows, build_pg_stats_rows, build_pg_views_rows,
 };
 use agg::*;
 use agg_output::*;
@@ -501,6 +501,10 @@ pub trait CatalogLookup {
 
     fn pg_stat_io_rows(&self) -> Vec<Vec<Value>> {
         Vec::new()
+    }
+
+    fn pg_locks_rows(&self) -> Vec<Vec<Value>> {
+        build_pg_locks_rows(Vec::new())
     }
 }
 

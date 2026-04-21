@@ -460,6 +460,8 @@ fn run_statement(
     let session_stats = Arc::new(parking_lot::RwLock::new(
         pgrust::pgrust::database::SessionStatsState::default(),
     ));
+    let advisory_locks =
+        Arc::new(pgrust::backend::storage::lmgr::advisory::AdvisoryLockManager::new());
     let relcache = catalog_store.relcache().map_err(|err| {
         ExecError::Parse(ParseError::UnexpectedToken {
             expected: "physical relcache",
@@ -668,6 +670,7 @@ fn run_statement(
                 txn_waiter: None,
                 sequences: None,
                 large_objects: None,
+                advisory_locks: Arc::clone(&advisory_locks),
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
@@ -677,8 +680,11 @@ fn run_statement(
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
+                current_database_name: pgrust::include::catalog::CURRENT_DATABASE_NAME.to_string(),
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+                current_xid: INVALID_TRANSACTION_ID,
+                statement_lock_scope_id: None,
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
@@ -704,6 +710,7 @@ fn run_statement(
                 txn_waiter: None,
                 sequences: None,
                 large_objects: None,
+                advisory_locks: Arc::clone(&advisory_locks),
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
@@ -713,8 +720,11 @@ fn run_statement(
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
+                current_database_name: pgrust::include::catalog::CURRENT_DATABASE_NAME.to_string(),
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+                current_xid: INVALID_TRANSACTION_ID,
+                statement_lock_scope_id: None,
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
@@ -740,6 +750,7 @@ fn run_statement(
                 txn_waiter: None,
                 sequences: None,
                 large_objects: None,
+                advisory_locks: Arc::clone(&advisory_locks),
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
@@ -749,8 +760,11 @@ fn run_statement(
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
+                current_database_name: pgrust::include::catalog::CURRENT_DATABASE_NAME.to_string(),
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+                current_xid: INVALID_TRANSACTION_ID,
+                statement_lock_scope_id: None,
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
@@ -776,6 +790,7 @@ fn run_statement(
                 txn_waiter: None,
                 sequences: None,
                 large_objects: None,
+                advisory_locks: Arc::clone(&advisory_locks),
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
@@ -785,8 +800,11 @@ fn run_statement(
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
+                current_database_name: pgrust::include::catalog::CURRENT_DATABASE_NAME.to_string(),
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+                current_xid: INVALID_TRANSACTION_ID,
+                statement_lock_scope_id: None,
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
@@ -895,6 +913,7 @@ fn run_statement(
                 txn_waiter: None,
                 sequences: None,
                 large_objects: None,
+                advisory_locks: Arc::clone(&advisory_locks),
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
@@ -904,8 +923,11 @@ fn run_statement(
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
+                current_database_name: pgrust::include::catalog::CURRENT_DATABASE_NAME.to_string(),
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+                current_xid: INVALID_TRANSACTION_ID,
+                statement_lock_scope_id: None,
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
@@ -931,6 +953,7 @@ fn run_statement(
                 txn_waiter: None,
                 sequences: None,
                 large_objects: None,
+                advisory_locks: Arc::clone(&advisory_locks),
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
@@ -940,8 +963,11 @@ fn run_statement(
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
                 client_id: 21,
+                current_database_name: pgrust::include::catalog::CURRENT_DATABASE_NAME.to_string(),
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+                current_xid: INVALID_TRANSACTION_ID,
+                statement_lock_scope_id: None,
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
@@ -970,6 +996,7 @@ fn run_statement(
                     txn_waiter: None,
                     sequences: None,
                     large_objects: None,
+                    advisory_locks: Arc::clone(&advisory_locks),
                     checkpoint_stats:
                         pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                     datetime_config:
@@ -979,8 +1006,12 @@ fn run_statement(
                     session_stats: Arc::clone(&session_stats),
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
+                    current_database_name:
+                        pgrust::include::catalog::CURRENT_DATABASE_NAME.to_string(),
                     session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+                    current_xid: xid,
+                    statement_lock_scope_id: None,
                     next_command_id: 0,
                     default_toast_compression:
                         pgrust::include::access::htup::AttributeCompression::Pglz,
@@ -1020,6 +1051,7 @@ fn run_statement(
                     txn_waiter: None,
                     sequences: None,
                     large_objects: None,
+                    advisory_locks: Arc::clone(&advisory_locks),
                     checkpoint_stats:
                         pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                     datetime_config:
@@ -1029,8 +1061,12 @@ fn run_statement(
                     session_stats: Arc::clone(&session_stats),
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
+                    current_database_name:
+                        pgrust::include::catalog::CURRENT_DATABASE_NAME.to_string(),
                     session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+                    current_xid: xid,
+                    statement_lock_scope_id: None,
                     next_command_id: 0,
                     default_toast_compression:
                         pgrust::include::access::htup::AttributeCompression::Pglz,
@@ -1070,6 +1106,7 @@ fn run_statement(
                     txn_waiter: None,
                     sequences: None,
                     large_objects: None,
+                    advisory_locks: Arc::clone(&advisory_locks),
                     checkpoint_stats:
                         pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                     datetime_config:
@@ -1079,8 +1116,12 @@ fn run_statement(
                     session_stats: Arc::clone(&session_stats),
                     snapshot: txns.read().snapshot(xid)?,
                     client_id: 21,
+                    current_database_name:
+                        pgrust::include::catalog::CURRENT_DATABASE_NAME.to_string(),
                     session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+                    current_xid: xid,
+                    statement_lock_scope_id: None,
                     next_command_id: 0,
                     default_toast_compression:
                         pgrust::include::access::htup::AttributeCompression::Pglz,

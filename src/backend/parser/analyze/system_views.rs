@@ -83,6 +83,10 @@ fn is_information_schema_columns_name(name: &str) -> bool {
     name.eq_ignore_ascii_case("information_schema.columns")
 }
 
+fn is_pg_locks_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("pg_locks") || name.eq_ignore_ascii_case("pg_catalog.pg_locks")
+}
+
 pub(super) fn bind_builtin_system_view(
     name: &str,
     catalog: &dyn CatalogLookup,
@@ -195,6 +199,76 @@ pub(super) fn bind_builtin_system_view(
             QueryColumn::text("query"),
         ];
         return build_values_view(name, output_columns, catalog.pg_stat_activity_rows());
+    }
+
+    if is_pg_locks_name(name) {
+        let output_columns = vec![
+            QueryColumn::text("locktype"),
+            QueryColumn {
+                name: "database".into(),
+                sql_type: SqlType::new(SqlTypeKind::Oid),
+                wire_type_oid: None,
+            },
+            QueryColumn {
+                name: "relation".into(),
+                sql_type: SqlType::new(SqlTypeKind::Oid),
+                wire_type_oid: None,
+            },
+            QueryColumn {
+                name: "page".into(),
+                sql_type: SqlType::new(SqlTypeKind::Int4),
+                wire_type_oid: None,
+            },
+            QueryColumn {
+                name: "tuple".into(),
+                sql_type: SqlType::new(SqlTypeKind::Int2),
+                wire_type_oid: None,
+            },
+            QueryColumn::text("virtualxid"),
+            QueryColumn {
+                name: "transactionid".into(),
+                sql_type: SqlType::new(SqlTypeKind::Xid),
+                wire_type_oid: None,
+            },
+            QueryColumn {
+                name: "classid".into(),
+                sql_type: SqlType::new(SqlTypeKind::Oid),
+                wire_type_oid: None,
+            },
+            QueryColumn {
+                name: "objid".into(),
+                sql_type: SqlType::new(SqlTypeKind::Oid),
+                wire_type_oid: None,
+            },
+            QueryColumn {
+                name: "objsubid".into(),
+                sql_type: SqlType::new(SqlTypeKind::Int2),
+                wire_type_oid: None,
+            },
+            QueryColumn::text("virtualtransaction"),
+            QueryColumn {
+                name: "pid".into(),
+                sql_type: SqlType::new(SqlTypeKind::Int4),
+                wire_type_oid: None,
+            },
+            QueryColumn::text("mode"),
+            QueryColumn {
+                name: "granted".into(),
+                sql_type: SqlType::new(SqlTypeKind::Bool),
+                wire_type_oid: None,
+            },
+            QueryColumn {
+                name: "fastpath".into(),
+                sql_type: SqlType::new(SqlTypeKind::Bool),
+                wire_type_oid: None,
+            },
+            QueryColumn {
+                name: "waitstart".into(),
+                sql_type: SqlType::new(SqlTypeKind::TimestampTz),
+                wire_type_oid: None,
+            },
+        ];
+        return build_values_view(name, output_columns, catalog.pg_locks_rows());
     }
 
     if is_pg_stat_user_tables_name(name) {

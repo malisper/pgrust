@@ -28,6 +28,7 @@ use super::expr_json::{
     eval_json_builtin_function, eval_json_get, eval_json_path, eval_json_record_builtin_function,
     eval_jsonpath_operator,
 };
+use super::expr_locks::eval_advisory_lock_builtin_function;
 use super::expr_math::{
     cosd, cotd, eval_abs_function, eval_acosd, eval_acosh, eval_asind, eval_atanh,
     eval_binary_float_function, eval_bitcast_bigint_to_float8, eval_bitcast_integer_to_float4,
@@ -491,6 +492,17 @@ fn ensure_builtin_side_effects_allowed(
             | BuiltinScalarFunction::SetVal
             | BuiltinScalarFunction::LoCreate
             | BuiltinScalarFunction::LoUnlink
+            | BuiltinScalarFunction::PgAdvisoryLock
+            | BuiltinScalarFunction::PgAdvisoryXactLock
+            | BuiltinScalarFunction::PgAdvisoryLockShared
+            | BuiltinScalarFunction::PgAdvisoryXactLockShared
+            | BuiltinScalarFunction::PgTryAdvisoryLock
+            | BuiltinScalarFunction::PgTryAdvisoryXactLock
+            | BuiltinScalarFunction::PgTryAdvisoryLockShared
+            | BuiltinScalarFunction::PgTryAdvisoryXactLockShared
+            | BuiltinScalarFunction::PgAdvisoryUnlock
+            | BuiltinScalarFunction::PgAdvisoryUnlockShared
+            | BuiltinScalarFunction::PgAdvisoryUnlockAll
     ) && !ctx.allow_side_effects
     {
         return Err(ExecError::DetailedError {
@@ -501,6 +513,27 @@ fn ensure_builtin_side_effects_allowed(
                     BuiltinScalarFunction::SetVal => "setval",
                     BuiltinScalarFunction::LoCreate => "lo_create",
                     BuiltinScalarFunction::LoUnlink => "lo_unlink",
+                    BuiltinScalarFunction::PgAdvisoryLock => "pg_advisory_lock",
+                    BuiltinScalarFunction::PgAdvisoryXactLock => "pg_advisory_xact_lock",
+                    BuiltinScalarFunction::PgAdvisoryLockShared => "pg_advisory_lock_shared",
+                    BuiltinScalarFunction::PgAdvisoryXactLockShared => {
+                        "pg_advisory_xact_lock_shared"
+                    }
+                    BuiltinScalarFunction::PgTryAdvisoryLock => "pg_try_advisory_lock",
+                    BuiltinScalarFunction::PgTryAdvisoryXactLock => {
+                        "pg_try_advisory_xact_lock"
+                    }
+                    BuiltinScalarFunction::PgTryAdvisoryLockShared => {
+                        "pg_try_advisory_lock_shared"
+                    }
+                    BuiltinScalarFunction::PgTryAdvisoryXactLockShared => {
+                        "pg_try_advisory_xact_lock_shared"
+                    }
+                    BuiltinScalarFunction::PgAdvisoryUnlock => "pg_advisory_unlock",
+                    BuiltinScalarFunction::PgAdvisoryUnlockShared => {
+                        "pg_advisory_unlock_shared"
+                    }
+                    BuiltinScalarFunction::PgAdvisoryUnlockAll => "pg_advisory_unlock_all",
                     _ => unreachable!(),
                 }
             ),
@@ -2020,6 +2053,7 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::BitcastIntegerToFloat4 => eval_bitcast_integer_to_float4(&values),
         BuiltinScalarFunction::BitcastBigintToFloat8 => eval_bitcast_bigint_to_float8(&values),
         BuiltinScalarFunction::Random
+        | BuiltinScalarFunction::CurrentDatabase
         | BuiltinScalarFunction::GetDatabaseEncoding
         | BuiltinScalarFunction::PgGetUserById
         | BuiltinScalarFunction::ObjDescription
@@ -2598,6 +2632,9 @@ fn eval_builtin_function(
     ) {
         return eval_large_object_builtin_function(func, &values, ctx);
     }
+    if let Some(result) = eval_advisory_lock_builtin_function(func, &values, ctx) {
+        return result;
+    }
     match func {
         BuiltinScalarFunction::ToTsVector
         | BuiltinScalarFunction::ToTsQuery
@@ -2666,10 +2703,26 @@ fn eval_builtin_function(
         | BuiltinScalarFunction::PgGetSerialSequence => {
             unreachable!("sequence builtins handled earlier");
         }
+        BuiltinScalarFunction::PgAdvisoryLock
+        | BuiltinScalarFunction::PgAdvisoryXactLock
+        | BuiltinScalarFunction::PgAdvisoryLockShared
+        | BuiltinScalarFunction::PgAdvisoryXactLockShared
+        | BuiltinScalarFunction::PgTryAdvisoryLock
+        | BuiltinScalarFunction::PgTryAdvisoryXactLock
+        | BuiltinScalarFunction::PgTryAdvisoryLockShared
+        | BuiltinScalarFunction::PgTryAdvisoryXactLockShared
+        | BuiltinScalarFunction::PgAdvisoryUnlock
+        | BuiltinScalarFunction::PgAdvisoryUnlockShared
+        | BuiltinScalarFunction::PgAdvisoryUnlockAll => {
+            unreachable!("advisory lock builtins handled earlier");
+        }
         BuiltinScalarFunction::DatePart => eval_date_part_function(&values),
         BuiltinScalarFunction::DateTrunc => eval_date_trunc_function(&values, &ctx.datetime_config),
         BuiltinScalarFunction::IsFinite => eval_isfinite_function(&values),
         BuiltinScalarFunction::MakeDate => eval_make_date_function(&values),
+        BuiltinScalarFunction::CurrentDatabase => {
+            Ok(Value::Text(ctx.current_database_name.clone().into()))
+        }
         BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),
         BuiltinScalarFunction::PgMyTempSchema => Ok(current_temp_namespace_name(ctx)
             .map(Value::Text)
