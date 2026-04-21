@@ -27,8 +27,9 @@ use crate::backend::rewrite::pg_rewrite_query;
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PgCastRow, PgClassRow, PgConstraintRow, PgInheritsRow, PgLanguageRow,
-    PgOperatorRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow, PgTypeRow, RECORD_TYPE_OID,
+    BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgCastRow, PgClassRow, PgConstraintRow,
+    PgInheritsRow, PgLanguageRow, PgOperatorRow, PgProcRow, PgRangeRow, PgRewriteRow,
+    PgStatisticRow, PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_aggregate_rows,
     bootstrap_pg_cast_rows, bootstrap_pg_language_rows, bootstrap_pg_operator_rows,
     bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
     proc_oid_for_builtin_aggregate_function, range_type_ref_for_sql_type, relkind_is_analyzable,
@@ -225,6 +226,12 @@ pub trait CatalogLookup {
         bootstrap_pg_proc_rows()
             .into_iter()
             .find(|row| row.oid == oid)
+    }
+
+    fn aggregate_by_fnoid(&self, aggfnoid: u32) -> Option<PgAggregateRow> {
+        bootstrap_pg_aggregate_rows()
+            .into_iter()
+            .find(|row| row.aggfnoid == aggfnoid)
     }
 
     fn operator_by_name_left_right(
@@ -475,6 +482,12 @@ impl CatalogLookup for Catalog {
 
     fn proc_row_by_oid(&self, oid: u32) -> Option<PgProcRow> {
         CatCache::from_catalog(self).proc_by_oid(oid).cloned()
+    }
+
+    fn aggregate_by_fnoid(&self, aggfnoid: u32) -> Option<PgAggregateRow> {
+        CatCache::from_catalog(self)
+            .aggregate_by_fnoid(aggfnoid)
+            .cloned()
     }
 
     fn type_rows(&self) -> Vec<PgTypeRow> {

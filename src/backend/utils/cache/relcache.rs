@@ -575,6 +575,7 @@ mod tests {
             rows.opclasses,
             rows.opfamilies,
             rows.procs,
+            rows.aggregates,
             rows.casts,
             rows.collations,
             rows.foreign_data_wrappers,

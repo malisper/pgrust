@@ -24,6 +24,7 @@ pub const PG_AMPROC_RELATION_OID: u32 = 2603;
 pub const PG_ATTRDEF_RELATION_OID: u32 = 2604;
 pub const PG_CAST_RELATION_OID: u32 = 2605;
 pub const PG_CONSTRAINT_RELATION_OID: u32 = 2606;
+pub const PG_AGGREGATE_RELATION_OID: u32 = 2600;
 pub const PG_DEPEND_RELATION_OID: u32 = 2608;
 pub const PG_DESCRIPTION_RELATION_OID: u32 = 2609;
 pub const PG_FOREIGN_DATA_WRAPPER_RELATION_OID: u32 = 2328;
@@ -187,6 +188,7 @@ pub enum BootstrapCatalogKind {
     PgPolicy,
     PgOpclass,
     PgOpfamily,
+    PgAggregate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,6 +224,7 @@ impl BootstrapCatalogKind {
             Self::PgAttrdef => PG_ATTRDEF_RELATION_OID,
             Self::PgCast => PG_CAST_RELATION_OID,
             Self::PgConstraint => PG_CONSTRAINT_RELATION_OID,
+            Self::PgAggregate => PG_AGGREGATE_RELATION_OID,
             Self::PgDepend => PG_DEPEND_RELATION_OID,
             Self::PgDescription => PG_DESCRIPTION_RELATION_OID,
             Self::PgForeignDataWrapper => PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
@@ -262,6 +265,7 @@ impl BootstrapCatalogKind {
             Self::PgAttrdef => "pg_attrdef",
             Self::PgCast => "pg_cast",
             Self::PgConstraint => "pg_constraint",
+            Self::PgAggregate => "pg_aggregate",
             Self::PgDepend => "pg_depend",
             Self::PgDescription => "pg_description",
             Self::PgForeignDataWrapper => "pg_foreign_data_wrapper",
@@ -302,6 +306,7 @@ impl BootstrapCatalogKind {
             Self::PgAttrdef => PG_ATTRDEF_ROWTYPE_OID,
             Self::PgCast => 0,
             Self::PgConstraint => 0,
+            Self::PgAggregate => 0,
             Self::PgDepend => PG_DEPEND_ROWTYPE_OID,
             Self::PgDescription => 0,
             Self::PgForeignDataWrapper => 0,
@@ -328,7 +333,7 @@ impl BootstrapCatalogKind {
     }
 }
 
-pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 34] = [
+pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 36] = [
     BootstrapCatalogKind::PgNamespace,
     BootstrapCatalogKind::PgType,
     BootstrapCatalogKind::PgProc,
@@ -364,14 +369,15 @@ pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 34] = [
     BootstrapCatalogKind::PgStatistic,
     BootstrapCatalogKind::PgTrigger,
     BootstrapCatalogKind::PgPolicy,
+    BootstrapCatalogKind::PgAggregate,
 ];
 
-pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 34] {
+pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 36] {
     CORE_BOOTSTRAP_KINDS
 }
 
 use crate::include::catalog::{
-    pg_description_desc, pg_foreign_data_wrapper_desc, pg_inherits_desc,
+    pg_aggregate_desc, pg_description_desc, pg_foreign_data_wrapper_desc, pg_inherits_desc,
     pg_largeobject_metadata_desc, pg_policy_desc, pg_rewrite_desc, pg_statistic_desc,
     pg_trigger_desc,
 };
@@ -402,6 +408,7 @@ pub fn bootstrap_relation_desc(kind: BootstrapCatalogKind) -> RelationDesc {
         BootstrapCatalogKind::PgAttrdef => pg_attrdef_desc(),
         BootstrapCatalogKind::PgCast => pg_cast_desc(),
         BootstrapCatalogKind::PgConstraint => pg_constraint_desc(),
+        BootstrapCatalogKind::PgAggregate => pg_aggregate_desc(),
         BootstrapCatalogKind::PgDepend => pg_depend_desc(),
         BootstrapCatalogKind::PgDescription => pg_description_desc(),
         BootstrapCatalogKind::PgForeignDataWrapper => pg_foreign_data_wrapper_desc(),
@@ -420,7 +427,7 @@ pub const fn bootstrap_namespace_oid() -> u32 {
     PG_CATALOG_NAMESPACE_OID
 }
 
-pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 34] = [
+pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 36] = [
     BootstrapCatalogRelation {
         oid: PG_NAMESPACE_RELATION_OID,
         name: "pg_namespace",
@@ -561,6 +568,10 @@ pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 34] = [
         oid: PG_POLICY_RELATION_OID,
         name: "pg_policy",
     },
+    BootstrapCatalogRelation {
+        oid: PG_AGGREGATE_RELATION_OID,
+        name: "pg_aggregate",
+    },
 ];
 
 #[cfg(test)]
@@ -614,6 +625,8 @@ mod tests {
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[30].oid, PG_REWRITE_RELATION_OID);
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[31].oid, PG_STATISTIC_RELATION_OID);
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[32].oid, PG_TRIGGER_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[33].oid, PG_POLICY_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[34].oid, PG_AGGREGATE_RELATION_OID);
     }
 
     #[test]
@@ -658,6 +671,8 @@ mod tests {
                 "pg_rewrite",
                 "pg_statistic",
                 "pg_trigger",
+                "pg_policy",
+                "pg_aggregate",
             ]
         );
     }

@@ -8,11 +8,11 @@ use crate::backend::utils::cache::system_views::{
     build_pg_views_rows,
 };
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PgAuthIdRow, PgCastRow, PgClassRow, PgConstraintRow, PgIndexRow,
-    PgInheritsRow, PgLanguageRow, PgOperatorRow, PgPolicyRow, PgProcRow, PgRangeRow,
-    PgRewriteRow, PgStatisticRow, PgTriggerRow, PgTypeRow, bootstrap_pg_cast_rows,
-    bootstrap_pg_language_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
-    builtin_range_rows, builtin_type_rows,
+    BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAuthIdRow, PgCastRow, PgClassRow,
+    PgConstraintRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgOperatorRow, PgPolicyRow,
+    PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow, PgTriggerRow, PgTypeRow,
+    bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows, bootstrap_pg_language_rows,
+    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
 };
 use crate::pgrust::database::DatabaseStatsStore;
 
@@ -161,6 +161,17 @@ impl CatalogLookup for VisibleCatalog {
                     &self.type_rows(),
                     &self.range_rows(),
                 )
+            })
+    }
+
+    fn aggregate_by_fnoid(&self, aggfnoid: u32) -> Option<PgAggregateRow> {
+        self.catcache
+            .as_ref()
+            .and_then(|catcache| catcache.aggregate_by_fnoid(aggfnoid).cloned())
+            .or_else(|| {
+                bootstrap_pg_aggregate_rows()
+                    .into_iter()
+                    .find(|row| row.aggfnoid == aggfnoid)
             })
     }
 
@@ -473,6 +484,7 @@ mod tests {
                 .into_iter()
                 .filter(|row| row.proname != "lower")
                 .collect(),
+            base.aggregate_rows(),
             base.cast_rows(),
             base.collation_rows(),
             base.foreign_data_wrapper_rows(),
