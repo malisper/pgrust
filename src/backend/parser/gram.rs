@@ -90,6 +90,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_policy_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_alter_table_add_unnamed_foreign_key_statement(&sql, options)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_unsupported_statement(&sql) {
         if matches!(
             stmt,
@@ -107,6 +110,46 @@ fn parse_statement_with_options_inner(
             try_parse_unsupported_statement(&sql).ok_or_else(|| map_pest_error("statement", err))
         }
     }
+}
+
+fn try_parse_alter_table_add_unnamed_foreign_key_statement(
+    sql: &str,
+    options: ParseOptions,
+) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    let needle = " add foreign key";
+    if !lowered.starts_with("alter table ") || !lowered.contains(needle) {
+        return Ok(None);
+    }
+
+    let split = lowered.find(needle).expect("checked contains above");
+    let suffix = &lowered[split + needle.len()..];
+    if !suffix.is_empty() && !suffix.starts_with(' ') && !suffix.starts_with('(') {
+        return Ok(None);
+    }
+    let rewritten = format!(
+        "{} add constraint __pgrust_internal_unnamed_fk__ {}",
+        &trimmed[..split],
+        &trimmed[split + " add ".len()..]
+    );
+    let mut parsed = parse_statement_with_options_inner(rewritten, options)?;
+    let Statement::AlterTableAddConstraint(ref mut stmt) = parsed else {
+        return Ok(None);
+    };
+    match &mut stmt.constraint {
+        TableConstraint::NotNull { attributes, .. }
+        | TableConstraint::Check { attributes, .. }
+        | TableConstraint::PrimaryKey { attributes, .. }
+        | TableConstraint::Unique { attributes, .. }
+        | TableConstraint::ForeignKey { attributes, .. }
+            if attributes.name.as_deref() == Some("__pgrust_internal_unnamed_fk__") =>
+        {
+            attributes.name = None;
+        }
+        _ => return Ok(None),
+    }
+    Ok(Some(parsed))
 }
 
 fn try_parse_create_tablespace_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
@@ -6901,7 +6944,7 @@ fn build_alter_table_add_constraint(
                 table_name = Some(parsed_table_name);
             }
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
-            Rule::named_table_constraint => constraint = Some(build_table_constraint_inner(part)?),
+            Rule::table_constraint => constraint = Some(build_table_constraint(part)?),
             _ => {}
         }
     }
