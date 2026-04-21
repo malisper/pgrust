@@ -1880,14 +1880,14 @@ impl<'a> RecursiveReferenceChecker<'a> {
                 }
                 Ok(())
             }
-            SqlExpr::AggCall {
+            SqlExpr::FuncCall {
                 args,
                 order_by,
                 filter,
                 over,
                 ..
             } => {
-                for arg in args {
+                for arg in args.args() {
                     self.visit_expr(&arg.value, context)?;
                 }
                 for item in order_by {
@@ -1895,20 +1895,6 @@ impl<'a> RecursiveReferenceChecker<'a> {
                 }
                 if let Some(filter) = filter {
                     self.visit_expr(filter, context)?;
-                }
-                if let Some(over) = over {
-                    for expr in &over.partition_by {
-                        self.visit_expr(expr, context)?;
-                    }
-                    for item in &over.order_by {
-                        self.visit_expr(&item.expr, context)?;
-                    }
-                }
-                Ok(())
-            }
-            SqlExpr::FuncCall { args, over, .. } => {
-                for arg in args {
-                    self.visit_expr(&arg.value, context)?;
                 }
                 if let Some(over) = over {
                     for expr in &over.partition_by {
@@ -2170,16 +2156,14 @@ fn sql_expr_references_table(expr: &SqlExpr, table_name: &str) -> bool {
         SqlExpr::ArrayLiteral(items) | SqlExpr::Row(items) => items
             .iter()
             .any(|item| sql_expr_references_table(item, table_name)),
-        SqlExpr::AggCall { args, order_by, .. } => {
-            args.iter()
+        SqlExpr::FuncCall { args, order_by, .. } => {
+            args.args()
+                .iter()
                 .any(|arg| sql_expr_references_table(&arg.value, table_name))
                 || order_by
                     .iter()
                     .any(|item| sql_expr_references_table(&item.expr, table_name))
         }
-        SqlExpr::FuncCall { args, .. } => args
-            .iter()
-            .any(|arg| sql_expr_references_table(&arg.value, table_name)),
         SqlExpr::ScalarSubquery(subquery)
         | SqlExpr::ArraySubquery(subquery)
         | SqlExpr::Exists(subquery) => select_statement_references_table(subquery, table_name),
