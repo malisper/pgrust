@@ -607,7 +607,23 @@ fn bind_grouped_window_func_call(
             )
         })
         .collect::<Vec<_>>();
-    let resolved = resolve_function_call(catalog, name, &actual_types, func_variadic)?;
+    let mut resolution_types = actual_types.clone();
+    if matches!(args.len(), 3)
+        && !func_variadic
+        && (name.eq_ignore_ascii_case("lag") || name.eq_ignore_ascii_case("lead"))
+    {
+        let common_type = grouped_infer_common_scalar_expr_type(
+            &[args[0].value.clone(), args[2].value.clone()],
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            "lag/lead value and default arguments with a common type",
+        )?;
+        resolution_types[0] = common_type;
+        resolution_types[2] = common_type;
+    }
+    let resolved = resolve_function_call(catalog, name, &resolution_types, func_variadic)?;
     if resolved.proretset || !matches!(resolved.prokind, 'w' | 'a') {
         return Err(ParseError::UnexpectedToken {
             expected: "window or aggregate function",
@@ -651,11 +667,19 @@ fn bind_grouped_window_func_call(
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let coerced_args = bound_args
+            .into_iter()
+            .zip(actual_types.iter().copied())
+            .zip(resolved.declared_arg_types.iter().copied())
+            .map(|((arg, actual_type), declared_type)| {
+                coerce_bound_expr(arg, actual_type, declared_type)
+            })
+            .collect::<Vec<_>>();
         return Ok(register_window_expr(
             &state,
             spec,
             WindowFuncKind::Builtin(window_impl),
-            bound_args,
+            coerced_args,
             resolved.result_type,
         ));
     }
