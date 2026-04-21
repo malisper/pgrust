@@ -12,7 +12,8 @@ use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name};
 use crate::include::catalog::{
     CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, PG_CATALOG_NAMESPACE_OID, PG_CONSTRAINT_RELATION_OID,
-    bootstrap_catalog_kinds, relam_for_relkind, system_catalog_index_by_oid,
+    PgOpclassRow, bootstrap_catalog_kinds, bootstrap_pg_opclass_rows, relam_for_relkind,
+    system_catalog_index_by_oid,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,11 +249,8 @@ impl RelCache {
                         };
                     };
                     let indclass = index.indclass.clone();
-                    let opclass_rows = catcache.opclass_rows();
-                    let resolved_opclasses = indclass
-                        .iter()
-                        .filter_map(|oid| opclass_rows.iter().find(|row| row.oid == *oid))
-                        .collect::<Vec<_>>();
+                    let (opfamily_oids, opcintype_oids) =
+                        resolve_opclass_match_metadata(&indclass, &catcache.opclass_rows());
                     IndexRelCacheEntry {
                         indexrelid: class.oid,
                         indrelid: index.indrelid,
@@ -279,11 +277,8 @@ impl RelCache {
                         indclass,
                         indcollation: index.indcollation.clone(),
                         indoption: index.indoption.clone(),
-                        opfamily_oids: resolved_opclasses.iter().map(|row| row.opcfamily).collect(),
-                        opcintype_oids: resolved_opclasses
-                            .iter()
-                            .map(|row| row.opcintype)
-                            .collect(),
+                        opfamily_oids,
+                        opcintype_oids,
                         indexprs: index.indexprs.clone(),
                         indpred: index.indpred.clone(),
                     }
@@ -389,6 +384,11 @@ fn relation_locator_for_class_row(
 }
 
 fn from_catalog_entry(entry: &CatalogEntry) -> RelCacheEntry {
+    let (opfamily_oids, opcintype_oids) = entry
+        .index_meta
+        .as_ref()
+        .map(|index| resolve_opclass_match_metadata(&index.indclass, &bootstrap_pg_opclass_rows()))
+        .unwrap_or_default();
     RelCacheEntry {
         rel: entry.rel,
         relation_oid: entry.relation_oid,
@@ -425,12 +425,28 @@ fn from_catalog_entry(entry: &CatalogEntry) -> RelCacheEntry {
             indclass: index.indclass.clone(),
             indcollation: index.indcollation.clone(),
             indoption: index.indoption.clone(),
-            opfamily_oids: Vec::new(),
-            opcintype_oids: Vec::new(),
+            opfamily_oids: opfamily_oids.clone(),
+            opcintype_oids: opcintype_oids.clone(),
             indexprs: index.indexprs.clone(),
             indpred: index.indpred.clone(),
         }),
     }
+}
+
+fn resolve_opclass_match_metadata(
+    indclass: &[u32],
+    opclass_rows: &[PgOpclassRow],
+) -> (Vec<u32>, Vec<u32>) {
+    indclass
+        .iter()
+        .map(|oid| {
+            opclass_rows
+                .iter()
+                .find(|row| row.oid == *oid)
+                .map(|row| (row.opcfamily, row.opcintype))
+                .unwrap_or((0, 0))
+        })
+        .unzip()
 }
 
 #[cfg(test)]
