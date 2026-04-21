@@ -1318,6 +1318,16 @@ fn parse_alter_table_constraint_statements() {
         })
     );
 
+    let err = parse_statement(
+        "alter table items alter constraint items_id_check enforced not enforced",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::FeatureNotSupportedMessage(message)
+            if message == "multiple ENFORCED/NOT ENFORCED clauses not allowed"
+    ));
+
     let stmt =
         parse_statement("alter table items rename constraint items_id_check to items_id_guard")
             .unwrap();
@@ -5958,6 +5968,16 @@ fn parse_create_table_foreign_key_constraints() {
             on_update: ForeignKeyAction::NoAction,
         }]
     );
+
+    let err = parse_statement(
+        "create temp table fktable2 (fk int references pktable enforced not enforced)",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::FeatureNotSupportedMessage(message)
+            if message == "multiple ENFORCED/NOT ENFORCED clauses not allowed"
+    ));
 }
 
 #[test]
