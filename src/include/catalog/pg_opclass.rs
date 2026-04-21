@@ -214,21 +214,6 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             GIST_RANGE_FAMILY_OID,
             INT4RANGE_TYPE_OID,
         ),
-        gist_row(
-            BOX_GIST_OPCLASS_OID,
-            "box_ops",
-            GIST_BOX_FAMILY_OID,
-            BOX_TYPE_OID,
-        ),
-        // :HACK: PostgreSQL models this as a single anyrange opclass. pgrust does
-        // not have an anyrange pseudo-type yet, so keep one catalog row and use
-        // the concrete type only as a placeholder for lookup.
-        gist_row(
-            RANGE_GIST_OPCLASS_OID,
-            "range_ops",
-            GIST_RANGE_FAMILY_OID,
-            INT4RANGE_TYPE_OID,
-        ),
     ]
 }
 
