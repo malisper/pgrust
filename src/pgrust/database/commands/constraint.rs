@@ -316,7 +316,10 @@ fn column_index_for_attnum(
         })
 }
 
-fn find_constraint_row<'a>(rows: &'a [PgConstraintRow], name: &str) -> Option<&'a PgConstraintRow> {
+pub(crate) fn find_constraint_row<'a>(
+    rows: &'a [PgConstraintRow],
+    name: &str,
+) -> Option<&'a PgConstraintRow> {
     rows.iter()
         .find(|row| row.conname.eq_ignore_ascii_case(name))
 }

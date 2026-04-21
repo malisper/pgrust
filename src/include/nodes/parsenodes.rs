@@ -309,6 +309,7 @@ pub enum Statement {
     AlterTableNoInherit(AlterTableNoInheritStatement),
     AlterPublication(AlterPublicationStatement),
     CommentOnTable(CommentOnTableStatement),
+    CommentOnConstraint(CommentOnConstraintStatement),
     CommentOnRule(CommentOnRuleStatement),
     CommentOnDomain(CommentOnDomainStatement),
     CommentOnConversion(CommentOnConversionStatement),
@@ -1493,6 +1494,13 @@ pub struct AlterTableNoInheritStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommentOnTableStatement {
+    pub table_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnConstraintStatement {
+    pub constraint_name: String,
     pub table_name: String,
     pub comment: Option<String>,
 }
