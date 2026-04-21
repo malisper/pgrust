@@ -86,6 +86,15 @@ transform_foreign_data_fixture() {
     " "$input_path" > "$output_path"
 }
 
+transform_triggers_fixture() {
+    local input_path="$1"
+    local output_path="$2"
+
+    perl -0pe "
+        s/CREATE FUNCTION trigger_return_old \\(\\)\\n\\s+RETURNS trigger\\n\\s+AS :'regresslib'\\n\\s+LANGUAGE C;/CREATE FUNCTION trigger_return_old ()\\n        RETURNS trigger\\n        AS \\\$\\\$\\nBEGIN\\n    IF TG_OP = 'INSERT' THEN\\n        RETURN NEW;\\n    END IF;\\n    RETURN OLD;\\nEND\\n\\\$\\\$\\n        LANGUAGE plpgsql;/s;
+    " "$input_path" > "$output_path"
+}
+
 prepare_test_fixture() {
     local sql_file="$1"
     local expected_file="$2"
@@ -109,6 +118,13 @@ prepare_test_fixture() {
             PREPARED_EXPECTED_FILE="$fixture_dir/${test_name}.out"
             transform_foreign_data_fixture "$sql_file" "$PREPARED_SQL_FILE"
             transform_foreign_data_fixture "$expected_file" "$PREPARED_EXPECTED_FILE"
+            ;;
+        triggers)
+            mkdir -p "$fixture_dir"
+            PREPARED_SQL_FILE="$fixture_dir/${test_name}.sql"
+            PREPARED_EXPECTED_FILE="$fixture_dir/${test_name}.out"
+            transform_triggers_fixture "$sql_file" "$PREPARED_SQL_FILE"
+            transform_triggers_fixture "$expected_file" "$PREPARED_EXPECTED_FILE"
             ;;
         *)
             ;;
