@@ -304,6 +304,42 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'w',
             'i',
         ),
+        proc_row(
+            3112,
+            "first_value",
+            ANYOID,
+            &oid_argtypes(&[ANYOID]),
+            "window_first_value",
+            1,
+            false,
+            false,
+            'w',
+            'i',
+        ),
+        proc_row(
+            3113,
+            "last_value",
+            ANYOID,
+            &oid_argtypes(&[ANYOID]),
+            "window_last_value",
+            1,
+            false,
+            false,
+            'w',
+            'i',
+        ),
+        proc_row(
+            3114,
+            "nth_value",
+            ANYOID,
+            &oid_argtypes(&[ANYOID, INT4_TYPE_OID]),
+            "window_nth_value",
+            2,
+            false,
+            false,
+            'w',
+            'i',
+        ),
         PgProcRow {
             pronargdefaults: 2,
             proargnames: Some(vec!["mean".into(), "stddev".into()]),
@@ -2626,6 +2662,9 @@ fn synthetic_window_proc_oids() -> &'static Vec<(BuiltinWindowFunction, u32)> {
             BuiltinWindowFunction::PercentRank,
             BuiltinWindowFunction::CumeDist,
             BuiltinWindowFunction::Ntile,
+            BuiltinWindowFunction::FirstValue,
+            BuiltinWindowFunction::LastValue,
+            BuiltinWindowFunction::NthValue,
         ]
         .into_iter()
         .enumerate()
@@ -2662,6 +2701,9 @@ fn window_func_for_proname(name: &str) -> Option<BuiltinWindowFunction> {
         "percent_rank" => Some(BuiltinWindowFunction::PercentRank),
         "cume_dist" => Some(BuiltinWindowFunction::CumeDist),
         "ntile" => Some(BuiltinWindowFunction::Ntile),
+        "first_value" => Some(BuiltinWindowFunction::FirstValue),
+        "last_value" => Some(BuiltinWindowFunction::LastValue),
+        "nth_value" => Some(BuiltinWindowFunction::NthValue),
         _ => None,
     }
 }
