@@ -3459,7 +3459,7 @@ fn explain_update_accepts_inherited_update_statement() {
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("f1 =") && line.contains("12::integer") && line.contains("13::integer")),
+            .any(|line| line.contains("f1 = 12") && line.contains("f2 = 13")),
         "expected EXPLAIN UPDATE to show index quals, got {lines:?}"
     );
 }
@@ -4854,6 +4854,31 @@ fn create_index_and_alter_table_set_are_noops() {
     {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Int64(0)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn create_index_without_name_uses_all_key_columns_in_default_name() {
+    let dir = temp_dir("unnamed_multicol_index_name");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(1, "create table items (a int, b int)").unwrap();
+    assert_eq!(
+        db.execute(1, "create index on items (a, b)").unwrap(),
+        StatementResult::AffectedRows(0)
+    );
+
+    match db
+        .execute(
+            1,
+            "select count(*) from pg_class where relname = 'items_a_b_idx'",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(1)]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }
