@@ -9,8 +9,7 @@ use crate::include::nodes::pathnodes::{
 };
 use crate::include::nodes::plannodes::PlanEstimate;
 use crate::include::nodes::primnodes::{
-    Expr, JoinType, OrderByEntry, QueryColumn, RelationDesc, TargetEntry, ToastRelationRef, Var,
-    user_attrno,
+    Expr, JoinType, OrderByEntry, QueryColumn, RelationDesc, ToastRelationRef, Var, user_attrno,
 };
 
 use super::super::bestpath;
@@ -19,20 +18,20 @@ use super::super::inherit::{
 };
 use super::super::joininfo;
 use super::super::optimize_path;
-use super::super::pathnodes::{expr_sql_type, layout_candidate_for_expr, next_synthetic_slot_id};
+use super::super::pathnodes::{next_synthetic_slot_id, slot_output_target};
 use super::super::plan::grouping_planner;
 use super::super::util::{
-    annotate_targets_for_input, normalize_rte_path, pathkeys_to_order_items,
-    project_to_slot_layout, required_query_pathkeys_for_rel,
+    normalize_rte_path, pathkeys_to_order_items, project_to_slot_layout,
+    required_query_pathkeys_for_rel,
 };
 use super::super::{
-    JoinBuildSpec, and_exprs, exact_join_rtindex, expand_join_rte_vars, expr_relids,
-    flatten_and_conjuncts, has_outer_joins, is_pushable_base_clause, relids_disjoint,
-    relids_overlap, relids_subset, relids_union, reverse_join_type,
+    JoinBuildSpec, and_exprs, expand_join_rte_vars, expr_relids, flatten_and_conjuncts,
+    has_outer_joins, is_pushable_base_clause, relids_disjoint, relids_overlap, relids_subset,
+    relids_union, reverse_join_type,
 };
 use super::{
     build_index_path_spec, build_join_paths_with_root, estimate_index_candidate,
-    estimate_seqscan_candidate, relation_stats, restore_join_output_order,
+    estimate_seqscan_candidate, relation_stats,
 };
 
 fn collect_inner_join_clauses(root: &PlannerInfo) -> Vec<RestrictInfo> {
@@ -295,6 +294,7 @@ fn cheapest_relation_access_path(
     })
     .unwrap_or(Path::Result {
         plan_info: PlanEstimate::default(),
+        pathtarget: PathTarget::new(Vec::new()),
     })
 }
 
@@ -310,6 +310,7 @@ fn plan_query_path(
         .cloned()
         .unwrap_or(Path::Result {
             plan_info: PlanEstimate::default(),
+            pathtarget: PathTarget::new(Vec::new()),
         });
     (root, path)
 }
@@ -322,10 +323,22 @@ fn build_recursive_union_path(
     let recursive_query = recursive_union.recursive.clone();
     let (anchor_root, anchor_path) = plan_query_path(recursive_union.anchor, catalog);
     let (recursive_root, recursive_path) = plan_query_path(recursive_union.recursive, catalog);
+    let slot_id = next_synthetic_slot_id();
+    let output_columns = recursive_union
+        .output_desc
+        .columns
+        .iter()
+        .map(|column| QueryColumn {
+            name: column.name.clone(),
+            sql_type: column.sql_type,
+            wire_type_oid: None,
+        })
+        .collect::<Vec<_>>();
     optimize_path(
         Path::RecursiveUnion {
             plan_info: PlanEstimate::default(),
-            slot_id: next_synthetic_slot_id(),
+            pathtarget: slot_output_target(slot_id, &output_columns, |column| column.sql_type),
+            slot_id,
             worktable_id: recursive_union.worktable_id,
             distinct: recursive_union.distinct,
             anchor_root: PlannerSubroot::new(anchor_root),
@@ -333,16 +346,7 @@ fn build_recursive_union_path(
             anchor_query: Box::new(anchor_query),
             recursive_query: Box::new(recursive_query),
             recursive_references_worktable: recursive_union.recursive_references_worktable,
-            output_columns: recursive_union
-                .output_desc
-                .columns
-                .iter()
-                .map(|column| QueryColumn {
-                    name: column.name.clone(),
-                    sql_type: column.sql_type,
-                    wire_type_oid: None,
-                })
-                .collect(),
+            output_columns,
             anchor: Box::new(anchor_path),
             recursive: Box::new(recursive_path),
         },
@@ -375,20 +379,22 @@ fn build_set_operation_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) 
             )
         })
         .unzip::<_, _, Vec<_>, Vec<_>>();
+    let output_columns = desc
+        .columns
+        .iter()
+        .map(|column| QueryColumn {
+            name: column.name.clone(),
+            sql_type: column.sql_type,
+            wire_type_oid: None,
+        })
+        .collect::<Vec<_>>();
     let set_op = optimize_path(
         Path::SetOp {
             plan_info: PlanEstimate::default(),
+            pathtarget: slot_output_target(source_id, &output_columns, |column| column.sql_type),
             slot_id: source_id,
             op: set_operation.op,
-            output_columns: desc
-                .columns
-                .iter()
-                .map(|column| QueryColumn {
-                    name: column.name.clone(),
-                    sql_type: column.sql_type,
-                    wire_type_oid: None,
-                })
-                .collect(),
+            output_columns,
             child_roots,
             children,
         },
@@ -419,22 +425,24 @@ fn build_cte_scan_path(
     } else {
         plan_query_path(query.clone(), catalog)
     };
+    let output_columns = desc
+        .columns
+        .iter()
+        .map(|column| QueryColumn {
+            name: column.name.clone(),
+            sql_type: column.sql_type,
+            wire_type_oid: None,
+        })
+        .collect::<Vec<_>>();
     Path::CteScan {
         plan_info: cte_path.plan_info(),
+        pathtarget: slot_output_target(rtindex, &output_columns, |column| column.sql_type),
         slot_id: rtindex,
         cte_id,
         subroot: PlannerSubroot::new(subroot),
         query: Box::new(query),
         cte_plan: Box::new(cte_path),
-        output_columns: desc
-            .columns
-            .iter()
-            .map(|column| QueryColumn {
-                name: column.name.clone(),
-                sql_type: column.sql_type,
-                wire_type_oid: None,
-            })
-            .collect(),
+        output_columns,
     }
 }
 
@@ -478,21 +486,23 @@ fn build_subquery_scan_path(
                 })
         })
         .collect();
+    let output_columns = desc
+        .columns
+        .iter()
+        .map(|column| QueryColumn {
+            name: column.name.clone(),
+            sql_type: column.sql_type,
+            wire_type_oid: None,
+        })
+        .collect::<Vec<_>>();
     Path::SubqueryScan {
         plan_info: input.plan_info(),
+        pathtarget: slot_output_target(rtindex, &output_columns, |column| column.sql_type),
         rtindex,
         subroot: PlannerSubroot::new(subroot),
         query: Box::new(query),
         input: Box::new(input),
-        output_columns: desc
-            .columns
-            .iter()
-            .map(|column| QueryColumn {
-                name: column.name.clone(),
-                sql_type: column.sql_type,
-                wire_type_oid: None,
-            })
-            .collect(),
+        output_columns,
         pathkeys,
     }
 }
@@ -566,6 +576,9 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         let append = optimize_path(
             Path::Append {
                 plan_info: PlanEstimate::default(),
+                pathtarget: slot_output_target(rtindex, &rte.desc.columns, |column| {
+                    column.sql_type
+                }),
                 source_id: rtindex,
                 desc: rte.desc.clone(),
                 children,
@@ -596,6 +609,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         RangeTblEntryKind::Result => rel.add_path(optimize_path(
             Path::Result {
                 plan_info: PlanEstimate::default(),
+                pathtarget: PathTarget::new(Vec::new()),
             },
             catalog,
         )),
@@ -625,6 +639,9 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             let mut path = optimize_path(
                 Path::Values {
                     plan_info: PlanEstimate::default(),
+                    pathtarget: slot_output_target(rtindex, &output_columns, |column| {
+                        column.sql_type
+                    }),
                     slot_id: rtindex,
                     rows,
                     output_columns,
@@ -636,6 +653,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 path = optimize_path(
                     Path::Filter {
                         plan_info: PlanEstimate::default(),
+                        pathtarget: path.semantic_output_target(),
                         predicate: filter,
                         input: Box::new(path),
                     },
@@ -648,6 +666,9 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             let mut path = optimize_path(
                 Path::FunctionScan {
                     plan_info: PlanEstimate::default(),
+                    pathtarget: slot_output_target(rtindex, call.output_columns(), |column| {
+                        column.sql_type
+                    }),
                     slot_id: rtindex,
                     call,
                 },
@@ -658,6 +679,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 path = optimize_path(
                     Path::Filter {
                         plan_info: PlanEstimate::default(),
+                        pathtarget: path.semantic_output_target(),
                         predicate: filter,
                         input: Box::new(path),
                     },
@@ -670,6 +692,19 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             let mut path = optimize_path(
                 Path::WorkTableScan {
                     plan_info: PlanEstimate::default(),
+                    pathtarget: slot_output_target(
+                        rtindex,
+                        &rte.desc
+                            .columns
+                            .iter()
+                            .map(|column| QueryColumn {
+                                name: column.name.clone(),
+                                sql_type: column.sql_type,
+                                wire_type_oid: None,
+                            })
+                            .collect::<Vec<_>>(),
+                        |column| column.sql_type,
+                    ),
                     slot_id: rtindex,
                     worktable_id,
                     output_columns: rte
@@ -690,6 +725,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 path = optimize_path(
                     Path::Filter {
                         plan_info: PlanEstimate::default(),
+                        pathtarget: path.semantic_output_target(),
                         predicate: filter,
                         input: Box::new(path),
                     },
@@ -705,6 +741,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 path = optimize_path(
                     Path::Filter {
                         plan_info: PlanEstimate::default(),
+                        pathtarget: path.semantic_output_target(),
                         predicate: filter,
                         input: Box::new(path),
                     },
@@ -719,6 +756,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                 path = optimize_path(
                     Path::Filter {
                         plan_info: PlanEstimate::default(),
+                        pathtarget: path.semantic_output_target(),
                         predicate: filter,
                         input: Box::new(path),
                     },
@@ -759,11 +797,7 @@ fn build_join_restrict_clauses(
         clauses.extend(
             flatten_and_conjuncts(&explicit_qual)
                 .into_iter()
-                .map(|clause| RestrictInfo {
-                    required_relids: expr_relids(&clause),
-                    clause,
-                    is_pushed_down: false,
-                }),
+                .map(|clause| joininfo::make_restrict_info_with_pushdown(clause, false)),
         );
     }
     if matches!(kind, JoinType::Inner | JoinType::Cross) {
@@ -787,130 +821,42 @@ fn build_join_restrict_clauses(
     clauses
 }
 
-fn maybe_project_join_alias(
-    rtindex: usize,
-    input: Path,
-    root: &PlannerInfo,
-    reltarget: &PathTarget,
-    catalog: &dyn CatalogLookup,
-) -> Path {
-    let Some(rte) = root.parse.rtable.get(rtindex.saturating_sub(1)) else {
-        return input;
-    };
-    let RangeTblEntryKind::Join { joinaliasvars, .. } = &rte.kind else {
-        return input;
-    };
-    let input_target = input.semantic_output_target();
-    let layout = input.semantic_output_vars();
-    let desired_layout = PathTarget::from_rte(rtindex, rte).exprs;
-    let alias_target_exprs = joinaliasvars.clone();
-    let extra_exprs = reltarget
-        .exprs
-        .iter()
-        .filter(|expr| layout_candidate_for_expr(Some(root), expr, &desired_layout).is_none())
-        .cloned()
-        .collect::<Vec<_>>();
-    if extra_exprs.is_empty() && (layout == desired_layout || alias_target_exprs == layout) {
-        return input;
-    }
-    let mut targets = rte
-        .desc
-        .columns
-        .iter()
-        .zip(alias_target_exprs)
-        .enumerate()
-        .map(|(index, (column, expr))| {
-            let input_resno = input_target
-                .exprs
-                .iter()
-                .position(|input_expr| *input_expr == expr)
-                .map(|position| position + 1);
-            TargetEntry::new(column.name.clone(), expr, column.sql_type, index + 1)
-                .with_input_resno_opt(input_resno)
-        })
-        .collect::<Vec<_>>();
-    let base_resno = targets.len();
-    let support_targets = extra_exprs
-        .into_iter()
-        .enumerate()
-        .map(|(index, expr): (usize, Expr)| {
-            let resno = base_resno + index + 1;
-            TargetEntry::new(
-                format!("support{resno}"),
-                expr.clone(),
-                expr_sql_type(&expr),
-                resno,
-            )
-        })
-        .collect::<Vec<_>>();
-    let support_targets = annotate_targets_for_input(Some(root), &input, &support_targets);
-    targets.extend(support_targets);
-
-    optimize_path(
-        Path::Projection {
-            plan_info: PlanEstimate::default(),
-            slot_id: next_synthetic_slot_id(),
-            input: Box::new(input),
-            targets,
-        },
-        catalog,
-    )
+#[derive(Clone, Copy)]
+enum LevelRelRef {
+    Base(usize),
+    Join(usize),
 }
 
-fn top_join_rtindex(root: &PlannerInfo) -> Option<usize> {
-    match root.parse.jointree.as_ref() {
-        Some(JoinTreeNode::JoinExpr { rtindex, .. }) => root
-            .parse
-            .rtable
-            .get(rtindex.saturating_sub(1))
-            .filter(|rte| matches!(rte.kind, RangeTblEntryKind::Join { .. }))
-            .map(|_| *rtindex),
-        _ => None,
+fn rel_at_level<'a>(root: &'a PlannerInfo, rel_ref: LevelRelRef) -> &'a RelOptInfo {
+    match rel_ref {
+        LevelRelRef::Base(rtindex) => root.simple_rel_array[rtindex]
+            .as_ref()
+            .expect("base rel ref should point at an existing rel"),
+        LevelRelRef::Join(index) => root
+            .join_rel_list
+            .get(index)
+            .expect("join rel ref should point at an existing rel"),
     }
 }
 
-fn normalize_join_output_rel(
-    root: &PlannerInfo,
-    input_rel: RelOptInfo,
-    rtindex: usize,
-    catalog: &dyn CatalogLookup,
-) -> RelOptInfo {
-    let Some(rte) = root.parse.rtable.get(rtindex.saturating_sub(1)) else {
-        return input_rel;
-    };
-    let mut rel = RelOptInfo::new(
-        input_rel.relids.clone(),
-        input_rel.reloptkind,
-        PathTarget::from_rte(rtindex, rte),
-    );
-    for path in input_rel.pathlist {
-        rel.add_path(maybe_project_join_alias(
-            rtindex,
-            path,
-            root,
-            &rel.reltarget,
-            catalog,
-        ));
-    }
-    bestpath::set_cheapest(&mut rel);
-    rel
-}
-
-fn base_rels_at_level(root: &PlannerInfo, level: usize) -> Vec<RelOptInfo> {
+fn rel_refs_at_level(root: &PlannerInfo, level: usize) -> Vec<LevelRelRef> {
     if level == 1 {
         root.simple_rel_array
             .iter()
+            .enumerate()
             .skip(1)
-            .filter_map(|rel| {
-                rel.clone()
+            .filter_map(|(rtindex, rel)| {
+                rel.as_ref()
                     .filter(|rel| rel.reloptkind != RelOptKind::OtherMemberRel)
+                    .map(|_| LevelRelRef::Base(rtindex))
             })
             .collect()
     } else {
         root.join_rel_list
             .iter()
-            .filter(|rel| rel.relids.len() == level)
-            .cloned()
+            .enumerate()
+            .filter(|(_, rel)| rel.relids.len() == level)
+            .map(|(index, _)| LevelRelRef::Join(index))
             .collect()
     }
 }
@@ -929,7 +875,9 @@ fn join_reltarget(
 ) -> PathTarget {
     let mut exprs = left_rel.reltarget.exprs.clone();
     exprs.extend(right_rel.reltarget.exprs.clone());
-    PathTarget::new(exprs)
+    let mut sortgrouprefs = left_rel.reltarget.sortgrouprefs.clone();
+    sortgrouprefs.extend(right_rel.reltarget.sortgrouprefs.clone());
+    PathTarget::with_sortgrouprefs(exprs, sortgrouprefs)
 }
 
 fn join_spec_for_special_join(sjinfo: &SpecialJoinInfo, reversed: bool) -> JoinBuildSpec {
@@ -1098,23 +1046,69 @@ fn join_is_legal(
 
 fn make_join_rel(
     root: &mut PlannerInfo,
-    left_rel: &RelOptInfo,
-    right_rel: &RelOptInfo,
-    catalog: &dyn CatalogLookup,
-) -> Option<RelOptInfo> {
-    if !relids_disjoint(&left_rel.relids, &right_rel.relids) {
-        return None;
-    }
-    let relids = relids_union(&left_rel.relids, &right_rel.relids);
-    let spec = join_is_legal(root, left_rel, right_rel)?;
-    let reltarget = join_reltarget(root, &relids, left_rel, right_rel);
-    let join_restrict_clauses = build_join_restrict_clauses(
-        spec.kind,
-        spec.explicit_qual.clone(),
-        &left_rel.relids,
-        &right_rel.relids,
-        &root.inner_join_clauses,
-    );
+    left_ref: LevelRelRef,
+    right_ref: LevelRelRef,
+    _catalog: &dyn CatalogLookup,
+) -> Option<()> {
+    let (relids, _spec, reltarget, _output_columns, join_restrict_clauses, candidate_paths) = {
+        let left_rel = rel_at_level(root, left_ref);
+        let right_rel = rel_at_level(root, right_ref);
+        if !relids_disjoint(&left_rel.relids, &right_rel.relids) {
+            return None;
+        }
+        let relids = relids_union(&left_rel.relids, &right_rel.relids);
+        let spec = join_is_legal(root, left_rel, right_rel)?;
+        let (logical_left_rel, logical_right_rel) = if spec.reversed {
+            (right_rel, left_rel)
+        } else {
+            (left_rel, right_rel)
+        };
+        let reltarget = join_reltarget(root, &relids, logical_left_rel, logical_right_rel);
+        let mut output_columns = logical_left_rel
+            .cheapest_total_path()
+            .map(Path::columns)
+            .unwrap_or_default();
+        output_columns.extend(
+            logical_right_rel
+                .cheapest_total_path()
+                .map(Path::columns)
+                .unwrap_or_default(),
+        );
+        let join_restrict_clauses = build_join_restrict_clauses(
+            spec.kind,
+            spec.explicit_qual.clone(),
+            &left_rel.relids,
+            &right_rel.relids,
+            &root.inner_join_clauses,
+        );
+        let mut candidate_paths = Vec::new();
+        for left_path in &left_rel.pathlist {
+            for right_path in &right_rel.pathlist {
+                let paths = build_join_paths_with_root(
+                    root,
+                    left_path.clone(),
+                    right_path.clone(),
+                    &left_rel.relids,
+                    &right_rel.relids,
+                    spec.kind,
+                    join_restrict_clauses.clone(),
+                    reltarget.clone(),
+                    output_columns.clone(),
+                );
+                for path in paths {
+                    candidate_paths.push(path);
+                }
+            }
+        }
+        (
+            relids,
+            spec,
+            reltarget,
+            output_columns,
+            join_restrict_clauses,
+            candidate_paths,
+        )
+    };
     let join_rel_index = match find_join_rel_index(root, &relids) {
         Some(index) => index,
         None => {
@@ -1126,45 +1120,6 @@ fn make_join_rel(
             root.join_rel_list.len() - 1
         }
     };
-    let mut candidate_paths = Vec::new();
-    let output_rtindex = spec
-        .rtindex
-        .filter(|rtindex| exact_join_rtindex(root, &relids) == Some(*rtindex))
-        .or_else(|| exact_join_rtindex(root, &relids));
-    for left_path in &left_rel.pathlist {
-        for right_path in &right_rel.pathlist {
-            let paths = build_join_paths_with_root(
-                root,
-                left_path.clone(),
-                right_path.clone(),
-                &left_rel.relids,
-                &right_rel.relids,
-                spec.kind,
-                join_restrict_clauses.clone(),
-            );
-            for path in paths {
-                let path = if spec.reversed {
-                    restore_join_output_order(
-                        Some(root),
-                        path,
-                        &right_path.columns(),
-                        &left_path.columns(),
-                        &right_path.semantic_output_vars(),
-                        &left_path.semantic_output_vars(),
-                    )
-                } else {
-                    path
-                };
-                let path = match output_rtindex {
-                    Some(rtindex) => {
-                        maybe_project_join_alias(rtindex, path, root, &reltarget, catalog)
-                    }
-                    None => path,
-                };
-                candidate_paths.push(path);
-            }
-        }
-    }
     let join_rel = root
         .join_rel_list
         .get_mut(join_rel_index)
@@ -1180,17 +1135,7 @@ fn make_join_rel(
         join_rel.add_path(path);
     }
     bestpath::set_cheapest(join_rel);
-    let rel = join_rel.clone();
-    let rel = if let Some(rtindex) = spec
-        .rtindex
-        .filter(|rtindex| exact_join_rtindex(root, &relids) == Some(*rtindex))
-    {
-        normalize_join_output_rel(root, rel, rtindex, catalog)
-    } else {
-        rel
-    };
-    root.join_rel_list[join_rel_index] = rel.clone();
-    Some(rel)
+    Some(())
 }
 
 fn join_search_one_level(root: &mut PlannerInfo, level: usize, catalog: &dyn CatalogLookup) {
@@ -1199,14 +1144,16 @@ fn join_search_one_level(root: &mut PlannerInfo, level: usize, catalog: &dyn Cat
         if left_level > right_level {
             continue;
         }
-        let left_rels = base_rels_at_level(root, left_level);
-        let right_rels = base_rels_at_level(root, right_level);
-        for left_rel in &left_rels {
-            for right_rel in &right_rels {
-                if left_level == right_level && left_rel.relids >= right_rel.relids {
+        let left_refs = rel_refs_at_level(root, left_level);
+        let right_refs = rel_refs_at_level(root, right_level);
+        for left_ref in left_refs {
+            for right_ref in &right_refs {
+                if left_level == right_level
+                    && rel_at_level(root, left_ref).relids >= rel_at_level(root, *right_ref).relids
+                {
                     continue;
                 }
-                let _ = make_join_rel(root, left_rel, right_rel, catalog);
+                let _ = make_join_rel(root, left_ref, *right_ref, catalog);
             }
         }
     }
@@ -1227,6 +1174,7 @@ pub(super) fn make_one_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) 
         rel.add_path(optimize_path(
             Path::Result {
                 plan_info: PlanEstimate::default(),
+                pathtarget: PathTarget::new(Vec::new()),
             },
             catalog,
         ));
@@ -1247,11 +1195,7 @@ pub(super) fn make_one_rel(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) 
         .find(|rel| rel.relids == query_relids)
         .cloned()
         .unwrap_or_else(|| panic!("failed to build join rel for relids {:?}", query_relids));
-    if let Some(rtindex) = top_join_rtindex(root) {
-        normalize_join_output_rel(root, rel, rtindex, catalog)
-    } else {
-        rel
-    }
+    rel
 }
 
 pub(super) fn query_planner(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) -> RelOptInfo {

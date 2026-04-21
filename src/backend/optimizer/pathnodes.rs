@@ -10,8 +10,8 @@ use crate::include::nodes::primnodes::{
     user_attrno,
 };
 
-use super::flatten_join_alias_vars;
 use super::inherit::{append_translation, translate_append_rel_expr};
+use super::util::{IndexedPathTarget, simple_var_key, strip_binary_coercible_casts};
 
 // :HACK: Planner-generated slot Vars still share the same Var identity space as parse-time
 // rtindex Vars, so keep synthetic slots in a disjoint high range until slot identity is split
@@ -48,7 +48,7 @@ impl Path {
 
     pub fn plan_info(&self) -> PlanEstimate {
         match self {
-            Self::Result { plan_info }
+            Self::Result { plan_info, .. }
             | Self::Append { plan_info, .. }
             | Self::SeqScan { plan_info, .. }
             | Self::IndexScan { plan_info, .. }
@@ -110,10 +110,8 @@ impl Path {
             Self::WorkTableScan { output_columns, .. }
             | Self::RecursiveUnion { output_columns, .. }
             | Self::SetOp { output_columns, .. } => output_columns.clone(),
-            Self::NestedLoopJoin { left, right, .. } | Self::HashJoin { left, right, .. } => {
-                let mut cols = left.columns();
-                cols.extend(right.columns());
-                cols
+            Self::NestedLoopJoin { output_columns, .. } | Self::HashJoin { output_columns, .. } => {
+                output_columns.clone()
             }
             Self::FunctionScan { call, .. } => call.output_columns().to_vec(),
             Self::Values { output_columns, .. } => output_columns.clone(),
@@ -271,65 +269,26 @@ impl Path {
 
     pub fn semantic_output_target(&self) -> PathTarget {
         match self {
-            Self::Result { .. } => PathTarget::new(Vec::new()),
-            Self::Append {
-                source_id, desc, ..
-            } => slot_output_target(*source_id, &desc.columns, |column| column.sql_type),
-            Self::SeqScan {
-                source_id, desc, ..
-            }
-            | Self::IndexScan {
-                source_id, desc, ..
-            } => slot_output_target(*source_id, &desc.columns, |column| column.sql_type),
-            Self::Filter { input, .. }
-            | Self::OrderBy { input, .. }
-            | Self::Limit { input, .. } => input.semantic_output_target(),
-            Self::Projection { targets, .. } => PathTarget::from_target_list(targets),
-            Self::Aggregate {
-                group_by,
-                accumulators,
-                ..
-            } => aggregate_output_target(group_by, accumulators),
-            Self::WindowAgg { input, clause, .. } => window_semantic_output_target(input, clause),
-            Self::Values {
-                slot_id,
-                output_columns,
-                ..
-            }
-            | Self::CteScan {
-                slot_id,
-                output_columns,
-                ..
-            }
-            | Self::WorkTableScan {
-                slot_id,
-                output_columns,
-                ..
-            }
-            | Self::RecursiveUnion {
-                slot_id,
-                output_columns,
-                ..
-            }
-            | Self::SetOp {
-                slot_id,
-                output_columns,
-                ..
-            } => slot_output_target(*slot_id, output_columns, |column| column.sql_type),
-            Self::FunctionScan { slot_id, call, .. } => {
-                slot_output_target(*slot_id, call.output_columns(), |column| column.sql_type)
-            }
-            Self::SubqueryScan {
-                rtindex,
-                output_columns,
-                ..
-            } => slot_output_target(*rtindex, output_columns, |column| column.sql_type),
-            Self::ProjectSet { targets, .. } => project_set_output_target(targets),
-            Self::NestedLoopJoin { left, right, .. } | Self::HashJoin { left, right, .. } => {
-                let mut exprs = left.semantic_output_vars();
-                exprs.extend(right.semantic_output_vars());
-                PathTarget::new(exprs)
-            }
+            Self::Result { pathtarget, .. }
+            | Self::Append { pathtarget, .. }
+            | Self::SeqScan { pathtarget, .. }
+            | Self::IndexScan { pathtarget, .. }
+            | Self::Filter { pathtarget, .. }
+            | Self::NestedLoopJoin { pathtarget, .. }
+            | Self::HashJoin { pathtarget, .. }
+            | Self::Projection { pathtarget, .. }
+            | Self::OrderBy { pathtarget, .. }
+            | Self::Limit { pathtarget, .. }
+            | Self::Aggregate { pathtarget, .. }
+            | Self::WindowAgg { pathtarget, .. }
+            | Self::Values { pathtarget, .. }
+            | Self::FunctionScan { pathtarget, .. }
+            | Self::SubqueryScan { pathtarget, .. }
+            | Self::CteScan { pathtarget, .. }
+            | Self::WorkTableScan { pathtarget, .. }
+            | Self::RecursiveUnion { pathtarget, .. }
+            | Self::SetOp { pathtarget, .. }
+            | Self::ProjectSet { pathtarget, .. } => pathtarget.clone(),
         }
     }
 
@@ -377,24 +336,19 @@ impl Path {
 }
 
 pub(super) fn layout_candidate_for_expr(
-    root: Option<&PlannerInfo>,
+    _root: Option<&PlannerInfo>,
     expr: &Expr,
     layout: &[Expr],
 ) -> Option<Expr> {
+    let expr_var = simple_var_key(expr);
+    let stripped_expr = strip_binary_coercible_casts(expr);
     layout
         .iter()
-        .find(|candidate| **candidate == *expr)
-        .cloned()
-        .or_else(|| {
-            root.and_then(|root| {
-                let flattened_expr = flatten_join_alias_vars(root, expr.clone());
-                layout.iter().find_map(|candidate| {
-                    let flattened_candidate = flatten_join_alias_vars(root, candidate.clone());
-                    (flattened_candidate == *expr || flattened_candidate == flattened_expr)
-                        .then(|| candidate.clone())
-                })
-            })
+        .find(|candidate| {
+            expr_var.is_some_and(|key| simple_var_key(candidate) == Some(key))
+                || strip_binary_coercible_casts(candidate) == stripped_expr
         })
+        .cloned()
 }
 
 pub(super) fn lower_expr_to_path_output(
@@ -452,59 +406,44 @@ fn lower_expr_to_path_output_internal(
         _ => {}
     }
     let output_target = path.output_target();
-    if ressortgroupref != 0
-        && let Some(index) = output_target
-            .sortgrouprefs
-            .iter()
-            .position(|candidate| *candidate == ressortgroupref)
-    {
-        return output_target.exprs.get(index).cloned();
-    }
-    layout_candidate_for_expr(root, expr, &output_target.exprs)
+    IndexedPathTarget::new(&output_target)
+        .matched_expr(expr, ressortgroupref)
+        .or_else(|| layout_candidate_for_expr(root, expr, &output_target.exprs))
 }
 
 fn projection_output_match(
-    root: Option<&PlannerInfo>,
+    _root: Option<&PlannerInfo>,
     targets: &[TargetEntry],
     input_target: &PathTarget,
     expr: &Expr,
     ressortgroupref: usize,
 ) -> Option<Expr> {
-    targets
-        .iter()
-        .find(|target| {
-            target.input_resno.and_then(|input_resno| {
-                input_target
-                    .exprs
-                    .get(input_resno.saturating_sub(1))
-                    .cloned()
-            }) == Some(expr.clone())
+    let target_pathtarget = PathTarget::from_target_list(targets);
+    let indexed_targets = IndexedPathTarget::new(&target_pathtarget);
+    let indexed_input = IndexedPathTarget::new(input_target);
+    (ressortgroupref != 0)
+        .then(|| {
+            indexed_targets
+                .index_for_sortgroupref(ressortgroupref)
+                .and_then(|index| targets.get(index))
+                .map(|target| target.expr.clone())
         })
-        .map(|target| target.expr.clone())
+        .flatten()
         .or_else(|| {
-            (ressortgroupref != 0)
-                .then(|| {
+            indexed_input
+                .match_index(expr, 0)
+                .and_then(|index| {
                     targets
                         .iter()
-                        .find(|target| target.ressortgroupref == ressortgroupref)
-                        .map(|target| target.expr.clone())
+                        .find(|target| target.input_resno == Some(index + 1))
                 })
-                .flatten()
-        })
-        .or_else(|| {
-            targets
-                .iter()
-                .find(|target| target.expr == *expr)
                 .map(|target| target.expr.clone())
         })
         .or_else(|| {
-            root.and_then(|root| {
-                let flattened_expr = flatten_join_alias_vars(root, expr.clone());
-                targets.iter().find_map(|target| {
-                    (flatten_join_alias_vars(root, target.expr.clone()) == flattened_expr)
-                        .then(|| target.expr.clone())
-                })
-            })
+            indexed_targets
+                .match_index(expr, ressortgroupref)
+                .and_then(|index| targets.get(index))
+                .map(|target| target.expr.clone())
         })
 }
 
@@ -537,7 +476,22 @@ fn appendrel_expr_for_path(root: &PlannerInfo, path: &Path, expr: Expr) -> Expr 
         .unwrap_or(expr)
 }
 
-fn slot_output_target<T>(
+pub(super) fn exprs_match_for_path_layout(
+    _root: Option<&PlannerInfo>,
+    left: &Expr,
+    right: &Expr,
+) -> bool {
+    simple_var_key(left)
+        .zip(simple_var_key(right))
+        .is_some_and(|(left, right)| left == right)
+        || normalize_expr_for_path_layout(None, left) == normalize_expr_for_path_layout(None, right)
+}
+
+pub(super) fn normalize_expr_for_path_layout(_root: Option<&PlannerInfo>, expr: &Expr) -> Expr {
+    strip_binary_coercible_casts(expr)
+}
+
+pub(crate) fn slot_output_target<T>(
     varno: usize,
     columns: &[T],
     sql_type: impl Fn(&T) -> SqlType,

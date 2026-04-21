@@ -315,6 +315,24 @@ fn make_window_input_target(
         for item in &clause.spec.order_by {
             collect_window_input_exprs(&item.expr, has_grouping(parse), &mut input_target);
         }
+        match &clause.spec.frame.start_bound {
+            crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(expr)
+            | crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(expr) => {
+                collect_window_input_exprs(expr, has_grouping(parse), &mut input_target);
+            }
+            crate::include::nodes::primnodes::WindowFrameBound::UnboundedPreceding
+            | crate::include::nodes::primnodes::WindowFrameBound::CurrentRow
+            | crate::include::nodes::primnodes::WindowFrameBound::UnboundedFollowing => {}
+        }
+        match &clause.spec.frame.end_bound {
+            crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(expr)
+            | crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(expr) => {
+                collect_window_input_exprs(expr, has_grouping(parse), &mut input_target);
+            }
+            crate::include::nodes::primnodes::WindowFrameBound::UnboundedPreceding
+            | crate::include::nodes::primnodes::WindowFrameBound::CurrentRow
+            | crate::include::nodes::primnodes::WindowFrameBound::UnboundedFollowing => {}
+        }
     }
     input_target
 }

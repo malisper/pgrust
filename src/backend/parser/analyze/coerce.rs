@@ -1,8 +1,8 @@
 use super::*;
+use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::catalog::bootstrap_pg_cast_rows;
 use crate::include::catalog::{
     builtin_multirange_name_for_sql_type, builtin_range_name_for_sql_type,
-    multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 
 pub(super) fn coerce_bound_expr(expr: Expr, from: SqlType, to: SqlType) -> Expr {
@@ -23,26 +23,12 @@ pub fn is_binary_coercible_type(from: SqlType, to: SqlType) -> bool {
         return true;
     }
 
-    let from_oid = range_type_ref_for_sql_type(from)
-        .map(|range_type| range_type.type_oid())
-        .or_else(|| {
-            crate::include::catalog::builtin_type_rows()
-                .iter()
-                .find(|row| row.sql_type == from && row.typrelid == 0)
-                .map(|row| row.oid)
-        });
-    let to_oid = range_type_ref_for_sql_type(to)
-        .map(|range_type| range_type.type_oid())
-        .or_else(|| {
-            crate::include::catalog::builtin_type_rows()
-                .iter()
-                .find(|row| row.sql_type == to && row.typrelid == 0)
-                .map(|row| row.oid)
-        });
+    let from_oid = sql_type_oid(from);
+    let to_oid = sql_type_oid(to);
 
-    let (Some(from_oid), Some(to_oid)) = (from_oid, to_oid) else {
+    if from_oid == 0 || to_oid == 0 {
         return false;
-    };
+    }
 
     bootstrap_pg_cast_rows()
         .into_iter()
