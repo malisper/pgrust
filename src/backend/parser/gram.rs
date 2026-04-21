@@ -5145,6 +5145,7 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
     let mut buffers = false;
     let mut costs = true;
     let mut timing = true;
+    let mut verbose = false;
     let mut statement = None;
     for part in pair.into_inner() {
         match part.as_rule() {
@@ -5174,12 +5175,14 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
                     Some(Rule::kw_buffers) => buffers = bool_val,
                     Some(Rule::kw_costs) => costs = bool_val,
                     Some(Rule::kw_timing) => timing = bool_val,
-                    _ => {} // VERBOSE, SUMMARY, FORMAT: parsed but ignored
+                    Some(Rule::kw_verbose) => verbose = bool_val,
+                    _ => {} // SUMMARY, FORMAT: parsed but ignored
                 }
             }
             Rule::select_stmt => statement = Some(Statement::Select(build_select(part)?)),
             Rule::insert_stmt => statement = Some(Statement::Insert(build_insert(part)?)),
             Rule::merge_stmt => statement = Some(Statement::Merge(build_merge(part)?)),
+            Rule::update_stmt => statement = Some(Statement::Update(build_update(part)?)),
             _ => {}
         }
     }
@@ -5188,6 +5191,7 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
         buffers,
         costs,
         timing,
+        verbose,
         statement: Box::new(statement.ok_or(ParseError::UnexpectedEof)?),
     })
 }

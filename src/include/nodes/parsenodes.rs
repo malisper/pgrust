@@ -711,6 +711,7 @@ pub struct ExplainStatement {
     pub buffers: bool,
     pub costs: bool,
     pub timing: bool,
+    pub verbose: bool,
     pub statement: Box<Statement>,
 }
 
