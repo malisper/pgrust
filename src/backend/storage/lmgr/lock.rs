@@ -3,12 +3,14 @@ use std::time::Duration;
 
 use parking_lot::{Condvar, Mutex};
 
+use crate::backend::utils::activity::now_timestamptz;
 use crate::backend::utils::misc::interrupts::{
     InterruptReason, InterruptState, check_for_interrupts,
 };
+use crate::include::nodes::datetime::TimestampTzADT;
 use crate::{ClientId, RelFileLocator};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TableLockMode {
     AccessShare,
     RowExclusive,
@@ -22,6 +24,15 @@ impl TableLockMode {
             self
         } else {
             other
+        }
+    }
+
+    pub(crate) fn pg_mode_name(self) -> &'static str {
+        match self {
+            TableLockMode::AccessShare => "AccessShareLock",
+            TableLockMode::RowExclusive => "RowExclusiveLock",
+            TableLockMode::ShareUpdateExclusive => "ShareUpdateExclusiveLock",
+            TableLockMode::AccessExclusive => "AccessExclusiveLock",
         }
     }
 
@@ -55,13 +66,34 @@ impl TableLockMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TableLockSnapshotRow {
+    pub rel: RelFileLocator,
+    pub client_id: ClientId,
+    pub mode: TableLockMode,
+    pub granted: bool,
+    pub waitstart: Option<TimestampTzADT>,
+}
+
 struct TableLockEntry {
     mode: TableLockMode,
     holder: ClientId,
 }
 
+struct TableLockWaiter {
+    holder: ClientId,
+    mode: TableLockMode,
+    waitstart: TimestampTzADT,
+}
+
+#[derive(Default)]
+struct TableLockState {
+    locks: HashMap<RelFileLocator, Vec<TableLockEntry>>,
+    waiters: HashMap<RelFileLocator, Vec<TableLockWaiter>>,
+}
+
 pub struct TableLockManager {
-    locks: Mutex<HashMap<RelFileLocator, Vec<TableLockEntry>>>,
+    state: Mutex<TableLockState>,
     cv: Condvar,
 }
 
@@ -73,30 +105,23 @@ pub enum TableLockError {
 impl TableLockManager {
     pub fn new() -> Self {
         Self {
-            locks: Mutex::new(HashMap::new()),
+            state: Mutex::new(TableLockState::default()),
             cv: Condvar::new(),
         }
     }
 
     pub fn lock_table(&self, rel: RelFileLocator, mode: TableLockMode, client_id: ClientId) {
-        let mut locks = self.locks.lock();
+        let mut state = self.state.lock();
         loop {
-            let entries = locks.entry(rel).or_default();
+            let entries = state.locks.entry(rel).or_default();
             let has_conflict = entries.iter().any(|e| {
                 e.holder != client_id && e.mode.conflicts_with(mode_for_holder(e, client_id, mode))
             });
             if !has_conflict {
-                if let Some(entry) = entries.iter_mut().find(|entry| entry.holder == client_id) {
-                    entry.mode = entry.mode.strongest(mode);
-                } else {
-                    entries.push(TableLockEntry {
-                        mode,
-                        holder: client_id,
-                    });
-                }
+                grant_table_lock(entries, client_id, mode);
                 return;
             }
-            self.cv.wait(&mut locks);
+            self.cv.wait(&mut state);
         }
     }
 
@@ -107,47 +132,60 @@ impl TableLockManager {
         client_id: ClientId,
         interrupts: &InterruptState,
     ) -> Result<(), TableLockError> {
-        let mut locks = self.locks.lock();
+        let mut state = self.state.lock();
+        let mut waiting = false;
         loop {
-            let entries = locks.entry(rel).or_default();
-            let has_conflict = entries.iter().any(|e| {
+            let has_conflict = state.locks.entry(rel).or_default().iter().any(|e| {
                 e.holder != client_id && e.mode.conflicts_with(mode_for_holder(e, client_id, mode))
             });
             if !has_conflict {
-                if let Some(entry) = entries.iter_mut().find(|entry| entry.holder == client_id) {
-                    entry.mode = entry.mode.strongest(mode);
-                } else {
-                    entries.push(TableLockEntry {
-                        mode,
-                        holder: client_id,
-                    });
+                if waiting {
+                    remove_table_waiter(&mut state.waiters, rel, client_id, mode);
                 }
+                let entries = state.locks.entry(rel).or_default();
+                grant_table_lock(entries, client_id, mode);
                 return Ok(());
             }
+            if !waiting {
+                state.waiters.entry(rel).or_default().push(TableLockWaiter {
+                    holder: client_id,
+                    mode,
+                    waitstart: now_timestamptz(),
+                });
+                waiting = true;
+            }
             if let Err(reason) = check_for_interrupts(interrupts) {
+                remove_table_waiter(&mut state.waiters, rel, client_id, mode);
+                self.cv.notify_all();
                 return Err(TableLockError::Interrupted(reason));
             }
-            self.cv.wait_for(&mut locks, Duration::from_millis(10));
+            self.cv.wait_for(&mut state, Duration::from_millis(10));
         }
     }
 
     pub fn unlock_table(&self, rel: RelFileLocator, client_id: ClientId) {
-        let mut locks = self.locks.lock();
-        if let Some(entries) = locks.get_mut(&rel) {
+        let mut state = self.state.lock();
+        if let Some(entries) = state.locks.get_mut(&rel) {
             if let Some(idx) = entries.iter().rposition(|e| e.holder == client_id) {
                 entries.remove(idx);
             }
             if entries.is_empty() {
-                locks.remove(&rel);
+                state.locks.remove(&rel);
             }
         }
         self.cv.notify_all();
     }
 
     pub fn unlock_all_for_client(&self, client_id: ClientId) {
-        let mut locks = self.locks.lock();
+        let mut state = self.state.lock();
         let mut released_any = false;
-        locks.retain(|_, entries| {
+        state.locks.retain(|_, entries| {
+            let before = entries.len();
+            entries.retain(|entry| entry.holder != client_id);
+            released_any |= entries.len() != before;
+            !entries.is_empty()
+        });
+        state.waiters.retain(|_, entries| {
             let before = entries.len();
             entries.retain(|entry| entry.holder != client_id);
             released_any |= entries.len() != before;
@@ -158,10 +196,48 @@ impl TableLockManager {
         }
     }
 
+    pub fn snapshot(&self) -> Vec<TableLockSnapshotRow> {
+        let state = self.state.lock();
+        let mut rows = Vec::new();
+        for (rel, entries) in &state.locks {
+            for entry in entries {
+                rows.push(TableLockSnapshotRow {
+                    rel: *rel,
+                    client_id: entry.holder,
+                    mode: entry.mode,
+                    granted: true,
+                    waitstart: None,
+                });
+            }
+        }
+        for (rel, entries) in &state.waiters {
+            for entry in entries {
+                rows.push(TableLockSnapshotRow {
+                    rel: *rel,
+                    client_id: entry.holder,
+                    mode: entry.mode,
+                    granted: false,
+                    waitstart: Some(entry.waitstart),
+                });
+            }
+        }
+        rows.sort_by_key(|row| {
+            (
+                row.rel,
+                row.client_id,
+                row.mode,
+                !row.granted,
+                row.waitstart,
+            )
+        });
+        rows
+    }
+
     #[cfg(test)]
     pub(crate) fn has_locks_for_client(&self, client_id: ClientId) -> bool {
-        self.locks
+        self.state
             .lock()
+            .locks
             .values()
             .any(|entries| entries.iter().any(|entry| entry.holder == client_id))
     }
@@ -225,6 +301,39 @@ pub(crate) fn lock_table_requests_interruptible(
         locked.push(*rel);
     }
     Ok(())
+}
+
+fn grant_table_lock(entries: &mut Vec<TableLockEntry>, client_id: ClientId, mode: TableLockMode) {
+    if let Some(entry) = entries.iter_mut().find(|entry| entry.holder == client_id) {
+        entry.mode = entry.mode.strongest(mode);
+    } else {
+        entries.push(TableLockEntry {
+            mode,
+            holder: client_id,
+        });
+    }
+}
+
+fn remove_table_waiter(
+    waiters: &mut HashMap<RelFileLocator, Vec<TableLockWaiter>>,
+    rel: RelFileLocator,
+    client_id: ClientId,
+    mode: TableLockMode,
+) {
+    let remove_key = if let Some(entries) = waiters.get_mut(&rel) {
+        if let Some(index) = entries
+            .iter()
+            .position(|entry| entry.holder == client_id && entry.mode == mode)
+        {
+            entries.remove(index);
+        }
+        entries.is_empty()
+    } else {
+        false
+    };
+    if remove_key {
+        waiters.remove(&rel);
+    }
 }
 
 fn mode_for_holder(

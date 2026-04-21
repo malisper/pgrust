@@ -8416,6 +8416,35 @@ fn analyze_json_each_uses_pg_proc_out_metadata_for_output_columns() {
 }
 
 #[test]
+fn analyze_pg_locks_uses_expected_columns_and_types() {
+    let stmt = parse_select("select * from pg_locks").unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[]).unwrap();
+
+    assert_eq!(
+        query_column_names_and_types(&query),
+        vec![
+            ("locktype".into(), SqlType::new(SqlTypeKind::Text)),
+            ("database".into(), SqlType::new(SqlTypeKind::Oid)),
+            ("relation".into(), SqlType::new(SqlTypeKind::Oid)),
+            ("page".into(), SqlType::new(SqlTypeKind::Int4)),
+            ("tuple".into(), SqlType::new(SqlTypeKind::Int2)),
+            ("virtualxid".into(), SqlType::new(SqlTypeKind::Text)),
+            ("transactionid".into(), SqlType::new(SqlTypeKind::Xid)),
+            ("classid".into(), SqlType::new(SqlTypeKind::Oid)),
+            ("objid".into(), SqlType::new(SqlTypeKind::Oid)),
+            ("objsubid".into(), SqlType::new(SqlTypeKind::Int2)),
+            ("virtualtransaction".into(), SqlType::new(SqlTypeKind::Text)),
+            ("pid".into(), SqlType::new(SqlTypeKind::Int4)),
+            ("mode".into(), SqlType::new(SqlTypeKind::Text)),
+            ("granted".into(), SqlType::new(SqlTypeKind::Bool)),
+            ("fastpath".into(), SqlType::new(SqlTypeKind::Bool)),
+            ("waitstart".into(), SqlType::new(SqlTypeKind::TimestampTz)),
+        ]
+    );
+}
+
+#[test]
 fn analyze_json_each_rejects_typed_column_definitions_for_out_parameters() {
     let stmt =
         parse_select("select * from json_each('{\"a\":1}'::json) as j(key text, value json)")

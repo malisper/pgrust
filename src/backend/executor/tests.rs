@@ -604,6 +604,9 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         large_objects: Some(std::sync::Arc::new(
             crate::pgrust::database::LargeObjectRuntime::new_ephemeral(),
         )),
+        advisory_locks: std::sync::Arc::new(
+            crate::backend::storage::lmgr::advisory::AdvisoryLockManager::new(),
+        ),
         checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(
         ),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -618,8 +621,11 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         )),
         snapshot,
         client_id: 1,
+        current_database_name: crate::include::catalog::CURRENT_DATABASE_NAME.to_string(),
         session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+        current_xid: INVALID_TRANSACTION_ID,
+        statement_lock_scope_id: None,
         next_command_id: 0,
         default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -655,6 +661,9 @@ fn run_plan(
         large_objects: Some(std::sync::Arc::new(
             crate::pgrust::database::LargeObjectRuntime::new_ephemeral(),
         )),
+        advisory_locks: std::sync::Arc::new(
+            crate::backend::storage::lmgr::advisory::AdvisoryLockManager::new(),
+        ),
         checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(
         ),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -669,8 +678,11 @@ fn run_plan(
         )),
         snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
         client_id: 42,
+        current_database_name: crate::include::catalog::CURRENT_DATABASE_NAME.to_string(),
         session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+        current_xid: INVALID_TRANSACTION_ID,
+        statement_lock_scope_id: None,
         next_command_id: 0,
         default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -744,6 +756,9 @@ fn run_sql_with_catalog(
             large_objects: Some(std::sync::Arc::new(
                 crate::pgrust::database::LargeObjectRuntime::new_ephemeral(),
             )),
+            advisory_locks: std::sync::Arc::new(
+                crate::backend::storage::lmgr::advisory::AdvisoryLockManager::new(),
+            ),
             checkpoint_stats:
                 crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -758,8 +773,11 @@ fn run_sql_with_catalog(
             )),
             snapshot: txns.snapshot(xid).unwrap(),
             client_id: 77,
+            current_database_name: crate::include::catalog::CURRENT_DATABASE_NAME.to_string(),
             session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+            current_xid: xid,
+            statement_lock_scope_id: None,
             next_command_id: 0,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -880,6 +898,36 @@ fn expr_eval_obeys_null_semantics() {
         .unwrap(),
         Value::Bool(true)
     );
+}
+
+#[test]
+fn advisory_lock_builtins_are_rejected_in_read_only_executor_context() {
+    let base = temp_dir("advisory_lock_builtins_are_rejected_in_read_only_executor_context");
+    let mut ctx = empty_executor_context(&base);
+    ctx.allow_side_effects = false;
+    let mut slot = TupleSlot::virtual_row(vec![]);
+
+    let err = eval_expr(
+        &Expr::builtin_func(
+            crate::include::nodes::primnodes::BuiltinScalarFunction::PgAdvisoryLock,
+            Some(crate::backend::parser::SqlType::new(
+                crate::backend::parser::SqlTypeKind::Void,
+            )),
+            false,
+            vec![Expr::Const(Value::Int64(1))],
+        ),
+        &mut slot,
+        &mut ctx,
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            sqlstate: "25006",
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -6731,6 +6779,9 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         large_objects: Some(std::sync::Arc::new(
             crate::pgrust::database::LargeObjectRuntime::new_ephemeral(),
         )),
+        advisory_locks: std::sync::Arc::new(
+            crate::backend::storage::lmgr::advisory::AdvisoryLockManager::new(),
+        ),
         checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(
         ),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -6745,8 +6796,11 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         )),
         snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
         client_id: 77,
+        current_database_name: crate::include::catalog::CURRENT_DATABASE_NAME.to_string(),
         session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+        current_xid: INVALID_TRANSACTION_ID,
+        statement_lock_scope_id: None,
         next_command_id: 0,
         default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -15805,6 +15859,9 @@ fn large_object_metadata_tracks_create_and_unlink() {
                 crate::pgrust::database::SequenceRuntime::new_ephemeral(),
             )),
             large_objects: Some(large_objects.clone()),
+            advisory_locks: std::sync::Arc::new(
+                crate::backend::storage::lmgr::advisory::AdvisoryLockManager::new(),
+            ),
             checkpoint_stats:
                 crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -15819,8 +15876,11 @@ fn large_object_metadata_tracks_create_and_unlink() {
             )),
             snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
             client_id: 77,
+            current_database_name: crate::include::catalog::CURRENT_DATABASE_NAME.to_string(),
             session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+            current_xid: INVALID_TRANSACTION_ID,
+            statement_lock_scope_id: None,
             next_command_id: 0,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),

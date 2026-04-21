@@ -180,6 +180,10 @@ pub fn build_pg_stats_rows(
     rows.into_iter().map(|(_, _, _, _, row)| row).collect()
 }
 
+pub fn build_pg_locks_rows(rows: Vec<Vec<Value>>) -> Vec<Vec<Value>> {
+    rows
+}
+
 fn slot_index(stat: &PgStatisticRow, kind: i16) -> Option<usize> {
     stat.stakind.iter().position(|entry| *entry == kind)
 }

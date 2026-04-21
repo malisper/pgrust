@@ -577,6 +577,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::StatementTimestamp
             | BuiltinScalarFunction::ClockTimestamp
             | BuiltinScalarFunction::TimeOfDay => args.is_empty(),
+            BuiltinScalarFunction::CurrentDatabase => args.is_empty(),
             BuiltinScalarFunction::DatePart | BuiltinScalarFunction::DateTrunc => args.len() == 2,
             BuiltinScalarFunction::IsFinite => args.len() == 1,
             BuiltinScalarFunction::MakeDate => args.len() == 3,
@@ -594,6 +595,17 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::ObjDescription => args.len() == 2,
             BuiltinScalarFunction::PgGetExpr => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::PgRelationIsPublishable => args.len() == 1,
+            BuiltinScalarFunction::PgAdvisoryUnlockAll => args.is_empty(),
+            BuiltinScalarFunction::PgAdvisoryLock
+            | BuiltinScalarFunction::PgAdvisoryXactLock
+            | BuiltinScalarFunction::PgAdvisoryLockShared
+            | BuiltinScalarFunction::PgAdvisoryXactLockShared
+            | BuiltinScalarFunction::PgTryAdvisoryLock
+            | BuiltinScalarFunction::PgTryAdvisoryXactLock
+            | BuiltinScalarFunction::PgTryAdvisoryLockShared
+            | BuiltinScalarFunction::PgTryAdvisoryXactLockShared
+            | BuiltinScalarFunction::PgAdvisoryUnlock
+            | BuiltinScalarFunction::PgAdvisoryUnlockShared => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::LoCreate | BuiltinScalarFunction::LoUnlink => args.len() == 1,
             BuiltinScalarFunction::PgStatGetCheckpointerNumTimed
             | BuiltinScalarFunction::PgStatGetCheckpointerNumRequested
@@ -1246,6 +1258,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("numeric_random", BuiltinScalarFunction::Random),
         ("random_normal", BuiltinScalarFunction::RandomNormal),
         ("drandom_normal", BuiltinScalarFunction::RandomNormal),
+        ("current_database", BuiltinScalarFunction::CurrentDatabase),
         ("cashlarger", BuiltinScalarFunction::CashLarger),
         ("cashsmaller", BuiltinScalarFunction::CashSmaller),
         ("cash_words", BuiltinScalarFunction::CashWords),
@@ -1299,6 +1312,47 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_relation_is_publishable",
             BuiltinScalarFunction::PgRelationIsPublishable,
+        ),
+        ("pg_advisory_lock", BuiltinScalarFunction::PgAdvisoryLock),
+        (
+            "pg_advisory_xact_lock",
+            BuiltinScalarFunction::PgAdvisoryXactLock,
+        ),
+        (
+            "pg_advisory_lock_shared",
+            BuiltinScalarFunction::PgAdvisoryLockShared,
+        ),
+        (
+            "pg_advisory_xact_lock_shared",
+            BuiltinScalarFunction::PgAdvisoryXactLockShared,
+        ),
+        (
+            "pg_try_advisory_lock",
+            BuiltinScalarFunction::PgTryAdvisoryLock,
+        ),
+        (
+            "pg_try_advisory_xact_lock",
+            BuiltinScalarFunction::PgTryAdvisoryXactLock,
+        ),
+        (
+            "pg_try_advisory_lock_shared",
+            BuiltinScalarFunction::PgTryAdvisoryLockShared,
+        ),
+        (
+            "pg_try_advisory_xact_lock_shared",
+            BuiltinScalarFunction::PgTryAdvisoryXactLockShared,
+        ),
+        (
+            "pg_advisory_unlock",
+            BuiltinScalarFunction::PgAdvisoryUnlock,
+        ),
+        (
+            "pg_advisory_unlock_shared",
+            BuiltinScalarFunction::PgAdvisoryUnlockShared,
+        ),
+        (
+            "pg_advisory_unlock_all",
+            BuiltinScalarFunction::PgAdvisoryUnlockAll,
         ),
         ("lo_create", BuiltinScalarFunction::LoCreate),
         ("lo_unlink", BuiltinScalarFunction::LoUnlink),
@@ -1978,6 +2032,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::StatementTimestamp
             | BuiltinScalarFunction::ClockTimestamp
             | BuiltinScalarFunction::TimeOfDay
+            | BuiltinScalarFunction::CurrentDatabase
             | BuiltinScalarFunction::NextVal
             | BuiltinScalarFunction::CurrVal
             | BuiltinScalarFunction::SetVal
@@ -1986,6 +2041,17 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::ObjDescription
             | BuiltinScalarFunction::PgGetExpr
             | BuiltinScalarFunction::PgRelationIsPublishable
+            | BuiltinScalarFunction::PgAdvisoryLock
+            | BuiltinScalarFunction::PgAdvisoryXactLock
+            | BuiltinScalarFunction::PgAdvisoryLockShared
+            | BuiltinScalarFunction::PgAdvisoryXactLockShared
+            | BuiltinScalarFunction::PgTryAdvisoryLock
+            | BuiltinScalarFunction::PgTryAdvisoryXactLock
+            | BuiltinScalarFunction::PgTryAdvisoryLockShared
+            | BuiltinScalarFunction::PgTryAdvisoryXactLockShared
+            | BuiltinScalarFunction::PgAdvisoryUnlock
+            | BuiltinScalarFunction::PgAdvisoryUnlockShared
+            | BuiltinScalarFunction::PgAdvisoryUnlockAll
             | BuiltinScalarFunction::GetDatabaseEncoding
             | BuiltinScalarFunction::PgMyTempSchema
             | BuiltinScalarFunction::PgRustTestFdwHandler
@@ -2294,6 +2360,14 @@ mod tests {
         assert_eq!(
             resolve_scalar_function("jsonb_exists_any"),
             Some(BuiltinScalarFunction::JsonbExistsAny)
+        );
+        assert_eq!(
+            resolve_scalar_function("pg_advisory_lock"),
+            Some(BuiltinScalarFunction::PgAdvisoryLock)
+        );
+        assert_eq!(
+            resolve_scalar_function("pg_advisory_unlock_all"),
+            Some(BuiltinScalarFunction::PgAdvisoryUnlockAll)
         );
         assert_eq!(
             resolve_scalar_function("float8_accum"),
@@ -2611,6 +2685,9 @@ mod tests {
         assert!(validate_scalar_function_arity(BuiltinScalarFunction::Random, &[]).is_ok());
         assert!(validate_scalar_function_arity(BuiltinScalarFunction::PgMyTempSchema, &[]).is_ok());
         assert!(
+            validate_scalar_function_arity(BuiltinScalarFunction::CurrentDatabase, &[]).is_ok()
+        );
+        assert!(
             validate_scalar_function_arity(BuiltinScalarFunction::Random, &[SqlExpr::Default])
                 .is_err()
         );
@@ -2635,6 +2712,40 @@ mod tests {
                 &[SqlExpr::Default, SqlExpr::Default]
             )
             .is_ok()
+        );
+        assert!(
+            validate_scalar_function_arity(
+                BuiltinScalarFunction::PgAdvisoryLock,
+                &[SqlExpr::Default]
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_scalar_function_arity(
+                BuiltinScalarFunction::PgAdvisoryLock,
+                &[SqlExpr::Default, SqlExpr::Default]
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_scalar_function_arity(BuiltinScalarFunction::PgAdvisoryLock, &[]).is_err()
+        );
+        assert!(
+            validate_scalar_function_arity(
+                BuiltinScalarFunction::PgAdvisoryLock,
+                &[SqlExpr::Default, SqlExpr::Default, SqlExpr::Default]
+            )
+            .is_err()
+        );
+        assert!(
+            validate_scalar_function_arity(BuiltinScalarFunction::PgAdvisoryUnlockAll, &[]).is_ok()
+        );
+        assert!(
+            validate_scalar_function_arity(
+                BuiltinScalarFunction::PgAdvisoryUnlockAll,
+                &[SqlExpr::Default]
+            )
+            .is_err()
         );
     }
 
@@ -2730,8 +2841,24 @@ mod tests {
             Some(SqlType::new(SqlTypeKind::Text))
         );
         assert_eq!(
+            fixed_scalar_return_type(BuiltinScalarFunction::CurrentDatabase),
+            Some(SqlType::new(SqlTypeKind::Name))
+        );
+        assert_eq!(
             fixed_scalar_return_type(BuiltinScalarFunction::ToJsonb),
             Some(SqlType::new(SqlTypeKind::Jsonb))
+        );
+        assert_eq!(
+            fixed_scalar_return_type(BuiltinScalarFunction::PgAdvisoryLock),
+            Some(SqlType::new(SqlTypeKind::Void))
+        );
+        assert_eq!(
+            fixed_scalar_return_type(BuiltinScalarFunction::PgTryAdvisoryLock),
+            Some(SqlType::new(SqlTypeKind::Bool))
+        );
+        assert_eq!(
+            fixed_scalar_return_type(BuiltinScalarFunction::PgAdvisoryUnlockAll),
+            Some(SqlType::new(SqlTypeKind::Void))
         );
         assert_eq!(fixed_scalar_return_type(BuiltinScalarFunction::Abs), None);
         assert_eq!(

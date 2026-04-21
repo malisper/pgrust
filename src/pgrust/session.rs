@@ -22,6 +22,7 @@ use crate::backend::parser::{
     plan_merge,
 };
 use crate::backend::rewrite::relation_has_row_security;
+use crate::backend::storage::lmgr::AdvisoryLockManager;
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
 use crate::backend::utils::cache::inval::CatalogInvalidation;
 use crate::backend::utils::cache::lsyscache::LazyCatalogLookup;
@@ -58,12 +59,18 @@ pub struct SelectGuard<'a> {
     pub column_names: Vec<String>,
     pub(crate) rels: Vec<RelFileLocator>,
     pub(crate) table_locks: &'a TableLockManager,
+    pub(crate) advisory_locks: &'a AdvisoryLockManager,
     pub(crate) client_id: ClientId,
+    pub(crate) statement_lock_scope_id: Option<u64>,
     pub(crate) interrupt_guard: Option<StatementInterruptGuard>,
 }
 
 impl Drop for SelectGuard<'_> {
     fn drop(&mut self) {
+        if let Some(scope_id) = self.statement_lock_scope_id {
+            self.advisory_locks
+                .unlock_all_statement(self.client_id, scope_id);
+        }
         unlock_relations(self.table_locks, self.client_id, &self.rels);
     }
 }
@@ -306,12 +313,14 @@ impl Session {
         catalog: &crate::backend::utils::cache::lsyscache::LazyCatalogLookup<'_>,
         deferred_foreign_keys: Option<DeferredForeignKeyTracker>,
     ) -> ExecutorContext {
+        use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         ExecutorContext {
             pool: Arc::clone(&db.pool),
             txns: db.txns.clone(),
             txn_waiter: Some(db.txn_waiter.clone()),
             sequences: Some(db.sequences.clone()),
             large_objects: Some(db.large_objects.clone()),
+            advisory_locks: Arc::clone(&db.advisory_locks),
             checkpoint_stats: db.checkpoint_stats_snapshot(),
             datetime_config: self.datetime_config.clone(),
             interrupts: self.interrupts(),
@@ -319,8 +328,15 @@ impl Session {
             session_stats: Arc::clone(&self.stats_state),
             snapshot,
             client_id: self.client_id,
+            current_database_name: db.current_database_name(),
             session_user_oid: self.session_user_oid(),
             current_user_oid: self.current_user_oid(),
+            current_xid: self
+                .active_txn
+                .as_ref()
+                .map(|txn| txn.xid)
+                .unwrap_or(INVALID_TRANSACTION_ID),
+            statement_lock_scope_id: None,
             next_command_id: cid,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             timed: false,
@@ -416,6 +432,8 @@ impl Session {
                 Err(e)
             }
         };
+        db.advisory_locks
+            .unlock_all_transaction(self.client_id, txn.xid);
         for rel in held_locks {
             db.table_locks.unlock_table(rel, self.client_id);
         }
@@ -432,6 +450,8 @@ impl Session {
         db.finalize_aborted_catalog_effects(&txn.catalog_effects);
         db.finalize_aborted_temp_effects(self.client_id, &txn.temp_effects);
         db.finalize_aborted_sequence_effects(&txn.sequence_effects);
+        db.advisory_locks
+            .unlock_all_transaction(self.client_id, txn.xid);
         db.txn_waiter.notify();
         self.stats_state.write().rollback_top_level_xact();
     }
@@ -1489,6 +1509,8 @@ impl Session {
             db.finalize_aborted_temp_effects(self.client_id, &txn.temp_effects);
             db.finalize_aborted_sequence_effects(&txn.sequence_effects);
             db.txn_waiter.notify();
+            db.advisory_locks
+                .unlock_all_transaction(self.client_id, txn.xid);
             for rel in txn.held_table_locks.keys().copied() {
                 db.table_locks.unlock_table(rel, self.client_id);
             }
@@ -1499,6 +1521,7 @@ impl Session {
         // still associated with this backend on disconnect, mirroring PostgreSQL
         // backend-exit lock cleanup even if the session missed normal unwind.
         db.table_locks.unlock_all_for_client(self.client_id);
+        db.advisory_locks.unlock_all_session(self.client_id);
     }
 
     fn lock_table_if_needed(
