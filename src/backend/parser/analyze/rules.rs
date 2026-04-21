@@ -103,6 +103,42 @@ pub(crate) fn bind_rule_action_statement(
     }
 }
 
+fn rule_action_returning_targets(action: &BoundRuleAction) -> &[TargetEntry] {
+    match action {
+        BoundRuleAction::Insert(stmt) => &stmt.returning,
+        BoundRuleAction::Update(stmt) => &stmt.returning,
+        BoundRuleAction::Delete(stmt) => &stmt.returning,
+    }
+}
+
+fn validate_rule_action_returning_targets(
+    targets: &[TargetEntry],
+    relation_desc: &RelationDesc,
+) -> Result<(), ParseError> {
+    if targets.len() > relation_desc.columns.len() {
+        return Err(ParseError::FeatureNotSupported(
+            "RETURNING list has too many entries".into(),
+        ));
+    }
+    if targets.len() < relation_desc.columns.len() {
+        return Err(ParseError::FeatureNotSupported(
+            "RETURNING list has too few entries".into(),
+        ));
+    }
+
+    for (index, (target, column)) in targets.iter().zip(&relation_desc.columns).enumerate() {
+        if target.sql_type != column.sql_type {
+            return Err(ParseError::FeatureNotSupported(format!(
+                "RETURNING list's entry {} has different type from column \"{}\"",
+                index + 1,
+                column.name
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 pub(crate) fn validate_rule_definition(
     stmt: &CreateRuleStatement,
     relation_desc: &RelationDesc,
@@ -111,8 +147,32 @@ pub(crate) fn validate_rule_definition(
     if let Some(expr) = &stmt.where_clause {
         let _ = bind_rule_qual(expr, relation_desc, stmt.event, catalog)?;
     }
+
+    let mut returning_count = 0usize;
     for action in &stmt.actions {
-        let _ = bind_rule_action_statement(&action.statement, relation_desc, catalog)?;
+        let bound = bind_rule_action_statement(&action.statement, relation_desc, catalog)?;
+        let returning = rule_action_returning_targets(&bound);
+        if returning.is_empty() {
+            continue;
+        }
+
+        returning_count += 1;
+        if returning_count > 1 {
+            return Err(ParseError::FeatureNotSupported(
+                "cannot have multiple RETURNING lists in a rule".into(),
+            ));
+        }
+        if stmt.where_clause.is_some() {
+            return Err(ParseError::FeatureNotSupported(
+                "RETURNING lists are not supported in conditional rules".into(),
+            ));
+        }
+        if stmt.do_kind != RuleDoKind::Instead {
+            return Err(ParseError::FeatureNotSupported(
+                "RETURNING lists are not supported in non-INSTEAD rules".into(),
+            ));
+        }
+        validate_rule_action_returning_targets(returning, relation_desc)?;
     }
     Ok(())
 }

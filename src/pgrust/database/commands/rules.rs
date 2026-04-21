@@ -27,7 +27,7 @@ use crate::backend::rewrite::{ViewDmlEvent, ViewDmlRewriteError};
 use crate::backend::rewrite::split_stored_rule_action_sql;
 use crate::backend::storage::lmgr::TableLockMode;
 use crate::include::catalog::PgRewriteRow;
-use crate::include::nodes::primnodes::RelationDesc;
+use crate::include::nodes::primnodes::{QueryColumn, RelationDesc, TargetEntry};
 use crate::pgrust::database::TransactionWaiter;
 use crate::pgrust::database::ddl::map_catalog_error;
 use crate::pgrust::database::ddl::{ensure_relation_owner, lookup_rule_relation_for_ddl};
@@ -382,6 +382,14 @@ struct PreparedRule {
     actions: Vec<crate::backend::parser::BoundRuleAction>,
 }
 
+#[derive(Default)]
+struct RuleMatchOutcome {
+    matched_instead: bool,
+    matched_actions: bool,
+    returning_seen: bool,
+    returning_rows: Vec<Vec<Value>>,
+}
+
 pub(crate) struct PreparedBoundStatement<T> {
     pub(crate) stmt: T,
     pub(crate) extra_lock_requests: Vec<TableLockRequest>,
@@ -488,13 +496,36 @@ pub(crate) fn execute_bound_insert_with_rules(
         let rules = load_prepared_rules(stmt.relation_oid, RuleEvent::Insert, &stmt.desc, catalog)?;
         let rows = materialize_insert_rows(&stmt, catalog, ctx)?;
         let mut affected_rows = 0usize;
+        let mut returned_rows = Vec::new();
         let null_old = vec![Value::Null; stmt.desc.columns.len()];
 
         for row in rows {
-            let (matched_instead, matched_actions) =
-                execute_matching_rules(&rules, &null_old, &row, catalog, ctx, xid, cid, None)?;
-            if matched_instead {
-                if matched_actions {
+            let outcome = execute_matching_rules(
+                &rules,
+                &null_old,
+                &row,
+                catalog,
+                ctx,
+                xid,
+                cid,
+                None,
+                !stmt.returning.is_empty(),
+            )?;
+            if outcome.matched_instead {
+                if !stmt.returning.is_empty() {
+                    if !outcome.returning_seen {
+                        return Err(missing_rule_returning_error(
+                            RuleEvent::Insert,
+                            &stmt.relation_name,
+                        ));
+                    }
+                    returned_rows.extend(project_statement_returning_rows(
+                        &stmt.returning,
+                        &outcome.returning_rows,
+                        ctx,
+                    )?);
+                }
+                if outcome.matched_actions {
                     affected_rows += 1;
                 }
                 continue;
@@ -505,23 +536,51 @@ pub(crate) fn execute_bound_insert_with_rules(
                     expected: "table",
                 }));
             }
-            execute_insert_values(
-                &stmt.relation_name,
-                stmt.relation_oid,
-                stmt.rel,
-                stmt.toast,
-                stmt.toast_index.as_ref(),
-                &stmt.desc,
-                &stmt.relation_constraints,
-                &stmt.indexes,
-                std::slice::from_ref(&row),
-                ctx,
-                xid,
-                cid,
-            )?;
+            if stmt.returning.is_empty() {
+                execute_insert_values(
+                    &stmt.relation_name,
+                    stmt.relation_oid,
+                    stmt.rel,
+                    stmt.toast,
+                    stmt.toast_index.as_ref(),
+                    &stmt.desc,
+                    &stmt.relation_constraints,
+                    &stmt.indexes,
+                    std::slice::from_ref(&row),
+                    ctx,
+                    xid,
+                    cid,
+                )?;
+            } else {
+                returned_rows.extend(project_statement_returning_rows(
+                    &stmt.returning,
+                    &crate::backend::commands::tablecmds::execute_insert_rows(
+                        &stmt.relation_name,
+                        stmt.relation_oid,
+                        stmt.rel,
+                        stmt.toast,
+                        stmt.toast_index.as_ref(),
+                        &stmt.desc,
+                        &stmt.relation_constraints,
+                        &stmt.indexes,
+                        std::slice::from_ref(&row),
+                        ctx,
+                        xid,
+                        cid,
+                    )?,
+                    ctx,
+                )?);
+            }
             affected_rows += 1;
         }
-        Ok(StatementResult::AffectedRows(affected_rows))
+        if stmt.returning.is_empty() {
+            Ok(StatementResult::AffectedRows(affected_rows))
+        } else {
+            Ok(build_statement_returning_result(
+                &stmt.returning,
+                returned_rows,
+            ))
+        }
     })();
     ctx.subplans = saved_subplans;
     result
@@ -556,6 +615,7 @@ pub(crate) fn execute_bound_update_with_rules(
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
     let result = (|| {
         let mut affected_rows = 0usize;
+        let mut returned_rows = Vec::new();
         for target in &stmt.targets {
             let rules = load_prepared_rules(
                 target.relation_oid,
@@ -567,7 +627,7 @@ pub(crate) fn execute_bound_update_with_rules(
                 for (old_values, new_values) in
                     materialize_view_update_events(target, catalog, ctx)?
                 {
-                    let (matched_instead, matched_actions) = execute_matching_rules(
+                    let outcome = execute_matching_rules(
                         &rules,
                         &old_values,
                         &new_values,
@@ -576,14 +636,28 @@ pub(crate) fn execute_bound_update_with_rules(
                         xid,
                         cid,
                         waiter,
+                        !stmt.returning.is_empty(),
                     )?;
-                    if !matched_instead {
+                    if !outcome.matched_instead {
                         return Err(ExecError::Parse(ParseError::WrongObjectType {
                             name: target.relation_name.clone(),
                             expected: "table",
                         }));
                     }
-                    if matched_actions {
+                    if !stmt.returning.is_empty() {
+                        if !outcome.returning_seen {
+                            return Err(missing_rule_returning_error(
+                                RuleEvent::Update,
+                                &target.relation_name,
+                            ));
+                        }
+                        returned_rows.extend(project_statement_returning_rows(
+                            &stmt.returning,
+                            &outcome.returning_rows,
+                            ctx,
+                        )?);
+                    }
+                    if outcome.matched_actions {
                         affected_rows += 1;
                     }
                 }
@@ -598,7 +672,7 @@ pub(crate) fn execute_bound_update_with_rules(
                 },
                 ctx,
             )? {
-                let (matched_instead, matched_actions) = execute_matching_rules(
+                let outcome = execute_matching_rules(
                     &rules,
                     &event.old_values,
                     &event.new_values,
@@ -607,13 +681,28 @@ pub(crate) fn execute_bound_update_with_rules(
                     xid,
                     cid,
                     waiter,
+                    !stmt.returning.is_empty(),
                 )?;
-                if matched_instead {
-                    if matched_actions {
+                if outcome.matched_instead {
+                    if !stmt.returning.is_empty() {
+                        if !outcome.returning_seen {
+                            return Err(missing_rule_returning_error(
+                                RuleEvent::Update,
+                                &event.target.relation_name,
+                            ));
+                        }
+                        returned_rows.extend(project_statement_returning_rows(
+                            &stmt.returning,
+                            &outcome.returning_rows,
+                            ctx,
+                        )?);
+                    }
+                    if outcome.matched_actions {
                         affected_rows += 1;
                     }
                     continue;
                 }
+                let returned_row = (!stmt.returning.is_empty()).then(|| event.new_values.clone());
                 if apply_base_update_row(
                     &event.target,
                     event.tid,
@@ -624,11 +713,25 @@ pub(crate) fn execute_bound_update_with_rules(
                     cid,
                     waiter,
                 )? {
+                    if let Some(returned_row) = returned_row {
+                        returned_rows.push(project_statement_returning_row(
+                            &stmt.returning,
+                            &returned_row,
+                            ctx,
+                        )?);
+                    }
                     affected_rows += 1;
                 }
             }
         }
-        Ok(StatementResult::AffectedRows(affected_rows))
+        if stmt.returning.is_empty() {
+            Ok(StatementResult::AffectedRows(affected_rows))
+        } else {
+            Ok(build_statement_returning_result(
+                &stmt.returning,
+                returned_rows,
+            ))
+        }
     })();
     ctx.subplans = saved_subplans;
     result
@@ -662,6 +765,7 @@ pub(crate) fn execute_bound_delete_with_rules(
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
     let result = (|| {
         let mut affected_rows = 0usize;
+        let mut returned_rows = Vec::new();
         for target in &stmt.targets {
             let rules = load_prepared_rules(
                 target.relation_oid,
@@ -671,7 +775,7 @@ pub(crate) fn execute_bound_delete_with_rules(
             )?;
             if target.relkind == 'v' {
                 for old_values in materialize_view_delete_events(target, catalog, ctx)? {
-                    let (matched_instead, matched_actions) = execute_matching_rules(
+                    let outcome = execute_matching_rules(
                         &rules,
                         &old_values,
                         &vec![Value::Null; target.desc.columns.len()],
@@ -680,14 +784,28 @@ pub(crate) fn execute_bound_delete_with_rules(
                         xid,
                         0,
                         waiter,
+                        !stmt.returning.is_empty(),
                     )?;
-                    if !matched_instead {
+                    if !outcome.matched_instead {
                         return Err(ExecError::Parse(ParseError::WrongObjectType {
                             name: target.relation_name.clone(),
                             expected: "table",
                         }));
                     }
-                    if matched_actions {
+                    if !stmt.returning.is_empty() {
+                        if !outcome.returning_seen {
+                            return Err(missing_rule_returning_error(
+                                RuleEvent::Delete,
+                                &target.relation_name,
+                            ));
+                        }
+                        returned_rows.extend(project_statement_returning_rows(
+                            &stmt.returning,
+                            &outcome.returning_rows,
+                            ctx,
+                        )?);
+                    }
+                    if outcome.matched_actions {
                         affected_rows += 1;
                     }
                 }
@@ -703,7 +821,7 @@ pub(crate) fn execute_bound_delete_with_rules(
                 ctx,
             )? {
                 let null_new = vec![Value::Null; event.target.desc.columns.len()];
-                let (matched_instead, matched_actions) = execute_matching_rules(
+                let outcome = execute_matching_rules(
                     &rules,
                     &event.old_values,
                     &null_new,
@@ -712,13 +830,28 @@ pub(crate) fn execute_bound_delete_with_rules(
                     xid,
                     0,
                     waiter,
+                    !stmt.returning.is_empty(),
                 )?;
-                if matched_instead {
-                    if matched_actions {
+                if outcome.matched_instead {
+                    if !stmt.returning.is_empty() {
+                        if !outcome.returning_seen {
+                            return Err(missing_rule_returning_error(
+                                RuleEvent::Delete,
+                                &event.target.relation_name,
+                            ));
+                        }
+                        returned_rows.extend(project_statement_returning_rows(
+                            &stmt.returning,
+                            &outcome.returning_rows,
+                            ctx,
+                        )?);
+                    }
+                    if outcome.matched_actions {
                         affected_rows += 1;
                     }
                     continue;
                 }
+                let returned_row = (!stmt.returning.is_empty()).then(|| event.old_values.clone());
                 if apply_base_delete_row(
                     &event.target,
                     event.tid,
@@ -727,11 +860,25 @@ pub(crate) fn execute_bound_delete_with_rules(
                     xid,
                     waiter,
                 )? {
+                    if let Some(returned_row) = returned_row {
+                        returned_rows.push(project_statement_returning_row(
+                            &stmt.returning,
+                            &returned_row,
+                            ctx,
+                        )?);
+                    }
                     affected_rows += 1;
                 }
             }
         }
-        Ok(StatementResult::AffectedRows(affected_rows))
+        if stmt.returning.is_empty() {
+            Ok(StatementResult::AffectedRows(affected_rows))
+        } else {
+            Ok(build_statement_returning_result(
+                &stmt.returning,
+                returned_rows,
+            ))
+        }
     })();
     ctx.subplans = saved_subplans;
     result
@@ -750,26 +897,136 @@ fn execute_matching_rules(
         &TransactionWaiter,
         &crate::backend::utils::misc::interrupts::InterruptState,
     )>,
-) -> Result<(bool, bool), ExecError> {
-    let mut matched_instead = false;
-    let mut matched_actions = false;
+    capture_returning: bool,
+) -> Result<RuleMatchOutcome, ExecError> {
+    let mut outcome = RuleMatchOutcome::default();
     for rule in rules {
         if let Some(qual) = &rule.qual
             && !evaluate_rule_qual(qual, old_values, new_values, ctx)?
         {
             continue;
         }
-        matched_instead |= rule.is_instead;
+        outcome.matched_instead |= rule.is_instead;
         if !rule.actions.is_empty() {
-            matched_actions = true;
+            outcome.matched_actions = true;
         }
         for action in &rule.actions {
-            with_rule_bindings(ctx, old_values, new_values, |ctx| {
+            let result = with_rule_bindings(ctx, old_values, new_values, |ctx| {
                 execute_rule_action(action, catalog, ctx, xid, cid, waiter)
             })?;
+            if capture_returning && rule_action_has_returning(action) {
+                if outcome.returning_seen {
+                    return Err(multiple_rule_returning_error());
+                }
+                outcome.returning_seen = true;
+                outcome.returning_rows = extract_rule_action_returning_rows(result)?;
+            }
         }
     }
-    Ok((matched_instead, matched_actions))
+    Ok(outcome)
+}
+
+fn rule_action_has_returning(action: &crate::backend::parser::BoundRuleAction) -> bool {
+    match action {
+        crate::backend::parser::BoundRuleAction::Insert(stmt) => !stmt.returning.is_empty(),
+        crate::backend::parser::BoundRuleAction::Update(stmt) => !stmt.returning.is_empty(),
+        crate::backend::parser::BoundRuleAction::Delete(stmt) => !stmt.returning.is_empty(),
+    }
+}
+
+fn extract_rule_action_returning_rows(
+    result: StatementResult,
+) -> Result<Vec<Vec<Value>>, ExecError> {
+    match result {
+        StatementResult::Query { rows, .. } => Ok(rows),
+        _ => Err(ExecError::DetailedError {
+            message: "rule action RETURNING did not produce rows".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        }),
+    }
+}
+
+fn missing_rule_returning_error(event: RuleEvent, relation_name: &str) -> ExecError {
+    let (message, hint) = match event {
+        RuleEvent::Insert => (
+            format!("cannot perform INSERT RETURNING on relation \"{relation_name}\""),
+            "You need an unconditional ON INSERT DO INSTEAD rule with a RETURNING clause.",
+        ),
+        RuleEvent::Update => (
+            format!("cannot perform UPDATE RETURNING on relation \"{relation_name}\""),
+            "You need an unconditional ON UPDATE DO INSTEAD rule with a RETURNING clause.",
+        ),
+        RuleEvent::Delete => (
+            format!("cannot perform DELETE RETURNING on relation \"{relation_name}\""),
+            "You need an unconditional ON DELETE DO INSTEAD rule with a RETURNING clause.",
+        ),
+        RuleEvent::Select => unreachable!("SELECT rules are rejected before execution"),
+    };
+    ExecError::DetailedError {
+        message,
+        detail: None,
+        hint: Some(hint.into()),
+        sqlstate: "0A000",
+    }
+}
+
+fn multiple_rule_returning_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "cannot have RETURNING lists in multiple rules".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
+fn statement_returning_columns(targets: &[TargetEntry]) -> Vec<QueryColumn> {
+    targets
+        .iter()
+        .map(|target| QueryColumn {
+            name: target.name.clone(),
+            sql_type: target.sql_type,
+            wire_type_oid: None,
+        })
+        .collect()
+}
+
+fn project_statement_returning_row(
+    targets: &[TargetEntry],
+    row: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    let mut slot = TupleSlot::virtual_row(row.to_vec());
+    let mut values = targets
+        .iter()
+        .map(|target| eval_expr(&target.expr, &mut slot, ctx).map(|value| value.to_owned_value()))
+        .collect::<Result<Vec<_>, _>>()?;
+    Value::materialize_all(&mut values);
+    Ok(values)
+}
+
+fn project_statement_returning_rows(
+    targets: &[TargetEntry],
+    rows: &[Vec<Value>],
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Vec<Value>>, ExecError> {
+    rows.iter()
+        .map(|row| project_statement_returning_row(targets, row, ctx))
+        .collect()
+}
+
+fn build_statement_returning_result(
+    targets: &[TargetEntry],
+    rows: Vec<Vec<Value>>,
+) -> StatementResult {
+    let columns = statement_returning_columns(targets);
+    let column_names = columns.iter().map(|column| column.name.clone()).collect();
+    StatementResult::Query {
+        columns,
+        column_names,
+        rows,
+    }
 }
 
 fn execute_rule_action(

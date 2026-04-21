@@ -4455,6 +4455,192 @@ fn view_dml_routes_through_instead_rules() {
     );
 }
 
+#[test]
+fn view_dml_returning_routes_through_instead_rules() {
+    let base = temp_dir("rule_view_dml_returning");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table base_items (id int4 not null, name text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create view item_view as select id, name from base_items",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create rule item_view_ins as on insert to item_view do instead insert into base_items values (new.id, new.name) returning id, name",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create rule item_view_upd as on update to item_view do instead update base_items set id = new.id, name = new.name where id = old.id returning id, name",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create rule item_view_del as on delete to item_view do instead delete from base_items where id = old.id returning id, name",
+    )
+    .unwrap();
+
+    match db
+        .execute(
+            1,
+            "insert into item_view values (1, 'alpha') returning name || '!' as excited_name",
+        )
+        .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["excited_name"]);
+            assert_eq!(rows, vec![vec![Value::Text("alpha!".into())]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+
+    match db
+        .execute(
+            1,
+            "update item_view set name = 'beta' where id = 1 returning id + 10 as bumped_id, name",
+        )
+        .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["bumped_id", "name"]);
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int32(11), Value::Text("beta".into())]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+
+    match db
+        .execute(
+            1,
+            "delete from item_view where id = 1 returning name || '!' as excited_name",
+        )
+        .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["excited_name"]);
+            assert_eq!(rows, vec![vec![Value::Text("beta!".into())]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+fn assert_rule_returning_error(err: ExecError, expected_message: &str, expected_hint: &str) {
+    match err {
+        ExecError::DetailedError {
+            message,
+            detail: None,
+            hint: Some(hint),
+            sqlstate,
+        } => {
+            assert_eq!(message, expected_message);
+            assert_eq!(hint, expected_hint);
+            assert_eq!(sqlstate, "0A000");
+        }
+        other => panic!("expected explicit-rule RETURNING error, got {other:?}"),
+    }
+}
+
+#[test]
+fn view_dml_returning_requires_rule_returning_clause() {
+    let base = temp_dir("rule_view_missing_returning");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table base_items (id int4 not null, name text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create view item_view as select id, name from base_items",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create rule item_view_ins as on insert to item_view do instead insert into base_items values (new.id, new.name)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create rule item_view_upd as on update to item_view do instead update base_items set id = new.id, name = new.name where id = old.id",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create rule item_view_del as on delete to item_view do instead delete from base_items where id = old.id",
+    )
+    .unwrap();
+
+    assert_rule_returning_error(
+        db.execute(1, "insert into item_view values (1, 'alpha') returning id")
+            .unwrap_err(),
+        "cannot perform INSERT RETURNING on relation \"item_view\"",
+        "You need an unconditional ON INSERT DO INSTEAD rule with a RETURNING clause.",
+    );
+
+    db.execute(1, "insert into base_items values (1, 'alpha')")
+        .unwrap();
+    assert_rule_returning_error(
+        db.execute(
+            1,
+            "update item_view set name = 'beta' where id = 1 returning id",
+        )
+        .unwrap_err(),
+        "cannot perform UPDATE RETURNING on relation \"item_view\"",
+        "You need an unconditional ON UPDATE DO INSTEAD rule with a RETURNING clause.",
+    );
+    assert_rule_returning_error(
+        db.execute(1, "delete from item_view where id = 1 returning id")
+            .unwrap_err(),
+        "cannot perform DELETE RETURNING on relation \"item_view\"",
+        "You need an unconditional ON DELETE DO INSTEAD rule with a RETURNING clause.",
+    );
+}
+
+#[test]
+fn create_rule_rejects_invalid_returning_lists() {
+    let base = temp_dir("rule_invalid_returning");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null, name text)")
+        .unwrap();
+
+    match db.execute(
+        1,
+        "create rule items_ins as on insert to items where new.id > 0 do instead insert into items values (new.id, new.name) returning id, name",
+    ) {
+        Err(ExecError::Parse(ParseError::FeatureNotSupported(feature)))
+            if feature == "RETURNING lists are not supported in conditional rules" => {}
+        other => panic!("expected conditional rule RETURNING rejection, got {other:?}"),
+    }
+
+    match db.execute(
+        1,
+        "create rule items_log as on insert to items do also insert into items values (new.id, new.name) returning id, name",
+    ) {
+        Err(ExecError::Parse(ParseError::FeatureNotSupported(feature)))
+            if feature == "RETURNING lists are not supported in non-INSTEAD rules" => {}
+        other => panic!("expected non-INSTEAD RETURNING rejection, got {other:?}"),
+    }
+
+    match db.execute(
+        1,
+        "create rule items_multi as on insert to items do instead (insert into items values (new.id, new.name) returning id, name; insert into items values (new.id + 1, new.name) returning id, name;)",
+    ) {
+        Err(ExecError::Parse(ParseError::FeatureNotSupported(feature)))
+            if feature == "cannot have multiple RETURNING lists in a rule" => {}
+        other => panic!("expected multiple RETURNING rejection, got {other:?}"),
+    }
+}
+
 fn assert_view_dml_error(
     err: ExecError,
     expected_message: &str,

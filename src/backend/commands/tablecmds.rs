@@ -2854,7 +2854,7 @@ fn build_returning_result(columns: Vec<QueryColumn>, rows: Vec<Vec<Value>>) -> S
     }
 }
 
-fn execute_insert_rows(
+pub(crate) fn execute_insert_rows(
     relation_name: &str,
     relation_oid: u32,
     rel: crate::backend::storage::smgr::RelFileLocator,
