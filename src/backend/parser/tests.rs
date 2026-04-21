@@ -1492,6 +1492,21 @@ fn parse_alter_table_set_statement() {
 }
 
 #[test]
+fn parse_alter_table_no_inherit_statement() {
+    let stmt = parse_statement("alter table if exists only child_items no inherit parent_items")
+        .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableNoInherit(AlterTableNoInheritStatement {
+            if_exists: true,
+            only: true,
+            table_name: "child_items".into(),
+            parent_name: "parent_items".into(),
+        })
+    );
+}
+
+#[test]
 fn parse_alter_table_row_security_statements() {
     let cases = [
         (

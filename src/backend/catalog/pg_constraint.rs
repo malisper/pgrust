@@ -53,9 +53,9 @@ pub fn derived_pg_constraint_rows(
                 confdelsetcols: None,
                 conexclop: None,
                 conbin: None,
-                conislocal: true,
-                coninhcount: 0,
-                connoinherit: false,
+                conislocal: column.not_null_constraint_is_local,
+                coninhcount: column.not_null_constraint_inhcount,
+                connoinherit: column.not_null_constraint_no_inherit,
                 conperiod: false,
             }
         })

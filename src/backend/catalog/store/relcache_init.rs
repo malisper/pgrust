@@ -14,7 +14,7 @@ use crate::include::nodes::primnodes::{ColumnDesc, RelationDesc};
 use crate::pgrust::database::default_sequence_oid_from_default_expr;
 
 const RELCACHE_INIT_MAGIC: u32 = 0x5052_494E;
-const RELCACHE_INIT_VERSION: u32 = 3;
+const RELCACHE_INIT_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum RelCacheInitScopeFile {
@@ -71,6 +71,9 @@ struct ColumnDescFile {
     not_null_constraint_oid: Option<u32>,
     not_null_constraint_name: Option<String>,
     not_null_constraint_validated: bool,
+    not_null_constraint_is_local: bool,
+    not_null_constraint_inhcount: i16,
+    not_null_constraint_no_inherit: bool,
     not_null_primary_key_owned: bool,
     attrdef_oid: Option<u32>,
     default_expr: Option<String>,
@@ -242,6 +245,9 @@ fn column_desc_to_file(column: &ColumnDesc) -> ColumnDescFile {
         not_null_constraint_oid: column.not_null_constraint_oid,
         not_null_constraint_name: column.not_null_constraint_name.clone(),
         not_null_constraint_validated: column.not_null_constraint_validated,
+        not_null_constraint_is_local: column.not_null_constraint_is_local,
+        not_null_constraint_inhcount: column.not_null_constraint_inhcount,
+        not_null_constraint_no_inherit: column.not_null_constraint_no_inherit,
         not_null_primary_key_owned: column.not_null_primary_key_owned,
         attrdef_oid: column.attrdef_oid,
         default_expr: column.default_expr.clone(),
@@ -273,6 +279,9 @@ fn column_desc_from_file(column: ColumnDescFile) -> ColumnDesc {
         not_null_constraint_oid: column.not_null_constraint_oid,
         not_null_constraint_name: column.not_null_constraint_name,
         not_null_constraint_validated: column.not_null_constraint_validated,
+        not_null_constraint_is_local: column.not_null_constraint_is_local,
+        not_null_constraint_inhcount: column.not_null_constraint_inhcount,
+        not_null_constraint_no_inherit: column.not_null_constraint_no_inherit,
         not_null_primary_key_owned: column.not_null_primary_key_owned,
         attrdef_oid: column.attrdef_oid,
         default_expr: column.default_expr,

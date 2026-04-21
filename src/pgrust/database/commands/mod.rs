@@ -11,6 +11,7 @@ mod drop;
 mod drop_column;
 mod execute;
 mod foreign_data_wrapper;
+mod inheritance;
 mod index;
 mod maintenance;
 mod opclass;
