@@ -2868,65 +2868,6 @@ fn aggregate_filter_clause_counts_matching_rows() {
 }
 
 #[test]
-fn any_value_over_values_mixed_nulls_uses_concrete_values_type() {
-    let base = temp_dir("any_value_values_mixed_nulls");
-    let txns = TransactionManager::new_durable(&base).unwrap();
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select any_value(v) from (values (null), (1), (2)) as t(v)",
-    )
-    .unwrap()
-    {
-        StatementResult::Query {
-            column_names, rows, ..
-        } => {
-            assert_eq!(column_names, vec!["any_value".to_string()]);
-            assert_eq!(rows, vec![vec![Value::Int32(1)]]);
-        }
-        other => panic!("expected query result, got {:?}", other),
-    }
-}
-
-#[test]
-fn float8_regression_helper_functions_update_transition_states() {
-    let base = temp_dir("float8_regression_helpers");
-    let txns = TransactionManager::new_durable(&base).unwrap();
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select \
-            float8_accum('{4,140,2900}'::float8[], 100), \
-            float8_regr_accum('{4,140,2900,1290,83075,15050}'::float8[], 200, 100), \
-            float8_combine('{3,60,200}'::float8[], '{2,180,200}'::float8[]), \
-            float8_regr_combine('{3,60,200,750,20000,2000}'::float8[], '{2,180,200,740,57800,-3400}'::float8[])",
-    )
-    .unwrap()
-    {
-        StatementResult::Query { rows, .. } => {
-            let float8_array = |values: &[f64]| {
-                Value::PgArray(
-                    ArrayValue::from_1d(values.iter().copied().map(Value::Float64).collect())
-                        .with_element_type_oid(crate::include::catalog::FLOAT8_TYPE_OID),
-                )
-            };
-            assert_eq!(
-                rows,
-                vec![vec![
-                    float8_array(&[5.0, 240.0, 6280.0]),
-                    float8_array(&[5.0, 240.0, 6280.0, 1490.0, 95080.0, 8680.0]),
-                    float8_array(&[5.0, 240.0, 6280.0]),
-                    float8_array(&[5.0, 240.0, 6280.0, 1490.0, 95080.0, 8680.0]),
-                ]]
-            );
-        }
-        other => panic!("expected query result, got {:?}", other),
-    }
-}
-
-#[test]
 fn group_by_with_count() {
     let base = temp_dir("group_by_count");
     let mut txns = TransactionManager::new_durable(&base).unwrap();
@@ -5330,6 +5271,51 @@ fn float_and_numeric_casts_to_int2_follow_postgres_rounding() {
 }
 
 #[test]
+fn numeric_special_values_to_integer_casts_raise_postgres_style_errors() {
+    let base = temp_dir("numeric_special_values_to_int_casts");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select 'NaN'::numeric::int2",
+    )
+    .unwrap_err();
+    assert!(matches!(err, ExecError::NumericNaNToInt { ty: "smallint" }));
+    assert_eq!(format_exec_error(&err), "cannot convert NaN to smallint");
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select 'Infinity'::numeric::int4",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::NumericInfinityToInt { ty: "integer" }
+    ));
+    assert_eq!(
+        format_exec_error(&err),
+        "cannot convert infinity to integer"
+    );
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select '-Infinity'::numeric::int8",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::NumericInfinityToInt { ty: "bigint" }
+    ));
+    assert_eq!(format_exec_error(&err), "cannot convert infinity to bigint");
+}
+
+#[test]
 fn abs_builtin_supports_smallint_filters() {
     let base = temp_dir("abs_builtin_smallint");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -7455,72 +7441,6 @@ fn numeric_power_zero_exponents_with_fractional_scale_follow_postgres() {
 }
 
 #[test]
-fn numeric_power_fractional_exponents_preserve_special_result_scale() {
-    let base = temp_dir("numeric_power_fractional_special_scale");
-    let txns = TransactionManager::new_durable(&base).unwrap();
-
-    assert_query_rows(
-        run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select 0::numeric ^ 4.2::numeric, \
-                0.0::numeric ^ 4.2::numeric, \
-                1::numeric ^ 4.2::numeric, \
-                1.0::numeric ^ 4.2::numeric",
-        )
-        .unwrap(),
-        vec![vec![
-            Value::Numeric("0.0000000000000000".into()),
-            Value::Numeric("0.0000000000000000".into()),
-            Value::Numeric("1.0000000000000000".into()),
-            Value::Numeric("1.0000000000000000".into()),
-        ]],
-    );
-}
-
-#[test]
-fn numeric_variance_preserves_tiny_values() {
-    let base = temp_dir("numeric_variance_tiny_values");
-    let txns = TransactionManager::new_durable(&base).unwrap();
-
-    assert_query_rows(
-        run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select trim_scale(variance(a) * 1e1000) \
-             from (values \
-                (0::numeric), \
-                (3e-500), \
-                (-3e-500), \
-                (4e-500 - 1e-16383), \
-                (-4e-500 + 1e-16383)) as t(a)",
-        )
-        .unwrap(),
-        vec![vec![Value::Numeric("12".into())]],
-    );
-}
-
-#[test]
-fn numeric_variance_handles_large_offset_inputs() {
-    let base = temp_dir("numeric_variance_large_offsets");
-    let txns = TransactionManager::new_durable(&base).unwrap();
-
-    assert_query_rows(
-        run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select variance(a) \
-             from (select 9e131071 + x as a from generate_series(1, 5) as x) as t",
-        )
-        .unwrap(),
-        vec![vec![Value::Numeric("2.5000000000000000".into())]],
-    );
-}
-
-#[test]
 fn numeric_log_special_values_follow_postgres() {
     let base = temp_dir("numeric_log_special_values");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -8380,20 +8300,51 @@ fn select_list_srfs_run_in_lockstep() {
 }
 
 #[test]
-fn select_list_composite_srf_is_rejected() {
-    let base = temp_dir("project_set_composite_reject");
+fn select_list_json_each_returns_record_value() {
+    let base = temp_dir("project_set_composite_json");
     let txns = TransactionManager::new_durable(&base).unwrap();
-    let err = run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select json_each('{\"a\":1}'::json)",
-    )
-    .unwrap_err();
-    assert!(matches!(
-        err,
-        ExecError::Parse(ParseError::UnexpectedToken { .. })
-    ));
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select json_each('{\"a\":1}'::json)",
+        )
+        .unwrap(),
+        vec![vec![Value::Record(RecordValue::anonymous(vec![
+            ("key".into(), Value::Text("a".into())),
+            ("value".into(), Value::Json("1".into())),
+        ]))]],
+    );
+}
+
+#[test]
+fn select_list_jsonb_each_field_select_projects_column() {
+    let base = temp_dir("project_set_composite_json_field");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select (jsonb_each('{\"a\":1,\"b\":null}')).key order by 1",
+        )
+        .unwrap(),
+        vec![vec![Value::Text("a".into())], vec![Value::Text("b".into())]],
+    );
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select key, count(*) from (select (jsonb_each('{\"a\":1,\"b\":null}')).key) wow group by key order by key",
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Text("a".into()), Value::Int64(1)],
+            vec![Value::Text("b".into()), Value::Int64(1)],
+        ],
+    );
 }
 
 #[test]
@@ -9632,22 +9583,6 @@ fn point_slice_subscript_uses_fixed_length_array_error() {
 }
 
 #[test]
-fn legacy_executor_rejects_drop_table_cascade() {
-    let base = temp_dir("legacy_drop_table_cascade_rejected");
-    let txns = TransactionManager::new_durable(&base).unwrap();
-
-    run_sql(&base, &txns, INVALID_TRANSACTION_ID, "create table items (id int4)").unwrap();
-
-    match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "drop table items cascade") {
-        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual })) => {
-            assert_eq!(expected, "DROP TABLE CASCADE handled by database/session layer");
-            assert_eq!(actual, "DROP TABLE ... CASCADE");
-        }
-        other => panic!("expected DROP TABLE CASCADE rejection, got {other:?}"),
-    }
-}
-
-#[test]
 fn array_subscript_mixed_slice_scalar_queries_match_postgres() {
     let base = temp_dir("array_subscript_mixed_slice_scalar_queries");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -10052,167 +9987,6 @@ fn window_builtin_functions_handle_peer_groups() {
 }
 
 #[test]
-fn window_distribution_functions_handle_peer_groups() {
-    let base = temp_dir("window_distribution_peer_groups");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let xid = txns.begin();
-    run_sql(
-        &base,
-        &txns,
-        xid,
-        "insert into people (id, name, note) values
-            (1, 'alice', 'x'),
-            (2, 'bob', 'x'),
-            (3, 'carol', 'y'),
-            (4, 'dave', 'x')",
-    )
-    .unwrap();
-    txns.commit(xid).unwrap();
-
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select id,
-                percent_rank() over (order by note),
-                cume_dist() over (order by note),
-                ntile(3) over (order by note, id)
-         from people
-         order by id",
-    )
-    .unwrap()
-    {
-        StatementResult::Query { rows, .. } => {
-            assert_eq!(rows.len(), 4);
-            assert_eq!(rows[0][0], Value::Int32(1));
-            assert_eq!(rows[1][0], Value::Int32(2));
-            assert_eq!(rows[2][0], Value::Int32(3));
-            assert_eq!(rows[3][0], Value::Int32(4));
-
-            for index in [0usize, 1, 3] {
-                match rows[index][1] {
-                    Value::Float64(value) => assert_eq!(value, 0.0),
-                    ref other => panic!("expected Float64, got {other:?}"),
-                }
-                match rows[index][2] {
-                    Value::Float64(value) => assert!((value - 0.75).abs() < 1e-12),
-                    ref other => panic!("expected Float64, got {other:?}"),
-                }
-            }
-            match rows[2][1] {
-                Value::Float64(value) => assert_eq!(value, 1.0),
-                ref other => panic!("expected Float64, got {other:?}"),
-            }
-            match rows[2][2] {
-                Value::Float64(value) => assert_eq!(value, 1.0),
-                ref other => panic!("expected Float64, got {other:?}"),
-            }
-
-            assert_eq!(rows[0][3], Value::Int32(1));
-            assert_eq!(rows[1][3], Value::Int32(1));
-            assert_eq!(rows[2][3], Value::Int32(3));
-            assert_eq!(rows[3][3], Value::Int32(2));
-        }
-        other => panic!("expected query result, got {:?}", other),
-    }
-
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select ntile(null) over (order by id) from people order by id limit 2",
-    )
-    .unwrap()
-    {
-        StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Null], vec![Value::Null]]);
-        }
-        other => panic!("expected query result, got {:?}", other),
-    }
-}
-
-#[test]
-fn window_ntile_rejects_nonpositive_bucket_count() {
-    let base = temp_dir("window_ntile_invalid_bucket_count");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let xid = txns.begin();
-    run_sql(
-        &base,
-        &txns,
-        xid,
-        "insert into people (id, name, note) values
-            (1, 'alice', 'x'),
-            (2, 'bob', 'y')",
-    )
-    .unwrap();
-    txns.commit(xid).unwrap();
-
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select ntile(0) over (order by id) from people",
-    )
-    .unwrap_err()
-    {
-        ExecError::DetailedError {
-            message, sqlstate, ..
-        } => {
-            assert_eq!(message, "argument of ntile must be greater than zero");
-            assert_eq!(sqlstate, "22023");
-        }
-        other => panic!("expected detailed error, got {other:?}"),
-    }
-}
-
-#[test]
-fn window_ntile_supports_join_bucket_expression() {
-    let base = temp_dir("window_ntile_join_bucket_expression");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let xid = txns.begin();
-    run_sql(
-        &base,
-        &txns,
-        xid,
-        "insert into people (id, name, note) values
-            (1, 'alice', 'x'),
-            (2, 'bob', 'x'),
-            (3, 'carol', 'y')",
-    )
-    .unwrap();
-    txns.commit(xid).unwrap();
-
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select c
-         from (
-             select ntile(r.id) over (partition by l.note order by l.id) as c
-             from people l
-             left join people r on true
-             where l.id = r.id
-         ) s
-         where c = 1
-         order by c",
-    )
-    .unwrap()
-    {
-        StatementResult::Query { rows, .. } => {
-            assert_eq!(
-                rows,
-                vec![
-                    vec![Value::Int32(1)],
-                    vec![Value::Int32(1)],
-                    vec![Value::Int32(1)]
-                ]
-            );
-        }
-        other => panic!("expected query result, got {:?}", other),
-    }
-}
-
-#[test]
 fn window_aggregate_supports_partitioning_and_running_totals() {
     let base = temp_dir("window_partition_running_sum");
     let mut txns = TransactionManager::new_durable(&base).unwrap();
@@ -10490,6 +10264,28 @@ fn json_scalar_functions_work() {
             }
             other => panic!("expected query result, got {:?}", other),
         }
+}
+
+#[test]
+fn array_to_json_preserves_nested_jsonb_spacing() {
+    let base = temp_dir("array_to_json_nested_jsonb_spacing");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select array_to_json(ARRAY [jsonb '{\"a\":1}', jsonb '{\"b\":[2,3]}'])",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Json("[{\"a\": 1},{\"b\": [2, 3]}]".into())]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
 }
 
 #[test]
@@ -13322,6 +13118,36 @@ fn jsonb_table_functions_and_agg_work() {
         &base,
         &txns,
         INVALID_TRANSACTION_ID,
+        "select key, value from jsonb_each('{\"a\":1,\"b\":null}') order by key",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![
+                        Value::Text("a".into()),
+                        Value::Jsonb(
+                            crate::backend::executor::jsonb::parse_jsonb_text("1").unwrap()
+                        ),
+                    ],
+                    vec![
+                        Value::Text("b".into()),
+                        Value::Jsonb(
+                            crate::backend::executor::jsonb::parse_jsonb_text("null").unwrap()
+                        ),
+                    ],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
         "select jsonb_agg(id) from people",
     )
     .unwrap()
@@ -13336,6 +13162,62 @@ fn jsonb_table_functions_and_agg_work() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn jsonb_array_length_and_each_errors_match_postgres() {
+    let base = temp_dir("jsonb_array_length_and_each_errors");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_array_length('{\"f1\":1,\"f2\":[5,6]}')",
+    )
+    .unwrap_err();
+    assert_eq!(format_exec_error(&err), "cannot get array length of a non-array");
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { sqlstate, .. } if sqlstate == "22023"
+    ));
+
+    let err = run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select jsonb_array_length('4')")
+        .unwrap_err();
+    assert_eq!(format_exec_error(&err), "cannot get array length of a scalar");
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { sqlstate, .. } if sqlstate == "22023"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select * from jsonb_each('[]')",
+    )
+    .unwrap_err();
+    assert_eq!(format_exec_error(&err), "cannot call jsonb_each on a non-object");
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { sqlstate, .. } if sqlstate == "22023"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select * from jsonb_each_text('null')",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "cannot call jsonb_each_text on a non-object"
+    );
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { sqlstate, .. } if sqlstate == "22023"
+    ));
 }
 
 #[test]

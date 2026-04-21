@@ -133,9 +133,6 @@ pub(super) fn bind_values_rows(
         let mut common = None;
         let mut common_expr: Option<&SqlExpr> = None;
         for row in rows {
-            if matches!(row[col_idx], SqlExpr::Const(Value::Null)) {
-                continue;
-            }
             let inferred = infer_sql_expr_type_with_ctes(
                 &row[col_idx],
                 &empty,
@@ -1072,19 +1069,15 @@ fn bind_function_from_item_with_ctes(
         other => {
             if let Some(kind) = resolve_json_table_function(other) {
                 let empty_scope = empty_scope();
-                let bound_args = args
-                    .iter()
-                    .map(|arg| {
-                        bind_expr_with_outer_and_ctes(
-                            arg,
-                            &empty_scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer,
-                            ctes,
-                        )
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
+                let bound_args = bind_json_table_function_args(
+                    kind,
+                    &args,
+                    &empty_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?;
                 let output_columns = resolved_row_columns.clone().unwrap_or_else(|| match kind {
                     JsonTableFunction::ObjectKeys => vec![QueryColumn::text("json_object_keys")],
                     JsonTableFunction::Each => vec![
@@ -1241,6 +1234,41 @@ fn bind_function_from_item_with_ctes(
             }
         }
     }
+}
+
+fn bind_json_table_function_args(
+    kind: JsonTableFunction,
+    args: &[SqlExpr],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Vec<Expr>, ParseError> {
+    let target_type = match kind {
+        JsonTableFunction::JsonbEach | JsonTableFunction::JsonbEachText => {
+            Some(SqlType::new(SqlTypeKind::Jsonb))
+        }
+        _ => None,
+    };
+    args.iter()
+        .map(|arg| {
+            let raw_arg_type =
+                infer_sql_expr_type_with_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes);
+            let resolved_arg_type = target_type
+                .map(|target| coerce_unknown_string_literal_type(arg, raw_arg_type, target))
+                .unwrap_or(raw_arg_type);
+            let bound =
+                bind_expr_with_outer_and_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+            Ok(match target_type {
+                Some(target) if resolved_arg_type == target && raw_arg_type != target => {
+                    coerce_bound_expr(bound, raw_arg_type, target)
+                }
+                None => bound,
+                Some(_) => bound,
+            })
+        })
+        .collect()
 }
 
 fn bind_json_record_from_item(
