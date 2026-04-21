@@ -2962,6 +2962,61 @@ fn any_value_over_values_skips_null_type_bias() {
 }
 
 #[test]
+fn variance_and_stddev_pop_samp_single_row_match_pg() {
+    let base = temp_dir("variance_stddev_single_row");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select var_pop(1.0::float8), var_samp(1.0::float8), stddev_pop(1.0::float8), stddev_samp(1.0::float8)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(
+                column_names,
+                vec!["var_pop", "var_samp", "stddev_pop", "stddev_samp"]
+            );
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Float64(0.0),
+                    Value::Null,
+                    Value::Float64(0.0),
+                    Value::Null
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn variance_and_stddev_aliases_use_sample_semantics() {
+    let base = temp_dir("variance_stddev_aliases");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select variance(1.0::float8), stddev(1.0::float8)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["variance", "stddev"]);
+            assert_eq!(rows, vec![vec![Value::Null, Value::Null]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn string_agg_skips_null_values() {
     let base = temp_dir("string_agg_text");
     let mut txns = TransactionManager::new_durable(&base).unwrap();

@@ -52,6 +52,7 @@ pub(crate) enum AccumState {
         sum_sq: NumericValue,
         result_type: SqlType,
         stddev: bool,
+        sample: bool,
     },
     JsonAgg {
         values: Vec<Value>,
@@ -103,19 +104,37 @@ impl AccumState {
                 count: 0,
                 result_type: sql_type,
             },
-            (AggFunc::Variance, _) => AccumState::NumericStats {
+            (AggFunc::VarPop, _) => AccumState::NumericStats {
                 count: 0,
                 sum: NumericValue::zero(),
                 sum_sq: NumericValue::zero(),
                 result_type: sql_type,
                 stddev: false,
+                sample: false,
             },
-            (AggFunc::Stddev, _) => AccumState::NumericStats {
+            (AggFunc::VarSamp, _) => AccumState::NumericStats {
+                count: 0,
+                sum: NumericValue::zero(),
+                sum_sq: NumericValue::zero(),
+                result_type: sql_type,
+                stddev: false,
+                sample: true,
+            },
+            (AggFunc::StddevPop, _) => AccumState::NumericStats {
                 count: 0,
                 sum: NumericValue::zero(),
                 sum_sq: NumericValue::zero(),
                 result_type: sql_type,
                 stddev: true,
+                sample: false,
+            },
+            (AggFunc::StddevSamp, _) => AccumState::NumericStats {
+                count: 0,
+                sum: NumericValue::zero(),
+                sum_sq: NumericValue::zero(),
+                result_type: sql_type,
+                stddev: true,
+                sample: true,
             },
             (AggFunc::JsonAgg, _) => AccumState::JsonAgg {
                 values: Vec::new(),
@@ -208,7 +227,14 @@ impl AccumState {
                 }
                 Ok(())
             },
-            (AggFunc::Variance | AggFunc::Stddev, _, _) => |state, values| {
+            (
+                AggFunc::VarPop
+                | AggFunc::VarSamp
+                | AggFunc::StddevPop
+                | AggFunc::StddevSamp,
+                _,
+                _,
+            ) => |state, values| {
                 if let AccumState::NumericStats {
                     count, sum, sum_sq, ..
                 } = state
@@ -407,13 +433,18 @@ impl AccumState {
                 sum_sq,
                 result_type,
                 stddev,
+                sample,
             } => {
-                if *count < 2 {
+                if *count == 0 || (*sample && *count < 2) {
                     Value::Null
                 } else {
                     let n = NumericValue::from_i64(*count);
                     let numerator = n.mul(sum_sq).sub(&sum.mul(sum));
-                    let denominator = n.mul(&NumericValue::from_i64(*count - 1));
+                    let denominator = if *sample {
+                        n.mul(&NumericValue::from_i64(*count - 1))
+                    } else {
+                        n.mul(&n)
+                    };
                     let variance = if numerator.cmp(&NumericValue::zero()) != Ordering::Greater {
                         NumericValue::zero()
                     } else {
