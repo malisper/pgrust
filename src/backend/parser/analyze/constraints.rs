@@ -47,6 +47,7 @@ pub struct ForeignKeyConstraintAction {
     pub referenced_columns: Vec<String>,
     pub match_type: ForeignKeyMatchType,
     pub on_delete: ForeignKeyAction,
+    pub on_delete_set_columns: Option<Vec<String>>,
     pub on_update: ForeignKeyAction,
     pub not_valid: bool,
     pub enforced: bool,
@@ -104,6 +105,7 @@ pub struct BoundReferencedByForeignKey {
     pub referenced_column_indexes: Vec<usize>,
     pub child_index: Option<super::BoundIndexRelation>,
     pub on_delete: ForeignKeyAction,
+    pub on_delete_set_column_indexes: Option<Vec<usize>>,
     pub on_update: ForeignKeyAction,
     pub deferrable: bool,
     pub initially_deferred: bool,
@@ -168,6 +170,7 @@ struct PendingForeignKeyConstraint {
     referenced_columns: Option<Vec<String>>,
     match_type: ForeignKeyMatchType,
     on_delete: ForeignKeyAction,
+    on_delete_set_columns: Option<Vec<String>>,
     on_update: ForeignKeyAction,
     not_valid: bool,
     enforced: bool,
@@ -269,9 +272,16 @@ pub fn normalize_create_table_constraints(
                     referenced_columns,
                     match_type,
                     on_delete,
+                    on_delete_set_columns,
                     on_update,
                 } => {
-                    validate_create_foreign_key(attributes, *match_type, *on_delete, *on_update)?;
+                    validate_create_foreign_key(
+                        attributes,
+                        *match_type,
+                        *on_delete,
+                        on_delete_set_columns.as_deref(),
+                        *on_update,
+                    )?;
                     foreign_keys.push(PendingForeignKeyConstraint {
                         explicit_name: attributes.name.clone(),
                         generated_base: format!("{}_{}_fkey", stmt.table_name, column.name),
@@ -280,6 +290,7 @@ pub fn normalize_create_table_constraints(
                         referenced_columns: referenced_columns.clone(),
                         match_type: *match_type,
                         on_delete: *on_delete,
+                        on_delete_set_columns: on_delete_set_columns.clone(),
                         on_update: *on_update,
                         not_valid: attributes.not_valid,
                         enforced: attributes.enforced.unwrap_or(true),
@@ -347,9 +358,16 @@ pub fn normalize_create_table_constraints(
                 referenced_columns,
                 match_type,
                 on_delete,
+                on_delete_set_columns,
                 on_update,
             } => {
-                validate_create_foreign_key(attributes, *match_type, *on_delete, *on_update)?;
+                validate_create_foreign_key(
+                    attributes,
+                    *match_type,
+                    *on_delete,
+                    on_delete_set_columns.as_deref(),
+                    *on_update,
+                )?;
                 let resolved = resolve_constraint_columns(key_columns, &columns, &column_lookup)?;
                 foreign_keys.push(PendingForeignKeyConstraint {
                     explicit_name: attributes.name.clone(),
@@ -359,6 +377,7 @@ pub fn normalize_create_table_constraints(
                     referenced_columns: referenced_columns.clone(),
                     match_type: *match_type,
                     on_delete: *on_delete,
+                    on_delete_set_columns: on_delete_set_columns.clone(),
                     on_update: *on_update,
                     not_valid: attributes.not_valid,
                     enforced: attributes.enforced.unwrap_or(true),
@@ -526,6 +545,10 @@ pub fn normalize_create_table_constraints(
                 referenced_columns,
                 match_type: constraint.match_type,
                 on_delete: constraint.on_delete,
+                on_delete_set_columns: resolve_foreign_key_delete_set_columns(
+                    constraint.on_delete_set_columns.as_deref(),
+                    &constraint.columns,
+                )?,
                 on_update: constraint.on_update,
                 not_valid: constraint.not_valid,
                 enforced: constraint.enforced,
@@ -712,9 +735,16 @@ pub fn normalize_alter_table_add_constraint(
             referenced_columns,
             match_type,
             on_delete,
+            on_delete_set_columns,
             on_update,
         } => {
-            validate_alter_foreign_key(attributes, *match_type, *on_delete, *on_update)?;
+            validate_alter_foreign_key(
+                attributes,
+                *match_type,
+                *on_delete,
+                on_delete_set_columns.as_deref(),
+                *on_update,
+            )?;
             let resolved = resolve_relation_constraint_columns(columns, desc, &column_lookup)?;
             let child_types = resolved
                 .iter()
@@ -754,6 +784,10 @@ pub fn normalize_alter_table_add_constraint(
                     referenced_columns: referenced.columns,
                     match_type: *match_type,
                     on_delete: *on_delete,
+                    on_delete_set_columns: resolve_foreign_key_delete_set_columns(
+                        on_delete_set_columns.as_deref(),
+                        columns,
+                    )?,
                     on_update: *on_update,
                     not_valid: attributes.not_valid,
                     enforced: attributes.enforced.unwrap_or(true),
@@ -973,24 +1007,39 @@ fn validate_create_foreign_key(
     attributes: &ConstraintAttributes,
     match_type: ForeignKeyMatchType,
     on_delete: ForeignKeyAction,
+    on_delete_set_columns: Option<&[String]>,
     on_update: ForeignKeyAction,
 ) -> Result<(), ParseError> {
-    validate_foreign_key(attributes, match_type, on_delete, on_update)
+    validate_foreign_key(
+        attributes,
+        match_type,
+        on_delete,
+        on_delete_set_columns,
+        on_update,
+    )
 }
 
 fn validate_alter_foreign_key(
     attributes: &ConstraintAttributes,
     match_type: ForeignKeyMatchType,
     on_delete: ForeignKeyAction,
+    on_delete_set_columns: Option<&[String]>,
     on_update: ForeignKeyAction,
 ) -> Result<(), ParseError> {
-    validate_foreign_key(attributes, match_type, on_delete, on_update)
+    validate_foreign_key(
+        attributes,
+        match_type,
+        on_delete,
+        on_delete_set_columns,
+        on_update,
+    )
 }
 
 fn validate_foreign_key(
     attributes: &ConstraintAttributes,
     match_type: ForeignKeyMatchType,
-    _on_delete: ForeignKeyAction,
+    on_delete: ForeignKeyAction,
+    on_delete_set_columns: Option<&[String]>,
     _on_update: ForeignKeyAction,
 ) -> Result<(), ParseError> {
     if attributes.deferrable.is_some() || attributes.initially_deferred.is_some() {
@@ -1006,7 +1055,43 @@ fn validate_foreign_key(
             foreign_key_match_keyword(match_type)
         )));
     }
+    if on_delete_set_columns.is_some()
+        && !matches!(
+            on_delete,
+            ForeignKeyAction::SetNull | ForeignKeyAction::SetDefault
+        )
+    {
+        return Err(ParseError::FeatureNotSupported(
+            "ON DELETE column lists require SET NULL or SET DEFAULT".into(),
+        ));
+    }
     Ok(())
+}
+
+fn resolve_foreign_key_delete_set_columns(
+    delete_set_columns: Option<&[String]>,
+    foreign_key_columns: &[String],
+) -> Result<Option<Vec<String>>, ParseError> {
+    let Some(delete_set_columns) = delete_set_columns else {
+        return Ok(None);
+    };
+    let mut resolved = Vec::new();
+    let mut seen = BTreeSet::new();
+    for column_name in delete_set_columns {
+        let Some(foreign_key_column) = foreign_key_columns
+            .iter()
+            .find(|candidate| candidate.eq_ignore_ascii_case(column_name))
+        else {
+            return Err(ParseError::FeatureNotSupported(format!(
+                "column \"{column_name}\" referenced in ON DELETE SET action must be part of foreign key"
+            )));
+        };
+        let normalized = foreign_key_column.to_ascii_lowercase();
+        if seen.insert(normalized) {
+            resolved.push(foreign_key_column.clone());
+        }
+    }
+    Ok(Some(resolved))
 }
 
 fn resolve_pending_self_referenced_key(
@@ -1276,6 +1361,11 @@ fn bind_inbound_foreign_key_constraint(
             false,
         ),
         on_delete: foreign_key_action_from_code(row.confdeltype)?,
+        on_delete_set_column_indexes: row
+            .confdelsetcols
+            .as_ref()
+            .map(|attnums| attnums_to_column_indexes(&child_relation.desc, attnums))
+            .transpose()?,
         on_update: foreign_key_action_from_code(row.confupdtype)?,
         deferrable: row.condeferrable,
         initially_deferred: row.condeferred,

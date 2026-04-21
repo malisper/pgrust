@@ -5562,6 +5562,7 @@ struct ParsedReferencesClause {
     referenced_columns: Option<Vec<String>>,
     match_type: ForeignKeyMatchType,
     on_delete: ForeignKeyAction,
+    on_delete_set_columns: Option<Vec<String>>,
     on_update: ForeignKeyAction,
 }
 
@@ -5669,6 +5670,7 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
                 referenced_columns: references.referenced_columns,
                 match_type: references.match_type,
                 on_delete: references.on_delete,
+                on_delete_set_columns: references.on_delete_set_columns,
                 on_update: references.on_update,
             })
         }
@@ -5778,6 +5780,7 @@ fn build_column_constraint(pair: Pair<'_, Rule>) -> Result<ColumnConstraint, Par
                 referenced_columns: references.referenced_columns,
                 match_type: references.match_type,
                 on_delete: references.on_delete,
+                on_delete_set_columns: references.on_delete_set_columns,
                 on_update: references.on_update,
             })
         }
@@ -5793,6 +5796,7 @@ fn build_references_clause(pair: Pair<'_, Rule>) -> Result<ParsedReferencesClaus
     let mut referenced_columns = None;
     let mut match_type = ForeignKeyMatchType::Simple;
     let mut on_delete = ForeignKeyAction::NoAction;
+    let mut on_delete_set_columns = None;
     let mut on_update = ForeignKeyAction::NoAction;
 
     for part in pair.into_inner() {
@@ -5825,17 +5829,12 @@ fn build_references_clause(pair: Pair<'_, Rule>) -> Result<ParsedReferencesClaus
                 };
             }
             Rule::reference_action_clause => {
-                let text = part.as_str().trim();
-                let lower = text.to_ascii_lowercase();
-                if let Some(action) = lower.strip_prefix("on delete ") {
-                    on_delete = build_reference_action_text(action)?;
-                } else if let Some(action) = lower.strip_prefix("on update ") {
-                    on_update = build_reference_action_text(action)?;
+                let (delete_action, action, set_columns) = build_reference_action_clause(part)?;
+                if delete_action {
+                    on_delete = action;
+                    on_delete_set_columns = set_columns;
                 } else {
-                    return Err(ParseError::UnexpectedToken {
-                        expected: "foreign-key action clause",
-                        actual: text.to_string(),
-                    });
+                    on_update = action;
                 }
             }
             _ => {}
@@ -5847,12 +5846,64 @@ fn build_references_clause(pair: Pair<'_, Rule>) -> Result<ParsedReferencesClaus
         referenced_columns,
         match_type,
         on_delete,
+        on_delete_set_columns,
         on_update,
     })
 }
 
 fn build_reference_action(pair: Pair<'_, Rule>) -> Result<ForeignKeyAction, ParseError> {
     build_reference_action_text(pair.as_str())
+}
+
+fn build_reference_action_clause(
+    pair: Pair<'_, Rule>,
+) -> Result<(bool, ForeignKeyAction, Option<Vec<String>>), ParseError> {
+    let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+    let text = inner.as_str().trim();
+    let lower = text.to_ascii_lowercase();
+    match inner.as_rule() {
+        Rule::delete_action_clause => {
+            let action = lower
+                .strip_prefix("on delete ")
+                .ok_or_else(|| ParseError::UnexpectedToken {
+                    expected: "ON DELETE action",
+                    actual: text.to_string(),
+                })?;
+            let set_columns = inner
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::delete_reference_action)
+                .and_then(|part| {
+                    part.into_inner()
+                        .find(|inner| inner.as_rule() == Rule::delete_set_columns_clause)
+                })
+                .map(build_ident_list_clause);
+            Ok((
+                true,
+                build_reference_action_text(action.split('(').next().unwrap_or(action).trim())?,
+                set_columns,
+            ))
+        }
+        Rule::update_action_clause => {
+            let action = lower
+                .strip_prefix("on update ")
+                .ok_or_else(|| ParseError::UnexpectedToken {
+                    expected: "ON UPDATE action",
+                    actual: text.to_string(),
+                })?;
+            Ok((false, build_reference_action_text(action.trim())?, None))
+        }
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "foreign-key action clause",
+            actual: text.to_string(),
+        }),
+    }
+}
+
+fn build_ident_list_clause(pair: Pair<'_, Rule>) -> Vec<String> {
+    pair.into_inner()
+        .find(|inner| inner.as_rule() == Rule::ident_list)
+        .map(|inner| inner.into_inner().map(build_identifier).collect())
+        .unwrap_or_default()
 }
 
 fn build_reference_action_text(text: &str) -> Result<ForeignKeyAction, ParseError> {

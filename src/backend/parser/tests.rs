@@ -1110,6 +1110,7 @@ fn parse_alter_table_constraint_statements() {
                 referenced_columns: Some(vec!["id".into(), "name".into()]),
                 match_type: ForeignKeyMatchType::Full,
                 on_delete: ForeignKeyAction::NoAction,
+                on_delete_set_columns: None,
                 on_update: ForeignKeyAction::NoAction,
             },
         })
@@ -1132,6 +1133,30 @@ fn parse_alter_table_constraint_statements() {
                 referenced_columns: Some(vec!["id".into(), "name".into()]),
                 match_type: ForeignKeyMatchType::Full,
                 on_delete: ForeignKeyAction::NoAction,
+                on_delete_set_columns: None,
+                on_update: ForeignKeyAction::NoAction,
+            },
+        })
+    );
+
+    let stmt = parse_statement(
+        "alter table pets add foreign key (owner_id, owner_name) references people(id, name) on delete set null (owner_name)",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAddConstraint(AlterTableAddConstraintStatement {
+            if_exists: false,
+            only: false,
+            table_name: "pets".into(),
+            constraint: TableConstraint::ForeignKey {
+                attributes: attrs(),
+                columns: vec!["owner_id".into(), "owner_name".into()],
+                referenced_table: "people".into(),
+                referenced_columns: Some(vec!["id".into(), "name".into()]),
+                match_type: ForeignKeyMatchType::Simple,
+                on_delete: ForeignKeyAction::SetNull,
+                on_delete_set_columns: Some(vec!["owner_name".into()]),
                 on_update: ForeignKeyAction::NoAction,
             },
         })
@@ -5649,6 +5674,7 @@ fn parse_create_table_foreign_key_constraints() {
             referenced_columns: Some(vec!["id".into()]),
             match_type: ForeignKeyMatchType::Simple,
             on_delete: ForeignKeyAction::NoAction,
+            on_delete_set_columns: None,
             on_update: ForeignKeyAction::NoAction,
         }]
     );
@@ -5661,6 +5687,7 @@ fn parse_create_table_foreign_key_constraints() {
             referenced_columns: Some(vec!["name".into()]),
             match_type: ForeignKeyMatchType::Simple,
             on_delete: ForeignKeyAction::Restrict,
+            on_delete_set_columns: None,
             on_update: ForeignKeyAction::NoAction,
         }]
     );
