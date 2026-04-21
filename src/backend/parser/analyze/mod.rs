@@ -27,10 +27,11 @@ use crate::backend::rewrite::pg_rewrite_query;
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PgCastRow, PgClassRow, PgConstraintRow, PgInheritsRow, PgLanguageRow,
-    PgOperatorRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow, PgTypeRow, RECORD_TYPE_OID,
-    bootstrap_pg_cast_rows, bootstrap_pg_language_rows, bootstrap_pg_operator_rows,
-    bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
+    BOOTSTRAP_SUPERUSER_OID, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
+    PgInheritsRow, PgLanguageRow, PgOpclassRow, PgOperatorRow, PgProcRow, PgRangeRow,
+    PgRewriteRow, PgStatisticRow, PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_cast_rows,
+    bootstrap_pg_collation_rows, bootstrap_pg_language_rows, bootstrap_pg_opclass_rows,
+    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
     proc_oid_for_builtin_aggregate_function, range_type_ref_for_sql_type, relkind_is_analyzable,
 };
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
@@ -228,6 +229,14 @@ pub trait CatalogLookup {
         bootstrap_pg_proc_rows()
             .into_iter()
             .find(|row| row.oid == oid)
+    }
+
+    fn opclass_rows(&self) -> Vec<PgOpclassRow> {
+        bootstrap_pg_opclass_rows()
+    }
+
+    fn collation_rows(&self) -> Vec<PgCollationRow> {
+        bootstrap_pg_collation_rows().to_vec()
     }
 
     fn operator_by_name_left_right(
@@ -478,6 +487,14 @@ impl CatalogLookup for Catalog {
 
     fn proc_row_by_oid(&self, oid: u32) -> Option<PgProcRow> {
         CatCache::from_catalog(self).proc_by_oid(oid).cloned()
+    }
+
+    fn opclass_rows(&self) -> Vec<PgOpclassRow> {
+        CatCache::from_catalog(self).opclass_rows()
+    }
+
+    fn collation_rows(&self) -> Vec<PgCollationRow> {
+        CatCache::from_catalog(self).collation_rows()
     }
 
     fn type_rows(&self) -> Vec<PgTypeRow> {

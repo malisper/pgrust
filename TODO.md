@@ -196,6 +196,7 @@ Targeted reruns and notes:
 - insert.sql: 54/390
 - insert_conflict.sql: 104/266
   - [done] support `INSERT ... ON CONFLICT ... RETURNING`
+  - [done] support richer `ON CONFLICT` inference targets: partial predicates, expression indexes, collations, and opclasses
 - int4.sql: 94/94
 - int8.sql: 145/174
 - interval.sql: 38/450
