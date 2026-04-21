@@ -6,13 +6,13 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::utils::cache::catcache::format_indkey;
 use crate::include::access::htup::{AttributeAlign, AttributeCompression, AttributeStorage};
 use crate::include::catalog::{
-    BootstrapCatalogKind, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
-    PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
-    PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow,
-    PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
-    PgOpfamilyRow, PgPolicyRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow,
-    PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
-    PgTypeRow, bootstrap_composite_type_rows, builtin_type_rows,
+    BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
+    PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow,
+    PgDatabaseRow, PgDependRow, PgDescriptionRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
+    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow,
+    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticRow,
+    PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
+    PgTsTemplateRow, PgTypeRow, bootstrap_composite_type_rows, builtin_type_rows,
 };
 use crate::include::nodes::datum::{ArrayValue, Value};
 
@@ -191,11 +191,23 @@ pub(crate) fn catalog_row_values_for_kind(
             .cloned()
             .map(pg_trigger_row_values)
             .collect(),
-        BootstrapCatalogKind::PgPolicy => rows
-            .policies
+        BootstrapCatalogKind::PgPublication => rows
+            .publications
             .iter()
             .cloned()
-            .map(pg_policy_row_values)
+            .map(pg_publication_row_values)
+            .collect(),
+        BootstrapCatalogKind::PgPublicationRel => rows
+            .publication_rels
+            .iter()
+            .cloned()
+            .map(pg_publication_rel_row_values)
+            .collect(),
+        BootstrapCatalogKind::PgPublicationNamespace => rows
+            .publication_namespaces
+            .iter()
+            .cloned()
+            .map(pg_publication_namespace_row_values)
             .collect(),
         BootstrapCatalogKind::PgStatistic => rows
             .statistics
@@ -323,20 +335,42 @@ pub(crate) fn pg_trigger_row_from_values(values: Vec<Value>) -> Result<PgTrigger
     })
 }
 
-pub(crate) fn pg_policy_row_from_values(values: Vec<Value>) -> Result<PgPolicyRow, CatalogError> {
-    Ok(PgPolicyRow {
+pub(crate) fn pg_publication_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgPublicationRow, CatalogError> {
+    Ok(PgPublicationRow {
         oid: expect_oid(&values[0])?,
-        polname: expect_text(&values[1])?,
-        polrelid: expect_oid(&values[2])?,
-        polcmd: crate::include::catalog::PolicyCommand::from_char(expect_char(
-            &values[3], "polcmd",
-        )?)
-        .ok_or(CatalogError::Corrupt("expected recognized policy command"))?,
-        polpermissive: expect_bool(&values[4])?,
-        polroles: nullable_oid_array(&values[5])?
-            .ok_or(CatalogError::Corrupt("expected polroles array"))?,
-        polqual: nullable_text(&values[6])?,
-        polwithcheck: nullable_text(&values[7])?,
+        pubname: expect_text(&values[1])?,
+        pubowner: expect_oid(&values[2])?,
+        puballtables: expect_bool(&values[3])?,
+        pubinsert: expect_bool(&values[4])?,
+        pubupdate: expect_bool(&values[5])?,
+        pubdelete: expect_bool(&values[6])?,
+        pubtruncate: expect_bool(&values[7])?,
+        pubviaroot: expect_bool(&values[8])?,
+        pubgencols: expect_char(&values[9], "pubgencols")?,
+    })
+}
+
+pub(crate) fn pg_publication_rel_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgPublicationRelRow, CatalogError> {
+    Ok(PgPublicationRelRow {
+        oid: expect_oid(&values[0])?,
+        prpubid: expect_oid(&values[1])?,
+        prrelid: expect_oid(&values[2])?,
+        prqual: expect_nullable_text(&values[3])?,
+        prattrs: expect_nullable_text(&values[4])?.map(|text| parse_indkey(&text)),
+    })
+}
+
+pub(crate) fn pg_publication_namespace_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgPublicationNamespaceRow, CatalogError> {
+    Ok(PgPublicationNamespaceRow {
+        oid: expect_oid(&values[0])?,
+        pnpubid: expect_oid(&values[1])?,
+        pnnspid: expect_oid(&values[2])?,
     })
 }
 
@@ -1332,16 +1366,36 @@ fn pg_trigger_row_values(row: PgTriggerRow) -> Vec<Value> {
     ]
 }
 
-fn pg_policy_row_values(row: PgPolicyRow) -> Vec<Value> {
+fn pg_publication_row_values(row: PgPublicationRow) -> Vec<Value> {
     vec![
         Value::Int32(row.oid as i32),
-        Value::Text(row.polname.into()),
-        Value::Int32(row.polrelid as i32),
-        Value::InternalChar(row.polcmd.as_char() as u8),
-        Value::Bool(row.polpermissive),
-        Value::PgArray(oid_array_value(row.polroles)),
-        nullable_text_value(row.polqual),
-        nullable_text_value(row.polwithcheck),
+        Value::Text(row.pubname.into()),
+        Value::Int32(row.pubowner as i32),
+        Value::Bool(row.puballtables),
+        Value::Bool(row.pubinsert),
+        Value::Bool(row.pubupdate),
+        Value::Bool(row.pubdelete),
+        Value::Bool(row.pubtruncate),
+        Value::Bool(row.pubviaroot),
+        Value::InternalChar(row.pubgencols as u8),
+    ]
+}
+
+fn pg_publication_rel_row_values(row: PgPublicationRelRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Int32(row.prpubid as i32),
+        Value::Int32(row.prrelid as i32),
+        nullable_text_value(row.prqual),
+        nullable_text_value(row.prattrs.as_deref().map(format_indkey)),
+    ]
+}
+
+fn pg_publication_namespace_row_values(row: PgPublicationNamespaceRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Int32(row.pnpubid as i32),
+        Value::Int32(row.pnnspid as i32),
     ]
 }
 

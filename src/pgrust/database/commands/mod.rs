@@ -19,6 +19,7 @@ mod opclass;
 mod owner;
 mod policy;
 mod privilege;
+mod publication;
 mod rename;
 mod role;
 mod row_security;

@@ -432,22 +432,32 @@ impl Database {
         Ok(StatementResult::AffectedRows(0))
     }
 
+    pub(crate) fn role_has_database_create_privilege(
+        &self,
+        role_oid: u32,
+        auth_catalog: &AuthCatalog,
+    ) -> bool {
+        if auth_catalog
+            .role_by_oid(role_oid)
+            .is_some_and(|row| row.rolsuper)
+        {
+            return true;
+        }
+        let mut role_auth = AuthState::default();
+        role_auth.assume_authenticated_user(role_oid);
+        let grants = self.database_create_grants.read();
+        auth_catalog.roles().iter().any(|role| {
+            role_auth.has_effective_membership(role.oid, auth_catalog)
+                && grants.iter().any(|grant| grant.grantee_oid == role.oid)
+        })
+    }
+
     pub(crate) fn user_has_database_create_privilege(
         &self,
         auth: &AuthState,
         auth_catalog: &AuthCatalog,
     ) -> bool {
-        if auth_catalog
-            .role_by_oid(auth.current_user_oid())
-            .is_some_and(|row| row.rolsuper)
-        {
-            return true;
-        }
-        let grants = self.database_create_grants.read();
-        auth_catalog.roles().iter().any(|role| {
-            auth.has_effective_membership(role.oid, auth_catalog)
-                && grants.iter().any(|grant| grant.grantee_oid == role.oid)
-        })
+        self.role_has_database_create_privilege(auth.current_user_oid(), auth_catalog)
     }
 }
 

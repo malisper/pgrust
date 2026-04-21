@@ -3,7 +3,8 @@ use super::{
     pg_authid_desc, pg_cast_desc, pg_class_desc, pg_collation_desc, pg_constraint_desc,
     pg_database_desc, pg_depend_desc, pg_index_desc, pg_inherits_desc, pg_language_desc,
     pg_largeobject_metadata_desc, pg_namespace_desc, pg_opclass_desc, pg_operator_desc,
-    pg_opfamily_desc, pg_proc_desc, pg_rewrite_desc, pg_tablespace_desc, pg_type_desc,
+    pg_opfamily_desc, pg_proc_desc, pg_publication_desc, pg_publication_namespace_desc,
+    pg_publication_rel_desc, pg_rewrite_desc, pg_tablespace_desc, pg_type_desc,
 };
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
@@ -28,7 +29,8 @@ use crate::include::catalog::{
     PG_INDEX_RELATION_OID, PG_INHERITS_RELATION_OID, PG_LANGUAGE_RELATION_OID,
     PG_LARGEOBJECT_METADATA_RELATION_OID, PG_NAMESPACE_RELATION_OID, PG_NODE_TREE_TYPE_OID,
     PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_OPFAMILY_RELATION_OID,
-    PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TABLESPACE_RELATION_OID,
+    PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
+    PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TABLESPACE_RELATION_OID,
     PG_TYPE_RELATION_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, REGCONFIG_ARRAY_TYPE_OID,
     REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID,
     TEXT_TYPE_OID, TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIME_ARRAY_TYPE_OID, TIME_TYPE_OID,
@@ -173,6 +175,18 @@ pub fn bootstrap_pg_attribute_rows() -> Vec<PgAttributeRow> {
     rows.extend(attribute_rows_for_desc(
         PG_REWRITE_RELATION_OID,
         &pg_rewrite_desc(),
+    ));
+    rows.extend(attribute_rows_for_desc(
+        PG_PUBLICATION_RELATION_OID,
+        &pg_publication_desc(),
+    ));
+    rows.extend(attribute_rows_for_desc(
+        PG_PUBLICATION_REL_RELATION_OID,
+        &pg_publication_rel_desc(),
+    ));
+    rows.extend(attribute_rows_for_desc(
+        PG_PUBLICATION_NAMESPACE_RELATION_OID,
+        &pg_publication_namespace_desc(),
     ));
     rows.extend(attribute_rows_for_desc(
         PG_OPCLASS_RELATION_OID,
@@ -418,6 +432,9 @@ mod tests {
             pg_rewrite_desc().columns.len(),
             pg_opclass_desc().columns.len(),
             pg_opfamily_desc().columns.len(),
+            pg_publication_desc().columns.len(),
+            pg_publication_rel_desc().columns.len(),
+            pg_publication_namespace_desc().columns.len(),
         ]
         .into_iter()
         .sum::<usize>();

@@ -161,6 +161,13 @@ fn execute_statement_with_source(
             expected: "COPY handled by session layer",
             actual: "COPY".into(),
         })),
+        Statement::AlterPublication(_)
+        | Statement::CommentOnPublication(_)
+        | Statement::CreatePublication(_)
+        | Statement::DropPublication(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "PUBLICATION handled by database/session layer",
+            actual: "PUBLICATION".into(),
+        })),
         Statement::CreateTrigger(_) | Statement::DropTrigger(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "TRIGGER handled by database/session layer",

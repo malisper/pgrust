@@ -181,6 +181,22 @@ mod tests {
     }
 
     #[test]
+    fn set_session_authorization_accepts_string_literal_role_name() {
+        let base = temp_dir("set_reset_string_literal");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create role tenant login").unwrap();
+
+        assert_eq!(
+            session
+                .execute(&db, "set session authorization 'tenant'")
+                .unwrap(),
+            StatementResult::AffectedRows(0)
+        );
+        assert_eq!(session.current_user_oid(), role_oid(&db, "tenant"));
+    }
+
+    #[test]
     fn non_superuser_cannot_set_session_authorization_without_set_role_path() {
         let base = temp_dir("denied");
         let db = Database::open(&base, 16).unwrap();

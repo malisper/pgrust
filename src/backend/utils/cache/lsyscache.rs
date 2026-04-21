@@ -506,8 +506,8 @@ pub fn lookup_any_relation(
     search_path: &[String],
     name: &str,
 ) -> Option<BoundRelation> {
-    let normalized = normalize_catalog_name(name).to_ascii_lowercase();
-    if let Some((schema, relname)) = normalized.split_once('.') {
+    let exact = name.to_ascii_lowercase();
+    if let Some((schema, relname)) = exact.split_once('.') {
         let schema_name = if schema == "pg_temp" {
             owned_temp_namespace(db, client_id)?.name
         } else {
@@ -524,7 +524,7 @@ pub fn lookup_any_relation(
             }
         }
         let entry = relcache
-            .get_by_name(&format!("{schema_name}.{relname}"))
+            .get_by_name_exact(&format!("{schema_name}.{relname}"))
             .filter(|entry| !db.other_session_temp_namespace_oid(client_id, entry.namespace_oid))?
             .clone();
         return Some(BoundRelation {
@@ -539,6 +539,7 @@ pub fn lookup_any_relation(
         });
     }
 
+    let normalized = normalize_catalog_name(name).to_ascii_lowercase();
     if let Some(temp) = db
         .temp_relations
         .read()

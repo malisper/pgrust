@@ -468,7 +468,7 @@ impl Database {
             if !owned_objects.is_empty() {
                 let detail = owned_objects
                     .iter()
-                    .filter(|object| object.relkind != 'i')
+                    .filter(|object| object.kind != OwnedObjectKind::Index)
                     .map(OwnedObject::drop_detail)
                     .collect::<Vec<_>>()
                     .join("\n");
@@ -735,11 +735,38 @@ impl Database {
                 waiter: None,
                 interrupts: Arc::clone(&interrupts),
             };
-            let effect = self
-                .catalog
-                .write()
-                .alter_relation_owner_mvcc(object.relation_oid, new_role.oid, &ctx)
-                .map_err(map_role_catalog_error)?;
+            let effect = match object.kind {
+                OwnedObjectKind::Publication => {
+                    let catcache = self
+                        .txn_backend_catcache(client_id, xid, cid.saturating_add(offset as u32))
+                        .map_err(map_role_catalog_error)?;
+                    let publication = catcache
+                        .publication_rows()
+                        .into_iter()
+                        .find(|row| row.oid == object.oid)
+                        .ok_or_else(|| {
+                            ExecError::Parse(role_management_error(format!(
+                                "publication \"{}\" does not exist",
+                                object.name
+                            )))
+                        })?;
+                    self.catalog
+                        .write()
+                        .replace_publication_row_mvcc(
+                            crate::include::catalog::PgPublicationRow {
+                                pubowner: new_role.oid,
+                                ..publication
+                            },
+                            &ctx,
+                        )
+                        .map_err(map_role_catalog_error)?
+                }
+                OwnedObjectKind::Index | OwnedObjectKind::Table | OwnedObjectKind::View => self
+                    .catalog
+                    .write()
+                    .alter_relation_owner_mvcc(object.oid, new_role.oid, &ctx)
+                    .map_err(map_role_catalog_error)?,
+            };
             catalog_effects.push(effect);
         }
 
@@ -902,18 +929,26 @@ fn drop_role_permission_error(existing: &crate::include::catalog::PgAuthIdRow) -
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OwnedObject {
-    relation_oid: u32,
-    relkind: char,
+    oid: u32,
+    kind: OwnedObjectKind,
     name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum OwnedObjectKind {
+    Index,
+    Publication,
+    Table,
+    View,
 }
 
 impl OwnedObject {
     fn kind_name(&self) -> &'static str {
-        match self.relkind {
-            'v' => "view",
-            'i' => "index",
-            'S' => "sequence",
-            _ => "table",
+        match self.kind {
+            OwnedObjectKind::Index => "index",
+            OwnedObjectKind::Publication => "publication",
+            OwnedObjectKind::Table => "table",
+            OwnedObjectKind::View => "view",
         }
     }
 
@@ -946,19 +981,30 @@ fn owned_objects_for_roles(
         .filter(|row| row.relpersistence != 't')
         .filter(|row| matches!(row.relkind, 'r' | 'v' | 'i' | 'S'))
         .map(|row| OwnedObject {
-            relation_oid: row.oid,
-            relkind: row.relkind,
+            oid: row.oid,
+            kind: match row.relkind {
+                'i' => OwnedObjectKind::Index,
+                'v' => OwnedObjectKind::View,
+                _ => OwnedObjectKind::Table,
+            },
             name: match namespaces.get(&row.relnamespace).map(String::as_str) {
                 Some("public") | Some("pg_catalog") | None => row.relname,
                 Some(schema) => format!("{schema}.{}", row.relname),
             },
         })
         .collect::<Vec<_>>();
-    objects.sort_by(|left, right| {
-        left.name
-            .cmp(&right.name)
-            .then(left.relkind.cmp(&right.relkind))
-    });
+    objects.extend(
+        catcache
+            .publication_rows()
+            .into_iter()
+            .filter(|row| role_oids.contains(&row.pubowner))
+            .map(|row| OwnedObject {
+                oid: row.oid,
+                kind: OwnedObjectKind::Publication,
+                name: row.pubname,
+            }),
+    );
+    objects.sort_by(|left, right| left.name.cmp(&right.name).then(left.kind.cmp(&right.kind)));
     Ok(objects)
 }
 

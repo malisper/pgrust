@@ -76,7 +76,8 @@ use super::pg_regex::{
 };
 pub(crate) use super::value_io::{format_array_text, format_array_value_text};
 use super::{ExecError, ExecutorContext, exec_next, executor_start};
-use crate::backend::catalog::roles::find_role_by_oid;
+use crate::backend::catalog::indexing::probe_system_catalog_rows_visible_in_db;
+use crate::backend::catalog::rowcodec::pg_description_row_from_values;
 use crate::backend::executor::jsonb::{
     JsonbValue, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any, jsonb_from_value,
 };
@@ -86,7 +87,10 @@ use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp,
 };
 use crate::backend::utils::misc::checkpoint::checkpoint_stats_value;
-use crate::include::catalog::{FLOAT8_TYPE_OID, builtin_scalar_function_for_proc_oid};
+use crate::include::catalog::{
+    CURRENT_DATABASE_OID, PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID,
+    builtin_scalar_function_for_proc_oid,
+};
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
 use crate::include::nodes::primnodes::{
     BoolExpr, BoolExprType, FuncExpr, INDEX_VAR, INNER_VAR, OUTER_VAR, OpExpr, OpExprKind,
@@ -104,8 +108,9 @@ use arrays::{
     eval_array_lower_function, eval_array_ndims_function, eval_array_overlap,
     eval_array_position_function, eval_array_positions_function, eval_array_remove_function,
     eval_array_replace_function, eval_array_sort_function, eval_array_subscript,
-    eval_array_subscript_plpgsql, eval_array_to_string_function, eval_cardinality_function,
-    eval_quantified_array, eval_string_to_array_function, eval_width_bucket_thresholds,
+    eval_array_subscript_plpgsql, eval_array_to_string_function, eval_array_upper_function,
+    eval_cardinality_function, eval_quantified_array, eval_string_to_array_function,
+    eval_width_bucket_thresholds,
 };
 use subquery::{
     eval_array_subquery, eval_exists_subquery, eval_quantified_subquery, eval_scalar_subquery,
@@ -114,6 +119,7 @@ use subquery::{
 extern crate rand;
 
 const INVALID_PARAMETER_VALUE_SQLSTATE: &str = "22023";
+const PG_DESCRIPTION_O_C_O_INDEX_OID: u32 = 2675;
 
 fn malformed_expr_error(kind: &str) -> ExecError {
     ExecError::DetailedError {
@@ -251,6 +257,16 @@ fn oid_arg_to_u32(value: &Value, op: &'static str) -> Result<u32, ExecError> {
     match value {
         Value::Int32(oid) => u32::try_from(*oid).map_err(|_| ExecError::OidOutOfRange),
         Value::Int64(oid) => u32::try_from(*oid).map_err(|_| ExecError::OidOutOfRange),
+        _ if value.as_text().is_some() => value
+            .as_text()
+            .expect("guarded above")
+            .trim()
+            .parse::<u32>()
+            .map_err(|_| ExecError::TypeMismatch {
+                op,
+                left: value.clone(),
+                right: Value::Int64(i64::from(crate::include::catalog::OID_TYPE_OID)),
+            }),
         _ => Err(ExecError::TypeMismatch {
             op,
             left: value.clone(),
@@ -421,84 +437,151 @@ fn sequence_catalog(
         })
 }
 
-fn role_catalog(
+fn executor_catalog(
     ctx: &ExecutorContext,
 ) -> Result<&crate::backend::utils::cache::visible_catalog::VisibleCatalog, ExecError> {
     ctx.catalog
         .as_ref()
         .ok_or_else(|| ExecError::DetailedError {
-            message: "role lookup requires a visible catalog".into(),
+            message: "catalog lookup requires executor catalog context".into(),
             detail: None,
             hint: None,
             sqlstate: "XX000",
         })
 }
 
-fn auth_role_name(ctx: &ExecutorContext, role_oid: u32) -> Result<Value, ExecError> {
-    let catalog = role_catalog(ctx)?;
-    let rows = catalog.authid_rows();
-    let role = find_role_by_oid(&rows, role_oid).ok_or_else(|| ExecError::DetailedError {
-        message: format!("role with OID {role_oid} does not exist"),
-        detail: None,
-        hint: None,
-        sqlstate: "XX000",
-    })?;
-    Ok(Value::Text(role.rolname.clone().into()))
-}
-
-fn quote_identifier_if_needed(identifier: &str) -> String {
-    if !identifier.is_empty()
-        && identifier.chars().enumerate().all(|(idx, ch)| {
-            if idx == 0 {
-                ch == '_' || ch.is_ascii_lowercase()
-            } else {
-                ch == '_' || ch.is_ascii_lowercase() || ch.is_ascii_digit()
-            }
-        })
-    {
-        return identifier.into();
-    }
-    let escaped = identifier.replace('"', "\"\"");
-    format!("\"{escaped}\"")
-}
-
-fn eval_regrole_to_text_function(
-    values: &[Value],
-    ctx: Option<&ExecutorContext>,
-) -> Result<Value, ExecError> {
-    let Some(value) = values.first() else {
-        return Ok(Value::Null);
-    };
-    if matches!(value, Value::Null) {
-        return Ok(Value::Null);
-    }
-    let oid = match value {
-        Value::Int32(oid) if *oid >= 0 => *oid as u32,
-        Value::Int64(oid) if *oid >= 0 && *oid <= i64::from(u32::MAX) => *oid as u32,
-        _ => {
-            return Err(ExecError::TypeMismatch {
-                op: "::text",
-                left: value.clone(),
-                right: Value::Text("".into()),
-            });
+fn eval_pg_get_userbyid(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null] => Ok(Value::Null),
+        [value] => {
+            let role_oid = oid_arg_to_u32(value, "pg_get_userbyid")?;
+            let catalog = executor_catalog(ctx)?;
+            Ok(Value::Text(
+                catalog
+                    .role_name_by_oid(role_oid)
+                    .unwrap_or_else(|| format!("unknown (OID={role_oid})"))
+                    .into(),
+            ))
         }
-    };
-    if oid == 0 {
-        return Ok(Value::Text("-".into()));
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_get_userbyid(oid)",
+            actual: format!("PgGetUserById({} args)", values.len()),
+        })),
     }
-    if let Some(role_name) = ctx
-        .and_then(|ctx| ctx.catalog.as_ref())
-        .and_then(|catalog| {
-            catalog
-                .authid_rows()
-                .into_iter()
-                .find(|row| row.oid == oid)
-                .map(|row| row.rolname)
-        })
-    {
-        return Ok(Value::Text(quote_identifier_if_needed(&role_name).into()));
+}
+
+fn eval_obj_description(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [objoid, class_name] => {
+            let objoid = oid_arg_to_u32(objoid, "obj_description")?;
+            let Some(class_name) = class_name.as_text() else {
+                return Err(ExecError::TypeMismatch {
+                    op: "obj_description",
+                    left: class_name.clone(),
+                    right: Value::Text("".into()),
+                });
+            };
+            let catalog = executor_catalog(ctx)?;
+            let Some(classoid) = catalog
+                .lookup_any_relation(class_name)
+                .map(|rel| rel.relation_oid)
+            else {
+                return Ok(Value::Null);
+            };
+            let rows = probe_system_catalog_rows_visible_in_db(
+                &ctx.pool,
+                &ctx.txns,
+                &ctx.snapshot,
+                ctx.client_id,
+                CURRENT_DATABASE_OID,
+                PG_DESCRIPTION_O_C_O_INDEX_OID,
+                vec![
+                    crate::include::access::scankey::ScanKeyData {
+                        attribute_number: 1,
+                        strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                        argument: Value::Int64(i64::from(objoid)),
+                    },
+                    crate::include::access::scankey::ScanKeyData {
+                        attribute_number: 2,
+                        strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                        argument: Value::Int64(i64::from(classoid)),
+                    },
+                    crate::include::access::scankey::ScanKeyData {
+                        attribute_number: 3,
+                        strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                        argument: Value::Int32(0),
+                    },
+                ],
+            )
+            .map_err(|err| ExecError::DetailedError {
+                message: format!("pg_description lookup failed: {err:?}"),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })?;
+            let Some(row) = rows.into_iter().next() else {
+                return Ok(Value::Null);
+            };
+            let row =
+                pg_description_row_from_values(row).map_err(|err| ExecError::DetailedError {
+                    message: format!("invalid pg_description row: {err:?}"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                })?;
+            Ok(Value::Text(row.description.into()))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "obj_description(oid, catalog_name)",
+            actual: format!("ObjDescription({} args)", values.len()),
+        })),
     }
-    Ok(Value::Text(oid.to_string().into()))
+}
+
+fn eval_pg_get_expr(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [Value::Null, _, _] | [_, Value::Null] | [_, Value::Null, _] => {
+            Ok(Value::Null)
+        }
+        [expr, _relation] => Ok(expr
+            .as_text()
+            .map(|text| Value::Text(text.into()))
+            .unwrap_or(Value::Null)),
+        [expr, _relation, _pretty] => Ok(expr
+            .as_text()
+            .map(|text| Value::Text(text.into()))
+            .unwrap_or(Value::Null)),
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_get_expr(pg_node_tree, oid [, pretty])",
+            actual: format!("PgGetExpr({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_pg_relation_is_publishable(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null] => Ok(Value::Null),
+        [value] => {
+            let relation_oid = oid_arg_to_u32(value, "pg_relation_is_publishable")?;
+            let catalog = executor_catalog(ctx)?;
+            let Some(relation) = catalog.relation_by_oid(relation_oid) else {
+                return Ok(Value::Null);
+            };
+            let publishable = matches!(relation.relkind, 'r' | 'p')
+                && relation.relpersistence == 'p'
+                && relation.namespace_oid != PG_CATALOG_NAMESPACE_OID
+                && relation.namespace_oid != PG_TOAST_NAMESPACE_OID;
+            Ok(Value::Bool(publishable))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_relation_is_publishable(oid)",
+            actual: format!("PgRelationIsPublishable({} args)", values.len()),
+        })),
+    }
 }
 
 fn sequence_runtime(
@@ -1603,6 +1686,7 @@ fn eval_plpgsql_builtin_function(
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
             _ => eval_length_function(&values),
         },
+        BuiltinScalarFunction::ArrayUpper => eval_array_upper_function(&values),
         BuiltinScalarFunction::CashLarger => match values.as_slice() {
             [Value::Money(left), Value::Money(right)] => {
                 Ok(Value::Money(money_larger(*left, *right)))
@@ -1825,6 +1909,10 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::BitcastBigintToFloat8 => eval_bitcast_bigint_to_float8(&values),
         BuiltinScalarFunction::Random
         | BuiltinScalarFunction::GetDatabaseEncoding
+        | BuiltinScalarFunction::PgGetUserById
+        | BuiltinScalarFunction::ObjDescription
+        | BuiltinScalarFunction::PgGetExpr
+        | BuiltinScalarFunction::PgRelationIsPublishable
         | BuiltinScalarFunction::ToJson
         | BuiltinScalarFunction::ToJsonb
         | BuiltinScalarFunction::ArrayToJson
@@ -2645,6 +2733,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::ArrayNdims => eval_array_ndims_function(&values),
         BuiltinScalarFunction::ArrayDims => eval_array_dims_function(&values),
         BuiltinScalarFunction::ArrayLower => eval_array_lower_function(&values),
+        BuiltinScalarFunction::ArrayUpper => eval_array_upper_function(&values),
         BuiltinScalarFunction::ArrayFill => eval_array_fill_function(&values),
         BuiltinScalarFunction::StringToArray => eval_string_to_array_function(&values),
         BuiltinScalarFunction::ArrayToString => eval_array_to_string_function(&values),
@@ -2655,6 +2744,12 @@ fn eval_builtin_function(
         BuiltinScalarFunction::ArrayRemove => eval_array_remove_function(&values),
         BuiltinScalarFunction::ArrayReplace => eval_array_replace_function(&values),
         BuiltinScalarFunction::ArraySort => eval_array_sort_function(&values),
+        BuiltinScalarFunction::PgGetUserById => eval_pg_get_userbyid(&values, ctx),
+        BuiltinScalarFunction::ObjDescription => eval_obj_description(&values, ctx),
+        BuiltinScalarFunction::PgGetExpr => eval_pg_get_expr(&values),
+        BuiltinScalarFunction::PgRelationIsPublishable => {
+            eval_pg_relation_is_publishable(&values, ctx)
+        }
         BuiltinScalarFunction::PgLsn => eval_pg_lsn_function(&values),
         BuiltinScalarFunction::Trunc => eval_trunc_function(&values),
         BuiltinScalarFunction::Round => eval_round_function(&values),

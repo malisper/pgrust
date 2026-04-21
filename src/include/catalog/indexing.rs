@@ -63,8 +63,13 @@ const PG_INDEX_INDRELID_INDEX_KEYS: [i16; 1] = [2];
 const PG_INDEX_INDEXRELID_INDEX_KEYS: [i16; 1] = [1];
 const PG_TRIGGER_RELID_NAME_INDEX_KEYS: [i16; 2] = [2, 4];
 const PG_TRIGGER_OID_INDEX_KEYS: [i16; 1] = [1];
-const PG_POLICY_OID_INDEX_KEYS: [i16; 1] = [1];
-const PG_POLICY_RELID_NAME_INDEX_KEYS: [i16; 2] = [3, 2];
+const PG_PUBLICATION_OID_INDEX_KEYS: [i16; 1] = [1];
+const PG_PUBLICATION_PUBNAME_INDEX_KEYS: [i16; 1] = [2];
+const PG_PUBLICATION_REL_OID_INDEX_KEYS: [i16; 1] = [1];
+const PG_PUBLICATION_REL_PRRELID_PRPUBID_INDEX_KEYS: [i16; 2] = [3, 2];
+const PG_PUBLICATION_REL_PRPUBID_INDEX_KEYS: [i16; 1] = [2];
+const PG_PUBLICATION_NAMESPACE_OID_INDEX_KEYS: [i16; 1] = [1];
+const PG_PUBLICATION_NAMESPACE_PNNSPID_PNPUBID_INDEX_KEYS: [i16; 2] = [3, 2];
 const PG_AM_NAME_INDEX_KEYS: [i16; 1] = [2];
 const PG_AM_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_AMOP_FAM_STRAT_INDEX_KEYS: [i16; 5] = [2, 3, 4, 5, 6];
@@ -153,7 +158,7 @@ const OID_INT2_BOOL_OPCLASS_3: [u32; 3] = [
     BOOL_BTREE_OPCLASS_OID,
 ];
 
-pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 67] = [
+pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 71] = [
     CatalogIndexDescriptor {
         relation_oid: 2684,
         relation_name: "pg_namespace_nspname_index",
@@ -547,20 +552,60 @@ pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 67] = [
         opclass_oids: &OID_OPCLASS_1,
     },
     CatalogIndexDescriptor {
-        relation_oid: 3257,
-        relation_name: "pg_policy_oid_index",
-        heap_kind: BootstrapCatalogKind::PgPolicy,
+        relation_oid: 6110,
+        relation_name: "pg_publication_oid_index",
+        heap_kind: BootstrapCatalogKind::PgPublication,
         unique: true,
-        key_attnums: &PG_POLICY_OID_INDEX_KEYS,
+        key_attnums: &PG_PUBLICATION_OID_INDEX_KEYS,
         opclass_oids: &OID_OPCLASS_1,
     },
     CatalogIndexDescriptor {
-        relation_oid: 3258,
-        relation_name: "pg_policy_polrelid_polname_index",
-        heap_kind: BootstrapCatalogKind::PgPolicy,
+        relation_oid: 6111,
+        relation_name: "pg_publication_pubname_index",
+        heap_kind: BootstrapCatalogKind::PgPublication,
         unique: true,
-        key_attnums: &PG_POLICY_RELID_NAME_INDEX_KEYS,
-        opclass_oids: &OID_NAME_OPCLASS_2,
+        key_attnums: &PG_PUBLICATION_PUBNAME_INDEX_KEYS,
+        opclass_oids: &NAME_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 6112,
+        relation_name: "pg_publication_rel_oid_index",
+        heap_kind: BootstrapCatalogKind::PgPublicationRel,
+        unique: true,
+        key_attnums: &PG_PUBLICATION_REL_OID_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 6113,
+        relation_name: "pg_publication_rel_prrelid_prpubid_index",
+        heap_kind: BootstrapCatalogKind::PgPublicationRel,
+        unique: true,
+        key_attnums: &PG_PUBLICATION_REL_PRRELID_PRPUBID_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_2,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 6116,
+        relation_name: "pg_publication_rel_prpubid_index",
+        heap_kind: BootstrapCatalogKind::PgPublicationRel,
+        unique: false,
+        key_attnums: &PG_PUBLICATION_REL_PRPUBID_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 6238,
+        relation_name: "pg_publication_namespace_oid_index",
+        heap_kind: BootstrapCatalogKind::PgPublicationNamespace,
+        unique: true,
+        key_attnums: &PG_PUBLICATION_NAMESPACE_OID_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 6239,
+        relation_name: "pg_publication_namespace_pnnspid_pnpubid_index",
+        heap_kind: BootstrapCatalogKind::PgPublicationNamespace,
+        unique: true,
+        key_attnums: &PG_PUBLICATION_NAMESPACE_PNNSPID_PNPUBID_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_2,
     },
     CatalogIndexDescriptor {
         relation_oid: 2651,

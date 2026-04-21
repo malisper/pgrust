@@ -26,6 +26,9 @@ use crate::backend::catalog::pg_operator::sort_pg_operator_rows;
 use crate::backend::catalog::pg_opfamily::sort_pg_opfamily_rows;
 use crate::backend::catalog::pg_policy::sort_pg_policy_rows;
 use crate::backend::catalog::pg_proc::sort_pg_proc_rows;
+use crate::backend::catalog::pg_publication::{
+    sort_pg_publication_namespace_rows, sort_pg_publication_rel_rows, sort_pg_publication_rows,
+};
 use crate::backend::catalog::pg_tablespace::sort_pg_tablespace_rows;
 use crate::backend::catalog::pg_trigger::sort_pg_trigger_rows;
 use crate::backend::catalog::pg_ts_config::sort_pg_ts_config_rows;
@@ -44,13 +47,13 @@ use crate::include::catalog::{
     INTERVAL_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID, JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID,
     JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID, MONEY_ARRAY_TYPE_OID,
     MONEY_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
-    PATH_TYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, PgAggregateRow, PgAmRow, PgAmopRow,
-    PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow,
-    PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow,
-    PgForeignDataWrapperRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
-    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPolicyRow, PgProcRow, PgRewriteRow,
-    PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
-    PgTsParserRow, PgTsTemplateRow, PgTypeRow, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID,
+    PATH_TYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
+    PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
+    PgConstraintRow, PgDatabaseRow, PgDependRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
+    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow,
+    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticRow,
+    PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
+    PgTsTemplateRow, PgTypeRow, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID,
     REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
     TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
     TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID,
@@ -82,7 +85,9 @@ pub struct CatCache {
     index_rows: Vec<PgIndexRow>,
     rewrite_rows: Vec<PgRewriteRow>,
     trigger_rows: Vec<PgTriggerRow>,
-    policy_rows: Vec<PgPolicyRow>,
+    publication_rows: Vec<PgPublicationRow>,
+    publication_rel_rows: Vec<PgPublicationRelRow>,
+    publication_namespace_rows: Vec<PgPublicationNamespaceRow>,
     am_rows: Vec<PgAmRow>,
     amop_rows: Vec<PgAmopRow>,
     amproc_rows: Vec<PgAmprocRow>,
@@ -258,6 +263,12 @@ impl CatCache {
                 normalize_catalog_name(name).to_ascii_lowercase(),
                 class_row.clone(),
             );
+            if let Some(namespace) = cache.namespaces_by_oid.get(&entry.namespace_oid) {
+                cache.classes_by_name.insert(
+                    format!("{}.{}", namespace.nspname.to_ascii_lowercase(), relname),
+                    class_row.clone(),
+                );
+            }
             cache.classes_by_oid.insert(class_row.oid, class_row);
 
             if entry.row_type_oid != 0 {
@@ -375,14 +386,22 @@ impl CatCache {
             .extend(catalog.rewrite_rows().iter().cloned());
         cache.trigger_rows.extend(catalog.triggers.iter().cloned());
         cache
-            .policy_rows
-            .extend(catalog.policy_rows().iter().cloned());
+            .publication_rows
+            .extend(catalog.publication_rows().iter().cloned());
+        cache
+            .publication_rel_rows
+            .extend(catalog.publication_rel_rows().iter().cloned());
+        cache
+            .publication_namespace_rows
+            .extend(catalog.publication_namespace_rows().iter().cloned());
         sort_pg_constraint_rows(&mut cache.constraint_rows);
         sort_pg_depend_rows(&mut cache.depend_rows);
         sort_pg_inherits_rows(&mut cache.inherit_rows);
         sort_pg_rewrite_rows(&mut cache.rewrite_rows);
         sort_pg_trigger_rows(&mut cache.trigger_rows);
-        sort_pg_policy_rows(&mut cache.policy_rows);
+        sort_pg_publication_rows(&mut cache.publication_rows);
+        sort_pg_publication_rel_rows(&mut cache.publication_rel_rows);
+        sort_pg_publication_namespace_rows(&mut cache.publication_namespace_rows);
         sort_pg_index_rows(&mut cache.index_rows);
 
         cache.normalize_composite_array_types();
@@ -401,7 +420,9 @@ impl CatCache {
             rows.indexes,
             rows.rewrites,
             rows.triggers,
-            rows.policies,
+            rows.publications,
+            rows.publication_rels,
+            rows.publication_namespaces,
             rows.ams,
             rows.amops,
             rows.amprocs,
@@ -439,7 +460,9 @@ impl CatCache {
         index_rows: Vec<PgIndexRow>,
         rewrite_rows: Vec<PgRewriteRow>,
         trigger_rows: Vec<PgTriggerRow>,
-        policy_rows: Vec<PgPolicyRow>,
+        publication_rows: Vec<PgPublicationRow>,
+        publication_rel_rows: Vec<PgPublicationRelRow>,
+        publication_namespace_rows: Vec<PgPublicationNamespaceRow>,
         am_rows: Vec<PgAmRow>,
         amop_rows: Vec<PgAmopRow>,
         amproc_rows: Vec<PgAmprocRow>,
@@ -507,8 +530,12 @@ impl CatCache {
         sort_pg_rewrite_rows(&mut cache.rewrite_rows);
         cache.trigger_rows = trigger_rows;
         sort_pg_trigger_rows(&mut cache.trigger_rows);
-        cache.policy_rows = policy_rows;
-        sort_pg_policy_rows(&mut cache.policy_rows);
+        cache.publication_rows = publication_rows;
+        sort_pg_publication_rows(&mut cache.publication_rows);
+        cache.publication_rel_rows = publication_rel_rows;
+        sort_pg_publication_rel_rows(&mut cache.publication_rel_rows);
+        cache.publication_namespace_rows = publication_namespace_rows;
+        sort_pg_publication_namespace_rows(&mut cache.publication_namespace_rows);
         cache.am_rows = am_rows;
         sort_pg_am_rows(&mut cache.am_rows);
         cache.amop_rows = amop_rows;
@@ -566,6 +593,10 @@ impl CatCache {
             .get(&normalize_catalog_name(name).to_ascii_lowercase())
     }
 
+    pub fn namespace_by_name_exact(&self, name: &str) -> Option<&PgNamespaceRow> {
+        self.namespaces_by_name.get(&name.to_ascii_lowercase())
+    }
+
     pub fn namespace_by_oid(&self, oid: u32) -> Option<&PgNamespaceRow> {
         self.namespaces_by_oid.get(&oid)
     }
@@ -573,6 +604,10 @@ impl CatCache {
     pub fn class_by_name(&self, name: &str) -> Option<&PgClassRow> {
         self.classes_by_name
             .get(&normalize_catalog_name(name).to_ascii_lowercase())
+    }
+
+    pub fn class_by_name_exact(&self, name: &str) -> Option<&PgClassRow> {
+        self.classes_by_name.get(&name.to_ascii_lowercase())
     }
 
     pub fn class_by_oid(&self, oid: u32) -> Option<&PgClassRow> {
@@ -639,8 +674,68 @@ impl CatCache {
         self.trigger_rows.clone()
     }
 
-    pub fn policy_rows(&self) -> Vec<PgPolicyRow> {
-        self.policy_rows.clone()
+    pub fn publication_rows(&self) -> Vec<PgPublicationRow> {
+        self.publication_rows.clone()
+    }
+
+    pub fn publication_row_by_name(&self, name: &str) -> Option<&PgPublicationRow> {
+        let normalized = normalize_catalog_name(name);
+        self.publication_rows
+            .iter()
+            .find(|row| row.pubname.eq_ignore_ascii_case(normalized))
+    }
+
+    pub fn publication_row_by_oid(&self, oid: u32) -> Option<&PgPublicationRow> {
+        self.publication_rows.iter().find(|row| row.oid == oid)
+    }
+
+    pub fn publication_rel_rows(&self) -> Vec<PgPublicationRelRow> {
+        self.publication_rel_rows.clone()
+    }
+
+    pub fn publication_rel_rows_for_publication(
+        &self,
+        publication_oid: u32,
+    ) -> Vec<PgPublicationRelRow> {
+        self.publication_rel_rows
+            .iter()
+            .filter(|row| row.prpubid == publication_oid)
+            .cloned()
+            .collect()
+    }
+
+    pub fn publication_rel_rows_for_relation(&self, relation_oid: u32) -> Vec<PgPublicationRelRow> {
+        self.publication_rel_rows
+            .iter()
+            .filter(|row| row.prrelid == relation_oid)
+            .cloned()
+            .collect()
+    }
+
+    pub fn publication_namespace_rows(&self) -> Vec<PgPublicationNamespaceRow> {
+        self.publication_namespace_rows.clone()
+    }
+
+    pub fn publication_namespace_rows_for_publication(
+        &self,
+        publication_oid: u32,
+    ) -> Vec<PgPublicationNamespaceRow> {
+        self.publication_namespace_rows
+            .iter()
+            .filter(|row| row.pnpubid == publication_oid)
+            .cloned()
+            .collect()
+    }
+
+    pub fn publication_namespace_rows_for_namespace(
+        &self,
+        namespace_oid: u32,
+    ) -> Vec<PgPublicationNamespaceRow> {
+        self.publication_namespace_rows
+            .iter()
+            .filter(|row| row.pnnspid == namespace_oid)
+            .cloned()
+            .collect()
     }
 
     pub fn trigger_rows_for_relation(&self, relation_oid: u32) -> Vec<PgTriggerRow> {
@@ -1073,6 +1168,14 @@ mod tests {
         );
         assert_eq!(
             cache.namespace_by_name("pg_catalog").map(|row| row.oid),
+            Some(11)
+        );
+        assert_eq!(
+            cache.class_by_name_exact("pg_catalog.pg_class").map(|row| row.oid),
+            Some(PG_CLASS_RELATION_OID)
+        );
+        assert_eq!(
+            cache.namespace_by_name_exact("pg_catalog").map(|row| row.oid),
             Some(11)
         );
     }
