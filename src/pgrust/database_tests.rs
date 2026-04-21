@@ -7597,6 +7597,92 @@ fn alter_table_add_validate_and_drop_foreign_keys() {
 }
 
 #[test]
+fn alter_table_add_foreign_key_without_constraint_name_generates_default_name() {
+    let base = temp_dir("alter_table_add_fk_unnamed");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table parents (id int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table children (id int4 primary key, parent_id int4)",
+    )
+    .unwrap();
+    db.execute(1, "insert into parents values (1)").unwrap();
+    db.execute(1, "insert into children values (1, 1)").unwrap();
+
+    db.execute(
+        1,
+        "alter table children add foreign key (parent_id) references parents(id)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conname, convalidated from pg_constraint where conrelid = (select oid from pg_class where relname = 'children') and contype = 'f'",
+        ),
+        vec![vec![
+            Value::Text("children_parent_id_fkey".into()),
+            Value::Bool(true),
+        ]]
+    );
+
+    match db.execute(1, "insert into children values (2, 2)") {
+        Err(ExecError::ForeignKeyViolation { constraint, .. }) => {
+            assert_eq!(constraint, "children_parent_id_fkey");
+        }
+        other => panic!("expected unnamed ALTER TABLE foreign-key violation, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "alter table children drop constraint children_parent_id_fkey",
+    )
+    .unwrap();
+}
+
+#[test]
+fn alter_table_add_foreign_key_without_constraint_name_accepts_no_space_before_column_list() {
+    let base = temp_dir("alter_table_add_fk_unnamed_nospace");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table parents (id int4, code text, primary key (id, code))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table children (id int4 primary key, parent_id int4, parent_code text)",
+    )
+    .unwrap();
+    db.execute(1, "insert into parents values (1, 'one')")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into children values (1, 1, 'one'), (2, null, null)",
+    )
+    .unwrap();
+
+    db.execute(
+        1,
+        "alter table children add foreign key(parent_id, parent_code) references parents(id, code) match full",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select confmatchtype, convalidated from pg_constraint where conname = 'children_parent_id_parent_code_fkey'",
+        ),
+        vec![vec![Value::Text("f".into()), Value::Bool(true)]]
+    );
+}
+
+#[test]
 fn foreign_keys_support_enforced_not_valid_on_create_and_alter_table_add() {
     let base = temp_dir("foreign_keys_enforced_not_valid");
     let db = Database::open(&base, 16).unwrap();
