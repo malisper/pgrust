@@ -299,6 +299,7 @@ pub enum BuiltinScalarFunction {
     PgRustTestFdwHandler,
     PgRustTestEncSetup,
     PgRustTestEncConversion,
+    CurrentSetting,
     PgTypeof,
     PgStatGetCheckpointerNumTimed,
     PgStatGetCheckpointerNumRequested,

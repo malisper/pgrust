@@ -587,6 +587,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgRustTestFdwHandler => args.is_empty(),
             BuiltinScalarFunction::PgRustTestEncSetup => args.is_empty(),
             BuiltinScalarFunction::PgRustTestEncConversion => args.len() == 4,
+            BuiltinScalarFunction::CurrentSetting => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgTypeof => args.len() == 1,
             BuiltinScalarFunction::NextVal | BuiltinScalarFunction::CurrVal => args.len() == 1,
             BuiltinScalarFunction::SetVal => matches!(args.len(), 2 | 3),
@@ -1035,6 +1036,9 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         BuiltinScalarFunction::TsVectorConcat => {
             return Some(SqlType::new(SqlTypeKind::TsVector));
         }
+        BuiltinScalarFunction::CurrentSetting => {
+            return Some(SqlType::new(SqlTypeKind::Text));
+        }
         _ => {}
     }
     scalar_fixed_return_types()
@@ -1312,6 +1316,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_rust_test_enc_conversion",
             BuiltinScalarFunction::PgRustTestEncConversion,
         ),
+        ("current_setting", BuiltinScalarFunction::CurrentSetting),
         ("nextval", BuiltinScalarFunction::NextVal),
         ("currval", BuiltinScalarFunction::CurrVal),
         ("setval", BuiltinScalarFunction::SetVal),

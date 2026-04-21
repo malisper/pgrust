@@ -98,9 +98,6 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_sequence_statement(&sql)? {
         return Ok(stmt);
     }
-    if let Some(stmt) = try_parse_index_statement(&sql)? {
-        return Ok(stmt);
-    }
     if let Some(stmt) = try_parse_create_tablespace_statement(&sql)? {
         return Ok(stmt);
     }
@@ -1030,19 +1027,6 @@ fn try_parse_unsupported_statement(sql: &str) -> Option<Statement> {
         sql: trimmed.into(),
         feature,
     }))
-}
-
-fn try_parse_index_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
-    let trimmed = sql.trim().trim_end_matches(';').trim();
-    let lowered = trimmed.to_ascii_lowercase();
-    if !lowered.starts_with("alter index ") {
-        return Ok(None);
-    }
-    if lowered.contains(" rename to ") {
-        return build_alter_index_rename_statement(trimmed)
-            .map(|stmt| Some(Statement::AlterIndexRename(stmt)));
-    }
-    Ok(None)
 }
 
 fn try_parse_domain_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
@@ -2290,43 +2274,6 @@ fn build_alter_sequence_rename_statement(
     }
     Ok(AlterTableRenameStatement {
         if_exists: false,
-        only: false,
-        table_name,
-        new_table_name,
-    })
-}
-
-fn build_alter_index_rename_statement(
-    sql: &str,
-) -> Result<AlterTableRenameStatement, ParseError> {
-    let mut rest = consume_keyword(sql.trim_start(), "alter").trim_start();
-    rest = consume_keyword(rest, "index").trim_start();
-    let mut if_exists = false;
-    if keyword_at_start(rest, "if") {
-        let after_if = consume_keyword(rest, "if").trim_start();
-        if !keyword_at_start(after_if, "exists") {
-            return Err(ParseError::UnexpectedToken {
-                expected: "IF EXISTS",
-                actual: sql.into(),
-            });
-        }
-        if_exists = true;
-        rest = consume_keyword(after_if, "exists").trim_start();
-    }
-    let (parts, rest) = parse_qualified_identifier_parts(rest)?;
-    let table_name = parts.join(".");
-    let mut rest = rest.trim_start();
-    rest = consume_keyword(rest, "rename").trim_start();
-    rest = consume_keyword(rest, "to").trim_start();
-    let (new_table_name, rest) = parse_sql_identifier(rest)?;
-    if !rest.trim().is_empty() {
-        return Err(ParseError::UnexpectedToken {
-            expected: "end of ALTER INDEX RENAME statement",
-            actual: rest.trim().into(),
-        });
-    }
-    Ok(AlterTableRenameStatement {
-        if_exists,
         only: false,
         table_name,
         new_table_name,
@@ -4645,9 +4592,6 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_validate_constraint_stmt => Ok(Statement::AlterTableValidateConstraint(
             build_alter_table_validate_constraint(inner)?,
         )),
-        Rule::alter_table_inherit_stmt => {
-            Ok(Statement::AlterTableInherit(build_alter_table_inherit(inner)?))
-        }
         Rule::alter_table_no_inherit_stmt => Ok(Statement::AlterTableNoInherit(
             build_alter_table_no_inherit(inner)?,
         )),
@@ -5260,7 +5204,6 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
     let mut buffers = false;
     let mut costs = true;
     let mut timing = true;
-    let mut verbose = false;
     let mut statement = None;
     for part in pair.into_inner() {
         match part.as_rule() {
@@ -5290,14 +5233,12 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
                     Some(Rule::kw_buffers) => buffers = bool_val,
                     Some(Rule::kw_costs) => costs = bool_val,
                     Some(Rule::kw_timing) => timing = bool_val,
-                    Some(Rule::kw_verbose) => verbose = bool_val,
-                    _ => {} // SUMMARY, FORMAT: parsed but ignored
+                    _ => {} // VERBOSE, SUMMARY, FORMAT: parsed but ignored
                 }
             }
             Rule::select_stmt => statement = Some(Statement::Select(build_select(part)?)),
             Rule::insert_stmt => statement = Some(Statement::Insert(build_insert(part)?)),
             Rule::merge_stmt => statement = Some(Statement::Merge(build_merge(part)?)),
-            Rule::update_stmt => statement = Some(Statement::Update(build_update(part)?)),
             _ => {}
         }
     }
@@ -5306,7 +5247,6 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
         buffers,
         costs,
         timing,
-        verbose,
         statement: Box::new(statement.ok_or(ParseError::UnexpectedEof)?),
     })
 }
@@ -7174,25 +7114,6 @@ fn build_reference_action_clause(
                         expected: "ON UPDATE action",
                         actual: text.to_string(),
                     })?;
-            let action_name = action.split('(').next().unwrap_or(action).trim();
-            if action_name != action.trim() {
-                let action = build_reference_action_text(action_name)?;
-                let action_name = match action {
-                    ForeignKeyAction::SetNull => "SET NULL",
-                    ForeignKeyAction::SetDefault => "SET DEFAULT",
-                    ForeignKeyAction::NoAction
-                    | ForeignKeyAction::Restrict
-                    | ForeignKeyAction::Cascade => {
-                        return Err(ParseError::UnexpectedToken {
-                            expected: "ON UPDATE action",
-                            actual: text.to_string(),
-                        });
-                    }
-                };
-                return Err(ParseError::FeatureNotSupportedMessage(format!(
-                    "a column list with {action_name} is only supported for ON DELETE actions"
-                )));
-            }
             Ok((false, build_reference_action_text(action.trim())?, None))
         }
         _ => Err(ParseError::UnexpectedToken {
@@ -8045,7 +7966,6 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
     let _ = index;
     match expr {
         SqlExpr::Column(name) => name.rsplit('.').next().unwrap_or(name).to_string(),
-        SqlExpr::ArrayLiteral(_) => "array".to_string(),
         SqlExpr::ArraySubscript { array, .. } => select_item_name(array, index),
         SqlExpr::FieldSelect { field, .. } => field.clone(),
         SqlExpr::Cast(inner, ty) => match inner.as_ref() {
@@ -8057,6 +7977,9 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
         },
         SqlExpr::Row(_) => "row".to_string(),
         SqlExpr::Random => "random".to_string(),
+        SqlExpr::CurrentUser => "current_user".to_string(),
+        SqlExpr::SessionUser => "session_user".to_string(),
+        SqlExpr::CurrentRole => "current_role".to_string(),
         SqlExpr::FuncCall { name, .. } => name.clone(),
         _ => "?column?".to_string(),
     }
@@ -8097,7 +8020,6 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Int8Range => "int8range",
         SqlTypeKind::Name => "name",
         SqlTypeKind::Oid => "oid",
-        SqlTypeKind::RegType => "regtype",
         SqlTypeKind::RegRole => "regrole",
         SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::Tid => "tid",
@@ -8884,32 +8806,6 @@ fn build_alter_table_no_inherit(
     }
     let mut parts = parts.into_iter();
     Ok(AlterTableNoInheritStatement {
-        if_exists,
-        only,
-        table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
-        parent_name: parts.next().ok_or(ParseError::UnexpectedEof)?,
-    })
-}
-
-fn build_alter_table_inherit(pair: Pair<'_, Rule>) -> Result<AlterTableInheritStatement, ParseError> {
-    let mut if_exists = false;
-    let mut only = false;
-    let mut parts = Vec::new();
-    for part in pair.into_inner() {
-        match part.as_rule() {
-            Rule::alter_table_target => {
-                let (parsed_if_exists, parsed_only, parsed_table_name) =
-                    build_alter_table_target(part)?;
-                if_exists = parsed_if_exists;
-                only = parsed_only;
-                parts.push(parsed_table_name);
-            }
-            Rule::identifier => parts.push(build_identifier(part)),
-            _ => {}
-        }
-    }
-    let mut parts = parts.into_iter();
-    Ok(AlterTableInheritStatement {
         if_exists,
         only,
         table_name: parts.next().ok_or(ParseError::UnexpectedEof)?,

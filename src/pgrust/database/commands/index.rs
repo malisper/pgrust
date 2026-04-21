@@ -1,6 +1,5 @@
 use super::super::*;
 use crate::backend::commands::tablecmds::{collect_matching_rows_heap, index_key_values_for_row};
-use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::backend::utils::cache::relcache::{IndexAmOpEntry, IndexAmProcEntry};
 use crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
@@ -205,6 +204,8 @@ impl Database {
             }));
         }
 
+        let type_rows =
+            crate::backend::utils::cache::syscache::ensure_type_rows(self, client_id, txn_ctx);
         let opclass_rows =
             crate::backend::utils::cache::syscache::ensure_opclass_rows(self, client_id, txn_ctx);
         let mut indclass = Vec::with_capacity(columns.len());
@@ -231,8 +232,12 @@ impl Database {
             };
             let type_oid = range_type_ref_for_sql_type(sql_type)
                 .map(|range_type| range_type.type_oid())
-                .or_else(|| Some(sql_type_oid(sql_type)))
-                .filter(|oid| *oid != 0)
+                .or_else(|| {
+                    type_rows
+                        .iter()
+                        .find(|row| row.sql_type == sql_type)
+                        .map(|row| row.oid)
+                })
                 .ok_or_else(|| {
                     ExecError::Parse(ParseError::UnsupportedType(
                         column
@@ -423,15 +428,11 @@ impl Database {
                 txn_waiter: Some(self.txn_waiter.clone()),
                 sequences: Some(self.sequences.clone()),
                 large_objects: Some(self.large_objects.clone()),
-                advisory_locks: Arc::clone(&self.advisory_locks),
                 datetime_config: DateTimeConfig::default(),
                 stats: std::sync::Arc::clone(&self.stats),
                 session_stats: self.session_stats_state(client_id),
-                current_database_name: self.current_database_name(),
                 session_user_oid: self.auth_state(client_id).session_user_oid(),
                 current_user_oid: self.auth_state(client_id).current_user_oid(),
-                current_xid: xid,
-                statement_lock_scope_id: None,
                 visible_catalog: visible_catalog.clone(),
             }),
         };
@@ -539,7 +540,6 @@ impl Database {
                 txn_waiter: Some(self.txn_waiter.clone()),
                 sequences: Some(self.sequences.clone()),
                 large_objects: Some(self.large_objects.clone()),
-                advisory_locks: Arc::clone(&self.advisory_locks),
                 checkpoint_stats: CheckpointStatsSnapshot::default(),
                 datetime_config: DateTimeConfig::default(),
                 interrupts,
@@ -547,11 +547,9 @@ impl Database {
                 session_stats: self.session_stats_state(client_id),
                 snapshot: self.txns.read().snapshot_for_command(xid, cid)?,
                 client_id,
-                current_database_name: self.current_database_name(),
                 session_user_oid: self.auth_state(client_id).session_user_oid(),
                 current_user_oid: self.auth_state(client_id).current_user_oid(),
-                current_xid: xid,
-                statement_lock_scope_id: None,
+                active_role_oid: self.auth_state(client_id).active_role_oid(),
                 next_command_id: cid,
                 default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
                 expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
