@@ -325,6 +325,10 @@ fn catalog_with_people_id_index() -> Catalog {
 }
 
 fn catalog_with_people_primary_key() -> Catalog {
+    catalog_with_people_primary_key_opclass(crate::include::catalog::INT4_BTREE_OPCLASS_OID)
+}
+
+fn catalog_with_people_primary_key_opclass(opclass_oid: u32) -> Catalog {
     let mut catalog = catalog();
     catalog.insert(
         "people_pkey",
@@ -360,7 +364,7 @@ fn catalog_with_people_primary_key() -> Catalog {
                 indisready: true,
                 indislive: true,
                 indkey: vec![1],
-                indclass: vec![crate::include::catalog::INT4_BTREE_OPCLASS_OID],
+                indclass: vec![opclass_oid],
                 indcollation: vec![0],
                 indoption: vec![0],
                 indexprs: None,
@@ -392,7 +396,7 @@ fn add_ready_people_index(
 }
 
 fn catalog_with_people_id_name_unique_index() -> Catalog {
-    let mut catalog = catalog();
+    let mut catalog = catalog_with_people_primary_key();
     add_ready_people_index(
         &mut catalog,
         "people_id_name_key",
@@ -696,6 +700,72 @@ fn visible_catalog_without_operator(
             })
             .collect(),
         base.opclass_rows(),
+        base.opfamily_rows(),
+        base.proc_rows(),
+        base.aggregate_rows(),
+        base.cast_rows(),
+        base.collation_rows(),
+        base.foreign_data_wrapper_rows(),
+        base.database_rows(),
+        base.tablespace_rows(),
+        base.statistic_rows(),
+        base.type_rows(),
+    );
+    crate::backend::utils::cache::visible_catalog::VisibleCatalog::new(relcache, Some(filtered))
+}
+
+fn custom_btree_opclass(
+    oid: u32,
+    name: &str,
+    family_oid: u32,
+    input_type_oid: u32,
+) -> crate::include::catalog::PgOpclassRow {
+    crate::include::catalog::PgOpclassRow {
+        oid,
+        opcmethod: crate::include::catalog::BTREE_AM_OID,
+        opcname: name.into(),
+        opcnamespace: crate::include::catalog::PG_CATALOG_NAMESPACE_OID,
+        opcowner: BOOTSTRAP_SUPERUSER_OID,
+        opcfamily: family_oid,
+        opcintype: input_type_oid,
+        opcdefault: false,
+        opckeytype: 0,
+    }
+}
+
+fn visible_catalog_with_extra_opclasses(
+    catalog: &Catalog,
+    extra_opclasses: Vec<crate::include::catalog::PgOpclassRow>,
+) -> crate::backend::utils::cache::visible_catalog::VisibleCatalog {
+    let relcache = crate::backend::utils::cache::relcache::RelCache::from_catalog(catalog);
+    let base = crate::backend::utils::cache::catcache::CatCache::from_catalog(catalog);
+    let mut opclass_rows = base.opclass_rows();
+    opclass_rows.extend(extra_opclasses);
+    let filtered = crate::backend::utils::cache::catcache::CatCache::from_rows(
+        base.namespace_rows(),
+        base.class_rows(),
+        base.attribute_rows(),
+        base.attrdef_rows(),
+        base.depend_rows(),
+        base.inherit_rows(),
+        base.index_rows(),
+        base.rewrite_rows(),
+        base.trigger_rows(),
+        base.policy_rows(),
+        base.am_rows(),
+        base.amop_rows(),
+        base.amproc_rows(),
+        base.authid_rows(),
+        base.auth_members_rows(),
+        base.language_rows(),
+        base.ts_parser_rows(),
+        base.ts_template_rows(),
+        base.ts_dict_rows(),
+        base.ts_config_rows(),
+        base.ts_config_map_rows(),
+        base.constraint_rows(),
+        base.operator_rows(),
+        opclass_rows,
         base.opfamily_rows(),
         base.proc_rows(),
         base.aggregate_rows(),
@@ -5265,6 +5335,147 @@ fn bind_insert_rejects_non_matching_expression_collation_and_opclass_targets() {
             );
             assert!(matches!(
                 bind_insert(&opclass_stmt, &catalog_with_people_primary_key()),
+                Err(ParseError::UnexpectedToken { actual, .. })
+                    if actual
+                        == "there is no unique or exclusion constraint matching the ON CONFLICT specification"
+            ));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn bind_insert_matches_opclass_inference_by_family_and_input_type() {
+    std::thread::Builder::new()
+        .name("bind_insert_matches_opclass_inference_by_family_and_input_type".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let requested_opclass = custom_btree_opclass(
+                910_001,
+                "int4_same_family_alias_ops",
+                crate::include::catalog::BTREE_INTEGER_FAMILY_OID,
+                crate::include::catalog::INT4_TYPE_OID,
+            );
+            let base_catalog = catalog_with_people_primary_key();
+            let visible = visible_catalog_with_extra_opclasses(
+                &base_catalog,
+                vec![requested_opclass.clone()],
+            );
+
+            let opclass_stmt = people_insert_with_on_conflict(
+                Some(OnConflictTarget::Inference(OnConflictInferenceSpec {
+                    elements: vec![OnConflictInferenceElem {
+                        expr: SqlExpr::Column("id".into()),
+                        collation: None,
+                        opclass: Some(requested_opclass.opcname.clone()),
+                    }],
+                    predicate: None,
+                })),
+                OnConflictAction::Nothing,
+                vec![],
+                None,
+            );
+            let opclass_bound = bind_insert(&opclass_stmt, &visible).unwrap();
+            assert_eq!(
+                opclass_bound
+                    .on_conflict
+                    .expect("on conflict")
+                    .arbiter_indexes[0]
+                    .name,
+                "people_pkey"
+            );
+
+            let custom_index_opclass = custom_btree_opclass(
+                910_002,
+                "int4_nondefault_index_ops",
+                crate::include::catalog::BTREE_INTEGER_FAMILY_OID,
+                crate::include::catalog::INT4_TYPE_OID,
+            );
+            let custom_index_catalog =
+                catalog_with_people_primary_key_opclass(custom_index_opclass.oid);
+            let custom_index_visible = visible_catalog_with_extra_opclasses(
+                &custom_index_catalog,
+                vec![custom_index_opclass],
+            );
+            let wildcard_stmt = people_insert_with_on_conflict(
+                Some(plain_inference_target(&["id"])),
+                OnConflictAction::Nothing,
+                vec![],
+                None,
+            );
+            let wildcard_bound = bind_insert(&wildcard_stmt, &custom_index_visible).unwrap();
+            assert_eq!(
+                wildcard_bound
+                    .on_conflict
+                    .expect("on conflict")
+                    .arbiter_indexes[0]
+                    .name,
+                "people_pkey"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn bind_insert_rejects_opclass_inference_with_wrong_family_or_input_type() {
+    std::thread::Builder::new()
+        .name("bind_insert_rejects_opclass_inference_with_wrong_family_or_input_type".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let wrong_input = custom_btree_opclass(
+                910_003,
+                "int8_same_family_alias_ops",
+                crate::include::catalog::BTREE_INTEGER_FAMILY_OID,
+                crate::include::catalog::INT8_TYPE_OID,
+            );
+            let wrong_family = custom_btree_opclass(
+                910_004,
+                "int4_wrong_family_alias_ops",
+                crate::include::catalog::BTREE_FLOAT_FAMILY_OID,
+                crate::include::catalog::INT4_TYPE_OID,
+            );
+            let base_catalog = catalog_with_people_primary_key();
+            let visible =
+                visible_catalog_with_extra_opclasses(&base_catalog, vec![wrong_input, wrong_family]);
+
+            let wrong_input_stmt = people_insert_with_on_conflict(
+                Some(OnConflictTarget::Inference(OnConflictInferenceSpec {
+                    elements: vec![OnConflictInferenceElem {
+                        expr: SqlExpr::Column("id".into()),
+                        collation: None,
+                        opclass: Some("int8_same_family_alias_ops".into()),
+                    }],
+                    predicate: None,
+                })),
+                OnConflictAction::Nothing,
+                vec![],
+                None,
+            );
+            assert!(matches!(
+                bind_insert(&wrong_input_stmt, &visible),
+                Err(ParseError::UnexpectedToken { actual, .. })
+                    if actual
+                        == "there is no unique or exclusion constraint matching the ON CONFLICT specification"
+            ));
+
+            let wrong_family_stmt = people_insert_with_on_conflict(
+                Some(OnConflictTarget::Inference(OnConflictInferenceSpec {
+                    elements: vec![OnConflictInferenceElem {
+                        expr: SqlExpr::Column("id".into()),
+                        collation: None,
+                        opclass: Some("int4_wrong_family_alias_ops".into()),
+                    }],
+                    predicate: None,
+                })),
+                OnConflictAction::Nothing,
+                vec![],
+                None,
+            );
+            assert!(matches!(
+                bind_insert(&wrong_family_stmt, &visible),
                 Err(ParseError::UnexpectedToken { actual, .. })
                     if actual
                         == "there is no unique or exclusion constraint matching the ON CONFLICT specification"

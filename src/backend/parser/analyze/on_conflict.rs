@@ -2,8 +2,9 @@ use super::query::rewrite_local_vars_for_output_exprs;
 use super::*;
 use crate::include::catalog::BTREE_AM_OID;
 use crate::include::nodes::parsenodes::{OnConflictAction, OnConflictClause, OnConflictTarget};
+use crate::include::nodes::primnodes::{AttrNumber, INNER_VAR, OUTER_VAR, Var, user_attrno};
 use crate::include::nodes::primnodes::{BoolExprType, OpExprKind};
-use crate::include::nodes::primnodes::{INNER_VAR, OUTER_VAR, Var, user_attrno};
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundOnConflictClause {
@@ -189,8 +190,15 @@ fn resolve_arbiter_indexes(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BoundInferenceElement {
     expr: Expr,
-    opclass_oid: Option<u32>,
+    plain_attnum: Option<AttrNumber>,
+    opclass: Option<BoundOpclassSpec>,
     collation_oid: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BoundOpclassSpec {
+    family_oid: u32,
+    input_type_oid: u32,
 }
 
 fn inferable_unique_indexes(indexes: &[BoundIndexRelation]) -> Vec<BoundIndexRelation> {
@@ -212,13 +220,13 @@ fn bind_inference_element(
     catalog: &dyn CatalogLookup,
 ) -> Result<BoundInferenceElement, ParseError> {
     let expr = bind_expr_with_outer_and_ctes(&element.expr, scope, catalog, &[], None, &[])?;
-    let expr_type = infer_sql_expr_type_with_ctes(&element.expr, scope, catalog, &[], None, &[]);
     Ok(BoundInferenceElement {
+        plain_attnum: plain_attnum(&expr),
         expr,
-        opclass_oid: element
+        opclass: element
             .opclass
             .as_ref()
-            .map(|name| resolve_opclass_oid(name, expr_type, catalog))
+            .map(|name| resolve_opclass_spec(name, catalog))
             .transpose()?,
         collation_oid: element
             .collation
@@ -228,17 +236,16 @@ fn bind_inference_element(
     })
 }
 
-fn resolve_opclass_oid(
+fn resolve_opclass_spec(
     name: &str,
-    _expr_type: SqlType,
     catalog: &dyn CatalogLookup,
-) -> Result<u32, ParseError> {
+) -> Result<BoundOpclassSpec, ParseError> {
     let normalized = normalize_lookup_name(name);
     catalog
         .opclass_rows()
         .into_iter()
         .find(|row| row.opcmethod == BTREE_AM_OID && row.opcname.eq_ignore_ascii_case(normalized))
-        .map(|row| row.oid)
+        .map(bound_opclass_spec_from_row)
         .ok_or_else(|| ParseError::UnexpectedToken {
             expected: "known btree operator class",
             actual: name.to_string(),
@@ -271,6 +278,9 @@ fn index_matches_inference(
     if requested.is_empty() || indexed_elements.is_empty() {
         return Ok(false);
     }
+    if requested_plain_attnums(requested) != indexed_plain_attnums(&indexed_elements) {
+        return Ok(false);
+    }
     if !requested.iter().all(|element| {
         indexed_elements
             .iter()
@@ -278,11 +288,15 @@ fn index_matches_inference(
     }) {
         return Ok(false);
     }
-    if !indexed_elements.iter().all(|candidate| {
-        requested
-            .iter()
-            .any(|element| inference_element_matches(element, candidate))
-    }) {
+    if !indexed_elements
+        .iter()
+        .filter(|candidate| candidate.plain_attnum.is_none())
+        .all(|candidate| {
+            requested
+                .iter()
+                .any(|element| candidate.expr == element.expr)
+        })
+    {
         return Ok(false);
     }
     index_predicate_matches(index, requested_predicate, relation_name, desc, catalog)
@@ -318,13 +332,9 @@ fn index_key_elements(
             expr
         };
         elements.push(BoundInferenceElement {
+            plain_attnum: (attnum > 0).then_some(AttrNumber::from(attnum)),
             expr,
-            opclass_oid: index
-                .index_meta
-                .indclass
-                .get(position)
-                .copied()
-                .filter(|oid| *oid != 0),
+            opclass: index_opclass_spec(index, position, catalog),
             collation_oid: index
                 .index_meta
                 .indcollation
@@ -341,12 +351,79 @@ fn inference_element_matches(
     indexed: &BoundInferenceElement,
 ) -> bool {
     requested.expr == indexed.expr
-        && requested
-            .opclass_oid
-            .is_none_or(|opclass_oid| indexed.opclass_oid == Some(opclass_oid))
+        && requested.opclass.as_ref().is_none_or(|requested_opclass| {
+            indexed.opclass.as_ref().is_some_and(|indexed_opclass| {
+                requested_opclass.family_oid == indexed_opclass.family_oid
+                    && requested_opclass.input_type_oid == indexed_opclass.input_type_oid
+            })
+        })
         && requested
             .collation_oid
             .is_none_or(|collation_oid| indexed.collation_oid == Some(collation_oid))
+}
+
+fn plain_attnum(expr: &Expr) -> Option<AttrNumber> {
+    match expr {
+        Expr::Var(var) if var.varattno > 0 => Some(var.varattno),
+        _ => None,
+    }
+}
+
+fn requested_plain_attnums(requested: &[BoundInferenceElement]) -> BTreeSet<AttrNumber> {
+    requested
+        .iter()
+        .filter_map(|element| element.plain_attnum)
+        .collect()
+}
+
+fn indexed_plain_attnums(indexed: &[BoundInferenceElement]) -> BTreeSet<AttrNumber> {
+    indexed
+        .iter()
+        .filter_map(|element| element.plain_attnum)
+        .collect()
+}
+
+fn bound_opclass_spec_from_row(row: crate::include::catalog::PgOpclassRow) -> BoundOpclassSpec {
+    BoundOpclassSpec {
+        family_oid: row.opcfamily,
+        input_type_oid: row.opcintype,
+    }
+}
+
+fn index_opclass_spec(
+    index: &BoundIndexRelation,
+    position: usize,
+    catalog: &dyn CatalogLookup,
+) -> Option<BoundOpclassSpec> {
+    let oid = index
+        .index_meta
+        .indclass
+        .get(position)
+        .copied()
+        .filter(|oid| *oid != 0)?;
+    let cached_family = index
+        .index_meta
+        .opfamily_oids
+        .get(position)
+        .copied()
+        .filter(|oid| *oid != 0);
+    let cached_input_type = index
+        .index_meta
+        .opcintype_oids
+        .get(position)
+        .copied()
+        .filter(|oid| *oid != 0);
+    match (cached_family, cached_input_type) {
+        (Some(family_oid), Some(input_type_oid)) => Some(BoundOpclassSpec {
+            family_oid,
+            input_type_oid,
+        }),
+        _ => catalog
+            .opclass_rows()
+            .into_iter()
+            .find(|row| row.oid == oid)
+            .map(bound_opclass_spec_from_row),
+    }
 }
 
 fn index_predicate_matches(

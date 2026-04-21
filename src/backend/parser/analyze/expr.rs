@@ -1,6 +1,7 @@
 use super::functions::*;
 use super::infer::*;
 use super::*;
+use crate::backend::catalog::roles::find_role_by_name;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::range_type_ref_for_sql_type;
 use crate::include::nodes::primnodes::{
@@ -2681,27 +2682,30 @@ fn bind_regrole_literal_cast(
     target_type: SqlType,
     catalog: &dyn CatalogLookup,
 ) -> Result<Option<Expr>, ParseError> {
-    let Some(role_name) = regprocedure_literal_text(expr) else {
+    let Some(role_name) = regrole_literal_text(expr) else {
         return Ok(None);
     };
     let Some(visible_catalog) = catalog.materialize_visible_catalog() else {
         return Ok(None);
     };
-    let Some(role_oid) = visible_catalog
-        .authid_rows()
-        .into_iter()
-        .find(|row| row.rolname.eq_ignore_ascii_case(role_name))
-        .map(|row| row.oid)
-    else {
-        return Err(ParseError::UnexpectedToken {
-            expected: "role name",
-            actual: format!("role \"{role_name}\" does not exist"),
-        });
-    };
+    let authid_rows = visible_catalog.authid_rows();
+    let role =
+        find_role_by_name(&authid_rows, role_name).ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "existing role name",
+            actual: role_name.to_string(),
+        })?;
     Ok(Some(Expr::Cast(
-        Box::new(Expr::Const(Value::Int64(role_oid as i64))),
+        Box::new(Expr::Const(Value::Int64(role.oid as i64))),
         target_type,
     )))
+}
+
+fn regrole_literal_text(expr: &SqlExpr) -> Option<&str> {
+    match expr {
+        SqlExpr::Const(Value::Text(text)) => Some(text.as_str()),
+        SqlExpr::Const(Value::TextRef(_, _)) => None,
+        _ => None,
+    }
 }
 
 fn regprocedure_literal_text(expr: &SqlExpr) -> Option<&str> {
