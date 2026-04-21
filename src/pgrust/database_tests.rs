@@ -6718,6 +6718,74 @@ fn alter_table_alter_column_type_allows_textlike_cast_without_using() {
 }
 
 #[test]
+fn alter_table_alter_column_type_allows_foreign_key_columns() {
+    let base = temp_dir("alter_table_alter_column_type_foreign_key");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table pktable (ptest1 int, ptest2 int, ptest3 text, primary key (ptest1, ptest2))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table fktable (
+            ftest1 int,
+            ftest2 int,
+            ftest3 int,
+            constraint constrname foreign key (ftest1, ftest2)
+                references pktable match full on delete set null on update set null
+        )",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into pktable values (1, 2, 'Test1')")
+        .unwrap();
+    db.execute(1, "insert into pktable values (2, 4, 'Test2')")
+        .unwrap();
+    db.execute(1, "insert into fktable values (1, 2, 4)")
+        .unwrap();
+    db.execute(1, "insert into fktable values (2, 4, 8)")
+        .unwrap();
+
+    db.execute(1, "alter table pktable alter column ptest1 type bigint")
+        .unwrap();
+    db.execute(1, "alter table fktable alter column ftest1 type bigint")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select ptest1, ptest2, ptest3 from pktable order by ptest2",
+        ),
+        vec![
+            vec![
+                Value::Int64(1),
+                Value::Int32(2),
+                Value::Text("Test1".into()),
+            ],
+            vec![
+                Value::Int64(2),
+                Value::Int32(4),
+                Value::Text("Test2".into()),
+            ],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select ftest1, ftest2, ftest3 from fktable order by ftest2",
+        ),
+        vec![
+            vec![Value::Int64(1), Value::Int32(2), Value::Int32(4)],
+            vec![Value::Int64(2), Value::Int32(4), Value::Int32(8)],
+        ]
+    );
+}
+
+#[test]
 fn alter_table_alter_column_type_rejects_indexed_target_column() {
     let base = temp_dir("alter_table_alter_column_type_index_guard");
     let db = Database::open(&base, 16).unwrap();
