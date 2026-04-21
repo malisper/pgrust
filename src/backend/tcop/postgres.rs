@@ -155,6 +155,15 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
     {
         return None;
     }
+    if matches!(
+        e,
+        ExecError::DetailedError { message, .. }
+            if message == "invalid input syntax for type numeric: \" \""
+    )
+        && sql.to_ascii_lowercase().contains("to_number(")
+    {
+        return None;
+    }
     let value = match e {
         ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
             expected, ..
@@ -5157,6 +5166,19 @@ mod tests {
     }
 
     #[test]
+    fn exec_error_position_omits_to_number_roman_empty_input() {
+        let sql = "SELECT to_number('', 'RN');";
+        let err = ExecError::DetailedError {
+            message: "invalid input syntax for type numeric: \" \"".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22P02",
+        };
+
+        assert_eq!(exec_error_position(sql, &err), None);
+    }
+
+    #[test]
     fn simple_query_reports_position_for_date_input_error() {
         let db = Database::open(temp_dir("date_error_position"), 16).unwrap();
         let mut state = ConnectionState {
@@ -5193,6 +5215,22 @@ mod tests {
         .unwrap();
 
         assert_eq!(first_error_response_position(&output), Some(22));
+    }
+
+    #[test]
+    fn simple_query_omits_position_for_to_number_roman_empty_input() {
+        let db = Database::open(temp_dir("to_number_roman_empty_input_position"), 16).unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+
+        handle_query(&mut output, &db, &mut state, "SELECT to_number('', 'RN');").unwrap();
+
+        assert_eq!(first_error_response_position(&output), None);
     }
 
     fn split_simple_query_statements_keeps_rule_action_lists_together() {
