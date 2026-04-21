@@ -3620,6 +3620,12 @@ fn explain_verbose_update_where_false_is_accepted() {
     assert!(
         lines
             .iter()
+            .any(|line| line == "        Output: (some_tab.a + 1), NULL::oid, NULL::tid"),
+        "expected EXPLAIN VERBOSE UPDATE to render assignment output, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
             .any(|line| line == "        One-Time Filter: false"),
         "expected EXPLAIN VERBOSE UPDATE to show false one-time filter, got {lines:?}"
     );

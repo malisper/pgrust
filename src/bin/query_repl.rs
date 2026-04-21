@@ -495,6 +495,8 @@ fn run_statement(
         | Statement::AlterTableSetNotNull(_)
         | Statement::AlterTableDropNotNull(_)
         | Statement::AlterTableValidateConstraint(_)
+        | Statement::AlterIndexRename(_)
+        | Statement::AlterTableInherit(_)
         | Statement::AlterTableNoInherit(_)
         | Statement::AlterTableSetRowSecurity(_)
         | Statement::CreatePolicy(_)
