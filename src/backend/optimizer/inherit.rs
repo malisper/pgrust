@@ -1,10 +1,10 @@
 use crate::backend::parser::CatalogLookup;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{RangeTblEntry, RangeTblEntryKind};
-use crate::include::nodes::pathnodes::{
-    AppendRelInfo, PlannerInfo, RelOptInfo, RelOptKind, RestrictInfo,
-};
+use crate::include::nodes::pathnodes::{AppendRelInfo, PlannerInfo, RelOptInfo, RelOptKind};
 use crate::include::nodes::primnodes::{Expr, ExprArraySubscript, RelationDesc, Var, user_attrno};
+
+use super::joininfo;
 
 pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) {
     let original_len = root.parse.rtable.len();
@@ -70,17 +70,18 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
                 rel.reloptkind = RelOptKind::OtherMemberRel;
                 rel.baserestrictinfo = parent_restrictinfo
                     .iter()
-                    .map(|restrict| RestrictInfo {
-                        clause: translate_append_rel_expr(
-                            restrict.clause.clone(),
-                            &AppendRelInfo {
-                                parent_relid: parent_rtindex,
-                                child_relid: child_rtindex,
-                                translated_vars: translated_vars.clone(),
-                            },
-                        ),
-                        required_relids: vec![child_rtindex],
-                        is_pushed_down: restrict.is_pushed_down,
+                    .map(|restrict| {
+                        let mut translated =
+                            joininfo::make_restrict_info(translate_append_rel_expr(
+                                restrict.clause.clone(),
+                                &AppendRelInfo {
+                                    parent_relid: parent_rtindex,
+                                    child_relid: child_rtindex,
+                                    translated_vars: translated_vars.clone(),
+                                },
+                            ));
+                        translated.is_pushed_down = restrict.is_pushed_down;
+                        translated
                     })
                     .collect();
             }

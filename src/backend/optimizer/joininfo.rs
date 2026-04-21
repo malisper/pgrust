@@ -19,8 +19,40 @@ struct AncestorJoin {
 }
 
 pub(super) fn make_restrict_info(clause: Expr) -> RestrictInfo {
+    make_restrict_info_with_pushdown(clause, true)
+}
+
+pub(super) fn make_restrict_info_with_pushdown(clause: Expr, is_pushed_down: bool) -> RestrictInfo {
     let required_relids = expr_relids(&clause);
-    RestrictInfo::new(clause, required_relids)
+    let mut restrict = RestrictInfo::new(clause.clone(), required_relids);
+    restrict.is_pushed_down = is_pushed_down;
+    if let Some((left_relids, right_relids, hashjoin_operator)) = classify_join_clause(&clause) {
+        restrict.can_join = true;
+        restrict.left_relids = left_relids;
+        restrict.right_relids = right_relids;
+        restrict.hashjoin_operator = hashjoin_operator;
+    }
+    restrict
+}
+
+fn classify_join_clause(clause: &Expr) -> Option<(Vec<usize>, Vec<usize>, Option<u32>)> {
+    let Expr::Op(op) = clause else {
+        return None;
+    };
+    if op.args.len() != 2 {
+        return None;
+    }
+    let left_relids = expr_relids(&op.args[0]);
+    let right_relids = expr_relids(&op.args[1]);
+    if left_relids.is_empty()
+        || right_relids.is_empty()
+        || relids_overlap(&left_relids, &right_relids)
+    {
+        return None;
+    }
+    let hashjoin_operator =
+        matches!(op.op, crate::include::nodes::primnodes::OpExprKind::Eq).then_some(op.opno);
+    Some((left_relids, right_relids, hashjoin_operator))
 }
 
 pub(super) fn build_special_join_info(query: &Query) -> Vec<SpecialJoinInfo> {

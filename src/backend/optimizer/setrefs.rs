@@ -411,20 +411,74 @@ fn build_window_tlist(
     IndexedTlist { entries }
 }
 
-fn build_join_tlist(root: Option<&PlannerInfo>, left: &Path, right: &Path) -> IndexedTlist {
+fn build_join_tlist(
+    root: Option<&PlannerInfo>,
+    path: &Path,
+    left: &Path,
+    right: &Path,
+) -> IndexedTlist {
     let left_tlist = build_path_tlist(root, left);
     let right_tlist = build_path_tlist(root, right);
-    let left_len = left_tlist.entries.len();
-    let mut entries = left_tlist.entries;
-    entries.extend(
-        right_tlist
-            .entries
-            .into_iter()
-            .map(|entry| IndexedTlistEntry {
-                index: left_len + entry.index,
-                ..entry
-            }),
-    );
+    let left_physical_width = left.output_vars().len();
+    let output_target = path.output_target();
+    let semantic_target = path.semantic_output_target();
+    let mut entries = Vec::with_capacity(semantic_target.exprs.len());
+
+    for (logical_index, semantic_expr) in semantic_target.exprs.iter().enumerate() {
+        let ressortgroupref = semantic_target.get_pathtarget_sortgroupref(logical_index);
+        let left_match = search_tlist_entry(root, semantic_expr, &left_tlist);
+        let right_match = search_tlist_entry(root, semantic_expr, &right_tlist);
+        let (physical_index, sql_type, mut match_exprs) = match (left_match, right_match) {
+            (Some(entry), None) => (entry.index, entry.sql_type, entry.match_exprs.clone()),
+            (None, Some(entry)) => (
+                left_physical_width + entry.index,
+                entry.sql_type,
+                entry.match_exprs.clone(),
+            ),
+            (Some(left_entry), Some(right_entry)) => {
+                let left_index = left_tlist
+                    .entries
+                    .iter()
+                    .position(|entry| entry.index == left_entry.index);
+                let right_index = right_tlist
+                    .entries
+                    .iter()
+                    .position(|entry| entry.index == right_entry.index);
+                if logical_index < left_tlist.entries.len()
+                    && left_index == Some(logical_index)
+                    && right_index != Some(logical_index)
+                {
+                    (
+                        left_entry.index,
+                        left_entry.sql_type,
+                        left_entry.match_exprs.clone(),
+                    )
+                } else {
+                    (
+                        left_physical_width + right_entry.index,
+                        right_entry.sql_type,
+                        right_entry.match_exprs.clone(),
+                    )
+                }
+            }
+            (None, None) => (
+                logical_index,
+                expr_sql_type(semantic_expr),
+                vec![semantic_expr.clone()],
+            ),
+        };
+
+        if let Some(output_expr) = output_target.exprs.get(physical_index) {
+            match_exprs.push(output_expr.clone());
+        }
+        match_exprs.push(semantic_expr.clone());
+        entries.push(IndexedTlistEntry {
+            index: physical_index,
+            sql_type,
+            ressortgroupref,
+            match_exprs: dedup_match_exprs(match_exprs),
+        });
+    }
     IndexedTlist { entries }
 }
 
@@ -492,7 +546,7 @@ fn build_path_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
             ..
         } => build_subquery_tlist(*rtindex, query, output_columns),
         Path::NestedLoopJoin { left, right, .. } | Path::HashJoin { left, right, .. } => {
-            build_join_tlist(root, left, right)
+            build_join_tlist(root, path, left, right)
         }
         _ => build_simple_tlist(&path.output_vars()),
     }
@@ -3377,12 +3431,13 @@ fn set_project_set_references(
 
 fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
     match path {
-        Path::Result { plan_info } => Plan::Result { plan_info },
+        Path::Result { plan_info, .. } => Plan::Result { plan_info },
         Path::Append {
             plan_info,
             source_id,
             desc,
             children,
+            ..
         } => set_append_references(ctx, plan_info, source_id, desc, children),
         Path::SetOp {
             plan_info,
@@ -3401,6 +3456,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             relkind,
             toast,
             desc,
+            ..
         } => set_seq_scan_references(
             plan_info,
             source_id,
@@ -3426,6 +3482,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             order_by_keys,
             direction,
             pathkeys: _,
+            ..
         } => set_index_scan_references(
             plan_info,
             source_id,
@@ -3445,6 +3502,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             plan_info,
             input,
             predicate,
+            ..
         } => set_filter_references(ctx, plan_info, input, predicate),
         Path::NestedLoopJoin {
             plan_info,
@@ -3452,6 +3510,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             right,
             kind,
             restrict_clauses,
+            ..
         } => set_nested_loop_join_references(ctx, plan_info, left, right, kind, restrict_clauses),
         Path::HashJoin {
             plan_info,
@@ -3462,6 +3521,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             outer_hash_keys,
             inner_hash_keys,
             restrict_clauses,
+            ..
         } => set_hash_join_references(
             ctx,
             plan_info,
@@ -3483,12 +3543,14 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             plan_info,
             input,
             items,
+            ..
         } => set_order_references(ctx, plan_info, input, items),
         Path::Limit {
             plan_info,
             input,
             limit,
             offset,
+            ..
         } => set_limit_references(ctx, plan_info, input, limit, offset),
         Path::Aggregate {
             plan_info,
@@ -3498,6 +3560,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             accumulators,
             having,
             output_columns,
+            ..
         } => set_aggregate_references(
             ctx,
             plan_info,
@@ -3514,6 +3577,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             input,
             clause,
             output_columns,
+            ..
         } => set_window_references(ctx, plan_info, slot_id, input, clause, output_columns),
         Path::Values {
             plan_info,
@@ -3675,8 +3739,8 @@ fn fix_upper_expr(root: Option<&PlannerInfo>, expr: Expr, tlist: &IndexedTlist) 
 fn fix_join_expr_for_inputs(
     root: Option<&PlannerInfo>,
     expr: Expr,
-    left: &Path,
-    right: &Path,
+    _left: &Path,
+    _right: &Path,
     outer_tlist: &IndexedTlist,
     inner_tlist: &IndexedTlist,
 ) -> Expr {

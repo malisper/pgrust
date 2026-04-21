@@ -12,11 +12,19 @@ use crate::include::nodes::pathnodes::{
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     Aggref, AttrNumber, Expr, INNER_VAR, JoinType, OUTER_VAR, OpExpr, OpExprKind, OrderByEntry,
-    Param, ParamKind, QueryColumn, RelationDesc, TargetEntry, Var,
+    Param, ParamKind, QueryColumn, RelationDesc, TargetEntry, Var, WindowFrameBound, user_attrno,
 };
 
 fn int4() -> SqlType {
     SqlType::new(SqlTypeKind::Int4)
+}
+
+fn oid() -> SqlType {
+    SqlType::new(SqlTypeKind::Oid)
+}
+
+fn regprocedure() -> SqlType {
+    SqlType::new(SqlTypeKind::RegProcedure)
 }
 
 fn bool_ty() -> SqlType {
@@ -29,6 +37,19 @@ fn var(varno: usize, attno: usize) -> crate::include::nodes::primnodes::Expr {
         varattno: attno as AttrNumber,
         varlevelsup: 0,
         vartype: int4(),
+    })
+}
+
+fn typed_var(
+    varno: usize,
+    attno: usize,
+    vartype: SqlType,
+) -> crate::include::nodes::primnodes::Expr {
+    crate::include::nodes::primnodes::Expr::Var(Var {
+        varno,
+        varattno: attno as AttrNumber,
+        varlevelsup: 0,
+        vartype,
     })
 }
 
@@ -74,43 +95,150 @@ fn is_special_user_var(expr: &Expr, varno: usize, index: usize) -> bool {
 }
 
 fn restrict(clause: Expr) -> crate::include::nodes::pathnodes::RestrictInfo {
-    crate::include::nodes::pathnodes::RestrictInfo::new(clause.clone(), super::expr_relids(&clause))
+    super::make_restrict_info(clause)
+}
+
+fn values_output_columns() -> Vec<QueryColumn> {
+    vec![
+        QueryColumn {
+            name: "a".into(),
+            sql_type: int4(),
+            wire_type_oid: None,
+        },
+        QueryColumn {
+            name: "b".into(),
+            sql_type: int4(),
+            wire_type_oid: None,
+        },
+    ]
 }
 
 fn values_path(slot_id: usize, startup_cost: f64, total_cost: f64) -> Path {
+    let output_columns = values_output_columns();
     Path::Values {
         plan_info: PlanEstimate::new(startup_cost, total_cost, 10.0, 2),
+        pathtarget: PathTarget::new(vec![var(slot_id, 1), var(slot_id, 2)]),
         slot_id,
         rows: vec![vec![
             crate::include::nodes::primnodes::Expr::Const(Value::Int32(1)),
             crate::include::nodes::primnodes::Expr::Const(Value::Int32(2)),
         ]],
-        output_columns: vec![
-            QueryColumn {
-                name: "a".into(),
-                sql_type: int4(),
-                wire_type_oid: None,
-            },
-            QueryColumn {
-                name: "b".into(),
-                sql_type: int4(),
-                wire_type_oid: None,
-            },
-        ],
+        output_columns,
     }
 }
 
-fn ordered_path(slot_id: usize, startup_cost: f64, total_cost: f64, key_attno: usize) -> Path {
+fn projection_path(
+    slot_id: usize,
+    startup_cost: f64,
+    total_cost: f64,
+    input: Path,
+    targets: Vec<TargetEntry>,
+) -> Path {
+    let pathtarget = PathTarget::from_target_list(&targets);
+    Path::Projection {
+        plan_info: PlanEstimate::new(startup_cost, total_cost, 10.0, targets.len()),
+        pathtarget,
+        slot_id,
+        input: Box::new(input),
+        targets,
+    }
+}
+
+fn filter_path(startup_cost: f64, total_cost: f64, input: Path, predicate: Expr) -> Path {
+    let pathtarget = input.semantic_output_target();
+    Path::Filter {
+        plan_info: PlanEstimate::new(startup_cost, total_cost, 10.0, input.columns().len()),
+        pathtarget,
+        input: Box::new(input),
+        predicate,
+    }
+}
+
+fn order_by_path(
+    startup_cost: f64,
+    total_cost: f64,
+    input: Path,
+    items: Vec<OrderByEntry>,
+) -> Path {
+    let pathtarget = input.semantic_output_target();
     Path::OrderBy {
-        plan_info: PlanEstimate::new(startup_cost, total_cost, 10.0, 2),
-        input: Box::new(values_path(slot_id, startup_cost, total_cost)),
-        items: vec![OrderByEntry {
+        plan_info: PlanEstimate::new(startup_cost, total_cost, 10.0, input.columns().len()),
+        pathtarget,
+        input: Box::new(input),
+        items,
+    }
+}
+
+fn project_set_pathtarget(
+    slot_id: usize,
+    targets: &[crate::include::nodes::primnodes::ProjectSetTarget],
+) -> PathTarget {
+    PathTarget::new(
+        targets
+            .iter()
+            .enumerate()
+            .map(|(index, target)| match target {
+                crate::include::nodes::primnodes::ProjectSetTarget::Scalar(entry) => {
+                    entry.expr.clone()
+                }
+                crate::include::nodes::primnodes::ProjectSetTarget::Set { sql_type, .. } => {
+                    Expr::Var(Var {
+                        varno: slot_id,
+                        varattno: user_attrno(index),
+                        varlevelsup: 0,
+                        vartype: *sql_type,
+                    })
+                }
+            })
+            .collect(),
+    )
+}
+
+fn project_set_path(
+    slot_id: usize,
+    startup_cost: f64,
+    total_cost: f64,
+    input: Path,
+    targets: Vec<crate::include::nodes::primnodes::ProjectSetTarget>,
+) -> Path {
+    let pathtarget = project_set_pathtarget(slot_id, &targets);
+    Path::ProjectSet {
+        plan_info: PlanEstimate::new(startup_cost, total_cost, 10.0, targets.len()),
+        pathtarget,
+        slot_id,
+        input: Box::new(input),
+        targets,
+    }
+}
+
+fn join_output_columns(left: &Path, right: &Path) -> Vec<QueryColumn> {
+    let mut output_columns = left.columns();
+    output_columns.extend(right.columns());
+    output_columns
+}
+
+fn join_pathtarget(left: &Path, right: &Path) -> PathTarget {
+    let left_target = left.semantic_output_target();
+    let right_target = right.semantic_output_target();
+    let mut exprs = left_target.exprs;
+    exprs.extend(right_target.exprs);
+    let mut sortgrouprefs = left_target.sortgrouprefs;
+    sortgrouprefs.extend(right_target.sortgrouprefs);
+    PathTarget::with_sortgrouprefs(exprs, sortgrouprefs)
+}
+
+fn ordered_path(slot_id: usize, startup_cost: f64, total_cost: f64, key_attno: usize) -> Path {
+    order_by_path(
+        startup_cost,
+        total_cost,
+        values_path(slot_id, startup_cost, total_cost),
+        vec![OrderByEntry {
             expr: var(slot_id, key_attno),
             ressortgroupref: 0,
             descending: false,
             nulls_first: None,
         }],
-    }
+    )
 }
 
 #[test]
@@ -182,11 +310,12 @@ fn choose_final_path_falls_back_to_cheapest_total_without_match() {
 fn projection_keeps_hidden_order_pathkeys() {
     let order_expr = var(10, 1);
     let ordered = ordered_path(10, 1.0, 1.0, 1);
-    let projection = Path::Projection {
-        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
-        slot_id: 20,
-        input: Box::new(ordered),
-        targets: vec![TargetEntry::new(
+    let projection = projection_path(
+        20,
+        1.0,
+        1.5,
+        ordered,
+        vec![TargetEntry::new(
             "expr",
             crate::include::nodes::primnodes::Expr::Op(Box::new(OpExpr {
                 opno: 0,
@@ -201,22 +330,23 @@ fn projection_keeps_hidden_order_pathkeys() {
             int4(),
             1,
         )],
-    };
+    );
 
     assert_eq!(projection.pathkeys(), vec![pathkey(order_expr)]);
 }
 
 #[test]
 fn projection_output_target_keeps_sortgrouprefs() {
-    let projection = Path::Projection {
-        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
-        slot_id: 20,
-        input: Box::new(values_path(10, 1.0, 1.0)),
-        targets: vec![
+    let projection = projection_path(
+        20,
+        1.0,
+        1.5,
+        values_path(10, 1.0, 1.0),
+        vec![
             TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(11),
             TargetEntry::new("b", var(10, 2), int4(), 2),
         ],
-    };
+    );
 
     assert_eq!(projection.output_target().sortgrouprefs, vec![11, 0]);
 }
@@ -224,24 +354,26 @@ fn projection_output_target_keeps_sortgrouprefs() {
 #[test]
 fn normalize_rte_path_preserves_projection_sortgrouprefs() {
     let catalog = LiteralDefaultCatalog;
-    let ordered_projection = Path::OrderBy {
-        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
-        input: Box::new(Path::Projection {
-            plan_info: PlanEstimate::new(1.0, 1.2, 10.0, 1),
-            slot_id: 20,
-            input: Box::new(values_path(10, 1.0, 1.0)),
-            targets: vec![
+    let ordered_projection = order_by_path(
+        1.0,
+        1.5,
+        projection_path(
+            20,
+            1.0,
+            1.2,
+            values_path(10, 1.0, 1.0),
+            vec![
                 TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(17),
                 TargetEntry::new("b", var(10, 2), int4(), 2),
             ],
-        }),
-        items: vec![OrderByEntry {
+        ),
+        vec![OrderByEntry {
             expr: var(20, 1),
             ressortgroupref: 17,
             descending: false,
             nulls_first: None,
         }],
-    };
+    );
     let desc = RelationDesc {
         columns: vec![
             column_desc("a", int4(), true),
@@ -267,15 +399,16 @@ fn normalize_rte_path_records_passthrough_input_positions() {
             column_desc("a", int4(), true),
         ],
     };
-    let input = Path::Projection {
-        plan_info: PlanEstimate::new(1.0, 1.2, 10.0, 2),
-        slot_id: 20,
-        input: Box::new(values_path(10, 1.0, 1.0)),
-        targets: vec![
+    let input = projection_path(
+        20,
+        1.0,
+        1.2,
+        values_path(10, 1.0, 1.0),
+        vec![
             TargetEntry::new("a", var(10, 1), int4(), 1),
             TargetEntry::new("b", var(10, 2), int4(), 2),
         ],
-    };
+    );
 
     let normalized = super::util::project_to_slot_layout_internal(
         None,
@@ -590,6 +723,30 @@ fn planned_grouped_named_window_uses_named_spec() {
 }
 
 #[test]
+fn planned_window_frame_offsets_from_join_input_are_lowered() {
+    let planned = planned_stmt_for_sql(
+        "select sum(t.x) over (order by t.x rows between u.y preceding and u.y following), t.x \
+         from (values (1), (2)) as t(x), (values (1)) as u(y)",
+    );
+
+    assert!(plan_contains(&planned.plan_tree, |plan| match plan {
+        Plan::WindowAgg { clause, .. } => {
+            clause.spec.order_by.len() == 1
+                && is_special_user_var(&clause.spec.order_by[0].expr, OUTER_VAR, 0)
+                && matches!(
+                    &clause.spec.frame.start_bound,
+                    WindowFrameBound::OffsetPreceding(expr) if is_special_user_var(expr, OUTER_VAR, 1)
+                )
+                && matches!(
+                    &clause.spec.frame.end_bound,
+                    WindowFrameBound::OffsetFollowing(expr) if is_special_user_var(expr, OUTER_VAR, 1)
+                )
+        }
+        _ => false,
+    }));
+}
+
+#[test]
 fn planned_distinct_window_specs_stack_windowagg_nodes() {
     let planned = planned_stmt_for_values_sql(
         "select row_number() over (order by x), rank() over (partition by x order by x) from (values (1), (2)) as t(x)",
@@ -638,15 +795,16 @@ fn executable_plan_validator_reports_node_and_field() {
 
 #[test]
 fn planner_path_validator_rejects_executor_only_refs() {
-    let path = Path::Filter {
-        plan_info: PlanEstimate::new(1.0, 1.0, 1.0, 1),
-        input: Box::new(values_path(10, 1.0, 1.0)),
-        predicate: Expr::Param(Param {
+    let path = filter_path(
+        1.0,
+        1.0,
+        values_path(10, 1.0, 1.0),
+        Expr::Param(Param {
             paramkind: ParamKind::Exec,
             paramid: 1,
             paramtype: bool_ty(),
         }),
-    };
+    );
 
     let panic = std::panic::catch_unwind(|| {
         super::setrefs::validate_planner_path_for_tests(&path);
@@ -662,14 +820,13 @@ fn planner_path_validator_rejects_executor_only_refs() {
 fn required_query_pathkeys_for_path_keeps_sortgroup_identified_keys() {
     let root = planner_info_for_sql("select column1 as a from (values (1)) v order by a");
     let sortgroupref = root.query_pathkeys[0].ressortgroupref;
-    let path = Path::Projection {
-        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
-        slot_id: 20,
-        input: Box::new(values_path(10, 1.0, 1.0)),
-        targets: vec![
-            TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(sortgroupref),
-        ],
-    };
+    let path = projection_path(
+        20,
+        1.0,
+        1.5,
+        values_path(10, 1.0, 1.0),
+        vec![TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(sortgroupref)],
+    );
 
     let required = util::required_query_pathkeys_for_path(&root, &path);
 
@@ -679,25 +836,27 @@ fn required_query_pathkeys_for_path_keeps_sortgroup_identified_keys() {
 
 #[test]
 fn projection_pathkeys_prefer_sortgroupref_identity() {
-    let ordered = Path::OrderBy {
-        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
-        input: Box::new(values_path(10, 1.0, 1.0)),
-        items: vec![OrderByEntry {
+    let ordered = order_by_path(
+        1.0,
+        1.5,
+        values_path(10, 1.0, 1.0),
+        vec![OrderByEntry {
             expr: var(10, 2),
             ressortgroupref: 17,
             descending: false,
             nulls_first: None,
         }],
-    };
-    let projection = Path::Projection {
-        plan_info: PlanEstimate::new(1.0, 1.6, 10.0, 1),
-        slot_id: 20,
-        input: Box::new(ordered),
-        targets: vec![
+    );
+    let projection = projection_path(
+        20,
+        1.0,
+        1.6,
+        ordered,
+        vec![
             TargetEntry::new("a", var(10, 1), int4(), 1),
             TargetEntry::new("b", var(10, 2), int4(), 2).with_sort_group_ref(17),
         ],
-    };
+    );
 
     assert_eq!(
         projection.pathkeys(),
@@ -707,48 +866,52 @@ fn projection_pathkeys_prefer_sortgroupref_identity() {
 
 #[test]
 fn projection_pathkeys_follow_passthrough_position() {
-    let projection = Path::Projection {
-        plan_info: PlanEstimate::new(1.0, 1.6, 10.0, 1),
-        slot_id: 20,
-        input: Box::new(ordered_path(10, 1.0, 1.0, 2)),
-        targets: vec![
+    let projection = projection_path(
+        20,
+        1.0,
+        1.6,
+        ordered_path(10, 1.0, 1.0, 2),
+        vec![
             TargetEntry::new("a", var(10, 1), int4(), 1),
             TargetEntry::new("b", var(10, 2), int4(), 2),
         ],
-    };
+    );
 
     assert_eq!(projection.pathkeys(), vec![pathkey(var(10, 2))]);
 }
 
 #[test]
 fn projection_pathkeys_fall_back_to_expr_match_for_non_identity_projection() {
-    let projection = Path::Projection {
-        plan_info: PlanEstimate::new(1.0, 1.6, 10.0, 1),
-        slot_id: 20,
-        input: Box::new(ordered_path(10, 1.0, 1.0, 1)),
-        targets: vec![
+    let projection = projection_path(
+        20,
+        1.0,
+        1.6,
+        ordered_path(10, 1.0, 1.0, 1),
+        vec![
             TargetEntry::new("b", var(10, 2), int4(), 1),
             TargetEntry::new("a", var(10, 1), int4(), 2),
         ],
-    };
+    );
 
     assert_eq!(projection.pathkeys(), vec![pathkey(var(10, 1))]);
 }
 
 #[test]
 fn into_plan_projection_lowers_via_child_tlist_identity() {
-    let input = Path::Projection {
-        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
-        slot_id: 20,
-        input: Box::new(values_path(10, 1.0, 1.0)),
-        targets: vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
-    };
-    let plan = Path::Projection {
-        plan_info: PlanEstimate::new(1.0, 1.6, 10.0, 1),
-        slot_id: 21,
-        input: Box::new(input),
-        targets: vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
-    }
+    let input = projection_path(
+        20,
+        1.0,
+        1.5,
+        values_path(10, 1.0, 1.0),
+        vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
+    );
+    let plan = projection_path(
+        21,
+        1.0,
+        1.6,
+        input,
+        vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
+    )
     .into_plan();
 
     match plan {
@@ -762,17 +925,19 @@ fn into_plan_projection_lowers_via_child_tlist_identity() {
 
 #[test]
 fn into_plan_filter_lowers_via_child_tlist_identity() {
-    let input = Path::Projection {
-        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
-        slot_id: 20,
-        input: Box::new(values_path(10, 1.0, 1.0)),
-        targets: vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
-    };
-    let plan = Path::Filter {
-        plan_info: PlanEstimate::new(1.0, 1.7, 10.0, 1),
-        input: Box::new(input),
-        predicate: gt(var(10, 1), Expr::Const(Value::Int32(0))),
-    }
+    let input = projection_path(
+        20,
+        1.0,
+        1.5,
+        values_path(10, 1.0, 1.0),
+        vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
+    );
+    let plan = filter_path(
+        1.0,
+        1.7,
+        input,
+        gt(var(10, 1), Expr::Const(Value::Int32(0))),
+    )
     .into_plan();
 
     match plan {
@@ -789,22 +954,24 @@ fn into_plan_filter_lowers_via_child_tlist_identity() {
 
 #[test]
 fn into_plan_order_by_lowers_via_child_sortgroupref() {
-    let input = Path::Projection {
-        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
-        slot_id: 20,
-        input: Box::new(values_path(10, 1.0, 1.0)),
-        targets: vec![TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(17)],
-    };
-    let plan = Path::OrderBy {
-        plan_info: PlanEstimate::new(1.0, 1.7, 10.0, 1),
-        input: Box::new(input),
-        items: vec![OrderByEntry {
+    let input = projection_path(
+        20,
+        1.0,
+        1.5,
+        values_path(10, 1.0, 1.0),
+        vec![TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(17)],
+    );
+    let plan = order_by_path(
+        1.0,
+        1.7,
+        input,
+        vec![OrderByEntry {
             expr: var(10, 1),
             ressortgroupref: 17,
             descending: false,
             nulls_first: None,
         }],
-    }
+    )
     .into_plan();
 
     match plan {
@@ -818,17 +985,19 @@ fn into_plan_order_by_lowers_via_child_sortgroupref() {
 
 #[test]
 fn into_plan_project_set_set_arg_lowers_via_child_tlist_identity() {
-    let input = Path::Projection {
-        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
-        slot_id: 20,
-        input: Box::new(values_path(10, 1.0, 1.0)),
-        targets: vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
-    };
-    let plan = Path::ProjectSet {
-        plan_info: PlanEstimate::new(1.0, 1.7, 10.0, 1),
-        slot_id: 21,
-        input: Box::new(input),
-        targets: vec![crate::include::nodes::primnodes::ProjectSetTarget::Set {
+    let input = projection_path(
+        20,
+        1.0,
+        1.5,
+        values_path(10, 1.0, 1.0),
+        vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
+    );
+    let plan = project_set_path(
+        21,
+        1.0,
+        1.7,
+        input,
+        vec![crate::include::nodes::primnodes::ProjectSetTarget::Set {
             name: "g".into(),
             call: crate::include::nodes::primnodes::SetReturningCall::GenerateSeries {
                 func_oid: 1,
@@ -845,7 +1014,7 @@ fn into_plan_project_set_set_arg_lowers_via_child_tlist_identity() {
             sql_type: int4(),
             column_index: 1,
         }],
-    }
+    )
     .into_plan();
 
     match plan {
@@ -1037,20 +1206,26 @@ fn planned_lockstep_project_set_keeps_both_visible_targets_as_sets() {
 
 #[test]
 fn into_plan_nested_loop_join_lowers_join_qual_via_child_tlist_identity() {
-    let left = Path::Projection {
-        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
-        slot_id: 20,
-        input: Box::new(values_path(10, 1.0, 1.0)),
-        targets: vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
-    };
-    let right = Path::Projection {
-        plan_info: PlanEstimate::new(2.0, 2.5, 10.0, 1),
-        slot_id: 21,
-        input: Box::new(values_path(11, 2.0, 2.0)),
-        targets: vec![TargetEntry::new("b", var(11, 1), int4(), 1)],
-    };
+    let left = projection_path(
+        20,
+        1.0,
+        1.5,
+        values_path(10, 1.0, 1.0),
+        vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
+    );
+    let right = projection_path(
+        21,
+        2.0,
+        2.5,
+        values_path(11, 2.0, 2.0),
+        vec![TargetEntry::new("b", var(11, 1), int4(), 1)],
+    );
+    let pathtarget = join_pathtarget(&left, &right);
+    let output_columns = join_output_columns(&left, &right);
     let plan = Path::NestedLoopJoin {
         plan_info: PlanEstimate::new(5.0, 6.0, 10.0, 2),
+        pathtarget,
+        output_columns,
         left: Box::new(left),
         right: Box::new(right),
         kind: JoinType::Inner,
@@ -1075,20 +1250,26 @@ fn into_plan_nested_loop_join_lowers_join_qual_via_child_tlist_identity() {
 
 #[test]
 fn into_plan_hash_join_lowers_hash_clause_via_child_tlist_identity() {
-    let left = Path::Projection {
-        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
-        slot_id: 20,
-        input: Box::new(values_path(10, 1.0, 1.0)),
-        targets: vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
-    };
-    let right = Path::Projection {
-        plan_info: PlanEstimate::new(2.0, 2.5, 10.0, 1),
-        slot_id: 21,
-        input: Box::new(values_path(11, 2.0, 2.0)),
-        targets: vec![TargetEntry::new("b", var(11, 1), int4(), 1)],
-    };
+    let left = projection_path(
+        20,
+        1.0,
+        1.5,
+        values_path(10, 1.0, 1.0),
+        vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
+    );
+    let right = projection_path(
+        21,
+        2.0,
+        2.5,
+        values_path(11, 2.0, 2.0),
+        vec![TargetEntry::new("b", var(11, 1), int4(), 1)],
+    );
+    let pathtarget = join_pathtarget(&left, &right);
+    let output_columns = join_output_columns(&left, &right);
     let plan = Path::HashJoin {
         plan_info: PlanEstimate::new(5.0, 6.0, 10.0, 2),
+        pathtarget,
+        output_columns,
         left: Box::new(left),
         right: Box::new(right),
         kind: JoinType::Inner,
@@ -1131,12 +1312,13 @@ fn into_plan_hash_join_lowers_hash_clause_via_child_tlist_identity() {
 #[test]
 fn required_query_pathkeys_for_path_falls_back_when_input_lacks_sortgroup_identity() {
     let root = planner_info_for_sql("select column1 as a from (values (1)) v order by a");
-    let path = Path::Projection {
-        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
-        slot_id: 20,
-        input: Box::new(values_path(10, 1.0, 1.0)),
-        targets: vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
-    };
+    let path = projection_path(
+        20,
+        1.0,
+        1.5,
+        values_path(10, 1.0, 1.0),
+        vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
+    );
 
     let required = util::required_query_pathkeys_for_path(&root, &path);
     let lowered = util::lower_pathkeys_for_path(&root, &path, &root.query_pathkeys);
@@ -1148,12 +1330,13 @@ fn required_query_pathkeys_for_path_falls_back_when_input_lacks_sortgroup_identi
 fn required_query_pathkeys_for_path_falls_back_for_zero_ref_keys() {
     let mut root = planner_info_for_sql("select 1");
     root.query_pathkeys = vec![pathkey(var(10, 1))];
-    let path = Path::Projection {
-        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
-        slot_id: 20,
-        input: Box::new(values_path(10, 1.0, 1.0)),
-        targets: vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
-    };
+    let path = projection_path(
+        20,
+        1.0,
+        1.5,
+        values_path(10, 1.0, 1.0),
+        vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
+    );
 
     let required = util::required_query_pathkeys_for_path(&root, &path);
 
@@ -1161,23 +1344,61 @@ fn required_query_pathkeys_for_path_falls_back_for_zero_ref_keys() {
 }
 
 #[test]
+fn lower_pathkeys_for_path_strips_binary_coercible_casts() {
+    let root = planner_info_for_sql("select 1");
+    let input = Path::Values {
+        plan_info: PlanEstimate::new(1.0, 1.0, 1.0, 1),
+        pathtarget: PathTarget::new(vec![typed_var(10, 1, oid())]),
+        slot_id: 10,
+        rows: vec![vec![Expr::Const(Value::Int64(1))]],
+        output_columns: vec![QueryColumn {
+            name: "oidcol".into(),
+            sql_type: oid(),
+            wire_type_oid: None,
+        }],
+    };
+    let path = projection_path(
+        20,
+        1.0,
+        1.5,
+        input,
+        vec![TargetEntry::new(
+            "oidcol",
+            typed_var(10, 1, oid()),
+            oid(),
+            1,
+        )],
+    );
+    let cast_key = PathKey {
+        expr: Expr::Cast(Box::new(typed_var(10, 1, oid())), regprocedure()),
+        ressortgroupref: 0,
+        descending: false,
+        nulls_first: None,
+    };
+
+    let lowered = util::lower_pathkeys_for_path(&root, &path, &[cast_key]);
+
+    assert_eq!(lowered, vec![pathkey(typed_var(10, 1, oid()))]);
+}
+
+#[test]
 fn rel_exposes_required_pathkey_identity_only_when_a_path_matches() {
     let root = planner_info_for_sql("select column1 as a from (values (1)) v order by a");
     let sortgroupref = root.query_pathkeys[0].ressortgroupref;
-    let matching_path = Path::Projection {
-        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
-        slot_id: 20,
-        input: Box::new(values_path(10, 1.0, 1.0)),
-        targets: vec![
-            TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(sortgroupref),
-        ],
-    };
-    let non_matching_path = Path::Projection {
-        plan_info: PlanEstimate::new(2.0, 2.5, 10.0, 1),
-        slot_id: 21,
-        input: Box::new(values_path(11, 2.0, 2.0)),
-        targets: vec![TargetEntry::new("a", var(11, 1), int4(), 1)],
-    };
+    let matching_path = projection_path(
+        20,
+        1.0,
+        1.5,
+        values_path(10, 1.0, 1.0),
+        vec![TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(sortgroupref)],
+    );
+    let non_matching_path = projection_path(
+        21,
+        2.0,
+        2.5,
+        values_path(11, 2.0, 2.0),
+        vec![TargetEntry::new("a", var(11, 1), int4(), 1)],
+    );
     let mut rel = RelOptInfo::new(
         vec![1],
         RelOptKind::UpperRel,
@@ -1202,12 +1423,13 @@ fn rel_exposes_required_pathkey_identity_only_when_a_path_matches() {
 #[test]
 fn required_query_pathkeys_for_rel_falls_back_when_rel_lacks_identity() {
     let root = planner_info_for_sql("select column1 as a from (values (1)) v order by a");
-    let path = Path::Projection {
-        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
-        slot_id: 20,
-        input: Box::new(values_path(10, 1.0, 1.0)),
-        targets: vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
-    };
+    let path = projection_path(
+        20,
+        1.0,
+        1.5,
+        values_path(10, 1.0, 1.0),
+        vec![TargetEntry::new("a", var(10, 1), int4(), 1)],
+    );
     let mut rel = RelOptInfo::new(
         vec![1],
         RelOptKind::UpperRel,
@@ -1225,14 +1447,13 @@ fn required_query_pathkeys_for_rel_falls_back_when_rel_lacks_identity() {
 fn required_query_pathkeys_for_rel_keeps_sortgroup_identified_keys_when_rel_has_matching_path() {
     let root = planner_info_for_sql("select column1 as a from (values (1)) v order by a");
     let sortgroupref = root.query_pathkeys[0].ressortgroupref;
-    let path = Path::Projection {
-        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
-        slot_id: 20,
-        input: Box::new(values_path(10, 1.0, 1.0)),
-        targets: vec![
-            TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(sortgroupref),
-        ],
-    };
+    let path = projection_path(
+        20,
+        1.0,
+        1.5,
+        values_path(10, 1.0, 1.0),
+        vec![TargetEntry::new("a", var(10, 1), int4(), 1).with_sort_group_ref(sortgroupref)],
+    );
     let mut rel = RelOptInfo::new(
         vec![1],
         RelOptKind::UpperRel,
@@ -1246,41 +1467,21 @@ fn required_query_pathkeys_for_rel_keeps_sortgroup_identified_keys_when_rel_has_
 }
 
 #[test]
-fn join_input_rewrite_keeps_composite_expr_semantic_until_late_rewrite() {
-    let merged = Expr::Coalesce(Box::new(var(1, 1)), Box::new(var(1, 2)));
-    let right = Path::Projection {
-        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
-        slot_id: 30,
-        input: Box::new(values_path(1, 1.0, 1.0)),
-        targets: vec![TargetEntry::new("merged", merged.clone(), int4(), 1)],
-    };
-    let left = values_path(2, 1.0, 1.0);
-    let mut join_layout = left.output_vars();
-    join_layout.extend(right.output_vars());
-
-    let rewritten =
-        super::rewrite_semantic_expr_for_join_inputs(None, merged, &left, &right, &join_layout);
-
-    assert_eq!(
-        rewritten,
-        Expr::Coalesce(Box::new(var(1, 1)), Box::new(var(1, 2)))
-    );
-}
-
-#[test]
 fn projection_rewrite_maps_semantic_var_to_current_projection_slot() {
-    let inner = Path::Projection {
-        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
-        slot_id: 1_000_100,
-        input: Box::new(values_path(1, 1.0, 1.0)),
-        targets: vec![TargetEntry::new("name", var(1, 1), int4(), 1)],
-    };
-    let outer = Path::Projection {
-        plan_info: PlanEstimate::new(1.5, 2.0, 10.0, 1),
-        slot_id: 4,
-        input: Box::new(inner),
-        targets: vec![TargetEntry::new("name", var(1_000_100, 1), int4(), 1)],
-    };
+    let inner = projection_path(
+        1_000_100,
+        1.0,
+        1.5,
+        values_path(1, 1.0, 1.0),
+        vec![TargetEntry::new("name", var(1, 1), int4(), 1)],
+    );
+    let outer = projection_path(
+        4,
+        1.5,
+        2.0,
+        inner,
+        vec![TargetEntry::new("name", var(1_000_100, 1), int4(), 1)],
+    );
 
     let rewritten =
         super::rewrite::rewrite_semantic_expr_for_path(var(1, 1), &outer, &outer.output_vars());
@@ -1289,64 +1490,78 @@ fn projection_rewrite_maps_semantic_var_to_current_projection_slot() {
 }
 
 #[test]
-fn join_input_rewrite_maps_var_through_projected_join_output_slot() {
-    let right = Path::Projection {
-        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 5),
-        slot_id: 3,
-        input: Box::new(values_path(4, 1.0, 1.0)),
-        targets: vec![
-            TargetEntry::new("a1", var(1, 1), int4(), 1),
-            TargetEntry::new("a2", var(1, 2), int4(), 2),
-            TargetEntry::new("b1", var(2, 1), int4(), 3),
-            TargetEntry::new("b2", var(2, 2), int4(), 4),
-            TargetEntry::new("c1", var(4, 1), int4(), 5),
-        ],
-    };
-    let left = Path::Projection {
-        plan_info: PlanEstimate::new(1.0, 1.5, 10.0, 1),
-        slot_id: 6,
-        input: Box::new(values_path(6, 1.0, 1.0)),
-        targets: vec![TargetEntry::new("left", var(6, 1), int4(), 1)],
-    };
-    let expr = Expr::Op(Box::new(OpExpr {
-        opno: 0,
-        opfuncid: 0,
-        op: OpExprKind::Eq,
-        opresulttype: bool_ty(),
-        args: vec![
-            Expr::Coalesce(
-                Box::new(var(4, 1)),
-                Box::new(crate::include::nodes::primnodes::Expr::Const(Value::Int32(
-                    1,
-                ))),
-            ),
-            var(6, 1),
-        ],
-    }));
-    let mut join_layout = left.output_vars();
-    join_layout.extend(right.output_vars());
+fn swapped_join_candidate_keeps_logical_pathtarget_order() {
+    let paths = super::build_join_paths(
+        values_path(1, 1.0, 10.0),
+        values_path(2, 2.0, 20.0),
+        &[1],
+        &[2],
+        JoinType::Inner,
+        vec![restrict(eq(var(1, 1), var(2, 1)))],
+    );
 
-    let rewritten =
-        super::rewrite_semantic_expr_for_join_inputs(None, expr, &left, &right, &join_layout);
+    let swapped = paths
+        .into_iter()
+        .find(|path| match path {
+            Path::NestedLoopJoin { left, .. } => left.output_vars().first() == Some(&var(2, 1)),
+            _ => false,
+        })
+        .expect("swapped nested loop join");
 
     assert_eq!(
-        rewritten,
-        Expr::Op(Box::new(OpExpr {
-            opno: 0,
-            opfuncid: 0,
-            op: OpExprKind::Eq,
-            opresulttype: bool_ty(),
-            args: vec![
-                Expr::Coalesce(
-                    Box::new(var(4, 1)),
-                    Box::new(crate::include::nodes::primnodes::Expr::Const(Value::Int32(
-                        1
-                    ))),
-                ),
-                var(6, 1),
-            ],
-        }))
+        swapped.semantic_output_vars(),
+        vec![var(1, 1), var(1, 2), var(2, 1), var(2, 2)]
     );
+    assert_eq!(
+        swapped.output_vars(),
+        vec![var(2, 1), var(2, 2), var(1, 1), var(1, 2)]
+    );
+}
+
+#[test]
+fn projection_above_swapped_join_uses_physical_join_slot_indexes() {
+    let logical_left = projection_path(
+        20,
+        1.0,
+        1.5,
+        values_path(10, 1.0, 1.0),
+        vec![TargetEntry::new("left_col", var(10, 1), int4(), 1)],
+    );
+    let logical_right = projection_path(
+        21,
+        2.0,
+        2.5,
+        values_path(11, 2.0, 2.0),
+        vec![TargetEntry::new("right_col", var(11, 1), int4(), 1)],
+    );
+    let swapped_join = Path::NestedLoopJoin {
+        plan_info: PlanEstimate::new(5.0, 6.0, 10.0, 2),
+        pathtarget: join_pathtarget(&logical_left, &logical_right),
+        output_columns: join_output_columns(&logical_left, &logical_right),
+        left: Box::new(logical_right.clone()),
+        right: Box::new(logical_left.clone()),
+        kind: JoinType::Inner,
+        restrict_clauses: vec![restrict(eq(var(10, 1), var(11, 1)))],
+    };
+    let plan = projection_path(
+        30,
+        6.5,
+        7.0,
+        swapped_join,
+        vec![
+            TargetEntry::new("left_col", var(10, 1), int4(), 1),
+            TargetEntry::new("right_col", var(11, 1), int4(), 2),
+        ],
+    )
+    .into_plan();
+
+    match plan {
+        Plan::Projection { targets, .. } => {
+            assert!(is_special_user_var(&targets[0].expr, OUTER_VAR, 1));
+            assert!(is_special_user_var(&targets[1].expr, OUTER_VAR, 0));
+        }
+        other => panic!("expected projection plan, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1397,6 +1612,21 @@ fn extract_hash_join_clauses_splits_residual_predicates() {
 }
 
 #[test]
+fn extract_hash_join_clauses_commutes_join_sides_from_restrictinfo_metadata() {
+    let clauses =
+        super::extract_hash_join_clauses(&[restrict(eq(var(2, 1), var(1, 1)))], &[1], &[2])
+            .expect("hash join clauses");
+
+    assert_eq!(
+        clauses.hash_clauses,
+        vec![restrict(eq(var(2, 1), var(1, 1)))]
+    );
+    assert_eq!(clauses.outer_hash_keys, vec![var(1, 1)]);
+    assert_eq!(clauses.inner_hash_keys, vec![var(2, 1)]);
+    assert!(clauses.join_clauses.is_empty());
+}
+
+#[test]
 fn build_join_paths_skips_hash_join_for_cross_and_non_equi_joins() {
     let cross_paths = super::build_join_paths(
         values_path(1, 1.0, 10.0),
@@ -1429,10 +1659,14 @@ fn build_join_paths_skips_hash_join_for_cross_and_non_equi_joins() {
 
 #[test]
 fn hash_join_path_lowers_to_hash_join_plan_with_hash_inner() {
+    let left = values_path(1, 1.0, 10.0);
+    let right = values_path(2, 2.0, 20.0);
     let plan = Path::HashJoin {
         plan_info: PlanEstimate::new(5.0, 15.0, 10.0, 4),
-        left: Box::new(values_path(1, 1.0, 10.0)),
-        right: Box::new(values_path(2, 2.0, 20.0)),
+        pathtarget: join_pathtarget(&left, &right),
+        output_columns: join_output_columns(&left, &right),
+        left: Box::new(left),
+        right: Box::new(right),
         kind: JoinType::Inner,
         hash_clauses: vec![restrict(eq(var(1, 1), var(2, 1)))],
         outer_hash_keys: vec![var(1, 1)],

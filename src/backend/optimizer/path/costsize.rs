@@ -14,23 +14,20 @@ use crate::include::catalog::{
     relkind_has_storage,
 };
 use crate::include::nodes::datum::ArrayValue;
-use crate::include::nodes::pathnodes::{Path, PathKey, PlannerInfo, RestrictInfo};
+use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, PlannerInfo, RestrictInfo};
 use crate::include::nodes::plannodes::PlanEstimate;
 use crate::include::nodes::primnodes::SetReturningCall;
 use crate::include::nodes::primnodes::{
-    BoolExprType, BuiltinScalarFunction, Expr, ExprArraySubscript, JoinType, OpExprKind,
-    OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc, TargetEntry, ToastRelationRef,
-    attrno_index,
+    BoolExprType, BuiltinScalarFunction, Expr, JoinType, OpExprKind, OrderByEntry,
+    ProjectSetTarget, QueryColumn, RelationDesc, ToastRelationRef, attrno_index,
 };
 
-use super::super::pathnodes::{
-    layout_candidate_for_expr, lower_expr_to_path_output, next_synthetic_slot_id,
-};
+use super::super::pathnodes::slot_output_target;
 use super::super::{
     AccessCandidate, CPU_INDEX_TUPLE_COST, CPU_OPERATOR_COST, CPU_TUPLE_COST, DEFAULT_BOOL_SEL,
     DEFAULT_EQ_SEL, DEFAULT_INEQ_SEL, DEFAULT_NUM_PAGES, DEFAULT_NUM_ROWS, HashJoinClauses,
     IndexPathSpec, IndexableQual, RANDOM_PAGE_COST, RelationStats, SEQ_PAGE_COST,
-    STATISTIC_KIND_HISTOGRAM, STATISTIC_KIND_MCV, expr_relids, path_relids, relids_subset,
+    STATISTIC_KIND_HISTOGRAM, STATISTIC_KIND_MCV, path_relids, relids_subset,
 };
 use super::gistcost::estimate_gist_scan_cost;
 
@@ -41,10 +38,12 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
     match try_optimize_access_subtree(plan, catalog) {
         Ok(plan) => plan,
         Err(plan) => match plan {
-            Path::Result { .. } => Path::Result {
+            Path::Result { pathtarget, .. } => Path::Result {
                 plan_info: PlanEstimate::new(0.0, 0.0, 1.0, 0),
+                pathtarget,
             },
             Path::Append {
+                pathtarget,
                 source_id,
                 desc,
                 children,
@@ -75,12 +74,14 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     .sum();
                 Path::Append {
                     plan_info: PlanEstimate::new(startup_cost, total_cost, rows, width),
+                    pathtarget,
                     source_id,
                     desc,
                     children,
                 }
             }
             Path::SetOp {
+                pathtarget,
                 slot_id,
                 op,
                 output_columns,
@@ -112,6 +113,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     .sum();
                 Path::SetOp {
                     plan_info: PlanEstimate::new(startup_cost, total_cost, rows, width),
+                    pathtarget,
                     slot_id,
                     op,
                     output_columns,
@@ -120,6 +122,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 }
             }
             Path::SeqScan {
+                pathtarget,
                 source_id,
                 rel,
                 relation_name,
@@ -133,6 +136,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 let base = seq_scan_estimate(&stats);
                 Path::SeqScan {
                     plan_info: base,
+                    pathtarget,
                     source_id,
                     rel,
                     relation_name,
@@ -143,6 +147,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 }
             }
             Path::IndexScan {
+                pathtarget,
                 source_id,
                 rel,
                 relation_oid,
@@ -172,6 +177,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 );
                 Path::IndexScan {
                     plan_info,
+                    pathtarget,
                     source_id,
                     rel,
                     relation_oid,
@@ -188,7 +194,10 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 }
             }
             Path::Filter {
-                input, predicate, ..
+                pathtarget,
+                input,
+                predicate,
+                ..
             } => {
                 let input = optimize_path(*input, catalog);
                 let input_info = input.plan_info();
@@ -203,11 +212,17 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                         rows,
                         input_info.plan_width,
                     ),
+                    pathtarget,
                     input: Box::new(input),
                     predicate,
                 }
             }
-            Path::OrderBy { input, items, .. } => {
+            Path::OrderBy {
+                pathtarget,
+                input,
+                items,
+                ..
+            } => {
                 let input = optimize_path(*input, catalog);
                 let input_info = input.plan_info();
                 let sort_cost = estimate_sort_cost(input_info.plan_rows.as_f64(), items.len());
@@ -218,11 +233,13 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                         input_info.plan_rows.as_f64(),
                         input_info.plan_width,
                     ),
+                    pathtarget,
                     input: Box::new(input),
                     items,
                 }
             }
             Path::Limit {
+                pathtarget,
                 input,
                 limit,
                 offset,
@@ -254,12 +271,14 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                         rows,
                         input_info.plan_width,
                     ),
+                    pathtarget,
                     input: Box::new(input),
                     limit,
                     offset,
                 }
             }
             Path::Projection {
+                pathtarget,
                 input,
                 targets,
                 slot_id,
@@ -279,12 +298,14 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                         input_info.plan_rows.as_f64(),
                         width,
                     ),
+                    pathtarget,
                     slot_id,
                     input: Box::new(input),
                     targets,
                 }
             }
             Path::Aggregate {
+                pathtarget,
                 input,
                 group_by,
                 accumulators,
@@ -310,6 +331,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                         * CPU_OPERATOR_COST;
                 Path::Aggregate {
                     plan_info: PlanEstimate::new(total, total, rows, width),
+                    pathtarget,
                     slot_id,
                     input: Box::new(input),
                     group_by,
@@ -319,6 +341,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 }
             }
             Path::WindowAgg {
+                pathtarget,
                 input,
                 clause,
                 output_columns,
@@ -340,6 +363,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                         input_info.plan_rows.as_f64(),
                         width,
                     ),
+                    pathtarget,
                     slot_id,
                     input: Box::new(input),
                     clause,
@@ -347,6 +371,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 }
             }
             Path::CteScan {
+                pathtarget,
                 slot_id,
                 cte_id,
                 subroot,
@@ -368,6 +393,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                         cte_info.plan_rows.as_f64(),
                         width,
                     ),
+                    pathtarget,
                     slot_id,
                     cte_id,
                     subroot,
@@ -377,6 +403,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 }
             }
             Path::SubqueryScan {
+                pathtarget,
                 rtindex,
                 subroot,
                 query,
@@ -398,6 +425,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                         input_info.plan_rows.as_f64(),
                         width,
                     ),
+                    pathtarget,
                     rtindex,
                     subroot,
                     query,
@@ -407,6 +435,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 }
             }
             Path::WorkTableScan {
+                pathtarget,
                 slot_id,
                 worktable_id,
                 output_columns,
@@ -418,12 +447,14 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     .sum();
                 Path::WorkTableScan {
                     plan_info: PlanEstimate::new(0.0, CPU_TUPLE_COST, 100.0, width),
+                    pathtarget,
                     slot_id,
                     worktable_id,
                     output_columns,
                 }
             }
             Path::RecursiveUnion {
+                pathtarget,
                 slot_id,
                 worktable_id,
                 distinct,
@@ -462,6 +493,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                         rows,
                         width,
                     ),
+                    pathtarget,
                     slot_id,
                     worktable_id,
                     distinct,
@@ -476,6 +508,8 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 }
             }
             Path::NestedLoopJoin {
+                pathtarget,
+                output_columns,
                 left,
                 right,
                 kind,
@@ -484,9 +518,18 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
             } => {
                 let left = optimize_path(*left, catalog);
                 let right = optimize_path(*right, catalog);
-                choose_join_plan(left, right, kind, restrict_clauses)
+                choose_join_plan(
+                    left,
+                    right,
+                    kind,
+                    restrict_clauses,
+                    pathtarget,
+                    output_columns,
+                )
             }
             Path::HashJoin {
+                pathtarget,
+                output_columns,
                 left,
                 right,
                 kind,
@@ -508,6 +551,8 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     left,
                     right,
                     kind,
+                    pathtarget,
+                    output_columns,
                     hash_clauses,
                     outer_hash_keys,
                     inner_hash_keys,
@@ -515,7 +560,12 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     restrict_clauses,
                 )
             }
-            Path::FunctionScan { call, slot_id, .. } => {
+            Path::FunctionScan {
+                pathtarget,
+                call,
+                slot_id,
+                ..
+            } => {
                 let output_columns = call.output_columns();
                 let width = output_columns
                     .iter()
@@ -523,11 +573,13 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     .sum();
                 Path::FunctionScan {
                     plan_info: PlanEstimate::new(0.0, 10.0, 1000.0, width),
+                    pathtarget,
                     slot_id,
                     call,
                 }
             }
             Path::Values {
+                pathtarget,
                 rows,
                 output_columns,
                 slot_id,
@@ -540,12 +592,14 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 let row_count = rows.len().max(1) as f64;
                 Path::Values {
                     plan_info: PlanEstimate::new(0.0, row_count * CPU_TUPLE_COST, row_count, width),
+                    pathtarget,
                     slot_id,
                     rows,
                     output_columns,
                 }
             }
             Path::ProjectSet {
+                pathtarget,
                 input,
                 targets,
                 slot_id,
@@ -571,6 +625,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                         rows,
                         width,
                     ),
+                    pathtarget,
                     slot_id,
                     input: Box::new(input),
                     targets,
@@ -629,6 +684,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
                 other => {
                     return Err(Path::Filter {
                         plan_info: PlanEstimate::default(),
+                        pathtarget: other.semantic_output_target(),
                         input: Box::new(other),
                         predicate,
                     });
@@ -679,13 +735,16 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
                         Some(items),
                     ),
                     other => {
+                        let input = Path::Filter {
+                            plan_info: PlanEstimate::default(),
+                            pathtarget: other.semantic_output_target(),
+                            input: Box::new(other),
+                            predicate,
+                        };
                         return Err(Path::OrderBy {
                             plan_info: PlanEstimate::default(),
-                            input: Box::new(Path::Filter {
-                                plan_info: PlanEstimate::default(),
-                                input: Box::new(other),
-                                predicate,
-                            }),
+                            pathtarget: input.semantic_output_target(),
+                            input: Box::new(input),
                             items,
                         });
                     }
@@ -693,6 +752,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
                 other => {
                     return Err(Path::OrderBy {
                         plan_info: PlanEstimate::default(),
+                        pathtarget: other.semantic_output_target(),
                         input: Box::new(other),
                         items,
                     });
@@ -842,9 +902,11 @@ pub(super) fn estimate_seqscan_candidate(
     order_items: Option<Vec<OrderByEntry>>,
 ) -> AccessCandidate {
     let scan_info = seq_scan_estimate(stats);
+    let base_pathtarget = slot_output_target(source_id, &desc.columns, |column| column.sql_type);
     let mut total_cost = scan_info.total_cost.as_f64();
     let mut plan = Path::SeqScan {
         plan_info: scan_info,
+        pathtarget: base_pathtarget.clone(),
         source_id,
         rel,
         relation_name,
@@ -867,6 +929,7 @@ pub(super) fn estimate_seqscan_candidate(
                 current_rows,
                 width,
             ),
+            pathtarget: plan.semantic_output_target(),
             input: Box::new(plan),
             predicate,
         };
@@ -881,6 +944,7 @@ pub(super) fn estimate_seqscan_candidate(
                 current_rows,
                 width,
             ),
+            pathtarget: plan.semantic_output_target(),
             input: Box::new(plan),
             items,
         };
@@ -950,6 +1014,7 @@ pub(super) fn estimate_index_candidate(
     };
     let mut plan = Path::IndexScan {
         plan_info: scan_info,
+        pathtarget: slot_output_target(source_id, &desc.columns, |column| column.sql_type),
         source_id,
         rel,
         relation_oid,
@@ -976,6 +1041,7 @@ pub(super) fn estimate_index_candidate(
                 current_rows,
                 stats.width,
             ),
+            pathtarget: plan.semantic_output_target(),
             input: Box::new(plan),
             predicate,
         };
@@ -993,6 +1059,7 @@ pub(super) fn estimate_index_candidate(
                 current_rows,
                 stats.width,
             ),
+            pathtarget: plan.semantic_output_target(),
             input: Box::new(plan),
             items,
         };
@@ -1011,6 +1078,8 @@ fn choose_join_plan(
     right: Path,
     kind: JoinType,
     restrict_clauses: Vec<RestrictInfo>,
+    pathtarget: PathTarget,
+    output_columns: Vec<QueryColumn>,
 ) -> Path {
     let left_relids = path_relids(&left);
     let right_relids = path_relids(&right);
@@ -1021,6 +1090,8 @@ fn choose_join_plan(
         &right_relids,
         kind,
         restrict_clauses,
+        pathtarget,
+        output_columns,
     ))
 }
 
@@ -1031,6 +1102,8 @@ pub(super) fn build_join_paths(
     right_relids: &[usize],
     kind: JoinType,
     restrict_clauses: Vec<RestrictInfo>,
+    pathtarget: PathTarget,
+    output_columns: Vec<QueryColumn>,
 ) -> Vec<Path> {
     build_join_paths_internal(
         None,
@@ -1040,6 +1113,8 @@ pub(super) fn build_join_paths(
         right_relids,
         kind,
         restrict_clauses,
+        pathtarget,
+        output_columns,
     )
 }
 
@@ -1051,6 +1126,8 @@ pub(super) fn build_join_paths_with_root(
     right_relids: &[usize],
     kind: JoinType,
     restrict_clauses: Vec<RestrictInfo>,
+    pathtarget: PathTarget,
+    output_columns: Vec<QueryColumn>,
 ) -> Vec<Path> {
     build_join_paths_internal(
         Some(root),
@@ -1060,6 +1137,8 @@ pub(super) fn build_join_paths_with_root(
         right_relids,
         kind,
         restrict_clauses,
+        pathtarget,
+        output_columns,
     )
 }
 
@@ -1071,6 +1150,8 @@ fn build_join_paths_internal(
     right_relids: &[usize],
     kind: JoinType,
     restrict_clauses: Vec<RestrictInfo>,
+    pathtarget: PathTarget,
+    output_columns: Vec<QueryColumn>,
 ) -> Vec<Path> {
     let left_uses_immediate_outer = path_uses_immediate_outer_columns(&left);
     let right_uses_immediate_outer = path_uses_immediate_outer_columns(&right);
@@ -1087,28 +1168,20 @@ fn build_join_paths_internal(
             right.clone(),
             kind,
             restrict_clauses.clone(),
+            pathtarget.clone(),
+            output_columns.clone(),
         ));
     }
 
     if allow_swapped_orientation {
-        let left_columns = left.columns();
-        let right_columns = right.columns();
-        let left_vars = left.semantic_output_vars();
-        let right_vars = right.semantic_output_vars();
-        let swapped_join = estimate_nested_loop_join_internal(
+        paths.push(estimate_nested_loop_join_internal(
             root,
             right.clone(),
             left.clone(),
             kind,
             restrict_clauses.clone(),
-        );
-        paths.push(restore_join_output_order(
-            root,
-            swapped_join,
-            &left_columns,
-            &right_columns,
-            &left_vars,
-            &right_vars,
+            pathtarget.clone(),
+            output_columns.clone(),
         ));
     }
 
@@ -1116,13 +1189,14 @@ fn build_join_paths_internal(
         && !matches!(kind, JoinType::Cross)
         && let Some(hash_join) =
             extract_hash_join_clauses(&restrict_clauses, left_relids, right_relids)
-        && hash_join_inputs_rewrite_cleanly(root, &left, &right, &hash_join)
     {
         paths.push(estimate_hash_join_internal(
             root,
             left.clone(),
             right.clone(),
             kind,
+            pathtarget.clone(),
+            output_columns.clone(),
             hash_join.hash_clauses,
             hash_join.outer_hash_keys,
             hash_join.inner_hash_keys,
@@ -1135,30 +1209,19 @@ fn build_join_paths_internal(
         && matches!(kind, JoinType::Inner)
         && let Some(hash_join) =
             extract_hash_join_clauses(&restrict_clauses, right_relids, left_relids)
-        && hash_join_inputs_rewrite_cleanly(root, &right, &left, &hash_join)
     {
-        let left_columns = left.columns();
-        let right_columns = right.columns();
-        let left_vars = left.semantic_output_vars();
-        let right_vars = right.semantic_output_vars();
-        let swapped_join = estimate_hash_join_internal(
+        paths.push(estimate_hash_join_internal(
             root,
             right,
             left,
             kind,
+            pathtarget,
+            output_columns,
             hash_join.hash_clauses,
             hash_join.outer_hash_keys,
             hash_join.inner_hash_keys,
             hash_join.join_clauses,
             restrict_clauses,
-        );
-        paths.push(restore_join_output_order(
-            root,
-            swapped_join,
-            &left_columns,
-            &right_columns,
-            &left_vars,
-            &right_vars,
         ));
     }
 
@@ -1210,7 +1273,7 @@ pub(super) fn extract_hash_join_clauses(
 
     for restrict in restrict_clauses {
         if let Some((outer_key, inner_key)) =
-            hash_join_clause_sides(&restrict.clause, left_relids, right_relids)
+            clause_sides_match_join(restrict, left_relids, right_relids)
         {
             hash_clauses.push(restrict.clone());
             outer_hash_keys.push(outer_key);
@@ -1250,31 +1313,26 @@ fn predicate_cost_for_restrict_clauses(clauses: &[RestrictInfo]) -> f64 {
         .sum()
 }
 
-fn hash_join_clause_sides(
-    clause: &Expr,
+fn clause_sides_match_join(
+    restrict: &RestrictInfo,
     left_relids: &[usize],
     right_relids: &[usize],
 ) -> Option<(Expr, Expr)> {
-    let Expr::Op(op) = clause else {
-        return None;
-    };
-    if !matches!(op.op, OpExprKind::Eq) || op.args.len() != 2 {
+    if !restrict.can_join || restrict.hashjoin_operator.is_none() {
         return None;
     }
+    let Expr::Op(op) = &restrict.clause else {
+        return None;
+    };
 
-    let left_expr = op.args[0].clone();
-    let right_expr = op.args[1].clone();
-    let left_side_relids = expr_relids(&left_expr);
-    let right_side_relids = expr_relids(&right_expr);
-
-    if relids_match_hash_side(&left_side_relids, left_relids)
-        && relids_match_hash_side(&right_side_relids, right_relids)
+    if relids_match_hash_side(&restrict.left_relids, left_relids)
+        && relids_match_hash_side(&restrict.right_relids, right_relids)
     {
-        Some((left_expr, right_expr))
-    } else if relids_match_hash_side(&left_side_relids, right_relids)
-        && relids_match_hash_side(&right_side_relids, left_relids)
+        Some((op.args[0].clone(), op.args[1].clone()))
+    } else if relids_match_hash_side(&restrict.left_relids, right_relids)
+        && relids_match_hash_side(&restrict.right_relids, left_relids)
     {
-        Some((right_expr, left_expr))
+        Some((op.args[1].clone(), op.args[0].clone()))
     } else {
         None
     }
@@ -1282,652 +1340,6 @@ fn hash_join_clause_sides(
 
 fn relids_match_hash_side(expr_relids: &[usize], side_relids: &[usize]) -> bool {
     !expr_relids.is_empty() && relids_subset(expr_relids, side_relids)
-}
-
-fn expr_uses_only_layout_vars(expr: &Expr, layout: &[Expr]) -> bool {
-    if layout.contains(expr) {
-        return true;
-    }
-    match expr {
-        Expr::Var(var) => var.varlevelsup > 0,
-        Expr::Const(_) => true,
-        Expr::Aggref(aggref) => {
-            aggref
-                .args
-                .iter()
-                .all(|arg| expr_uses_only_layout_vars(arg, layout))
-                && aggref
-                    .aggfilter
-                    .as_ref()
-                    .is_none_or(|expr| expr_uses_only_layout_vars(expr, layout))
-        }
-        Expr::Op(op) => op
-            .args
-            .iter()
-            .all(|arg| expr_uses_only_layout_vars(arg, layout)),
-        Expr::Bool(bool_expr) => bool_expr
-            .args
-            .iter()
-            .all(|arg| expr_uses_only_layout_vars(arg, layout)),
-        Expr::Func(func) => func
-            .args
-            .iter()
-            .all(|arg| expr_uses_only_layout_vars(arg, layout)),
-        Expr::SubLink(sublink) => sublink
-            .testexpr
-            .as_deref()
-            .is_none_or(|expr| expr_uses_only_layout_vars(expr, layout)),
-        Expr::SubPlan(subplan) => subplan
-            .testexpr
-            .as_deref()
-            .is_none_or(|expr| expr_uses_only_layout_vars(expr, layout)),
-        Expr::ScalarArrayOp(saop) => {
-            expr_uses_only_layout_vars(&saop.left, layout)
-                && expr_uses_only_layout_vars(&saop.right, layout)
-        }
-        Expr::Cast(inner, _) => expr_uses_only_layout_vars(inner, layout),
-        Expr::Like {
-            expr,
-            pattern,
-            escape,
-            ..
-        }
-        | Expr::Similar {
-            expr,
-            pattern,
-            escape,
-            ..
-        } => {
-            expr_uses_only_layout_vars(expr, layout)
-                && expr_uses_only_layout_vars(pattern, layout)
-                && escape
-                    .as_deref()
-                    .is_none_or(|expr| expr_uses_only_layout_vars(expr, layout))
-        }
-        Expr::IsNull(inner) | Expr::IsNotNull(inner) => expr_uses_only_layout_vars(inner, layout),
-        Expr::IsDistinctFrom(left, right) | Expr::IsNotDistinctFrom(left, right) => {
-            expr_uses_only_layout_vars(left, layout) && expr_uses_only_layout_vars(right, layout)
-        }
-        Expr::ArrayLiteral { elements, .. } => elements
-            .iter()
-            .all(|element| expr_uses_only_layout_vars(element, layout)),
-        Expr::Coalesce(left, right) => {
-            expr_uses_only_layout_vars(left, layout) && expr_uses_only_layout_vars(right, layout)
-        }
-        Expr::ArraySubscript { array, subscripts } => {
-            expr_uses_only_layout_vars(array, layout)
-                && subscripts.iter().all(|subscript| {
-                    subscript
-                        .lower
-                        .as_ref()
-                        .is_none_or(|expr| expr_uses_only_layout_vars(expr, layout))
-                        && subscript
-                            .upper
-                            .as_ref()
-                            .is_none_or(|expr| expr_uses_only_layout_vars(expr, layout))
-                })
-        }
-        _ => true,
-    }
-}
-
-fn hash_join_inputs_rewrite_cleanly(
-    root: Option<&PlannerInfo>,
-    left: &Path,
-    right: &Path,
-    clauses: &HashJoinClauses,
-) -> bool {
-    let left_layout = left.semantic_output_vars();
-    let right_layout = right.semantic_output_vars();
-    let mut join_layout = left_layout.clone();
-    join_layout.extend(right_layout.clone());
-
-    clauses.hash_clauses.iter().all(|clause| {
-        expr_uses_only_layout_vars(
-            &rewrite_semantic_expr_for_join_inputs(
-                root,
-                clause.clause.clone(),
-                left,
-                right,
-                &join_layout,
-            ),
-            &join_layout,
-        )
-    }) && clauses.outer_hash_keys.iter().all(|expr| {
-        expr_uses_only_layout_vars(
-            &rewrite_join_input_expr(root, expr.clone(), left, &left_layout),
-            &left_layout,
-        )
-    }) && clauses.inner_hash_keys.iter().all(|expr| {
-        expr_uses_only_layout_vars(
-            &rewrite_join_input_expr(root, expr.clone(), right, &right_layout),
-            &right_layout,
-        )
-    }) && clauses.join_clauses.iter().all(|clause| {
-        expr_uses_only_layout_vars(
-            &rewrite_semantic_expr_for_join_inputs(
-                root,
-                clause.clause.clone(),
-                left,
-                right,
-                &join_layout,
-            ),
-            &join_layout,
-        )
-    })
-}
-
-pub(super) fn rewrite_join_input_expr(
-    root: Option<&PlannerInfo>,
-    expr: Expr,
-    path: &Path,
-    layout: &[Expr],
-) -> Expr {
-    rewrite_expr_for_path_output(root, expr, Some(path), layout)
-}
-
-fn layout_candidate_for_join_expr(
-    root: Option<&PlannerInfo>,
-    expr: &Expr,
-    layout: &[Expr],
-) -> Option<Expr> {
-    layout
-        .iter()
-        .find(|candidate| **candidate == *expr)
-        .cloned()
-        .or_else(|| root.and_then(|root| layout_candidate_for_expr(Some(root), expr, layout)))
-}
-
-pub(super) fn rewrite_semantic_expr_for_join_inputs(
-    root: Option<&PlannerInfo>,
-    expr: Expr,
-    left: &Path,
-    right: &Path,
-    join_layout: &[Expr],
-) -> Expr {
-    if let Some(candidate) = layout_candidate_for_join_expr(root, &expr, join_layout) {
-        return candidate;
-    }
-    if let Some(candidate) = lower_expr_to_path_output(root, left, expr.clone(), 0) {
-        return candidate;
-    }
-    if let Some(candidate) = lower_expr_to_path_output(root, right, expr.clone(), 0) {
-        return candidate;
-    }
-    let rebuilt = match expr {
-        Expr::Var(var) => Expr::Var(var),
-        Expr::Aggref(aggref) => Expr::Aggref(Box::new(crate::include::nodes::primnodes::Aggref {
-            args: aggref
-                .args
-                .into_iter()
-                .map(|arg| {
-                    rewrite_semantic_expr_for_join_inputs(root, arg, left, right, join_layout)
-                })
-                .collect(),
-            aggorder: aggref
-                .aggorder
-                .into_iter()
-                .map(|item| crate::include::nodes::primnodes::OrderByEntry {
-                    expr: rewrite_semantic_expr_for_join_inputs(
-                        root,
-                        item.expr,
-                        left,
-                        right,
-                        join_layout,
-                    ),
-                    ..item
-                })
-                .collect(),
-            aggfilter: aggref.aggfilter.map(|expr| {
-                rewrite_semantic_expr_for_join_inputs(root, expr, left, right, join_layout)
-            }),
-            ..*aggref
-        })),
-        Expr::Op(op) => Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {
-            args: op
-                .args
-                .into_iter()
-                .map(|arg| {
-                    rewrite_semantic_expr_for_join_inputs(root, arg, left, right, join_layout)
-                })
-                .collect(),
-            ..*op
-        })),
-        Expr::Bool(bool_expr) => Expr::Bool(Box::new(crate::include::nodes::primnodes::BoolExpr {
-            args: bool_expr
-                .args
-                .into_iter()
-                .map(|arg| {
-                    rewrite_semantic_expr_for_join_inputs(root, arg, left, right, join_layout)
-                })
-                .collect(),
-            ..*bool_expr
-        })),
-        Expr::Func(func) => Expr::Func(Box::new(crate::include::nodes::primnodes::FuncExpr {
-            args: func
-                .args
-                .into_iter()
-                .map(|arg| {
-                    rewrite_semantic_expr_for_join_inputs(root, arg, left, right, join_layout)
-                })
-                .collect(),
-            ..*func
-        })),
-        Expr::SubLink(sublink) => {
-            Expr::SubLink(Box::new(crate::include::nodes::primnodes::SubLink {
-                testexpr: sublink.testexpr.map(|expr| {
-                    Box::new(rewrite_semantic_expr_for_join_inputs(
-                        root,
-                        *expr,
-                        left,
-                        right,
-                        join_layout,
-                    ))
-                }),
-                ..*sublink
-            }))
-        }
-        Expr::SubPlan(subplan) => {
-            Expr::SubPlan(Box::new(crate::include::nodes::primnodes::SubPlan {
-                testexpr: subplan.testexpr.map(|expr| {
-                    Box::new(rewrite_semantic_expr_for_join_inputs(
-                        root,
-                        *expr,
-                        left,
-                        right,
-                        join_layout,
-                    ))
-                }),
-                ..*subplan
-            }))
-        }
-        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(
-            crate::include::nodes::primnodes::ScalarArrayOpExpr {
-                left: Box::new(rewrite_semantic_expr_for_join_inputs(
-                    root,
-                    *saop.left,
-                    left,
-                    right,
-                    join_layout,
-                )),
-                right: Box::new(rewrite_semantic_expr_for_join_inputs(
-                    root,
-                    *saop.right,
-                    left,
-                    right,
-                    join_layout,
-                )),
-                ..*saop
-            },
-        )),
-        Expr::Cast(inner, ty) => Expr::Cast(
-            Box::new(rewrite_semantic_expr_for_join_inputs(
-                root,
-                *inner,
-                left,
-                right,
-                join_layout,
-            )),
-            ty,
-        ),
-        Expr::Like {
-            expr,
-            pattern,
-            escape,
-            case_insensitive,
-            negated,
-        } => Expr::Like {
-            expr: Box::new(rewrite_semantic_expr_for_join_inputs(
-                root,
-                *expr,
-                left,
-                right,
-                join_layout,
-            )),
-            pattern: Box::new(rewrite_semantic_expr_for_join_inputs(
-                root,
-                *pattern,
-                left,
-                right,
-                join_layout,
-            )),
-            escape: escape.map(|expr| {
-                Box::new(rewrite_semantic_expr_for_join_inputs(
-                    root,
-                    *expr,
-                    left,
-                    right,
-                    join_layout,
-                ))
-            }),
-            case_insensitive,
-            negated,
-        },
-        Expr::Similar {
-            expr,
-            pattern,
-            escape,
-            negated,
-        } => Expr::Similar {
-            expr: Box::new(rewrite_semantic_expr_for_join_inputs(
-                root,
-                *expr,
-                left,
-                right,
-                join_layout,
-            )),
-            pattern: Box::new(rewrite_semantic_expr_for_join_inputs(
-                root,
-                *pattern,
-                left,
-                right,
-                join_layout,
-            )),
-            escape: escape.map(|expr| {
-                Box::new(rewrite_semantic_expr_for_join_inputs(
-                    root,
-                    *expr,
-                    left,
-                    right,
-                    join_layout,
-                ))
-            }),
-            negated,
-        },
-        Expr::IsNull(inner) => Expr::IsNull(Box::new(rewrite_semantic_expr_for_join_inputs(
-            root,
-            *inner,
-            left,
-            right,
-            join_layout,
-        ))),
-        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(rewrite_semantic_expr_for_join_inputs(
-            root,
-            *inner,
-            left,
-            right,
-            join_layout,
-        ))),
-        Expr::IsDistinctFrom(left_expr, right_expr) => Expr::IsDistinctFrom(
-            Box::new(rewrite_semantic_expr_for_join_inputs(
-                root,
-                *left_expr,
-                left,
-                right,
-                join_layout,
-            )),
-            Box::new(rewrite_semantic_expr_for_join_inputs(
-                root,
-                *right_expr,
-                left,
-                right,
-                join_layout,
-            )),
-        ),
-        Expr::IsNotDistinctFrom(left_expr, right_expr) => Expr::IsNotDistinctFrom(
-            Box::new(rewrite_semantic_expr_for_join_inputs(
-                root,
-                *left_expr,
-                left,
-                right,
-                join_layout,
-            )),
-            Box::new(rewrite_semantic_expr_for_join_inputs(
-                root,
-                *right_expr,
-                left,
-                right,
-                join_layout,
-            )),
-        ),
-        Expr::ArrayLiteral {
-            elements,
-            array_type,
-        } => Expr::ArrayLiteral {
-            elements: elements
-                .into_iter()
-                .map(|element| {
-                    rewrite_semantic_expr_for_join_inputs(root, element, left, right, join_layout)
-                })
-                .collect(),
-            array_type,
-        },
-        Expr::Coalesce(left_expr, right_expr) => Expr::Coalesce(
-            Box::new(rewrite_semantic_expr_for_join_inputs(
-                root,
-                *left_expr,
-                left,
-                right,
-                join_layout,
-            )),
-            Box::new(rewrite_semantic_expr_for_join_inputs(
-                root,
-                *right_expr,
-                left,
-                right,
-                join_layout,
-            )),
-        ),
-        Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
-            array: Box::new(rewrite_semantic_expr_for_join_inputs(
-                root,
-                *array,
-                left,
-                right,
-                join_layout,
-            )),
-            subscripts: subscripts
-                .into_iter()
-                .map(|subscript| ExprArraySubscript {
-                    is_slice: subscript.is_slice,
-                    lower: subscript.lower.map(|expr| {
-                        rewrite_semantic_expr_for_join_inputs(root, expr, left, right, join_layout)
-                    }),
-                    upper: subscript.upper.map(|expr| {
-                        rewrite_semantic_expr_for_join_inputs(root, expr, left, right, join_layout)
-                    }),
-                })
-                .collect(),
-        },
-        other => other,
-    };
-    if let Some(candidate) = layout_candidate_for_join_expr(root, &rebuilt, join_layout) {
-        return candidate;
-    }
-    if let Some(candidate) = lower_expr_to_path_output(root, left, rebuilt.clone(), 0) {
-        return candidate;
-    }
-    if let Some(candidate) = lower_expr_to_path_output(root, right, rebuilt.clone(), 0) {
-        return candidate;
-    }
-    rebuilt
-}
-
-fn rewrite_expr_for_path_output(
-    root: Option<&PlannerInfo>,
-    expr: Expr,
-    path: Option<&Path>,
-    layout: &[Expr],
-) -> Expr {
-    if let Some(path) = path
-        && let Some(candidate) = lower_expr_to_path_output(root, path, expr.clone(), 0)
-    {
-        return candidate;
-    }
-    if let Some(candidate) = layout_candidate_for_expr(root, &expr, layout) {
-        return candidate;
-    }
-    let rebuilt = match expr {
-        Expr::Var(var) => Expr::Var(var),
-        Expr::Aggref(aggref) => Expr::Aggref(Box::new(crate::include::nodes::primnodes::Aggref {
-            args: aggref
-                .args
-                .into_iter()
-                .map(|arg| rewrite_expr_for_path_output(root, arg, path, layout))
-                .collect(),
-            aggorder: aggref
-                .aggorder
-                .into_iter()
-                .map(|item| crate::include::nodes::primnodes::OrderByEntry {
-                    expr: rewrite_expr_for_path_output(root, item.expr, path, layout),
-                    ..item
-                })
-                .collect(),
-            ..*aggref
-        })),
-        Expr::Op(op) => Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {
-            args: op
-                .args
-                .into_iter()
-                .map(|arg| rewrite_expr_for_path_output(root, arg, path, layout))
-                .collect(),
-            ..*op
-        })),
-        Expr::Bool(bool_expr) => Expr::Bool(Box::new(crate::include::nodes::primnodes::BoolExpr {
-            args: bool_expr
-                .args
-                .into_iter()
-                .map(|arg| rewrite_expr_for_path_output(root, arg, path, layout))
-                .collect(),
-            ..*bool_expr
-        })),
-        Expr::Case(case_expr) => Expr::Case(Box::new(crate::include::nodes::primnodes::CaseExpr {
-            arg: case_expr
-                .arg
-                .map(|arg| Box::new(rewrite_expr_for_path_output(root, *arg, path, layout))),
-            args: case_expr
-                .args
-                .into_iter()
-                .map(|arm| crate::include::nodes::primnodes::CaseWhen {
-                    expr: rewrite_expr_for_path_output(root, arm.expr, path, layout),
-                    result: rewrite_expr_for_path_output(root, arm.result, path, layout),
-                })
-                .collect(),
-            defresult: Box::new(rewrite_expr_for_path_output(
-                root,
-                *case_expr.defresult,
-                path,
-                layout,
-            )),
-            ..*case_expr
-        })),
-        Expr::Func(func) => Expr::Func(Box::new(crate::include::nodes::primnodes::FuncExpr {
-            args: func
-                .args
-                .into_iter()
-                .map(|arg| rewrite_expr_for_path_output(root, arg, path, layout))
-                .collect(),
-            ..*func
-        })),
-        Expr::SubLink(sublink) => {
-            Expr::SubLink(Box::new(crate::include::nodes::primnodes::SubLink {
-                testexpr: sublink
-                    .testexpr
-                    .map(|expr| Box::new(rewrite_expr_for_path_output(root, *expr, path, layout))),
-                ..*sublink
-            }))
-        }
-        Expr::SubPlan(subplan) => {
-            Expr::SubPlan(Box::new(crate::include::nodes::primnodes::SubPlan {
-                testexpr: subplan
-                    .testexpr
-                    .map(|expr| Box::new(rewrite_expr_for_path_output(root, *expr, path, layout))),
-                ..*subplan
-            }))
-        }
-        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(
-            crate::include::nodes::primnodes::ScalarArrayOpExpr {
-                left: Box::new(rewrite_expr_for_path_output(root, *saop.left, path, layout)),
-                right: Box::new(rewrite_expr_for_path_output(
-                    root,
-                    *saop.right,
-                    path,
-                    layout,
-                )),
-                ..*saop
-            },
-        )),
-        Expr::Cast(inner, ty) => Expr::Cast(
-            Box::new(rewrite_expr_for_path_output(root, *inner, path, layout)),
-            ty,
-        ),
-        Expr::Like {
-            expr,
-            pattern,
-            escape,
-            case_insensitive,
-            negated,
-        } => Expr::Like {
-            expr: Box::new(rewrite_expr_for_path_output(root, *expr, path, layout)),
-            pattern: Box::new(rewrite_expr_for_path_output(root, *pattern, path, layout)),
-            escape: escape
-                .map(|expr| Box::new(rewrite_expr_for_path_output(root, *expr, path, layout))),
-            case_insensitive,
-            negated,
-        },
-        Expr::Similar {
-            expr,
-            pattern,
-            escape,
-            negated,
-        } => Expr::Similar {
-            expr: Box::new(rewrite_expr_for_path_output(root, *expr, path, layout)),
-            pattern: Box::new(rewrite_expr_for_path_output(root, *pattern, path, layout)),
-            escape: escape
-                .map(|expr| Box::new(rewrite_expr_for_path_output(root, *expr, path, layout))),
-            negated,
-        },
-        Expr::IsNull(inner) => Expr::IsNull(Box::new(rewrite_expr_for_path_output(
-            root, *inner, path, layout,
-        ))),
-        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(rewrite_expr_for_path_output(
-            root, *inner, path, layout,
-        ))),
-        Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
-            Box::new(rewrite_expr_for_path_output(root, *left, path, layout)),
-            Box::new(rewrite_expr_for_path_output(root, *right, path, layout)),
-        ),
-        Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
-            Box::new(rewrite_expr_for_path_output(root, *left, path, layout)),
-            Box::new(rewrite_expr_for_path_output(root, *right, path, layout)),
-        ),
-        Expr::ArrayLiteral {
-            elements,
-            array_type,
-        } => Expr::ArrayLiteral {
-            elements: elements
-                .into_iter()
-                .map(|element| rewrite_expr_for_path_output(root, element, path, layout))
-                .collect(),
-            array_type,
-        },
-        Expr::Coalesce(left, right) => Expr::Coalesce(
-            Box::new(rewrite_expr_for_path_output(root, *left, path, layout)),
-            Box::new(rewrite_expr_for_path_output(root, *right, path, layout)),
-        ),
-        Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
-            array: Box::new(rewrite_expr_for_path_output(root, *array, path, layout)),
-            subscripts: subscripts
-                .into_iter()
-                .map(|subscript| ExprArraySubscript {
-                    is_slice: subscript.is_slice,
-                    lower: subscript
-                        .lower
-                        .map(|expr| rewrite_expr_for_path_output(root, expr, path, layout)),
-                    upper: subscript
-                        .upper
-                        .map(|expr| rewrite_expr_for_path_output(root, expr, path, layout)),
-                })
-                .collect(),
-        },
-        other => other,
-    };
-    if let Some(path) = path
-        && let Some(candidate) = lower_expr_to_path_output(root, path, rebuilt.clone(), 0)
-    {
-        return candidate;
-    }
-    layout_candidate_for_expr(root, &rebuilt, layout).unwrap_or(rebuilt)
 }
 
 fn expr_uses_immediate_outer_columns(expr: &Expr) -> bool {
@@ -2178,11 +1590,13 @@ fn path_uses_immediate_outer_columns(path: &Path) -> bool {
 }
 
 fn estimate_nested_loop_join_internal(
-    root: Option<&PlannerInfo>,
+    _root: Option<&PlannerInfo>,
     left: Path,
     right: Path,
     kind: JoinType,
     restrict_clauses: Vec<RestrictInfo>,
+    pathtarget: PathTarget,
+    output_columns: Vec<QueryColumn>,
 ) -> Path {
     let left_info = left.plan_info();
     let right_info = right.plan_info();
@@ -2207,6 +1621,8 @@ fn estimate_nested_loop_join_internal(
             rows,
             left_info.plan_width + right_info.plan_width,
         ),
+        pathtarget,
+        output_columns,
         left: Box::new(left),
         right: Box::new(right),
         kind,
@@ -2219,8 +1635,18 @@ fn estimate_nested_loop_join(
     right: Path,
     kind: JoinType,
     restrict_clauses: Vec<RestrictInfo>,
+    pathtarget: PathTarget,
+    output_columns: Vec<QueryColumn>,
 ) -> Path {
-    estimate_nested_loop_join_internal(None, left, right, kind, restrict_clauses)
+    estimate_nested_loop_join_internal(
+        None,
+        left,
+        right,
+        kind,
+        restrict_clauses,
+        pathtarget,
+        output_columns,
+    )
 }
 
 fn estimate_nested_loop_join_with_root(
@@ -2229,8 +1655,18 @@ fn estimate_nested_loop_join_with_root(
     right: Path,
     kind: JoinType,
     restrict_clauses: Vec<RestrictInfo>,
+    pathtarget: PathTarget,
+    output_columns: Vec<QueryColumn>,
 ) -> Path {
-    estimate_nested_loop_join_internal(Some(root), left, right, kind, restrict_clauses)
+    estimate_nested_loop_join_internal(
+        Some(root),
+        left,
+        right,
+        kind,
+        restrict_clauses,
+        pathtarget,
+        output_columns,
+    )
 }
 
 fn hash_join_selectivity(hash_clauses: &[Expr], join_qual: &[Expr], left_rows: f64) -> f64 {
@@ -2258,6 +1694,8 @@ fn estimate_hash_join(
     left: Path,
     right: Path,
     kind: JoinType,
+    pathtarget: PathTarget,
+    output_columns: Vec<QueryColumn>,
     hash_clauses: Vec<RestrictInfo>,
     outer_hash_keys: Vec<Expr>,
     inner_hash_keys: Vec<Expr>,
@@ -2269,6 +1707,8 @@ fn estimate_hash_join(
         left,
         right,
         kind,
+        pathtarget,
+        output_columns,
         hash_clauses,
         outer_hash_keys,
         inner_hash_keys,
@@ -2278,10 +1718,12 @@ fn estimate_hash_join(
 }
 
 fn estimate_hash_join_internal(
-    root: Option<&PlannerInfo>,
+    _root: Option<&PlannerInfo>,
     left: Path,
     right: Path,
     kind: JoinType,
+    pathtarget: PathTarget,
+    output_columns: Vec<QueryColumn>,
     hash_clauses: Vec<RestrictInfo>,
     outer_hash_keys: Vec<Expr>,
     inner_hash_keys: Vec<Expr>,
@@ -2297,59 +1739,11 @@ fn estimate_hash_join_internal(
         "hash join does not support cross joins"
     );
 
-    let left_layout = left.semantic_output_vars();
-    let right_layout = right.semantic_output_vars();
-    let mut join_layout = left_layout.clone();
-    join_layout.extend(right_layout.clone());
-    let rewritten_hash_clauses = hash_clauses
-        .iter()
-        .map(|restrict| RestrictInfo {
-            clause: rewrite_semantic_expr_for_join_inputs(
-                root,
-                restrict.clause.clone(),
-                &left,
-                &right,
-                &join_layout,
-            ),
-            required_relids: restrict.required_relids.clone(),
-            is_pushed_down: restrict.is_pushed_down,
-        })
-        .collect::<Vec<_>>();
-    let rewritten_outer_hash_keys = outer_hash_keys
-        .into_iter()
-        .map(|expr| rewrite_join_input_expr(root, expr, &left, &left_layout))
-        .collect::<Vec<_>>();
-    let rewritten_inner_hash_keys = inner_hash_keys
-        .into_iter()
-        .map(|expr| rewrite_join_input_expr(root, expr, &right, &right_layout))
-        .collect::<Vec<_>>();
-    let rewritten_join_clauses = join_clauses
-        .into_iter()
-        .map(|restrict| RestrictInfo {
-            clause: rewrite_semantic_expr_for_join_inputs(
-                root,
-                restrict.clause,
-                &left,
-                &right,
-                &join_layout,
-            ),
-            required_relids: restrict.required_relids,
-            is_pushed_down: restrict.is_pushed_down,
-        })
-        .collect::<Vec<_>>();
-    let canonical_hash_clauses = rewritten_outer_hash_keys
-        .iter()
-        .cloned()
-        .zip(rewritten_inner_hash_keys.iter().cloned())
-        .map(|(outer, inner)| Expr::op_auto(OpExprKind::Eq, vec![outer, inner]))
-        .collect::<Vec<_>>();
-    let rewritten_join_qual = clause_exprs(&rewritten_join_clauses);
-
     let left_info = left.plan_info();
     let right_info = right.plan_info();
     let join_sel = hash_join_selectivity(
-        &canonical_hash_clauses,
-        &rewritten_join_qual,
+        &clause_exprs(&hash_clauses),
+        &clause_exprs(&join_clauses),
         left_info.plan_rows.as_f64(),
     );
     let rows = estimate_join_rows(
@@ -2359,11 +1753,10 @@ fn estimate_hash_join_internal(
         join_sel,
     );
     let build_cpu = right_info.plan_rows.as_f64()
-        * ((rewritten_inner_hash_keys.len() as f64) * CPU_OPERATOR_COST + CPU_TUPLE_COST);
+        * ((inner_hash_keys.len() as f64) * CPU_OPERATOR_COST + CPU_TUPLE_COST);
     let probe_cpu =
-        left_info.plan_rows.as_f64() * (rewritten_outer_hash_keys.len() as f64) * CPU_OPERATOR_COST;
-    let recheck_cpu =
-        rows * predicate_cost_for_restrict_clauses(&rewritten_join_clauses) * CPU_OPERATOR_COST;
+        left_info.plan_rows.as_f64() * (outer_hash_keys.len() as f64) * CPU_OPERATOR_COST;
+    let recheck_cpu = rows * predicate_cost_for_restrict_clauses(&join_clauses) * CPU_OPERATOR_COST;
     let startup = left_info.startup_cost.as_f64() + right_info.total_cost.as_f64() + build_cpu;
     let total = startup + left_info.total_cost.as_f64() + probe_cpu + recheck_cpu;
 
@@ -2374,83 +1767,15 @@ fn estimate_hash_join_internal(
             rows,
             left_info.plan_width + right_info.plan_width,
         ),
+        pathtarget,
+        output_columns,
         left: Box::new(left),
         right: Box::new(right),
         kind,
-        hash_clauses: rewritten_hash_clauses,
-        outer_hash_keys: rewritten_outer_hash_keys,
-        inner_hash_keys: rewritten_inner_hash_keys,
+        hash_clauses,
+        outer_hash_keys,
+        inner_hash_keys,
         restrict_clauses,
-    }
-}
-
-pub(super) fn restore_join_output_order(
-    root: Option<&PlannerInfo>,
-    join: Path,
-    left_columns: &[QueryColumn],
-    right_columns: &[QueryColumn],
-    left_vars: &[Expr],
-    right_vars: &[Expr],
-) -> Path {
-    let join_info = join.plan_info();
-    let join_layout = join.semantic_output_vars();
-    let (join_left, join_right) = match &join {
-        Path::NestedLoopJoin { left, right, .. } | Path::HashJoin { left, right, .. } => {
-            (&**left, &**right)
-        }
-        _ => return join,
-    };
-    let mut targets = Vec::with_capacity(left_columns.len() + right_columns.len());
-    for (column, expr) in left_columns.iter().zip(left_vars.iter()) {
-        let rewritten = rewrite_semantic_expr_for_join_inputs(
-            root,
-            expr.clone(),
-            join_left,
-            join_right,
-            &join_layout,
-        );
-        targets.push(TargetEntry {
-            name: column.name.clone(),
-            expr: rewritten,
-            sql_type: column.sql_type,
-            resno: targets.len() + 1,
-            ressortgroupref: 0,
-            input_resno: None,
-            resjunk: false,
-        });
-    }
-    for (column, expr) in right_columns.iter().zip(right_vars.iter()) {
-        let rewritten = rewrite_semantic_expr_for_join_inputs(
-            root,
-            expr.clone(),
-            join_left,
-            join_right,
-            &join_layout,
-        );
-        targets.push(TargetEntry {
-            name: column.name.clone(),
-            expr: rewritten,
-            sql_type: column.sql_type,
-            resno: targets.len() + 1,
-            ressortgroupref: 0,
-            input_resno: None,
-            resjunk: false,
-        });
-    }
-    let width = targets
-        .iter()
-        .map(|target| estimate_sql_type_width(target.sql_type))
-        .sum();
-    Path::Projection {
-        plan_info: PlanEstimate::new(
-            join_info.startup_cost.as_f64(),
-            join_info.total_cost.as_f64() + join_info.plan_rows.as_f64() * CPU_OPERATOR_COST,
-            join_info.plan_rows.as_f64(),
-            width,
-        ),
-        slot_id: next_synthetic_slot_id(),
-        input: Box::new(join),
-        targets,
     }
 }
 
