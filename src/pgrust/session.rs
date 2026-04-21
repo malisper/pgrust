@@ -440,7 +440,11 @@ impl Session {
         let Some(txn) = self.active_txn.as_mut() else {
             return;
         };
-        let consumed_catalog_cids = txn.catalog_effects.len().saturating_sub(effect_start).max(1);
+        let consumed_catalog_cids = txn
+            .catalog_effects
+            .len()
+            .saturating_sub(effect_start)
+            .max(1);
         let next_cid = base_cid.saturating_add(consumed_catalog_cids as u32);
         txn.next_command_id = txn.next_command_id.max(next_cid);
     }
@@ -2172,6 +2176,16 @@ impl Session {
             }
             Statement::RevokeRoleMembership(ref revoke_stmt) => {
                 db.execute_revoke_role_membership_stmt(client_id, revoke_stmt)
+            }
+            Statement::DropOwned(ref drop_stmt) => {
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_drop_owned_stmt_in_transaction(
+                    client_id,
+                    drop_stmt,
+                    xid,
+                    cid,
+                    &mut txn.catalog_effects,
+                )
             }
             Statement::ReassignOwned(ref reassign_stmt) => {
                 let txn = self.active_txn.as_mut().unwrap();

@@ -132,6 +132,7 @@ fn relation_desc() -> RelationDesc {
 
 fn test_catalog_entry(rel: RelFileLocator, desc: RelationDesc) -> CatalogEntry {
     CatalogEntry {
+        rel,
         relation_oid: 50_000u32.saturating_add(rel.rel_number),
         namespace_oid: crate::include::catalog::PUBLIC_NAMESPACE_OID,
         owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
@@ -140,14 +141,13 @@ fn test_catalog_entry(rel: RelFileLocator, desc: RelationDesc) -> CatalogEntry {
         reltoastrelid: 0,
         relpersistence: 'p',
         relkind: 'r',
-        relhastriggers: false,
         relhassubclass: false,
+        relhastriggers: false,
         relispartition: false,
         relrowsecurity: false,
         relforcerowsecurity: false,
         relpages: 0,
         reltuples: 0.0,
-        rel,
         desc,
         index_meta: None,
     }
@@ -9761,11 +9761,25 @@ fn legacy_executor_rejects_drop_table_cascade() {
     let base = temp_dir("legacy_drop_table_cascade_rejected");
     let txns = TransactionManager::new_durable(&base).unwrap();
 
-    run_sql(&base, &txns, INVALID_TRANSACTION_ID, "create table items (id int4)").unwrap();
+    run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "create table items (id int4)",
+    )
+    .unwrap();
 
-    match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "drop table items cascade") {
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "drop table items cascade",
+    ) {
         Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual })) => {
-            assert_eq!(expected, "DROP TABLE CASCADE handled by database/session layer");
+            assert_eq!(
+                expected,
+                "DROP TABLE CASCADE handled by database/session layer"
+            );
             assert_eq!(actual, "DROP TABLE ... CASCADE");
         }
         other => panic!("expected DROP TABLE CASCADE rejection, got {other:?}"),
