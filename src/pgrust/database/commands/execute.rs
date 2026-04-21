@@ -229,6 +229,12 @@ impl Database {
                     rename_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterIndexRename(ref rename_stmt) => self
+                .execute_alter_index_rename_stmt_with_search_path(
+                    client_id,
+                    rename_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterViewOwner(ref alter_stmt) => self
                 .execute_alter_view_owner_stmt_with_search_path(
                     client_id,
@@ -327,6 +333,12 @@ impl Database {
                 ),
             Statement::AlterTableValidateConstraint(ref alter_stmt) => self
                 .execute_alter_table_validate_constraint_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterTableInherit(ref alter_stmt) => self
+                .execute_alter_table_inherit_stmt_with_search_path(
                     client_id,
                     alter_stmt,
                     configured_search_path,

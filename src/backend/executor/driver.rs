@@ -174,10 +174,12 @@ fn execute_statement_with_source(
                 actual: "TRIGGER".into(),
             }))
         }
-        Statement::AlterTableRename(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "ALTER TABLE RENAME handled by database/session layer",
-            actual: "ALTER TABLE RENAME".into(),
-        })),
+        Statement::AlterTableRename(_) | Statement::AlterIndexRename(_) => {
+            Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "ALTER TABLE/INDEX RENAME handled by database/session layer",
+                actual: "ALTER TABLE/INDEX RENAME".into(),
+            }))
+        }
         Statement::AlterTableOwner(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "ALTER TABLE OWNER handled by database/session layer",
             actual: "ALTER TABLE OWNER".into(),
@@ -198,6 +200,7 @@ fn execute_statement_with_source(
         | Statement::AlterTableSetNotNull(_)
         | Statement::AlterTableDropNotNull(_)
         | Statement::AlterTableValidateConstraint(_)
+        | Statement::AlterTableInherit(_)
         | Statement::AlterTableNoInherit(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "ALTER TABLE constraint operations handled by database/session layer",

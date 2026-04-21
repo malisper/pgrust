@@ -1,7 +1,9 @@
 use super::super::*;
+use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::pgrust::database::ddl::{
-    lookup_heap_relation_for_alter_table, validate_alter_table_rename_column,
+    lookup_heap_relation_for_alter_table, lookup_index_relation_for_alter_index,
+    validate_alter_table_rename_column,
 };
 
 fn normalize_rename_target_name(name: &str) -> Result<String, ExecError> {
@@ -13,7 +15,91 @@ fn normalize_rename_target_name(name: &str) -> Result<String, ExecError> {
     Ok(name.to_ascii_lowercase())
 }
 
+fn push_relation_missing_notice(name: &str) {
+    push_notice(format!(r#"relation "{name}" does not exist, skipping"#));
+}
+
 impl Database {
+    pub(crate) fn execute_alter_index_rename_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        rename_stmt: &AlterTableRenameStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let Some(relation) = lookup_index_relation_for_alter_index(
+            &catalog,
+            &rename_stmt.table_name,
+            rename_stmt.if_exists,
+        )?
+        else {
+            push_relation_missing_notice(&rename_stmt.table_name);
+            return Ok(StatementResult::AffectedRows(0));
+        };
+        self.table_locks.lock_table_interruptible(
+            relation.rel,
+            TableLockMode::AccessExclusive,
+            client_id,
+            interrupts.as_ref(),
+        )?;
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_alter_index_rename_stmt_in_transaction_with_search_path(
+            client_id,
+            rename_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        self.table_locks.unlock_table(relation.rel, client_id);
+        result
+    }
+
+    pub(crate) fn execute_alter_index_rename_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        rename_stmt: &AlterTableRenameStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let Some(relation) = lookup_index_relation_for_alter_index(
+            &catalog,
+            &rename_stmt.table_name,
+            rename_stmt.if_exists,
+        )?
+        else {
+            push_relation_missing_notice(&rename_stmt.table_name);
+            return Ok(StatementResult::AffectedRows(0));
+        };
+        let new_name = normalize_rename_target_name(&rename_stmt.new_table_name)?;
+        ensure_relation_owner(self, client_id, &relation, &rename_stmt.table_name)?;
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts,
+        };
+        let effect = self
+            .catalog
+            .write()
+            .rename_relation_mvcc(relation.relation_oid, &new_name, &ctx)
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
     pub(crate) fn execute_alter_table_rename_stmt_with_search_path(
         &self,
         client_id: ClientId,

@@ -6650,6 +6650,196 @@ fn regtype_literal_cast_resolves_type_name() {
 }
 
 #[test]
+fn alter_index_rename_supports_if_exists_and_rename() {
+    let base = temp_dir("alter_index_rename");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4)").unwrap();
+    db.execute(1, "create index items_idx on items (id)").unwrap();
+    db.execute(1, "alter index if exists missing_idx rename to items_idx_new")
+        .unwrap();
+    db.execute(1, "alter index items_idx rename to items_idx_new")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relname from pg_class where relname = 'items_idx_new'"
+        ),
+        vec![vec![Value::Text("items_idx_new".into())]]
+    );
+}
+
+#[test]
+fn alter_index_rename_if_exists_missing_pushes_notice() {
+    let base = temp_dir("alter_index_rename_if_exists_missing");
+    let db = Database::open(&base, 16).unwrap();
+
+    clear_backend_notices();
+    db.execute(1, "alter index if exists missing_idx rename to items_idx_new")
+        .unwrap();
+
+    assert_eq!(
+        take_backend_notices().into_iter().collect::<Vec<_>>(),
+        vec![r#"relation "missing_idx" does not exist, skipping"#.to_string()]
+    );
+}
+
+#[test]
+fn alter_index_rename_if_exists_missing_in_transaction_pushes_notice() {
+    let base = temp_dir("alter_index_rename_if_exists_missing_txn");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    clear_backend_notices();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "alter index if exists missing_idx rename to items_idx_new")
+        .unwrap();
+    session.execute(&db, "commit").unwrap();
+
+    assert_eq!(
+        take_backend_notices().into_iter().collect::<Vec<_>>(),
+        vec![r#"relation "missing_idx" does not exist, skipping"#.to_string()]
+    );
+}
+
+#[test]
+fn alter_table_inherit_validates_shape_and_constraints() {
+    let base = temp_dir("alter_table_inherit_validate");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table parent_items (test2 int4)").unwrap();
+    db.execute(1, "create table child_items ()").unwrap();
+
+    match db.execute(1, "alter table child_items inherit parent_items") {
+        Err(ExecError::DetailedError { message, .. })
+            if message == "child table is missing column \"test2\"" => {}
+        other => panic!("expected missing-column inherit error, got {other:?}"),
+    }
+
+    db.execute(1, "drop table child_items").unwrap();
+    db.execute(1, "create table child_items (test2 bool)").unwrap();
+    match db.execute(1, "alter table child_items inherit parent_items") {
+        Err(ExecError::DetailedError { message, .. })
+            if message == "child table \"child_items\" has different type for column \"test2\"" => {}
+        other => panic!("expected type-mismatch inherit error, got {other:?}"),
+    }
+
+    db.execute(1, "drop table child_items").unwrap();
+    db.execute(1, "create table child_items (test2 int4)").unwrap();
+    db.execute(
+        1,
+        "alter table parent_items add constraint parent_items_check check (test2 > 0)",
+    )
+    .unwrap();
+    match db.execute(1, "alter table child_items inherit parent_items") {
+        Err(ExecError::DetailedError { message, .. })
+            if message == "child table is missing constraint \"parent_items_check\"" => {}
+        other => panic!("expected missing-constraint inherit error, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_inherit_supports_attach_duplicate_and_cycle_errors() {
+    let base = temp_dir("alter_table_inherit_attach");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table atacc1 (test int4)").unwrap();
+    db.execute(1, "create table atacc2 (test2 int4)").unwrap();
+    db.execute(1, "create table atacc3 (test3 int4, test2 int4) inherits (atacc1)")
+        .unwrap();
+    db.execute(1, "alter table atacc2 add constraint foo check (test2 > 0)")
+        .unwrap();
+    db.execute(1, "insert into atacc3 (test2) values (4)").unwrap();
+    db.execute(1, "update atacc3 set test2 = 4 where test2 is null")
+        .unwrap();
+    db.execute(1, "alter table atacc3 add constraint foo check (test2 > 0)")
+        .unwrap();
+    db.execute(1, "alter table atacc3 inherit atacc2").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select test2 from atacc2 order by test2"),
+        vec![vec![Value::Int32(4)]]
+    );
+
+    match db.execute(1, "alter table atacc3 inherit atacc2") {
+        Err(ExecError::DetailedError { message, .. })
+            if message == "relation \"atacc2\" would be inherited from more than once" => {}
+        other => panic!("expected duplicate-parent inherit error, got {other:?}"),
+    }
+
+    match db.execute(1, "alter table atacc2 inherit atacc3") {
+        Err(ExecError::DetailedError {
+            message, detail, ..
+        }) if message == "circular inheritance not allowed"
+            && detail == Some("\"atacc3\" is already a child of \"atacc2\".".into()) => {}
+        other => panic!("expected circular inherit error, got {other:?}"),
+    }
+
+    match db.execute(1, "alter table atacc2 inherit atacc2") {
+        Err(ExecError::DetailedError {
+            message, detail, ..
+        }) if message == "circular inheritance not allowed"
+            && detail == Some("\"atacc2\" is already a child of \"atacc2\".".into()) => {}
+        other => panic!("expected self-inherit error, got {other:?}"),
+    }
+}
+
+#[test]
+fn explain_inherited_append_uses_relation_names_and_sql_casts() {
+    let base = temp_dir("explain_inherited_append_format");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table nv_parent (d date)").unwrap();
+    db.execute(1, "create table nv_child_2009 () inherits (nv_parent)")
+        .unwrap();
+    db.execute(1, "create table nv_child_2010 () inherits (nv_parent)")
+        .unwrap();
+    db.execute(1, "create table nv_child_2011 () inherits (nv_parent)")
+        .unwrap();
+
+    let rows = query_rows(
+        &db,
+        1,
+        "explain select * from nv_parent where d >= '2009-08-01'::date and d <= '2009-08-31'::date",
+    );
+    let rendered = rows
+        .into_iter()
+        .map(|row| match &row[0] {
+            Value::Text(text) => text.clone(),
+            other => panic!("expected explain text row, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+
+    assert!(rendered.iter().any(|line| line.contains("Append")));
+    assert!(rendered.iter().any(|line| line.contains("Seq Scan on nv_parent")));
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("Seq Scan on nv_child_2009"))
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("'2009-08-01'::date"))
+    );
+    assert!(
+        rendered.iter().all(|line| !line.contains("Projection")),
+        "expected inherited append explain to elide passthrough projections, got {rendered:?}"
+    );
+    assert!(
+        rendered.iter().all(|line| !line.contains("Cast(Const(")),
+        "expected sql-style cast rendering, got {rendered:?}"
+    );
+    assert!(
+        rendered.iter().all(|line| !line.contains("rel ")),
+        "expected relation names instead of relcache numbers, got {rendered:?}"
+    );
+}
+
+#[test]
 fn alter_table_add_column_reads_old_rows_with_null_or_default() {
     let base = temp_dir("alter_table_add_column_reads_old_rows");
     let db = Database::open(&base, 16).unwrap();

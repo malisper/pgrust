@@ -57,6 +57,24 @@ pub(super) fn lookup_heap_relation_for_alter_table(
     }
 }
 
+pub(super) fn lookup_index_relation_for_alter_index(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+    if_exists: bool,
+) -> Result<Option<BoundRelation>, ExecError> {
+    match catalog.lookup_any_relation(name) {
+        Some(entry) if entry.relkind == 'i' => Ok(Some(entry)),
+        Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
+            name: name.to_string(),
+            expected: "index",
+        })),
+        None if if_exists => Ok(None),
+        None => Err(ExecError::Parse(ParseError::TableDoesNotExist(
+            name.to_string(),
+        ))),
+    }
+}
+
 pub(super) fn lookup_rule_relation_for_ddl(
     catalog: &dyn CatalogLookup,
     name: &str,

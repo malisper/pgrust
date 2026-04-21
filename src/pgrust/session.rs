@@ -698,6 +698,24 @@ impl Session {
                     )
                 }
             }
+            Statement::AlterIndexRename(ref rename_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_index_rename_stmt_with_search_path(
+                        self.client_id,
+                        rename_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::AlterViewOwner(ref alter_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt);
@@ -1034,6 +1052,24 @@ impl Session {
                 } else {
                     let search_path = self.configured_search_path();
                     db.execute_alter_table_validate_constraint_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::AlterTableInherit(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_table_inherit_stmt_with_search_path(
                         self.client_id,
                         alter_stmt,
                         search_path.as_deref(),
@@ -1802,6 +1838,22 @@ impl Session {
                     &mut txn.temp_effects,
                 )
             }
+            Statement::AlterIndexRename(ref rename_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                if let Some(relation) = catalog.lookup_any_relation(&rename_stmt.table_name) {
+                    self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                }
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_index_rename_stmt_in_transaction_with_search_path(
+                    client_id,
+                    rename_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::AlterViewOwner(ref alter_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let relation = catalog
@@ -2264,6 +2316,38 @@ impl Session {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_alter_table_no_inherit_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::AlterTableInherit(ref alter_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let mut requests: BTreeMap<RelFileLocator, TableLockMode> = BTreeMap::new();
+                if let Some(relation) = catalog.lookup_any_relation(&alter_stmt.table_name) {
+                    requests
+                        .entry(relation.rel)
+                        .and_modify(|existing| {
+                            *existing = existing.strongest(TableLockMode::AccessExclusive)
+                        })
+                        .or_insert(TableLockMode::AccessExclusive);
+                }
+                if let Some(parent) = catalog.lookup_any_relation(&alter_stmt.parent_name) {
+                    requests
+                        .entry(parent.rel)
+                        .and_modify(|existing| {
+                            *existing = existing.strongest(TableLockMode::AccessShare)
+                        })
+                        .or_insert(TableLockMode::AccessShare);
+                }
+                let requests = requests.into_iter().collect::<Vec<_>>();
+                self.lock_table_requests_if_needed(db, &requests)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_table_inherit_stmt_in_transaction_with_search_path(
                     client_id,
                     alter_stmt,
                     xid,

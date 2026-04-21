@@ -2227,6 +2227,21 @@ fn parse_alter_table_set_statement() {
 }
 
 #[test]
+fn parse_alter_table_inherit_statement() {
+    let stmt =
+        parse_statement("alter table if exists only child_items inherit parent_items").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableInherit(AlterTableInheritStatement {
+            if_exists: true,
+            only: true,
+            table_name: "child_items".into(),
+            parent_name: "parent_items".into(),
+        })
+    );
+}
+
+#[test]
 fn parse_alter_table_no_inherit_statement() {
     let stmt =
         parse_statement("alter table if exists only child_items no inherit parent_items").unwrap();
@@ -2371,6 +2386,20 @@ fn parse_alter_table_rename_statement() {
             only: false,
             table_name: "items".into(),
             new_table_name: "items_new".into(),
+        })
+    );
+}
+
+#[test]
+fn parse_alter_index_rename_statement() {
+    let stmt = parse_statement("alter index if exists items_idx rename to items_idx_new").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterIndexRename(AlterTableRenameStatement {
+            if_exists: true,
+            only: false,
+            table_name: "items_idx".into(),
+            new_table_name: "items_idx_new".into(),
         })
     );
 }
