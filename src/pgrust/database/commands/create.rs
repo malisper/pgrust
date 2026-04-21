@@ -1,7 +1,7 @@
 use super::super::*;
 use crate::backend::parser::{
-    resolve_raw_type_name, CreateFunctionReturnSpec, CreateFunctionStatement, FunctionArgMode,
-    FunctionParallel, FunctionVolatility, OwnedSequenceSpec, SequenceOptionsSpec, SqlTypeKind,
+    CreateFunctionReturnSpec, CreateFunctionStatement, FunctionArgMode, FunctionParallel,
+    FunctionVolatility, OwnedSequenceSpec, SequenceOptionsSpec, SqlTypeKind, resolve_raw_type_name,
 };
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_PLPGSQL_OID,
@@ -10,9 +10,8 @@ use crate::include::catalog::{
 use crate::include::nodes::parsenodes::{ForeignKeyAction, ForeignKeyMatchType};
 use crate::include::nodes::primnodes::{QueryColumn, ToastRelationRef};
 use crate::pgrust::database::{
-    default_sequence_name_base, format_nextval_default_oid, initial_sequence_state,
-    resolve_sequence_options_spec, sequence_type_oid_for_serial_kind, SequenceData,
-    SequenceRuntime,
+    SequenceData, SequenceRuntime, default_sequence_name_base, format_nextval_default_oid,
+    initial_sequence_state, resolve_sequence_options_spec, sequence_type_oid_for_serial_kind,
 };
 
 #[derive(Debug, Clone, Copy)]

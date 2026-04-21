@@ -107,7 +107,9 @@ fn json_array_length_error(value: ParsedJsonValue) -> ExecError {
         | ParsedJsonValue::Jsonb(JsonbValue::Array(_)) => {
             unreachable!("array length errors should only be raised for non-arrays")
         }
-        ParsedJsonValue::Json(_) | ParsedJsonValue::Jsonb(_) => "cannot get array length of a scalar",
+        ParsedJsonValue::Json(_) | ParsedJsonValue::Jsonb(_) => {
+            "cannot get array length of a scalar"
+        }
     };
     ExecError::DetailedError {
         message: message.into(),

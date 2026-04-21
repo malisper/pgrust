@@ -108,12 +108,18 @@ impl DropTableDependency {
                 display_name,
                 relkind,
                 ..
-            } => (0, format!("{}:{display_name}", drop_table_relation_kind_name(*relkind))),
+            } => (
+                0,
+                format!("{}:{display_name}", drop_table_relation_kind_name(*relkind)),
+            ),
             Self::ForeignKey {
                 relation_display_name,
                 constraint,
                 ..
-            } => (1, format!("{relation_display_name}:{}", constraint.constraint_name)),
+            } => (
+                1,
+                format!("{relation_display_name}:{}", constraint.constraint_name),
+            ),
             Self::Rule {
                 relation_display_name,
                 rule_name,
@@ -176,7 +182,9 @@ fn drop_table_direct_dependencies(
     let mut deps = Vec::new();
 
     for row in ctx.catcache.depend_rows() {
-        if row.refclassid != PG_CLASS_RELATION_OID || row.refobjid != relation_oid || row.objsubid != 0
+        if row.refclassid != PG_CLASS_RELATION_OID
+            || row.refobjid != relation_oid
+            || row.objsubid != 0
         {
             continue;
         }
@@ -201,7 +209,8 @@ fn drop_table_direct_dependencies(
                 let Some(constraint) = ctx.constraints_by_oid.get(&row.objid) else {
                     continue;
                 };
-                if constraint.contype != CONSTRAINT_FOREIGN || !constraint_oids.insert(constraint.oid)
+                if constraint.contype != CONSTRAINT_FOREIGN
+                    || !constraint_oids.insert(constraint.oid)
                 {
                     continue;
                 }
@@ -550,9 +559,7 @@ impl Database {
             }
 
             if !drop_stmt.cascade && !plan.blocker_details.is_empty() {
-                let (_, source_name) = plan
-                    .blocker_source
-                    .unwrap_or(('r', "table".to_string()));
+                let (_, source_name) = plan.blocker_source.unwrap_or(('r', "table".to_string()));
                 return Err(ExecError::DetailedError {
                     message: format!(
                         "cannot drop table {source_name} because other objects depend on it"
@@ -1098,7 +1105,10 @@ mod tests {
                     detail,
                     "constraint children_parent_id_fkey on table children depends on table parents"
                 );
-                assert_eq!(hint, "Use DROP ... CASCADE to drop the dependent objects too.");
+                assert_eq!(
+                    hint,
+                    "Use DROP ... CASCADE to drop the dependent objects too."
+                );
                 assert_eq!(sqlstate, "2BP01");
             }
             other => panic!("expected detailed dependency error, got {other:?}"),
@@ -1156,7 +1166,9 @@ mod tests {
             .unwrap();
 
         clear_backend_notices();
-        session.execute(&db, "drop table base_items cascade").unwrap();
+        session
+            .execute(&db, "drop table base_items cascade")
+            .unwrap();
 
         assert_eq!(
             take_backend_notice_messages(),
@@ -1208,7 +1220,9 @@ mod tests {
             .unwrap();
 
         clear_backend_notices();
-        session.execute(&db, "drop table parents, children").unwrap();
+        session
+            .execute(&db, "drop table parents, children")
+            .unwrap();
 
         assert!(take_backend_notice_messages().is_empty());
         let catcache = db.backend_catcache(1, None).unwrap();
@@ -1221,7 +1235,9 @@ mod tests {
         let base = temp_dir("table_temp_inherit_cascade");
         let db = Database::open(&base, 16).unwrap();
         let mut session = Session::new(1);
-        session.execute(&db, "create table parents (id int4)").unwrap();
+        session
+            .execute(&db, "create table parents (id int4)")
+            .unwrap();
         session
             .execute(&db, "create temp table temp_child () inherits (parents)")
             .unwrap();

@@ -256,14 +256,9 @@ fn classify_select_target_srf(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> TargetSrfInfo {
-    if let Some(target) = top_level_set_returning_target(
-        expr,
-        scope,
-        catalog,
-        outer_scopes,
-        grouped_outer,
-        ctes,
-    ) {
+    if let Some(target) =
+        top_level_set_returning_target(expr, scope, catalog, outer_scopes, grouped_outer, ctes)
+    {
         TargetSrfInfo {
             top_level: Some(target),
             has_nested: false,
@@ -339,7 +334,7 @@ fn top_level_set_returning_target(
                 })
             }
             _ => None,
-        }
+        },
         _ => None,
     }
 }
@@ -363,7 +358,12 @@ fn bind_select_list_srf_target(
             args,
             func_variadic,
             field,
-        } => (name.as_str(), args.as_slice(), *func_variadic, Some(field.as_str())),
+        } => (
+            name.as_str(),
+            args.as_slice(),
+            *func_variadic,
+            Some(field.as_str()),
+        ),
     };
     let call = bind_select_list_srf_call(
         name,
@@ -815,6 +815,8 @@ fn visit_nested_srfs(
         | SqlExpr::Random
         | SqlExpr::CurrentDate
         | SqlExpr::CurrentUser
+        | SqlExpr::SessionUser
+        | SqlExpr::CurrentRole
         | SqlExpr::CurrentTime { .. }
         | SqlExpr::CurrentTimestamp { .. }
         | SqlExpr::LocalTime { .. }
@@ -1232,13 +1234,25 @@ fn bind_json_table_srf_args(
     };
     args.iter()
         .map(|arg| {
-            let raw_arg_type =
-                infer_sql_expr_type_with_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes);
+            let raw_arg_type = infer_sql_expr_type_with_ctes(
+                arg,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             let resolved_arg_type = target_type
                 .map(|target| coerce_unknown_string_literal_type(arg, raw_arg_type, target))
                 .unwrap_or(raw_arg_type);
-            let bound =
-                bind_expr_with_outer_and_ctes(arg, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+            let bound = bind_expr_with_outer_and_ctes(
+                arg,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?;
             Ok(match target_type {
                 Some(target) if resolved_arg_type == target && raw_arg_type != target => {
                     coerce_bound_expr(bound, raw_arg_type, target)

@@ -8,6 +8,7 @@ use super::comments::{
 };
 use super::parsenodes::*;
 use crate::backend::executor::{AggFunc, Value};
+use crate::include::catalog::PolicyCommand;
 use crate::include::nodes::datum::BitString;
 
 #[derive(Parser)]
@@ -162,6 +163,23 @@ fn try_parse_create_tablespace_statement(sql: &str) -> Result<Option<Statement>,
     )))
 }
 
+fn try_parse_policy_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("create policy ") {
+        return build_create_policy_statement(trimmed)
+            .map(|stmt| Some(Statement::CreatePolicy(stmt)));
+    }
+    if lowered.starts_with("alter policy ") {
+        return build_alter_policy_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterPolicy(stmt)));
+    }
+    if lowered.starts_with("drop policy ") {
+        return build_drop_policy_statement(trimmed).map(|stmt| Some(Statement::DropPolicy(stmt)));
+    }
+    Ok(None)
+}
+
 fn try_parse_trigger_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
@@ -240,6 +258,7 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
         "trigger" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Trigger))),
         "void" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Void))),
         "fdw_handler" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::FdwHandler))),
+        "regrole" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegRole))),
         "regprocedure" => {
             return Ok(RawTypeName::Builtin(SqlType::new(
                 SqlTypeKind::RegProcedure,
@@ -1662,6 +1681,317 @@ fn build_drop_trigger_statement(sql: &str) -> Result<DropTriggerStatement, Parse
     })
 }
 
+fn build_create_policy_statement(sql: &str) -> Result<CreatePolicyStatement, ParseError> {
+    let prefix = "create policy";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CREATE POLICY name ON table",
+            actual: sql.into(),
+        });
+    };
+    let mut rest = rest.trim_start();
+    let (policy_name, after_name) = parse_sql_identifier(rest)?;
+    rest = after_name.trim_start();
+    if !keyword_at_start(rest, "on") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ON",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "on").trim_start();
+    let ((schema_name, table_name), after_table) = parse_schema_qualified_name(rest)?;
+    let _ = schema_name;
+    rest = after_table.trim_start();
+
+    let mut permissive = true;
+    let mut command = PolicyCommand::All;
+    let mut role_names = vec!["public".to_string()];
+    let mut using_expr = None;
+    let mut using_sql = None;
+    let mut with_check_expr = None;
+    let mut with_check_sql = None;
+
+    while !rest.is_empty() {
+        if keyword_at_start(rest, "as") {
+            rest = consume_keyword(rest, "as").trim_start();
+            if keyword_at_start(rest, "permissive") {
+                permissive = true;
+                rest = consume_keyword(rest, "permissive").trim_start();
+                continue;
+            }
+            if keyword_at_start(rest, "restrictive") {
+                permissive = false;
+                rest = consume_keyword(rest, "restrictive").trim_start();
+                continue;
+            }
+            return Err(ParseError::UnexpectedToken {
+                expected: "PERMISSIVE or RESTRICTIVE",
+                actual: rest.into(),
+            });
+        }
+        if keyword_at_start(rest, "for") {
+            rest = consume_keyword(rest, "for").trim_start();
+            let (parsed_command, next_rest) = parse_policy_command(rest)?;
+            command = parsed_command;
+            rest = next_rest.trim_start();
+            continue;
+        }
+        if keyword_at_start(rest, "to") {
+            rest = consume_keyword(rest, "to").trim_start();
+            let boundary =
+                find_next_top_level_keyword(rest, &["using", "with"]).unwrap_or(rest.len());
+            role_names = parse_policy_role_list(&rest[..boundary])?;
+            rest = rest[boundary..].trim_start();
+            continue;
+        }
+        if keyword_at_start(rest, "using") {
+            rest = consume_keyword(rest, "using");
+            let (sql, next_rest) = take_parenthesized_segment(rest)?;
+            using_expr = Some(parse_expr(&sql)?);
+            using_sql = Some(sql.trim().to_string());
+            rest = next_rest.trim_start();
+            continue;
+        }
+        if keyword_at_start(rest, "with") {
+            rest = consume_keyword(rest, "with").trim_start();
+            if !keyword_at_start(rest, "check") {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "CHECK",
+                    actual: rest.into(),
+                });
+            }
+            rest = consume_keyword(rest, "check");
+            let (sql, next_rest) = take_parenthesized_segment(rest)?;
+            with_check_expr = Some(parse_expr(&sql)?);
+            with_check_sql = Some(sql.trim().to_string());
+            rest = next_rest.trim_start();
+            continue;
+        }
+        return Err(ParseError::UnexpectedToken {
+            expected: "AS, FOR, TO, USING, or WITH CHECK",
+            actual: rest.into(),
+        });
+    }
+
+    Ok(CreatePolicyStatement {
+        policy_name,
+        table_name,
+        permissive,
+        command,
+        role_names,
+        using_expr,
+        using_sql,
+        with_check_expr,
+        with_check_sql,
+    })
+}
+
+fn build_alter_policy_statement(sql: &str) -> Result<AlterPolicyStatement, ParseError> {
+    let prefix = "alter policy";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ALTER POLICY name ON table",
+            actual: sql.into(),
+        });
+    };
+    let mut rest = rest.trim_start();
+    let (policy_name, after_name) = parse_sql_identifier(rest)?;
+    rest = after_name.trim_start();
+    if !keyword_at_start(rest, "on") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ON",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "on").trim_start();
+    let ((schema_name, table_name), after_table) = parse_schema_qualified_name(rest)?;
+    let _ = schema_name;
+    rest = after_table.trim_start();
+
+    if keyword_at_start(rest, "rename") {
+        rest = consume_keyword(rest, "rename").trim_start();
+        if !keyword_at_start(rest, "to") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "TO",
+                actual: rest.into(),
+            });
+        }
+        rest = consume_keyword(rest, "to").trim_start();
+        let (new_name, remainder) = parse_sql_identifier(rest)?;
+        if !remainder.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of statement",
+                actual: remainder.trim().into(),
+            });
+        }
+        return Ok(AlterPolicyStatement {
+            policy_name,
+            table_name,
+            action: AlterPolicyAction::Rename { new_name },
+        });
+    }
+
+    let mut role_names = None;
+    let mut using_expr = None;
+    let mut using_sql = None;
+    let mut with_check_expr = None;
+    let mut with_check_sql = None;
+    let mut saw_clause = false;
+
+    while !rest.is_empty() {
+        if keyword_at_start(rest, "to") {
+            rest = consume_keyword(rest, "to").trim_start();
+            let boundary =
+                find_next_top_level_keyword(rest, &["using", "with"]).unwrap_or(rest.len());
+            role_names = Some(parse_policy_role_list(&rest[..boundary])?);
+            rest = rest[boundary..].trim_start();
+            saw_clause = true;
+            continue;
+        }
+        if keyword_at_start(rest, "using") {
+            rest = consume_keyword(rest, "using");
+            let (sql, next_rest) = take_parenthesized_segment(rest)?;
+            using_expr = Some(parse_expr(&sql)?);
+            using_sql = Some(sql.trim().to_string());
+            rest = next_rest.trim_start();
+            saw_clause = true;
+            continue;
+        }
+        if keyword_at_start(rest, "with") {
+            rest = consume_keyword(rest, "with").trim_start();
+            if !keyword_at_start(rest, "check") {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "CHECK",
+                    actual: rest.into(),
+                });
+            }
+            rest = consume_keyword(rest, "check");
+            let (sql, next_rest) = take_parenthesized_segment(rest)?;
+            with_check_expr = Some(parse_expr(&sql)?);
+            with_check_sql = Some(sql.trim().to_string());
+            rest = next_rest.trim_start();
+            saw_clause = true;
+            continue;
+        }
+        return Err(ParseError::UnexpectedToken {
+            expected: "RENAME, TO, USING, or WITH CHECK",
+            actual: rest.into(),
+        });
+    }
+
+    if !saw_clause {
+        return Err(ParseError::UnexpectedToken {
+            expected: "policy alteration clause",
+            actual: sql.into(),
+        });
+    }
+
+    Ok(AlterPolicyStatement {
+        policy_name,
+        table_name,
+        action: AlterPolicyAction::Update {
+            role_names,
+            using_expr,
+            using_sql,
+            with_check_expr,
+            with_check_sql,
+        },
+    })
+}
+
+fn build_drop_policy_statement(sql: &str) -> Result<DropPolicyStatement, ParseError> {
+    let prefix = "drop policy";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "DROP POLICY [IF EXISTS] name ON table",
+            actual: sql.into(),
+        });
+    };
+    let mut rest = rest.trim_start();
+    let mut if_exists = false;
+    if keyword_at_start(rest, "if") {
+        rest = consume_keyword(rest, "if").trim_start();
+        if !keyword_at_start(rest, "exists") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "IF EXISTS",
+                actual: sql.into(),
+            });
+        }
+        rest = consume_keyword(rest, "exists").trim_start();
+        if_exists = true;
+    }
+    let (policy_name, after_name) = parse_sql_identifier(rest)?;
+    rest = after_name.trim_start();
+    if !keyword_at_start(rest, "on") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ON",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "on").trim_start();
+    let ((schema_name, table_name), remainder) = parse_schema_qualified_name(rest)?;
+    let _ = schema_name;
+    if !remainder.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of statement",
+            actual: remainder.trim().into(),
+        });
+    }
+    Ok(DropPolicyStatement {
+        if_exists,
+        policy_name,
+        table_name,
+    })
+}
+
+fn parse_policy_command(input: &str) -> Result<(PolicyCommand, &str), ParseError> {
+    if keyword_at_start(input, "all") {
+        return Ok((PolicyCommand::All, consume_keyword(input, "all")));
+    }
+    if keyword_at_start(input, "select") {
+        return Ok((PolicyCommand::Select, consume_keyword(input, "select")));
+    }
+    if keyword_at_start(input, "insert") {
+        return Ok((PolicyCommand::Insert, consume_keyword(input, "insert")));
+    }
+    if keyword_at_start(input, "update") {
+        return Ok((PolicyCommand::Update, consume_keyword(input, "update")));
+    }
+    if keyword_at_start(input, "delete") {
+        return Ok((PolicyCommand::Delete, consume_keyword(input, "delete")));
+    }
+    Err(ParseError::UnexpectedToken {
+        expected: "ALL, SELECT, INSERT, UPDATE, or DELETE",
+        actual: input.into(),
+    })
+}
+
+fn parse_policy_role_list(input: &str) -> Result<Vec<String>, ParseError> {
+    let items = split_top_level_items(input.trim(), ',')?;
+    let mut out = Vec::new();
+    for item in items {
+        let trimmed = item.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let (role_name, rest) = parse_sql_identifier(trimmed)?;
+        if !rest.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "role name",
+                actual: trimmed.into(),
+            });
+        }
+        out.push(role_name);
+    }
+    if out.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "role name",
+            actual: input.into(),
+        });
+    }
+    Ok(out)
+}
+
 fn parse_qualified_sql_name(input: &str) -> Result<((Option<String>, String), &str), ParseError> {
     let (first, mut rest) = parse_sql_identifier(input)?;
     rest = rest.trim_start();
@@ -3054,6 +3384,17 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_alter_column_default_stmt => Ok(Statement::AlterTableAlterColumnDefault(
             build_alter_table_alter_column_default(inner)?,
         )),
+        Rule::alter_table_alter_column_storage_stmt => Ok(Statement::AlterTableAlterColumnStorage(
+            build_alter_table_alter_column_storage(inner)?,
+        )),
+        Rule::alter_table_alter_column_options_stmt => Ok(Statement::AlterTableAlterColumnOptions(
+            build_alter_table_alter_column_options(inner)?,
+        )),
+        Rule::alter_table_alter_column_statistics_stmt => {
+            Ok(Statement::AlterTableAlterColumnStatistics(
+                build_alter_table_alter_column_statistics(inner)?,
+            ))
+        }
         Rule::alter_table_owner_stmt => Ok(Statement::AlterTableOwner(build_alter_relation_owner(
             inner,
         )?)),
@@ -3070,6 +3411,12 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             inner,
         )?)),
         Rule::alter_table_set_stmt => Ok(Statement::AlterTableSet(build_alter_table_set(inner)?)),
+        Rule::alter_table_set_row_security_stmt => Ok(Statement::AlterTableSetRowSecurity(
+            build_alter_table_set_row_security(inner)?,
+        )),
+        Rule::alter_policy_stmt => Ok(Statement::AlterPolicy(build_alter_policy_statement(
+            inner.as_str(),
+        )?)),
         Rule::alter_table_set_not_null_stmt => Ok(Statement::AlterTableSetNotNull(
             build_alter_table_set_not_null(inner)?,
         )),
@@ -3088,6 +3435,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         }
         Rule::comment_on_rule_stmt => Ok(Statement::CommentOnRule(build_comment_on_rule(inner)?)),
         Rule::create_schema_stmt => Ok(Statement::CreateSchema(build_create_schema(inner)?)),
+        Rule::create_policy_stmt => Ok(Statement::CreatePolicy(build_create_policy_statement(
+            inner.as_str(),
+        )?)),
         Rule::create_table_stmt => build_create_table(inner),
         Rule::create_view_stmt => Ok(Statement::CreateView(build_create_view(inner)?)),
         Rule::create_rule_stmt => Ok(Statement::CreateRule(build_create_rule(inner)?)),
@@ -3097,6 +3447,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::drop_index_stmt => Ok(Statement::DropIndex(build_drop_index(inner)?)),
         Rule::drop_view_stmt => Ok(Statement::DropView(build_drop_view(inner)?)),
         Rule::drop_rule_stmt => Ok(Statement::DropRule(build_drop_rule(inner)?)),
+        Rule::drop_policy_stmt => Ok(Statement::DropPolicy(build_drop_policy_statement(
+            inner.as_str(),
+        )?)),
         Rule::drop_schema_stmt => Ok(Statement::DropSchema(build_drop_schema(inner)?)),
         Rule::reassign_owned_stmt => Ok(Statement::ReassignOwned(build_reassign_owned(inner)?)),
         Rule::truncate_table_stmt => Ok(Statement::TruncateTable(build_truncate_table(inner)?)),
@@ -3133,6 +3486,7 @@ fn build_table_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseErro
         where_clause: None,
         group_by: Vec::new(),
         having: None,
+        window_clauses: Vec::new(),
         order_by: Vec::new(),
         limit: None,
         offset: None,
@@ -3314,8 +3668,26 @@ fn build_set_session_authorization(
 ) -> Result<SetSessionAuthorizationStatement, ParseError> {
     let role_name = pair
         .into_inner()
-        .find(|part| part.as_rule() == Rule::identifier)
-        .map(build_identifier)
+        .find_map(|part| match part.as_rule() {
+            Rule::identifier => Some(Ok(build_identifier(part))),
+            Rule::set_session_authorization_target => {
+                let inner = part.into_inner().next().ok_or(ParseError::UnexpectedEof);
+                Some(inner.and_then(|inner| match inner.as_rule() {
+                    Rule::identifier => Ok(build_identifier(inner)),
+                    Rule::quoted_string_literal
+                    | Rule::string_literal
+                    | Rule::unicode_string_literal
+                    | Rule::escape_string_literal
+                    | Rule::dollar_string_literal => decode_string_literal_pair(inner),
+                    _ => Err(ParseError::UnexpectedToken {
+                        expected: "role name",
+                        actual: inner.as_str().into(),
+                    }),
+                }))
+            }
+            _ => None,
+        })
+        .transpose()?
         .ok_or(ParseError::UnexpectedEof)?;
     Ok(SetSessionAuthorizationStatement { role_name })
 }
@@ -3408,7 +3780,12 @@ fn build_alter_group(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         match part.as_rule() {
             Rule::identifier if role_name.is_none() => role_name = Some(build_identifier(part)),
             Rule::alter_group_action => {
-                is_add = Some(part.as_str().trim_start().to_ascii_lowercase().starts_with("add"));
+                is_add = Some(
+                    part.as_str()
+                        .trim_start()
+                        .to_ascii_lowercase()
+                        .starts_with("add"),
+                );
                 for inner in part.into_inner() {
                     match inner.as_rule() {
                         Rule::ident_list => {
@@ -3429,25 +3806,29 @@ fn build_alter_group(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         return Err(ParseError::UnexpectedEof);
     }
     if is_add {
-        Ok(Statement::GrantRoleMembership(GrantRoleMembershipStatement {
-            role_names: vec![role_name],
-            grantee_names,
-            admin_option: false,
-            inherit_option: None,
-            set_option: None,
-            granted_by: None,
-        }))
+        Ok(Statement::GrantRoleMembership(
+            GrantRoleMembershipStatement {
+                role_names: vec![role_name],
+                grantee_names,
+                admin_option: false,
+                inherit_option: None,
+                set_option: None,
+                granted_by: None,
+            },
+        ))
     } else {
-        Ok(Statement::RevokeRoleMembership(RevokeRoleMembershipStatement {
-            role_names: vec![role_name],
-            grantee_names,
-            revoke_membership: true,
-            admin_option: false,
-            inherit_option: false,
-            set_option: false,
-            cascade: false,
-            granted_by: None,
-        }))
+        Ok(Statement::RevokeRoleMembership(
+            RevokeRoleMembershipStatement {
+                role_names: vec![role_name],
+                grantee_names,
+                revoke_membership: true,
+                admin_option: false,
+                inherit_option: false,
+                set_option: false,
+                cascade: false,
+                granted_by: None,
+            },
+        ))
     }
 }
 
@@ -3739,6 +4120,7 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
     let mut where_clause = None;
     let mut group_by = Vec::new();
     let mut having = None;
+    let mut window_clauses = Vec::new();
     let mut order_by = Vec::new();
     let mut limit = None;
     let mut offset = None;
@@ -3760,11 +4142,7 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
                         Rule::expr => where_clause = Some(build_expr(inner)?),
                         Rule::group_by_clause => group_by = build_group_by_clause(inner)?,
                         Rule::having_clause => having = Some(build_having_clause(inner)?),
-                        Rule::window_clause_unsupported => {
-                            return Err(ParseError::FeatureNotSupported(
-                                "WINDOW clause aliases".into(),
-                            ));
-                        }
+                        Rule::window_clause => window_clauses = build_window_clause(inner)?,
                         Rule::order_by_clause => order_by = build_order_by_clause(inner)?,
                         Rule::limit_clause => limit = Some(build_limit_clause(inner)?),
                         Rule::offset_clause => offset = Some(build_offset_clause(inner)?),
@@ -3778,11 +4156,7 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
             Rule::expr => where_clause = Some(build_expr(part)?),
             Rule::group_by_clause => group_by = build_group_by_clause(part)?,
             Rule::having_clause => having = Some(build_having_clause(part)?),
-            Rule::window_clause_unsupported => {
-                return Err(ParseError::FeatureNotSupported(
-                    "WINDOW clause aliases".into(),
-                ));
-            }
+            Rule::window_clause => window_clauses = build_window_clause(part)?,
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
             Rule::limit_clause => limit = Some(build_limit_clause(part)?),
             Rule::offset_clause => offset = Some(build_offset_clause(part)?),
@@ -3799,6 +4173,7 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
         where_clause,
         group_by,
         having,
+        window_clauses,
         order_by,
         limit,
         offset,
@@ -3832,6 +4207,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
     let raw = pair.as_str().to_string();
     let mut with_recursive = false;
     let mut with = Vec::new();
+    let mut window_clauses = Vec::new();
     let mut order_by = Vec::new();
     let mut limit = None;
     let mut offset = None;
@@ -3859,11 +4235,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
                 };
                 operators.push(op);
             }
-            Rule::window_clause_unsupported => {
-                return Err(ParseError::FeatureNotSupported(
-                    "WINDOW clause aliases".into(),
-                ));
-            }
+            Rule::window_clause => window_clauses = build_window_clause(part)?,
             Rule::order_by_clause => order_by = build_order_by_clause(part)?,
             Rule::limit_clause => limit = Some(build_limit_clause(part)?),
             Rule::offset_clause => offset = Some(build_offset_clause(part)?),
@@ -3890,6 +4262,7 @@ fn build_set_operation_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, P
         where_clause: None,
         group_by: Vec::new(),
         having: None,
+        window_clauses,
         order_by,
         limit,
         offset,
@@ -3950,6 +4323,7 @@ fn select_statement_for_set_operation(
         where_clause: None,
         group_by: Vec::new(),
         having: None,
+        window_clauses: Vec::new(),
         order_by: Vec::new(),
         limit: None,
         offset: None,
@@ -4005,6 +4379,7 @@ fn wrap_values_as_select(stmt: ValuesStatement) -> SelectStatement {
         where_clause: None,
         group_by: Vec::new(),
         having: None,
+        window_clauses: Vec::new(),
         order_by: stmt.order_by,
         limit: stmt.limit,
         offset: stmt.offset,
@@ -4495,6 +4870,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
     let mut columns = None;
     let mut source = None;
     let mut on_conflict = None;
+    let mut returning = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::cte_clause => {
@@ -4526,6 +4902,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
             Rule::insert_default_values_source => source = Some(InsertSource::DefaultValues),
             Rule::select_stmt => source = Some(InsertSource::Select(Box::new(build_select(part)?))),
             Rule::on_conflict_clause => on_conflict = Some(build_on_conflict_clause(part)?),
+            Rule::returning_clause => returning = build_returning_clause(part)?,
             _ => {}
         }
     }
@@ -4537,6 +4914,7 @@ fn build_insert(pair: Pair<'_, Rule>) -> Result<InsertStatement, ParseError> {
         columns,
         source: source.ok_or(ParseError::UnexpectedEof)?,
         on_conflict,
+        returning,
     })
 }
 
@@ -5518,12 +5896,13 @@ fn build_reference_action_clause(
     let lower = text.to_ascii_lowercase();
     match inner.as_rule() {
         Rule::delete_action_clause => {
-            let action = lower
-                .strip_prefix("on delete ")
-                .ok_or_else(|| ParseError::UnexpectedToken {
-                    expected: "ON DELETE action",
-                    actual: text.to_string(),
-                })?;
+            let action =
+                lower
+                    .strip_prefix("on delete ")
+                    .ok_or_else(|| ParseError::UnexpectedToken {
+                        expected: "ON DELETE action",
+                        actual: text.to_string(),
+                    })?;
             let set_columns = inner
                 .into_inner()
                 .find(|part| part.as_rule() == Rule::delete_reference_action)
@@ -5539,12 +5918,13 @@ fn build_reference_action_clause(
             ))
         }
         Rule::update_action_clause => {
-            let action = lower
-                .strip_prefix("on update ")
-                .ok_or_else(|| ParseError::UnexpectedToken {
-                    expected: "ON UPDATE action",
-                    actual: text.to_string(),
-                })?;
+            let action =
+                lower
+                    .strip_prefix("on update ")
+                    .ok_or_else(|| ParseError::UnexpectedToken {
+                        expected: "ON UPDATE action",
+                        actual: text.to_string(),
+                    })?;
             Ok((false, build_reference_action_text(action.trim())?, None))
         }
         _ => Err(ParseError::UnexpectedToken {
@@ -5737,6 +6117,56 @@ fn build_alter_table_set(pair: Pair<'_, Rule>) -> Result<AlterTableSetStatement,
     })
 }
 
+fn build_alter_table_set_row_security(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableSetRowSecurityStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
+    let mut table_name = None;
+    let mut action = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
+            Rule::alter_table_row_security_action => {
+                action = Some(build_alter_table_row_security_action(part)?);
+            }
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            _ => {}
+        }
+    }
+    Ok(AlterTableSetRowSecurityStatement {
+        if_exists,
+        only,
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        action: action.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_alter_table_row_security_action(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableRowSecurityAction, ParseError> {
+    let lowered = pair.as_str().to_ascii_lowercase();
+    if lowered.starts_with("enable ") {
+        return Ok(AlterTableRowSecurityAction::Enable);
+    }
+    if lowered.starts_with("disable ") {
+        return Ok(AlterTableRowSecurityAction::Disable);
+    }
+    if lowered.starts_with("no force ") {
+        return Ok(AlterTableRowSecurityAction::NoForce);
+    }
+    if lowered.starts_with("force ") {
+        return Ok(AlterTableRowSecurityAction::Force);
+    }
+    Err(ParseError::UnexpectedEof)
+}
+
 fn build_comment_on_table(pair: Pair<'_, Rule>) -> Result<CommentOnTableStatement, ParseError> {
     let mut table_name = None;
     let mut comment = None;
@@ -5906,6 +6336,7 @@ fn build_on_commit_action(pair: Pair<'_, Rule>) -> Result<OnCommitAction, ParseE
 fn build_drop_table(pair: Pair<'_, Rule>) -> Result<DropTableStatement, ParseError> {
     let mut if_exists = false;
     let mut table_names = Vec::new();
+    let mut cascade = false;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::if_exists_clause => if_exists = true,
@@ -5913,6 +6344,9 @@ fn build_drop_table(pair: Pair<'_, Rule>) -> Result<DropTableStatement, ParseErr
                 table_names.extend(part.into_inner().map(build_identifier));
             }
             Rule::identifier => table_names.push(build_identifier(part)),
+            Rule::drop_behavior => {
+                cascade = part.as_str().eq_ignore_ascii_case("cascade");
+            }
             _ => {}
         }
     }
@@ -5922,6 +6356,7 @@ fn build_drop_table(pair: Pair<'_, Rule>) -> Result<DropTableStatement, ParseErr
     Ok(DropTableStatement {
         if_exists,
         table_names,
+        cascade,
     })
 }
 
@@ -6163,6 +6598,7 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
     let mut only = false;
     let mut assignments = Vec::new();
     let mut where_clause = None;
+    let mut returning = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::cte_clause => {
@@ -6174,6 +6610,7 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::assignment => assignments.push(build_assignment(part)?),
             Rule::expr => where_clause = Some(build_expr(part)?),
+            Rule::returning_clause => returning = build_returning_clause(part)?,
             _ => {}
         }
     }
@@ -6184,6 +6621,7 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
         only,
         assignments,
         where_clause,
+        returning,
     })
 }
 
@@ -6193,6 +6631,7 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
     let mut table_name = None;
     let mut only = false;
     let mut where_clause = None;
+    let mut returning = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::cte_clause => {
@@ -6203,6 +6642,7 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
             Rule::only_clause => only = true,
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::expr => where_clause = Some(build_expr(part)?),
+            Rule::returning_clause => returning = build_returning_clause(part)?,
             _ => {}
         }
     }
@@ -6212,6 +6652,7 @@ fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         only,
         where_clause,
+        returning,
     })
 }
 
@@ -6269,6 +6710,14 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
     }
 
     Ok(items)
+}
+
+fn build_returning_clause(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError> {
+    let select_list = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::select_list)
+        .ok_or(ParseError::UnexpectedEof)?;
+    build_select_list(select_list)
 }
 
 fn top_level_extract_expr(pair: Pair<'_, Rule>) -> bool {
@@ -6341,6 +6790,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Int8Range => "int8range",
         SqlTypeKind::Name => "name",
         SqlTypeKind::Oid => "oid",
+        SqlTypeKind::RegRole => "regrole",
         SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::Tid => "tid",
         SqlTypeKind::Xid => "xid",
@@ -6829,6 +7279,142 @@ fn build_alter_table_alter_column_default(
         column_name: column_name.ok_or(ParseError::UnexpectedEof)?,
         default_expr,
         default_expr_sql,
+    })
+}
+
+fn build_alter_table_alter_column_storage(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableAlterColumnStorageStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
+    let mut table_name = None;
+    let mut column_name = None;
+    let mut storage = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::identifier if column_name.is_none() => column_name = Some(build_identifier(part)),
+            Rule::identifier => {
+                storage = Some(match build_identifier(part).to_ascii_lowercase().as_str() {
+                    "plain" => crate::include::access::htup::AttributeStorage::Plain,
+                    "external" => crate::include::access::htup::AttributeStorage::External,
+                    "extended" => crate::include::access::htup::AttributeStorage::Extended,
+                    "main" => crate::include::access::htup::AttributeStorage::Main,
+                    actual => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "PLAIN, EXTERNAL, EXTENDED, or MAIN",
+                            actual: actual.to_string(),
+                        });
+                    }
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(AlterTableAlterColumnStorageStatement {
+        if_exists,
+        only,
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        column_name: column_name.ok_or(ParseError::UnexpectedEof)?,
+        storage: storage.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_alter_table_alter_column_options(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableAlterColumnOptionsStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
+    let mut table_name = None;
+    let mut column_name = None;
+    let mut action = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::identifier if column_name.is_none() => column_name = Some(build_identifier(part)),
+            Rule::alter_table_column_options_action => {
+                for inner in part.into_inner() {
+                    match inner.as_rule() {
+                        Rule::alter_table_set_options_action => {
+                            let options = inner
+                                .into_inner()
+                                .filter(|item| item.as_rule() == Rule::reloption)
+                                .map(build_reloption)
+                                .collect::<Result<Vec<_>, _>>()?;
+                            action = Some(AlterColumnOptionsAction::Set(options));
+                        }
+                        Rule::alter_table_reset_options_action => {
+                            let options = inner
+                                .into_inner()
+                                .find(|item| item.as_rule() == Rule::ident_list)
+                                .map(|list| list.into_inner().map(build_identifier).collect())
+                                .ok_or(ParseError::UnexpectedEof)?;
+                            action = Some(AlterColumnOptionsAction::Reset(options));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(AlterTableAlterColumnOptionsStatement {
+        if_exists,
+        only,
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        column_name: column_name.ok_or(ParseError::UnexpectedEof)?,
+        action: action.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_alter_table_alter_column_statistics(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableAlterColumnStatisticsStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
+    let mut table_name = None;
+    let mut column_name = None;
+    let mut statistics_target = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::identifier if column_name.is_none() => column_name = Some(build_identifier(part)),
+            Rule::signed_integer => {
+                let value = parse_i32(part)?;
+                let value = i16::try_from(value)
+                    .map_err(|_| ParseError::InvalidInteger(value.to_string()))?;
+                statistics_target = Some(value);
+            }
+            _ => {}
+        }
+    }
+    Ok(AlterTableAlterColumnStatisticsStatement {
+        if_exists,
+        only,
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        column_name: column_name.ok_or(ParseError::UnexpectedEof)?,
+        statistics_target: statistics_target.ok_or(ParseError::UnexpectedEof)?,
     })
 }
 
@@ -8004,6 +8590,8 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::kw_false => Ok(SqlExpr::Const(Value::Bool(false))),
         Rule::kw_current_date => Ok(SqlExpr::CurrentDate),
         Rule::kw_current_user => Ok(SqlExpr::CurrentUser),
+        Rule::kw_session_user => Ok(SqlExpr::SessionUser),
+        Rule::kw_current_role => Ok(SqlExpr::CurrentRole),
         Rule::kw_current_time => Ok(SqlExpr::CurrentTime {
             precision: pair
                 .into_inner()
@@ -8166,9 +8754,11 @@ fn build_agg_filter_clause(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> 
 }
 
 fn build_over_clause(pair: Pair<'_, Rule>) -> Result<RawWindowSpec, ParseError> {
+    let mut name = None;
     let mut spec = None;
     for part in pair.into_inner() {
         match part.as_rule() {
+            Rule::identifier => name = Some(build_identifier(part)),
             Rule::raw_window_spec => spec = Some(build_raw_window_spec(part)?),
             Rule::unsupported_window_frame => {
                 return Err(ParseError::FeatureNotSupported(
@@ -8178,10 +8768,50 @@ fn build_over_clause(pair: Pair<'_, Rule>) -> Result<RawWindowSpec, ParseError> 
             _ => {}
         }
     }
+    if let Some(name) = name {
+        return Ok(RawWindowSpec {
+            name: Some(name),
+            partition_by: Vec::new(),
+            order_by: Vec::new(),
+        });
+    }
     Ok(spec.unwrap_or(RawWindowSpec {
+        name: None,
         partition_by: Vec::new(),
         order_by: Vec::new(),
     }))
+}
+
+fn build_window_clause(pair: Pair<'_, Rule>) -> Result<Vec<RawWindowClause>, ParseError> {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::window_definition)
+        .map(build_window_definition)
+        .collect()
+}
+
+fn build_window_definition(pair: Pair<'_, Rule>) -> Result<RawWindowClause, ParseError> {
+    let mut name = None;
+    let mut spec = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => name = Some(build_identifier(part)),
+            Rule::raw_window_spec => spec = Some(build_raw_window_spec(part)?),
+            Rule::unsupported_window_frame => {
+                return Err(ParseError::FeatureNotSupported(
+                    "window frame clauses".into(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(RawWindowClause {
+        name: name.ok_or(ParseError::UnexpectedEof)?,
+        spec: spec.unwrap_or(RawWindowSpec {
+            name: None,
+            partition_by: Vec::new(),
+            order_by: Vec::new(),
+        }),
+    })
 }
 
 fn build_raw_window_spec(pair: Pair<'_, Rule>) -> Result<RawWindowSpec, ParseError> {
@@ -8207,6 +8837,7 @@ fn build_raw_window_spec(pair: Pair<'_, Rule>) -> Result<RawWindowSpec, ParseErr
         }
     }
     Ok(RawWindowSpec {
+        name: None,
         partition_by,
         order_by,
     })

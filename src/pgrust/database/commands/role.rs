@@ -1100,7 +1100,12 @@ mod tests {
         let app_group_oid = role_oid(&db, "app_group");
         let admin_member_oid = role_oid(&db, "admin_member");
         let regular_member_oid = role_oid(&db, "regular_member");
-        let grants = db.shared_catalog.read().catcache().unwrap().auth_members_rows();
+        let grants = db
+            .shared_catalog
+            .read()
+            .catcache()
+            .unwrap()
+            .auth_members_rows();
         assert!(grants.iter().any(|row| {
             row.roleid == app_group_oid && row.member == admin_member_oid && row.admin_option
         }));

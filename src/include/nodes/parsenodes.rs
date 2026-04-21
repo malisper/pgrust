@@ -1,3 +1,4 @@
+use crate::include::catalog::PolicyCommand;
 use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::AggFunc;
@@ -5,7 +6,6 @@ use crate::include::nodes::primnodes::{
     AggAccum, Expr, JoinType, ProjectSetTarget, QueryColumn, RelationDesc, SetReturningCall,
     SortGroupClause, TargetEntry, ToastRelationRef, WindowClause,
 };
-use crate::include::catalog::PolicyCommand;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 

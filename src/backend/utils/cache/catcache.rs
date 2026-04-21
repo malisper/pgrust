@@ -4,8 +4,8 @@ use std::path::Path;
 use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::catalog::Catalog;
 use crate::backend::catalog::loader::load_physical_catalog_rows;
-use crate::backend::catalog::pg_am::sort_pg_am_rows;
 use crate::backend::catalog::pg_aggregate::sort_pg_aggregate_rows;
+use crate::backend::catalog::pg_am::sort_pg_am_rows;
 use crate::backend::catalog::pg_amop::sort_pg_amop_rows;
 use crate::backend::catalog::pg_amproc::sort_pg_amproc_rows;
 use crate::backend::catalog::pg_attrdef::sort_pg_attrdef_rows;
@@ -46,20 +46,20 @@ use crate::include::catalog::{
     MONEY_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID,
     PATH_TYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, PgAggregateRow, PgAmRow, PgAmopRow,
     PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow,
-    PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgIndexRow,
-    PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow,
-    PgPolicyRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow,
-    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
-    REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID,
+    PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow,
+    PgForeignDataWrapperRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
+    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPolicyRow, PgProcRow, PgRewriteRow,
+    PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
+    PgTsParserRow, PgTsTemplateRow, PgTypeRow, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID,
     REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
     TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
     TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID,
     VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
-    XID_ARRAY_TYPE_OID, XID_TYPE_OID, PgForeignDataWrapperRow, bootstrap_composite_type_rows,
-    bootstrap_pg_aggregate_rows, bootstrap_pg_am_rows, bootstrap_pg_amop_rows,
-    bootstrap_pg_amproc_rows, bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows,
-    bootstrap_pg_cast_rows, bootstrap_pg_collation_rows, bootstrap_pg_constraint_rows,
-    bootstrap_pg_database_rows, bootstrap_pg_foreign_data_wrapper_rows, bootstrap_pg_language_rows,
+    XID_ARRAY_TYPE_OID, XID_TYPE_OID, bootstrap_composite_type_rows, bootstrap_pg_aggregate_rows,
+    bootstrap_pg_am_rows, bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows,
+    bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows, bootstrap_pg_cast_rows,
+    bootstrap_pg_collation_rows, bootstrap_pg_constraint_rows, bootstrap_pg_database_rows,
+    bootstrap_pg_foreign_data_wrapper_rows, bootstrap_pg_language_rows,
     bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
     bootstrap_pg_opfamily_rows, bootstrap_pg_proc_rows, bootstrap_pg_tablespace_rows,
     bootstrap_pg_ts_config_map_rows, bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows,
@@ -374,7 +374,9 @@ impl CatCache {
             .rewrite_rows
             .extend(catalog.rewrite_rows().iter().cloned());
         cache.trigger_rows.extend(catalog.triggers.iter().cloned());
-        cache.policy_rows.extend(catalog.policy_rows().iter().cloned());
+        cache
+            .policy_rows
+            .extend(catalog.policy_rows().iter().cloned());
         sort_pg_constraint_rows(&mut cache.constraint_rows);
         sort_pg_depend_rows(&mut cache.depend_rows);
         sort_pg_inherits_rows(&mut cache.inherit_rows);

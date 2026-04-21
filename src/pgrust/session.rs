@@ -440,7 +440,11 @@ impl Session {
         let Some(txn) = self.active_txn.as_mut() else {
             return;
         };
-        let consumed_catalog_cids = txn.catalog_effects.len().saturating_sub(effect_start).max(1);
+        let consumed_catalog_cids = txn
+            .catalog_effects
+            .len()
+            .saturating_sub(effect_start)
+            .max(1);
         let next_cid = base_cid.saturating_add(consumed_catalog_cids as u32);
         txn.next_command_id = txn.next_command_id.max(next_cid);
     }

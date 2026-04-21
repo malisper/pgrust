@@ -108,7 +108,9 @@ fn finite_integer(value: &NumericValue) -> Option<i64> {
         return Some(0);
     }
     match value.clone().normalize() {
-        NumericValue::Finite { coeff, scale: 0, .. } => coeff.to_i64(),
+        NumericValue::Finite {
+            coeff, scale: 0, ..
+        } => coeff.to_i64(),
         _ => None,
     }
 }
