@@ -3896,6 +3896,184 @@ fn multidimensional_array_columns_round_trip_through_storage() {
 }
 
 #[test]
+fn array_append_prepend_and_cat_match_postgres() {
+    let base = temp_dir("array_append_prepend_cat");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select array_append(array[42], 6)",
+        )
+        .unwrap(),
+        vec![vec![Value::PgArray(
+            ArrayValue::from_dimensions(
+                vec![ArrayDimension {
+                    lower_bound: 1,
+                    length: 2,
+                }],
+                vec![Value::Int32(42), Value::Int32(6)],
+            ),
+        )]],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select array_prepend(6, array[42])",
+        )
+        .unwrap(),
+        vec![vec![Value::PgArray(
+            ArrayValue::from_dimensions(
+                vec![ArrayDimension {
+                    lower_bound: 1,
+                    length: 2,
+                }],
+                vec![Value::Int32(6), Value::Int32(42)],
+            ),
+        )]],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select array_cat(ARRAY[1,2], ARRAY[3,4])",
+        )
+        .unwrap(),
+        vec![vec![Value::PgArray(
+            ArrayValue::from_dimensions(
+                vec![ArrayDimension {
+                    lower_bound: 1,
+                    length: 4,
+                }],
+                vec![
+                    Value::Int32(1),
+                    Value::Int32(2),
+                    Value::Int32(3),
+                    Value::Int32(4),
+                ],
+            ),
+        )]],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select array_cat(ARRAY[1,2], ARRAY[[3,4],[5,6]])",
+        )
+        .unwrap(),
+        vec![vec![Value::PgArray(
+            ArrayValue::from_dimensions(
+                vec![
+                    ArrayDimension {
+                        lower_bound: 1,
+                        length: 3,
+                    },
+                    ArrayDimension {
+                        lower_bound: 1,
+                        length: 2,
+                    },
+                ],
+                vec![
+                    Value::Int32(1),
+                    Value::Int32(2),
+                    Value::Int32(3),
+                    Value::Int32(4),
+                    Value::Int32(5),
+                    Value::Int32(6),
+                ],
+            ),
+        )]],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select array_cat(ARRAY[[3,4],[5,6]], ARRAY[1,2])",
+        )
+        .unwrap(),
+        vec![vec![Value::PgArray(
+            ArrayValue::from_dimensions(
+                vec![
+                    ArrayDimension {
+                        lower_bound: 1,
+                        length: 3,
+                    },
+                    ArrayDimension {
+                        lower_bound: 1,
+                        length: 2,
+                    },
+                ],
+                vec![
+                    Value::Int32(3),
+                    Value::Int32(4),
+                    Value::Int32(5),
+                    Value::Int32(6),
+                    Value::Int32(1),
+                    Value::Int32(2),
+                ],
+            ),
+        )]],
+    );
+}
+
+#[test]
+fn array_position_reports_multidimensional_search_error() {
+    let base = temp_dir("array_position_multidimensional_error");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select array_position(ARRAY[[1,2],[3,4]], 3)",
+    )
+    .unwrap_err()
+    {
+        ExecError::DetailedError {
+            message, sqlstate, ..
+        } => {
+            assert_eq!(
+                message,
+                "searching for elements in multidimensional arrays is not supported"
+            );
+            assert_eq!(sqlstate, "0A000");
+        }
+        other => panic!("expected detailed error, got {other:?}"),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select array_positions(ARRAY[[1,2],[3,4]], 4)",
+    )
+    .unwrap_err()
+    {
+        ExecError::DetailedError {
+            message, sqlstate, ..
+        } => {
+            assert_eq!(
+                message,
+                "searching for elements in multidimensional arrays is not supported"
+            );
+            assert_eq!(sqlstate, "0A000");
+        }
+        other => panic!("expected detailed error, got {other:?}"),
+    }
+}
+
+#[test]
 fn array_subscript_select_and_update_work() {
     let base = temp_dir("array_subscript_update");
     let mut txns = TransactionManager::new_durable(&base).unwrap();
