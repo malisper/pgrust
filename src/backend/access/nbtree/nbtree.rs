@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLockWriteGuard;
 
+use crate::backend::access::common::toast_compression::compress_inline_datum;
 use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_next_visible};
 use crate::backend::access::index::unique::{UniqueCandidateResult, classify_unique_candidate};
 use crate::backend::access::nbtree::nbtcompare::{compare_bt_keyspace, compare_bt_values};
@@ -19,20 +20,22 @@ use crate::backend::catalog::CatalogError;
 use crate::backend::executor::render_datetime_value_text;
 use crate::backend::executor::value_io::{decode_value, missing_column_value};
 use crate::backend::storage::fsm::get_free_index_page;
-use crate::backend::storage::page::bufpage::page_header;
+use crate::backend::storage::page::bufpage::{MAX_HEAP_TUPLE_SIZE, max_align, page_header};
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, StorageManager};
 use crate::backend::utils::misc::interrupts::check_for_interrupts;
 use crate::include::access::amapi::{
     IndexAmRoutine, IndexBeginScanContext, IndexBuildContext, IndexBuildEmptyContext,
     IndexBuildResult, IndexInsertContext,
 };
+use crate::include::access::htup::{AttributeCompression, AttributeStorage};
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::itup::IndexTupleData;
 use crate::include::access::nbtree::{
     BTP_DELETED, BTP_INCOMPLETE_SPLIT, BTP_LEAF, BTP_ROOT, BTREE_DEFAULT_FILLFACTOR,
-    BTREE_METAPAGE, BTREE_NONLEAF_FILLFACTOR, P_NONE, bt_init_meta_page, bt_page_append_tuple,
-    bt_page_data_items, bt_page_get_meta, bt_page_get_opaque, bt_page_high_key, bt_page_init,
-    bt_page_is_recyclable, bt_page_set_high_key, bt_page_set_opaque,
+    BTREE_METAPAGE, BTREE_NONLEAF_FILLFACTOR, BTREE_VERSION, P_NONE, bt_init_meta_page,
+    bt_max_item_size, bt_page_append_tuple, bt_page_data_items, bt_page_get_meta,
+    bt_page_get_opaque, bt_page_high_key, bt_page_init, bt_page_is_recyclable,
+    bt_page_set_high_key, bt_page_set_opaque,
 };
 use crate::include::access::relscan::{
     BtIndexScanOpaque, IndexScanDesc, IndexScanOpaque, ScanDirection,
@@ -50,6 +53,7 @@ fn check_catalog_interrupts(
 }
 
 const BT_DESC_FLAG: i16 = 0x0001;
+const TOAST_INDEX_TARGET: usize = MAX_HEAP_TUPLE_SIZE / 16;
 
 #[derive(Debug, Clone)]
 struct BuiltPageRef {
@@ -181,7 +185,39 @@ fn decode_index_value(column: &ColumnDesc, bytes: &[u8]) -> Result<Value, Catalo
     decode_value(column, Some(bytes)).map_err(|err| CatalogError::Io(format!("{err:?}")))
 }
 
-fn encode_key_payload(desc: &RelationDesc, values: &[Value]) -> Result<Vec<u8>, CatalogError> {
+fn maybe_compress_index_value(
+    column: &ColumnDesc,
+    bytes: Vec<u8>,
+    default_toast_compression: AttributeCompression,
+) -> Result<Vec<u8>, CatalogError> {
+    if column.storage.attlen != -1
+        || bytes.len() <= TOAST_INDEX_TARGET
+        || !matches!(
+            column.storage.attstorage,
+            AttributeStorage::Extended | AttributeStorage::Main
+        )
+    {
+        return Ok(bytes);
+    }
+
+    match compress_inline_datum(
+        &bytes,
+        column.storage.attcompression,
+        default_toast_compression,
+    ) {
+        Ok(Some(compressed)) => Ok(compressed.encoded),
+        Ok(None) => Ok(bytes),
+        Err(err) => Err(CatalogError::Io(format!(
+            "btree index key compression failed: {err:?}"
+        ))),
+    }
+}
+
+fn encode_key_payload(
+    desc: &RelationDesc,
+    values: &[Value],
+    default_toast_compression: AttributeCompression,
+) -> Result<Vec<u8>, CatalogError> {
     let mut payload = Vec::new();
     payload.extend_from_slice(&(values.len() as u16).to_le_bytes());
     for (column, value) in desc.columns.iter().zip(values.iter()) {
@@ -192,7 +228,11 @@ fn encode_key_payload(desc: &RelationDesc, values: &[Value]) -> Result<Vec<u8>, 
             }
             _ => {
                 payload.push(0);
-                let bytes = encode_index_value(column.sql_type, &value)?;
+                let bytes = maybe_compress_index_value(
+                    column,
+                    encode_index_value(column.sql_type, &value)?,
+                    default_toast_compression,
+                )?;
                 payload.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
                 payload.extend_from_slice(&bytes);
             }
@@ -254,6 +294,7 @@ fn pivot_tuple(
     desc: &RelationDesc,
     child_block: u32,
     key_values: &[Value],
+    default_toast_compression: AttributeCompression,
 ) -> Result<IndexTupleData, CatalogError> {
     Ok(IndexTupleData::new_raw(
         ItemPointerData {
@@ -263,8 +304,25 @@ fn pivot_tuple(
         false,
         false,
         false,
-        encode_key_payload(desc, key_values)?,
+        encode_key_payload(desc, key_values, default_toast_compression)?,
     ))
+}
+
+fn oversized_btree_tuple_error(index_name: &str, tuple: &IndexTupleData) -> CatalogError {
+    CatalogError::Io(format!(
+        "index row size {} exceeds btree version {} maximum {} for index \"{}\"",
+        max_align(tuple.size()),
+        BTREE_VERSION,
+        bt_max_item_size(),
+        index_name,
+    ))
+}
+
+fn check_leaf_tuple_size(index_name: &str, tuple: &IndexTupleData) -> Result<(), CatalogError> {
+    if max_align(tuple.size()) <= bt_max_item_size() {
+        return Ok(());
+    }
+    Err(oversized_btree_tuple_error(index_name, tuple))
 }
 
 fn tuple_matches_scan_keys(
@@ -671,6 +729,7 @@ fn build_internal_level(
             &ctx.index_desc,
             child.block,
             &child.lower_bound,
+            ctx.default_toast_compression,
         )?);
     }
     let pages = group_sorted_tuples_into_pages(tuples, 0, level, BTREE_NONLEAF_FILLFACTOR)?;
@@ -870,8 +929,10 @@ fn btbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, CatalogError> {
             &ctx.index_meta.indkey,
             &row_values,
         )?;
-        let payload = encode_key_payload(&ctx.index_desc, &key_values)?;
+        let payload =
+            encode_key_payload(&ctx.index_desc, &key_values, ctx.default_toast_compression)?;
         let tuple = IndexTupleData::new_raw(tid, false, false, false, payload);
+        check_leaf_tuple_size(&ctx.index_name, &tuple)?;
         approx_bytes = approx_bytes
             .saturating_add(tuple.size())
             .saturating_add(key_values.len() * 16);
@@ -1912,8 +1973,18 @@ fn create_new_root(
     bt_page_init(&mut root, BTP_ROOT, child_level + 1)
         .map_err(|err| CatalogError::Io(format!("btree new root init failed: {err:?}")))?;
     for tuple in [
-        pivot_tuple(&ctx.index_desc, left_block, &left_lower_bound)?,
-        pivot_tuple(&ctx.index_desc, right_block, right_lower_bound)?,
+        pivot_tuple(
+            &ctx.index_desc,
+            left_block,
+            &left_lower_bound,
+            ctx.default_toast_compression,
+        )?,
+        pivot_tuple(
+            &ctx.index_desc,
+            right_block,
+            right_lower_bound,
+            ctx.default_toast_compression,
+        )?,
     ] {
         bt_page_append_tuple(&mut root, &tuple)
             .map_err(|_| CatalogError::Io("new btree root overflow".into()))?;
@@ -1967,8 +2038,12 @@ fn propagate_split_upwards(
             }
         }
 
-        let right_pivot =
-            pivot_tuple(&ctx.index_desc, split.right_block, &split.right_lower_bound)?;
+        let right_pivot = pivot_tuple(
+            &ctx.index_desc,
+            split.right_block,
+            &split.right_lower_bound,
+            ctx.default_toast_compression,
+        )?;
         let parent = find_parent_from_stack(ctx, &mut split.parent_stack, split.left_block)?;
         let fallback_parent = if parent.is_none() {
             find_parent_block_by_scan(ctx, split.left_block)?
@@ -2123,8 +2198,9 @@ fn btinsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError> {
         &ctx.index_meta.indkey,
         &ctx.values,
     )?;
-    let payload = encode_key_payload(&ctx.index_desc, &key_values)?;
+    let payload = encode_key_payload(&ctx.index_desc, &key_values, ctx.default_toast_compression)?;
     let new_tuple = IndexTupleData::new_raw(ctx.heap_tid, false, false, false, payload);
+    check_leaf_tuple_size(&ctx.index_name, &new_tuple)?;
 
     let check_unique = matches!(
         ctx.unique_check,
@@ -2227,5 +2303,57 @@ pub fn btree_am_handler() -> IndexAmRoutine {
         amendscan: Some(btendscan),
         ambulkdelete: Some(crate::backend::access::nbtree::nbtvacuum::btbulkdelete),
         amvacuumcleanup: Some(crate::backend::access::nbtree::nbtvacuum::btvacuumcleanup),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::catalog::column_desc;
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+
+    #[test]
+    fn large_text_index_keys_use_inline_compression() {
+        let mut column = column_desc("f1", SqlType::new(SqlTypeKind::Text), true);
+        column.storage.attstorage = AttributeStorage::Extended;
+        column.storage.attcompression = AttributeCompression::Pglz;
+        let desc = RelationDesc {
+            columns: vec![column],
+        };
+        let value = Value::Text("1234567890".repeat(1000).into());
+
+        let payload = encode_key_payload(
+            &desc,
+            std::slice::from_ref(&value),
+            AttributeCompression::Pglz,
+        )
+        .expect("payload should encode");
+
+        assert!(
+            payload.len() < 2000,
+            "expected compressed payload, got {}",
+            payload.len()
+        );
+        assert_eq!(decode_key_payload(&desc, &payload).unwrap(), vec![value]);
+    }
+
+    #[test]
+    fn oversized_leaf_tuple_reports_limit_error() {
+        let tuple = IndexTupleData::new_raw(
+            ItemPointerData::default(),
+            false,
+            false,
+            false,
+            vec![0; bt_max_item_size() + 1],
+        );
+
+        let err = check_leaf_tuple_size("idx", &tuple).unwrap_err();
+        match err {
+            CatalogError::Io(message) => {
+                assert!(message.starts_with("index row size "));
+                assert!(message.contains("maximum"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }

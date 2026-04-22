@@ -720,6 +720,7 @@ pub(crate) fn build_index_insert_context(
         index_name: index.name.clone(),
         index_desc: index.desc.clone(),
         index_meta,
+        default_toast_compression: ctx.default_toast_compression,
         values: key_values,
         heap_tid,
         unique_check: if index.index_meta.indisunique {
@@ -734,6 +735,16 @@ fn map_index_insert_error(err: crate::backend::catalog::CatalogError) -> ExecErr
     match err {
         crate::backend::catalog::CatalogError::UniqueViolation(constraint) => {
             ExecError::UniqueViolation { constraint }
+        }
+        crate::backend::catalog::CatalogError::Io(message)
+            if message.starts_with("index row size ") =>
+        {
+            ExecError::DetailedError {
+                message,
+                detail: None,
+                hint: Some("Values larger than 1/3 of a buffer page cannot be indexed.".into()),
+                sqlstate: "54000",
+            }
         }
         crate::backend::catalog::CatalogError::Interrupted(reason) => {
             ExecError::Interrupted(reason)

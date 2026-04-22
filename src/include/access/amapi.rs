@@ -12,6 +12,7 @@ use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::interrupts::InterruptState;
+use crate::include::access::htup::AttributeCompression;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::relscan::{IndexScanDesc, ScanDirection};
 use crate::include::access::scankey::ScanKeyData;
@@ -62,6 +63,7 @@ pub struct IndexBuildContext {
     pub index_name: String,
     pub index_desc: RelationDesc,
     pub index_meta: IndexRelCacheEntry,
+    pub default_toast_compression: AttributeCompression,
     pub maintenance_work_mem_kb: usize,
     pub expr_eval: Option<IndexBuildExprContext>,
 }
@@ -80,6 +82,7 @@ pub struct IndexInsertContext {
     pub index_name: String,
     pub index_desc: RelationDesc,
     pub index_meta: IndexRelCacheEntry,
+    pub default_toast_compression: AttributeCompression,
     pub heap_tid: ItemPointerData,
     pub values: Vec<crate::include::nodes::datum::Value>,
     pub unique_check: IndexUniqueCheck,
