@@ -7,6 +7,54 @@ fn normalize_temp_lookup_name(table_name: &str) -> String {
         .to_ascii_lowercase()
 }
 
+fn temp_relation_drop_order(
+    relation_oids: Vec<u32>,
+    inherit_rows: &[crate::include::catalog::PgInheritsRow],
+) -> Vec<u32> {
+    fn visit_relation(
+        relation_oid: u32,
+        children_by_parent: &std::collections::BTreeMap<u32, Vec<u32>>,
+        seen: &mut std::collections::BTreeSet<u32>,
+        ordered: &mut Vec<u32>,
+    ) {
+        if !seen.insert(relation_oid) {
+            return;
+        }
+        if let Some(children) = children_by_parent.get(&relation_oid) {
+            for child_oid in children {
+                visit_relation(*child_oid, children_by_parent, seen, ordered);
+            }
+        }
+        ordered.push(relation_oid);
+    }
+
+    let mut relation_oids = relation_oids;
+    relation_oids.sort_unstable();
+    let relation_set = relation_oids
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut children_by_parent = std::collections::BTreeMap::<u32, Vec<u32>>::new();
+    for row in inherit_rows {
+        if relation_set.contains(&row.inhparent) && relation_set.contains(&row.inhrelid) {
+            children_by_parent
+                .entry(row.inhparent)
+                .or_default()
+                .push(row.inhrelid);
+        }
+    }
+    for children in children_by_parent.values_mut() {
+        children.sort_unstable();
+    }
+
+    let mut ordered = Vec::with_capacity(relation_oids.len());
+    let mut seen = std::collections::BTreeSet::new();
+    for relation_oid in relation_oids {
+        visit_relation(relation_oid, &children_by_parent, &mut seen, &mut ordered);
+    }
+    ordered
+}
+
 impl Database {
     #[cfg(test)]
     pub(crate) fn temp_entry(
@@ -112,18 +160,22 @@ impl Database {
             Self::temp_toast_namespace_oid(temp_backend_id),
         ];
         for include_indexes in [false, true] {
-            let relation_oids = self
+            let catcache = self
                 .txn_backend_catcache(client_id, xid, *cid)
-                .map_err(map_catalog_error)?
-                .class_rows()
-                .into_iter()
-                .filter(|row| {
-                    row.relpersistence == 't'
-                        && namespace_oids.contains(&row.relnamespace)
-                        && (include_indexes == (row.relkind == 'i'))
-                })
-                .map(|row| row.oid)
-                .collect::<Vec<_>>();
+                .map_err(map_catalog_error)?;
+            let relation_oids = temp_relation_drop_order(
+                catcache
+                    .class_rows()
+                    .into_iter()
+                    .filter(|row| {
+                        row.relpersistence == 't'
+                            && namespace_oids.contains(&row.relnamespace)
+                            && (include_indexes == (row.relkind == 'i'))
+                    })
+                    .map(|row| row.oid)
+                    .collect::<Vec<_>>(),
+                &catcache.inherit_rows(),
+            );
             for relation_oid in relation_oids {
                 let ctx = CatalogWriteContext {
                     pool: self.pool.clone(),
