@@ -717,9 +717,9 @@ pub(crate) fn pg_tablespace_row_from_values(
 pub(crate) fn pg_attribute_row_from_values(
     values: Vec<Value>,
 ) -> Result<PgAttributeRow, CatalogError> {
-    let attalign = expect_char(&values[9], "attalign")?;
-    let attstorage = expect_char(&values[10], "attstorage")?;
-    let attcompression = match &values[11] {
+    let attalign = expect_char(&values[8], "attalign")?;
+    let attstorage = expect_char(&values[9], "attstorage")?;
+    let attcompression = match &values[10] {
         Value::Text(text) if text.is_empty() => '\0',
         other => expect_char(other, "attcompression")?,
     };
@@ -732,16 +732,15 @@ pub(crate) fn pg_attribute_row_from_values(
         attnotnull: expect_bool(&values[5])?,
         attisdropped: expect_bool(&values[6])?,
         atttypmod: expect_int32(&values[7])?,
-        attcollation: expect_oid(&values[8])?,
         attalign: AttributeAlign::from_char(attalign)
             .ok_or(CatalogError::Corrupt("unknown attalign"))?,
         attstorage: AttributeStorage::from_char(attstorage)
             .ok_or(CatalogError::Corrupt("unknown attstorage"))?,
         attcompression: AttributeCompression::from_char(attcompression)
             .ok_or(CatalogError::Corrupt("unknown attcompression"))?,
-        attstattarget: expect_int16(&values[12])?,
-        attinhcount: expect_int16(&values[13])?,
-        attislocal: expect_bool(&values[14])?,
+        attstattarget: expect_int16(&values[11])?,
+        attinhcount: expect_int16(&values[12])?,
+        attislocal: expect_bool(&values[13])?,
         sql_type: SqlType::new(SqlTypeKind::Text),
     })
 }
@@ -1316,7 +1315,6 @@ fn pg_attribute_row_values(row: PgAttributeRow) -> Vec<Value> {
         Value::Bool(row.attnotnull),
         Value::Bool(row.attisdropped),
         Value::Int32(row.atttypmod),
-        Value::Int32(row.attcollation as i32),
         Value::InternalChar(row.attalign.as_char() as u8),
         Value::InternalChar(row.attstorage.as_char() as u8),
         Value::InternalChar(row.attcompression.as_char() as u8),

@@ -200,24 +200,51 @@ mod tests {
         relation_name: &str,
         txns: Option<Arc<RwLock<TransactionManager>>>,
     ) {
-        // Use the database-visible catalog view so shared catalogs like pg_authid
-        // resolve through the normal pg_catalog lookup path during VACUUM.
-        let store = CatalogStore::load(base).unwrap();
-        let relcache = store.relcache().unwrap();
-
-        let mut smgr = MdStorageManager::new(base);
-        for kind in crate::backend::catalog::bootstrap::bootstrap_catalog_kinds() {
-            smgr.open(bootstrap_catalog_rel(kind, 1)).unwrap();
-        }
-        let pool = Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 16));
-        // :HACK: Tests that keep a durable TransactionManager alive after
-        // commit must reuse it here; reopening from disk can miss unflushed
-        // status bits that the live server would still have in memory.
-        let txns = txns.unwrap_or_else(|| {
-            Arc::new(RwLock::new(
-                TransactionManager::new_durable(base.clone()).unwrap(),
-            ))
-        });
+        let scope = relation_name
+            .strip_prefix("pg_catalog.")
+            .and_then(|name| {
+                crate::backend::catalog::bootstrap::bootstrap_catalog_kinds()
+                    .into_iter()
+                    .find(|kind| kind.relation_name() == name)
+                    .map(|kind| kind.scope())
+            })
+            .unwrap_or(CatalogScope::Database(1));
+        let (relcache, pool, txns) = match scope {
+            CatalogScope::Shared => {
+                let relcache = crate::backend::utils::cache::relcache::RelCache::from_catalog(
+                    &crate::backend::catalog::catalog::Catalog::default(),
+                );
+                let mut smgr = MdStorageManager::new(base);
+                for kind in crate::backend::catalog::bootstrap::bootstrap_catalog_kinds() {
+                    smgr.open(bootstrap_catalog_rel(kind, 1)).unwrap();
+                }
+                let pool = Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 16));
+                let txns = txns.unwrap_or_else(|| {
+                    Arc::new(RwLock::new(
+                        TransactionManager::new_durable(base.clone()).unwrap(),
+                    ))
+                });
+                (relcache, pool, txns)
+            }
+            CatalogScope::Database(_) => {
+                let store = CatalogStore::load(base).unwrap();
+                let relcache = store.relcache().unwrap();
+                let mut smgr = MdStorageManager::new(base);
+                for kind in crate::backend::catalog::bootstrap::bootstrap_catalog_kinds() {
+                    smgr.open(bootstrap_catalog_rel(kind, 1)).unwrap();
+                }
+                let pool = Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 16));
+                // :HACK: Tests that keep a durable TransactionManager alive after
+                // commit must reuse it here; reopening from disk can miss unflushed
+                // status bits that the live server would still have in memory.
+                let txns = txns.unwrap_or_else(|| {
+                    Arc::new(RwLock::new(
+                        TransactionManager::new_durable(base.clone()).unwrap(),
+                    ))
+                });
+                (relcache, pool, txns)
+            }
+        };
         let snapshot = txns.read().snapshot(INVALID_TRANSACTION_ID).unwrap();
         let mut ctx = crate::backend::executor::ExecutorContext {
             pool,
@@ -1851,62 +1878,128 @@ mod tests {
     #[test]
     fn catalog_store_bootstraps_physical_core_catalog_relfiles() {
         let base = temp_dir("physical_bootstrap");
-        let store = CatalogStore::load(&base).unwrap();
-        let catalog = store.catalog_snapshot().unwrap();
-        for name in ["pg_namespace", "pg_type", "pg_attribute", "pg_class"] {
-            let entry = catalog.get(name).unwrap();
-            let path = segment_path(&base, entry.rel, ForkNumber::Main, 0);
+        let _store = CatalogStore::load(&base).unwrap();
+        for (name, kind) in [
+            ("pg_namespace", BootstrapCatalogKind::PgNamespace),
+            ("pg_type", BootstrapCatalogKind::PgType),
+            ("pg_attribute", BootstrapCatalogKind::PgAttribute),
+            ("pg_class", BootstrapCatalogKind::PgClass),
+        ] {
+            let path = segment_path(&base, bootstrap_catalog_rel(kind, 1), ForkNumber::Main, 0);
             let meta = fs::metadata(path).unwrap();
             assert!(meta.len() > 0, "{name} should have heap data");
         }
 
-        let attrdef = catalog.get("pg_attrdef").unwrap();
-        let attrdef_path = segment_path(&base, attrdef.rel, ForkNumber::Main, 0);
+        let attrdef_path = segment_path(
+            &base,
+            bootstrap_catalog_rel(BootstrapCatalogKind::PgAttrdef, 1),
+            ForkNumber::Main,
+            0,
+        );
         assert!(attrdef_path.exists(), "pg_attrdef relfile should exist");
-        let depend = catalog.get("pg_depend").unwrap();
-        let depend_path = segment_path(&base, depend.rel, ForkNumber::Main, 0);
+        let depend_path = segment_path(
+            &base,
+            bootstrap_catalog_rel(BootstrapCatalogKind::PgDepend, 1),
+            ForkNumber::Main,
+            0,
+        );
         assert!(depend_path.exists(), "pg_depend relfile should exist");
-        let index = catalog.get("pg_index").unwrap();
-        let index_path = segment_path(&base, index.rel, ForkNumber::Main, 0);
+        let index_path = segment_path(
+            &base,
+            bootstrap_catalog_rel(BootstrapCatalogKind::PgIndex, 1),
+            ForkNumber::Main,
+            0,
+        );
         assert!(index_path.exists(), "pg_index relfile should exist");
-        let database = catalog.get("pg_database").unwrap();
-        let database_path = segment_path(&base, database.rel, ForkNumber::Main, 0);
+        let aggregate_path = segment_path(
+            &base,
+            bootstrap_catalog_rel(BootstrapCatalogKind::PgAggregate, 1),
+            ForkNumber::Main,
+            0,
+        );
+        assert!(aggregate_path.exists(), "pg_aggregate relfile should exist");
+        let database_path = segment_path(
+            &base,
+            bootstrap_catalog_rel(BootstrapCatalogKind::PgDatabase, 1),
+            ForkNumber::Main,
+            0,
+        );
         assert!(database_path.exists(), "pg_database relfile should exist");
-        let authid = catalog.get("pg_authid").unwrap();
-        let authid_path = segment_path(&base, authid.rel, ForkNumber::Main, 0);
+        let authid_path = segment_path(
+            &base,
+            bootstrap_catalog_rel(BootstrapCatalogKind::PgAuthId, 1),
+            ForkNumber::Main,
+            0,
+        );
         assert!(authid_path.exists(), "pg_authid relfile should exist");
-        let auth_members = catalog.get("pg_auth_members").unwrap();
-        let auth_members_path = segment_path(&base, auth_members.rel, ForkNumber::Main, 0);
+        let auth_members_path = segment_path(
+            &base,
+            bootstrap_catalog_rel(BootstrapCatalogKind::PgAuthMembers, 1),
+            ForkNumber::Main,
+            0,
+        );
         assert!(
             auth_members_path.exists(),
             "pg_auth_members relfile should exist"
         );
-        let collation = catalog.get("pg_collation").unwrap();
-        let collation_path = segment_path(&base, collation.rel, ForkNumber::Main, 0);
+        let collation_path = segment_path(
+            &base,
+            bootstrap_catalog_rel(BootstrapCatalogKind::PgCollation, 1),
+            ForkNumber::Main,
+            0,
+        );
         assert!(collation_path.exists(), "pg_collation relfile should exist");
-        let language = catalog.get("pg_language").unwrap();
-        let language_path = segment_path(&base, language.rel, ForkNumber::Main, 0);
+        let language_path = segment_path(
+            &base,
+            bootstrap_catalog_rel(BootstrapCatalogKind::PgLanguage, 1),
+            ForkNumber::Main,
+            0,
+        );
         assert!(language_path.exists(), "pg_language relfile should exist");
-        let operator = catalog.get("pg_operator").unwrap();
-        let operator_path = segment_path(&base, operator.rel, ForkNumber::Main, 0);
+        let operator_path = segment_path(
+            &base,
+            bootstrap_catalog_rel(BootstrapCatalogKind::PgOperator, 1),
+            ForkNumber::Main,
+            0,
+        );
         assert!(operator_path.exists(), "pg_operator relfile should exist");
-        let proc = catalog.get("pg_proc").unwrap();
-        let proc_path = segment_path(&base, proc.rel, ForkNumber::Main, 0);
+        let proc_path = segment_path(
+            &base,
+            bootstrap_catalog_rel(BootstrapCatalogKind::PgProc, 1),
+            ForkNumber::Main,
+            0,
+        );
         assert!(proc_path.exists(), "pg_proc relfile should exist");
-        let cast = catalog.get("pg_cast").unwrap();
-        let cast_path = segment_path(&base, cast.rel, ForkNumber::Main, 0);
+        let cast_path = segment_path(
+            &base,
+            bootstrap_catalog_rel(BootstrapCatalogKind::PgCast, 1),
+            ForkNumber::Main,
+            0,
+        );
         assert!(cast_path.exists(), "pg_cast relfile should exist");
-        let constraint = catalog.get("pg_constraint").unwrap();
-        let constraint_path = segment_path(&base, constraint.rel, ForkNumber::Main, 0);
+        let constraint_path = segment_path(
+            &base,
+            bootstrap_catalog_rel(BootstrapCatalogKind::PgConstraint, 1),
+            ForkNumber::Main,
+            0,
+        );
         assert!(
             constraint_path.exists(),
             "pg_constraint relfile should exist"
         );
-        let am = catalog.get("pg_am").unwrap();
-        let am_path = segment_path(&base, am.rel, ForkNumber::Main, 0);
+        let am_path = segment_path(
+            &base,
+            bootstrap_catalog_rel(BootstrapCatalogKind::PgAm, 1),
+            ForkNumber::Main,
+            0,
+        );
         assert!(am_path.exists(), "pg_am relfile should exist");
-        let tablespace = catalog.get("pg_tablespace").unwrap();
-        let tablespace_path = segment_path(&base, tablespace.rel, ForkNumber::Main, 0);
+        let tablespace_path = segment_path(
+            &base,
+            bootstrap_catalog_rel(BootstrapCatalogKind::PgTablespace, 1),
+            ForkNumber::Main,
+            0,
+        );
         assert!(
             tablespace_path.exists(),
             "pg_tablespace relfile should exist"

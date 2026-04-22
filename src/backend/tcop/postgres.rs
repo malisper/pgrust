@@ -30,9 +30,7 @@ use crate::backend::utils::misc::notices::{
 };
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::access::htup::TupleError;
-use crate::include::catalog::{
-    C_COLLATION_OID, DEFAULT_COLLATION_OID, POSIX_COLLATION_OID, RECORD_TYPE_OID,
-};
+use crate::include::catalog::RECORD_TYPE_OID;
 use crate::include::nodes::datetime::{DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT};
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value,
@@ -1878,23 +1876,7 @@ fn psql_describe_columns_query(
                 row.push(Value::Bool(!column.storage.nullable));
             }
             if include_attcollation {
-                row.push(match column.collation_oid {
-                    Some(DEFAULT_COLLATION_OID)
-                        if matches!(
-                            column.sql_type.kind,
-                            SqlTypeKind::Text
-                                | SqlTypeKind::Varchar
-                                | SqlTypeKind::Char
-                                | SqlTypeKind::Name
-                        ) =>
-                    {
-                        Value::Null
-                    }
-                    Some(DEFAULT_COLLATION_OID) => Value::Text("default".into()),
-                    Some(C_COLLATION_OID) => Value::Text("C".into()),
-                    Some(POSIX_COLLATION_OID) => Value::Text("POSIX".into()),
-                    Some(_) | None => Value::Null,
-                });
+                row.push(Value::Null);
             }
             if include_attidentity {
                 row.push(Value::InternalChar(0));
@@ -6391,10 +6373,7 @@ mod tests {
             sqlstate: "42725",
         });
 
-        assert_eq!(
-            exec_error_position(sql, &err),
-            sql.find('+').map(|index| index + 1)
-        );
+        assert_eq!(exec_error_position(sql, &err), sql.find('+').map(|index| index + 1));
     }
 
     #[test]

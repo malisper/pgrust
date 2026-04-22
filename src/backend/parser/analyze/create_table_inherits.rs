@@ -4,7 +4,6 @@ use crate::backend::access::common::toast_compression::compression_name;
 use crate::backend::utils::misc::notices::push_notice;
 
 use super::create_table::{LoweredCreateTable, lower_create_table};
-use super::create_table_like::expand_create_table_like_clauses;
 use super::{
     BoundRelation, CatalogLookup, ColumnConstraint, ConstraintAttributes, CreateTableElement,
     CreateTableStatement, ParseError, RawTypeName, TableConstraint, TablePersistence,
@@ -23,15 +22,14 @@ pub fn lower_create_table_with_catalog(
     catalog: &dyn CatalogLookup,
     persistence: TablePersistence,
 ) -> Result<LoweredCreateTable, ParseError> {
-    let expanded = expand_create_table_like_clauses(stmt, catalog)?;
-    if expanded.inherits.is_empty() {
-        return lower_create_table(&expanded, catalog);
+    if stmt.inherits.is_empty() {
+        return lower_create_table(stmt, catalog);
     }
 
-    let parents = resolve_parent_relations(&expanded, catalog, persistence)?;
-    let merged_columns = merge_inherited_columns(&expanded, &parents, catalog)?;
+    let parents = resolve_parent_relations(stmt, catalog, persistence)?;
+    let merged_columns = merge_inherited_columns(stmt, &parents)?;
     let inherited_constraints = inherited_table_constraints(&parents, catalog);
-    let mut synthetic = expanded.clone();
+    let mut synthetic = stmt.clone();
     synthetic.elements = merged_columns
         .iter()
         .map(|column| CreateTableElement::Column(column.column.clone()))
@@ -42,8 +40,7 @@ pub fn lower_create_table_with_catalog(
                 .map(CreateTableElement::Constraint),
         )
         .chain(
-            expanded
-                .constraints()
+            stmt.constraints()
                 .cloned()
                 .map(CreateTableElement::Constraint),
         )
@@ -138,7 +135,6 @@ fn resolve_parent_relations(
 fn merge_inherited_columns(
     stmt: &CreateTableStatement,
     parents: &[BoundRelation],
-    catalog: &dyn CatalogLookup,
 ) -> Result<Vec<MergedColumnSpec>, ParseError> {
     let mut merged = Vec::new();
     let mut column_lookup = BTreeMap::<String, usize>::new();
@@ -153,14 +149,6 @@ fn merge_inherited_columns(
                 name: column.name.clone(),
                 ty: RawTypeName::Builtin(column.sql_type),
                 default_expr: column.default_expr.clone(),
-                collation: column.collation_oid.and_then(|oid| {
-                    catalog
-                        .collation_rows()
-                        .into_iter()
-                        .find(|row| row.oid == oid)
-                        .map(|row| row.collname)
-                }),
-                storage: Some(column.storage.attstorage),
                 compression: Some(column.storage.attcompression),
                 constraints: inherited_constraints_for_parent(column),
             };
@@ -216,7 +204,6 @@ fn merge_parent_column(
     parent: &crate::backend::parser::ColumnDef,
 ) -> Result<(), ParseError> {
     ensure_matching_column_type(&merged.column.name, &merged.column.ty, &parent.ty)?;
-    ensure_matching_column_storage(&merged.column.name, merged.column.storage, parent.storage)?;
     merged.column.compression = merge_parent_column_compression(
         &merged.column.name,
         merged.column.compression,
@@ -249,14 +236,6 @@ fn merge_local_column(
         ));
     }
     merged.attislocal = true;
-    if let Some(local_storage) = local.storage {
-        ensure_matching_column_storage(
-            &merged.column.name,
-            merged.column.storage,
-            Some(local_storage),
-        )?;
-        merged.column.storage = Some(local_storage);
-    }
     if let Some(local_compression) = local.compression {
         ensure_matching_column_compression(
             &merged.column.name,
@@ -404,26 +383,6 @@ fn is_default_column_compression(
     )
 }
 
-fn ensure_matching_column_storage(
-    name: &str,
-    left: Option<crate::include::access::htup::AttributeStorage>,
-    right: Option<crate::include::access::htup::AttributeStorage>,
-) -> Result<(), ParseError> {
-    if left == right {
-        return Ok(());
-    }
-    Err(ParseError::DetailedError {
-        message: format!("column \"{name}\" has a storage strategy conflict"),
-        detail: Some(format!(
-            "{} versus {}",
-            format_column_storage(left),
-            format_column_storage(right)
-        )),
-        hint: None,
-        sqlstate: "42P16",
-    })
-}
-
 fn format_column_compression(
     compression: Option<crate::include::access::htup::AttributeCompression>,
 ) -> &'static str {
@@ -432,17 +391,6 @@ fn format_column_compression(
         .unwrap_or(compression_name(
             crate::include::access::htup::AttributeCompression::Default,
         ))
-}
-
-fn format_column_storage(
-    storage: Option<crate::include::access::htup::AttributeStorage>,
-) -> &'static str {
-    match storage.unwrap_or(crate::include::access::htup::AttributeStorage::Extended) {
-        crate::include::access::htup::AttributeStorage::Plain => "plain",
-        crate::include::access::htup::AttributeStorage::External => "external",
-        crate::include::access::htup::AttributeStorage::Extended => "extended",
-        crate::include::access::htup::AttributeStorage::Main => "main",
-    }
 }
 
 fn merge_parent_default(current: &mut Option<String>, incoming: Option<&str>) -> bool {

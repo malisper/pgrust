@@ -13,6 +13,18 @@ pub(crate) fn execute_user_defined_sql_scalar_function(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
+    let arg_values = args
+        .iter()
+        .map(|arg| crate::backend::executor::eval_expr(arg, slot, ctx))
+        .collect::<Result<Vec<_>, _>>()?;
+    execute_user_defined_sql_scalar_function_values(row, &arg_values, ctx)
+}
+
+pub(crate) fn execute_user_defined_sql_scalar_function_values(
+    row: &PgProcRow,
+    arg_values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
     if row.prolang != PG_LANGUAGE_SQL_OID {
         return Err(sql_function_runtime_error(
             "only LANGUAGE sql functions are supported by the SQL-function runtime",
@@ -21,10 +33,6 @@ pub(crate) fn execute_user_defined_sql_scalar_function(
         ));
     }
 
-    let arg_values = args
-        .iter()
-        .map(|arg| crate::backend::executor::eval_expr(arg, slot, ctx))
-        .collect::<Result<Vec<_>, _>>()?;
     if row.proisstrict && arg_values.iter().any(|value| matches!(value, Value::Null)) {
         return Ok(Value::Null);
     }

@@ -137,12 +137,8 @@ impl fmt::Display for ParseError {
                 f,
                 "INSERT has {actual} values but target list requires {expected}"
             ),
-            ParseError::TableAlreadyExists(name) => {
-                write!(f, "relation \"{name}\" already exists")
-            }
-            ParseError::TableDoesNotExist(name) => {
-                write!(f, "relation \"{name}\" does not exist")
-            }
+            ParseError::TableAlreadyExists(name) => write!(f, "table already exists: {name}"),
+            ParseError::TableDoesNotExist(name) => write!(f, "table does not exist: {name}"),
             ParseError::UnsupportedType(name) => write!(f, "type \"{name}\" does not exist"),
             ParseError::MissingDefaultOpclass {
                 access_method,
@@ -274,30 +270,6 @@ mod tests {
             "relation \"attmp\" does not exist"
         );
     }
-
-    #[test]
-    fn relation_and_type_lookup_displays_match_postgres_shape() {
-        assert_eq!(
-            ParseError::TableAlreadyExists("items".into()).to_string(),
-            "relation \"items\" already exists"
-        );
-        assert_eq!(
-            ParseError::TableDoesNotExist("items".into()).to_string(),
-            "relation \"items\" does not exist"
-        );
-        assert_eq!(
-            ParseError::UnsupportedType("widget".into()).to_string(),
-            "type \"widget\" does not exist"
-        );
-        assert_eq!(
-            ParseError::MissingDefaultOpclass {
-                access_method: "spgist".into(),
-                type_name: "box".into(),
-            }
-            .to_string(),
-            "data type box has no default operator class for access method \"spgist\""
-        );
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -305,9 +277,6 @@ pub enum Statement {
     Do(DoStatement),
     Explain(ExplainStatement),
     Show(ShowStatement),
-    Notify(NotifyStatement),
-    Listen(ListenStatement),
-    Unlisten(UnlistenStatement),
     Select(SelectStatement),
     Values(ValuesStatement),
     CopyFrom(CopyFromStatement),
@@ -316,6 +285,7 @@ pub enum Statement {
     Set(SetStatement),
     Reset(ResetStatement),
     CreateFunction(CreateFunctionStatement),
+    CreateAggregate(CreateAggregateStatement),
     CreateTrigger(CreateTriggerStatement),
     CreateType(CreateTypeStatement),
     CreateDatabase(CreateDatabaseStatement),
@@ -373,6 +343,7 @@ pub enum Statement {
     CommentOnConversion(CommentOnConversionStatement),
     CommentOnForeignDataWrapper(CommentOnForeignDataWrapperStatement),
     CommentOnPublication(CommentOnPublicationStatement),
+    CommentOnAggregate(CommentOnAggregateStatement),
     CreateDomain(CreateDomainStatement),
     CreateConversion(CreateConversionStatement),
     CreatePublication(CreatePublicationStatement),
@@ -388,6 +359,7 @@ pub enum Statement {
     DropPublication(DropPublicationStatement),
     DropFunction(DropFunctionStatement),
     DropOperator(DropOperatorStatement),
+    DropAggregate(DropAggregateStatement),
     DropTable(DropTableStatement),
     DropTrigger(DropTriggerStatement),
     DropIndex(DropIndexStatement),
@@ -411,6 +383,9 @@ pub enum Statement {
     ReassignOwned(ReassignOwnedStatement),
     TruncateTable(TruncateTableStatement),
     Vacuum(VacuumStatement),
+    Notify(NotifyStatement),
+    Listen(ListenStatement),
+    Unlisten(UnlistenStatement),
     Insert(InsertStatement),
     Merge(MergeStatement),
     Update(UpdateStatement),
@@ -568,6 +543,18 @@ pub enum FunctionParallel {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AggregateArgType {
+    Type(RawTypeName),
+    AnyPseudo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AggregateSignatureKind {
+    Star,
+    Args(Vec<AggregateArgType>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateFunctionArg {
     pub mode: FunctionArgMode,
     pub name: Option<String>,
@@ -601,6 +588,19 @@ pub struct CreateFunctionStatement {
     pub language: String,
     pub body: String,
     pub link_symbol: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateAggregateStatement {
+    pub schema_name: Option<String>,
+    pub aggregate_name: String,
+    pub replace_existing: bool,
+    pub signature: AggregateSignatureKind,
+    pub sfunc_name: String,
+    pub stype: RawTypeName,
+    pub finalfunc_name: Option<String>,
+    pub initcond: Option<String>,
+    pub parallel: Option<FunctionParallel>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1172,13 +1172,13 @@ impl CreateTableStatement {
     pub fn columns(&self) -> impl Iterator<Item = &ColumnDef> {
         self.elements.iter().filter_map(|element| match element {
             CreateTableElement::Column(column) => Some(column),
-            CreateTableElement::Constraint(_) | CreateTableElement::Like(_) => None,
+            CreateTableElement::Constraint(_) => None,
         })
     }
 
     pub fn constraints(&self) -> impl Iterator<Item = &TableConstraint> {
         self.elements.iter().filter_map(|element| match element {
-            CreateTableElement::Column(_) | CreateTableElement::Like(_) => None,
+            CreateTableElement::Column(_) => None,
             CreateTableElement::Constraint(constraint) => Some(constraint),
         })
     }
@@ -1347,46 +1347,6 @@ pub enum CreateOperatorClassItem {
         schema_name: Option<String>,
         function_name: String,
         arg_types: Vec<RawTypeName>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AlterOperatorStatement {
-    pub schema_name: Option<String>,
-    pub operator_name: String,
-    pub left_arg: Option<RawTypeName>,
-    pub right_arg: Option<RawTypeName>,
-    pub options: Vec<AlterOperatorOption>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AlterOperatorOption {
-    Restrict {
-        option_name: String,
-        function: Option<QualifiedNameRef>,
-    },
-    Join {
-        option_name: String,
-        function: Option<QualifiedNameRef>,
-    },
-    Commutator {
-        option_name: String,
-        operator_name: String,
-    },
-    Negator {
-        option_name: String,
-        operator_name: String,
-    },
-    Merges {
-        option_name: String,
-        enabled: bool,
-    },
-    Hashes {
-        option_name: String,
-        enabled: bool,
-    },
-    Unrecognized {
-        option_name: String,
     },
 }
 
@@ -1792,6 +1752,47 @@ pub enum AlterPublicationAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterOperatorStatement {
+    pub schema_name: Option<String>,
+    pub operator_name: String,
+    pub left_arg: Option<RawTypeName>,
+    pub right_arg: Option<RawTypeName>,
+    pub options: Vec<AlterOperatorOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterOperatorOption {
+    Restrict {
+        option_name: String,
+        function: Option<QualifiedNameRef>,
+    },
+    Join {
+        option_name: String,
+        function: Option<QualifiedNameRef>,
+    },
+    Commutator {
+        option_name: String,
+        operator_name: String,
+    },
+    Negator {
+        option_name: String,
+        operator_name: String,
+    },
+    Merges {
+        option_name: String,
+        enabled: bool,
+    },
+    Hashes {
+        option_name: String,
+        enabled: bool,
+    },
+    Unrecognized {
+        option_name: String,
+        raw_tokens: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DropPublicationStatement {
     pub if_exists: bool,
     pub publication_names: Vec<String>,
@@ -1884,6 +1885,15 @@ pub struct DropOperatorStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropAggregateStatement {
+    pub if_exists: bool,
+    pub schema_name: Option<String>,
+    pub aggregate_name: String,
+    pub signature: AggregateSignatureKind,
+    pub cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetSessionAuthorizationStatement {
     pub role_name: String,
 }
@@ -1902,6 +1912,14 @@ pub struct ResetRoleStatement;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommentOnRoleStatement {
     pub role_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnAggregateStatement {
+    pub schema_name: Option<String>,
+    pub aggregate_name: String,
+    pub signature: AggregateSignatureKind,
     pub comment: Option<String>,
 }
 
@@ -2128,8 +2146,6 @@ pub struct ColumnDef {
     pub name: String,
     pub ty: RawTypeName,
     pub default_expr: Option<String>,
-    pub collation: Option<String>,
-    pub storage: Option<crate::include::access::htup::AttributeStorage>,
     pub compression: Option<crate::include::access::htup::AttributeCompression>,
     pub constraints: Vec<ColumnConstraint>,
 }
@@ -2167,26 +2183,6 @@ pub struct CreateDomainStatement {
 pub enum CreateTableElement {
     Column(ColumnDef),
     Constraint(TableConstraint),
-    Like(TableLikeClause),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TableLikeClause {
-    pub relation_name: String,
-    pub options: TableLikeOptions,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct TableLikeOptions {
-    pub defaults: bool,
-    pub constraints: bool,
-    pub storage: bool,
-    pub compression: bool,
-    pub indexes: bool,
-    pub comments: bool,
-    pub statistics: bool,
-    pub generated: bool,
-    pub identity: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -122,6 +122,16 @@ impl VisibleCatalog {
                 .map(|row| row.rolname)
         })
     }
+
+    pub fn database_oid_by_name(&self, name: &str) -> Option<u32> {
+        self.catcache.as_ref().and_then(|catcache| {
+            catcache
+                .database_rows()
+                .into_iter()
+                .find(|row| row.datname.eq_ignore_ascii_case(name))
+                .map(|row| row.oid)
+        })
+    }
 }
 
 fn dedup_proc_rows(rows: &mut Vec<PgProcRow>) {

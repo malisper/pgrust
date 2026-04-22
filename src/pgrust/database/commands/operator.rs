@@ -264,8 +264,11 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let mut current_cid = cid;
-        let catalog =
-            self.lazy_catalog_lookup(client_id, Some((xid, current_cid)), configured_search_path);
+        let catalog = self.lazy_catalog_lookup(
+            client_id,
+            Some((xid, current_cid)),
+            configured_search_path,
+        );
         let namespace_oid = normalize_operator_namespace(
             self,
             client_id,
@@ -439,7 +442,7 @@ impl Database {
                 | AlterOperatorOption::Negator { option_name, .. }
                 | AlterOperatorOption::Merges { option_name, .. }
                 | AlterOperatorOption::Hashes { option_name, .. }
-                | AlterOperatorOption::Unrecognized { option_name } => {
+                | AlterOperatorOption::Unrecognized { option_name, .. } => {
                     if !matches!(
                         option_name.as_str(),
                         "restrict" | "join" | "commutator" | "negator" | "merges" | "hashes"
@@ -646,7 +649,7 @@ impl Database {
                         updated.oprcanhash = true;
                     }
                 }
-                AlterOperatorOption::Unrecognized { option_name } => {
+                AlterOperatorOption::Unrecognized { option_name, .. } => {
                     return Err(attribute_not_recognized_error(option_name));
                 }
             }

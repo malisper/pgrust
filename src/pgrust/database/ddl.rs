@@ -503,12 +503,6 @@ pub(super) fn validate_alter_table_add_column(
             desc.missing_default_value = Some(derive_literal_default_value(sql, desc.sql_type)?);
         }
     }
-    if let Some(storage) = column.storage {
-        desc.storage.attstorage = validate_new_column_storage(&desc, storage)?;
-    }
-    if let Some(compression) = column.compression {
-        desc.storage.attcompression = validate_new_column_compression(&desc, compression)?;
-    }
     let constraint_actions =
         normalize_alter_table_add_column_constraints(table_name, column, existing_constraints)
             .map_err(ExecError::Parse)?;
@@ -523,48 +517,6 @@ pub(super) fn validate_alter_table_add_column(
         not_null_action: constraint_actions.not_null,
         check_actions: constraint_actions.checks,
     })
-}
-
-fn validate_new_column_storage(
-    column: &ColumnDesc,
-    storage: AttributeStorage,
-) -> Result<AttributeStorage, ExecError> {
-    let type_default = column_desc("attstorage_check", column.sql_type, column.storage.nullable)
-        .storage
-        .attstorage;
-    if storage != AttributeStorage::Plain && type_default == AttributeStorage::Plain {
-        return Err(ExecError::DetailedError {
-            message: format!(
-                "column data type {} can only have storage PLAIN",
-                format_sql_type_name(column.sql_type)
-            ),
-            detail: None,
-            hint: None,
-            sqlstate: "0A000",
-        });
-    }
-    Ok(storage)
-}
-
-fn validate_new_column_compression(
-    column: &ColumnDesc,
-    compression: AttributeCompression,
-) -> Result<AttributeCompression, ExecError> {
-    ensure_attribute_compression_supported(compression)?;
-    if compression != AttributeCompression::Default
-        && column.storage.attstorage == AttributeStorage::Plain
-    {
-        return Err(ExecError::DetailedError {
-            message: format!(
-                "column data type {} does not support compression",
-                format_sql_type_name(column.sql_type)
-            ),
-            detail: None,
-            hint: None,
-            sqlstate: "0A000",
-        });
-    }
-    Ok(compression)
 }
 
 pub(super) fn validate_alter_table_rename_column(

@@ -427,20 +427,24 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             func_variadic,
             ..
         } => {
-            if let Some(func) = resolve_builtin_aggregate(name) {
-                return aggregate_sql_type(
-                    func,
-                    function_arg_values(args).next().map(|expr| {
-                        infer_sql_expr_type_with_ctes(
-                            expr,
-                            scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer,
-                            ctes,
-                        )
-                    }),
-                );
+            let aggregate_arg_types = args
+                .args()
+                .iter()
+                .map(|arg| {
+                    infer_sql_expr_type_with_ctes(
+                        &arg.value,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )
+                })
+                .collect::<Vec<_>>();
+            if let Some(resolved) =
+                resolve_aggregate_call(catalog, name, &aggregate_arg_types, *func_variadic)
+            {
+                return resolved.result_type;
             }
             if name.eq_ignore_ascii_case("coalesce") {
                 let values = args

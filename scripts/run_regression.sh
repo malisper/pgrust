@@ -183,7 +183,6 @@ SERVER_PID=""
 USE_PGRUST_SETUP=true
 REGRESS_USER="${PGRUST_REGRESS_USER:-${PGUSER:-$(id -un)}}"
 REGRESS_TABLESPACE_DIR=""
-SINGLE_TEST_PREREQS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -199,23 +198,6 @@ while [[ $# -gt 0 ]]; do
         *) echo "Unknown flag: $1"; exit 1 ;;
     esac
 done
-
-set_single_test_prereqs() {
-    SINGLE_TEST_PREREQS=()
-
-    case "$SINGLE_TEST" in
-        amutils)
-            # :HACK: Upstream amutils inherits persistent objects from several
-            # earlier regression files, but replaying those full files in
-            # pgrust currently trips unrelated unsupported features. Keep the
-            # isolated rerun path self-contained by provisioning just the
-            # named objects that amutils.sql references.
-            SINGLE_TEST_PREREQS=("$PGRUST_DIR/scripts/regression_prereqs/amutils.sql")
-            ;;
-    esac
-}
-
-set_single_test_prereqs
 
 make_temp_dir() {
     local prefix="$1"
@@ -305,11 +287,6 @@ restart_server() {
     # "unknown table" failures for setup objects like INT2_TBL.
     if ! run_bootstrap_setup; then
         echo "  -> Bootstrap replay failed after restart; aborting run."
-        return 1
-    fi
-
-    if ! run_single_test_prereqs; then
-        echo "  -> Prerequisite replay failed after restart; aborting run."
         return 1
     fi
 
@@ -411,71 +388,9 @@ run_bootstrap_setup() {
     return 0
 }
 
-run_single_test_prereqs() {
-    local prereq_test=""
-    local prereq_sql=""
-    local prereq_name=""
-    local prereq_expected=""
-    local prereq_output=""
-    local exit_code=0
-
-    if [[ ${#SINGLE_TEST_PREREQS[@]} -eq 0 ]]; then
-        return 0
-    fi
-
-    mkdir -p "$RESULTS_DIR/output/prereqs"
-    echo "Running prerequisite regression scripts for $SINGLE_TEST..."
-
-    for prereq_test in "${SINGLE_TEST_PREREQS[@]}"; do
-        prereq_sql="$prereq_test"
-        prereq_name="$(basename "$prereq_sql" .sql)"
-        prereq_output="$RESULTS_DIR/output/prereqs/${prereq_name}.out"
-
-        if [[ ! -f "$prereq_sql" ]]; then
-            echo "ERROR: prerequisite test file not found: $prereq_sql"
-            return 1
-        fi
-
-        if [[ "$prereq_sql" == "$SQL_DIR/"* ]]; then
-            prereq_expected="$EXPECTED_DIR/${prereq_name}.out"
-            if [[ -f "$prereq_expected" ]]; then
-                prepare_test_fixture "$prereq_sql" "$prereq_expected" "$prereq_name"
-                prereq_sql="$PREPARED_SQL_FILE"
-            fi
-        fi
-
-        echo "  -> $prereq_name"
-        if [[ -n "$TIMEOUT_CMD" ]]; then
-            if $TIMEOUT_CMD "$TIMEOUT" psql "${PG_ARGS[@]}" -a -q < "$prereq_sql" > "$prereq_output" 2>&1; then
-                :
-            else
-                exit_code=$?
-                if [[ $exit_code -eq 124 ]]; then
-                    echo "TIMEOUT" >> "$prereq_output"
-                fi
-                echo "ERROR: prerequisite test failed: $prereq_name"
-                echo "See: $prereq_output"
-                return 1
-            fi
-        else
-            if ! psql "${PG_ARGS[@]}" -a -q < "$prereq_sql" > "$prereq_output" 2>&1; then
-                echo "ERROR: prerequisite test failed: $prereq_name"
-                echo "See: $prereq_output"
-                return 1
-            fi
-        fi
-    done
-
-    return 0
-}
-
 echo "Per-query statement_timeout: 5s"
 
 if ! run_bootstrap_setup; then
-    exit 1
-fi
-
-if ! run_single_test_prereqs; then
     exit 1
 fi
 

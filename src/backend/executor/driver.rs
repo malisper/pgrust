@@ -257,6 +257,10 @@ fn execute_statement_with_source(
             expected: "COMMENT ON INDEX handled by database/session layer",
             actual: "COMMENT ON INDEX".into(),
         })),
+        Statement::CommentOnAggregate(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "COMMENT ON AGGREGATE handled by database/session layer",
+            actual: "COMMENT ON AGGREGATE".into(),
+        })),
         Statement::CommentOnConstraint(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "COMMENT ON CONSTRAINT handled by database/session layer",
             actual: "COMMENT ON CONSTRAINT".into(),
@@ -307,6 +311,10 @@ fn execute_statement_with_source(
             expected: "CREATE FUNCTION handled by database/session layer",
             actual: "CREATE FUNCTION".into(),
         })),
+        Statement::CreateAggregate(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "CREATE AGGREGATE handled by database/session layer",
+            actual: "CREATE AGGREGATE".into(),
+        })),
         Statement::CreateOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE OPERATOR handled by database/session layer",
             actual: "CREATE OPERATOR".into(),
@@ -314,6 +322,10 @@ fn execute_statement_with_source(
         Statement::DropFunction(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP FUNCTION handled by database/session layer",
             actual: "DROP FUNCTION".into(),
+        })),
+        Statement::DropAggregate(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "DROP AGGREGATE handled by database/session layer",
+            actual: "DROP AGGREGATE".into(),
         })),
         Statement::DropOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP OPERATOR handled by database/session layer",
@@ -474,6 +486,10 @@ pub fn execute_readonly_statement(
             expected: "read-only statement",
             actual: "COMMENT ON INDEX".into(),
         })),
+        Statement::CommentOnAggregate(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "COMMENT ON AGGREGATE".into(),
+        })),
         Statement::CommentOnConstraint(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "COMMENT ON CONSTRAINT".into(),
@@ -506,6 +522,10 @@ pub fn execute_readonly_statement(
             expected: "read-only statement",
             actual: "CREATE FUNCTION".into(),
         })),
+        Statement::CreateAggregate(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "CREATE AGGREGATE".into(),
+        })),
         Statement::CreateOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE OPERATOR".into(),
@@ -513,6 +533,10 @@ pub fn execute_readonly_statement(
         Statement::DropFunction(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "DROP FUNCTION".into(),
+        })),
+        Statement::DropAggregate(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "DROP AGGREGATE".into(),
         })),
         Statement::DropOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",

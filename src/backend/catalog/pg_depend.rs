@@ -5,7 +5,8 @@ use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::catalog::{
     DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_ATTRDEF_RELATION_OID,
     PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
-    PG_NAMESPACE_RELATION_OID, PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID,
+    PG_NAMESPACE_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID,
+    PG_PUBLICATION_NAMESPACE_RELATION_OID,
     PG_PUBLICATION_REL_RELATION_OID, PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID,
     PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PgDependRow,
 };
@@ -279,6 +280,103 @@ pub fn proc_depend_rows(
                 deptype: DEPENDENCY_NORMAL,
             }),
     );
+    sort_pg_depend_rows(&mut rows);
+    rows
+}
+
+pub fn aggregate_depend_rows(
+    proc_oid: u32,
+    namespace_oid: u32,
+    result_type_oid: u32,
+    arg_type_oids: &[u32],
+    transfn_oid: u32,
+    finalfn_oid: u32,
+) -> Vec<PgDependRow> {
+    let mut rows = proc_depend_rows(proc_oid, namespace_oid, result_type_oid, arg_type_oids);
+    if transfn_oid != 0 {
+        rows.push(PgDependRow {
+            classid: PG_PROC_RELATION_OID,
+            objid: proc_oid,
+            objsubid: 0,
+            refclassid: PG_PROC_RELATION_OID,
+            refobjid: transfn_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        });
+    }
+    if finalfn_oid != 0 {
+        rows.push(PgDependRow {
+            classid: PG_PROC_RELATION_OID,
+            objid: proc_oid,
+            objsubid: 0,
+            refclassid: PG_PROC_RELATION_OID,
+            refobjid: finalfn_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        });
+    }
+    sort_pg_depend_rows(&mut rows);
+    rows
+}
+
+pub fn operator_depend_rows(
+    row: &crate::include::catalog::PgOperatorRow,
+) -> Vec<PgDependRow> {
+    let mut rows = vec![PgDependRow {
+        classid: PG_OPERATOR_RELATION_OID,
+        objid: row.oid,
+        objsubid: 0,
+        refclassid: PG_NAMESPACE_RELATION_OID,
+        refobjid: row.oprnamespace,
+        refobjsubid: 0,
+        deptype: DEPENDENCY_NORMAL,
+    }];
+
+    for type_oid in [row.oprleft, row.oprright, row.oprresult]
+        .into_iter()
+        .filter(|oid| *oid != 0)
+    {
+        rows.push(PgDependRow {
+            classid: PG_OPERATOR_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+            refclassid: PG_TYPE_RELATION_OID,
+            refobjid: type_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        });
+    }
+
+    for proc_oid in [row.oprcode, row.oprrest, row.oprjoin]
+        .into_iter()
+        .filter(|oid| *oid != 0)
+    {
+        rows.push(PgDependRow {
+            classid: PG_OPERATOR_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+            refclassid: PG_PROC_RELATION_OID,
+            refobjid: proc_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        });
+    }
+
+    for operator_oid in [row.oprcom, row.oprnegate]
+        .into_iter()
+        .filter(|oid| *oid != 0)
+    {
+        rows.push(PgDependRow {
+            classid: PG_OPERATOR_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+            refclassid: PG_OPERATOR_RELATION_OID,
+            refobjid: operator_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        });
+    }
+
     sort_pg_depend_rows(&mut rows);
     rows
 }

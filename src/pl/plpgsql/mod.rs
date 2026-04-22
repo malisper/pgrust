@@ -13,8 +13,8 @@ pub use exec::{
     take_notices,
 };
 pub(crate) use exec::{
-    execute_user_defined_scalar_function, execute_user_defined_set_returning_function,
-    execute_user_defined_trigger_function,
+    execute_user_defined_scalar_function, execute_user_defined_scalar_function_values,
+    execute_user_defined_set_returning_function, execute_user_defined_trigger_function,
 };
 pub use gram::parse_block;
 

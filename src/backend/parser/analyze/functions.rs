@@ -569,6 +569,11 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PlainToTsQuery
             | BuiltinScalarFunction::PhraseToTsQuery
             | BuiltinScalarFunction::WebSearchToTsQuery => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::Int4Pl => args.len() == 2,
+            BuiltinScalarFunction::Int8Inc => args.len() == 1,
+            BuiltinScalarFunction::Int8IncAny => args.len() == 2,
+            BuiltinScalarFunction::Int4AvgAccum => args.len() == 2,
+            BuiltinScalarFunction::Int8Avg => args.len() == 1,
             BuiltinScalarFunction::TsLexize => args.len() == 2,
             BuiltinScalarFunction::TsQueryNot => args.len() == 1,
             BuiltinScalarFunction::TsMatch
@@ -1764,6 +1769,11 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("min_scale", BuiltinScalarFunction::MinScale),
         ("trim_scale", BuiltinScalarFunction::TrimScale),
         ("numeric_inc", BuiltinScalarFunction::NumericInc),
+        ("int4pl", BuiltinScalarFunction::Int4Pl),
+        ("int8inc", BuiltinScalarFunction::Int8Inc),
+        ("int8inc_any", BuiltinScalarFunction::Int8IncAny),
+        ("int4_avg_accum", BuiltinScalarFunction::Int4AvgAccum),
+        ("int8_avg", BuiltinScalarFunction::Int8Avg),
         ("factorial", BuiltinScalarFunction::Factorial),
         ("pg_lsn", BuiltinScalarFunction::PgLsn),
         ("trunc", BuiltinScalarFunction::Trunc),

@@ -169,6 +169,54 @@ pub fn execute_user_defined_scalar_function(
     }
 }
 
+pub fn execute_user_defined_scalar_function_values(
+    proc_oid: u32,
+    arg_values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let compiled = compiled_function_for_proc(proc_oid, ctx)?;
+
+    let FunctionReturnContract::Scalar { setof, ty, .. } = &compiled.return_contract else {
+        return Err(function_runtime_error(
+            "record-returning function called in scalar context",
+            None,
+            "0A000",
+        ));
+    };
+    if *setof {
+        return Err(function_runtime_error(
+            "set-returning function called in scalar context",
+            None,
+            "0A000",
+        ));
+    }
+
+    let track_stats = ctx.session_stats.read().track_functions.tracks_plpgsql();
+    if track_stats {
+        ctx.session_stats.write().begin_function_call(proc_oid);
+    }
+    let mut rows = execute_compiled_function(&compiled, arg_values, None, ctx)?;
+    if track_stats {
+        ctx.session_stats.write().finish_function_call(proc_oid);
+    }
+    let mut row = rows.pop().ok_or_else(|| {
+        function_runtime_error(
+            "control reached end of function without RETURN",
+            None,
+            "2F005",
+        )
+    })?;
+    let values = row.values()?;
+    match values {
+        [value] => cast_value(value.clone(), *ty),
+        other => Err(function_runtime_error(
+            "scalar function returned an unexpected row shape",
+            Some(format!("expected 1 column, got {}", other.len())),
+            "42804",
+        )),
+    }
+}
+
 pub fn execute_user_defined_set_returning_function(
     proc_oid: u32,
     args: &[Expr],

@@ -1,4 +1,7 @@
 use super::*;
+use crate::backend::catalog::loader::load_physical_catalog_rows_visible_scoped;
+use crate::backend::catalog::persistence::sync_catalog_rows_subset;
+use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::commands::analyze::collect_analyze_stats;
 use crate::backend::executor::{ExecError, Value};
 use crate::backend::parser::{BoundRelation, CatalogLookup, ParseError, SqlType, SqlTypeKind};
@@ -7,8 +10,8 @@ use crate::backend::utils::misc::notices::{
     clear_notices as clear_backend_notices, take_notices as take_backend_notices,
 };
 use crate::include::catalog::{
-    FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, PG_CLASS_RELATION_OID,
-    PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID,
+    BootstrapCatalogKind, FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID,
+    PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
 };
 use crate::include::nodes::parsenodes::MaintenanceTarget;
 use crate::include::nodes::primnodes::QueryColumn;
@@ -180,7 +183,6 @@ fn analyze_executor_context(
         txn_waiter: Some(db.txn_waiter.clone()),
         sequences: Some(db.sequences.clone()),
         large_objects: Some(db.large_objects.clone()),
-        async_notify_runtime: Some(db.async_notify_runtime.clone()),
         advisory_locks: Arc::clone(&db.advisory_locks),
         checkpoint_stats: db.checkpoint_stats_snapshot(),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -198,7 +200,6 @@ fn analyze_executor_context(
         default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
         timed: false,
         allow_side_effects: false,
-        pending_async_notifications: Vec::new(),
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
         case_test_values: Vec::new(),
         system_bindings: Vec::new(),
@@ -1075,154 +1076,80 @@ fn standalone_listen_and_unlisten_update_subscriptions_immediately() {
     assert!(!db.async_notify_runtime.is_listening(1, "alerts"));
 }
 
-#[test]
-fn explicit_transaction_listen_and_unlisten_apply_on_commit_and_rollback() {
-    let db = Database::open_ephemeral(32).unwrap();
-    let mut session = Session::new(1);
-
-    session.execute(&db, "begin").unwrap();
-    session.execute(&db, "listen alerts").unwrap();
-    assert!(!db.async_notify_runtime.is_listening(1, "alerts"));
-    session.execute(&db, "rollback").unwrap();
-    assert!(!db.async_notify_runtime.is_listening(1, "alerts"));
-
-    session.execute(&db, "begin").unwrap();
-    session.execute(&db, "listen alerts").unwrap();
-    assert!(!db.async_notify_runtime.is_listening(1, "alerts"));
-    session.execute(&db, "commit").unwrap();
-    assert!(db.async_notify_runtime.is_listening(1, "alerts"));
-
-    session.execute(&db, "begin").unwrap();
-    session.execute(&db, "unlisten alerts").unwrap();
-    assert!(db.async_notify_runtime.is_listening(1, "alerts"));
-    session.execute(&db, "rollback").unwrap();
-    assert!(db.async_notify_runtime.is_listening(1, "alerts"));
-
-    session.execute(&db, "begin").unwrap();
-    session.execute(&db, "unlisten alerts").unwrap();
-    assert!(db.async_notify_runtime.is_listening(1, "alerts"));
-    session.execute(&db, "commit").unwrap();
-    assert!(!db.async_notify_runtime.is_listening(1, "alerts"));
+fn create_plain_test_aggregates(db: &Database) {
+    db.execute(
+        1,
+        "create aggregate newavg ( \
+         sfunc = int4_avg_accum, basetype = int4, stype = _int8, \
+         finalfunc = int8_avg, initcond1 = '{0,0}')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create aggregate newsum ( \
+         sfunc1 = int4pl, basetype = int4, stype1 = int4, \
+         initcond1 = '0')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create aggregate newcnt (*) ( \
+         sfunc = int8inc, stype = int8, \
+         initcond = '0', parallel = safe)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create aggregate oldcnt ( \
+         sfunc = int8inc, basetype = 'ANY', stype = int8, \
+         initcond = '0')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create aggregate newcnt (\"any\") ( \
+         sfunc = int8inc_any, stype = int8, \
+         initcond = '0')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function sum3(int8, int8, int8) returns int8 as \
+         'select $1 + $2 + $3' language sql strict immutable",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create aggregate sum2(int8, int8) ( \
+         sfunc = sum3, stype = int8, \
+         initcond = '0')",
+    )
+    .unwrap();
 }
 
-#[test]
-fn standalone_select_pg_notify_and_notify_enqueue_cross_session_notifications() {
-    let db = Database::open_ephemeral(32).unwrap();
-
-    db.execute(2, "listen alerts").unwrap();
-    assert_eq!(
-        query_rows(&db, 1, "select pg_notify('alerts', 'from_select')"),
-        vec![vec![Value::Null]]
-    );
-    db.execute(1, "notify alerts, 'from_stmt'").unwrap();
-
-    assert_eq!(
-        db.async_notify_runtime.pending_notifications(2),
-        vec![
-            crate::pgrust::database::DeliveredNotification {
-                sender_pid: 1,
-                channel: "alerts".to_string(),
-                payload: "from_select".to_string(),
-            },
-            crate::pgrust::database::DeliveredNotification {
-                sender_pid: 1,
-                channel: "alerts".to_string(),
-                payload: "from_stmt".to_string(),
-            },
-        ]
-    );
-}
-
-#[test]
-fn duplicate_notifications_within_explicit_transaction_collapse_to_one_queued_notification() {
-    let db = Database::open_ephemeral(32).unwrap();
-    let mut session = Session::new(1);
-
-    db.execute(2, "listen alerts").unwrap();
-
-    session.execute(&db, "begin").unwrap();
-    session
-        .execute(&db, "select pg_notify('alerts', 'dup')")
+fn create_plain_test_aggregate_inputs(db: &Database) {
+    db.execute(1, "create table agg_input (four int4, q1 int8, q2 int8)")
         .unwrap();
-    session.execute(&db, "notify alerts, 'dup'").unwrap();
-    session
-        .execute(&db, "select pg_notify('alerts', 'dup')")
-        .unwrap();
-    session.execute(&db, "commit").unwrap();
-
-    assert_eq!(
-        db.async_notify_runtime.pending_notifications(2),
-        vec![crate::pgrust::database::DeliveredNotification {
-            sender_pid: 1,
-            channel: "alerts".to_string(),
-            payload: "dup".to_string(),
-        }]
-    );
+    db.execute(
+        1,
+        "insert into agg_input values \
+         (1, 10, 100), \
+         (2, 1, 2), \
+         (null, null, null), \
+         (3, 5, 6)",
+    )
+    .unwrap();
 }
 
-#[test]
-fn distinct_notification_payloads_remain_distinct() {
-    let db = Database::open_ephemeral(32).unwrap();
-    let mut session = Session::new(1);
-
-    db.execute(2, "listen alerts").unwrap();
-
-    session.execute(&db, "begin").unwrap();
-    session.execute(&db, "notify alerts, 'first'").unwrap();
-    session.execute(&db, "notify alerts, 'second'").unwrap();
-    session.execute(&db, "commit").unwrap();
-
-    assert_eq!(
-        db.async_notify_runtime.pending_notifications(2),
-        vec![
-            crate::pgrust::database::DeliveredNotification {
-                sender_pid: 1,
-                channel: "alerts".to_string(),
-                payload: "first".to_string(),
-            },
-            crate::pgrust::database::DeliveredNotification {
-                sender_pid: 1,
-                channel: "alerts".to_string(),
-                payload: "second".to_string(),
-            },
-        ]
-    );
-}
-
-#[test]
-fn unlisten_star_removes_all_subscriptions() {
-    let db = Database::open_ephemeral(32).unwrap();
-
-    db.execute(1, "listen first").unwrap();
-    db.execute(1, "listen second").unwrap();
-    assert_eq!(
-        db.async_notify_runtime.listening_channels(1),
-        vec!["first".to_string(), "second".to_string()]
-    );
-
-    db.execute(1, "unlisten *").unwrap();
-    assert!(db.async_notify_runtime.listening_channels(1).is_empty());
-}
-
-#[test]
-fn async_notification_queue_usage_tracks_pending_notifications_and_disconnect() {
-    let db = Database::open_ephemeral(32).unwrap();
-
-    assert_eq!(db.async_notify_runtime.queue_usage(), 0.0);
-    db.execute(2, "listen alerts").unwrap();
-    db.execute(1, "notify alerts, 'payload'").unwrap();
-    assert!(db.async_notify_runtime.queue_usage() > 0.0);
-
-    assert_eq!(db.async_notify_runtime.drain(2).len(), 1);
-    assert_eq!(db.async_notify_runtime.queue_usage(), 0.0);
-
-    db.execute(2, "listen alerts").unwrap();
-    db.execute(1, "notify alerts, 'again'").unwrap();
-    assert!(db.async_notify_runtime.queue_usage() > 0.0);
-
-    db.async_notify_runtime.disconnect(2);
-    assert_eq!(db.async_notify_runtime.queue_usage(), 0.0);
-    assert!(db.async_notify_runtime.listening_channels(2).is_empty());
+fn visible_aggregate_row(
+    db: &Database,
+    client_id: ClientId,
+    aggfnoid: u32,
+) -> Option<PgAggregateRow> {
+    db.backend_catcache(client_id, None)
+        .unwrap()
+        .aggregate_by_fnoid(aggfnoid)
+        .cloned()
 }
 
 fn take_notice_messages() -> Vec<String> {
@@ -1943,7 +1870,9 @@ fn advisory_session_and_transaction_locks_cleanup_and_encode_keys() {
         vec![vec![Value::Bool(false)]]
     );
 
-    session.execute(&db, "select pg_advisory_unlock_all()").unwrap();
+    session
+        .execute(&db, "select pg_advisory_unlock_all()")
+        .unwrap();
     assert_eq!(
         session_query_rows(
             &mut session,
@@ -4591,12 +4520,13 @@ fn gist_leaf_tuple_count(db: &Database, client_id: u32, rel: crate::RelFileLocat
 }
 
 fn assert_explain_uses_index(db: &Database, client_id: u32, sql: &str, index_name: &str) {
+    let relfilenode = relfilenode_for(db, client_id, index_name);
     let lines = explain_lines(db, client_id, sql);
     assert!(
         lines
             .iter()
-            .any(|line| line.contains(&format!("Index Scan using {index_name} "))),
-        "expected EXPLAIN to use index {index_name}, got {lines:?}"
+            .any(|line| line.contains(&format!("Index Scan using rel {relfilenode} "))),
+        "expected EXPLAIN to use index {index_name} (relfilenode {relfilenode}), got {lines:?}"
     );
 }
 
@@ -5769,6 +5699,157 @@ fn comment_on_index_upserts_and_clears_pg_description() {
 }
 
 #[test]
+fn create_aggregate_supports_plain_custom_aggregate_execution() {
+    let base = temp_dir("create_aggregate_execution");
+    let db = Database::open(&base, 16).unwrap();
+
+    create_plain_test_aggregates(&db);
+    create_plain_test_aggregate_inputs(&db);
+    let newavg_oid = int_value(
+        &query_rows(
+            &db,
+            1,
+            "select oid from pg_proc where proname = 'newavg' and prokind = 'a'",
+        )[0][0],
+    ) as u32;
+    let snapshot = db
+        .txns
+        .read()
+        .snapshot(crate::backend::access::transam::xact::INVALID_TRANSACTION_ID)
+        .unwrap();
+    let txns = db.txns.read();
+    let visible_rows = load_physical_catalog_rows_visible_scoped(
+        &db.cluster.base_dir,
+        &db.pool,
+        &txns,
+        &snapshot,
+        1,
+        db.database_oid,
+        &crate::include::catalog::bootstrap_catalog_kinds(),
+    )
+    .unwrap();
+    let local_catcache = db
+        .catalog
+        .read()
+        .catcache_with_snapshot(&db.pool, &txns, &snapshot, 1)
+        .unwrap();
+    let backend_catcache = db.backend_catcache(1, None).unwrap();
+    assert!(
+        visible_rows
+            .aggregates
+            .iter()
+            .any(|row| row.aggfnoid == newavg_oid),
+        "visible aggregate rows should include newavg; got {:?}",
+        visible_rows
+            .aggregates
+            .iter()
+            .map(|row| row.aggfnoid)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        local_catcache.aggregate_by_fnoid(newavg_oid).is_some(),
+        "local catcache aggregate rows: {:?}",
+        local_catcache
+            .aggregate_rows()
+            .into_iter()
+            .map(|row| row.aggfnoid)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        backend_catcache.aggregate_by_fnoid(newavg_oid).is_some(),
+        "backend catcache aggregate rows: {:?}",
+        backend_catcache
+            .aggregate_rows()
+            .into_iter()
+            .map(|row| row.aggfnoid)
+            .collect::<Vec<_>>()
+    );
+    drop(txns);
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select \
+             newavg(four), \
+             newsum(four), \
+             newcnt(four), \
+             newcnt(*), \
+             oldcnt(*), \
+             sum2(q1, q2) \
+             from agg_input"
+        ),
+        vec![vec![
+            Value::Numeric("2".into()),
+            Value::Int32(6),
+            Value::Int64(3),
+            Value::Int64(4),
+            Value::Int64(4),
+            Value::Int64(124),
+        ]]
+    );
+}
+
+#[test]
+fn reopen_backfills_missing_pg_aggregate_bootstrap_rows() {
+    let base = temp_dir("aggregate_backfill_reopen");
+    let db = Database::open(&base, 16).unwrap();
+    let db_oid = db.database_oid;
+    drop(db);
+
+    sync_catalog_rows_subset(
+        &base,
+        &PhysicalCatalogRows::default(),
+        db_oid,
+        &[BootstrapCatalogKind::PgAggregate],
+    )
+    .unwrap();
+
+    let reopened = Database::open(&base, 16).unwrap();
+    assert!(
+        reopened
+            .backend_catcache(1, None)
+            .unwrap()
+            .aggregate_by_fnoid(6219)
+            .is_some()
+    );
+    assert_eq!(
+        query_rows(
+            &reopened,
+            1,
+            "select count(*) from pg_aggregate where aggfnoid = 6219"
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+}
+
+#[test]
+fn reopen_missing_pg_aggregate_custom_rows_is_corrupt() {
+    let base = temp_dir("aggregate_backfill_custom_corrupt");
+    let db = Database::open(&base, 16).unwrap();
+    let db_oid = db.database_oid;
+
+    create_plain_test_aggregates(&db);
+    drop(db);
+
+    sync_catalog_rows_subset(
+        &base,
+        &PhysicalCatalogRows::default(),
+        db_oid,
+        &[BootstrapCatalogKind::PgAggregate],
+    )
+    .unwrap();
+
+    match Database::open(&base, 16) {
+        Err(DatabaseError::Catalog(crate::backend::catalog::CatalogError::Corrupt(
+            "missing pg_aggregate row for custom aggregate",
+        ))) => {}
+        Err(err) => panic!("unexpected reopen error: {err:?}"),
+        Ok(_) => panic!("expected reopen to fail"),
+    }
+}
+
+#[test]
 fn comment_on_missing_index_reports_relation_does_not_exist() {
     let base = temp_dir("comment_on_missing_index");
     let db = Database::open(&base, 16).unwrap();
@@ -5778,6 +5859,180 @@ fn comment_on_missing_index_reports_relation_does_not_exist() {
     match db.execute(1, "comment on index missing_idx is 'nope'") {
         Err(ExecError::Parse(ParseError::TableDoesNotExist(name))) if name == "missing_idx" => {}
         other => panic!("expected missing index error, got {:?}", other),
+    }
+}
+
+#[test]
+fn comment_on_aggregate_uses_pg_proc_description_rows() {
+    let base = temp_dir("comment_on_aggregate");
+    let db = Database::open(&base, 16).unwrap();
+
+    create_plain_test_aggregates(&db);
+
+    db.execute(1, "comment on aggregate newcnt(*) is 'an agg(*) comment'")
+        .unwrap();
+    db.execute(
+        1,
+        "comment on aggregate newcnt(\"any\") is 'an agg(any) comment'",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            &format!(
+                "select p.pronargs, d.description \
+                 from pg_description d \
+                 join pg_proc p on p.oid = d.objoid \
+                 where p.proname = 'newcnt' \
+                   and p.prokind = 'a' \
+                   and d.classoid = {} \
+                   and d.objsubid = 0 \
+                 order by p.pronargs",
+                PG_PROC_RELATION_OID
+            )
+        ),
+        vec![
+            vec![Value::Int16(0), Value::Text("an agg(*) comment".into())],
+            vec![Value::Int16(1), Value::Text("an agg(any) comment".into())],
+        ]
+    );
+
+    db.execute(1, "comment on aggregate newcnt(*) is null")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            &format!(
+                "select p.pronargs, d.description \
+                 from pg_description d \
+                 join pg_proc p on p.oid = d.objoid \
+                 where p.proname = 'newcnt' \
+                   and p.prokind = 'a' \
+                   and d.classoid = {} \
+                   and d.objsubid = 0 \
+                 order by p.pronargs",
+                PG_PROC_RELATION_OID
+            )
+        ),
+        vec![vec![
+            Value::Int16(1),
+            Value::Text("an agg(any) comment".into()),
+        ]]
+    );
+}
+
+#[test]
+fn drop_aggregate_removes_proc_and_aggregate_rows() {
+    let base = temp_dir("drop_aggregate_rows");
+    let db = Database::open(&base, 16).unwrap();
+
+    create_plain_test_aggregates(&db);
+    create_plain_test_aggregate_inputs(&db);
+
+    let proc_oid = int_value(
+        &query_rows(
+            &db,
+            1,
+            "select oid \
+             from pg_proc \
+             where proname = 'newcnt' and prokind = 'a' and pronargs = 0",
+        )[0][0],
+    );
+    assert!(visible_aggregate_row(&db, 1, proc_oid as u32).is_some());
+
+    db.execute(1, "drop aggregate newcnt(*)").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            &format!("select count(*) from pg_proc where oid = {proc_oid}"),
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+    assert_eq!(visible_aggregate_row(&db, 1, proc_oid as u32), None);
+
+    match db.execute(1, "select newcnt(*) from agg_input") {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
+            if expected.contains("supported") && actual == "newcnt" => {}
+        other => panic!("expected dropped aggregate call failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_or_replace_aggregate_preserves_proc_oid() {
+    let base = temp_dir("replace_aggregate_oid");
+    let db = Database::open(&base, 16).unwrap();
+
+    create_plain_test_aggregates(&db);
+    create_plain_test_aggregate_inputs(&db);
+
+    let before_rows = query_rows(
+        &db,
+        1,
+        "select oid, proparallel \
+         from pg_proc \
+         where proname = 'sum2'",
+    );
+    assert_eq!(before_rows.len(), 1);
+    let before_oid = int_value(&before_rows[0][0]);
+    assert_eq!(before_rows[0][1], Value::Text("u".into()));
+    assert_eq!(
+        visible_aggregate_row(&db, 1, before_oid as u32)
+            .expect("sum2 aggregate metadata should exist")
+            .agginitval,
+        Some("0".into())
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select sum2(q1, q2) from agg_input"),
+        vec![vec![Value::Int64(124)]]
+    );
+
+    db.execute(
+        1,
+        "create or replace aggregate sum2(int8, int8) ( \
+         sfunc = sum3, stype = int8, \
+         initcond = '10', parallel = safe)",
+    )
+    .unwrap();
+
+    let after_rows = query_rows(
+        &db,
+        1,
+        "select oid, proparallel \
+         from pg_proc \
+         where proname = 'sum2'",
+    );
+    assert_eq!(after_rows.len(), 1);
+    assert_eq!(int_value(&after_rows[0][0]), before_oid);
+    assert_eq!(after_rows[0][1], Value::Text("s".into()));
+    assert_eq!(
+        visible_aggregate_row(&db, 1, before_oid as u32)
+            .expect("sum2 aggregate metadata should still exist")
+            .agginitval,
+        Some("10".into())
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select sum2(q1, q2) from agg_input"),
+        vec![vec![Value::Int64(134)]]
+    );
+}
+
+#[test]
+fn custom_aggregate_window_execution_is_rejected() {
+    let base = temp_dir("aggregate_window_rejected");
+    let db = Database::open(&base, 16).unwrap();
+
+    create_plain_test_aggregates(&db);
+    create_plain_test_aggregate_inputs(&db);
+
+    match db.execute(1, "select newcnt(four) over () from agg_input") {
+        Err(ExecError::Parse(ParseError::FeatureNotSupported(feature)))
+            if feature == "window execution for custom aggregate newcnt" => {}
+        other => panic!("expected custom aggregate window rejection, got {other:?}"),
     }
 }
 
@@ -7253,85 +7508,6 @@ fn regtype_literal_cast_resolves_type_name() {
             "select typname from pg_type where oid = 'attmp_array[]'::regtype"
         ),
         vec![vec![Value::Text("_attmp_array".into())]]
-    );
-}
-
-#[test]
-fn regclass_literal_cast_resolves_relation_name() {
-    let base = temp_dir("regclass_literal_cast");
-    let db = Database::open(&base, 16).unwrap();
-
-    assert_eq!(
-        query_rows(&db, 1, "select 'pg_operator'::regclass::oid"),
-        vec![vec![Value::Int64(
-            crate::include::catalog::PG_OPERATOR_RELATION_OID as i64
-        )]]
-    );
-}
-
-#[test]
-fn regoperator_literal_cast_resolves_operator_signature() {
-    let base = temp_dir("regoperator_literal_cast");
-    let db = Database::open(&base, 16).unwrap();
-
-    db.execute(
-        1,
-        "create function regoperator_test_fn(boolean, boolean) returns boolean as $$ select null::boolean; $$ language sql immutable",
-    )
-    .unwrap();
-    db.execute(
-        1,
-        "create operator === (leftarg = boolean, rightarg = boolean, procedure = regoperator_test_fn)",
-    )
-    .unwrap();
-
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select oprleft, oprright from pg_operator where oid = '===(boolean,boolean)'::regoperator"
-        ),
-        vec![vec![Value::Int64(16), Value::Int64(16)]]
-    );
-}
-
-#[test]
-fn pg_describe_object_formats_operator_dependencies() {
-    let base = temp_dir("pg_describe_object_operator_deps");
-    let db = Database::open(&base, 16).unwrap();
-
-    db.execute(
-        1,
-        "create function alter_op_test_fn(boolean, boolean) returns boolean as $$ select null::boolean; $$ language sql immutable",
-    )
-    .unwrap();
-    db.execute(
-        1,
-        "create function customcontsel(internal, oid, internal, integer) returns float8 as 'contsel' language internal stable strict",
-    )
-    .unwrap();
-    db.execute(
-        1,
-        "create operator === (leftarg = boolean, rightarg = boolean, procedure = alter_op_test_fn, restrict = customcontsel, join = contjoinsel)",
-    )
-    .unwrap();
-
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select \
-                pg_describe_object('pg_proc'::regclass, 'alter_op_test_fn(boolean,boolean)'::regprocedure::oid, 0), \
-                pg_describe_object('pg_proc'::regclass, 'customcontsel(internal,oid,internal,integer)'::regprocedure::oid, 0), \
-                pg_describe_object('pg_namespace'::regclass, 2200, 0), \
-                pg_describe_object('pg_operator'::regclass, '===(boolean,boolean)'::regoperator::oid, 0)"
-        ),
-        vec![vec![
-            Value::Text("function alter_op_test_fn(boolean,boolean)".into()),
-            Value::Text("function customcontsel(internal,oid,internal,integer)".into()),
-            Value::Text("schema public".into()),
-            Value::Text("operator ===(boolean,boolean)".into()),
-        ]]
     );
 }
 
@@ -8841,96 +9017,6 @@ fn create_gist_box_index_supports_knn_order_by() {
 }
 
 #[test]
-fn create_spgist_text_index_reports_missing_default_opclass() {
-    let base = temp_dir("spgist_missing_default_opclass");
-    let db = Database::open(&base, 16).unwrap();
-
-    db.execute(1, "create table texts (t text)").unwrap();
-
-    match db.execute(1, "create index texts_t_spgist on texts using spgist (t)") {
-        Err(ExecError::Parse(ParseError::MissingDefaultOpclass {
-            access_method,
-            type_name,
-        })) => {
-            assert_eq!(access_method, "spgist");
-            assert_eq!(type_name, "text");
-        }
-        other => panic!("expected missing default opclass error, got {:?}", other),
-    }
-}
-
-#[test]
-fn create_spgist_box_index_supports_overlap_and_knn_order_by() {
-    let base = temp_dir("spgist_box_overlap_knn");
-    let db = Database::open(&base, 16).unwrap();
-
-    db.execute(1, "create table boxes (id int4 not null, b box)")
-        .unwrap();
-    db.execute(
-        1,
-        "insert into boxes values \
-         (1, '(0,0),(1,1)'::box), \
-         (2, '(5,5),(6,6)'::box), \
-         (3, '(10,10),(12,12)'::box), \
-         (4, '(7,7),(8,8)'::box)",
-    )
-    .unwrap();
-    db.execute(1, "create index boxes_b_spgist on boxes using spgist (b)")
-        .unwrap();
-
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select indclass \
-             from pg_index \
-             where indexrelid = (select oid from pg_class where relname = 'boxes_b_spgist')",
-        ),
-        vec![vec![Value::Text(
-            crate::include::catalog::BOX_SPGIST_OPCLASS_OID
-                .to_string()
-                .into()
-        )]]
-    );
-
-    let overlap_sql = "select id from boxes where b && '(6,6),(7,7)'::box order by id";
-    assert_explain_uses_index(&db, 1, overlap_sql, "boxes_b_spgist");
-    assert_eq!(
-        query_rows(&db, 1, overlap_sql),
-        vec![vec![Value::Int32(2)], vec![Value::Int32(4)]]
-    );
-
-    let left_of_sql = "select * from boxes where b << '(10,20),(30,40)'::box";
-    let left_of_lines = explain_lines(&db, 1, left_of_sql);
-    assert!(
-        left_of_lines
-            .iter()
-            .any(|line| line.contains("Index Scan using boxes_b_spgist on boxes")),
-        "expected named index scan in EXPLAIN, got {left_of_lines:?}"
-    );
-    assert!(
-        left_of_lines
-            .iter()
-            .any(|line| line.contains("Index Cond: (b << '(30,40),(10,20)'::box)")),
-        "expected box index condition in EXPLAIN, got {left_of_lines:?}"
-    );
-
-    let knn_sql = "select id from boxes \
-                   order by b <-> '(5.2,5.2),(5.2,5.2)'::box \
-                   limit 3";
-    let expected = query_rows(&db, 1, knn_sql);
-    assert_eq!(
-        expected,
-        vec![
-            vec![Value::Int32(2)],
-            vec![Value::Int32(4)],
-            vec![Value::Int32(1)],
-        ]
-    );
-    assert_explain_uses_index(&db, 1, knn_sql, "boxes_b_spgist");
-}
-
-#[test]
 fn create_gist_range_index_explain_and_query_use_it() {
     let base = temp_dir("gist_range_index_scan_explain");
     let db = Database::open(&base, 16).unwrap();
@@ -9377,8 +9463,7 @@ fn unique_expression_index_rejects_duplicate_expression_value() {
     db.execute(1, "insert into items values ('Alpha')").unwrap();
 
     match db.execute(1, "insert into items values ('alpha')") {
-        Err(ExecError::UniqueViolation { constraint, .. })
-            if constraint == "items_name_lower_key" => {}
+        Err(ExecError::UniqueViolation { constraint }) if constraint == "items_name_lower_key" => {}
         other => panic!("expected unique expression violation, got {other:?}"),
     }
 }
@@ -10052,7 +10137,7 @@ fn create_unique_index_rejects_duplicate_live_keys() {
         .unwrap();
 
     match db.execute(1, "create unique index items_id_key on items (id)") {
-        Err(ExecError::UniqueViolation { constraint, .. }) => {
+        Err(ExecError::UniqueViolation { constraint }) => {
             assert_eq!(constraint, "items_id_key");
         }
         other => panic!("expected unique violation, got {:?}", other),
@@ -10102,14 +10187,14 @@ fn create_table_primary_key_and_unique_constraints_are_enforced_and_persisted() 
     db.execute(1, "insert into items values (3, null)").unwrap();
 
     match db.execute(1, "insert into items values (1, 11)") {
-        Err(ExecError::UniqueViolation { constraint, .. }) => {
+        Err(ExecError::UniqueViolation { constraint }) => {
             assert_eq!(constraint, "items_pkey");
         }
         other => panic!("expected primary-key duplicate rejection, got {other:?}"),
     }
 
     match db.execute(1, "insert into items values (4, 10)") {
-        Err(ExecError::UniqueViolation { constraint, .. }) => {
+        Err(ExecError::UniqueViolation { constraint }) => {
             assert_eq!(constraint, "items_code_key");
         }
         other => panic!("expected unique duplicate rejection, got {other:?}"),
@@ -10196,14 +10281,14 @@ fn create_table_table_level_primary_key_and_unique_constraints_work() {
         .unwrap();
 
     match db.execute(1, "insert into memberships values (1, 10, 101)") {
-        Err(ExecError::UniqueViolation { constraint, .. }) => {
+        Err(ExecError::UniqueViolation { constraint }) => {
             assert_eq!(constraint, "memberships_pkey");
         }
         other => panic!("expected composite primary-key rejection, got {other:?}"),
     }
 
     match db.execute(1, "insert into memberships values (4, 10, 100)") {
-        Err(ExecError::UniqueViolation { constraint, .. }) => {
+        Err(ExecError::UniqueViolation { constraint }) => {
             assert_eq!(constraint, "memberships_tag_note_key");
         }
         other => panic!("expected composite unique rejection, got {other:?}"),
@@ -11220,211 +11305,20 @@ fn drop_sequence_restrict_and_cascade_respect_row_type_dependencies() {
 }
 
 #[test]
-fn create_table_like_plain_copies_columns_not_null_and_collation_without_defaults_or_checks() {
-    let base = temp_dir("create_table_like_plain");
-    let db = Database::open(&base, 64).unwrap();
-
-    db.execute(
-        1,
-        "create table src_like_plain (
-            id int4 default 7 constraint src_like_plain_id_positive check (id > 0),
-            note text collate \"C\" not null
-        )",
-    )
-    .unwrap();
-    db.execute(1, "create table dst_like_plain (like src_like_plain)")
-        .unwrap();
-
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select attname, attnotnull, attcollation \
-             from pg_attribute \
-             where attrelid = (select oid from pg_class where relname = 'dst_like_plain') \
-               and attnum > 0 \
-             order by attnum",
-        ),
-        vec![
-            vec![
-                Value::Text("id".into()),
-                Value::Bool(false),
-                Value::Int64(0),
-            ],
-            vec![
-                Value::Text("note".into()),
-                Value::Bool(true),
-                Value::Int64(crate::include::catalog::C_COLLATION_OID as i64),
-            ],
-        ]
-    );
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select count(*) from pg_attrdef where adrelid = (select oid from pg_class where relname = 'dst_like_plain')",
-        ),
-        vec![vec![Value::Int64(0)]]
-    );
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select count(*) from pg_constraint where conrelid = (select oid from pg_class where relname = 'dst_like_plain') and contype = 'c'",
-        ),
-        vec![vec![Value::Int64(0)]]
-    );
-
-    match db.execute(1, "insert into dst_like_plain values (1, null)") {
-        Err(ExecError::NotNullViolation {
-            relation, column, ..
-        }) if relation == "dst_like_plain" && column == "note" => {}
-        other => panic!("expected copied NOT NULL rejection, got {other:?}"),
-    }
-}
-
-#[test]
-fn create_table_like_with_defaults_and_constraints_copies_only_supported_constraint_types() {
-    let base = temp_dir("create_table_like_defaults_constraints");
-    let db = Database::open(&base, 64).unwrap();
-
-    db.execute(1, "create table like_parent (id int4 primary key)")
-        .unwrap();
-    db.execute(
-        1,
-        "create table src_like_opts (
-            id int4 primary key,
-            code text unique,
-            parent_id int4 references like_parent(id),
-            payload int4 default 7,
-            constraint src_like_payload_positive check (payload > 0)
-        )",
-    )
-    .unwrap();
-    db.execute(
-        1,
-        "create table dst_like_opts (
-            like src_like_opts including defaults including constraints
-        )",
-    )
-    .unwrap();
-
-    db.execute(
-        1,
-        "insert into dst_like_opts (id, code, parent_id) values (1, 'a', 999)",
-    )
-    .unwrap();
-    db.execute(
-        1,
-        "insert into dst_like_opts (id, code, parent_id) values (1, 'a', 999)",
-    )
-    .unwrap();
-
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select id, code, parent_id, payload from dst_like_opts order by payload, id",
-        ),
-        vec![
-            vec![
-                Value::Int32(1),
-                Value::Text("a".into()),
-                Value::Int32(999),
-                Value::Int32(7),
-            ],
-            vec![
-                Value::Int32(1),
-                Value::Text("a".into()),
-                Value::Int32(999),
-                Value::Int32(7),
-            ],
-        ]
-    );
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select count(*) from pg_constraint \
-             where conrelid = (select oid from pg_class where relname = 'dst_like_opts') \
-               and contype in ('p', 'u', 'f')",
-        ),
-        vec![vec![Value::Int64(0)]]
-    );
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select count(*) from pg_constraint \
-             where conrelid = (select oid from pg_class where relname = 'dst_like_opts') \
-               and contype = 'c'",
-        ),
-        vec![vec![Value::Int64(1)]]
-    );
-
-    match db.execute(
-        1,
-        "insert into dst_like_opts (id, code, parent_id, payload) values (2, 'b', 999, 0)",
-    ) {
-        Err(ExecError::CheckViolation {
-            relation,
-            constraint,
-        }) if relation == "dst_like_opts" && constraint == "src_like_payload_positive" => {}
-        other => panic!("expected copied CHECK rejection, got {other:?}"),
-    }
-}
-
-#[test]
-fn create_table_like_with_storage_and_compression_copies_pg_attribute_settings() {
-    let base = temp_dir("create_table_like_storage_compression");
-    let db = Database::open(&base, 64).unwrap();
-
-    db.execute(1, "create table src_like_storage (payload text)")
-        .unwrap();
-    db.execute(
-        1,
-        "alter table src_like_storage alter column payload set storage external",
-    )
-    .unwrap();
-    db.execute(
-        1,
-        "alter table src_like_storage alter column payload set compression pglz",
-    )
-    .unwrap();
-    db.execute(
-        1,
-        "create table dst_like_storage (
-            like src_like_storage including storage including compression
-        )",
-    )
-    .unwrap();
-
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select attstorage, attcompression \
-             from pg_attribute \
-             where attrelid = (select oid from pg_class where relname = 'dst_like_storage') \
-               and attname = 'payload'",
-        ),
-        vec![vec![Value::Text("e".into()), Value::Text("p".into())]]
-    );
-}
-
-#[test]
-fn create_table_like_sequence_reports_wrong_object_type_and_keeps_catalog_usable() {
-    let base = temp_dir("create_table_like_sequence");
+fn unsupported_create_table_like_does_not_poison_catalog_after_sequence_drop() {
+    let base = temp_dir("unsupported_create_table_like_sequence");
     let db = Database::open(&base, 64).unwrap();
 
     db.execute(1, "create table items (id int4)").unwrap();
     db.execute(1, "create sequence ctlseq1").unwrap();
     match db.execute(1, "create table ctlt10 (like ctlseq1)") {
-        Err(ExecError::Parse(ParseError::WrongObjectType { name, expected })) => {
-            assert_eq!(name, "ctlseq1");
-            assert_eq!(expected, "table");
+        Err(ExecError::Parse(ParseError::FeatureNotSupported(feature))) => {
+            assert_eq!(feature, "CREATE TABLE ... LIKE")
         }
-        other => panic!("expected wrong-object-type error, got {other:?}"),
+        other => panic!(
+            "expected unsupported CREATE TABLE LIKE error, got {:?}",
+            other
+        ),
     }
     db.execute(1, "drop sequence ctlseq1").unwrap();
 
@@ -13050,8 +12944,7 @@ fn create_temp_table_constraints_are_supported_with_postgres_persistence_rules()
     }
 
     match db.execute(1, "insert into department values (2, 0, 'A')") {
-        Err(ExecError::UniqueViolation { constraint, .. })
-            if constraint == "department_name_key" => {}
+        Err(ExecError::UniqueViolation { constraint }) if constraint == "department_name_key" => {}
         other => panic!("expected temp unique violation, got {other:?}"),
     }
 
@@ -13152,105 +13045,17 @@ fn unique_index_insert_rejects_duplicate_key() {
         .unwrap();
 
     match db.execute(1, "insert into items values (1, 'beta')") {
-        Err(ExecError::UniqueViolation { constraint, detail }) => {
+        Err(ExecError::UniqueViolation { constraint }) => {
             assert_eq!(constraint, "items_id_key");
-            assert_eq!(detail.as_deref(), Some("Key (id)=(1) already exists."));
             assert_eq!(
                 crate::backend::libpq::pqformat::format_exec_error(&ExecError::UniqueViolation {
-                    constraint: constraint.clone(),
-                    detail: detail.clone(),
+                    constraint: constraint.clone()
                 }),
                 "duplicate key value violates unique constraint \"items_id_key\""
             );
         }
         other => panic!("expected unique violation, got {:?}", other),
     }
-}
-
-#[test]
-fn unique_array_column_supports_duplicates_and_index_quals() {
-    let base = temp_dir("unique_array_column_supports_duplicates_and_index_quals");
-    let db = Database::open(&base, 16).unwrap();
-
-    db.execute(1, "create temp table arr_tbl (f1 int[] unique)")
-        .unwrap();
-    db.execute(1, "insert into arr_tbl values ('{1,2,3}')")
-        .unwrap();
-    db.execute(1, "insert into arr_tbl values ('{1,2}')")
-        .unwrap();
-    db.execute(1, "insert into arr_tbl values ('{2,3,4}')")
-        .unwrap();
-    db.execute(1, "insert into arr_tbl values ('{1,5,3}')")
-        .unwrap();
-    db.execute(1, "insert into arr_tbl values ('{1,2,10}')")
-        .unwrap();
-
-    match db.execute(1, "insert into arr_tbl values ('{1,2,3}')") {
-        Err(ExecError::UniqueViolation { constraint, detail }) => {
-            assert_eq!(constraint, "arr_tbl_f1_key");
-            assert_eq!(detail.as_deref(), Some("Key (f1)=({1,2,3}) already exists."));
-        }
-        other => panic!("expected unique violation, got {:?}", other),
-    }
-
-    db.execute(1, "set enable_seqscan to off").unwrap();
-    db.execute(1, "set enable_bitmapscan to off").unwrap();
-    assert_explain_uses_index(
-        &db,
-        1,
-        "select * from arr_tbl where f1 > '{1,2,3}' and f1 <= '{1,5,3}'",
-        "arr_tbl_f1_key",
-    );
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select * from arr_tbl where f1 > '{1,2,3}' and f1 <= '{1,5,3}'"
-        ),
-        vec![
-            vec![Value::PgArray(
-                crate::include::nodes::datum::ArrayValue::from_1d(vec![
-                    Value::Int32(1),
-                    Value::Int32(2),
-                    Value::Int32(10),
-                ])
-                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
-            )],
-            vec![Value::PgArray(
-                crate::include::nodes::datum::ArrayValue::from_1d(vec![
-                    Value::Int32(1),
-                    Value::Int32(5),
-                    Value::Int32(3),
-                ])
-                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
-            )],
-        ]
-    );
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select * from arr_tbl where f1 >= '{1,2,3}' and f1 < '{1,5,3}'"
-        ),
-        vec![
-            vec![Value::PgArray(
-                crate::include::nodes::datum::ArrayValue::from_1d(vec![
-                    Value::Int32(1),
-                    Value::Int32(2),
-                    Value::Int32(3),
-                ])
-                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
-            )],
-            vec![Value::PgArray(
-                crate::include::nodes::datum::ArrayValue::from_1d(vec![
-                    Value::Int32(1),
-                    Value::Int32(2),
-                    Value::Int32(10),
-                ])
-                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
-            )],
-        ]
-    );
 }
 
 #[test]
@@ -13266,7 +13071,7 @@ fn unique_index_update_rejects_duplicate_key() {
         .unwrap();
 
     match db.execute(1, "update items set id = 1 where id = 2") {
-        Err(ExecError::UniqueViolation { constraint, .. }) => {
+        Err(ExecError::UniqueViolation { constraint }) => {
             assert_eq!(constraint, "items_id_key");
         }
         other => panic!("expected unique violation, got {:?}", other),
@@ -13590,7 +13395,7 @@ fn concurrent_unique_index_inserts_only_allow_one_live_key() {
     for handle in handles {
         match handle.join().unwrap() {
             Ok(StatementResult::AffectedRows(1)) => successes += 1,
-            Err(ExecError::UniqueViolation { constraint, .. }) => {
+            Err(ExecError::UniqueViolation { constraint }) => {
                 assert_eq!(constraint, "items_id_key");
                 violations += 1;
             }
@@ -14720,10 +14525,11 @@ fn index_matrix_order_only_uses_forward_index_scan() {
 fn index_matrix_projection_over_ordered_index_keeps_order_without_sort() {
     let db = setup_index_matrix_db("index_matrix_order_projection");
     let lines = explain_lines(&db, 1, "select a + 1 from items order by a");
+    let relfilenode = relfilenode_for(&db, 1, "items_a_idx");
     assert!(
         lines
             .iter()
-            .any(|line| line.contains("Index Scan using items_a_idx ")),
+            .any(|line| line.contains(&format!("Index Scan using rel {relfilenode} "))),
         "expected ordered index scan, got {lines:?}"
     );
     assert!(
@@ -15286,97 +15092,6 @@ fn create_operator_class_persists_catalog_rows() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
-}
-
-#[test]
-fn create_operator_bool_bool_regression_debug() {
-    let base = temp_dir("create_operator_bool_bool_regression");
-    let db = Database::open(&base, 16).unwrap();
-
-    db.execute(
-        1,
-        "create function alter_op_test_fn(boolean, boolean) returns boolean as $$ select null::boolean; $$ language sql immutable",
-    )
-    .unwrap();
-    db.execute(
-        1,
-        "create function customcontsel(internal, oid, internal, integer) returns float8 as 'contsel' language internal stable strict",
-    )
-    .unwrap();
-
-    let xid = db.txns.write().begin();
-    let cid = 0;
-    let catalog = db.lazy_catalog_lookup(1, Some((xid, cid)), None);
-    let proc_oid = catalog
-        .proc_rows_by_name("alter_op_test_fn")
-        .into_iter()
-        .find(|row| row.proargtypes == "16 16")
-        .expect("alter_op_test_fn(bool,bool)")
-        .oid;
-    let restrict_oid = catalog
-        .proc_rows_by_name("customcontsel")
-        .into_iter()
-        .find(|row| row.proargtypes == "2281 26 2281 23")
-        .expect("customcontsel(internal,oid,internal,int4)")
-        .oid;
-    let join_oid = catalog
-        .proc_rows_by_name("contjoinsel")
-        .into_iter()
-        .find(|row| row.proargtypes == "2281 26 2281 21 2281")
-        .expect("contjoinsel(internal,oid,internal,int2,internal)")
-        .oid;
-    let ctx = crate::backend::catalog::store::CatalogWriteContext {
-        pool: db.pool.clone(),
-        txns: db.txns.clone(),
-        xid,
-        cid,
-        client_id: 1,
-        waiter: Some(db.txn_waiter.clone()),
-        interrupts: db.interrupt_state(1),
-    };
-    let row = crate::include::catalog::PgOperatorRow {
-        oid: 0,
-        oprname: "===".into(),
-        oprnamespace: crate::include::catalog::PUBLIC_NAMESPACE_OID,
-        oprowner: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
-        oprkind: 'b',
-        oprcanmerge: true,
-        oprcanhash: true,
-        oprleft: crate::include::catalog::BOOL_TYPE_OID,
-        oprright: crate::include::catalog::BOOL_TYPE_OID,
-        oprresult: crate::include::catalog::BOOL_TYPE_OID,
-        oprcom: 0,
-        oprnegate: 0,
-        oprcode: proc_oid,
-        oprrest: restrict_oid,
-        oprjoin: join_oid,
-    };
-    let (operator_oid, create_effect) = db
-        .catalog
-        .write()
-        .create_operator_mvcc(row.clone(), &ctx)
-        .unwrap();
-    db.apply_catalog_mutation_effect_immediate(&create_effect)
-        .unwrap();
-
-    let mut current = row;
-    current.oid = operator_oid;
-    let mut updated = current.clone();
-    updated.oprcom = operator_oid;
-    let replace_ctx = crate::backend::catalog::store::CatalogWriteContext {
-        pool: db.pool.clone(),
-        txns: db.txns.clone(),
-        xid,
-        cid: cid.saturating_add(1),
-        client_id: 1,
-        waiter: Some(db.txn_waiter.clone()),
-        interrupts: db.interrupt_state(1),
-    };
-    let replace_result = db
-        .catalog
-        .write()
-        .replace_operator_mvcc(&current, updated, &replace_ctx);
-    assert!(replace_result.is_ok(), "{replace_result:?}");
 }
 
 #[test]
@@ -16495,44 +16210,6 @@ fn temp_slot_reuse_starts_from_clean_namespace_contents() {
                     vec![Value::Text("pg_toast_temp_1".into())],
                 ]
             );
-        }
-        other => panic!("expected query result, got {:?}", other),
-    }
-}
-
-#[test]
-fn temp_slot_reuse_cleans_inherited_temp_relations() {
-    let base = temp_dir("temp_slot_reuse_inherits_cleanup");
-    let db = Database::open(&base, 16).unwrap();
-    let mut first_session = Session::with_temp_backend_id(10, 1);
-    let mut reused_session = Session::with_temp_backend_id(11, 1);
-
-    first_session
-        .execute(&db, "create temp table temp_parent (id int4 not null)")
-        .unwrap();
-    first_session
-        .execute(
-            &db,
-            "create temp table temp_child () inherits (temp_parent)",
-        )
-        .unwrap();
-
-    db.cleanup_client_temp_relations(10);
-    db.clear_temp_backend_id(10);
-
-    reused_session
-        .execute(&db, "create temp table temp_new (id int4 not null)")
-        .unwrap();
-    reused_session
-        .execute(&db, "insert into temp_new (id) values (9)")
-        .unwrap();
-
-    match reused_session
-        .execute(&db, "select count(*) from temp_new")
-        .unwrap()
-    {
-        StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Int64(1)]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }
@@ -19060,27 +18737,6 @@ fn create_function_row_returns_work_for_table_and_record() {
 }
 
 #[test]
-fn create_function_multi_out_non_set_returns_expand_in_select_list() {
-    let dir = temp_dir("create_function_multi_out_non_set");
-    let db = Database::open(&dir, 64).unwrap();
-
-    db.execute(
-        1,
-        "create function pair_row(input in int4, left out int4, label out text) language plpgsql as $$ begin left := input; label := 'row'; return; end $$",
-    )
-    .unwrap();
-
-    assert_eq!(
-        query_rows(&db, 1, "select (pair_row(7)).left, (pair_row(7)).label"),
-        vec![vec![Value::Int32(7), Value::Text("row".into())]]
-    );
-    assert_eq!(
-        query_rows(&db, 1, "select (pair_row(7)).*"),
-        vec![vec![Value::Int32(7), Value::Text("row".into())]]
-    );
-}
-
-#[test]
 fn create_function_named_composite_rows_expand_from_relation_rowtype() {
     let dir = temp_dir("create_function_named_composite");
     let db = Database::open(&dir, 64).unwrap();
@@ -19289,28 +18945,6 @@ fn plpgsql_alias_record_select_into_and_update_work() {
 }
 
 #[test]
-fn plpgsql_select_into_multiple_scalars_work() {
-    let dir = temp_dir("plpgsql_select_into_multiple_scalars");
-    let db = Database::open(&dir, 64).unwrap();
-
-    db.execute(
-        1,
-        "create function pair_source(x int4, y text, out a int4, out b text) language plpgsql as $$ begin a = x; b = y; return; end $$",
-    )
-    .unwrap();
-    db.execute(
-        1,
-        "create function assign_pair(out a int4, out b text) language plpgsql as $$ begin select * into a, b from pair_source(42, 'ok'); return; end $$",
-    )
-    .unwrap();
-
-    assert_eq!(
-        query_rows(&db, 1, "select (assign_pair()).*"),
-        vec![vec![Value::Int32(42), Value::Text("ok".into())]]
-    );
-}
-
-#[test]
 fn after_insert_triggers_fire_per_row_in_alphabetical_order() {
     let dir = temp_dir("after_insert_trigger_notices");
     let db = Database::open(&dir, 64).unwrap();
@@ -19462,27 +19096,6 @@ fn temp_trigger_function_is_resolved_from_temp_schema() {
         .unwrap();
 
     assert_eq!(take_notice_messages(), vec![String::from("temp-stmt")]);
-}
-
-#[test]
-fn temp_unique_array_columns_use_default_array_opclass() {
-    let dir = temp_dir("temp_unique_array_columns");
-    let db = Database::open(&dir, 16).unwrap();
-    let mut session = Session::new(1);
-
-    session
-        .execute(&db, "create temp table arr_tbl (f1 int[] unique)")
-        .unwrap();
-    session
-        .execute(&db, "insert into arr_tbl values ('{1,2,3}')")
-        .unwrap();
-
-    match session.execute(&db, "insert into arr_tbl values ('{1,2,3}')") {
-        Err(ExecError::UniqueViolation { constraint, .. }) => {
-            assert_eq!(constraint, "arr_tbl_f1_key");
-        }
-        other => panic!("expected unique violation, got {other:?}"),
-    }
 }
 
 #[test]

@@ -1,4 +1,6 @@
-use super::{AccumState, AggGroup, ExecError, ExecutorContext, OrderedAggInput, executor_start};
+use super::{
+    AggGroup, ExecError, ExecutorContext, OrderedAggInput, build_aggregate_runtime, executor_start,
+};
 use crate::backend::access::heap::heapam::{
     heap_fetch_visible_with_txns, heap_scan_begin_visible, heap_scan_end,
     heap_scan_page_next_tuple, heap_scan_prepare_next_page,
@@ -19,7 +21,6 @@ use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::time::date::format_date_text;
 use crate::backend::utils::time::instant::Instant;
 use crate::include::catalog::PG_LARGEOBJECT_METADATA_RELATION_OID;
-use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, CteScanState, FilterState, FunctionScanState, IndexScanState,
@@ -2192,6 +2193,18 @@ impl PlanNode for AggregateState {
             None
         };
         if self.result_rows.is_none() {
+            if self.runtimes.is_none() {
+                self.runtimes = Some(
+                    self.accumulators
+                        .iter()
+                        .map(|accum| build_aggregate_runtime(accum, ctx))
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
+            }
+            let runtimes = self
+                .runtimes
+                .clone()
+                .expect("aggregate runtimes initialized above");
             let mut groups: Vec<AggGroup> = Vec::new();
 
             while let Some(slot) = self.input.exec_proc_node(ctx)? {
@@ -2209,19 +2222,10 @@ impl PlanNode for AggregateState {
                     .iter()
                     .position(|g| g.key_values == self.key_buffer)
                     .unwrap_or_else(|| {
-                        let accum_states = self
-                            .accumulators
+                        let accum_states = runtimes
                             .iter()
-                            .map(|a| {
-                                let func = builtin_aggregate_function_for_proc_oid(a.aggfnoid)
-                                    .unwrap_or_else(|| {
-                                        panic!(
-                                            "aggregate {:?} lacks builtin implementation mapping",
-                                            a.aggfnoid
-                                        )
-                                    });
-                                AccumState::new(func, a.distinct, a.sql_type)
-                            })
+                            .zip(self.accumulators.iter())
+                            .map(|(runtime, accum)| runtime.initialize_state(accum))
                             .collect();
                         groups.push(AggGroup {
                             key_values: self.key_buffer.clone(),
@@ -2246,7 +2250,7 @@ impl PlanNode for AggregateState {
                         .map(|arg| eval_expr(arg, slot, ctx))
                         .collect::<Result<Vec<_>, _>>()?;
                     if accum.order_by.is_empty() {
-                        (self.trans_fns[i])(&mut group.accum_states[i], &values)?;
+                        runtimes[i].transition(&mut group.accum_states[i], &values, ctx)?;
                     } else {
                         let sort_keys = accum
                             .order_by
@@ -2262,19 +2266,10 @@ impl PlanNode for AggregateState {
             }
 
             if groups.is_empty() && self.group_by.is_empty() {
-                let accum_states = self
-                    .accumulators
+                let accum_states = runtimes
                     .iter()
-                    .map(|a| {
-                        let func = builtin_aggregate_function_for_proc_oid(a.aggfnoid)
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "aggregate {:?} lacks builtin implementation mapping",
-                                    a.aggfnoid
-                                )
-                            });
-                        AccumState::new(func, a.distinct, a.sql_type)
-                    })
+                    .zip(self.accumulators.iter())
+                    .map(|(runtime, accum)| runtime.initialize_state(accum))
                     .collect();
                 groups.push(AggGroup {
                     key_values: Vec::new(),
@@ -2309,7 +2304,11 @@ impl PlanNode for AggregateState {
                         return Err(err);
                     }
                     for input in inputs.iter() {
-                        (self.trans_fns[i])(&mut group.accum_states[i], &input.arg_values)?;
+                        runtimes[i].transition(
+                            &mut group.accum_states[i],
+                            &input.arg_values,
+                            ctx,
+                        )?;
                     }
                 }
             }
@@ -2318,8 +2317,8 @@ impl PlanNode for AggregateState {
             for group in &groups {
                 ctx.check_for_interrupts()?;
                 let mut row_values = group.key_values.clone();
-                for accum_state in &group.accum_states {
-                    row_values.push(accum_state.finalize());
+                for (runtime, accum_state) in runtimes.iter().zip(group.accum_states.iter()) {
+                    row_values.push(runtime.finalize(accum_state, ctx)?);
                 }
 
                 if let Some(having) = &self.having {

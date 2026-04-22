@@ -13,7 +13,7 @@ use crate::include::nodes::primnodes::{ColumnDesc, RelationDesc};
 use crate::pgrust::database::default_sequence_oid_from_default_expr;
 
 const RELCACHE_INIT_MAGIC: u32 = 0x5052_494E;
-const RELCACHE_INIT_VERSION: u32 = 5;
+const RELCACHE_INIT_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum RelCacheInitScopeFile {
@@ -63,7 +63,6 @@ struct ColumnDescFile {
     name: String,
     storage: AttributeDesc,
     sql_type: SqlType,
-    collation_oid: Option<u32>,
     dropped: bool,
     attstattarget: i16,
     attinhcount: i16,
@@ -238,7 +237,6 @@ fn column_desc_to_file(column: &ColumnDesc) -> ColumnDescFile {
         name: column.name.clone(),
         storage: column.storage.clone(),
         sql_type: column.sql_type,
-        collation_oid: column.collation_oid,
         dropped: column.dropped,
         attstattarget: column.attstattarget,
         attinhcount: column.attinhcount,
@@ -265,7 +263,6 @@ fn column_desc_from_file(column: ColumnDescFile) -> ColumnDesc {
         storage: column.storage,
         ty: scalar_type_for_sql_type(column.sql_type),
         sql_type: column.sql_type,
-        collation_oid: column.collation_oid,
         dropped: column.dropped,
         attstattarget: column.attstattarget,
         attinhcount: column.attinhcount,
