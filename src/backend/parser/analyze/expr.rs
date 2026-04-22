@@ -20,7 +20,8 @@ mod subquery;
 mod targets;
 
 use self::func::{
-    bind_row_to_json_call, bind_scalar_function_call, bind_user_defined_scalar_function_call,
+    bind_row_to_json_call, bind_scalar_function_call,
+    bind_user_defined_scalar_function_call,
 };
 use self::json::{
     bind_json_binary_expr, bind_jsonb_contained_expr, bind_jsonb_contains_expr,
@@ -50,6 +51,26 @@ use super::ranges::{
     bind_maybe_range_over_position, bind_maybe_range_shift,
 };
 use std::collections::BTreeSet;
+
+pub(super) fn bind_resolved_scalar_function_call(
+    resolved: &ResolvedFunctionCall,
+    args: &[SqlExpr],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    self::func::bind_resolved_scalar_function_call(
+        resolved,
+        args,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )
+}
 
 fn supports_array_subscripts(array_type: SqlType) -> bool {
     array_type.is_array

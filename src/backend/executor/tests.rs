@@ -13517,6 +13517,40 @@ fn bytea_hash_and_encoding_functions_work() {
 }
 
 #[test]
+fn bytea_concat_operator_concatenates_buffers() {
+    let base = temp_dir("bytea_concat_operator");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select E'\\\\001\\\\002'::bytea || E'\\\\003\\\\004'::bytea",
+        )
+        .unwrap(),
+        vec![vec![Value::Bytea(vec![1, 2, 3, 4])]],
+    );
+}
+
+#[test]
+fn length_accepts_bytea_argument() {
+    let base = temp_dir("length_bytea");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select length(E'\\\\001\\\\002\\\\003'::bytea)",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(3)]],
+    );
+}
+
+#[test]
 fn generate_series_accepts_named_sql_args_in_from() {
     let base = temp_dir("generate_series_named_args");
     let txns = TransactionManager::new_durable(&base).unwrap();
