@@ -1668,6 +1668,24 @@ fn lower_set_returning_call(
             output_columns,
             with_ordinality,
         },
+        SetReturningCall::StringTableFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::StringTableFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args: args
+                .into_iter()
+                .map(|arg| lower_expr(ctx, arg, mode))
+                .collect(),
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::TextSearchTableFunction {
             kind,
             args,
@@ -1789,6 +1807,24 @@ fn fix_set_returning_call_upper_exprs(
             output_columns,
             with_ordinality,
         } => SetReturningCall::RegexTableFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args: args
+                .into_iter()
+                .map(|arg| fix_upper_expr_for_input(root, arg, path, input_tlist))
+                .collect(),
+            output_columns,
+            with_ordinality,
+        },
+        SetReturningCall::StringTableFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::StringTableFunction {
             func_oid,
             func_variadic,
             kind,
@@ -2254,6 +2290,7 @@ fn validate_set_returning_call(
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }
         | SetReturningCall::RegexTableFunction { args, .. }
+        | SetReturningCall::StringTableFunction { args, .. }
         | SetReturningCall::TextSearchTableFunction { args, .. }
         | SetReturningCall::UserDefined { args, .. } => args
             .iter()
@@ -2575,6 +2612,7 @@ fn validate_planner_set_returning_call(
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }
         | SetReturningCall::RegexTableFunction { args, .. }
+        | SetReturningCall::StringTableFunction { args, .. }
         | SetReturningCall::TextSearchTableFunction { args, .. }
         | SetReturningCall::UserDefined { args, .. } => args
             .iter()

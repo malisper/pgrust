@@ -186,9 +186,7 @@ fn expr_references_local_cte(expr: &Expr, local_ctes: &HashMap<usize, String>) -
         Expr::Cast(inner, _)
         | Expr::Collate { expr: inner, .. }
         | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => {
-            expr_references_local_cte(inner, local_ctes)
-        }
+        | Expr::IsNotNull(inner) => expr_references_local_cte(inner, local_ctes),
         Expr::Like {
             expr,
             pattern,
@@ -284,6 +282,7 @@ fn query_references_local_cte(
                     | SetReturningCall::JsonTableFunction { args, .. }
                     | SetReturningCall::JsonRecordFunction { args, .. }
                     | SetReturningCall::RegexTableFunction { args, .. }
+                    | SetReturningCall::StringTableFunction { args, .. }
                     | SetReturningCall::TextSearchTableFunction { args, .. }
                     | SetReturningCall::UserDefined { args, .. } => args.iter().collect(),
                 };
@@ -387,6 +386,7 @@ fn query_references_local_cte(
                 | SetReturningCall::JsonTableFunction { args, .. }
                 | SetReturningCall::JsonRecordFunction { args, .. }
                 | SetReturningCall::RegexTableFunction { args, .. }
+                | SetReturningCall::StringTableFunction { args, .. }
                 | SetReturningCall::TextSearchTableFunction { args, .. }
                 | SetReturningCall::UserDefined { args, .. } => args
                     .iter()

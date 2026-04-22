@@ -90,9 +90,7 @@ pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLoc
         Expr::Cast(inner, _)
         | Expr::Collate { expr: inner, .. }
         | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => {
-            collect_rels_from_expr(inner, rels)
-        }
+        | Expr::IsNotNull(inner) => collect_rels_from_expr(inner, rels),
         Expr::Coalesce(left, right)
         | Expr::IsDistinctFrom(left, right)
         | Expr::IsNotDistinctFrom(left, right) => {
@@ -248,6 +246,9 @@ fn collect_rels_from_set_returning_call(
         | crate::include::nodes::primnodes::SetReturningCall::JsonTableFunction { args, .. }
         | crate::include::nodes::primnodes::SetReturningCall::JsonRecordFunction { args, .. }
         | crate::include::nodes::primnodes::SetReturningCall::RegexTableFunction { args, .. }
+        | crate::include::nodes::primnodes::SetReturningCall::StringTableFunction {
+            args, ..
+        }
         | crate::include::nodes::primnodes::SetReturningCall::TextSearchTableFunction {
             args,
             ..
@@ -403,6 +404,10 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
             | crate::include::nodes::primnodes::SetReturningCall::RegexTableFunction {
                 args, ..
             }
+            | crate::include::nodes::primnodes::SetReturningCall::StringTableFunction {
+                args,
+                ..
+            }
             | crate::include::nodes::primnodes::SetReturningCall::TextSearchTableFunction {
                 args,
                 ..
@@ -461,6 +466,9 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                                 args, ..
                             }
                             | crate::include::nodes::primnodes::SetReturningCall::RegexTableFunction {
+                                args, ..
+                            }
+                            | crate::include::nodes::primnodes::SetReturningCall::StringTableFunction {
                                 args, ..
                             }
                             | crate::include::nodes::primnodes::SetReturningCall::TextSearchTableFunction {
