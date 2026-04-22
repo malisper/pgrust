@@ -54,6 +54,8 @@ impl Path {
             | Self::Append { plan_info, .. }
             | Self::SeqScan { plan_info, .. }
             | Self::IndexScan { plan_info, .. }
+            | Self::BitmapIndexScan { plan_info, .. }
+            | Self::BitmapHeapScan { plan_info, .. }
             | Self::Filter { plan_info, .. }
             | Self::NestedLoopJoin { plan_info, .. }
             | Self::HashJoin { plan_info, .. }
@@ -86,6 +88,16 @@ impl Path {
                 })
                 .collect(),
             Self::SeqScan { desc, .. } | Self::IndexScan { desc, .. } => desc
+                .columns
+                .iter()
+                .map(|c| QueryColumn {
+                    name: c.name.clone(),
+                    sql_type: c.sql_type,
+                    wire_type_oid: None,
+                })
+                .collect(),
+            Self::BitmapIndexScan { .. } => Vec::new(),
+            Self::BitmapHeapScan { desc, .. } => desc
                 .columns
                 .iter()
                 .map(|c| QueryColumn {
@@ -146,7 +158,11 @@ impl Path {
             }
             | Self::IndexScan {
                 source_id, desc, ..
+            }
+            | Self::BitmapHeapScan {
+                source_id, desc, ..
             } => slot_output_vars(*source_id, &desc.columns, |column| column.sql_type),
+            Self::BitmapIndexScan { .. } => Vec::new(),
             Self::Filter { input, .. }
             | Self::OrderBy { input, .. }
             | Self::Limit { input, .. } => input.output_vars(),
@@ -275,6 +291,8 @@ impl Path {
             | Self::Append { pathtarget, .. }
             | Self::SeqScan { pathtarget, .. }
             | Self::IndexScan { pathtarget, .. }
+            | Self::BitmapIndexScan { pathtarget, .. }
+            | Self::BitmapHeapScan { pathtarget, .. }
             | Self::Filter { pathtarget, .. }
             | Self::NestedLoopJoin { pathtarget, .. }
             | Self::HashJoin { pathtarget, .. }
@@ -299,6 +317,8 @@ impl Path {
             Self::Result { .. }
             | Self::Append { .. }
             | Self::SeqScan { .. }
+            | Self::BitmapIndexScan { .. }
+            | Self::BitmapHeapScan { .. }
             | Self::Aggregate { .. }
             | Self::CteScan { .. }
             | Self::WorkTableScan { .. }

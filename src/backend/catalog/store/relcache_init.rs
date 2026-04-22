@@ -13,7 +13,7 @@ use crate::include::nodes::primnodes::{ColumnDesc, RelationDesc};
 use crate::pgrust::database::default_sequence_oid_from_default_expr;
 
 const RELCACHE_INIT_MAGIC: u32 = 0x5052_494E;
-const RELCACHE_INIT_VERSION: u32 = 4;
+const RELCACHE_INIT_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum RelCacheInitScopeFile {

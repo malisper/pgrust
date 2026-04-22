@@ -1,4 +1,10 @@
 pub mod amapi;
+pub mod brin;
+pub mod brin_internal;
+pub mod brin_page;
+pub mod brin_revmap;
+pub mod brin_tuple;
+pub mod brin_xlog;
 pub mod detoast;
 pub mod genam;
 pub mod gist;
@@ -11,6 +17,7 @@ pub mod nbtree;
 pub mod relscan;
 pub mod scankey;
 pub mod spgist;
+pub mod tidbitmap;
 pub mod toast_compression;
 pub mod toast_helper;
 pub mod toast_internals;

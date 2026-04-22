@@ -1304,9 +1304,12 @@ mod tests {
             owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             relpersistence: 't',
             relkind: 'r',
+            relispartition: false,
+            relpartbound: None,
             desc: crate::include::nodes::primnodes::RelationDesc {
                 columns: Vec::new(),
             },
+            partitioned_table: None,
         };
 
         let temp_err =
@@ -1340,9 +1343,12 @@ mod tests {
             owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             relpersistence: 'u',
             relkind: 'r',
+            relispartition: false,
+            relpartbound: None,
             desc: crate::include::nodes::primnodes::RelationDesc {
                 columns: Vec::new(),
             },
+            partitioned_table: None,
         };
 
         let unlogged_err =

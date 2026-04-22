@@ -183,6 +183,7 @@ fn analyze_executor_context(
         txn_waiter: Some(db.txn_waiter.clone()),
         sequences: Some(db.sequences.clone()),
         large_objects: Some(db.large_objects.clone()),
+        async_notify_runtime: Some(db.async_notify_runtime.clone()),
         advisory_locks: Arc::clone(&db.advisory_locks),
         checkpoint_stats: db.checkpoint_stats_snapshot(),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -204,6 +205,7 @@ fn analyze_executor_context(
         case_test_values: Vec::new(),
         system_bindings: Vec::new(),
         subplans: Vec::new(),
+        pending_async_notifications: Vec::new(),
         catalog: visible_catalog,
         compiled_functions: HashMap::new(),
         cte_tables: HashMap::new(),
@@ -9547,6 +9549,96 @@ fn create_gist_box_index_explain_and_query_use_it() {
 }
 
 #[test]
+fn create_brin_index_explain_uses_bitmap_scan_and_recheck() {
+    let base = temp_dir("brin_bitmap_scan_explain");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (a int4 not null, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into items select i, repeat('x', 200) from generate_series(1, 2000) i",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index items_a_brin on items using brin (a) with (pages_per_range = 1)",
+    )
+    .unwrap();
+    db.execute(1, "analyze items").unwrap();
+
+    let relfilenode = relfilenode_for(&db, 1, "items_a_brin");
+    let lines = explain_lines(&db, 1, "select a from items where a >= 200 and a < 210");
+    assert!(
+        lines.iter().any(|line| line.contains("Bitmap Heap Scan on items")),
+        "expected Bitmap Heap Scan in EXPLAIN, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains(&format!("Bitmap Index Scan using rel {relfilenode} "))),
+        "expected Bitmap Index Scan on items_a_brin, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Index Cond:") && line.contains("a >= 200") && line.contains("a < 210")),
+        "expected BRIN Index Cond in EXPLAIN, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Recheck Cond:") && line.contains("a >= 200") && line.contains("a < 210")),
+        "expected BRIN Recheck Cond in EXPLAIN, got {lines:?}"
+    );
+
+    assert_eq!(
+        query_rows(&db, 1, "select a from items where a >= 200 and a < 210 order by a"),
+        (200..210)
+            .map(|value| vec![Value::Int32(value)])
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn reopen_brin_index_preserves_pages_per_range_in_catalog() {
+    let base = temp_dir("brin_reopen_catalog_options");
+
+    {
+        let db = Database::open(&base, 16).unwrap();
+        db.execute(1, "create table items (a int4 not null)").unwrap();
+        db.execute(
+            1,
+            "create index items_a_brin on items using brin (a) with (pages_per_range = 32)",
+        )
+        .unwrap();
+
+        let catalog = db.catalog.read().catalog_snapshot().unwrap();
+        let index = catalog.get("items_a_brin").unwrap();
+        assert_eq!(
+            index
+                .index_meta
+                .as_ref()
+                .and_then(|meta| meta.brin_options.as_ref())
+                .map(|options| options.pages_per_range),
+            Some(32)
+        );
+    }
+
+    let reopened = Database::open(&base, 16).unwrap();
+    let catalog = reopened.catalog.read().catalog_snapshot().unwrap();
+    let index = catalog.get("items_a_brin").unwrap();
+    assert_eq!(
+        index
+            .index_meta
+            .as_ref()
+            .and_then(|meta| meta.brin_options.as_ref())
+            .map(|options| options.pages_per_range),
+        Some(32)
+    );
+}
+
+#[test]
 fn create_gist_box_index_supports_knn_order_by() {
     let base = temp_dir("gist_box_knn_order");
     let db = Database::open(&base, 16).unwrap();
@@ -10270,7 +10362,7 @@ fn unique_expression_index_rejects_duplicate_expression_value() {
     db.execute(1, "insert into items values ('Alpha')").unwrap();
 
     match db.execute(1, "insert into items values ('alpha')") {
-        Err(ExecError::UniqueViolation { constraint }) if constraint == "items_name_lower_key" => {}
+        Err(ExecError::UniqueViolation { constraint, .. }) if constraint == "items_name_lower_key" => {}
         other => panic!("expected unique expression violation, got {other:?}"),
     }
 }
@@ -10944,7 +11036,7 @@ fn create_unique_index_rejects_duplicate_live_keys() {
         .unwrap();
 
     match db.execute(1, "create unique index items_id_key on items (id)") {
-        Err(ExecError::UniqueViolation { constraint }) => {
+        Err(ExecError::UniqueViolation { constraint, .. }) => {
             assert_eq!(constraint, "items_id_key");
         }
         other => panic!("expected unique violation, got {:?}", other),
@@ -10994,14 +11086,14 @@ fn create_table_primary_key_and_unique_constraints_are_enforced_and_persisted() 
     db.execute(1, "insert into items values (3, null)").unwrap();
 
     match db.execute(1, "insert into items values (1, 11)") {
-        Err(ExecError::UniqueViolation { constraint }) => {
+        Err(ExecError::UniqueViolation { constraint, .. }) => {
             assert_eq!(constraint, "items_pkey");
         }
         other => panic!("expected primary-key duplicate rejection, got {other:?}"),
     }
 
     match db.execute(1, "insert into items values (4, 10)") {
-        Err(ExecError::UniqueViolation { constraint }) => {
+        Err(ExecError::UniqueViolation { constraint, .. }) => {
             assert_eq!(constraint, "items_code_key");
         }
         other => panic!("expected unique duplicate rejection, got {other:?}"),
@@ -11088,14 +11180,14 @@ fn create_table_table_level_primary_key_and_unique_constraints_work() {
         .unwrap();
 
     match db.execute(1, "insert into memberships values (1, 10, 101)") {
-        Err(ExecError::UniqueViolation { constraint }) => {
+        Err(ExecError::UniqueViolation { constraint, .. }) => {
             assert_eq!(constraint, "memberships_pkey");
         }
         other => panic!("expected composite primary-key rejection, got {other:?}"),
     }
 
     match db.execute(1, "insert into memberships values (4, 10, 100)") {
-        Err(ExecError::UniqueViolation { constraint }) => {
+        Err(ExecError::UniqueViolation { constraint, .. }) => {
             assert_eq!(constraint, "memberships_tag_note_key");
         }
         other => panic!("expected composite unique rejection, got {other:?}"),
@@ -12598,7 +12690,7 @@ fn create_table_unique_nulls_not_distinct_treats_nulls_as_conflicting() {
         .unwrap();
 
     match db.execute(1, "insert into items (note) values ('second')") {
-        Err(ExecError::UniqueViolation { constraint }) if constraint == "items_id_key" => {}
+        Err(ExecError::UniqueViolation { constraint, .. }) if constraint == "items_id_key" => {}
         other => panic!("expected null unique violation, got {other:?}"),
     }
 
@@ -13810,7 +13902,7 @@ fn create_temp_table_constraints_are_supported_with_postgres_persistence_rules()
     }
 
     match db.execute(1, "insert into department values (2, 0, 'A')") {
-        Err(ExecError::UniqueViolation { constraint }) if constraint == "department_name_key" => {}
+        Err(ExecError::UniqueViolation { constraint, .. }) if constraint == "department_name_key" => {}
         other => panic!("expected temp unique violation, got {other:?}"),
     }
 
@@ -13911,11 +14003,12 @@ fn unique_index_insert_rejects_duplicate_key() {
         .unwrap();
 
     match db.execute(1, "insert into items values (1, 'beta')") {
-        Err(ExecError::UniqueViolation { constraint }) => {
+        Err(ExecError::UniqueViolation { constraint, .. }) => {
             assert_eq!(constraint, "items_id_key");
             assert_eq!(
                 crate::backend::libpq::pqformat::format_exec_error(&ExecError::UniqueViolation {
-                    constraint: constraint.clone()
+                    constraint: constraint.clone(),
+                    detail: None,
                 }),
                 "duplicate key value violates unique constraint \"items_id_key\""
             );
@@ -14109,7 +14202,7 @@ fn unique_index_update_rejects_duplicate_key() {
         .unwrap();
 
     match db.execute(1, "update items set id = 1 where id = 2") {
-        Err(ExecError::UniqueViolation { constraint }) => {
+        Err(ExecError::UniqueViolation { constraint, .. }) => {
             assert_eq!(constraint, "items_id_key");
         }
         other => panic!("expected unique violation, got {:?}", other),
@@ -14482,7 +14575,7 @@ fn concurrent_unique_index_inserts_only_allow_one_live_key() {
     for handle in handles {
         match handle.join().unwrap() {
             Ok(StatementResult::AffectedRows(1)) => successes += 1,
-            Err(ExecError::UniqueViolation { constraint }) => {
+            Err(ExecError::UniqueViolation { constraint, .. }) => {
                 assert_eq!(constraint, "items_id_key");
                 violations += 1;
             }

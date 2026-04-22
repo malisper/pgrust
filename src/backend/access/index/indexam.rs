@@ -4,6 +4,7 @@ use crate::include::access::amapi::{
     IndexBulkDeleteCallback, IndexBulkDeleteResult, IndexInsertContext, IndexVacuumContext,
 };
 use crate::include::access::relscan::{IndexScanDesc, ScanDirection};
+use crate::include::access::tidbitmap::TidBitmap;
 
 pub fn index_build_stub(
     ctx: &IndexBuildContext,
@@ -72,6 +73,19 @@ pub fn index_getnext(scan: &mut IndexScanDesc, am_oid: u32) -> Result<bool, Cata
         .amgettuple
         .ok_or(CatalogError::Corrupt("missing index gettuple callback"))?;
     amgettuple(scan)
+}
+
+pub fn index_getbitmap(
+    scan: &mut IndexScanDesc,
+    am_oid: u32,
+    bitmap: &mut TidBitmap,
+) -> Result<i64, CatalogError> {
+    let routine = crate::backend::access::index::amapi::index_am_handler(am_oid)
+        .ok_or(CatalogError::Corrupt("unknown index access method"))?;
+    let amgetbitmap = routine
+        .amgetbitmap
+        .ok_or(CatalogError::Corrupt("missing index getbitmap callback"))?;
+    amgetbitmap(scan, bitmap)
 }
 
 pub fn index_endscan(scan: IndexScanDesc, am_oid: u32) -> Result<(), CatalogError> {

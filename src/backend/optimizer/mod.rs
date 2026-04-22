@@ -39,6 +39,7 @@ const CPU_OPERATOR_COST: f64 = 0.0025;
 
 const STATISTIC_KIND_MCV: i16 = 1;
 const STATISTIC_KIND_HISTOGRAM: i16 = 2;
+const STATISTIC_KIND_CORRELATION: i16 = 3;
 
 #[derive(Debug, Clone)]
 struct RelationStats {
@@ -174,7 +175,10 @@ fn path_relids(path: &Path) -> Vec<usize> {
         Path::Result { .. } => Vec::new(),
         Path::Append { source_id, .. } => vec![*source_id],
         Path::SetOp { slot_id, .. } => vec![*slot_id],
-        Path::SeqScan { source_id, .. } | Path::IndexScan { source_id, .. } => vec![*source_id],
+        Path::SeqScan { source_id, .. }
+        | Path::IndexScan { source_id, .. }
+        | Path::BitmapIndexScan { source_id, .. }
+        | Path::BitmapHeapScan { source_id, .. } => vec![*source_id],
         Path::Filter { input, .. }
         | Path::Projection { input, .. }
         | Path::OrderBy { input, .. }

@@ -2,13 +2,21 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    BIT_TYPE_OID, BOOL_TYPE_OID, BOX_TYPE_OID, BTREE_AM_OID, BTREE_BIT_FAMILY_OID,
-    BTREE_BOOL_FAMILY_OID, BTREE_BYTEA_FAMILY_OID, BTREE_FLOAT_FAMILY_OID,
-    BTREE_INTEGER_FAMILY_OID, BTREE_TEXT_FAMILY_OID, BTREE_VARBIT_FAMILY_OID, BYTEA_TYPE_OID,
-    DATERANGE_TYPE_OID, GIST_AM_OID, GIST_BOX_FAMILY_OID, GIST_RANGE_FAMILY_OID, INT4_TYPE_OID,
-    INT4RANGE_TYPE_OID, INT8RANGE_TYPE_OID, NUMRANGE_TYPE_OID, POINT_TYPE_OID, SPGIST_AM_OID,
-    SPGIST_BOX_FAMILY_OID, TEXT_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID,
-    bootstrap_pg_operator_rows,
+    BIT_TYPE_OID, BOOL_TYPE_OID, BOX_TYPE_OID, BPCHAR_TYPE_OID, BRIN_AM_OID,
+    BRIN_BIT_MINMAX_FAMILY_OID, BRIN_BPCHAR_MINMAX_FAMILY_OID, BRIN_BYTEA_MINMAX_FAMILY_OID,
+    BRIN_CHAR_MINMAX_FAMILY_OID, BRIN_DATETIME_MINMAX_FAMILY_OID,
+    BRIN_FLOAT_MINMAX_FAMILY_OID, BRIN_INTEGER_MINMAX_FAMILY_OID,
+    BRIN_OID_MINMAX_FAMILY_OID, BRIN_TEXT_MINMAX_FAMILY_OID, BRIN_TIME_MINMAX_FAMILY_OID,
+    BRIN_TIMETZ_MINMAX_FAMILY_OID, BRIN_VARBIT_MINMAX_FAMILY_OID, BTREE_AM_OID,
+    BTREE_BIT_FAMILY_OID, BTREE_BOOL_FAMILY_OID, BTREE_BYTEA_FAMILY_OID,
+    BTREE_FLOAT_FAMILY_OID, BTREE_INTEGER_FAMILY_OID, BTREE_TEXT_FAMILY_OID,
+    BTREE_VARBIT_FAMILY_OID, BYTEA_TYPE_OID, DATERANGE_TYPE_OID, DATE_TYPE_OID,
+    FLOAT4_TYPE_OID, FLOAT8_TYPE_OID, GIST_AM_OID, GIST_BOX_FAMILY_OID, GIST_RANGE_FAMILY_OID,
+    INT2_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID, INT8RANGE_TYPE_OID,
+    INTERNAL_CHAR_TYPE_OID, NUMRANGE_TYPE_OID, OID_TYPE_OID, POINT_TYPE_OID, SPGIST_AM_OID,
+    SPGIST_BOX_FAMILY_OID, TEXT_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_TYPE_OID,
+    TIMESTAMPTZ_TYPE_OID, TIMETZ_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID,
+    VARBIT_TYPE_OID, bootstrap_pg_operator_rows,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,6 +216,46 @@ pub fn bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
                 amoppurpose: 's',
                 amopopr: operator_oid(&operators, name, range_type_oid, righttype),
                 amopmethod: GIST_AM_OID,
+                amopsortfamily: 0,
+            });
+            oid = oid.saturating_add(1);
+        }
+    }
+    for (family, type_oid) in [
+        (BRIN_BYTEA_MINMAX_FAMILY_OID, BYTEA_TYPE_OID),
+        (BRIN_CHAR_MINMAX_FAMILY_OID, INTERNAL_CHAR_TYPE_OID),
+        (BRIN_INTEGER_MINMAX_FAMILY_OID, INT2_TYPE_OID),
+        (BRIN_INTEGER_MINMAX_FAMILY_OID, INT4_TYPE_OID),
+        (BRIN_INTEGER_MINMAX_FAMILY_OID, INT8_TYPE_OID),
+        (BRIN_OID_MINMAX_FAMILY_OID, OID_TYPE_OID),
+        (BRIN_FLOAT_MINMAX_FAMILY_OID, FLOAT4_TYPE_OID),
+        (BRIN_FLOAT_MINMAX_FAMILY_OID, FLOAT8_TYPE_OID),
+        (BRIN_TEXT_MINMAX_FAMILY_OID, TEXT_TYPE_OID),
+        (BRIN_BPCHAR_MINMAX_FAMILY_OID, BPCHAR_TYPE_OID),
+        (BRIN_DATETIME_MINMAX_FAMILY_OID, DATE_TYPE_OID),
+        (BRIN_TIME_MINMAX_FAMILY_OID, TIME_TYPE_OID),
+        (BRIN_TIMETZ_MINMAX_FAMILY_OID, TIMETZ_TYPE_OID),
+        (BRIN_DATETIME_MINMAX_FAMILY_OID, TIMESTAMP_TYPE_OID),
+        (BRIN_DATETIME_MINMAX_FAMILY_OID, TIMESTAMPTZ_TYPE_OID),
+        (BRIN_BIT_MINMAX_FAMILY_OID, BIT_TYPE_OID),
+        (BRIN_VARBIT_MINMAX_FAMILY_OID, VARBIT_TYPE_OID),
+    ] {
+        for (strategy, name) in [
+            (1_i16, "<"),
+            (2, "<="),
+            (3, "="),
+            (4, ">="),
+            (5, ">"),
+        ] {
+            rows.push(PgAmopRow {
+                oid,
+                amopfamily: family,
+                amoplefttype: type_oid,
+                amoprighttype: type_oid,
+                amopstrategy: strategy,
+                amoppurpose: 's',
+                amopopr: operator_oid(&operators, name, type_oid, type_oid),
+                amopmethod: BRIN_AM_OID,
                 amopsortfamily: 0,
             });
             oid = oid.saturating_add(1);

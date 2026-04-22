@@ -6531,7 +6531,10 @@ fn index_property_builtins_report_am_and_index_capabilities() {
                 indclass: vec![crate::include::catalog::INT4_BTREE_OPCLASS_OID],
                 indcollation: vec![0],
                 indoption: vec![0],
+                indnullsnotdistinct: false,
+                brin_options: None,
             },
+            None,
         )
         .unwrap();
     catalog
@@ -6546,7 +6549,10 @@ fn index_property_builtins_report_am_and_index_capabilities() {
                 indclass: vec![crate::include::catalog::BOX_GIST_OPCLASS_OID],
                 indcollation: vec![0],
                 indoption: vec![0],
+                indnullsnotdistinct: false,
+                brin_options: None,
             },
+            None,
         )
         .unwrap();
     catalog
@@ -6561,7 +6567,10 @@ fn index_property_builtins_report_am_and_index_capabilities() {
                 indclass: vec![crate::include::catalog::BOX_SPGIST_OPCLASS_OID],
                 indcollation: vec![0],
                 indoption: vec![0],
+                indnullsnotdistinct: false,
+                brin_options: None,
             },
+            None,
         )
         .unwrap();
 

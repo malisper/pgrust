@@ -1150,6 +1150,8 @@ pub(crate) fn reinitialize_index_relation(
             client_id: ctx.client_id,
             xid,
             index_relation: index.rel,
+            index_desc: index.desc.clone(),
+            index_meta: index.index_meta.clone(),
         },
         index.index_meta.am_oid,
     )

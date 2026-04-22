@@ -13,12 +13,11 @@ use crate::include::nodes::parsenodes::{
     CreateCompositeTypeStatement, CreateTriggerStatement, CreateTypeStatement,
     DropAggregateStatement, DropTriggerStatement, DropTypeStatement, ForeignKeyAction,
     ForeignKeyMatchType, IndexColumnDef, InsertSource, InsertStatement, JoinTreeNode,
-    PartitionStrategy, PublicationObjectSpec, PublicationObjectSpec, PublicationOption,
-    PublicationOption, PublicationSchemaName, PublicationSchemaName, RangeTblEntryKind,
+    PartitionStrategy, PublicationObjectSpec, PublicationOption, PublicationSchemaName,
     RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum,
-    RawPartitionSpec, RawTypeName, RawTypeName, SetSessionAuthorizationStatement,
-    SetSessionAuthorizationStatement, SqlCallArgs, SqlCallArgs, TableConstraint, TableConstraint,
-    TriggerEvent, TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerTiming, ViewCheckOption,
+    RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement, SqlCallArgs,
+    TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerTiming,
+    ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -739,6 +738,7 @@ fn catalog_with_people_id_index() -> Catalog {
                 indoption: vec![],
                 indexprs: None,
                 indpred: None,
+                brin_options: None,
             }),
         },
     );
@@ -797,6 +797,7 @@ fn catalog_with_people_primary_key_opclass(opclass_oid: u32) -> Catalog {
                 indoption: vec![0],
                 indexprs: None,
                 indpred: None,
+                brin_options: None,
             }),
         },
     );
@@ -869,6 +870,7 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
             desc: RelationDesc {
                 columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
             },
+            partitioned_table: None,
             index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
                 indrelid: people.relation_oid,
                 indisunique: true,
@@ -883,6 +885,7 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
                 indoption: vec![0],
                 indexprs: None,
                 indpred: Some("(id > 0)".into()),
+                brin_options: None,
             }),
         },
     );
@@ -912,10 +915,14 @@ fn catalog_with_people_ctid_partial_unique_index() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
+            relpartbound: None,
             relrowsecurity: false,
             relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
+            relallvisible: 0,
+            relallfrozen: 0,
+            relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
             desc: RelationDesc {
                 columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
             },
@@ -923,6 +930,7 @@ fn catalog_with_people_ctid_partial_unique_index() -> Catalog {
             index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
                 indrelid: people.relation_oid,
                 indisunique: true,
+                indnullsnotdistinct: false,
                 indisprimary: false,
                 indisvalid: true,
                 indisready: true,
@@ -933,6 +941,7 @@ fn catalog_with_people_ctid_partial_unique_index() -> Catalog {
                 indoption: vec![0],
                 indexprs: None,
                 indpred: Some("ctid >= '(1000,0)'".into()),
+                brin_options: None,
             }),
         },
     );
@@ -988,6 +997,7 @@ fn catalog_with_people_expression_unique_index() -> Catalog {
                 indoption: vec![0],
                 indexprs: Some(serde_json::to_string(&vec!["lower(name)"]).unwrap()),
                 indpred: None,
+                brin_options: None,
             }),
         },
     );
@@ -1043,6 +1053,7 @@ fn catalog_with_people_name_c_collation_index() -> Catalog {
                 indoption: vec![0],
                 indexprs: None,
                 indpred: None,
+                brin_options: None,
             }),
         },
     );
@@ -1106,6 +1117,7 @@ fn catalog_with_text_parent_primary_key() -> Catalog {
                 indoption: vec![0],
                 indexprs: None,
                 indpred: None,
+                brin_options: None,
             }),
         },
     );
@@ -2025,6 +2037,7 @@ fn parse_alter_table_add_column_statement() {
                 name: "note".into(),
                 ty: builtin_type(SqlType::new(SqlTypeKind::Text)),
                 default_expr: Some("'hello'".into()),
+                compression: None,
                 constraints: vec![],
             },
         })
@@ -7657,7 +7670,10 @@ fn build_plan_for_recursive_mixed_cte_query() {
             | Plan::Aggregate { input, .. }
             | Plan::WindowAgg { input, .. }
             | Plan::SubqueryScan { input, .. }
-            | Plan::ProjectSet { input, .. } => plan_contains_cte_scan(input),
+            | Plan::ProjectSet { input, .. }
+            | Plan::BitmapHeapScan {
+                bitmapqual: input, ..
+            } => plan_contains_cte_scan(input),
             Plan::NestedLoopJoin { left, right, .. } | Plan::HashJoin { left, right, .. } => {
                 plan_contains_cte_scan(left) || plan_contains_cte_scan(right)
             }
@@ -7667,6 +7683,7 @@ fn build_plan_for_recursive_mixed_cte_query() {
             Plan::Result { .. }
             | Plan::SeqScan { .. }
             | Plan::IndexScan { .. }
+            | Plan::BitmapIndexScan { .. }
             | Plan::FunctionScan { .. }
             | Plan::WorkTableScan { .. }
             | Plan::Values { .. } => false,

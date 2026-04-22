@@ -239,6 +239,7 @@ pub fn new_relation_create_toast_table(
             indcollation: vec![0, 0],
             indoption: vec![0, 0],
             indnullsnotdistinct: false,
+            brin_options: None,
         },
     )?;
     let (_index_name, _old_index, index_entry) =

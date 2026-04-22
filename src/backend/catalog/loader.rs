@@ -37,13 +37,20 @@ use crate::backend::executor::value_io::decode_value;
 use crate::backend::executor::value_io::missing_column_value;
 use crate::backend::parser::SqlType;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
-use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator, StorageManager};
+use crate::backend::storage::smgr::{
+    BLCKSZ, ForkNumber, MdStorageManager, RelFileLocator, StorageManager,
+};
+use crate::include::access::brin::BrinOptions;
+use crate::include::access::brin_page::{
+    BRIN_PAGE_CONTENT_OFFSET, BrinMetaPageData, brin_is_meta_page,
+};
 use crate::include::catalog::{
-    BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
-    PgClassRow, PgCollationRow, PgConstraintRow, PgIndexRow, PgNamespaceRow, PgOpclassRow,
-    PgOpfamilyRow, PgTypeRow, bootstrap_catalog_kinds, bootstrap_pg_auth_members_rows,
-    bootstrap_pg_authid_rows, bootstrap_pg_database_rows, bootstrap_pg_tablespace_rows,
-    bootstrap_relation_desc, system_catalog_index_by_oid,
+    BRIN_AM_OID, BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
+    PgAttributeRow, PgClassRow, PgCollationRow, PgConstraintRow, PgIndexRow, PgNamespaceRow,
+    PgOpclassRow, PgOpfamilyRow, PgTypeRow, bootstrap_catalog_kinds,
+    bootstrap_pg_aggregate_rows, bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows,
+    bootstrap_pg_database_rows, bootstrap_pg_tablespace_rows, bootstrap_relation_desc,
+    system_catalog_index_by_oid,
 };
 use crate::include::nodes::datum::Value;
 
@@ -373,10 +380,12 @@ pub(crate) fn catalog_from_physical_rows_scoped(
             "public" | "pg_catalog" => row.relname.clone(),
             other => format!("{other}.{}", row.relname),
         };
+        let rel = catalog_relation_locator(row.oid, row.relfilenode, db_oid);
+        let brin_options = load_brin_options_from_metapage(base_dir, rel, row.relam, row.relkind);
         catalog.insert(
             name,
             CatalogEntry {
-                rel: catalog_relation_locator(row.oid, row.relfilenode, db_oid),
+                rel,
                 relation_oid: row.oid,
                 namespace_oid: row.relnamespace,
                 owner_oid: row.relowner,
@@ -418,6 +427,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                         indoption: index.indoption.clone(),
                         indexprs: index.indexprs.clone(),
                         indpred: index.indpred.clone(),
+                        brin_options: brin_options.clone(),
                     }),
             },
         );
@@ -461,6 +471,33 @@ pub(crate) fn catalog_from_physical_rows_scoped(
     catalog.policies = policy_rows.clone();
     crate::include::catalog::sort_pg_policy_rows(&mut catalog.policies);
     Ok(catalog)
+}
+
+fn load_brin_options_from_metapage(
+    base_dir: &Path,
+    rel: RelFileLocator,
+    am_oid: u32,
+    relkind: char,
+) -> Option<BrinOptions> {
+    if am_oid != BRIN_AM_OID || relkind != 'i' || base_dir.as_os_str().is_empty() {
+        return None;
+    }
+
+    let mut smgr = MdStorageManager::new(base_dir);
+    if !smgr.exists(rel, ForkNumber::Main) || smgr.nblocks(rel, ForkNumber::Main).ok()? == 0 {
+        return None;
+    }
+
+    let mut page = [0u8; BLCKSZ];
+    smgr.read_block(rel, ForkNumber::Main, 0, &mut page).ok()?;
+    if !brin_is_meta_page(&page).ok()? {
+        return None;
+    }
+
+    let bytes =
+        page.get(BRIN_PAGE_CONTENT_OFFSET..BRIN_PAGE_CONTENT_OFFSET + BrinMetaPageData::SIZE)?;
+    let pages_per_range = u32::from_le_bytes(bytes[8..12].try_into().ok()?);
+    (pages_per_range > 0).then_some(BrinOptions { pages_per_range })
 }
 
 fn catalog_relation_locator(relation_oid: u32, relfilenode: u32, db_oid: u32) -> RelFileLocator {
