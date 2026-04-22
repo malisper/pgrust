@@ -14559,6 +14559,96 @@ fn create_operator_class_persists_catalog_rows() {
 }
 
 #[test]
+fn create_operator_bool_bool_regression_debug() {
+    let base = temp_dir("create_operator_bool_bool_regression");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function alter_op_test_fn(boolean, boolean) returns boolean as $$ select null::boolean; $$ language sql immutable",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function customcontsel(internal, oid, internal, integer) returns float8 as 'contsel' language internal stable strict",
+    )
+    .unwrap();
+
+    let xid = db.txns.write().begin();
+    let cid = 0;
+    let catalog = db.lazy_catalog_lookup(1, Some((xid, cid)), None);
+    let proc_oid = catalog
+        .proc_rows_by_name("alter_op_test_fn")
+        .into_iter()
+        .find(|row| row.proargtypes == "16 16")
+        .expect("alter_op_test_fn(bool,bool)")
+        .oid;
+    let restrict_oid = catalog
+        .proc_rows_by_name("customcontsel")
+        .into_iter()
+        .find(|row| row.proargtypes == "2281 26 2281 23")
+        .expect("customcontsel(internal,oid,internal,int4)")
+        .oid;
+    let join_oid = catalog
+        .proc_rows_by_name("contjoinsel")
+        .into_iter()
+        .find(|row| row.proargtypes == "2281 26 2281 21 2281")
+        .expect("contjoinsel(internal,oid,internal,int2,internal)")
+        .oid;
+    let ctx = crate::backend::catalog::store::CatalogWriteContext {
+        pool: db.pool.clone(),
+        txns: db.txns.clone(),
+        xid,
+        cid,
+        client_id: 1,
+        waiter: Some(db.txn_waiter.clone()),
+        interrupts: db.interrupt_state(1),
+    };
+    let row = crate::include::catalog::PgOperatorRow {
+        oid: 0,
+        oprname: "===".into(),
+        oprnamespace: crate::include::catalog::PUBLIC_NAMESPACE_OID,
+        oprowner: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+        oprkind: 'b',
+        oprcanmerge: true,
+        oprcanhash: true,
+        oprleft: crate::include::catalog::BOOL_TYPE_OID,
+        oprright: crate::include::catalog::BOOL_TYPE_OID,
+        oprresult: crate::include::catalog::BOOL_TYPE_OID,
+        oprcom: 0,
+        oprnegate: 0,
+        oprcode: proc_oid,
+        oprrest: restrict_oid,
+        oprjoin: join_oid,
+    };
+    let (operator_oid, create_effect) = db
+        .catalog
+        .write()
+        .create_operator_mvcc(row.clone(), &ctx)
+        .unwrap();
+    db.apply_catalog_mutation_effect_immediate(&create_effect).unwrap();
+
+    let mut current = row;
+    current.oid = operator_oid;
+    let mut updated = current.clone();
+    updated.oprcom = operator_oid;
+    let replace_ctx = crate::backend::catalog::store::CatalogWriteContext {
+        pool: db.pool.clone(),
+        txns: db.txns.clone(),
+        xid,
+        cid: cid.saturating_add(1),
+        client_id: 1,
+        waiter: Some(db.txn_waiter.clone()),
+        interrupts: db.interrupt_state(1),
+    };
+    let replace_result = db
+        .catalog
+        .write()
+        .replace_operator_mvcc(&current, updated, &replace_ctx);
+    assert!(replace_result.is_ok(), "{replace_result:?}");
+}
+
+#[test]
 fn copy_from_rows_respects_active_transaction() {
     let base = temp_dir("copy_from_rows_txn");
     let db = Database::open(&base, 16).unwrap();

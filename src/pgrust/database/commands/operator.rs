@@ -264,11 +264,16 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
-        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let mut current_cid = cid;
+        let catalog = self.lazy_catalog_lookup(
+            client_id,
+            Some((xid, current_cid)),
+            configured_search_path,
+        );
         let namespace_oid = normalize_operator_namespace(
             self,
             client_id,
-            Some((xid, cid)),
+            Some((xid, current_cid)),
             stmt.schema_name.as_deref(),
             configured_search_path,
         )?;
@@ -287,7 +292,7 @@ impl Database {
         if lookup_operator_row(
             self,
             client_id,
-            Some((xid, cid)),
+            Some((xid, current_cid)),
             &stmt.operator_name,
             left_type,
             right_type,
@@ -320,7 +325,7 @@ impl Database {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
             xid,
-            cid,
+            cid: current_cid,
             client_id,
             waiter: Some(self.txn_waiter.clone()),
             interrupts: self.interrupt_state(client_id),
@@ -356,6 +361,7 @@ impl Database {
         };
         self.apply_catalog_mutation_effect_immediate(&effect)?;
         catalog_effects.push(effect);
+        current_cid = current_cid.saturating_add(1);
 
         let mut updated = base_row;
         updated.oid = operator_oid;
@@ -366,7 +372,7 @@ impl Database {
             if let Some(row) = lookup_operator_row(
                 self,
                 client_id,
-                Some((xid, cid)),
+                Some((xid, current_cid)),
                 name,
                 left_type,
                 right_type,
@@ -375,25 +381,22 @@ impl Database {
             }
         }
         if updated.oprcom != 0 || updated.oprnegate != 0 {
+            let mut current_row = updated.clone();
+            current_row.oprcom = 0;
+            current_row.oprnegate = 0;
             let effect = {
                 let mut catalog_store = self.catalog.write();
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid: current_cid,
+                    client_id,
+                    waiter: Some(self.txn_waiter.clone()),
+                    interrupts: self.interrupt_state(client_id),
+                };
                 catalog_store
-                    .replace_operator_mvcc(
-                        &lookup_operator_row_by_oid(
-                            self,
-                            client_id,
-                            Some((xid, cid)),
-                            operator_oid,
-                        )?
-                        .ok_or_else(|| {
-                            ExecError::Parse(ParseError::UnexpectedToken {
-                                expected: "created operator row",
-                                actual: stmt.operator_name.clone(),
-                            })
-                        })?,
-                        updated,
-                        &ctx,
-                    )
+                    .replace_operator_mvcc(&current_row, updated, &ctx)
                     .map_err(map_catalog_error)?
                     .1
             };
