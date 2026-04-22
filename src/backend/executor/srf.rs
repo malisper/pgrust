@@ -11,14 +11,21 @@ pub(crate) fn eval_set_returning_call(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<TupleSlot>, ExecError> {
-    match call {
+    let mut rows = match call {
         SetReturningCall::GenerateSeries {
             start,
             stop,
             step,
-            output,
+            output_columns,
             ..
-        } => eval_generate_series(start, stop, step, output.sql_type.kind, slot, ctx),
+        } => eval_generate_series(
+            start,
+            stop,
+            step,
+            output_columns[0].sql_type.kind,
+            slot,
+            ctx,
+        ),
         SetReturningCall::Unnest { args, .. } => eval_unnest(args, slot, ctx),
         SetReturningCall::JsonTableFunction { kind, args, .. } => {
             eval_json_table_function(*kind, args, slot, ctx)
@@ -54,7 +61,14 @@ pub(crate) fn eval_set_returning_call(
         } => {
             execute_user_defined_set_returning_function(*proc_oid, args, output_columns, slot, ctx)
         }
+    }?;
+    if call.with_ordinality() {
+        for (index, row) in rows.iter_mut().enumerate() {
+            row.tts_values.push(Value::Int64((index + 1) as i64));
+            row.tts_nvalid = row.tts_values.len();
+        }
     }
+    Ok(rows)
 }
 
 pub(crate) fn eval_project_set_returning_call(

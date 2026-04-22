@@ -986,11 +986,12 @@ fn bind_select_list_srf_call(
                 start: coerce_bound_expr(start, start_type, common),
                 stop: coerce_bound_expr(stop, stop_type, common),
                 step,
-                output: QueryColumn {
+                output_columns: vec![QueryColumn {
                     name: "generate_series".into(),
                     sql_type: common,
                     wire_type_oid: None,
-                },
+                }],
+                with_ordinality: false,
             })
         }
         "unnest" => {
@@ -1060,6 +1061,7 @@ fn bind_select_list_srf_call(
                 func_variadic: resolved_func_variadic,
                 args: bound_args,
                 output_columns,
+                with_ordinality: false,
             })
         }
         other => {
@@ -1128,6 +1130,7 @@ fn bind_select_list_srf_call(
                     kind,
                     args: bound_args,
                     output_columns,
+                    with_ordinality: false,
                 })
             } else if let Some(kind) = resolve_json_record_function(other) {
                 if !kind.is_set_returning() {
@@ -1172,6 +1175,7 @@ fn bind_select_list_srf_call(
                     args: bound_args,
                     output_columns,
                     record_type: Some(resolved.result_type),
+                    with_ordinality: false,
                 })
             } else {
                 if let Some(kind) = resolve_regex_table_function(other) {
@@ -1206,6 +1210,7 @@ fn bind_select_list_srf_call(
                         kind,
                         args: bound_args,
                         output_columns,
+                        with_ordinality: false,
                     })
                 } else if let Some(resolved) = resolved.as_ref() {
                     if resolved.prokind != 'f' || !resolved.proretset {
@@ -1239,6 +1244,7 @@ fn bind_select_list_srf_call(
                         func_variadic: resolved.func_variadic,
                         args: bound_args,
                         output_columns,
+                        with_ordinality: false,
                     })
                 } else {
                     Err(ParseError::UnexpectedToken {

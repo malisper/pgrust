@@ -6427,12 +6427,14 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
         Rule::srf_from_item => {
             let mut name = None;
             let mut parsed_args = ParsedFunctionArgs::default();
+            let mut with_ordinality = false;
             for part in pair.into_inner() {
                 match part.as_rule() {
                     Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
                     Rule::function_arg_list => {
                         parsed_args = build_function_arg_list(part)?;
                     }
+                    Rule::srf_with_ordinality => with_ordinality = true,
                     _ => {}
                 }
             }
@@ -6440,6 +6442,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                 name: name.ok_or(ParseError::UnexpectedEof)?,
                 args: parsed_args.args,
                 func_variadic: parsed_args.func_variadic,
+                with_ordinality,
             })
         }
         Rule::derived_from_item => {

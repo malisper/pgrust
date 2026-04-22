@@ -5,8 +5,8 @@ mod views;
 
 use row_security::apply_query_row_security_with_active_relations;
 pub(crate) use row_security::{
-    build_target_relation_row_security, relation_has_row_security, RlsWriteCheck,
-    RlsWriteCheckSource,
+    RlsWriteCheck, RlsWriteCheckSource, build_target_relation_row_security,
+    relation_has_row_security,
 };
 pub(crate) use rules::{format_stored_rule_definition, split_stored_rule_action_sql};
 pub(crate) use view_dml::{
@@ -492,20 +492,23 @@ fn rewrite_set_returning_call(
             start,
             stop,
             step,
-            output,
+            output_columns,
+            with_ordinality,
         } => SetReturningCall::GenerateSeries {
             func_oid,
             func_variadic,
             start: rewrite_semantic_expr(start, catalog, expanded_views, active_policy_relations)?,
             stop: rewrite_semantic_expr(stop, catalog, expanded_views, active_policy_relations)?,
             step: rewrite_semantic_expr(step, catalog, expanded_views, active_policy_relations)?,
-            output,
+            output_columns,
+            with_ordinality,
         },
         SetReturningCall::Unnest {
             func_oid,
             func_variadic,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::Unnest {
             func_oid,
             func_variadic,
@@ -516,6 +519,7 @@ fn rewrite_set_returning_call(
                 })
                 .collect::<Result<Vec<_>, _>>()?,
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::JsonTableFunction {
             func_oid,
@@ -523,6 +527,7 @@ fn rewrite_set_returning_call(
             kind,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::JsonTableFunction {
             func_oid,
             func_variadic,
@@ -534,6 +539,7 @@ fn rewrite_set_returning_call(
                 })
                 .collect::<Result<Vec<_>, _>>()?,
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::JsonRecordFunction {
             func_oid,
@@ -542,6 +548,7 @@ fn rewrite_set_returning_call(
             args,
             output_columns,
             record_type,
+            with_ordinality,
         } => SetReturningCall::JsonRecordFunction {
             func_oid,
             func_variadic,
@@ -554,6 +561,7 @@ fn rewrite_set_returning_call(
                 .collect::<Result<Vec<_>, _>>()?,
             output_columns,
             record_type,
+            with_ordinality,
         },
         SetReturningCall::RegexTableFunction {
             func_oid,
@@ -561,6 +569,7 @@ fn rewrite_set_returning_call(
             kind,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::RegexTableFunction {
             func_oid,
             func_variadic,
@@ -572,11 +581,13 @@ fn rewrite_set_returning_call(
                 })
                 .collect::<Result<Vec<_>, _>>()?,
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::TextSearchTableFunction {
             kind,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::TextSearchTableFunction {
             kind,
             args: args
@@ -586,12 +597,14 @@ fn rewrite_set_returning_call(
                 })
                 .collect::<Result<Vec<_>, _>>()?,
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::UserDefined {
             proc_oid,
             func_variadic,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::UserDefined {
             proc_oid,
             func_variadic,
@@ -602,6 +615,7 @@ fn rewrite_set_returning_call(
                 })
                 .collect::<Result<Vec<_>, _>>()?,
             output_columns,
+            with_ordinality,
         },
     })
 }
@@ -878,7 +892,7 @@ fn rewrite_semantic_expr(
             escape: escape
                 .map(|expr| {
                     rewrite_semantic_expr(*expr, catalog, expanded_views, active_policy_relations)
-            })
+                })
                 .transpose()?
                 .map(Box::new),
             negated,
