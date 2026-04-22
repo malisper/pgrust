@@ -4694,6 +4694,16 @@ fn build_plan_accepts_catalog_backed_text_input_casts() {
 }
 
 #[test]
+fn build_plan_accepts_catalog_backed_time_casts_and_comparisons() {
+    assert!(build_plan(
+        &parse_select("select time('05:06:07'), time '05:06:07', time '05:06:07' < '06:07:08'")
+            .unwrap(),
+        &catalog(),
+    )
+    .is_ok());
+}
+
+#[test]
 fn build_plan_accepts_catalog_backed_bit_comparisons() {
     assert!(build_plan(
         &parse_select(

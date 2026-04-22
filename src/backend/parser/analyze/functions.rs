@@ -2662,6 +2662,10 @@ mod tests {
             resolve_function_cast_type(&Catalog::default(), "timestamp"),
             Some(SqlType::new(SqlTypeKind::Timestamp))
         );
+        assert_eq!(
+            resolve_function_cast_type(&Catalog::default(), "time"),
+            Some(SqlType::new(SqlTypeKind::Time))
+        );
     }
 
     #[test]
@@ -2673,6 +2677,10 @@ mod tests {
         assert!(explicit_text_input_cast_exists(
             &Catalog::default(),
             SqlType::new(SqlTypeKind::JsonPath)
+        ));
+        assert!(explicit_text_input_cast_exists(
+            &Catalog::default(),
+            SqlType::new(SqlTypeKind::Time)
         ));
         assert!(explicit_text_input_cast_exists(
             &Catalog::default(),
