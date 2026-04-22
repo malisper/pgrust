@@ -128,7 +128,6 @@ pub(super) fn bind_comparison_expr(
         )?;
         let (left_bound, left_explicit_collation) = strip_explicit_collation(left_bound);
         let (right_bound, right_explicit_collation) = strip_explicit_collation(right_bound);
-        let money = SqlType::new(SqlTypeKind::Money);
         return bind_lowered_comparison_expr(
             op,
             make,

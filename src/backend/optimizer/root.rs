@@ -1605,9 +1605,7 @@ fn collect_query_outer_refs_expr(expr: &Expr, levelsup: usize, exprs: &mut Vec<E
             collect_query_outer_refs_expr(&saop.left, levelsup, exprs);
             collect_query_outer_refs_expr(&saop.right, levelsup, exprs);
         }
-        Expr::Cast(inner, _)
-        | Expr::Collate { expr: inner, .. }
-        | Expr::IsNull(inner)
+        Expr::Cast(inner, _) | Expr::IsNull(inner)
         | Expr::IsNotNull(inner) => {
             collect_query_outer_refs_expr(inner, levelsup, exprs);
         }

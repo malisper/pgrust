@@ -110,7 +110,7 @@ pub(super) fn build_special_join_info(query: &Query) -> Vec<SpecialJoinInfo> {
                     relids_union(&left_info.inner_join_relids, &right_info.inner_join_relids)
                 };
                 if !matches!(kind, JoinType::Inner | JoinType::Cross) {
-                    let expanded_quals = expanded_quals.expect("outer join quals");
+                    let _expanded_quals = expanded_quals.expect("outer join quals");
                     let mut min_lefthand = if matches!(kind, JoinType::Full) {
                         left_relids.clone()
                     } else {

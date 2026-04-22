@@ -50,9 +50,9 @@ use crate::backend::parser::{
     normalize_create_table_as_name, normalize_create_table_name, normalize_create_view_name,
 };
 use crate::backend::storage::lmgr::{
-    AdvisoryLockKey, AdvisoryLockManager, AdvisoryLockMode, AdvisoryLockOwner, AdvisoryLockScope,
-    AdvisoryLockSnapshotRow, TableLockManager, TableLockMode, TableLockSnapshotRow,
-    lock_relations_interruptible, lock_tables_interruptible, unlock_relations,
+    AdvisoryLockKey, AdvisoryLockManager, AdvisoryLockSnapshotRow, TableLockManager,
+    TableLockMode, TableLockSnapshotRow, lock_relations_interruptible,
+    lock_tables_interruptible, unlock_relations,
 };
 use crate::backend::storage::smgr::{RelFileLocator, StorageManager};
 pub use crate::backend::utils::activity::{DatabaseStatsStore, SessionStatsState};
@@ -84,14 +84,14 @@ use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CURRENT_DATABASE_NAME, PUBLIC_NAMESPACE_OID, PgConstraintRow,
-    PgRangeRow, PgTypeRow, RangeCanonicalization, relkind_has_storage, system_catalog_indexes,
+    PgRangeRow, PgTypeRow, RangeCanonicalization, system_catalog_indexes,
 };
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 use crate::pgrust::cluster::{Cluster, ClusterShared, SessionActivityEntry, SessionActivityState};
 use crate::pl::plpgsql::execute_do;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 use ddl::{
-    ensure_can_set_role, ensure_relation_owner, lookup_heap_relation_for_ddl, map_catalog_error,
+    ensure_can_set_role, ensure_relation_owner, map_catalog_error,
     reject_column_with_foreign_key_dependencies, reject_index_with_referencing_foreign_keys,
     reject_inheritance_tree_ddl, reject_relation_with_dependent_views,
     validate_alter_table_add_column,
@@ -99,11 +99,10 @@ use ddl::{
 pub(crate) use large_objects::LargeObjectRuntime;
 use relation_refs::{collect_direct_relation_oids_from_select, collect_rels_from_planned_stmt};
 pub(crate) use sequences::{
-    SequenceData, SequenceMutationEffect, SequenceOptions, SequenceOwnedByRef, SequenceRuntime,
-    SequenceState, apply_sequence_option_patch, default_sequence_name_base,
-    default_sequence_oid_from_default_expr, format_nextval_default_oid, initial_sequence_state,
-    resolve_sequence_options_spec, sequence_type_oid_for_serial_kind,
-    sequence_type_oid_for_sql_type,
+    SequenceData, SequenceMutationEffect, SequenceOwnedByRef, SequenceRuntime,
+    default_sequence_name_base, default_sequence_oid_from_default_expr,
+    format_nextval_default_oid, initial_sequence_state, resolve_sequence_options_spec,
+    sequence_type_oid_for_serial_kind,
 };
 use toast::{toast_bindings_from_create_result, toast_bindings_from_temp_relation};
 use txn::AutoCommitGuard;

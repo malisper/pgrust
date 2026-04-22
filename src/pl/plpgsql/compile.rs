@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 
 use crate::backend::executor::Expr;
@@ -9,7 +11,6 @@ use crate::backend::parser::{
     bind_scalar_expr_in_named_slot_scope, parse_expr, parse_statement, parse_type_name,
     pg_plan_query_with_outer_scopes, pg_plan_values_query_with_outer_scopes, SqlExpr,
 };
-use crate::backend::parser::analyze::scope_for_relation;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::backend::catalog::catalog::column_desc;
 use crate::include::catalog::{PgProcRow, RECORD_TYPE_OID};

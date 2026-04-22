@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use super::rewrite_policy_expr;
 use crate::backend::catalog::role_memberships::has_effective_membership;
 use crate::backend::catalog::roles::{has_bypassrls_privilege, policy_applies_to_role};

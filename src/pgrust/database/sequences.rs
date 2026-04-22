@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use super::*;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 mod indexed_pathtarget;
 mod tlist;
 

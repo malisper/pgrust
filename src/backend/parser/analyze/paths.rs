@@ -295,7 +295,7 @@ fn choose_index_path(
             && index.index_meta.indisready
             && !index.index_meta.indkey.is_empty()
     }) {
-        let (keys, equality_prefix, removes_order) = match index.index_meta.am_oid {
+        let (keys, _equality_prefix, removes_order) = match index.index_meta.am_oid {
             BTREE_AM_OID => {
                 let (keys, equality_prefix) = build_btree_scan_keys(index, &parsed_quals);
                 let removes_order = order_items

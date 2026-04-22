@@ -2807,10 +2807,7 @@ fn eval_builtin_function(
             [value] => eval_regprocedure_to_text(value, ctx),
             _ => Err(malformed_expr_error("regprocedure_to_text")),
         },
-        BuiltinScalarFunction::PgGetUserById => match values.as_slice() {
-            [..] => eval_pg_get_userbyid(&values, ctx),
-            _ => Err(malformed_expr_error("pg_get_userbyid")),
-        },
+        BuiltinScalarFunction::PgGetUserById => eval_pg_get_userbyid(&values, ctx),
         BuiltinScalarFunction::Now
         | BuiltinScalarFunction::TransactionTimestamp
         | BuiltinScalarFunction::StatementTimestamp
@@ -3033,7 +3030,6 @@ fn eval_builtin_function(
         BuiltinScalarFunction::CurrentDatabase => {
             Ok(Value::Text(ctx.current_database_name.clone().into()))
         }
-        BuiltinScalarFunction::PgGetUserById => eval_pg_get_userbyid(&values, ctx),
         BuiltinScalarFunction::ObjDescription => eval_obj_description(&values, ctx),
         BuiltinScalarFunction::PgGetExpr => eval_pg_get_expr(&values),
         BuiltinScalarFunction::PgRelationIsPublishable => {

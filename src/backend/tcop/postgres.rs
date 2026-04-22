@@ -730,8 +730,7 @@ where
 {
     let mut writer = BufWriter::new(writer);
 
-    let mut startup_params = HashMap::new();
-    loop {
+    let startup_params = loop {
         let len = read_i32(&mut reader)? as usize;
         if len < 4 {
             return Err(io::Error::new(
@@ -750,8 +749,7 @@ where
                 continue;
             }
             PROTOCOL_VERSION_3_0 => {
-                startup_params = parse_startup_parameters(&payload[4..])?;
-                break;
+                break parse_startup_parameters(&payload[4..])?;
             }
             _ => {
                 send_error(
@@ -766,7 +764,7 @@ where
                 return Ok(());
             }
         }
-    }
+    };
 
     let requested_database = startup_params
         .get("database")
@@ -3567,7 +3565,7 @@ fn decode_binary_array_parameter(
             ),
         });
     }
-    let element_type = catalog
+    catalog
         .type_by_oid(element_oid)
         .ok_or_else(|| feature_not_supported_error(format!("array element oid {element_oid}")))?;
     let mut offset = 12usize;
