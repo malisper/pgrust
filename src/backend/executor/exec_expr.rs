@@ -3038,6 +3038,8 @@ fn eval_builtin_function(
         BuiltinScalarFunction::PgRelationIsPublishable => {
             eval_pg_relation_is_publishable(&values, ctx)
         }
+        BuiltinScalarFunction::PgSizePretty => eval_pg_size_pretty_function(&values),
+        BuiltinScalarFunction::PgSizeBytes => eval_pg_size_bytes_function(&values),
         BuiltinScalarFunction::PgLsn => eval_pg_lsn_function(&values),
         BuiltinScalarFunction::Trunc => eval_trunc_function(&values),
         BuiltinScalarFunction::Round => eval_round_function(&values),
