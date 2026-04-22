@@ -105,6 +105,7 @@ fn encode_array_element_payload(
                 element_type.kind,
                 SqlTypeKind::Oid
                     | SqlTypeKind::RegClass
+                    | SqlTypeKind::RegOperator
                     | SqlTypeKind::RegConfig
                     | SqlTypeKind::RegDictionary
             ) =>
@@ -531,6 +532,7 @@ fn array_element_layout(
         | SqlTypeKind::RegClass
         | SqlTypeKind::RegType
         | SqlTypeKind::RegRole
+        | SqlTypeKind::RegOperator
         | SqlTypeKind::RegProcedure
         | SqlTypeKind::Xid
         | SqlTypeKind::RegConfig
@@ -851,6 +853,7 @@ fn decode_array_element_value(
         | SqlTypeKind::RegClass
         | SqlTypeKind::RegType
         | SqlTypeKind::RegRole
+        | SqlTypeKind::RegOperator
         | SqlTypeKind::RegProcedure
         | SqlTypeKind::Xid
         | SqlTypeKind::RegConfig

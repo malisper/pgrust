@@ -7068,6 +7068,32 @@ fn regclass_literal_cast_resolves_relation_name() {
 }
 
 #[test]
+fn regoperator_literal_cast_resolves_operator_signature() {
+    let base = temp_dir("regoperator_literal_cast");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function regoperator_test_fn(boolean, boolean) returns boolean as $$ select null::boolean; $$ language sql immutable",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create operator === (leftarg = boolean, rightarg = boolean, procedure = regoperator_test_fn)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select oprleft, oprright from pg_operator where oid = '===(boolean,boolean)'::regoperator"
+        ),
+        vec![vec![Value::Int64(16), Value::Int64(16)]]
+    );
+}
+
+#[test]
 fn alter_index_rename_supports_if_exists_and_rename() {
     let base = temp_dir("alter_index_rename");
     let db = Database::open(&base, 16).unwrap();

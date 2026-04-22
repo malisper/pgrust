@@ -174,6 +174,7 @@ pub(super) fn sql_type_name(ty: SqlType) -> String {
             SqlTypeKind::RegClass => "regclass",
             SqlTypeKind::RegType => "regtype",
             SqlTypeKind::RegRole => "regrole",
+            SqlTypeKind::RegOperator => "regoperator",
             SqlTypeKind::RegProcedure => "regprocedure",
             SqlTypeKind::Tid => "tid",
             SqlTypeKind::Xid => "xid",
@@ -240,6 +241,7 @@ pub(super) fn is_numeric_family(ty: SqlType) -> bool {
                 | SqlTypeKind::RegClass
                 | SqlTypeKind::RegType
                 | SqlTypeKind::RegRole
+                | SqlTypeKind::RegOperator
                 | SqlTypeKind::Float4
                 | SqlTypeKind::Float8
                 | SqlTypeKind::Numeric
@@ -257,6 +259,7 @@ pub(super) fn is_integer_family(ty: SqlType) -> bool {
                 | SqlTypeKind::RegClass
                 | SqlTypeKind::RegType
                 | SqlTypeKind::RegRole
+                | SqlTypeKind::RegOperator
         )
 }
 
@@ -325,6 +328,7 @@ pub(super) fn coerce_unknown_string_literal_type(
             SqlTypeKind::RegClass => return SqlType::new(SqlTypeKind::RegClass),
             SqlTypeKind::RegType => return SqlType::new(SqlTypeKind::RegType),
             SqlTypeKind::RegRole => return SqlType::new(SqlTypeKind::RegRole),
+            SqlTypeKind::RegOperator => return SqlType::new(SqlTypeKind::RegOperator),
             SqlTypeKind::RegProcedure => return SqlType::new(SqlTypeKind::RegProcedure),
             SqlTypeKind::RegConfig => return SqlType::new(SqlTypeKind::RegConfig),
             SqlTypeKind::RegDictionary => return SqlType::new(SqlTypeKind::RegDictionary),
@@ -350,6 +354,9 @@ pub(super) fn coerce_unknown_string_literal_type(
                 }
                 SqlTypeKind::RegRole => {
                     return SqlType::array_of(SqlType::new(SqlTypeKind::RegRole));
+                }
+                SqlTypeKind::RegOperator => {
+                    return SqlType::array_of(SqlType::new(SqlTypeKind::RegOperator));
                 }
                 SqlTypeKind::RegProcedure => {
                     return SqlType::array_of(SqlType::new(SqlTypeKind::RegProcedure));

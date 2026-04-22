@@ -21,7 +21,8 @@ use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
     PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow,
     PgCollationRow, PgConstraintRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgOpclassRow,
-    PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTriggerRow, PgTypeRow,
+    PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTriggerRow,
+    PgTypeRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::pgrust::database::{
@@ -770,6 +771,24 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             relkind: entry.relkind,
             desc: entry.desc.clone(),
         })
+    }
+
+    fn operator_by_name_left_right(
+        &self,
+        name: &str,
+        left_type_oid: u32,
+        right_type_oid: u32,
+    ) -> Option<PgOperatorRow> {
+        let normalized = crate::backend::parser::analyze::normalize_catalog_lookup_name(name);
+        backend_catcache(self.db, self.client_id, self.txn_ctx)
+            .ok()?
+            .operator_rows()
+            .into_iter()
+            .find(|row| {
+                row.oprname.eq_ignore_ascii_case(normalized)
+                    && row.oprleft == left_type_oid
+                    && row.oprright == right_type_oid
+            })
     }
 
     fn current_user_oid(&self) -> u32 {

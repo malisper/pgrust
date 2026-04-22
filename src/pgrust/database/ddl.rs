@@ -629,6 +629,7 @@ pub(crate) fn format_sql_type_name(sql_type: SqlType) -> &'static str {
         SqlTypeKind::RegClass => "regclass",
         SqlTypeKind::RegType => "regtype",
         SqlTypeKind::RegRole => "regrole",
+        SqlTypeKind::RegOperator => "regoperator",
         SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::OidVector => "oidvector",
         SqlTypeKind::Bit => "bit",

@@ -608,6 +608,23 @@ impl CatalogLookup for Catalog {
         CatCache::from_catalog(self).collation_rows()
     }
 
+    fn operator_by_name_left_right(
+        &self,
+        name: &str,
+        left_type_oid: u32,
+        right_type_oid: u32,
+    ) -> Option<PgOperatorRow> {
+        let normalized = normalize_catalog_lookup_name(name);
+        CatCache::from_catalog(self)
+            .operator_rows()
+            .into_iter()
+            .find(|row| {
+                row.oprname.eq_ignore_ascii_case(normalized)
+                    && row.oprleft == left_type_oid
+                    && row.oprright == right_type_oid
+            })
+    }
+
     fn aggregate_by_fnoid(&self, aggfnoid: u32) -> Option<PgAggregateRow> {
         CatCache::from_catalog(self)
             .aggregate_by_fnoid(aggfnoid)
@@ -834,7 +851,7 @@ impl CatalogLookup for RelCache {
     }
 }
 
-fn normalize_catalog_lookup_name(name: &str) -> &str {
+pub(crate) fn normalize_catalog_lookup_name(name: &str) -> &str {
     name.strip_prefix("pg_catalog.").unwrap_or(name)
 }
 
@@ -1022,6 +1039,8 @@ fn builtin_named_type_alias(name: &str) -> Option<SqlType> {
         Some(SqlType::new(SqlTypeKind::RegType))
     } else if name.eq_ignore_ascii_case("regproc") {
         Some(SqlType::new(SqlTypeKind::RegProcedure))
+    } else if name.eq_ignore_ascii_case("regoperator") {
+        Some(SqlType::new(SqlTypeKind::RegOperator))
     } else if name.eq_ignore_ascii_case("regnamespace") {
         // :HACK: PostgreSQL's `regnamespace` is an OID-backed catalog type with
         // namespace-aware I/O. pgrust only needs enough surface area for

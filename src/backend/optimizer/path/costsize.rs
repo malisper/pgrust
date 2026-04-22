@@ -2123,6 +2123,7 @@ pub(super) fn estimate_sql_type_width(sql_type: SqlType) -> usize {
         | SqlTypeKind::RegClass
         | SqlTypeKind::RegType
         | SqlTypeKind::RegRole
+        | SqlTypeKind::RegOperator
         | SqlTypeKind::RegProcedure
         | SqlTypeKind::Xid
         | SqlTypeKind::Date
