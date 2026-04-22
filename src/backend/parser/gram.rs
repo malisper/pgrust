@@ -8462,8 +8462,10 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
     let mut with_recursive = false;
     let mut with = Vec::new();
     let mut table_name = None;
+    let mut target_alias = None;
     let mut only = false;
     let mut assignments = Vec::new();
+    let mut from = None;
     let mut where_clause = None;
     let mut returning = Vec::new();
     for part in pair.into_inner() {
@@ -8473,8 +8475,13 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
                 with_recursive = recursive;
                 with = ctes;
             }
-            Rule::only_clause => only = true,
-            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::update_target => {
+                let (parsed_table_name, parsed_alias, parsed_only) = build_update_target(part)?;
+                table_name = Some(parsed_table_name);
+                target_alias = parsed_alias;
+                only = parsed_only;
+            }
+            Rule::from_item => from = Some(build_from_item(part)?),
             Rule::assignment => assignments.push(build_assignment(part)?),
             Rule::expr => where_clause = Some(build_expr(part)?),
             Rule::returning_clause => returning = build_returning_clause(part)?,
@@ -8485,11 +8492,38 @@ fn build_update(pair: Pair<'_, Rule>) -> Result<UpdateStatement, ParseError> {
         with_recursive,
         with,
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        target_alias,
         only,
         assignments,
+        from,
         where_clause,
         returning,
     })
+}
+
+fn build_update_target(pair: Pair<'_, Rule>) -> Result<(String, Option<String>, bool), ParseError> {
+    let mut table_name = None;
+    let mut alias = None;
+    let mut only = false;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::only_clause => only = true,
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::update_target_alias => {
+                let alias_pair = part.into_inner().find(|inner| {
+                    matches!(
+                        inner.as_rule(),
+                        Rule::update_alias_identifier | Rule::identifier
+                    )
+                });
+                if let Some(alias_pair) = alias_pair {
+                    alias = Some(build_identifier(alias_pair));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok((table_name.ok_or(ParseError::UnexpectedEof)?, alias, only))
 }
 
 fn build_delete(pair: Pair<'_, Rule>) -> Result<DeleteStatement, ParseError> {

@@ -6,8 +6,12 @@ use crate::backend::rewrite::{
     relation_has_row_security, resolve_auto_updatable_view_target,
 };
 use crate::include::catalog::PolicyCommand;
+use crate::include::executor::execdesc::CommandType;
+use crate::include::nodes::plannodes::PlannedStmt;
 use crate::include::nodes::primnodes::JoinType;
-use crate::include::nodes::primnodes::{SELF_ITEM_POINTER_ATTR_NO, TargetEntry, Var};
+use crate::include::nodes::primnodes::{
+    SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO, TargetEntry, Var,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundInsertStatement {
@@ -69,14 +73,22 @@ pub struct BoundUpdateTarget {
     pub row_source: BoundModifyRowSource,
     pub indexes: Vec<BoundIndexRelation>,
     pub assignments: Vec<BoundAssignment>,
+    pub parent_visible_exprs: Vec<Expr>,
     pub predicate: Option<Expr>,
     pub(crate) rls_write_checks: Vec<RlsWriteCheck>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundUpdateStatement {
+    pub target_relation_name: String,
+    pub explain_target_name: String,
     pub targets: Vec<BoundUpdateTarget>,
     pub returning: Vec<TargetEntry>,
+    pub input_plan: Option<PlannedStmt>,
+    pub target_visible_count: usize,
+    pub visible_column_count: usize,
+    pub target_ctid_index: usize,
+    pub target_tableoid_index: usize,
     pub subplans: Vec<Plan>,
 }
 
@@ -167,6 +179,19 @@ fn merge_target_relation_name(stmt: &MergeStatement) -> String {
         .unwrap_or_else(|| stmt.target_table.clone())
 }
 
+fn update_target_relation_name(stmt: &UpdateStatement) -> String {
+    stmt.target_alias
+        .clone()
+        .unwrap_or_else(|| stmt.table_name.clone())
+}
+
+fn update_explain_target_name(stmt: &UpdateStatement) -> String {
+    stmt.target_alias
+        .as_ref()
+        .map(|alias| format!("{} {}", stmt.table_name, alias))
+        .unwrap_or_else(|| stmt.table_name.clone())
+}
+
 fn merge_explain_target_name(stmt: &MergeStatement) -> String {
     stmt.target_alias
         .as_ref()
@@ -176,6 +201,14 @@ fn merge_explain_target_name(stmt: &MergeStatement) -> String {
 
 fn merge_hidden_ctid_name() -> String {
     "__merge_target_ctid".into()
+}
+
+fn update_hidden_ctid_name() -> String {
+    "__update_target_ctid".into()
+}
+
+fn update_hidden_tableoid_name() -> String {
+    "__update_target_tableoid".into()
 }
 
 fn merge_hidden_source_present_name() -> String {
@@ -382,6 +415,49 @@ fn with_merge_target_ctid(from: AnalyzedFrom, target_desc: &RelationDesc) -> (An
     (projected, target_desc.columns.len())
 }
 
+fn with_update_target_identity(
+    from: AnalyzedFrom,
+    target_desc: &RelationDesc,
+) -> (AnalyzedFrom, usize, usize) {
+    let mut targets = merge_projection_targets(&from.output_columns, &from.output_exprs);
+    let ctid_resno = targets.len() + 1;
+    targets.push(
+        TargetEntry::new(
+            update_hidden_ctid_name(),
+            Expr::Var(Var {
+                varno: 1,
+                varattno: SELF_ITEM_POINTER_ATTR_NO,
+                varlevelsup: 0,
+                vartype: SqlType::new(SqlTypeKind::Tid),
+            }),
+            SqlType::new(SqlTypeKind::Tid),
+            ctid_resno,
+        )
+        .with_input_resno(ctid_resno),
+    );
+    let tableoid_resno = targets.len() + 1;
+    targets.push(
+        TargetEntry::new(
+            update_hidden_tableoid_name(),
+            Expr::Var(Var {
+                varno: 1,
+                varattno: TABLE_OID_ATTR_NO,
+                varlevelsup: 0,
+                vartype: SqlType::new(SqlTypeKind::Oid),
+            }),
+            SqlType::new(SqlTypeKind::Oid),
+            tableoid_resno,
+        )
+        .with_input_resno(tableoid_resno),
+    );
+    let projected = from.with_projection(targets);
+    (
+        projected,
+        target_desc.columns.len(),
+        target_desc.columns.len() + 1,
+    )
+}
+
 fn with_merge_source_present(from: AnalyzedFrom) -> (AnalyzedFrom, usize) {
     let source_visible_count = from.output_columns.len();
     let mut targets = merge_projection_targets(&from.output_columns, &from.output_exprs);
@@ -397,6 +473,86 @@ fn with_merge_source_present(from: AnalyzedFrom) -> (AnalyzedFrom, usize) {
     );
     let projected = from.with_projection(targets);
     (projected, source_visible_count)
+}
+
+fn update_from_projection_targets(
+    from: &AnalyzedFrom,
+    target_visible_count: usize,
+    source_visible_count: usize,
+) -> Vec<TargetEntry> {
+    let ctid_index = target_visible_count;
+    let tableoid_index = target_visible_count + 1;
+    let source_start = target_visible_count + 2;
+    let mut targets = Vec::with_capacity(target_visible_count + source_visible_count + 2);
+    for index in 0..target_visible_count {
+        targets.push(
+            TargetEntry::new(
+                from.output_columns[index].name.clone(),
+                from.output_exprs[index].clone(),
+                from.output_columns[index].sql_type,
+                targets.len() + 1,
+            )
+            .with_input_resno(index + 1),
+        );
+    }
+    for source_index in 0..source_visible_count {
+        let input_index = source_start + source_index;
+        targets.push(
+            TargetEntry::new(
+                from.output_columns[input_index].name.clone(),
+                from.output_exprs[input_index].clone(),
+                from.output_columns[input_index].sql_type,
+                targets.len() + 1,
+            )
+            .with_input_resno(input_index + 1),
+        );
+    }
+    targets.push(
+        TargetEntry::new(
+            update_hidden_ctid_name(),
+            from.output_exprs[ctid_index].clone(),
+            SqlType::new(SqlTypeKind::Tid),
+            targets.len() + 1,
+        )
+        .with_input_resno(ctid_index + 1),
+    );
+    targets.push(
+        TargetEntry::new(
+            update_hidden_tableoid_name(),
+            from.output_exprs[tableoid_index].clone(),
+            SqlType::new(SqlTypeKind::Oid),
+            targets.len() + 1,
+        )
+        .with_input_resno(tableoid_index + 1),
+    );
+    targets
+}
+
+fn query_from_projection_with_qual(input: AnalyzedFrom, where_qual: Option<Expr>) -> Query {
+    let AnalyzedFrom {
+        rtable,
+        jointree,
+        output_columns,
+        output_exprs,
+    } = input;
+    Query {
+        command_type: CommandType::Select,
+        depends_on_row_security: false,
+        rtable,
+        jointree,
+        target_list: normalize_target_list(identity_target_list(&output_columns, &output_exprs)),
+        where_qual,
+        group_by: Vec::new(),
+        accumulators: Vec::new(),
+        window_clauses: Vec::new(),
+        having_qual: None,
+        sort_clause: Vec::new(),
+        limit_count: None,
+        limit_offset: 0,
+        project_set: None,
+        recursive_union: None,
+        set_operation: None,
+    }
 }
 
 pub fn plan_merge(
@@ -440,7 +596,7 @@ pub fn plan_merge(
             .iter()
             .any(|name| name.eq_ignore_ascii_case(&target_relation_name))
     }) {
-        return Err(ParseError::DuplicateTableName(target_relation_name));
+        return Err(ParseError::DuplicateTableName(target_relation_name.clone()));
     }
 
     let source_scope = shift_scope_rtindexes(source_scope_raw, target_from.rtable.len());
@@ -717,7 +873,76 @@ fn build_update_target(
         row_source: choose_modify_row_source(predicate.as_ref(), &indexes),
         indexes,
         assignments,
+        parent_visible_exprs: translation_exprs,
         predicate,
+        rls_write_checks,
+    })
+}
+
+fn build_update_target_from_joined_input(
+    base_relation_name: &str,
+    parent_desc: &RelationDesc,
+    parent_assignments: &[BoundAssignment],
+    parent_predicate: Option<&Expr>,
+    parent_rls_write_checks: &[RlsWriteCheck],
+    child: &BoundRelation,
+    catalog: &dyn CatalogLookup,
+) -> Result<BoundUpdateTarget, ParseError> {
+    let relation_name = relation_display_name(catalog, child.relation_oid, base_relation_name);
+    let translation_indexes = inheritance_translation_indexes(parent_desc, &child.desc);
+    let parent_visible_exprs = inheritance_translation_exprs(&child.desc, &translation_indexes);
+    let indexes = catalog.index_relations_for_heap(child.relation_oid);
+    let assignments = parent_assignments
+        .iter()
+        .map(|assignment| {
+            Ok(BoundAssignment {
+                column_index: translated_child_column_index(
+                    assignment.column_index,
+                    &translation_indexes,
+                    &relation_name,
+                )?,
+                subscripts: assignment.subscripts.clone(),
+                expr: assignment.expr.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, ParseError>>()?;
+    let rls_write_checks = parent_rls_write_checks
+        .iter()
+        .map(|check| RlsWriteCheck {
+            expr: rewrite_local_vars_for_output_exprs(
+                check.expr.clone(),
+                1,
+                &parent_visible_exprs,
+            ),
+            policy_name: check.policy_name.clone(),
+            source: check.source.clone(),
+        })
+        .collect();
+
+    Ok(BoundUpdateTarget {
+        relation_name: relation_name.clone(),
+        rel: child.rel,
+        relation_oid: child.relation_oid,
+        relkind: child.relkind,
+        toast: child.toast,
+        toast_index: first_toast_index(catalog, child.toast),
+        desc: child.desc.clone(),
+        relation_constraints: bind_relation_constraints(
+            Some(&relation_name),
+            child.relation_oid,
+            &child.desc,
+            catalog,
+        )?,
+        referenced_by_foreign_keys: bind_referenced_by_foreign_keys(
+            child.relation_oid,
+            &child.desc,
+            catalog,
+        )?,
+        row_source: BoundModifyRowSource::Heap,
+        indexes,
+        assignments,
+        parent_visible_exprs,
+        predicate: parent_predicate.cloned(),
         rls_write_checks,
     })
 }
@@ -972,7 +1197,7 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
             stmt.returning,
             &resolved.visible_output_exprs,
         ),
-        subplans: stmt.subplans,
+        ..stmt
     })
 }
 
@@ -1424,16 +1649,31 @@ pub(crate) fn bind_update_with_outer_scopes(
         &[],
     )?;
     let entry = lookup_modify_relation(catalog, &stmt.table_name)?;
-    let scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
+    if stmt.from.is_some() {
+        return bind_update_from(stmt, catalog, outer_scopes, &local_ctes, &entry);
+    }
+    bind_simple_update(stmt, catalog, outer_scopes, &local_ctes, &entry)
+}
+
+fn bind_simple_update(
+    stmt: &UpdateStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    local_ctes: &[BoundCte],
+    entry: &BoundRelation,
+) -> Result<BoundUpdateStatement, ParseError> {
+    let target_relation_name = update_target_relation_name(stmt);
+    let explain_target_name = update_explain_target_name(stmt);
+    let scope = scope_for_base_relation(&target_relation_name, &entry.desc);
     let predicate = stmt
         .where_clause
         .as_ref()
         .map(|expr| {
-            bind_expr_with_outer_and_ctes(expr, &scope, catalog, outer_scopes, None, &local_ctes)
+            bind_expr_with_outer_and_ctes(expr, &scope, catalog, outer_scopes, None, local_ctes)
         })
         .transpose()?;
     let returning =
-        bind_returning_targets(&stmt.returning, &scope, catalog, outer_scopes, &local_ctes)?;
+        bind_returning_targets(&stmt.returning, &scope, catalog, outer_scopes, local_ctes)?;
     let target_rls = build_target_relation_row_security(
         &stmt.table_name,
         entry.relation_oid,
@@ -1461,7 +1701,7 @@ pub(crate) fn bind_update_with_outer_scopes(
                     &assignment.target.subscripts,
                     &scope,
                     catalog,
-                    &local_ctes,
+                    local_ctes,
                     outer_scopes,
                 )?,
                 expr: bind_expr_with_outer_and_ctes(
@@ -1470,7 +1710,7 @@ pub(crate) fn bind_update_with_outer_scopes(
                     catalog,
                     outer_scopes,
                     None,
-                    &local_ctes,
+                    local_ctes,
                 )?,
             })
         })
@@ -1499,8 +1739,162 @@ pub(crate) fn bind_update_with_outer_scopes(
     .collect::<Result<Vec<_>, ParseError>>()?;
 
     Ok(BoundUpdateStatement {
+        target_relation_name,
+        explain_target_name,
         targets,
         returning,
+        input_plan: None,
+        target_visible_count: entry.desc.columns.len(),
+        visible_column_count: entry.desc.columns.len(),
+        target_ctid_index: entry.desc.columns.len(),
+        target_tableoid_index: entry.desc.columns.len() + 1,
+        subplans: Vec::new(),
+    })
+}
+
+fn bind_update_from(
+    stmt: &UpdateStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    local_ctes: &[BoundCte],
+    entry: &BoundRelation,
+) -> Result<BoundUpdateStatement, ParseError> {
+    let target_relation_name = update_target_relation_name(stmt);
+    let explain_target_name = update_explain_target_name(stmt);
+    let target_scope = scope_for_base_relation(&target_relation_name, &entry.desc);
+    let source_stmt = stmt.from.as_ref().expect("checked above");
+    let (source_from, source_scope_raw) =
+        bind_from_item_with_ctes(source_stmt, catalog, outer_scopes, None, local_ctes, &[])?;
+    if source_scope_raw.relations.iter().any(|relation| {
+        relation
+            .relation_names
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(&target_relation_name))
+    }) {
+        return Err(ParseError::DuplicateTableName(target_relation_name));
+    }
+
+    let target_base = AnalyzedFrom::relation(
+        target_relation_name.clone(),
+        entry.rel,
+        entry.relation_oid,
+        entry.relkind,
+        entry.toast,
+        !stmt.only && entry.relkind == 'r',
+        entry.desc.clone(),
+    );
+    let (target_from, _, _) = with_update_target_identity(target_base, &entry.desc);
+    let source_scope = shift_scope_rtindexes(source_scope_raw, target_from.rtable.len());
+    let source_visible_count = source_scope.desc.columns.len();
+    let joined = AnalyzedFrom::join(
+        target_from,
+        source_from,
+        JoinType::Cross,
+        Expr::Const(Value::Bool(true)),
+        None,
+    );
+    let target_visible_count = entry.desc.columns.len();
+    let visible_column_count = target_visible_count + source_visible_count;
+    let projection = update_from_projection_targets(
+        &joined,
+        target_visible_count,
+        source_visible_count,
+    );
+    let projected = joined.with_projection(projection);
+    let mut eval_scope = combine_scopes(&target_scope, &source_scope);
+    eval_scope.output_exprs = projected.output_exprs[..visible_column_count].to_vec();
+
+    let target_rls = build_target_relation_row_security(
+        &stmt.table_name,
+        entry.relation_oid,
+        &entry.desc,
+        PolicyCommand::Update,
+        true,
+        false,
+        catalog,
+    )?;
+    let predicate = stmt
+        .where_clause
+        .as_ref()
+        .map(|expr| {
+            bind_expr_with_outer_and_ctes(
+                expr,
+                &eval_scope,
+                catalog,
+                outer_scopes,
+                None,
+                local_ctes,
+            )
+        })
+        .transpose()?;
+    let predicate = match (predicate, target_rls.visibility_qual) {
+        (Some(predicate), Some(visibility_qual)) => Some(Expr::and(predicate, visibility_qual)),
+        (Some(predicate), None) => Some(predicate),
+        (None, Some(visibility_qual)) => Some(visibility_qual),
+        (None, None) => None,
+    };
+    let assignments = stmt
+        .assignments
+        .iter()
+        .map(|assignment| {
+            Ok(BoundAssignment {
+                column_index: resolve_column(&target_scope, &assignment.target.column)?,
+                subscripts: bind_assignment_subscripts(
+                    &assignment.target.subscripts,
+                    &eval_scope,
+                    catalog,
+                    local_ctes,
+                    outer_scopes,
+                )?,
+                expr: bind_expr_with_outer_and_ctes(
+                    &assignment.expr,
+                    &eval_scope,
+                    catalog,
+                    outer_scopes,
+                    None,
+                    local_ctes,
+                )?,
+            })
+        })
+        .collect::<Result<Vec<_>, ParseError>>()?;
+    let returning =
+        bind_returning_targets(&stmt.returning, &eval_scope, catalog, outer_scopes, local_ctes)?;
+    let query = query_from_projection_with_qual(projected, predicate.clone());
+    let input_plan = crate::backend::optimizer::fold_query_constants(query)
+        .map(|query| planner(query, catalog))?;
+
+    let targets = if stmt.only {
+        vec![entry.relation_oid]
+    } else {
+        catalog.find_all_inheritors(entry.relation_oid)
+    }
+    .into_iter()
+    .map(|relation_oid| {
+        let child = catalog
+            .relation_by_oid(relation_oid)
+            .ok_or_else(|| ParseError::UnknownTable(stmt.table_name.clone()))?;
+        build_update_target_from_joined_input(
+            &stmt.table_name,
+            &entry.desc,
+            &assignments,
+            predicate.as_ref(),
+            &target_rls.write_checks,
+            &child,
+            catalog,
+        )
+    })
+    .collect::<Result<Vec<_>, ParseError>>()?;
+
+    Ok(BoundUpdateStatement {
+        target_relation_name,
+        explain_target_name,
+        targets,
+        returning,
+        input_plan: Some(input_plan),
+        target_visible_count,
+        visible_column_count,
+        target_ctid_index: visible_column_count,
+        target_tableoid_index: visible_column_count + 1,
         subplans: Vec::new(),
     })
 }
