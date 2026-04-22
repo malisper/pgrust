@@ -15,13 +15,14 @@ use crate::backend::libpq::pqformat::{
     infer_command_tag, send_auth_ok, send_backend_key_data, send_bind_complete,
     send_close_complete, send_command_complete, send_copy_in_response, send_empty_query,
     send_error, send_error_with_fields, send_error_with_hint, send_no_data, send_notice,
-    send_notice_with_severity, send_parameter_description, send_parameter_status,
-    send_parse_complete, send_query_result, send_ready_for_query, send_row_description,
-    send_row_description_with_formats, send_typed_data_row, validate_binary_result_formats,
+    send_notice_with_severity, send_notification_response, send_parameter_description,
+    send_parameter_status, send_parse_complete, send_query_result, send_ready_for_query,
+    send_row_description, send_row_description_with_formats, send_typed_data_row,
+    validate_binary_result_formats,
 };
-use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::UngroupedColumnClause;
 use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
+use crate::backend::parser::{CatalogLookup, Statement};
 use crate::backend::parser::{SqlType, SqlTypeKind, parse_expr};
 use crate::backend::utils::misc::guc_datetime::{DateTimeConfig, format_datestyle};
 use crate::backend::utils::misc::notices::{
@@ -35,8 +36,8 @@ use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value,
 };
 use crate::include::nodes::primnodes::RelationDesc;
-use crate::pgrust::database::ddl::format_sql_type_name;
 use crate::pgrust::compact_string::CompactString;
+use crate::pgrust::database::ddl::format_sql_type_name;
 use crate::pl::plpgsql::{PlpgsqlNotice, RaiseLevel, clear_notices, take_notices};
 
 fn exec_error_sqlstate(e: &ExecError) -> &'static str {
@@ -161,8 +162,7 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         e,
         ExecError::DetailedError { message, .. }
             if message == "invalid input syntax for type numeric: \" \""
-    )
-        && sql.to_ascii_lowercase().contains("to_number(")
+    ) && sql.to_ascii_lowercase().contains("to_number(")
     {
         return None;
     }
@@ -619,7 +619,7 @@ fn find_identifier_in_segment(segment: &str, token: &str) -> Option<usize> {
     None
 }
 use crate::ClientId;
-use crate::backend::parser::{Statement, parse_statement};
+use crate::backend::parser::parse_statement;
 use crate::pgrust::cluster::Cluster;
 use crate::pgrust::database::Database;
 use crate::pgrust::session::Session;
@@ -843,7 +843,7 @@ where
             "off"
         },
     )?;
-    send_backend_key_data(&mut writer, std::process::id() as i32, client_id as i32)?;
+    send_backend_key_data(&mut writer, client_id as i32, client_id as i32)?;
     send_ready_for_query(&mut writer, b'I')?;
     writer.flush()?;
 
@@ -881,14 +881,17 @@ where
                 }
                 b'P' => {
                     handle_parse(&mut writer, state, &body)?;
+                    flush_pending_backend_messages(&mut writer, &db, &state.session)?;
                     writer.flush()?;
                 }
                 b'B' => {
                     handle_bind(&mut writer, &db, state, &body)?;
+                    flush_pending_backend_messages(&mut writer, &db, &state.session)?;
                     writer.flush()?;
                 }
                 b'D' => {
                     handle_describe(&mut writer, &db, state, &body)?;
+                    flush_pending_backend_messages(&mut writer, &db, &state.session)?;
                     writer.flush()?;
                 }
                 b'E' => {
@@ -899,14 +902,16 @@ where
                     state.session.interrupts().reset_statement_state();
                     db.interrupt_state(state.session.client_id)
                         .reset_statement_state();
-                    send_ready_for_query(&mut writer, state.session.ready_status())?;
+                    send_ready_with_pending_messages(&mut writer, &db, &state.session)?;
                     writer.flush()?;
                 }
                 b'C' => {
                     handle_close(&mut writer, state, &body)?;
+                    flush_pending_backend_messages(&mut writer, &db, &state.session)?;
                     writer.flush()?;
                 }
                 b'H' => {
+                    flush_pending_backend_messages(&mut writer, &db, &state.session)?;
                     writer.flush()?;
                 }
                 b'd' => handle_copy_data(state, &body)?,
@@ -915,7 +920,7 @@ where
                     writer.flush()?;
                 }
                 b'f' => {
-                    handle_copy_fail(&mut writer, state, &body)?;
+                    handle_copy_fail(&mut writer, &db, state, &body)?;
                     writer.flush()?;
                 }
                 b'X' => break Ok(()),
@@ -928,7 +933,7 @@ where
                         None,
                         None,
                     )?;
-                    send_ready_for_query(&mut writer, state.session.ready_status())?;
+                    send_ready_with_pending_messages(&mut writer, &db, &state.session)?;
                     writer.flush()?;
                 }
             }
@@ -972,7 +977,7 @@ fn handle_query(
         .reset_statement_state();
     if sql_is_effectively_empty_after_comments(sql) {
         send_empty_query(stream)?;
-        send_ready_for_query(stream, state.session.ready_status())?;
+        send_ready_with_pending_messages(stream, db, &state.session)?;
         return Ok(());
     }
     let mut executed_any = false;
@@ -998,7 +1003,7 @@ fn handle_query(
     if copy_in_started {
         return Ok(());
     }
-    send_ready_for_query(stream, state.session.ready_status())?;
+    send_ready_with_pending_messages(stream, db, &state.session)?;
     Ok(())
 }
 
@@ -1051,7 +1056,9 @@ fn execute_query_statement(
         )
         .map_err(|e| io::Error::other(format!("{e:?}")))
     };
-    if let Ok(Statement::Select(ref select_stmt)) = parsed {
+    if let Ok(Statement::Select(ref select_stmt)) = parsed
+        && !raw_select_contains_pg_notify(select_stmt)
+    {
         clear_backend_notices();
         clear_notices();
         match state.session.execute_streaming(db, select_stmt) {
@@ -1116,7 +1123,7 @@ fn execute_query_statement(
                     return Ok(QueryStatementFlow::Stop);
                 }
 
-                send_queued_notices(stream)?;
+                flush_pending_backend_messages(stream, db, &state.session)?;
                 if !header_sent {
                     send_row_description(stream, &columns)?;
                 }
@@ -1141,7 +1148,7 @@ fn execute_query_statement(
             let role_names = role_name_map(&catalog);
             let proc_names = proc_name_map(&catalog);
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
-            send_queued_notices(stream)?;
+            flush_pending_backend_messages(stream, db, &state.session)?;
             send_query_result(
                 stream,
                 &columns,
@@ -1158,7 +1165,7 @@ fn execute_query_statement(
             Ok(QueryStatementFlow::Continue)
         }
         Ok(StatementResult::AffectedRows(n)) => {
-            send_queued_notices(stream)?;
+            flush_pending_backend_messages(stream, db, &state.session)?;
             send_command_complete(stream, &infer_command_tag(&sql, n))?;
             Ok(QueryStatementFlow::Continue)
         }
@@ -1843,7 +1850,12 @@ fn psql_index_display_columns(
                             .get((*attnum as usize).saturating_sub(1))
                             .map(|column| column.name.clone())
                     })
-                    .or_else(|| index_desc.columns.get(index).map(|column| column.name.clone()))
+                    .or_else(|| {
+                        index_desc
+                            .columns
+                            .get(index)
+                            .map(|column| column.name.clone())
+                    })
                     .unwrap_or_else(|| format!("column{}", index + 1));
                 return PsqlIndexDisplayColumn {
                     display_name: name.clone(),
@@ -1853,7 +1865,12 @@ fn psql_index_display_columns(
             let expression_sql = expression_sqls
                 .get(expression_index)
                 .cloned()
-                .or_else(|| index_desc.columns.get(index).map(|column| column.name.clone()))
+                .or_else(|| {
+                    index_desc
+                        .columns
+                        .get(index)
+                        .map(|column| column.name.clone())
+                })
                 .unwrap_or_else(|| format!("expr{}", index + 1));
             expression_index += 1;
             PsqlIndexDisplayColumn {
@@ -2809,17 +2826,19 @@ fn handle_copy_done(
             .copy_from_rows_into(db, &copy.table_name, copy.columns.as_deref(), &rows)
     {
         send_exec_error(stream, &copy_sql, &e)?;
-        send_ready_for_query(stream, state.session.ready_status())?;
+        send_ready_with_pending_messages(stream, db, &state.session)?;
         return Ok(());
     }
 
+    flush_pending_backend_messages(stream, db, &state.session)?;
     send_command_complete(stream, "COPY")?;
-    send_ready_for_query(stream, state.session.ready_status())?;
+    send_ready_with_pending_messages(stream, db, &state.session)?;
     Ok(())
 }
 
 fn handle_copy_fail(
     stream: &mut impl Write,
+    db: &Database,
     state: &mut ConnectionState,
     body: &[u8],
 ) -> io::Result<()> {
@@ -2833,7 +2852,7 @@ fn handle_copy_fail(
         None,
         None,
     )?;
-    send_ready_for_query(stream, state.session.ready_status())?;
+    send_ready_with_pending_messages(stream, db, &state.session)?;
     Ok(())
 }
 
@@ -3103,9 +3122,9 @@ fn execute_portal(
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
             let role_names = role_name_map(&catalog);
             let proc_names = proc_name_map(&catalog);
-            send_queued_notices(stream)?;
             if let Err(e) = validate_binary_result_formats(&rows, &columns, &portal.result_formats)
             {
+                send_queued_notices(stream)?;
                 let message = format_exec_error(&e);
                 let hint = format_exec_error_hint(&e);
                 send_error_with_hint(
@@ -3117,6 +3136,7 @@ fn execute_portal(
                 )?;
                 return Ok(());
             }
+            flush_pending_backend_messages(stream, db, session)?;
             for row in &rows {
                 send_typed_data_row(
                     stream,
@@ -3136,7 +3156,7 @@ fn execute_portal(
             send_command_complete(stream, &format!("SELECT {}", rows.len()))?;
         }
         Ok(StatementResult::AffectedRows(n)) => {
-            send_queued_notices(stream)?;
+            flush_pending_backend_messages(stream, db, session)?;
             send_command_complete(stream, &infer_command_tag(&sql, n))?;
         }
         Err(e) => {
@@ -3179,6 +3199,348 @@ fn send_queued_notices(stream: &mut impl Write) -> io::Result<()> {
         )?;
     }
     send_plpgsql_notices(stream, &take_notices())
+}
+
+fn send_queued_notifications(
+    stream: &mut impl Write,
+    db: &Database,
+    session: &Session,
+) -> io::Result<()> {
+    for notification in db.async_notify_runtime.drain(session.client_id) {
+        send_notification_response(
+            stream,
+            notification.sender_pid,
+            &notification.channel,
+            &notification.payload,
+        )?;
+    }
+    Ok(())
+}
+
+fn flush_pending_backend_messages(
+    stream: &mut impl Write,
+    db: &Database,
+    session: &Session,
+) -> io::Result<()> {
+    send_queued_notices(stream)?;
+    send_queued_notifications(stream, db, session)
+}
+
+fn send_ready_with_pending_messages(
+    stream: &mut impl Write,
+    db: &Database,
+    session: &Session,
+) -> io::Result<()> {
+    flush_pending_backend_messages(stream, db, session)?;
+    send_ready_for_query(stream, session.ready_status())
+}
+
+fn raw_select_contains_pg_notify(select_stmt: &crate::backend::parser::SelectStatement) -> bool {
+    select_stmt.with.iter().any(raw_cte_contains_pg_notify)
+        || select_stmt
+            .targets
+            .iter()
+            .any(|target| raw_expr_contains_pg_notify(&target.expr))
+        || select_stmt
+            .from
+            .as_ref()
+            .is_some_and(raw_from_item_contains_pg_notify)
+        || select_stmt
+            .where_clause
+            .as_ref()
+            .is_some_and(raw_expr_contains_pg_notify)
+        || select_stmt.group_by.iter().any(raw_expr_contains_pg_notify)
+        || select_stmt
+            .having
+            .as_ref()
+            .is_some_and(raw_expr_contains_pg_notify)
+        || select_stmt
+            .window_clauses
+            .iter()
+            .any(|clause| raw_window_spec_contains_pg_notify(&clause.spec))
+        || select_stmt
+            .order_by
+            .iter()
+            .any(raw_order_by_contains_pg_notify)
+        || select_stmt
+            .set_operation
+            .as_ref()
+            .is_some_and(|set_operation| raw_set_operation_contains_pg_notify(set_operation))
+}
+
+fn raw_cte_contains_pg_notify(cte: &crate::backend::parser::CommonTableExpr) -> bool {
+    raw_cte_body_contains_pg_notify(&cte.body)
+}
+
+fn raw_cte_body_contains_pg_notify(body: &crate::backend::parser::CteBody) -> bool {
+    match body {
+        crate::backend::parser::CteBody::Select(select_stmt) => {
+            raw_select_contains_pg_notify(select_stmt)
+        }
+        crate::backend::parser::CteBody::Values(values_stmt) => {
+            raw_values_statement_contains_pg_notify(values_stmt)
+        }
+        crate::backend::parser::CteBody::RecursiveUnion {
+            anchor, recursive, ..
+        } => raw_cte_body_contains_pg_notify(anchor) || raw_select_contains_pg_notify(recursive),
+    }
+}
+
+fn raw_values_statement_contains_pg_notify(
+    values_stmt: &crate::backend::parser::ValuesStatement,
+) -> bool {
+    values_stmt.with.iter().any(raw_cte_contains_pg_notify)
+        || values_stmt
+            .rows
+            .iter()
+            .flatten()
+            .any(raw_expr_contains_pg_notify)
+        || values_stmt
+            .order_by
+            .iter()
+            .any(raw_order_by_contains_pg_notify)
+}
+
+fn raw_set_operation_contains_pg_notify(
+    set_operation: &crate::backend::parser::SetOperationStatement,
+) -> bool {
+    set_operation
+        .inputs
+        .iter()
+        .any(raw_select_contains_pg_notify)
+}
+
+fn raw_from_item_contains_pg_notify(from_item: &crate::backend::parser::FromItem) -> bool {
+    match from_item {
+        crate::backend::parser::FromItem::Table { .. } => false,
+        crate::backend::parser::FromItem::Values { rows } => {
+            rows.iter().flatten().any(raw_expr_contains_pg_notify)
+        }
+        crate::backend::parser::FromItem::FunctionCall { args, .. } => args
+            .iter()
+            .any(|arg| raw_expr_contains_pg_notify(&arg.value)),
+        crate::backend::parser::FromItem::Lateral(inner)
+        | crate::backend::parser::FromItem::Alias { source: inner, .. } => {
+            raw_from_item_contains_pg_notify(inner)
+        }
+        crate::backend::parser::FromItem::DerivedTable(select_stmt) => {
+            raw_select_contains_pg_notify(select_stmt)
+        }
+        crate::backend::parser::FromItem::Join {
+            left,
+            right,
+            constraint,
+            ..
+        } => {
+            raw_from_item_contains_pg_notify(left)
+                || raw_from_item_contains_pg_notify(right)
+                || match constraint {
+                    crate::backend::parser::JoinConstraint::On(expr) => {
+                        raw_expr_contains_pg_notify(expr)
+                    }
+                    crate::backend::parser::JoinConstraint::None
+                    | crate::backend::parser::JoinConstraint::Using(_)
+                    | crate::backend::parser::JoinConstraint::Natural => false,
+                }
+        }
+    }
+}
+
+fn raw_order_by_contains_pg_notify(order_by: &crate::backend::parser::OrderByItem) -> bool {
+    raw_expr_contains_pg_notify(&order_by.expr)
+}
+
+fn raw_window_spec_contains_pg_notify(spec: &crate::backend::parser::RawWindowSpec) -> bool {
+    spec.partition_by.iter().any(raw_expr_contains_pg_notify)
+        || spec.order_by.iter().any(raw_order_by_contains_pg_notify)
+        || spec
+            .frame
+            .as_ref()
+            .is_some_and(|frame| raw_window_frame_contains_pg_notify(frame))
+}
+
+fn raw_window_frame_contains_pg_notify(frame: &crate::backend::parser::RawWindowFrame) -> bool {
+    raw_window_frame_bound_contains_pg_notify(&frame.start_bound)
+        || raw_window_frame_bound_contains_pg_notify(&frame.end_bound)
+}
+
+fn raw_window_frame_bound_contains_pg_notify(
+    bound: &crate::backend::parser::RawWindowFrameBound,
+) -> bool {
+    match bound {
+        crate::backend::parser::RawWindowFrameBound::OffsetPreceding(expr)
+        | crate::backend::parser::RawWindowFrameBound::OffsetFollowing(expr) => {
+            raw_expr_contains_pg_notify(expr)
+        }
+        crate::backend::parser::RawWindowFrameBound::UnboundedPreceding
+        | crate::backend::parser::RawWindowFrameBound::CurrentRow
+        | crate::backend::parser::RawWindowFrameBound::UnboundedFollowing => false,
+    }
+}
+
+fn raw_expr_contains_pg_notify(expr: &crate::backend::parser::SqlExpr) -> bool {
+    match expr {
+        crate::backend::parser::SqlExpr::Column(_)
+        | crate::backend::parser::SqlExpr::Default
+        | crate::backend::parser::SqlExpr::Const(_)
+        | crate::backend::parser::SqlExpr::IntegerLiteral(_)
+        | crate::backend::parser::SqlExpr::NumericLiteral(_)
+        | crate::backend::parser::SqlExpr::Random
+        | crate::backend::parser::SqlExpr::CurrentDate
+        | crate::backend::parser::SqlExpr::CurrentUser
+        | crate::backend::parser::SqlExpr::SessionUser
+        | crate::backend::parser::SqlExpr::CurrentRole => false,
+        crate::backend::parser::SqlExpr::CurrentTime { .. }
+        | crate::backend::parser::SqlExpr::CurrentTimestamp { .. }
+        | crate::backend::parser::SqlExpr::LocalTime { .. }
+        | crate::backend::parser::SqlExpr::LocalTimestamp { .. } => false,
+        crate::backend::parser::SqlExpr::UnaryPlus(inner)
+        | crate::backend::parser::SqlExpr::Negate(inner)
+        | crate::backend::parser::SqlExpr::BitNot(inner)
+        | crate::backend::parser::SqlExpr::Subscript { expr: inner, .. }
+        | crate::backend::parser::SqlExpr::PrefixOperator { expr: inner, .. }
+        | crate::backend::parser::SqlExpr::Cast(inner, _)
+        | crate::backend::parser::SqlExpr::Not(inner)
+        | crate::backend::parser::SqlExpr::IsNull(inner)
+        | crate::backend::parser::SqlExpr::IsNotNull(inner)
+        | crate::backend::parser::SqlExpr::FieldSelect { expr: inner, .. } => {
+            raw_expr_contains_pg_notify(inner)
+        }
+        crate::backend::parser::SqlExpr::GeometryUnaryOp { expr: inner, .. } => {
+            raw_expr_contains_pg_notify(inner)
+        }
+        crate::backend::parser::SqlExpr::Collate { expr: inner, .. } => {
+            raw_expr_contains_pg_notify(inner)
+        }
+        crate::backend::parser::SqlExpr::Add(left, right)
+        | crate::backend::parser::SqlExpr::Sub(left, right)
+        | crate::backend::parser::SqlExpr::BitAnd(left, right)
+        | crate::backend::parser::SqlExpr::BitOr(left, right)
+        | crate::backend::parser::SqlExpr::BitXor(left, right)
+        | crate::backend::parser::SqlExpr::Shl(left, right)
+        | crate::backend::parser::SqlExpr::Shr(left, right)
+        | crate::backend::parser::SqlExpr::Mul(left, right)
+        | crate::backend::parser::SqlExpr::Div(left, right)
+        | crate::backend::parser::SqlExpr::Mod(left, right)
+        | crate::backend::parser::SqlExpr::Concat(left, right)
+        | crate::backend::parser::SqlExpr::Eq(left, right)
+        | crate::backend::parser::SqlExpr::NotEq(left, right)
+        | crate::backend::parser::SqlExpr::Lt(left, right)
+        | crate::backend::parser::SqlExpr::LtEq(left, right)
+        | crate::backend::parser::SqlExpr::Gt(left, right)
+        | crate::backend::parser::SqlExpr::GtEq(left, right)
+        | crate::backend::parser::SqlExpr::RegexMatch(left, right)
+        | crate::backend::parser::SqlExpr::And(left, right)
+        | crate::backend::parser::SqlExpr::Or(left, right)
+        | crate::backend::parser::SqlExpr::IsDistinctFrom(left, right)
+        | crate::backend::parser::SqlExpr::IsNotDistinctFrom(left, right)
+        | crate::backend::parser::SqlExpr::ArrayOverlap(left, right)
+        | crate::backend::parser::SqlExpr::ArrayContains(left, right)
+        | crate::backend::parser::SqlExpr::ArrayContained(left, right)
+        | crate::backend::parser::SqlExpr::JsonbContains(left, right)
+        | crate::backend::parser::SqlExpr::JsonbContained(left, right)
+        | crate::backend::parser::SqlExpr::JsonbExists(left, right)
+        | crate::backend::parser::SqlExpr::JsonbExistsAny(left, right)
+        | crate::backend::parser::SqlExpr::JsonbExistsAll(left, right)
+        | crate::backend::parser::SqlExpr::JsonbPathExists(left, right)
+        | crate::backend::parser::SqlExpr::JsonbPathMatch(left, right)
+        | crate::backend::parser::SqlExpr::JsonGet(left, right)
+        | crate::backend::parser::SqlExpr::JsonGetText(left, right)
+        | crate::backend::parser::SqlExpr::JsonPath(left, right)
+        | crate::backend::parser::SqlExpr::JsonPathText(left, right) => {
+            raw_expr_contains_pg_notify(left) || raw_expr_contains_pg_notify(right)
+        }
+        crate::backend::parser::SqlExpr::BinaryOperator { left, right, .. }
+        | crate::backend::parser::SqlExpr::GeometryBinaryOp { left, right, .. } => {
+            raw_expr_contains_pg_notify(left) || raw_expr_contains_pg_notify(right)
+        }
+        crate::backend::parser::SqlExpr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | crate::backend::parser::SqlExpr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            raw_expr_contains_pg_notify(expr)
+                || raw_expr_contains_pg_notify(pattern)
+                || escape
+                    .as_ref()
+                    .is_some_and(|expr| raw_expr_contains_pg_notify(expr))
+        }
+        crate::backend::parser::SqlExpr::Case {
+            arg,
+            args,
+            defresult,
+        } => {
+            arg.as_ref()
+                .is_some_and(|expr| raw_expr_contains_pg_notify(expr))
+                || args.iter().any(|case_when| {
+                    raw_expr_contains_pg_notify(&case_when.expr)
+                        || raw_expr_contains_pg_notify(&case_when.result)
+                })
+                || defresult
+                    .as_ref()
+                    .is_some_and(|expr| raw_expr_contains_pg_notify(expr))
+        }
+        crate::backend::parser::SqlExpr::ArrayLiteral(exprs)
+        | crate::backend::parser::SqlExpr::Row(exprs) => {
+            exprs.iter().any(raw_expr_contains_pg_notify)
+        }
+        crate::backend::parser::SqlExpr::ScalarSubquery(select_stmt)
+        | crate::backend::parser::SqlExpr::ArraySubquery(select_stmt)
+        | crate::backend::parser::SqlExpr::Exists(select_stmt) => {
+            raw_select_contains_pg_notify(select_stmt)
+        }
+        crate::backend::parser::SqlExpr::InSubquery { expr, subquery, .. } => {
+            raw_expr_contains_pg_notify(expr) || raw_select_contains_pg_notify(subquery)
+        }
+        crate::backend::parser::SqlExpr::QuantifiedSubquery { left, subquery, .. } => {
+            raw_expr_contains_pg_notify(left) || raw_select_contains_pg_notify(subquery)
+        }
+        crate::backend::parser::SqlExpr::QuantifiedArray { left, array, .. } => {
+            raw_expr_contains_pg_notify(left) || raw_expr_contains_pg_notify(array)
+        }
+        crate::backend::parser::SqlExpr::ArraySubscript { array, subscripts } => {
+            raw_expr_contains_pg_notify(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(|expr| raw_expr_contains_pg_notify(expr))
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(|expr| raw_expr_contains_pg_notify(expr))
+                })
+        }
+        crate::backend::parser::SqlExpr::Xml(xml) => {
+            xml.child_exprs().any(raw_expr_contains_pg_notify)
+        }
+        crate::backend::parser::SqlExpr::FuncCall {
+            name,
+            args,
+            order_by,
+            filter,
+            over,
+            ..
+        } => {
+            name.eq_ignore_ascii_case("pg_notify")
+                || crate::backend::parser::function_arg_values(args)
+                    .any(raw_expr_contains_pg_notify)
+                || order_by.iter().any(raw_order_by_contains_pg_notify)
+                || filter
+                    .as_ref()
+                    .is_some_and(|expr| raw_expr_contains_pg_notify(expr))
+                || over
+                    .as_ref()
+                    .is_some_and(raw_window_spec_contains_pg_notify)
+        }
+    }
 }
 
 fn rewrite_regression_sql(sql: &str) -> std::borrow::Cow<'_, str> {
@@ -3991,9 +4353,20 @@ mod tests {
     use crate::pgrust::cluster::Cluster;
     use crate::pgrust::database::Database;
     use crate::pgrust::session::Session;
-    use std::io::Cursor;
+    use std::io::{self, Cursor, Read, Write};
+    #[cfg(not(unix))]
+    use std::net::{TcpListener, TcpStream};
+    #[cfg(unix)]
+    use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    #[cfg(unix)]
+    type TestStream = UnixStream;
+    #[cfg(not(unix))]
+    type TestStream = TcpStream;
 
     fn temp_dir(name: &str) -> PathBuf {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
@@ -4041,6 +4414,123 @@ mod tests {
         let mut packet = vec![b'X'];
         packet.extend_from_slice(&4_i32.to_be_bytes());
         packet
+    }
+
+    #[cfg(unix)]
+    fn start_test_connection_with_cluster(
+        cluster: Cluster,
+        client_id: u32,
+    ) -> (TestStream, thread::JoinHandle<io::Result<()>>) {
+        let (server_stream, client_stream) = UnixStream::pair().unwrap();
+        let reader = server_stream.try_clone().unwrap();
+        let server = thread::spawn(move || {
+            handle_connection_with_io(reader, server_stream, &cluster, client_id)
+        });
+        client_stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        (client_stream, server)
+    }
+
+    #[cfg(not(unix))]
+    fn start_test_connection_with_cluster(
+        cluster: Cluster,
+        client_id: u32,
+    ) -> (TestStream, thread::JoinHandle<io::Result<()>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let reader = stream.try_clone().unwrap();
+            handle_connection_with_io(reader, stream, &cluster, client_id)
+        });
+        let stream = TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        (stream, server)
+    }
+
+    fn write_packet(stream: &mut impl Write, packet: &[u8]) {
+        stream.write_all(packet).unwrap();
+        stream.flush().unwrap();
+    }
+
+    fn parse_message(statement_name: &str, sql: &str) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(statement_name.as_bytes());
+        body.push(0);
+        body.extend_from_slice(sql.as_bytes());
+        body.push(0);
+        body.extend_from_slice(&0_i16.to_be_bytes());
+        frontend_message(b'P', &body)
+    }
+
+    fn flush_message() -> Vec<u8> {
+        frontend_message(b'H', &[])
+    }
+
+    fn read_message(stream: &mut impl Read, label: &str) -> (u8, Vec<u8>) {
+        let mut kind = [0u8; 1];
+        stream
+            .read_exact(&mut kind)
+            .unwrap_or_else(|e| panic!("{label}: failed reading kind: {e}"));
+        let mut len = [0u8; 4];
+        stream
+            .read_exact(&mut len)
+            .unwrap_or_else(|e| panic!("{label}: failed reading length: {e}"));
+        let len = i32::from_be_bytes(len) as usize;
+        let mut body = vec![0u8; len - 4];
+        stream
+            .read_exact(&mut body)
+            .unwrap_or_else(|e| panic!("{label}: failed reading body: {e}"));
+        (kind[0], body)
+    }
+
+    fn try_read_message(stream: &mut TestStream, label: &str) -> Option<(u8, Vec<u8>)> {
+        let mut kind = [0u8; 1];
+        match stream.read_exact(&mut kind) {
+            Ok(()) => {}
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
+                ) =>
+            {
+                return None;
+            }
+            Err(err) => panic!("{label}: failed reading kind: {err}"),
+        }
+        let mut len = [0u8; 4];
+        stream
+            .read_exact(&mut len)
+            .unwrap_or_else(|e| panic!("{label}: failed reading length: {e}"));
+        let len = i32::from_be_bytes(len) as usize;
+        let mut body = vec![0u8; len - 4];
+        stream
+            .read_exact(&mut body)
+            .unwrap_or_else(|e| panic!("{label}: failed reading body: {e}"));
+        Some((kind[0], body))
+    }
+
+    fn read_until_ready(stream: &mut TestStream, label: &str) -> Vec<(u8, Vec<u8>)> {
+        let mut messages = Vec::new();
+        loop {
+            let message = read_message(stream, label);
+            let done = message.0 == b'Z';
+            messages.push(message);
+            if done {
+                return messages;
+            }
+        }
+    }
+
+    fn read_available_messages(stream: &mut TestStream, label: &str) -> Vec<(u8, Vec<u8>)> {
+        let mut messages = Vec::new();
+        while let Some(message) = try_read_message(stream, label) {
+            messages.push(message);
+        }
+        messages
     }
 
     fn first_error_response_position(output: &[u8]) -> Option<usize> {
@@ -4107,6 +4597,73 @@ mod tests {
             }
         }
         None
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct NotificationResponseMessage {
+        sender_pid: i32,
+        channel: String,
+        payload: String,
+    }
+
+    fn backend_messages(output: &[u8]) -> Vec<(u8, Vec<u8>)> {
+        let mut messages = Vec::new();
+        let mut offset = 0;
+        while offset + 5 <= output.len() {
+            let tag = output[offset];
+            let len =
+                i32::from_be_bytes(output[offset + 1..offset + 5].try_into().unwrap()) as usize;
+            if len < 4 || offset + 1 + len > output.len() {
+                break;
+            }
+            let body = output[offset + 5..offset + 1 + len].to_vec();
+            messages.push((tag, body));
+            offset += 1 + len;
+        }
+        messages
+    }
+
+    fn backend_key_data_pid(output: &[u8]) -> Option<i32> {
+        backend_messages(output)
+            .into_iter()
+            .find(|(tag, _)| *tag == b'K')
+            .and_then(|(_, body)| {
+                body.get(..4)
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .map(i32::from_be_bytes)
+            })
+    }
+
+    fn notification_responses(output: &[u8]) -> Vec<NotificationResponseMessage> {
+        notification_responses_from_messages(&backend_messages(output))
+    }
+
+    fn notification_responses_from_messages(
+        messages: &[(u8, Vec<u8>)],
+    ) -> Vec<NotificationResponseMessage> {
+        messages
+            .iter()
+            .filter(|(tag, _)| *tag == b'A')
+            .filter_map(|(_, body)| {
+                let sender_pid = i32::from_be_bytes(body.get(..4)?.try_into().ok()?);
+                let mut offset = 4usize;
+                let channel = read_cstr(&body, &mut offset).ok()?.to_string();
+                let payload = read_cstr(&body, &mut offset).ok()?.to_string();
+                Some(NotificationResponseMessage {
+                    sender_pid,
+                    channel,
+                    payload,
+                })
+            })
+            .collect()
+    }
+
+    fn command_complete_tags(output: &[u8]) -> Vec<String> {
+        backend_messages(output)
+            .into_iter()
+            .filter(|(tag, _)| *tag == b'C')
+            .map(|(_, body)| cstr_from_bytes(&body).to_string())
+            .collect()
     }
 
     fn output_contains_message(output: &[u8], message: &str) -> bool {
@@ -4481,6 +5038,187 @@ mod tests {
         assert_eq!(
             parameter_status_value(&output, "server_version").as_deref(),
             Some("18.3")
+        );
+    }
+
+    #[test]
+    fn simple_query_listener_receives_notification_response_on_next_interaction() {
+        let db = Database::open(temp_dir("simple_query_notification_response"), 16).unwrap();
+        let mut listener = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut sender = ConnectionState {
+            session: Session::new(1),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+
+        handle_query(&mut output, &db, &mut listener, "listen alerts;").unwrap();
+        output.clear();
+        handle_query(
+            &mut output,
+            &db,
+            &mut sender,
+            "select pg_notify('alerts', 'hello');",
+        )
+        .unwrap();
+
+        output.clear();
+        handle_query(&mut output, &db, &mut listener, "select 1;").unwrap();
+
+        assert_eq!(
+            notification_responses(&output),
+            vec![NotificationResponseMessage {
+                sender_pid: 1,
+                channel: "alerts".to_string(),
+                payload: "hello".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn extended_protocol_parse_receives_notification_response_on_next_interaction() {
+        let cluster = Cluster::open(temp_dir("extended_parse_notification_response"), 16).unwrap();
+        let db = cluster.connect_database("postgres").unwrap();
+        let (mut listener, server) = start_test_connection_with_cluster(cluster, 2);
+
+        write_packet(&mut listener, &startup_packet("postgres", "postgres"));
+        let _ = read_until_ready(&mut listener, "startup");
+        write_packet(&mut listener, &query_message("listen alerts"));
+        let _ = read_until_ready(&mut listener, "listen");
+
+        let mut sender = Session::new(41);
+        sender.execute(&db, "notify alerts, 'hello'").unwrap();
+
+        write_packet(&mut listener, &parse_message("noop_stmt", "select 1"));
+        let response = read_available_messages(&mut listener, "parse");
+
+        assert_eq!(
+            response.iter().map(|(tag, _)| *tag).collect::<Vec<_>>(),
+            vec![b'1', b'A']
+        );
+        assert_eq!(
+            notification_responses_from_messages(&response),
+            vec![NotificationResponseMessage {
+                sender_pid: 41,
+                channel: "alerts".to_string(),
+                payload: "hello".to_string(),
+            }]
+        );
+
+        write_packet(&mut listener, &terminate_message());
+        drop(listener);
+        server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn flush_message_receives_notification_response_on_next_interaction() {
+        let cluster = Cluster::open(temp_dir("flush_notification_response"), 16).unwrap();
+        let db = cluster.connect_database("postgres").unwrap();
+        let (mut listener, server) = start_test_connection_with_cluster(cluster, 2);
+
+        write_packet(&mut listener, &startup_packet("postgres", "postgres"));
+        let _ = read_until_ready(&mut listener, "startup");
+        write_packet(&mut listener, &query_message("listen alerts"));
+        let _ = read_until_ready(&mut listener, "listen");
+
+        let mut sender = Session::new(7);
+        sender.execute(&db, "notify alerts, 'flushed'").unwrap();
+
+        write_packet(&mut listener, &flush_message());
+        let response = read_available_messages(&mut listener, "flush");
+
+        assert_eq!(
+            response.iter().map(|(tag, _)| *tag).collect::<Vec<_>>(),
+            vec![b'A']
+        );
+        assert_eq!(
+            notification_responses_from_messages(&response),
+            vec![NotificationResponseMessage {
+                sender_pid: 7,
+                channel: "alerts".to_string(),
+                payload: "flushed".to_string(),
+            }]
+        );
+
+        write_packet(&mut listener, &terminate_message());
+        drop(listener);
+        server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn notification_sender_pid_matches_startup_backend_key_data_pid() {
+        let cluster = Cluster::open(temp_dir("notification_sender_pid"), 16).unwrap();
+        let db = cluster.connect_database("postgres").unwrap();
+        let mut startup_input = startup_packet("postgres", "postgres");
+        startup_input.extend(terminate_message());
+        let mut startup_output = Vec::new();
+
+        handle_connection_with_io(
+            Cursor::new(startup_input),
+            &mut startup_output,
+            &cluster,
+            41,
+        )
+        .unwrap();
+        assert_eq!(backend_key_data_pid(&startup_output), Some(41));
+
+        let mut listener = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+        handle_query(&mut output, &db, &mut listener, "listen alerts;").unwrap();
+
+        let mut sender = Session::new(41);
+        sender.execute(&db, "notify alerts, 'pid-check'").unwrap();
+
+        output.clear();
+        handle_query(&mut output, &db, &mut listener, "select 1;").unwrap();
+
+        assert_eq!(
+            notification_responses(&output),
+            vec![NotificationResponseMessage {
+                sender_pid: 41,
+                channel: "alerts".to_string(),
+                payload: "pid-check".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn listen_unlisten_and_notify_emit_expected_command_tags() {
+        let db = Database::open(temp_dir("async_command_tags"), 16).unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            "listen alerts; unlisten alerts; notify alerts;",
+        )
+        .unwrap();
+
+        assert_eq!(
+            command_complete_tags(&output),
+            vec![
+                "LISTEN".to_string(),
+                "UNLISTEN".to_string(),
+                "NOTIFY".to_string(),
+            ]
         );
     }
 
@@ -4937,8 +5675,11 @@ mod tests {
             .unwrap();
         db.execute(1, "create index attmp_idx on attmp (a, (d + e), b)")
             .unwrap();
-        db.execute(1, "alter index attmp_idx alter column 2 set statistics 1000")
-            .unwrap();
+        db.execute(
+            1,
+            "alter index attmp_idx alter column 2 set statistics 1000",
+        )
+        .unwrap();
         let entry = session
             .catalog_lookup(&db)
             .lookup_any_relation("attmp_idx")
@@ -5604,7 +6345,11 @@ mod tests {
         )
         .unwrap();
 
-        assert!(output.windows("C54000\0".len()).any(|window| window == b"C54000\0"));
+        assert!(
+            output
+                .windows("C54000\0".len())
+                .any(|window| window == b"C54000\0")
+        );
     }
 
     fn split_simple_query_statements_keeps_rule_action_lists_together() {

@@ -474,6 +474,9 @@ fn run_statement(
         Statement::Set(_)
         | Statement::Reset(_)
         | Statement::Checkpoint(_)
+        | Statement::Notify(_)
+        | Statement::Listen(_)
+        | Statement::Unlisten(_)
         | Statement::CopyFrom(_)
         | Statement::CreatePublication(_)
         | Statement::AlterPublication(_)
@@ -672,6 +675,7 @@ fn run_statement(
                 txn_waiter: None,
                 sequences: None,
                 large_objects: None,
+                async_notify_runtime: None,
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
@@ -693,6 +697,7 @@ fn run_statement(
                 subplans: Vec::new(),
                 timed: false,
                 allow_side_effects: false,
+                pending_async_notifications: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
@@ -714,6 +719,7 @@ fn run_statement(
                 txn_waiter: None,
                 sequences: None,
                 large_objects: None,
+                async_notify_runtime: None,
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
@@ -735,6 +741,7 @@ fn run_statement(
                 subplans: Vec::new(),
                 timed: false,
                 allow_side_effects: false,
+                pending_async_notifications: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
@@ -756,6 +763,7 @@ fn run_statement(
                 txn_waiter: None,
                 sequences: None,
                 large_objects: None,
+                async_notify_runtime: None,
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
@@ -777,6 +785,7 @@ fn run_statement(
                 subplans: Vec::new(),
                 timed: false,
                 allow_side_effects: false,
+                pending_async_notifications: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
@@ -798,6 +807,7 @@ fn run_statement(
                 txn_waiter: None,
                 sequences: None,
                 large_objects: None,
+                async_notify_runtime: None,
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
@@ -819,6 +829,7 @@ fn run_statement(
                 subplans: Vec::new(),
                 timed: false,
                 allow_side_effects: false,
+                pending_async_notifications: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
@@ -925,6 +936,7 @@ fn run_statement(
                 txn_waiter: None,
                 sequences: None,
                 large_objects: None,
+                async_notify_runtime: None,
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
@@ -946,6 +958,7 @@ fn run_statement(
                 subplans: Vec::new(),
                 timed: false,
                 allow_side_effects: true,
+                pending_async_notifications: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
@@ -967,6 +980,7 @@ fn run_statement(
                 txn_waiter: None,
                 sequences: None,
                 large_objects: None,
+                async_notify_runtime: None,
                 checkpoint_stats:
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
@@ -988,6 +1002,7 @@ fn run_statement(
                 subplans: Vec::new(),
                 timed: false,
                 allow_side_effects: false,
+                pending_async_notifications: Vec::new(),
                 catalog: relcache.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),
@@ -1012,6 +1027,7 @@ fn run_statement(
                     txn_waiter: None,
                     sequences: None,
                     large_objects: None,
+                    async_notify_runtime: None,
                     checkpoint_stats:
                         pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                     datetime_config:
@@ -1033,6 +1049,7 @@ fn run_statement(
                     subplans: Vec::new(),
                     timed: false,
                     allow_side_effects: true,
+                    pending_async_notifications: Vec::new(),
                     catalog: relcache.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -1068,6 +1085,7 @@ fn run_statement(
                     txn_waiter: None,
                     sequences: None,
                     large_objects: None,
+                    async_notify_runtime: None,
                     checkpoint_stats:
                         pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                     datetime_config:
@@ -1089,6 +1107,7 @@ fn run_statement(
                     subplans: Vec::new(),
                     timed: false,
                     allow_side_effects: true,
+                    pending_async_notifications: Vec::new(),
                     catalog: relcache.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -1124,6 +1143,7 @@ fn run_statement(
                     txn_waiter: None,
                     sequences: None,
                     large_objects: None,
+                    async_notify_runtime: None,
                     checkpoint_stats:
                         pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                     datetime_config:
@@ -1145,6 +1165,7 @@ fn run_statement(
                     subplans: Vec::new(),
                     timed: false,
                     allow_side_effects: true,
+                    pending_async_notifications: Vec::new(),
                     catalog: relcache.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),

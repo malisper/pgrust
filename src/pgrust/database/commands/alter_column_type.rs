@@ -4,8 +4,8 @@ use crate::backend::commands::tablecmds::{
     collect_matching_rows_heap, insert_index_entry_for_row, reinitialize_index_relation,
 };
 use crate::backend::executor::value_io::tuple_from_values;
-use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::backend::executor::{ExecutorContext, RelationDesc, TupleSlot, eval_expr};
+use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::{BTREE_AM_OID, PG_CATALOG_NAMESPACE_OID, default_btree_opclass_oid};
 use crate::pgrust::database::ddl::{
@@ -342,6 +342,7 @@ impl Database {
             txn_waiter: Some(self.txn_waiter.clone()),
             sequences: Some(self.sequences.clone()),
             large_objects: Some(self.large_objects.clone()),
+            async_notify_runtime: Some(self.async_notify_runtime.clone()),
             advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
             checkpoint_stats: self.checkpoint_stats_snapshot(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -363,6 +364,7 @@ impl Database {
             subplans: Vec::new(),
             timed: false,
             allow_side_effects: true,
+            pending_async_notifications: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),

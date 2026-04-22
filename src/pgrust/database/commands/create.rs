@@ -35,12 +35,14 @@ fn existing_view_prefix_matches(
     new_desc: &crate::backend::executor::RelationDesc,
 ) -> bool {
     old_desc.columns.len() <= new_desc.columns.len()
-        && old_desc.columns.iter().zip(new_desc.columns.iter()).all(
-            |(old_column, new_column)| {
+        && old_desc
+            .columns
+            .iter()
+            .zip(new_desc.columns.iter())
+            .all(|(old_column, new_column)| {
                 old_column.name.eq_ignore_ascii_case(&new_column.name)
                     && old_column.sql_type == new_column.sql_type
-            },
-        )
+            })
 }
 
 fn normalize_create_function_name_for_search_path(
@@ -1097,8 +1099,7 @@ impl Database {
             }
             if !existing_view_prefix_matches(&existing_relation.desc, &desc) {
                 return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
-                    "CREATE OR REPLACE VIEW can only add new columns at the end of the view"
-                        .into(),
+                    "CREATE OR REPLACE VIEW can only add new columns at the end of the view".into(),
                 )));
             }
             let replace_effect = self
@@ -1207,6 +1208,7 @@ impl Database {
             txn_waiter: Some(self.txn_waiter.clone()),
             sequences: Some(self.sequences.clone()),
             large_objects: Some(self.large_objects.clone()),
+            async_notify_runtime: Some(self.async_notify_runtime.clone()),
             advisory_locks: Arc::clone(&self.advisory_locks),
             checkpoint_stats: self.checkpoint_stats_snapshot(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -1228,6 +1230,7 @@ impl Database {
             subplans: Vec::new(),
             timed: false,
             allow_side_effects: false,
+            pending_async_notifications: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
@@ -1355,6 +1358,7 @@ impl Database {
             txn_waiter: Some(self.txn_waiter.clone()),
             sequences: Some(self.sequences.clone()),
             large_objects: Some(self.large_objects.clone()),
+            async_notify_runtime: Some(self.async_notify_runtime.clone()),
             advisory_locks: Arc::clone(&self.advisory_locks),
             checkpoint_stats: self.checkpoint_stats_snapshot(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -1376,6 +1380,7 @@ impl Database {
             subplans: Vec::new(),
             timed: false,
             allow_side_effects: true,
+            pending_async_notifications: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),

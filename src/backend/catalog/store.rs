@@ -229,6 +229,7 @@ mod tests {
             large_objects: Some(Arc::new(
                 crate::pgrust::database::LargeObjectRuntime::new_ephemeral(),
             )),
+            async_notify_runtime: None,
             advisory_locks: Arc::new(crate::backend::storage::lmgr::AdvisoryLockManager::new()),
             checkpoint_stats:
                 crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
@@ -255,6 +256,7 @@ mod tests {
             subplans: Vec::new(),
             timed: false,
             allow_side_effects: true,
+            pending_async_notifications: Vec::new(),
             catalog: None,
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),

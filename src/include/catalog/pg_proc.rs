@@ -535,6 +535,32 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'f',
             's',
         ),
+        proc_row_with_parallel(
+            3036,
+            "pg_notify",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID, TEXT_TYPE_OID]),
+            "pg_notify",
+            2,
+            false,
+            false,
+            'f',
+            'v',
+            'r',
+        ),
+        proc_row_with_parallel(
+            3296,
+            "pg_notification_queue_usage",
+            FLOAT8_TYPE_OID,
+            "",
+            "pg_notification_queue_usage",
+            0,
+            false,
+            false,
+            'f',
+            'v',
+            'r',
+        ),
         proc_row(
             6301,
             "nextval",
@@ -3258,6 +3284,11 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "getdatabaseencoding",
             BuiltinScalarFunction::GetDatabaseEncoding,
+        ),
+        ("pg_notify", BuiltinScalarFunction::PgNotify),
+        (
+            "pg_notification_queue_usage",
+            BuiltinScalarFunction::PgNotificationQueueUsage,
         ),
         ("pg_my_temp_schema", BuiltinScalarFunction::PgMyTempSchema),
         (
@@ -6912,6 +6943,38 @@ mod tests {
     }
 
     #[test]
+    fn async_notification_rows_have_expected_oids() {
+        let rows = bootstrap_pg_proc_rows();
+        let pg_notify = rows.iter().find(|row| row.oid == 3036).expect("pg_notify");
+        assert_eq!(pg_notify.proname, "pg_notify");
+        assert_eq!(
+            pg_notify.proargtypes,
+            oid_argtypes(&[TEXT_TYPE_OID, TEXT_TYPE_OID])
+        );
+        assert_eq!(pg_notify.prorettype, VOID_TYPE_OID);
+        assert_eq!(pg_notify.provolatile, 'v');
+        assert_eq!(pg_notify.proparallel, 'r');
+        assert_eq!(
+            builtin_scalar_function_for_proc_oid(pg_notify.oid),
+            Some(BuiltinScalarFunction::PgNotify)
+        );
+
+        let queue_usage = rows
+            .iter()
+            .find(|row| row.oid == 3296)
+            .expect("pg_notification_queue_usage");
+        assert_eq!(queue_usage.proname, "pg_notification_queue_usage");
+        assert_eq!(queue_usage.proargtypes, "");
+        assert_eq!(queue_usage.prorettype, FLOAT8_TYPE_OID);
+        assert_eq!(queue_usage.provolatile, 'v');
+        assert_eq!(queue_usage.proparallel, 'r');
+        assert_eq!(
+            builtin_scalar_function_for_proc_oid(queue_usage.oid),
+            Some(BuiltinScalarFunction::PgNotificationQueueUsage)
+        );
+    }
+
+    #[test]
     fn bootstrap_rows_have_unique_oids() {
         use std::collections::HashSet;
 
@@ -6931,6 +6994,8 @@ mod tests {
         for func in [
             BuiltinScalarFunction::CurrentDatabase,
             BuiltinScalarFunction::CurrentSetting,
+            BuiltinScalarFunction::PgNotify,
+            BuiltinScalarFunction::PgNotificationQueueUsage,
             BuiltinScalarFunction::RegProcedureToText,
             BuiltinScalarFunction::RegRoleToText,
             BuiltinScalarFunction::PgGetUserById,

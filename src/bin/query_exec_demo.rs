@@ -204,6 +204,7 @@ fn main() -> Result<(), ExecError> {
         txn_waiter: None,
         sequences: None,
         large_objects: None,
+        async_notify_runtime: None,
         checkpoint_stats:
             pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
         datetime_config: pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -223,6 +224,7 @@ fn main() -> Result<(), ExecError> {
         subplans: Vec::new(),
         timed: false,
         allow_side_effects: false,
+        pending_async_notifications: Vec::new(),
         catalog: None,
         compiled_functions: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),

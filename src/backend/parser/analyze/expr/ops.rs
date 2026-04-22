@@ -294,7 +294,10 @@ pub(crate) fn bind_lowered_comparison_expr(
         catalog,
         CollationConsumer::StringComparison,
         &[
-            (expr_sql_type_hint(&left).unwrap_or(left_type), left_explicit_collation),
+            (
+                expr_sql_type_hint(&left).unwrap_or(left_type),
+                left_explicit_collation,
+            ),
             (
                 expr_sql_type_hint(&right).unwrap_or(right_type),
                 right_explicit_collation,
@@ -400,7 +403,10 @@ fn supports_array_comparison_operator(op: &str, left: SqlType, right: SqlType) -
     left.is_array
         && right.is_array
         && left == right
-        && matches!(op, "=" | "<>" | "<" | "<=" | ">" | ">=" | "@>" | "<@" | "&&")
+        && matches!(
+            op,
+            "=" | "<>" | "<" | "<=" | ">" | ">=" | "@>" | "<@" | "&&"
+        )
 }
 
 fn supports_builtin_datetime_comparison(op: &str, left: SqlType, right: SqlType) -> bool {
