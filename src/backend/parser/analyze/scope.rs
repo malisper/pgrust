@@ -3,8 +3,8 @@ use super::*;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::record::lookup_anonymous_record_descriptor;
 use crate::include::nodes::primnodes::{
-    AttrNumber, JoinType, JsonRecordFunction, SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO, Var,
-    user_attrno,
+    AttrNumber, ColumnDesc, JoinType, JsonRecordFunction, SELF_ITEM_POINTER_ATTR_NO,
+    TABLE_OID_ATTR_NO, Var, user_attrno,
 };
 
 #[derive(Debug, Clone)]
@@ -596,11 +596,13 @@ pub(super) fn bind_from_item_with_ctes(
             name,
             args,
             func_variadic,
+            with_ordinality,
         } => {
             let (plan, scope, _) = bind_function_from_item_with_ctes(
                 name,
                 args,
                 *func_variadic,
+                *with_ordinality,
                 None,
                 catalog,
                 outer_scopes,
@@ -700,19 +702,31 @@ pub(super) fn bind_from_item_with_ctes(
                     name,
                     args,
                     func_variadic,
-                } => Some((name.as_str(), args.as_slice(), *func_variadic)),
+                    with_ordinality,
+                } => Some((
+                    name.as_str(),
+                    args.as_slice(),
+                    *func_variadic,
+                    *with_ordinality,
+                )),
                 FromItem::Lateral(inner) => match inner.as_ref() {
                     FromItem::FunctionCall {
                         name,
                         args,
                         func_variadic,
-                    } => Some((name.as_str(), args.as_slice(), *func_variadic)),
+                        with_ordinality,
+                    } => Some((
+                        name.as_str(),
+                        args.as_slice(),
+                        *func_variadic,
+                        *with_ordinality,
+                    )),
                     _ => None,
                 },
                 _ => None,
             };
             let (plan, scope, alias_single_function_output) =
-                if let Some((name, args, func_variadic)) = function_source {
+                if let Some((name, args, func_variadic, with_ordinality)) = function_source {
                     let typed_defs = match column_aliases {
                         AliasColumnSpec::Definitions(defs) => Some(defs.as_slice()),
                         AliasColumnSpec::None | AliasColumnSpec::Names(_) => None,
@@ -721,6 +735,7 @@ pub(super) fn bind_from_item_with_ctes(
                         name,
                         args,
                         func_variadic,
+                        with_ordinality,
                         typed_defs,
                         catalog,
                         outer_scopes,
@@ -760,6 +775,7 @@ fn bind_function_from_item_with_ctes(
     name: &str,
     args: &[SqlFunctionArg],
     func_variadic: bool,
+    with_ordinality: bool,
     column_definitions: Option<&[AliasColumnDef]>,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
@@ -875,8 +891,19 @@ fn bind_function_from_item_with_ctes(
                     _ => Expr::Const(Value::Int32(1)),
                 }
             };
+            let mut output_columns = vec![QueryColumn {
+                name: "generate_series".to_string(),
+                sql_type: common,
+                wire_type_oid: None,
+            }];
+            let mut desc_columns = vec![column_desc("generate_series", common, false)];
+            maybe_append_function_ordinality(
+                with_ordinality,
+                &mut output_columns,
+                &mut desc_columns,
+            );
             let desc = RelationDesc {
-                columns: vec![column_desc("generate_series", common, false)],
+                columns: desc_columns,
             };
             let scope = scope_for_relation(Some(name), &desc);
             Ok((
@@ -886,14 +913,11 @@ fn bind_function_from_item_with_ctes(
                     start: coerce_bound_expr(start, start_type, common),
                     stop: coerce_bound_expr(stop, stop_type, common),
                     step,
-                    output: QueryColumn {
-                        name: "generate_series".to_string(),
-                        sql_type: common,
-                        wire_type_oid: None,
-                    },
+                    output_columns,
+                    with_ordinality,
                 }),
                 scope,
-                true,
+                !with_ordinality,
             ))
         }
         "unnest" => {
@@ -954,6 +978,11 @@ fn bind_function_from_item_with_ctes(
                 });
                 desc_columns.push(column_desc(column_name, element_type, true));
             }
+            maybe_append_function_ordinality(
+                with_ordinality,
+                &mut output_columns,
+                &mut desc_columns,
+            );
             let desc = RelationDesc {
                 columns: desc_columns,
             };
@@ -965,6 +994,7 @@ fn bind_function_from_item_with_ctes(
                     func_variadic: resolved_func_variadic,
                     args: bound_args,
                     output_columns,
+                    with_ordinality,
                 }),
                 scope,
                 alias_single_function_output,
@@ -1144,11 +1174,18 @@ fn bind_function_from_item_with_ctes(
                         vec![QueryColumn::text("jsonb_array_elements_text")]
                     }
                 });
+                let mut output_columns = output_columns;
+                let mut desc_columns = output_columns
+                    .iter()
+                    .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+                    .collect::<Vec<_>>();
+                maybe_append_function_ordinality(
+                    with_ordinality,
+                    &mut output_columns,
+                    &mut desc_columns,
+                );
                 let desc = RelationDesc {
-                    columns: output_columns
-                        .iter()
-                        .map(|col| column_desc(col.name.clone(), col.sql_type, true))
-                        .collect(),
+                    columns: desc_columns,
                 };
                 let scope = scope_for_relation(Some(name), &desc);
                 let alias_single_function_output = output_columns.len() == 1;
@@ -1159,6 +1196,7 @@ fn bind_function_from_item_with_ctes(
                         kind,
                         args: bound_args,
                         output_columns,
+                        with_ordinality,
                     }),
                     scope,
                     alias_single_function_output,
@@ -1190,11 +1228,18 @@ fn bind_function_from_item_with_ctes(
                         vec![QueryColumn::text("regexp_split_to_table")]
                     }
                 };
+                let mut output_columns = output_columns;
+                let mut desc_columns = output_columns
+                    .iter()
+                    .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+                    .collect::<Vec<_>>();
+                maybe_append_function_ordinality(
+                    with_ordinality,
+                    &mut output_columns,
+                    &mut desc_columns,
+                );
                 let desc = RelationDesc {
-                    columns: output_columns
-                        .iter()
-                        .map(|col| column_desc(col.name.clone(), col.sql_type, true))
-                        .collect(),
+                    columns: desc_columns,
                 };
                 let scope = scope_for_relation(Some(name), &desc);
                 let alias_single_function_output = output_columns.len() == 1;
@@ -1205,6 +1250,7 @@ fn bind_function_from_item_with_ctes(
                         kind,
                         args: bound_args,
                         output_columns,
+                        with_ordinality,
                     }),
                     scope,
                     alias_single_function_output,
@@ -1229,11 +1275,18 @@ fn bind_function_from_item_with_ctes(
                         wire_type_oid: None,
                     }]
                 });
+                let mut output_columns = output_columns;
+                let mut desc_columns = output_columns
+                    .iter()
+                    .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+                    .collect::<Vec<_>>();
+                maybe_append_function_ordinality(
+                    with_ordinality,
+                    &mut output_columns,
+                    &mut desc_columns,
+                );
                 let desc = RelationDesc {
-                    columns: output_columns
-                        .iter()
-                        .map(|col| column_desc(col.name.clone(), col.sql_type, true))
-                        .collect(),
+                    columns: desc_columns,
                 };
                 let scope = scope_for_relation(Some(name), &desc);
                 Ok((
@@ -1242,6 +1295,7 @@ fn bind_function_from_item_with_ctes(
                         func_variadic: resolved.func_variadic,
                         args: bound_args,
                         output_columns,
+                        with_ordinality,
                     }),
                     scope,
                     alias_single_function_output,
@@ -1251,6 +1305,23 @@ fn bind_function_from_item_with_ctes(
             }
         }
     }
+}
+
+fn maybe_append_function_ordinality(
+    with_ordinality: bool,
+    output_columns: &mut Vec<QueryColumn>,
+    desc_columns: &mut Vec<ColumnDesc>,
+) {
+    if !with_ordinality {
+        return;
+    }
+    let ordinality_type = SqlType::new(SqlTypeKind::Int8);
+    output_columns.push(QueryColumn {
+        name: "ordinality".to_string(),
+        sql_type: ordinality_type,
+        wire_type_oid: None,
+    });
+    desc_columns.push(column_desc("ordinality", ordinality_type, false));
 }
 
 fn bind_json_table_function_args(
@@ -1378,6 +1449,7 @@ fn bind_json_record_from_item(
             args: bound_args,
             output_columns,
             record_type: None,
+            with_ordinality: false,
         }),
         scope,
         false,

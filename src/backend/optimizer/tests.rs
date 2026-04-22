@@ -1037,11 +1037,12 @@ fn into_plan_project_set_set_arg_lowers_via_child_tlist_identity() {
                 start: var(10, 1),
                 stop: Expr::Const(Value::Int32(3)),
                 step: Expr::Const(Value::Int32(1)),
-                output: QueryColumn {
+                output_columns: vec![QueryColumn {
                     name: "g".into(),
                     sql_type: int4(),
                     wire_type_oid: None,
-                },
+                }],
+                with_ordinality: false,
             },
             sql_type: int4(),
             column_index: 1,

@@ -7995,6 +7995,37 @@ fn parse_array_and_unnest_expressions() {
 }
 
 #[test]
+fn parse_unnest_with_ordinality_aliases_columns() {
+    let stmt = parse_select(
+        "select * from unnest(ARRAY['a', 'b']::varchar[]) with ordinality as u(val, ord)",
+    )
+    .unwrap();
+    let Some(FromItem::Alias {
+        source,
+        alias,
+        column_aliases,
+        ..
+    }) = stmt.from
+    else {
+        panic!("expected aliased function call in from");
+    };
+    assert_eq!(alias, "u");
+    assert_eq!(
+        column_aliases,
+        AliasColumnSpec::Names(vec!["val".into(), "ord".into()])
+    );
+    assert!(matches!(
+        source.as_ref(),
+        FromItem::FunctionCall {
+            name,
+            args,
+            with_ordinality: true,
+            ..
+        } if name == "unnest" && args.len() == 1
+    ));
+}
+
+#[test]
 fn parse_nested_array_constructor_shorthand() {
     let stmt =
         parse_select("select ARRAY[[[111,112],[121,122]],[[211,212],[221,222]]] as f").unwrap();
@@ -8796,6 +8827,34 @@ fn build_plan_for_unnest_uses_array_element_types() {
                 SqlType::new(SqlTypeKind::Varchar)
             );
             assert_eq!(output_columns[1].sql_type, SqlType::new(SqlTypeKind::Int4));
+        }
+        other => panic!("expected unnest plan, got {other:?}"),
+    }
+}
+
+#[test]
+fn build_plan_for_unnest_with_ordinality_adds_bigint_column() {
+    let stmt = parse_select("select * from unnest(ARRAY['a']::varchar[]) with ordinality").unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+    match plan {
+        Plan::FunctionScan {
+            call:
+                crate::include::nodes::primnodes::SetReturningCall::Unnest {
+                    output_columns,
+                    with_ordinality,
+                    ..
+                },
+            ..
+        } => {
+            assert!(with_ordinality);
+            assert_eq!(output_columns.len(), 2);
+            assert_eq!(output_columns[0].name, "unnest");
+            assert_eq!(
+                output_columns[0].sql_type,
+                SqlType::new(SqlTypeKind::Varchar)
+            );
+            assert_eq!(output_columns[1].name, "ordinality");
+            assert_eq!(output_columns[1].sql_type, SqlType::new(SqlTypeKind::Int8));
         }
         other => panic!("expected unnest plan, got {other:?}"),
     }

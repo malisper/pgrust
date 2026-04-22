@@ -303,20 +303,23 @@ fn finalize_set_returning_call(
             start,
             stop,
             step,
-            output,
+            output_columns,
+            with_ordinality,
         } => SetReturningCall::GenerateSeries {
             func_oid,
             func_variadic,
             start: finalize_expr_subqueries(start, catalog, subplans),
             stop: finalize_expr_subqueries(stop, catalog, subplans),
             step: finalize_expr_subqueries(step, catalog, subplans),
-            output,
+            output_columns,
+            with_ordinality,
         },
         SetReturningCall::Unnest {
             func_oid,
             func_variadic,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::Unnest {
             func_oid,
             func_variadic,
@@ -325,6 +328,7 @@ fn finalize_set_returning_call(
                 .map(|arg| finalize_expr_subqueries(arg, catalog, subplans))
                 .collect(),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::JsonTableFunction {
             func_oid,
@@ -332,6 +336,7 @@ fn finalize_set_returning_call(
             kind,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::JsonTableFunction {
             func_oid,
             func_variadic,
@@ -341,6 +346,7 @@ fn finalize_set_returning_call(
                 .map(|arg| finalize_expr_subqueries(arg, catalog, subplans))
                 .collect(),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::JsonRecordFunction {
             func_oid,
@@ -349,6 +355,7 @@ fn finalize_set_returning_call(
             args,
             output_columns,
             record_type,
+            with_ordinality,
         } => SetReturningCall::JsonRecordFunction {
             func_oid,
             func_variadic,
@@ -359,6 +366,7 @@ fn finalize_set_returning_call(
                 .collect(),
             output_columns,
             record_type,
+            with_ordinality,
         },
         SetReturningCall::RegexTableFunction {
             func_oid,
@@ -366,6 +374,7 @@ fn finalize_set_returning_call(
             kind,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::RegexTableFunction {
             func_oid,
             func_variadic,
@@ -375,11 +384,13 @@ fn finalize_set_returning_call(
                 .map(|arg| finalize_expr_subqueries(arg, catalog, subplans))
                 .collect(),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::TextSearchTableFunction {
             kind,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::TextSearchTableFunction {
             kind,
             args: args
@@ -387,12 +398,14 @@ fn finalize_set_returning_call(
                 .map(|arg| finalize_expr_subqueries(arg, catalog, subplans))
                 .collect(),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::UserDefined {
             proc_oid,
             func_variadic,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::UserDefined {
             proc_oid,
             func_variadic,
@@ -401,6 +414,7 @@ fn finalize_set_returning_call(
                 .map(|arg| finalize_expr_subqueries(arg, catalog, subplans))
                 .collect(),
             output_columns,
+            with_ordinality,
         },
     }
 }
@@ -679,20 +693,23 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
             start,
             stop,
             step,
-            output,
+            output_columns,
+            with_ordinality,
         } => SetReturningCall::GenerateSeries {
             func_oid,
             func_variadic,
             start: rebase_expr_subplan_ids(start, base),
             stop: rebase_expr_subplan_ids(stop, base),
             step: rebase_expr_subplan_ids(step, base),
-            output,
+            output_columns,
+            with_ordinality,
         },
         SetReturningCall::Unnest {
             func_oid,
             func_variadic,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::Unnest {
             func_oid,
             func_variadic,
@@ -701,6 +718,7 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
                 .map(|arg| rebase_expr_subplan_ids(arg, base))
                 .collect(),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::JsonTableFunction {
             func_oid,
@@ -708,6 +726,7 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
             kind,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::JsonTableFunction {
             func_oid,
             func_variadic,
@@ -717,6 +736,7 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
                 .map(|arg| rebase_expr_subplan_ids(arg, base))
                 .collect(),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::JsonRecordFunction {
             func_oid,
@@ -725,6 +745,7 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
             args,
             output_columns,
             record_type,
+            with_ordinality,
         } => SetReturningCall::JsonRecordFunction {
             func_oid,
             func_variadic,
@@ -735,6 +756,7 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
                 .collect(),
             output_columns,
             record_type,
+            with_ordinality,
         },
         SetReturningCall::RegexTableFunction {
             func_oid,
@@ -742,6 +764,7 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
             kind,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::RegexTableFunction {
             func_oid,
             func_variadic,
@@ -751,11 +774,13 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
                 .map(|arg| rebase_expr_subplan_ids(arg, base))
                 .collect(),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::TextSearchTableFunction {
             kind,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::TextSearchTableFunction {
             kind,
             args: args
@@ -763,12 +788,14 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
                 .map(|arg| rebase_expr_subplan_ids(arg, base))
                 .collect(),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::UserDefined {
             proc_oid,
             func_variadic,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::UserDefined {
             proc_oid,
             func_variadic,
@@ -777,6 +804,7 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
                 .map(|arg| rebase_expr_subplan_ids(arg, base))
                 .collect(),
             output_columns,
+            with_ordinality,
         },
     }
 }

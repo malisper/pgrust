@@ -897,6 +897,7 @@ pub enum FromItem {
         name: String,
         args: Vec<SqlFunctionArg>,
         func_variadic: bool,
+        with_ordinality: bool,
     },
     Lateral(Box<FromItem>),
     DerivedTable(Box<SelectStatement>),
