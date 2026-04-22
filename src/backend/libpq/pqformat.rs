@@ -638,9 +638,43 @@ pub(crate) fn send_typed_data_row(
             Value::Int32(v) => {
                 let start = buf.len();
                 buf.extend_from_slice(&0_i32.to_be_bytes());
-                let mut itoa_buf = itoa::Buffer::new();
-                let written = itoa_buf.format(*v);
-                buf.extend_from_slice(written.as_bytes());
+                if matches!(sql_type.map(|ty| ty.kind), Some(SqlTypeKind::RegRole)) {
+                    if let Ok(role_oid) = u32::try_from(*v) {
+                        if let Some(role_name) = role_names.and_then(|names| names.get(&role_oid)) {
+                            buf.extend_from_slice(role_name.as_bytes());
+                        } else {
+                            let mut itoa_buf = itoa::Buffer::new();
+                            let written = itoa_buf.format(*v);
+                            buf.extend_from_slice(written.as_bytes());
+                        }
+                    } else {
+                        let mut itoa_buf = itoa::Buffer::new();
+                        let written = itoa_buf.format(*v);
+                        buf.extend_from_slice(written.as_bytes());
+                    }
+                } else if matches!(sql_type.map(|ty| ty.kind), Some(SqlTypeKind::RegProcedure)) {
+                    if let Ok(proc_oid) = u32::try_from(*v) {
+                        if proc_oid == 0 {
+                            buf.extend_from_slice(b"-");
+                        } else if let Some(proc_name) =
+                            proc_names.and_then(|names| names.get(&proc_oid))
+                        {
+                            buf.extend_from_slice(proc_name.as_bytes());
+                        } else {
+                            let mut itoa_buf = itoa::Buffer::new();
+                            let written = itoa_buf.format(*v);
+                            buf.extend_from_slice(written.as_bytes());
+                        }
+                    } else {
+                        let mut itoa_buf = itoa::Buffer::new();
+                        let written = itoa_buf.format(*v);
+                        buf.extend_from_slice(written.as_bytes());
+                    }
+                } else {
+                    let mut itoa_buf = itoa::Buffer::new();
+                    let written = itoa_buf.format(*v);
+                    buf.extend_from_slice(written.as_bytes());
+                }
                 let text_len = (buf.len() - start - 4) as i32;
                 buf[start..start + 4].copy_from_slice(&text_len.to_be_bytes());
             }

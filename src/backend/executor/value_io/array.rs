@@ -105,7 +105,10 @@ fn encode_array_element_payload(
                 element_type.kind,
                 SqlTypeKind::Oid
                     | SqlTypeKind::RegClass
+                    | SqlTypeKind::RegType
+                    | SqlTypeKind::RegRole
                     | SqlTypeKind::RegOperator
+                    | SqlTypeKind::RegProcedure
                     | SqlTypeKind::RegConfig
                     | SqlTypeKind::RegDictionary
             ) =>
