@@ -710,13 +710,15 @@ pub enum SetReturningCall {
         start: Expr,
         stop: Expr,
         step: Expr,
-        output: QueryColumn,
+        output_columns: Vec<QueryColumn>,
+        with_ordinality: bool,
     },
     Unnest {
         func_oid: u32,
         func_variadic: bool,
         args: Vec<Expr>,
         output_columns: Vec<QueryColumn>,
+        with_ordinality: bool,
     },
     JsonTableFunction {
         func_oid: u32,
@@ -724,6 +726,7 @@ pub enum SetReturningCall {
         kind: JsonTableFunction,
         args: Vec<Expr>,
         output_columns: Vec<QueryColumn>,
+        with_ordinality: bool,
     },
     JsonRecordFunction {
         func_oid: u32,
@@ -732,6 +735,7 @@ pub enum SetReturningCall {
         args: Vec<Expr>,
         output_columns: Vec<QueryColumn>,
         record_type: Option<SqlType>,
+        with_ordinality: bool,
     },
     RegexTableFunction {
         func_oid: u32,
@@ -739,30 +743,59 @@ pub enum SetReturningCall {
         kind: RegexTableFunction,
         args: Vec<Expr>,
         output_columns: Vec<QueryColumn>,
+        with_ordinality: bool,
     },
     TextSearchTableFunction {
         kind: TextSearchTableFunction,
         args: Vec<Expr>,
         output_columns: Vec<QueryColumn>,
+        with_ordinality: bool,
     },
     UserDefined {
         proc_oid: u32,
         func_variadic: bool,
         args: Vec<Expr>,
         output_columns: Vec<QueryColumn>,
+        with_ordinality: bool,
     },
 }
 
 impl SetReturningCall {
     pub fn output_columns(&self) -> &[QueryColumn] {
         match self {
-            SetReturningCall::GenerateSeries { output, .. } => std::slice::from_ref(output),
-            SetReturningCall::Unnest { output_columns, .. }
+            SetReturningCall::GenerateSeries { output_columns, .. }
+            | SetReturningCall::Unnest { output_columns, .. }
             | SetReturningCall::JsonTableFunction { output_columns, .. }
             | SetReturningCall::JsonRecordFunction { output_columns, .. }
             | SetReturningCall::RegexTableFunction { output_columns, .. }
             | SetReturningCall::TextSearchTableFunction { output_columns, .. }
             | SetReturningCall::UserDefined { output_columns, .. } => output_columns,
+        }
+    }
+
+    pub fn with_ordinality(&self) -> bool {
+        match self {
+            SetReturningCall::GenerateSeries {
+                with_ordinality, ..
+            }
+            | SetReturningCall::Unnest {
+                with_ordinality, ..
+            }
+            | SetReturningCall::JsonTableFunction {
+                with_ordinality, ..
+            }
+            | SetReturningCall::JsonRecordFunction {
+                with_ordinality, ..
+            }
+            | SetReturningCall::RegexTableFunction {
+                with_ordinality, ..
+            }
+            | SetReturningCall::TextSearchTableFunction {
+                with_ordinality, ..
+            }
+            | SetReturningCall::UserDefined {
+                with_ordinality, ..
+            } => *with_ordinality,
         }
     }
 }

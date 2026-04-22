@@ -3618,11 +3618,7 @@ fn oid_text_input_wraps_negative_values_and_orders_unsigned() {
     assert_eq!(small, Value::Int64(1234));
     assert_eq!(
         crate::backend::executor::expr_ops::compare_order_values(
-            &small,
-            &wrapped,
-            None,
-            None,
-            false,
+            &small, &wrapped, None, None, false,
         )
         .unwrap(),
         std::cmp::Ordering::Less
@@ -5139,6 +5135,34 @@ fn unnest_single_and_multi_arg_work() {
                 vec![
                     vec![Value::Int32(1), Value::Text("x".into())],
                     vec![Value::Int32(2), Value::Null]
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn unnest_with_ordinality_aliases_and_counts_rows() {
+    let base = temp_dir("unnest_with_ordinality");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select * from unnest(ARRAY[10, 20], ARRAY['x']::varchar[]) with ordinality as u(a, b, ord)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["a", "b", "ord"]);
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(10), Value::Text("x".into()), Value::Int64(1)],
+                    vec![Value::Int32(20), Value::Null, Value::Int64(2)],
                 ]
             );
         }
@@ -16311,7 +16335,9 @@ fn large_object_metadata_tracks_create_and_unlink() {
                 crate::pgrust::database::SequenceRuntime::new_ephemeral(),
             )),
             large_objects: Some(large_objects.clone()),
-            advisory_locks: std::sync::Arc::new(crate::backend::storage::lmgr::AdvisoryLockManager::new()),
+            advisory_locks: std::sync::Arc::new(
+                crate::backend::storage::lmgr::AdvisoryLockManager::new(),
+            ),
             checkpoint_stats:
                 crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
