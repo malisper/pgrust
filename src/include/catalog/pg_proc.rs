@@ -4,13 +4,15 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
     ANYARRAYOID, ANYOID, BIT_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID, BOX_TYPE_OID,
     BPCHAR_TYPE_OID, BYTEA_TYPE_OID, CIRCLE_TYPE_OID, DATE_TYPE_OID, DATERANGE_TYPE_OID,
-    FDW_HANDLER_TYPE_OID, FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INT2_TYPE_OID, INT4_TYPE_OID,
-    INT4MULTIRANGE_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID, INT8RANGE_TYPE_OID, JSON_TYPE_OID,
-    JSONB_TYPE_OID, JSONPATH_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID, MONEY_TYPE_OID, NAME_TYPE_OID,
+    FDW_HANDLER_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID,
+    INT2_TYPE_OID, INT4_TYPE_OID, INT4MULTIRANGE_TYPE_OID, INT4RANGE_TYPE_OID,
+    INT8_TYPE_OID, INT8RANGE_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSON_TYPE_OID, JSONB_TYPE_OID,
+    JSONPATH_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID, MONEY_TYPE_OID, NAME_TYPE_OID,
     NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID, OID_TYPE_OID, PATH_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
     PG_LANGUAGE_INTERNAL_OID, PG_NODE_TREE_TYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID,
-    RECORD_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
-    TSQUERY_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID,
+    RECORD_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_TYPE_OID,
+    TIMESTAMPTZ_TYPE_OID, TIMETZ_TYPE_OID, TSQUERY_TYPE_OID, TSRANGE_TYPE_OID,
+    TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID,
     aggregate_func_for_dynamic_range_proc_oid,
 };
 use crate::include::nodes::primnodes::{AggFunc, BuiltinScalarFunction, BuiltinWindowFunction};
@@ -90,6 +92,10 @@ pub const RANGE_GIST_SAME_PROC_OID: u32 = 3881;
 pub const GIST_BOX_DISTANCE_PROC_OID: u32 = 3998;
 pub const GIST_TRANSLATE_CMPTYPE_COMMON_PROC_OID: u32 = 6347;
 pub const RANGE_SORTSUPPORT_PROC_OID: u32 = 6391;
+pub const BRIN_MINMAX_OPCINFO_PROC_OID: u32 = 3383;
+pub const BRIN_MINMAX_ADD_VALUE_PROC_OID: u32 = 3384;
+pub const BRIN_MINMAX_CONSISTENT_PROC_OID: u32 = 3385;
+pub const BRIN_MINMAX_UNION_PROC_OID: u32 = 3386;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PgProcRow {
@@ -2991,6 +2997,8 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
     rows.extend(geometry_proc_rows());
     rows.extend(range_proc_rows());
     rows.extend(gist_support_proc_rows());
+    rows.extend(brin_scalar_comparison_proc_rows());
+    rows.extend(brin_support_proc_rows());
     rows
 }
 
@@ -4705,6 +4713,171 @@ fn gist_support_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
     ]
+}
+
+fn brin_support_proc_rows() -> Vec<PgProcRow> {
+    vec![
+        proc_row(
+            BRIN_MINMAX_OPCINFO_PROC_OID,
+            "brin_minmax_opcinfo",
+            INTERNAL_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID]),
+            "brin_minmax_opcinfo",
+            1,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            BRIN_MINMAX_ADD_VALUE_PROC_OID,
+            "brin_minmax_add_value",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[
+                INTERNAL_TYPE_OID,
+                INTERNAL_TYPE_OID,
+                INTERNAL_TYPE_OID,
+                INTERNAL_TYPE_OID,
+            ]),
+            "brin_minmax_add_value",
+            4,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            BRIN_MINMAX_CONSISTENT_PROC_OID,
+            "brin_minmax_consistent",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "brin_minmax_consistent",
+            3,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            BRIN_MINMAX_UNION_PROC_OID,
+            "brin_minmax_union",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "brin_minmax_union",
+            3,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+    ]
+}
+
+fn brin_scalar_comparison_proc_rows() -> Vec<PgProcRow> {
+    const BASE: u32 = 76_200;
+
+    let specs = [
+        (
+            INTERNAL_CHAR_TYPE_OID,
+            ["chareq", "charne", "charlt", "charle", "chargt", "charge"],
+        ),
+        (
+            INT2_TYPE_OID,
+            ["int2eq", "int2ne", "int2lt", "int2le", "int2gt", "int2ge"],
+        ),
+        (
+            INT8_TYPE_OID,
+            ["int8eq", "int8ne", "int8lt", "int8le", "int8gt", "int8ge"],
+        ),
+        (
+            OID_TYPE_OID,
+            ["oideq", "oidne", "oidlt", "oidle", "oidgt", "oidge"],
+        ),
+        (
+            FLOAT4_TYPE_OID,
+            [
+                "float4eq",
+                "float4ne",
+                "float4lt",
+                "float4le",
+                "float4gt",
+                "float4ge",
+            ],
+        ),
+        (
+            FLOAT8_TYPE_OID,
+            [
+                "float8eq",
+                "float8ne",
+                "float8lt",
+                "float8le",
+                "float8gt",
+                "float8ge",
+            ],
+        ),
+        (
+            BPCHAR_TYPE_OID,
+            [
+                "bpchareq",
+                "bpcharne",
+                "bpcharlt",
+                "bpcharle",
+                "bpchargt",
+                "bpcharge",
+            ],
+        ),
+        (
+            DATE_TYPE_OID,
+            ["date_eq", "date_ne", "date_lt", "date_le", "date_gt", "date_ge"],
+        ),
+        (
+            TIME_TYPE_OID,
+            ["time_eq", "time_ne", "time_lt", "time_le", "time_gt", "time_ge"],
+        ),
+        (
+            TIMETZ_TYPE_OID,
+            [
+                "timetz_eq",
+                "timetz_ne",
+                "timetz_lt",
+                "timetz_le",
+                "timetz_gt",
+                "timetz_ge",
+            ],
+        ),
+        (
+            TIMESTAMP_TYPE_OID,
+            [
+                "timestamp_eq",
+                "timestamp_ne",
+                "timestamp_lt",
+                "timestamp_le",
+                "timestamp_gt",
+                "timestamp_ge",
+            ],
+        ),
+        (
+            TIMESTAMPTZ_TYPE_OID,
+            [
+                "timestamptz_eq",
+                "timestamptz_ne",
+                "timestamptz_lt",
+                "timestamptz_le",
+                "timestamptz_gt",
+                "timestamptz_ge",
+            ],
+        ),
+    ];
+
+    let mut oid = BASE;
+    let mut rows = Vec::new();
+    for (type_oid, proc_names) in specs {
+        for proc_name in proc_names {
+            rows.push(comparison_proc_row(oid, proc_name, &[type_oid, type_oid]));
+            oid = oid.saturating_add(1);
+        }
+    }
+    rows
 }
 
 fn geometry_operator_proc_rows() -> Vec<PgProcRow> {

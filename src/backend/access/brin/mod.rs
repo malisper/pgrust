@@ -7,3 +7,4 @@ mod validate;
 pub mod xlog;
 
 pub use brin::brin_am_handler;
+pub(crate) use validate::validate_brin_am;
