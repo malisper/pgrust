@@ -7270,6 +7270,23 @@ fn regclass_literal_cast_resolves_relation_name() {
 }
 
 #[test]
+fn regclass_cast_resolves_text_expression() {
+    let base = temp_dir("regclass_text_cast");
+    let db = Database::open(&base, 16).unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relname::regclass::oid from (values ('pg_operator'::text)) rel(relname)",
+        ),
+        vec![vec![Value::Int64(
+            crate::include::catalog::PG_OPERATOR_RELATION_OID as i64
+        )]]
+    );
+}
+
+#[test]
 fn regoperator_literal_cast_resolves_operator_signature() {
     let base = temp_dir("regoperator_literal_cast");
     let db = Database::open(&base, 16).unwrap();
