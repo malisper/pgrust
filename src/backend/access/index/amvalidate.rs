@@ -5,12 +5,16 @@ use crate::include::access::gist::{
     GIST_PICKSPLIT_PROC, GIST_TRANSLATE_CMPTYPE_PROC, GIST_UNION_PROC,
 };
 use crate::include::catalog::{
-    GIST_AM_OID, bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows, bootstrap_pg_opclass_rows,
+    BRIN_AM_OID, GIST_AM_OID, bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows,
+    bootstrap_pg_opclass_rows,
 };
 
 pub fn validate_index_am(am_oid: u32) -> bool {
     if crate::backend::access::index::amapi::index_am_handler(am_oid).is_none() {
         return false;
+    }
+    if am_oid == BRIN_AM_OID {
+        return crate::backend::access::brin::validate_brin_am();
     }
     if am_oid != GIST_AM_OID {
         return true;

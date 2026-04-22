@@ -2,7 +2,7 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, GIST_AM_OID, PG_CATALOG_NAMESPACE_OID,
+    BOOTSTRAP_SUPERUSER_OID, BRIN_AM_OID, BTREE_AM_OID, GIST_AM_OID, PG_CATALOG_NAMESPACE_OID,
 };
 
 pub const BTREE_INTEGER_FAMILY_OID: u32 = 1976;
@@ -23,6 +23,18 @@ pub const GIST_BOX_FAMILY_OID: u32 = 2593;
 pub const GIST_POLY_FAMILY_OID: u32 = 2594;
 pub const GIST_CIRCLE_FAMILY_OID: u32 = 2595;
 pub const GIST_RANGE_FAMILY_OID: u32 = 3919;
+pub const BRIN_BYTEA_MINMAX_FAMILY_OID: u32 = 76100;
+pub const BRIN_CHAR_MINMAX_FAMILY_OID: u32 = 76101;
+pub const BRIN_INTEGER_MINMAX_FAMILY_OID: u32 = 76102;
+pub const BRIN_TEXT_MINMAX_FAMILY_OID: u32 = 76103;
+pub const BRIN_OID_MINMAX_FAMILY_OID: u32 = 76104;
+pub const BRIN_FLOAT_MINMAX_FAMILY_OID: u32 = 76105;
+pub const BRIN_BPCHAR_MINMAX_FAMILY_OID: u32 = 76106;
+pub const BRIN_TIME_MINMAX_FAMILY_OID: u32 = 76107;
+pub const BRIN_DATETIME_MINMAX_FAMILY_OID: u32 = 76108;
+pub const BRIN_TIMETZ_MINMAX_FAMILY_OID: u32 = 76109;
+pub const BRIN_BIT_MINMAX_FAMILY_OID: u32 = 76110;
+pub const BRIN_VARBIT_MINMAX_FAMILY_OID: u32 = 76111;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgOpfamilyRow {
@@ -173,5 +185,27 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
             opfnamespace: PG_CATALOG_NAMESPACE_OID,
             opfowner: BOOTSTRAP_SUPERUSER_OID,
         },
+        brin_row(BRIN_BYTEA_MINMAX_FAMILY_OID, "bytea_minmax_ops"),
+        brin_row(BRIN_CHAR_MINMAX_FAMILY_OID, "char_minmax_ops"),
+        brin_row(BRIN_INTEGER_MINMAX_FAMILY_OID, "integer_minmax_ops"),
+        brin_row(BRIN_TEXT_MINMAX_FAMILY_OID, "text_minmax_ops"),
+        brin_row(BRIN_OID_MINMAX_FAMILY_OID, "oid_minmax_ops"),
+        brin_row(BRIN_FLOAT_MINMAX_FAMILY_OID, "float_minmax_ops"),
+        brin_row(BRIN_BPCHAR_MINMAX_FAMILY_OID, "bpchar_minmax_ops"),
+        brin_row(BRIN_TIME_MINMAX_FAMILY_OID, "time_minmax_ops"),
+        brin_row(BRIN_DATETIME_MINMAX_FAMILY_OID, "datetime_minmax_ops"),
+        brin_row(BRIN_TIMETZ_MINMAX_FAMILY_OID, "timetz_minmax_ops"),
+        brin_row(BRIN_BIT_MINMAX_FAMILY_OID, "bit_minmax_ops"),
+        brin_row(BRIN_VARBIT_MINMAX_FAMILY_OID, "varbit_minmax_ops"),
     ]
+}
+
+fn brin_row(oid: u32, name: &str) -> PgOpfamilyRow {
+    PgOpfamilyRow {
+        oid,
+        opfmethod: BRIN_AM_OID,
+        opfname: name.into(),
+        opfnamespace: PG_CATALOG_NAMESPACE_OID,
+        opfowner: BOOTSTRAP_SUPERUSER_OID,
+    }
 }

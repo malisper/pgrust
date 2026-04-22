@@ -3,17 +3,23 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
     ANYMULTIRANGEOID, BIT_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID, BOX_TYPE_OID,
-    BPCHAR_TYPE_OID, BTREE_AM_OID, BTREE_BIT_FAMILY_OID, BTREE_BOOL_FAMILY_OID,
-    BTREE_BYTEA_FAMILY_OID, BTREE_CHAR_FAMILY_OID, BTREE_DATETIME_FAMILY_OID,
-    BTREE_FLOAT_FAMILY_OID, BTREE_INTEGER_FAMILY_OID, BTREE_MULTIRANGE_FAMILY_OID,
-    BTREE_NUMERIC_FAMILY_OID, BTREE_OID_FAMILY_OID, BTREE_OIDVECTOR_FAMILY_OID,
-    BTREE_TEXT_FAMILY_OID, BTREE_VARBIT_FAMILY_OID, BYTEA_TYPE_OID, DATEMULTIRANGE_TYPE_OID,
+    BPCHAR_TYPE_OID, BRIN_AM_OID, BRIN_BIT_MINMAX_FAMILY_OID, BRIN_BPCHAR_MINMAX_FAMILY_OID,
+    BRIN_BYTEA_MINMAX_FAMILY_OID, BRIN_CHAR_MINMAX_FAMILY_OID,
+    BRIN_DATETIME_MINMAX_FAMILY_OID, BRIN_FLOAT_MINMAX_FAMILY_OID,
+    BRIN_INTEGER_MINMAX_FAMILY_OID, BRIN_OID_MINMAX_FAMILY_OID,
+    BRIN_TEXT_MINMAX_FAMILY_OID, BRIN_TIME_MINMAX_FAMILY_OID,
+    BRIN_TIMETZ_MINMAX_FAMILY_OID, BRIN_VARBIT_MINMAX_FAMILY_OID, BTREE_AM_OID,
+    BTREE_BIT_FAMILY_OID, BTREE_BOOL_FAMILY_OID, BTREE_BYTEA_FAMILY_OID,
+    BTREE_CHAR_FAMILY_OID, BTREE_DATETIME_FAMILY_OID, BTREE_FLOAT_FAMILY_OID,
+    BTREE_INTEGER_FAMILY_OID, BTREE_MULTIRANGE_FAMILY_OID, BTREE_NUMERIC_FAMILY_OID,
+    BTREE_OID_FAMILY_OID, BTREE_OIDVECTOR_FAMILY_OID, BTREE_TEXT_FAMILY_OID,
+    BTREE_VARBIT_FAMILY_OID, BYTEA_TYPE_OID, DATEMULTIRANGE_TYPE_OID, DATE_TYPE_OID,
     FLOAT4_TYPE_OID, FLOAT8_TYPE_OID, GIST_AM_OID, GIST_BOX_FAMILY_OID, GIST_RANGE_FAMILY_OID,
     INT2_TYPE_OID, INT4_TYPE_OID, INT4MULTIRANGE_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID,
     INT8MULTIRANGE_TYPE_OID, INTERNAL_CHAR_TYPE_OID, NAME_TYPE_OID, NUMERIC_TYPE_OID,
     NUMMULTIRANGE_TYPE_OID, OID_TYPE_OID, OIDVECTOR_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
-    TEXT_TYPE_OID, TIMESTAMP_TYPE_OID, TSMULTIRANGE_TYPE_OID, TSTZMULTIRANGE_TYPE_OID,
-    VARBIT_TYPE_OID, VARCHAR_TYPE_OID,
+    TEXT_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TIMETZ_TYPE_OID,
+    TSMULTIRANGE_TYPE_OID, TSTZMULTIRANGE_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_TYPE_OID,
 };
 
 pub const BOOL_BTREE_OPCLASS_OID: u32 = 424;
@@ -37,6 +43,23 @@ pub const VARBIT_BTREE_OPCLASS_OID: u32 = 10005;
 pub const MULTIRANGE_BTREE_OPCLASS_OID: u32 = 10033;
 pub const BOX_GIST_OPCLASS_OID: u32 = 76010;
 pub const RANGE_GIST_OPCLASS_OID: u32 = 76011;
+pub const BYTEA_BRIN_MINMAX_OPCLASS_OID: u32 = 76120;
+pub const CHAR_BRIN_MINMAX_OPCLASS_OID: u32 = 76121;
+pub const INT2_BRIN_MINMAX_OPCLASS_OID: u32 = 76122;
+pub const INT4_BRIN_MINMAX_OPCLASS_OID: u32 = 76123;
+pub const INT8_BRIN_MINMAX_OPCLASS_OID: u32 = 76124;
+pub const OID_BRIN_MINMAX_OPCLASS_OID: u32 = 76125;
+pub const FLOAT4_BRIN_MINMAX_OPCLASS_OID: u32 = 76126;
+pub const FLOAT8_BRIN_MINMAX_OPCLASS_OID: u32 = 76127;
+pub const TEXT_BRIN_MINMAX_OPCLASS_OID: u32 = 76128;
+pub const BPCHAR_BRIN_MINMAX_OPCLASS_OID: u32 = 76129;
+pub const TIME_BRIN_MINMAX_OPCLASS_OID: u32 = 76130;
+pub const DATE_BRIN_MINMAX_OPCLASS_OID: u32 = 76131;
+pub const TIMESTAMP_BRIN_MINMAX_OPCLASS_OID: u32 = 76132;
+pub const TIMESTAMPTZ_BRIN_MINMAX_OPCLASS_OID: u32 = 76133;
+pub const TIMETZ_BRIN_MINMAX_OPCLASS_OID: u32 = 76134;
+pub const BIT_BRIN_MINMAX_OPCLASS_OID: u32 = 76135;
+pub const VARBIT_BRIN_MINMAX_OPCLASS_OID: u32 = 76136;
 pub const INT4RANGE_GIST_OPCLASS_OID: u32 = RANGE_GIST_OPCLASS_OID;
 pub const INT8RANGE_GIST_OPCLASS_OID: u32 = RANGE_GIST_OPCLASS_OID;
 pub const NUMRANGE_GIST_OPCLASS_OID: u32 = RANGE_GIST_OPCLASS_OID;
@@ -214,6 +237,108 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             GIST_RANGE_FAMILY_OID,
             INT4RANGE_TYPE_OID,
         ),
+        brin_row(
+            BYTEA_BRIN_MINMAX_OPCLASS_OID,
+            "bytea_minmax_ops",
+            BRIN_BYTEA_MINMAX_FAMILY_OID,
+            BYTEA_TYPE_OID,
+        ),
+        brin_row(
+            CHAR_BRIN_MINMAX_OPCLASS_OID,
+            "char_minmax_ops",
+            BRIN_CHAR_MINMAX_FAMILY_OID,
+            INTERNAL_CHAR_TYPE_OID,
+        ),
+        brin_row(
+            INT2_BRIN_MINMAX_OPCLASS_OID,
+            "int2_minmax_ops",
+            BRIN_INTEGER_MINMAX_FAMILY_OID,
+            INT2_TYPE_OID,
+        ),
+        brin_row(
+            INT4_BRIN_MINMAX_OPCLASS_OID,
+            "int4_minmax_ops",
+            BRIN_INTEGER_MINMAX_FAMILY_OID,
+            INT4_TYPE_OID,
+        ),
+        brin_row(
+            INT8_BRIN_MINMAX_OPCLASS_OID,
+            "int8_minmax_ops",
+            BRIN_INTEGER_MINMAX_FAMILY_OID,
+            INT8_TYPE_OID,
+        ),
+        brin_row(
+            OID_BRIN_MINMAX_OPCLASS_OID,
+            "oid_minmax_ops",
+            BRIN_OID_MINMAX_FAMILY_OID,
+            OID_TYPE_OID,
+        ),
+        brin_row(
+            FLOAT4_BRIN_MINMAX_OPCLASS_OID,
+            "float4_minmax_ops",
+            BRIN_FLOAT_MINMAX_FAMILY_OID,
+            FLOAT4_TYPE_OID,
+        ),
+        brin_row(
+            FLOAT8_BRIN_MINMAX_OPCLASS_OID,
+            "float8_minmax_ops",
+            BRIN_FLOAT_MINMAX_FAMILY_OID,
+            FLOAT8_TYPE_OID,
+        ),
+        brin_row(
+            TEXT_BRIN_MINMAX_OPCLASS_OID,
+            "text_minmax_ops",
+            BRIN_TEXT_MINMAX_FAMILY_OID,
+            TEXT_TYPE_OID,
+        ),
+        brin_row(
+            BPCHAR_BRIN_MINMAX_OPCLASS_OID,
+            "bpchar_minmax_ops",
+            BRIN_BPCHAR_MINMAX_FAMILY_OID,
+            BPCHAR_TYPE_OID,
+        ),
+        brin_row(
+            TIME_BRIN_MINMAX_OPCLASS_OID,
+            "time_minmax_ops",
+            BRIN_TIME_MINMAX_FAMILY_OID,
+            TIME_TYPE_OID,
+        ),
+        brin_row(
+            DATE_BRIN_MINMAX_OPCLASS_OID,
+            "date_minmax_ops",
+            BRIN_DATETIME_MINMAX_FAMILY_OID,
+            DATE_TYPE_OID,
+        ),
+        brin_row(
+            TIMESTAMP_BRIN_MINMAX_OPCLASS_OID,
+            "timestamp_minmax_ops",
+            BRIN_DATETIME_MINMAX_FAMILY_OID,
+            TIMESTAMP_TYPE_OID,
+        ),
+        brin_row(
+            TIMESTAMPTZ_BRIN_MINMAX_OPCLASS_OID,
+            "timestamptz_minmax_ops",
+            BRIN_DATETIME_MINMAX_FAMILY_OID,
+            TIMESTAMPTZ_TYPE_OID,
+        ),
+        brin_row(
+            TIMETZ_BRIN_MINMAX_OPCLASS_OID,
+            "timetz_minmax_ops",
+            BRIN_TIMETZ_MINMAX_FAMILY_OID,
+            TIMETZ_TYPE_OID,
+        ),
+        brin_row(
+            BIT_BRIN_MINMAX_OPCLASS_OID,
+            "bit_minmax_ops",
+            BRIN_BIT_MINMAX_FAMILY_OID,
+            BIT_TYPE_OID,
+        ),
+        brin_row(
+            VARBIT_BRIN_MINMAX_OPCLASS_OID,
+            "varbit_minmax_ops",
+            BRIN_VARBIT_MINMAX_FAMILY_OID,
+            VARBIT_TYPE_OID,
+        ),
     ]
 }
 
@@ -235,6 +360,20 @@ fn gist_row(oid: u32, opcname: &str, family: u32, input_type: u32) -> PgOpclassR
     PgOpclassRow {
         oid,
         opcmethod: GIST_AM_OID,
+        opcname: opcname.into(),
+        opcnamespace: PG_CATALOG_NAMESPACE_OID,
+        opcowner: BOOTSTRAP_SUPERUSER_OID,
+        opcfamily: family,
+        opcintype: input_type,
+        opcdefault: true,
+        opckeytype: 0,
+    }
+}
+
+fn brin_row(oid: u32, opcname: &str, family: u32, input_type: u32) -> PgOpclassRow {
+    PgOpclassRow {
+        oid,
+        opcmethod: BRIN_AM_OID,
         opcname: opcname.into(),
         opcnamespace: PG_CATALOG_NAMESPACE_OID,
         opcowner: BOOTSTRAP_SUPERUSER_OID,
