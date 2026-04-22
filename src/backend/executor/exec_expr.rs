@@ -5,6 +5,7 @@ use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
 use crate::include::nodes::primnodes::expr_sql_type_hint;
 use rand::{Rng, RngCore};
 
+use super::expr_agg_support::execute_scalar_function_value_call;
 use super::expr_bit::{
     bit_count as eval_bit_count, bit_length as eval_bit_length, get_bit as eval_get_bit,
     overlay as eval_bit_overlay, position as eval_bit_position, set_bit as eval_set_bit,
@@ -83,7 +84,6 @@ use super::pg_regex::{
 pub(crate) use super::value_io::{format_array_text, format_array_value_text};
 use super::{ExecError, ExecutorContext, exec_next, executor_start};
 use crate::backend::catalog::indexing::probe_system_catalog_rows_visible_in_db;
-use crate::backend::utils::misc::guc::normalize_guc_name;
 use crate::backend::catalog::rowcodec::pg_description_row_from_values;
 use crate::backend::executor::jsonb::{
     JsonbValue, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any, jsonb_from_value,
@@ -94,9 +94,10 @@ use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp,
 };
 use crate::backend::utils::misc::checkpoint::checkpoint_stats_value;
+use crate::backend::utils::misc::guc::normalize_guc_name;
 use crate::include::catalog::{
     CURRENT_DATABASE_OID, FLOAT8_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID,
-    builtin_scalar_function_for_proc_oid,
+    builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
 };
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
 use crate::include::nodes::primnodes::{
@@ -111,15 +112,14 @@ mod arrays;
 mod subquery;
 
 use arrays::{
-    eval_array_append_function, eval_array_cat_function, eval_array_contained,
-    eval_array_contains, eval_array_dims_function, eval_array_fill_function,
-    eval_array_length_function, eval_array_lower_function, eval_array_ndims_function,
-    eval_array_overlap, eval_array_position_function, eval_array_positions_function,
-    eval_array_prepend_function, eval_array_remove_function, eval_array_replace_function,
-    eval_array_sort_function, eval_array_subscript, eval_array_subscript_plpgsql,
-    eval_array_to_string_function, eval_array_upper_function, eval_cardinality_function,
-    eval_quantified_array, eval_string_to_array_function,
-    eval_width_bucket_thresholds,
+    eval_array_append_function, eval_array_cat_function, eval_array_contained, eval_array_contains,
+    eval_array_dims_function, eval_array_fill_function, eval_array_length_function,
+    eval_array_lower_function, eval_array_ndims_function, eval_array_overlap,
+    eval_array_position_function, eval_array_positions_function, eval_array_prepend_function,
+    eval_array_remove_function, eval_array_replace_function, eval_array_sort_function,
+    eval_array_subscript, eval_array_subscript_plpgsql, eval_array_to_string_function,
+    eval_array_upper_function, eval_cardinality_function, eval_quantified_array,
+    eval_string_to_array_function, eval_width_bucket_thresholds,
 };
 use subquery::{
     eval_array_subquery, eval_exists_subquery, eval_quantified_subquery, eval_scalar_subquery,
@@ -1026,13 +1026,11 @@ fn eval_op_expr(
             eval_expr(right, slot, ctx)?,
             op.collation_oid,
         ),
-        (OpExprKind::NotEq, [left, right]) => {
-            not_equal_values(
-                eval_expr(left, slot, ctx)?,
-                eval_expr(right, slot, ctx)?,
-                op.collation_oid,
-            )
-        }
+        (OpExprKind::NotEq, [left, right]) => not_equal_values(
+            eval_expr(left, slot, ctx)?,
+            eval_expr(right, slot, ctx)?,
+            op.collation_oid,
+        ),
         (OpExprKind::Lt, [left, right]) => order_values(
             "<",
             eval_expr(left, slot, ctx)?,
@@ -2803,6 +2801,21 @@ fn eval_builtin_function(
                 right: Value::Null,
             }),
         },
+        BuiltinScalarFunction::Int4Pl
+        | BuiltinScalarFunction::Int8Inc
+        | BuiltinScalarFunction::Int8IncAny
+        | BuiltinScalarFunction::Int4AvgAccum
+        | BuiltinScalarFunction::Int8Avg => {
+            let proc_oid = proc_oid_for_builtin_scalar_function(func).ok_or_else(|| {
+                ExecError::DetailedError {
+                    message: format!("missing builtin proc oid for {func:?}"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                }
+            })?;
+            execute_scalar_function_value_call(proc_oid, &values, ctx)
+        }
         BuiltinScalarFunction::RegProcedureToText => match values.as_slice() {
             [value] => eval_regprocedure_to_text(value, ctx),
             _ => Err(malformed_expr_error("regprocedure_to_text")),

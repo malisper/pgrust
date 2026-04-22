@@ -186,9 +186,7 @@ fn expr_references_local_cte(expr: &Expr, local_ctes: &HashMap<usize, String>) -
         Expr::Cast(inner, _)
         | Expr::Collate { expr: inner, .. }
         | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => {
-            expr_references_local_cte(inner, local_ctes)
-        }
+        | Expr::IsNotNull(inner) => expr_references_local_cte(inner, local_ctes),
         Expr::Like {
             expr,
             pattern,
@@ -438,14 +436,7 @@ fn bind_grouped_window_agg_call(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(
-        AggFunc,
-        Vec<SqlFunctionArg>,
-        Vec<OrderByItem>,
-        bool,
-        bool,
-        Option<SqlExpr>,
-    )],
+    agg_list: &[CollectedAggregate],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     let state = current_window_state_or_error()?;
@@ -463,7 +454,7 @@ fn bind_grouped_window_agg_call(
             grouped_infer_sql_expr_type(expr, input_scope, catalog, outer_scopes, grouped_outer)
         })
         .collect::<Vec<_>>();
-    let resolved = resolve_aggregate_call(catalog, func, &arg_types, func_variadic);
+    let resolved = resolve_builtin_aggregate_call(catalog, func, &arg_types, func_variadic);
     let bound_args = arg_values
         .iter()
         .map(|expr| {
@@ -593,14 +584,7 @@ fn bind_grouped_window_func_call(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(
-        AggFunc,
-        Vec<SqlFunctionArg>,
-        Vec<OrderByItem>,
-        bool,
-        bool,
-        Option<SqlExpr>,
-    )],
+    agg_list: &[CollectedAggregate],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     let state = current_window_state_or_error()?;
@@ -692,24 +676,29 @@ fn bind_grouped_window_func_call(
             resolved.result_type,
         ));
     }
-    if let Some(agg_impl) = resolved.agg_impl {
-        return bind_grouped_window_agg_call(
-            agg_impl,
-            args,
-            &[],
-            false,
-            resolved.func_variadic,
-            None,
-            over,
-            group_by_exprs,
-            group_key_exprs,
-            input_scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            agg_list,
-            n_keys,
-        );
+    if resolved.prokind == 'a' {
+        if let Some(agg_impl) = resolved.agg_impl {
+            return bind_grouped_window_agg_call(
+                agg_impl,
+                args,
+                &[],
+                false,
+                resolved.func_variadic,
+                None,
+                over,
+                group_by_exprs,
+                group_key_exprs,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                agg_list,
+                n_keys,
+            );
+        }
+        return Err(ParseError::FeatureNotSupported(format!(
+            "window execution for custom aggregate {name}"
+        )));
     }
     Err(ParseError::FeatureNotSupported(format!(
         "window function {name}"
@@ -734,14 +723,7 @@ pub(super) fn bind_agg_output_expr(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(
-        AggFunc,
-        Vec<SqlFunctionArg>,
-        Vec<OrderByItem>,
-        bool,
-        bool,
-        Option<SqlExpr>,
-    )],
+    agg_list: &[CollectedAggregate],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     bind_agg_output_expr_in_clause(
@@ -767,14 +749,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(
-        AggFunc,
-        Vec<SqlFunctionArg>,
-        Vec<OrderByItem>,
-        bool,
-        bool,
-        Option<SqlExpr>,
-    )],
+    agg_list: &[CollectedAggregate],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     for (i, gk) in group_by_exprs.iter().enumerate() {
@@ -846,119 +821,127 @@ pub(super) fn bind_agg_output_expr_in_clause(
                         n_keys,
                     );
                 }
-                let entry = (
+                validate_aggregate_arity(
                     func,
-                    args.args().to_vec(),
-                    order_by.clone(),
+                    &args
+                        .args()
+                        .iter()
+                        .map(|arg| arg.value.clone())
+                        .collect::<Vec<_>>(),
+                )?;
+            }
+            if let Some((i, _)) = agg_list.iter().enumerate().find(|(_, agg)| {
+                agg.matches_call(
+                    name,
+                    args,
+                    order_by,
                     *distinct,
                     *func_variadic,
-                    filter.as_deref().cloned(),
-                );
-                for (i, agg) in agg_list.iter().enumerate() {
-                    if *agg == entry {
-                        let arg_values: Vec<SqlExpr> =
-                            args.args().iter().map(|arg| arg.value.clone()).collect();
-                        let arg_types = arg_values
-                            .iter()
-                            .map(|e| {
-                                grouped_infer_sql_expr_type(
-                                    e,
-                                    input_scope,
-                                    catalog,
-                                    outer_scopes,
-                                    grouped_outer,
-                                )
-                            })
-                            .collect::<Vec<_>>();
-                        let resolved =
-                            resolve_aggregate_call(catalog, func, &arg_types, *func_variadic);
-                        let aggfnoid = resolved
-                            .as_ref()
-                            .map(|call| call.proc_oid)
-                            .or_else(|| proc_oid_for_builtin_aggregate_function(func))
-                            .unwrap_or(0);
-                        let agg_variadic = resolved
-                            .as_ref()
-                            .map(|call| call.func_variadic)
-                            .unwrap_or(*func_variadic);
-                        let bound_args = arg_values
-                            .iter()
-                            .map(|arg| {
-                                bind_grouped_plain_expr(
-                                    arg,
-                                    input_scope,
-                                    catalog,
-                                    outer_scopes,
-                                    grouped_outer,
-                                )
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-                        for arg in &bound_args {
-                            reject_nested_local_ctes_in_agg_expr(arg)?;
-                        }
-                        let coerced_args = if let Some(resolved) = &resolved {
-                            bound_args
-                                .into_iter()
-                                .zip(arg_types.iter().copied())
-                                .zip(resolved.declared_arg_types.iter().copied())
-                                .map(|((arg, actual_type), declared_type)| {
-                                    coerce_bound_expr(arg, actual_type, declared_type)
-                                })
-                                .collect()
-                        } else {
-                            bound_args
-                        };
-                        let bound_filter = filter
-                            .as_deref()
-                            .map(|expr| {
-                                bind_grouped_plain_expr(
-                                    expr,
-                                    input_scope,
-                                    catalog,
-                                    outer_scopes,
-                                    grouped_outer,
-                                )
-                            })
-                            .transpose()?;
-                        if let Some(filter) = &bound_filter {
-                            reject_nested_local_ctes_in_agg_expr(filter)?;
-                        }
-                        let bound_order_by = order_by
-                            .iter()
-                            .map(|item| {
-                                let bound_expr = bind_grouped_plain_expr(
-                                    &item.expr,
-                                    input_scope,
-                                    catalog,
-                                    outer_scopes,
-                                    grouped_outer,
-                                )?;
-                                let (expr, collation_oid) =
-                                    finalize_order_by_expr(bound_expr, catalog)?;
-                                Ok(OrderByEntry {
-                                    expr,
-                                    ressortgroupref: 0,
-                                    descending: item.descending,
-                                    nulls_first: item.nulls_first,
-                                    collation_oid,
-                                })
-                            })
-                            .collect::<Result<Vec<_>, ParseError>>()?;
-                        for item in &bound_order_by {
-                            reject_nested_local_ctes_in_agg_expr(&item.expr)?;
-                        }
-                        return Ok(Expr::aggref(
-                            aggfnoid,
-                            aggregate_sql_type(func, arg_types.first().copied()),
-                            agg_variadic,
-                            *distinct,
-                            coerced_args,
-                            bound_order_by,
-                            bound_filter,
-                            i,
-                        ));
+                    filter.as_deref(),
+                )
+            }) {
+                let arg_values: Vec<SqlExpr> =
+                    args.args().iter().map(|arg| arg.value.clone()).collect();
+                let arg_types = arg_values
+                    .iter()
+                    .map(|expr| {
+                        grouped_infer_sql_expr_type(
+                            expr,
+                            input_scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let resolved = resolve_aggregate_call(catalog, name, &arg_types, *func_variadic)
+                    .ok_or_else(|| ParseError::UnexpectedToken {
+                        expected: "supported aggregate",
+                        actual: name.clone(),
+                    })?;
+                if resolved.is_custom() {
+                    if *distinct {
+                        return Err(ParseError::FeatureNotSupported(format!(
+                            "DISTINCT on custom aggregate {name}"
+                        )));
+                    }
+                    if !order_by.is_empty() {
+                        return Err(ParseError::FeatureNotSupported(format!(
+                            "aggregate ORDER BY on custom aggregate {name}"
+                        )));
                     }
                 }
+                let bound_args = arg_values
+                    .iter()
+                    .map(|arg| {
+                        bind_grouped_plain_expr(
+                            arg,
+                            input_scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                for arg in &bound_args {
+                    reject_nested_local_ctes_in_agg_expr(arg)?;
+                }
+                let coerced_args = bound_args
+                    .into_iter()
+                    .zip(arg_types.iter().copied())
+                    .zip(resolved.declared_arg_types.iter().copied())
+                    .map(|((arg, actual_type), declared_type)| {
+                        coerce_bound_expr(arg, actual_type, declared_type)
+                    })
+                    .collect();
+                let bound_filter = filter
+                    .as_deref()
+                    .map(|expr| {
+                        bind_grouped_plain_expr(
+                            expr,
+                            input_scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                        )
+                    })
+                    .transpose()?;
+                if let Some(filter) = &bound_filter {
+                    reject_nested_local_ctes_in_agg_expr(filter)?;
+                }
+                let bound_order_by = order_by
+                    .iter()
+                    .map(|item| {
+                        let bound_expr = bind_grouped_plain_expr(
+                            &item.expr,
+                            input_scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                        )?;
+                        let (expr, collation_oid) = finalize_order_by_expr(bound_expr, catalog)?;
+                        Ok(OrderByEntry {
+                            expr,
+                            ressortgroupref: 0,
+                            descending: item.descending,
+                            nulls_first: item.nulls_first,
+                            collation_oid,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, ParseError>>()?;
+                for item in &bound_order_by {
+                    reject_nested_local_ctes_in_agg_expr(&item.expr)?;
+                }
+                return Ok(Expr::aggref(
+                    resolved.proc_oid,
+                    resolved.result_type,
+                    resolved.func_variadic,
+                    *distinct,
+                    coerced_args,
+                    bound_order_by,
+                    bound_filter,
+                    i,
+                ));
             }
             if !order_by.is_empty() || *distinct || filter.is_some() || args.is_star() {
                 return Err(ParseError::UnexpectedToken {
@@ -2646,14 +2629,7 @@ fn bind_grouped_array_membership_expr(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
-    agg_list: &[(
-        AggFunc,
-        Vec<SqlFunctionArg>,
-        Vec<OrderByItem>,
-        bool,
-        bool,
-        Option<SqlExpr>,
-    )],
+    agg_list: &[CollectedAggregate],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
     let raw_left_type =

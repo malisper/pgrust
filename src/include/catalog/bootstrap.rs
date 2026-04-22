@@ -381,7 +381,7 @@ impl BootstrapCatalogKind {
     }
 }
 
-pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 38] = [
+pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 39] = [
     BootstrapCatalogKind::PgNamespace,
     BootstrapCatalogKind::PgType,
     BootstrapCatalogKind::PgProc,
@@ -420,9 +420,10 @@ pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 38] = [
     BootstrapCatalogKind::PgPublication,
     BootstrapCatalogKind::PgPublicationRel,
     BootstrapCatalogKind::PgPublicationNamespace,
+    BootstrapCatalogKind::PgAggregate,
 ];
 
-pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 38] {
+pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 39] {
     CORE_BOOTSTRAP_KINDS
 }
 
@@ -481,7 +482,7 @@ pub const fn bootstrap_namespace_oid() -> u32 {
     PG_CATALOG_NAMESPACE_OID
 }
 
-pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 38] = [
+pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 39] = [
     BootstrapCatalogRelation {
         oid: PG_NAMESPACE_RELATION_OID,
         name: "pg_namespace",
@@ -634,6 +635,10 @@ pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 38] = [
         oid: PG_PUBLICATION_NAMESPACE_RELATION_OID,
         name: "pg_publication_namespace",
     },
+    BootstrapCatalogRelation {
+        oid: PG_AGGREGATE_RELATION_OID,
+        name: "pg_aggregate",
+    },
 ];
 
 #[cfg(test)]
@@ -704,6 +709,7 @@ mod tests {
             CORE_BOOTSTRAP_RELATIONS[37].oid,
             PG_PUBLICATION_NAMESPACE_RELATION_OID
         );
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[38].oid, PG_AGGREGATE_RELATION_OID);
     }
 
     #[test]
@@ -753,6 +759,7 @@ mod tests {
                 "pg_publication",
                 "pg_publication_rel",
                 "pg_publication_namespace",
+                "pg_aggregate",
             ]
         );
     }

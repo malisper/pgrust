@@ -54,11 +54,9 @@ fn eval_advisory_lock_builtin_function_inner(
             Ok(Value::Bool(ctx.advisory_locks.try_lock(key, mode, owner)))
         }
         BuiltinScalarFunction::PgAdvisoryUnlock | BuiltinScalarFunction::PgAdvisoryUnlockShared => {
-            let released = ctx.advisory_locks.unlock(
-                key,
-                mode,
-                AdvisoryLockOwner::session(ctx.client_id),
-            );
+            let released =
+                ctx.advisory_locks
+                    .unlock(key, mode, AdvisoryLockOwner::session(ctx.client_id));
             if !released {
                 push_warning(format!(
                     "you don't own a lock of type {}",

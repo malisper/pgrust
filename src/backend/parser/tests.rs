@@ -8,13 +8,14 @@ use crate::include::catalog::{
     RECORD_TYPE_OID, bootstrap_pg_proc_rows, sort_pg_rewrite_rows,
 };
 use crate::include::nodes::parsenodes::{
-    AliasColumnDef, AliasColumnSpec, ColumnConstraint, CompositeTypeAttributeDef,
+    AggregateArgType, AggregateSignatureKind, AliasColumnDef, AliasColumnSpec, ColumnConstraint,
+    CommentOnAggregateStatement, CompositeTypeAttributeDef, CreateAggregateStatement,
     CreateCompositeTypeStatement, CreateTriggerStatement, CreateTypeStatement,
-    DropTriggerStatement, DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, IndexColumnDef,
-    InsertSource, InsertStatement, JoinTreeNode, PublicationObjectSpec, PublicationOption,
-    PublicationSchemaName, RangeTblEntryKind, RawTypeName, SetSessionAuthorizationStatement,
-    SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerTiming,
-    ViewCheckOption,
+    DropAggregateStatement, DropTriggerStatement, DropTypeStatement, ForeignKeyAction,
+    ForeignKeyMatchType, IndexColumnDef, InsertSource, InsertStatement, JoinTreeNode,
+    PublicationObjectSpec, PublicationOption, PublicationSchemaName, RangeTblEntryKind,
+    RawTypeName, SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint, TriggerEvent,
+    TriggerEventSpec, TriggerLevel, TriggerTiming, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -327,7 +328,8 @@ fn parse_select_with_collate_expression() {
 
 #[test]
 fn parse_select_with_order_by_collate_and_ordinal() {
-    let stmt = parse_select("select name, note from people order by name collate \"C\", 2").unwrap();
+    let stmt =
+        parse_select("select name, note from people order by name collate \"C\", 2").unwrap();
     assert_eq!(stmt.order_by.len(), 2);
     assert_eq!(
         stmt.order_by[0].expr,
@@ -2484,8 +2486,7 @@ fn parse_alter_index_rename_statement() {
 
 #[test]
 fn parse_alter_index_set_statistics_statement() {
-    let stmt =
-        parse_statement("alter index attmp_idx alter column 2 set statistics 1000").unwrap();
+    let stmt = parse_statement("alter index attmp_idx alter column 2 set statistics 1000").unwrap();
     assert_eq!(
         stmt,
         Statement::AlterIndexAlterColumnStatistics(AlterIndexAlterColumnStatisticsStatement {
@@ -2496,10 +2497,8 @@ fn parse_alter_index_set_statistics_statement() {
         })
     );
 
-    let stmt = parse_statement(
-        "alter index if exists attmp_idx alter column 2 set statistics -1",
-    )
-    .unwrap();
+    let stmt = parse_statement("alter index if exists attmp_idx alter column 2 set statistics -1")
+        .unwrap();
     assert_eq!(
         stmt,
         Statement::AlterIndexAlterColumnStatistics(AlterIndexAlterColumnStatisticsStatement {
@@ -3510,6 +3509,135 @@ fn parse_drop_function_statement_with_signature() {
             cascade: false,
         })
     );
+}
+
+#[test]
+fn parse_create_aggregate_statement_with_plain_signature() {
+    let stmt = parse_statement(
+        "create aggregate newavg(int4) (sfunc = int4_avg_accum, stype = _int8, finalfunc = int8_avg, initcond = '{0,0}', parallel = safe)",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateAggregate(CreateAggregateStatement {
+            schema_name: None,
+            aggregate_name: "newavg".into(),
+            replace_existing: false,
+            signature: AggregateSignatureKind::Args(vec![AggregateArgType::Type(
+                RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+            )]),
+            sfunc_name: "int4_avg_accum".into(),
+            stype: RawTypeName::Named {
+                name: "_int8".into(),
+                array_bounds: 0,
+            },
+            finalfunc_name: Some("int8_avg".into()),
+            initcond: Some("{0,0}".into()),
+            parallel: Some(FunctionParallel::Safe),
+        })
+    );
+}
+
+#[test]
+fn parse_create_aggregate_statement_with_old_style_basetype() {
+    let stmt = parse_statement(
+        "create aggregate oldcnt (sfunc = int8inc, basetype = 'ANY', stype = int8, initcond = '0')",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateAggregate(CreateAggregateStatement {
+            schema_name: None,
+            aggregate_name: "oldcnt".into(),
+            replace_existing: false,
+            signature: AggregateSignatureKind::Star,
+            sfunc_name: "int8inc".into(),
+            stype: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int8)),
+            finalfunc_name: None,
+            initcond: Some("0".into()),
+            parallel: None,
+        })
+    );
+}
+
+#[test]
+fn parse_create_or_replace_aggregate_star_signature() {
+    let stmt = parse_statement(
+        "create or replace aggregate public.newcnt(*) (sfunc = int8inc, stype = int8, initcond = '0')",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateAggregate(CreateAggregateStatement {
+            schema_name: Some("public".into()),
+            aggregate_name: "newcnt".into(),
+            replace_existing: true,
+            signature: AggregateSignatureKind::Star,
+            sfunc_name: "int8inc".into(),
+            stype: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int8)),
+            finalfunc_name: None,
+            initcond: Some("0".into()),
+            parallel: None,
+        })
+    );
+}
+
+#[test]
+fn parse_drop_and_comment_on_aggregate_statements() {
+    let stmt = parse_statement("drop aggregate if exists public.newcnt(\"any\") cascade").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::DropAggregate(DropAggregateStatement {
+            if_exists: true,
+            schema_name: Some("public".into()),
+            aggregate_name: "newcnt".into(),
+            signature: AggregateSignatureKind::Args(vec![AggregateArgType::AnyPseudo]),
+            cascade: true,
+        })
+    );
+
+    let stmt = parse_statement("comment on aggregate newcnt(*) is 'an agg(*) comment'").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CommentOnAggregate(CommentOnAggregateStatement {
+            schema_name: None,
+            aggregate_name: "newcnt".into(),
+            signature: AggregateSignatureKind::Star,
+            comment: Some("an agg(*) comment".into()),
+        })
+    );
+}
+
+#[test]
+fn parse_create_aggregate_rejects_unsupported_forms() {
+    let err = parse_statement(
+        "create aggregate my_percentile_disc(float8 order by anyelement) (sfunc = int8inc, stype = int8)",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::FeatureNotSupported(message)
+            if message.contains("ordered-set aggregate signatures")
+    ));
+
+    let err = parse_statement(
+        "create aggregate least_agg(variadic items anyarray) (sfunc = int8inc, stype = int8)",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::FeatureNotSupported(message)
+            if message.contains("VARIADIC aggregate signatures")
+    ));
+
+    let err = parse_statement(
+        "create aggregate badagg(int4) (sfunc = int4pl, stype = int4, combinefunc = int4pl)",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::FeatureNotSupported(message) if message.contains("combinefunc")
+    ));
 }
 
 #[test]
@@ -4815,8 +4943,7 @@ fn build_plan_accepts_catalog_backed_text_array_casts() {
 #[test]
 fn analyze_interval_array_text_cast_keeps_outer_text_cast() {
     let stmt =
-        parse_select("select '{0 second,1 hour 42 minutes 20 seconds}'::interval[]::text")
-            .unwrap();
+        parse_select("select '{0 second,1 hour 42 minutes 20 seconds}'::interval[]::text").unwrap();
     let (query, _) =
         analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[]).unwrap();
     assert!(matches!(
@@ -5074,9 +5201,7 @@ fn parse_select_with_explicit_nulls_ordering() {
 
 #[test]
 fn build_plan_tracks_order_by_collation_for_aliases_and_ordinals() {
-    fn order_by_items(
-        plan: &Plan,
-    ) -> &[crate::include::nodes::primnodes::OrderByEntry] {
+    fn order_by_items(plan: &Plan) -> &[crate::include::nodes::primnodes::OrderByEntry] {
         match plan {
             Plan::Projection { input, .. }
             | Plan::Filter { input, .. }
@@ -5149,7 +5274,8 @@ fn build_plan_rejects_invalid_collation_usage() {
                 && sqlstate == "42804"
     ));
 
-    let stmt = parse_select("select name collate \"C\" = note collate \"POSIX\" from people").unwrap();
+    let stmt =
+        parse_select("select name collate \"C\" = note collate \"POSIX\" from people").unwrap();
     assert!(matches!(
         build_plan(&stmt, &catalog()),
         Err(ParseError::DetailedError { message, sqlstate, .. })
@@ -7886,7 +8012,10 @@ fn parse_array_and_unnest_expressions() {
 
     let stmt = parse_select("select ARRAY['a'] @> ARRAY['b'], ARRAY['a'] <@ ARRAY['b']").unwrap();
     assert!(matches!(stmt.targets[0].expr, SqlExpr::ArrayContains(_, _)));
-    assert!(matches!(stmt.targets[1].expr, SqlExpr::ArrayContained(_, _)));
+    assert!(matches!(
+        stmt.targets[1].expr,
+        SqlExpr::ArrayContained(_, _)
+    ));
 
     let stmt = parse_select("select '(0,0),(1,1)'::box && '(2,2),(3,3)'::box").unwrap();
     assert!(matches!(

@@ -86,9 +86,7 @@ pub(crate) fn enforce_row_security_write_checks(
                     &check.source
                 {
                     return Err(ExecError::DetailedError {
-                        message: format!(
-                            "new row violates check option for view \"{view_name}\""
-                        ),
+                        message: format!("new row violates check option for view \"{view_name}\""),
                         detail: Some(format_failing_row_detail(values, &ctx.datetime_config)),
                         hint: None,
                         sqlstate: "44000",

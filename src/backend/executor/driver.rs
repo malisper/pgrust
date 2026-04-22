@@ -248,6 +248,10 @@ fn execute_statement_with_source(
             expected: "COMMENT ON DOMAIN handled by database/session layer",
             actual: "COMMENT ON DOMAIN".into(),
         })),
+        Statement::CommentOnAggregate(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "COMMENT ON AGGREGATE handled by database/session layer",
+            actual: "COMMENT ON AGGREGATE".into(),
+        })),
         Statement::CommentOnConversion(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "COMMENT ON CONVERSION handled by database/session layer",
             actual: "COMMENT ON CONVERSION".into(),
@@ -281,6 +285,10 @@ fn execute_statement_with_source(
         Statement::CreateFunction(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE FUNCTION handled by database/session layer",
             actual: "CREATE FUNCTION".into(),
+        })),
+        Statement::CreateAggregate(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "CREATE AGGREGATE handled by database/session layer",
+            actual: "CREATE AGGREGATE".into(),
         })),
         Statement::DropFunction(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP FUNCTION handled by database/session layer",
@@ -339,6 +347,10 @@ fn execute_statement_with_source(
         Statement::DropDomain(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP DOMAIN handled by database/session layer",
             actual: "DROP DOMAIN".into(),
+        })),
+        Statement::DropAggregate(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "DROP AGGREGATE handled by database/session layer",
+            actual: "DROP AGGREGATE".into(),
         })),
         Statement::DropConversion(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP CONVERSION handled by database/session layer",

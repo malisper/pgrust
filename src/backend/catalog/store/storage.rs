@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -12,18 +13,20 @@ use crate::backend::catalog::indexing::{
 use crate::backend::catalog::loader::{
     catalog_from_physical_rows_scoped, load_catalog_from_visible_pool,
     load_physical_catalog_rows_visible_in_pool, load_physical_catalog_rows_visible_scoped,
+    load_visible_catalog_kind_in_pool_scoped,
 };
 use crate::backend::catalog::persistence::{
     apply_catalog_row_changes_subset_incremental, sync_catalog_rows_subset,
 };
+use crate::backend::catalog::rowcodec::{pg_aggregate_row_from_values, pg_proc_row_from_values};
 use crate::backend::catalog::rows::{PhysicalCatalogRows, physical_catalog_rows_from_catcache};
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::include::catalog::{
-    BootstrapCatalogKind, CatalogScope, bootstrap_catalog_kinds, system_catalog_indexes,
-    system_catalog_indexes_for_heap,
+    BootstrapCatalogKind, CatalogScope, bootstrap_catalog_kinds, bootstrap_pg_aggregate_rows,
+    system_catalog_indexes, system_catalog_indexes_for_heap,
 };
 
 use super::relcache_init::{
@@ -130,6 +133,15 @@ impl CatalogStore {
         };
         let migrated_legacy_attrdefs =
             migrate_legacy_attrdef_defaults_if_needed(&base_dir, scope, &catalog)?;
+        let backfilled_pg_aggregate = backfill_pg_aggregate_rows_if_needed(&base_dir, scope)?;
+        if migrated_legacy_attrdefs || backfilled_pg_aggregate {
+            catalog = load_catalog_from_visible_physical_startup_scoped(&base_dir, scope)?;
+            insert_missing_bootstrap_relations(&mut catalog, &kinds, db_oid);
+            if matches!(scope, CatalogScope::Database(_)) {
+                insert_bootstrap_system_indexes(&mut catalog);
+            }
+            catalog.next_rel_number = catalog.next_rel_number.max(control.next_rel_number);
+        }
         if !needs_bootstrap_sync {
             validate_storage_relfiles_exist(&base_dir, scope)?;
         }
@@ -142,7 +154,7 @@ impl CatalogStore {
             next_oid: catalog.next_oid.max(oid_next),
             bootstrap_complete: control.bootstrap_complete,
         };
-        if needs_bootstrap_sync || migrated_legacy_attrdefs {
+        if needs_bootstrap_sync || migrated_legacy_attrdefs || backfilled_pg_aggregate {
             persist_scope_control_file(
                 &control_path,
                 oid_control_path.as_deref(),
@@ -660,6 +672,89 @@ fn migrate_legacy_attrdef_defaults_if_needed(
     )?;
     invalidate_relcache_init_file(base_dir, scope);
     fs::remove_file(defaults_path).map_err(|e| CatalogError::Io(e.to_string()))?;
+    Ok(true)
+}
+
+fn backfill_pg_aggregate_rows_if_needed(
+    base_dir: &Path,
+    scope: CatalogScope,
+) -> Result<bool, CatalogError> {
+    let CatalogScope::Database(db_oid) = scope else {
+        return Ok(false);
+    };
+
+    let txns = TransactionManager::new_durable(base_dir.to_path_buf())
+        .map_err(|e| CatalogError::Io(format!("transaction status load failed: {e:?}")))?;
+    let snapshot = txns
+        .snapshot(INVALID_TRANSACTION_ID)
+        .map_err(|e| CatalogError::Io(format!("startup catalog snapshot failed: {e:?}")))?;
+    let pool = BufferPool::new(SmgrStorageBackend::new(MdStorageManager::new(base_dir)), 64);
+    let mut aggregates = load_visible_catalog_kind_in_pool_scoped(
+        &pool,
+        &txns,
+        &snapshot,
+        0,
+        BootstrapCatalogKind::PgAggregate,
+        db_oid,
+    )?
+    .into_iter()
+    .map(pg_aggregate_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
+    let aggregate_proc_rows = load_visible_catalog_kind_in_pool_scoped(
+        &pool,
+        &txns,
+        &snapshot,
+        0,
+        BootstrapCatalogKind::PgProc,
+        db_oid,
+    )?
+    .into_iter()
+    .map(pg_proc_row_from_values)
+    .collect::<Result<Vec<_>, _>>()?;
+    let mut present_fnoids = aggregates
+        .iter()
+        .map(|row| row.aggfnoid)
+        .collect::<BTreeSet<_>>();
+    let bootstrap_rows_by_fnoid = bootstrap_pg_aggregate_rows()
+        .into_iter()
+        .map(|row| (row.aggfnoid, row))
+        .collect::<BTreeMap<_, _>>();
+    // PostgreSQL anchors aggregate identity on pg_proc and looks up pg_aggregate
+    // metadata by aggfnoid. Keep the same invariant here: backfill only builtin
+    // rows that correspond to known aggregate pg_proc entries, and fail rather
+    // than inventing metadata for custom aggregate procs.
+    let mut changed = false;
+    for proc_row in aggregate_proc_rows
+        .into_iter()
+        .filter(|row| row.prokind == 'a')
+    {
+        if present_fnoids.contains(&proc_row.oid) {
+            continue;
+        }
+        let Some(row) = bootstrap_rows_by_fnoid.get(&proc_row.oid).cloned() else {
+            return Err(CatalogError::Corrupt(
+                "missing pg_aggregate row for custom aggregate",
+            ));
+        };
+        present_fnoids.insert(proc_row.oid);
+        aggregates.push(row);
+        changed = true;
+    }
+
+    if !changed {
+        return Ok(false);
+    }
+
+    aggregates.sort_by_key(|row| row.aggfnoid);
+    sync_catalog_rows_subset(
+        base_dir,
+        &PhysicalCatalogRows {
+            aggregates,
+            ..PhysicalCatalogRows::default()
+        },
+        db_oid,
+        &[BootstrapCatalogKind::PgAggregate],
+    )?;
     Ok(true)
 }
 
