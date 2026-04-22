@@ -7237,6 +7237,63 @@ fn lower_create_table_rejects_invalid_key_constraints() {
 }
 
 #[test]
+fn lower_create_table_rejects_invalid_foreign_key_delete_set_columns() {
+    let catalog = catalog_with_people_id_name_unique_index();
+
+    let stmt = parse_statement(
+        "create table fktable (
+            owner_id int4,
+            owner_name text,
+            foo int,
+            foreign key (owner_id, owner_name) references people(id, name) on delete set null (bar)
+        )",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let err = lower_create_table(&ct, &catalog).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            ParseError::DetailedError {
+                message,
+                sqlstate,
+                ..
+            } if message == "column \"bar\" referenced in foreign key constraint does not exist"
+                && *sqlstate == "42703"
+        ),
+        "unexpected error: {err:?}"
+    );
+
+    let stmt = parse_statement(
+        "create table fktable (
+            owner_id int4,
+            owner_name text,
+            foo int,
+            foreign key (owner_id, owner_name) references people(id, name) on delete set null (foo)
+        )",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let err = lower_create_table(&ct, &catalog).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            ParseError::DetailedError {
+                message,
+                sqlstate,
+                ..
+            } if message == "column \"foo\" referenced in ON DELETE SET action must be part of foreign key"
+                && *sqlstate == "42P10"
+        ),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
 fn lower_create_table_rejects_duplicate_constraint_names() {
     let stmt = parse_statement(
         "create table items (id int4 constraint dup not null, note text, constraint dup unique (note))",
