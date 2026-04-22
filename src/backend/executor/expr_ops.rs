@@ -732,9 +732,7 @@ pub(crate) fn order_values(
             op,
         ))),
         (Value::Timestamp(l), Value::Timestamp(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
-        (Value::TimestampTz(l), Value::TimestampTz(r)) => {
-            Ok(Value::Bool(compare_ord(*l, *r, op)))
-        }
+        (Value::TimestampTz(l), Value::TimestampTz(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(match op {
             "<" => pg_float_cmp(*l, *r) == Ordering::Less,
             "<=" => pg_float_cmp(*l, *r) != Ordering::Greater,

@@ -7435,26 +7435,88 @@ fn split_rule_action_list(list_sql: &str) -> Result<Vec<String>, ParseError> {
 }
 
 fn build_create_table_element(pair: Pair<'_, Rule>) -> Result<CreateTableElement, ParseError> {
-    let raw = pair.as_str().trim_start();
-    if raw.len() > 4
-        && raw[..4].eq_ignore_ascii_case("like")
-        && raw[4..].chars().next().is_some_and(char::is_whitespace)
-    {
-        return Err(ParseError::FeatureNotSupported(
-            "CREATE TABLE ... LIKE".into(),
-        ));
-    }
     let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
     match inner.as_rule() {
         Rule::column_def => Ok(CreateTableElement::Column(build_column_def(inner)?)),
+        Rule::create_table_like_element => {
+            Ok(CreateTableElement::Like(build_table_like_clause(inner)?))
+        }
         Rule::table_constraint => Ok(CreateTableElement::Constraint(build_table_constraint(
             inner,
         )?)),
         _ => Err(ParseError::UnexpectedToken {
-            expected: "column definition or table constraint",
+            expected: "column definition, table constraint, or LIKE clause",
             actual: inner.as_str().to_string(),
         }),
     }
+}
+
+fn build_table_like_clause(pair: Pair<'_, Rule>) -> Result<TableLikeClause, ParseError> {
+    let mut relation_name = None;
+    let mut options = TableLikeOptions::default();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::table_like_relation_name => {
+                relation_name = Some(build_qualified_identifier_name(part)?);
+            }
+            Rule::table_like_option_modifier => {
+                apply_table_like_option_modifier(&mut options, part)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(TableLikeClause {
+        relation_name: relation_name.ok_or(ParseError::UnexpectedEof)?,
+        options,
+    })
+}
+
+fn apply_table_like_option_modifier(
+    options: &mut TableLikeOptions,
+    pair: Pair<'_, Rule>,
+) -> Result<(), ParseError> {
+    let actual = pair.as_str().trim().to_string();
+    let (including, option_name) = if let Some(rest) = strip_keyword_prefix(&actual, "including") {
+        (true, rest)
+    } else if let Some(rest) = strip_keyword_prefix(&actual, "excluding") {
+        (false, rest)
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "INCLUDING or EXCLUDING",
+            actual,
+        });
+    };
+    match option_name.to_ascii_lowercase().as_str() {
+        "all" => set_all_table_like_options(options, including),
+        "defaults" => options.defaults = including,
+        "constraints" => options.constraints = including,
+        "storage" => options.storage = including,
+        "compression" => options.compression = including,
+        "indexes" => options.indexes = including,
+        "comments" => options.comments = including,
+        "statistics" => options.statistics = including,
+        "generated" => options.generated = including,
+        "identity" => options.identity = including,
+        _ => {
+            return Err(ParseError::UnexpectedToken {
+                expected: "table LIKE option",
+                actual,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn set_all_table_like_options(options: &mut TableLikeOptions, enabled: bool) {
+    options.defaults = enabled;
+    options.constraints = enabled;
+    options.storage = enabled;
+    options.compression = enabled;
+    options.indexes = enabled;
+    options.comments = enabled;
+    options.statistics = enabled;
+    options.generated = enabled;
+    options.identity = enabled;
 }
 
 fn build_table_constraint(pair: Pair<'_, Rule>) -> Result<TableConstraint, ParseError> {
@@ -8913,6 +8975,7 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
         inner.next().ok_or(ParseError::UnexpectedEof)?,
     ))?;
     let mut default_expr = None;
+    let mut collation = None;
     let mut compression = None;
     let mut constraints = Vec::new();
     for flag in inner {
@@ -8928,6 +8991,13 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
                     .into_inner()
                     .find(|part| part.as_rule() == Rule::expr)
                     .map(|expr| expr.as_str().to_string());
+            }
+            Rule::column_collation => {
+                collation = flag
+                    .into_inner()
+                    .find(|part| part.as_rule() == Rule::collation_name)
+                    .map(build_collation_name)
+                    .transpose()?;
             }
             Rule::column_compression => {
                 let value = flag
@@ -8953,6 +9023,8 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
         name,
         ty,
         default_expr,
+        collation,
+        storage: None,
         compression,
         constraints,
     })
@@ -9983,6 +10055,10 @@ fn parse_i32(pair: Pair<'_, Rule>) -> Result<i32, ParseError> {
 }
 
 fn build_collation_name(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
+    build_qualified_identifier_name(pair)
+}
+
+fn build_qualified_identifier_name(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
     let parts = pair
         .into_inner()
         .filter(|part| part.as_rule() == Rule::identifier)

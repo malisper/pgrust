@@ -4816,6 +4816,7 @@ fn rows_for_new_relation_entry(
                     attnotnull: !column.storage.nullable,
                     attisdropped: column.dropped,
                     atttypmod: column.sql_type.typmod,
+                    attcollation: column.collation_oid.unwrap_or(0),
                     attalign: column.storage.attalign,
                     attstorage: column.storage.attstorage,
                     attcompression: column.storage.attcompression,

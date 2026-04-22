@@ -1172,13 +1172,13 @@ impl CreateTableStatement {
     pub fn columns(&self) -> impl Iterator<Item = &ColumnDef> {
         self.elements.iter().filter_map(|element| match element {
             CreateTableElement::Column(column) => Some(column),
-            CreateTableElement::Constraint(_) => None,
+            CreateTableElement::Constraint(_) | CreateTableElement::Like(_) => None,
         })
     }
 
     pub fn constraints(&self) -> impl Iterator<Item = &TableConstraint> {
         self.elements.iter().filter_map(|element| match element {
-            CreateTableElement::Column(_) => None,
+            CreateTableElement::Column(_) | CreateTableElement::Like(_) => None,
             CreateTableElement::Constraint(constraint) => Some(constraint),
         })
     }
@@ -2128,6 +2128,8 @@ pub struct ColumnDef {
     pub name: String,
     pub ty: RawTypeName,
     pub default_expr: Option<String>,
+    pub collation: Option<String>,
+    pub storage: Option<crate::include::access::htup::AttributeStorage>,
     pub compression: Option<crate::include::access::htup::AttributeCompression>,
     pub constraints: Vec<ColumnConstraint>,
 }
@@ -2165,6 +2167,26 @@ pub struct CreateDomainStatement {
 pub enum CreateTableElement {
     Column(ColumnDef),
     Constraint(TableConstraint),
+    Like(TableLikeClause),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableLikeClause {
+    pub relation_name: String,
+    pub options: TableLikeOptions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TableLikeOptions {
+    pub defaults: bool,
+    pub constraints: bool,
+    pub storage: bool,
+    pub compression: bool,
+    pub indexes: bool,
+    pub comments: bool,
+    pub statistics: bool,
+    pub generated: bool,
+    pub identity: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

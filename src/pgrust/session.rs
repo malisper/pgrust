@@ -7,9 +7,7 @@ use std::time::Duration;
 use crate::backend::access::transam::xact::TransactionId;
 use crate::backend::catalog::store::CatalogMutationEffect;
 use crate::backend::commands::copyfrom::parse_text_array_literal;
-use crate::backend::commands::tablecmds::{
-    execute_merge, execute_prepared_insert_row,
-};
+use crate::backend::commands::tablecmds::{execute_merge, execute_prepared_insert_row};
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
     DeferredForeignKeyTracker, ExecError, ExecutorContext, StatementResult, Value, cast_value,

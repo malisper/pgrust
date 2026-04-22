@@ -6,6 +6,7 @@ mod collation;
 mod constraints;
 mod create_table;
 mod create_table_inherits;
+mod create_table_like;
 mod expr;
 mod functions;
 mod geometry;
