@@ -8496,6 +8496,44 @@ fn create_brin_index_explain_uses_bitmap_scan_and_recheck() {
 }
 
 #[test]
+fn reopen_brin_index_preserves_pages_per_range_in_catalog() {
+    let base = temp_dir("brin_reopen_catalog_options");
+
+    {
+        let db = Database::open(&base, 16).unwrap();
+        db.execute(1, "create table items (a int4 not null)").unwrap();
+        db.execute(
+            1,
+            "create index items_a_brin on items using brin (a) with (pages_per_range = 32)",
+        )
+        .unwrap();
+
+        let catalog = db.catalog.read().catalog_snapshot().unwrap();
+        let index = catalog.get("items_a_brin").unwrap();
+        assert_eq!(
+            index
+                .index_meta
+                .as_ref()
+                .and_then(|meta| meta.brin_options.as_ref())
+                .map(|options| options.pages_per_range),
+            Some(32)
+        );
+    }
+
+    let reopened = Database::open(&base, 16).unwrap();
+    let catalog = reopened.catalog.read().catalog_snapshot().unwrap();
+    let index = catalog.get("items_a_brin").unwrap();
+    assert_eq!(
+        index
+            .index_meta
+            .as_ref()
+            .and_then(|meta| meta.brin_options.as_ref())
+            .map(|options| options.pages_per_range),
+        Some(32)
+    );
+}
+
+#[test]
 fn create_gist_box_index_supports_knn_order_by() {
     let base = temp_dir("gist_box_knn_order");
     let db = Database::open(&base, 16).unwrap();
