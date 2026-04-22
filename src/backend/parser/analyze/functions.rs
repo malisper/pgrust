@@ -613,6 +613,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgGetSerialSequence => args.len() == 2,
             BuiltinScalarFunction::PgGetUserById => args.len() == 1,
             BuiltinScalarFunction::ObjDescription => args.len() == 2,
+            BuiltinScalarFunction::PgDescribeObject => args.len() == 3,
             BuiltinScalarFunction::PgGetExpr => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::PgRelationIsPublishable => args.len() == 1,
             BuiltinScalarFunction::PgIndexAmHasProperty => args.len() == 2,
@@ -1370,6 +1371,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("pg_size_bytes", BuiltinScalarFunction::PgSizeBytes),
         ("pg_get_userbyid", BuiltinScalarFunction::PgGetUserById),
         ("obj_description", BuiltinScalarFunction::ObjDescription),
+        ("pg_describe_object", BuiltinScalarFunction::PgDescribeObject),
         ("pg_get_expr", BuiltinScalarFunction::PgGetExpr),
         ("pg_get_expr_ext", BuiltinScalarFunction::PgGetExpr),
         (
@@ -1709,6 +1711,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_index_column_has_property",
             BuiltinScalarFunction::PgIndexColumnHasProperty,
         ),
+        ("pg_describe_object", BuiltinScalarFunction::PgDescribeObject),
         ("position", BuiltinScalarFunction::Position),
         ("strpos", BuiltinScalarFunction::Strpos),
         ("substring", BuiltinScalarFunction::Substring),
@@ -2037,6 +2040,7 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
         for func in [
             BuiltinScalarFunction::PgGetSerialSequence,
             BuiltinScalarFunction::ObjDescription,
+            BuiltinScalarFunction::PgDescribeObject,
             BuiltinScalarFunction::PgGetExpr,
         ] {
             if by_func.iter().all(|(candidate, _)| *candidate != func) {
@@ -2135,6 +2139,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgGetSerialSequence
             | BuiltinScalarFunction::PgGetUserById
             | BuiltinScalarFunction::ObjDescription
+            | BuiltinScalarFunction::PgDescribeObject
             | BuiltinScalarFunction::PgGetExpr
             | BuiltinScalarFunction::PgRelationIsPublishable
             | BuiltinScalarFunction::PgIndexAmHasProperty

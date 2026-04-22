@@ -1143,6 +1143,12 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             {
                 return Ok(bound_regclass);
             }
+            if target_type.kind == SqlTypeKind::RegOperator
+                && let Some(bound_regoperator) =
+                    bind_regoperator_literal_cast(inner, target_type, catalog)?
+            {
+                return Ok(bound_regoperator);
+            }
             if target_type.kind == SqlTypeKind::RegType
                 && let Some(bound_regtype) = bind_regtype_literal_cast(inner, target_type, catalog)?
             {
@@ -3035,6 +3041,21 @@ fn bind_regtype_literal_cast(
     )))
 }
 
+fn bind_regoperator_literal_cast(
+    expr: &SqlExpr,
+    target_type: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<Expr>, ParseError> {
+    let Some(signature) = regoperator_literal_text(expr) else {
+        return Ok(None);
+    };
+    let operator_oid = resolve_regoperator_signature(signature, catalog)?;
+    Ok(Some(Expr::Cast(
+        Box::new(Expr::Const(Value::Int64(operator_oid as i64))),
+        target_type,
+    )))
+}
+
 fn bind_regrole_literal_cast(
     expr: &SqlExpr,
     target_type: SqlType,
@@ -3067,6 +3088,14 @@ fn regrole_literal_text(expr: &SqlExpr) -> Option<&str> {
 }
 
 fn regclass_literal_text(expr: &SqlExpr) -> Option<&str> {
+    match expr {
+        SqlExpr::Const(Value::Text(text)) => Some(text.as_str()),
+        SqlExpr::Const(Value::TextRef(_, _)) => None,
+        _ => None,
+    }
+}
+
+fn regoperator_literal_text(expr: &SqlExpr) -> Option<&str> {
     match expr {
         SqlExpr::Const(Value::Text(text)) => Some(text.as_str()),
         SqlExpr::Const(Value::TextRef(_, _)) => None,
@@ -3336,6 +3365,63 @@ fn resolve_regprocedure_signature(
             actual: signature.to_string(),
         }),
     }
+}
+
+fn resolve_regoperator_signature(
+    signature: &str,
+    catalog: &dyn CatalogLookup,
+) -> Result<u32, ParseError> {
+    let Some(open_paren) = signature.rfind('(') else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "operator signature",
+            actual: signature.to_string(),
+        });
+    };
+    let Some(arg_sql) = signature.get(open_paren + 1..signature.len().saturating_sub(1)) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "operator signature",
+            actual: signature.to_string(),
+        });
+    };
+    if !signature.ends_with(')') {
+        return Err(ParseError::UnexpectedToken {
+            expected: "operator signature",
+            actual: signature.to_string(),
+        });
+    }
+    let operator_name = signature[..open_paren].trim();
+    if operator_name.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "operator name",
+            actual: signature.to_string(),
+        });
+    }
+    let args = arg_sql.split(',').map(str::trim).collect::<Vec<_>>();
+    if args.len() != 2 {
+        return Err(ParseError::UnexpectedToken {
+            expected: "operator signature",
+            actual: signature.to_string(),
+        });
+    }
+    let parse_arg = |arg: &str| -> Result<u32, ParseError> {
+        if arg.eq_ignore_ascii_case("none") {
+            return Ok(0);
+        }
+        let raw_type = crate::backend::parser::parse_type_name(arg)?;
+        let sql_type = resolve_raw_type_name(&raw_type, catalog)?;
+        catalog
+            .type_oid_for_sql_type(sql_type)
+            .ok_or_else(|| ParseError::UnsupportedType(sql_type_name(sql_type)))
+    };
+    let left_type_oid = parse_arg(args[0])?;
+    let right_type_oid = parse_arg(args[1])?;
+    catalog
+        .operator_by_name_left_right(operator_name, left_type_oid, right_type_oid)
+        .map(|row| row.oid)
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "existing operator signature",
+            actual: signature.to_string(),
+        })
 }
 
 fn bind_array_membership_expr(

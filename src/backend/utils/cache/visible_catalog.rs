@@ -9,12 +9,12 @@ use crate::backend::utils::cache::system_views::{
 };
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
-    PgCollationRow, PgConstraintRow, PgInheritsRow, PgLanguageRow, PgOpclassRow, PgOperatorRow,
-    PgPolicyRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow, PgTriggerRow, PgTypeRow,
-    bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
-    bootstrap_pg_language_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
-    bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
-    synthetic_range_proc_rows_by_name,
+    PgCollationRow, PgConstraintRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
+    PgOperatorRow, PgPolicyRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow, PgTriggerRow,
+    PgTypeRow, bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows,
+    bootstrap_pg_collation_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
+    bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
+    builtin_range_rows, builtin_type_rows, synthetic_range_proc_rows_by_name,
 };
 use crate::pgrust::database::DatabaseStatsStore;
 use std::collections::BTreeSet;
@@ -207,6 +207,17 @@ impl CatalogLookup for VisibleCatalog {
         VisibleCatalog::auth_members_rows(self)
     }
 
+    fn namespace_row_by_oid(&self, oid: u32) -> Option<PgNamespaceRow> {
+        self.catcache
+            .as_ref()
+            .and_then(|catcache| catcache.namespace_by_oid(oid).cloned())
+            .or_else(|| {
+                bootstrap_pg_namespace_rows()
+                    .into_iter()
+                    .find(|row| row.oid == oid)
+            })
+    }
+
     fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
         if let Some(catcache) = self.catcache.as_ref() {
             let mut rows = catcache
@@ -297,6 +308,17 @@ impl CatalogLookup for VisibleCatalog {
                 && row.oprleft == left_type_oid
                 && row.oprright == right_type_oid
         })
+    }
+
+    fn operator_by_oid(&self, oid: u32) -> Option<PgOperatorRow> {
+        self.catcache
+            .as_ref()
+            .and_then(|catcache| catcache.operator_rows().into_iter().find(|row| row.oid == oid))
+            .or_else(|| {
+                bootstrap_pg_operator_rows()
+                    .into_iter()
+                    .find(|row| row.oid == oid)
+            })
     }
 
     fn cast_by_source_target(

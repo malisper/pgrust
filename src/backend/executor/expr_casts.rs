@@ -1490,6 +1490,7 @@ pub(crate) fn cast_value_with_source_type_and_config(
                     | SqlTypeKind::RegClass
                     | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
+                    | SqlTypeKind::RegOperator
                     | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid,
                 ..
@@ -1625,6 +1626,7 @@ pub(crate) fn cast_value_with_source_type_and_config(
                     | SqlTypeKind::RegClass
                     | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
+                    | SqlTypeKind::RegOperator
                     | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid,
                 ..
@@ -1792,6 +1794,7 @@ pub(crate) fn cast_value_with_source_type_and_config(
                     | SqlTypeKind::RegClass
                     | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
+                    | SqlTypeKind::RegOperator
                     | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid
                     | SqlTypeKind::Bytea
@@ -2209,6 +2212,7 @@ pub(crate) fn cast_value_with_source_type_and_config(
                     | SqlTypeKind::RegClass
                     | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
+                    | SqlTypeKind::RegOperator
                     | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid,
                 ..
@@ -2409,6 +2413,7 @@ pub(crate) fn cast_value_with_source_type_and_config(
                     | SqlTypeKind::RegClass
                     | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
+                    | SqlTypeKind::RegOperator
                     | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid,
                 ..
@@ -2665,6 +2670,7 @@ pub(super) fn cast_text_value_with_config(
         }),
         SqlTypeKind::RegClass
         | SqlTypeKind::RegRole
+        | SqlTypeKind::RegOperator
         | SqlTypeKind::RegType
         | SqlTypeKind::RegProcedure
         | SqlTypeKind::RegConfig
@@ -2841,6 +2847,7 @@ pub(super) fn cast_numeric_value(
         | SqlTypeKind::RegClass
         | SqlTypeKind::RegType
         | SqlTypeKind::RegRole
+        | SqlTypeKind::RegOperator
         | SqlTypeKind::RegProcedure
         | SqlTypeKind::Xid => value
             .round_to_scale(0)
@@ -2955,6 +2962,7 @@ fn cast_float_to_int(value: f64, ty: SqlType) -> Result<Value, ExecError> {
         | SqlTypeKind::RegClass
         | SqlTypeKind::RegType
         | SqlTypeKind::RegRole
+        | SqlTypeKind::RegOperator
         | SqlTypeKind::RegProcedure => {
             if rounded < 0.0 || rounded > u32::MAX as f64 {
                 Err(ExecError::OidOutOfRange)

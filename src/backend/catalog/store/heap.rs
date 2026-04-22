@@ -36,8 +36,9 @@ use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
 use crate::include::catalog::{
     BootstrapCatalogKind, CONSTRAINT_CHECK, CONSTRAINT_NOTNULL, DEPENDENCY_NORMAL,
     PG_AM_RELATION_OID, PG_AMOP_RELATION_OID, PG_AMPROC_RELATION_OID, PG_AUTHID_RELATION_OID,
-    PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
-    PG_NAMESPACE_RELATION_OID, PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID,
+    PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
+    PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_NAMESPACE_RELATION_OID, PG_OPCLASS_RELATION_OID,
+    PG_OPERATOR_RELATION_OID,
     PG_OPFAMILY_RELATION_OID, PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID,
     PG_PUBLICATION_REL_RELATION_OID, PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID,
     PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PUBLISH_GENCOLS_NONE, PgAmopRow, PgAmprocRow,
@@ -45,6 +46,7 @@ use crate::include::catalog::{
     PgDescriptionRow, PgForeignDataWrapperRow, PgInheritsRow, PgNamespaceRow, PgOpclassRow,
     PgOperatorRow, PgOpfamilyRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow,
     PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow,
+    bootstrap_pg_proc_rows,
     relkind_has_storage,
 };
 use crate::include::nodes::datum::Value;
@@ -5334,39 +5336,8 @@ fn operator_depend_rows(row: &PgOperatorRow) -> Vec<PgDependRow> {
             refobjsubid: 0,
             deptype: DEPENDENCY_NORMAL,
         },
-        PgDependRow {
-            classid: PG_OPERATOR_RELATION_OID,
-            objid: row.oid,
-            objsubid: 0,
-            refclassid: PG_TYPE_RELATION_OID,
-            refobjid: row.oprresult,
-            refobjsubid: 0,
-            deptype: DEPENDENCY_NORMAL,
-        },
     ];
-    if row.oprleft != 0 {
-        rows.push(PgDependRow {
-            classid: PG_OPERATOR_RELATION_OID,
-            objid: row.oid,
-            objsubid: 0,
-            refclassid: PG_TYPE_RELATION_OID,
-            refobjid: row.oprleft,
-            refobjsubid: 0,
-            deptype: DEPENDENCY_NORMAL,
-        });
-    }
-    if row.oprright != 0 {
-        rows.push(PgDependRow {
-            classid: PG_OPERATOR_RELATION_OID,
-            objid: row.oid,
-            objsubid: 0,
-            refclassid: PG_TYPE_RELATION_OID,
-            refobjid: row.oprright,
-            refobjsubid: 0,
-            deptype: DEPENDENCY_NORMAL,
-        });
-    }
-    if row.oprrest != 0 {
+    if row.oprrest != 0 && !is_bootstrap_pg_catalog_proc(row.oprrest) {
         rows.push(PgDependRow {
             classid: PG_OPERATOR_RELATION_OID,
             objid: row.oid,
@@ -5377,7 +5348,7 @@ fn operator_depend_rows(row: &PgOperatorRow) -> Vec<PgDependRow> {
             deptype: DEPENDENCY_NORMAL,
         });
     }
-    if row.oprjoin != 0 {
+    if row.oprjoin != 0 && !is_bootstrap_pg_catalog_proc(row.oprjoin) {
         rows.push(PgDependRow {
             classid: PG_OPERATOR_RELATION_OID,
             objid: row.oid,
@@ -5390,6 +5361,12 @@ fn operator_depend_rows(row: &PgOperatorRow) -> Vec<PgDependRow> {
     }
     sort_pg_depend_rows(&mut rows);
     rows
+}
+
+fn is_bootstrap_pg_catalog_proc(proc_oid: u32) -> bool {
+    bootstrap_pg_proc_rows()
+        .into_iter()
+        .any(|row| row.oid == proc_oid && row.pronamespace == PG_CATALOG_NAMESPACE_OID)
 }
 
 fn effect_record_catalog_kinds(effect: &mut CatalogMutationEffect, kinds: &[BootstrapCatalogKind]) {

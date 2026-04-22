@@ -437,6 +437,9 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::RegClass => crate::include::catalog::REGCLASS_ARRAY_TYPE_OID as i32,
             SqlTypeKind::RegType => unreachable!("regtype arrays are unsupported"),
             SqlTypeKind::RegRole => unreachable!("regrole arrays are unsupported"),
+            SqlTypeKind::RegOperator => {
+                crate::include::catalog::REGOPERATOR_ARRAY_TYPE_OID as i32
+            }
             SqlTypeKind::RegProcedure => {
                 crate::include::catalog::REGPROCEDURE_ARRAY_TYPE_OID as i32
             }
@@ -537,6 +540,9 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::RegClass => (crate::include::catalog::REGCLASS_TYPE_OID as i32, 4, -1),
         SqlTypeKind::RegType => (crate::include::catalog::REGTYPE_TYPE_OID as i32, 4, -1),
         SqlTypeKind::RegRole => (crate::include::catalog::REGROLE_TYPE_OID as i32, 4, -1),
+        SqlTypeKind::RegOperator => {
+            (crate::include::catalog::REGOPERATOR_TYPE_OID as i32, 4, -1)
+        }
         SqlTypeKind::RegProcedure => (crate::include::catalog::REGPROCEDURE_TYPE_OID as i32, 4, -1),
         SqlTypeKind::Tid => (27, 6, -1),
         SqlTypeKind::Xid => (28, 4, -1),
@@ -635,9 +641,43 @@ pub(crate) fn send_typed_data_row(
             Value::Int32(v) => {
                 let start = buf.len();
                 buf.extend_from_slice(&0_i32.to_be_bytes());
-                let mut itoa_buf = itoa::Buffer::new();
-                let written = itoa_buf.format(*v);
-                buf.extend_from_slice(written.as_bytes());
+                if matches!(sql_type.map(|ty| ty.kind), Some(SqlTypeKind::RegRole)) {
+                    if let Ok(role_oid) = u32::try_from(*v) {
+                        if let Some(role_name) = role_names.and_then(|names| names.get(&role_oid)) {
+                            buf.extend_from_slice(role_name.as_bytes());
+                        } else {
+                            let mut itoa_buf = itoa::Buffer::new();
+                            let written = itoa_buf.format(*v);
+                            buf.extend_from_slice(written.as_bytes());
+                        }
+                    } else {
+                        let mut itoa_buf = itoa::Buffer::new();
+                        let written = itoa_buf.format(*v);
+                        buf.extend_from_slice(written.as_bytes());
+                    }
+                } else if matches!(sql_type.map(|ty| ty.kind), Some(SqlTypeKind::RegProcedure)) {
+                    if let Ok(proc_oid) = u32::try_from(*v) {
+                        if proc_oid == 0 {
+                            buf.extend_from_slice(b"-");
+                        } else if let Some(proc_name) =
+                            proc_names.and_then(|names| names.get(&proc_oid))
+                        {
+                            buf.extend_from_slice(proc_name.as_bytes());
+                        } else {
+                            let mut itoa_buf = itoa::Buffer::new();
+                            let written = itoa_buf.format(*v);
+                            buf.extend_from_slice(written.as_bytes());
+                        }
+                    } else {
+                        let mut itoa_buf = itoa::Buffer::new();
+                        let written = itoa_buf.format(*v);
+                        buf.extend_from_slice(written.as_bytes());
+                    }
+                } else {
+                    let mut itoa_buf = itoa::Buffer::new();
+                    let written = itoa_buf.format(*v);
+                    buf.extend_from_slice(written.as_bytes());
+                }
                 let text_len = (buf.len() - start - 4) as i32;
                 buf[start..start + 4].copy_from_slice(&text_len.to_be_bytes());
             }
@@ -853,6 +893,7 @@ fn encode_binary_data_row_value(value: &Value, sql_type: SqlType) -> Result<Vec<
                     | SqlTypeKind::RegClass
                     | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
+                    | SqlTypeKind::RegOperator
                     | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid
                     | SqlTypeKind::RegConfig
