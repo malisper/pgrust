@@ -30,6 +30,7 @@ pub fn compare_bt_values(left: &Value, right: &Value) -> Ordering {
             compare_order_values(left, right, None, None, false)
                 .expect("btree array comparisons use implicit default collation")
         }
+        (Value::InternalChar(a), Value::InternalChar(b)) => a.cmp(b),
         (Value::Multirange(a), Value::Multirange(b)) => compare_multirange_values(a, b),
         (Value::Numeric(a), Value::Numeric(b)) => a.render().cmp(&b.render()),
         (Value::Float64(a), Value::Float64(b)) => a.total_cmp(b),
@@ -61,6 +62,7 @@ pub fn compare_bt_keyspace(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::include::nodes::datum::{ArrayDimension, ArrayValue};
 
     #[test]
     fn bt_keyspace_uses_heap_tid_as_final_tiebreak() {
@@ -76,5 +78,32 @@ mod tests {
             compare_bt_keyspace(&[Value::Int32(10)], &a, &[Value::Int32(10)], &b),
             Ordering::Less
         );
+    }
+
+    #[test]
+    fn bt_array_comparison_uses_pg_array_shape_rules() {
+        let lower_bounds_first = Value::PgArray(ArrayValue::from_dimensions(
+            vec![ArrayDimension {
+                lower_bound: 0,
+                length: 2,
+            }],
+            vec![Value::Int32(1), Value::Int32(2)],
+        ));
+        let lower_bounds_second = Value::PgArray(ArrayValue::from_dimensions(
+            vec![ArrayDimension {
+                lower_bound: 1,
+                length: 2,
+            }],
+            vec![Value::Int32(1), Value::Int32(2)],
+        ));
+        assert_eq!(
+            compare_bt_values(&lower_bounds_first, &lower_bounds_second),
+            Ordering::Less
+        );
+
+        let with_null = Value::PgArray(ArrayValue::from_1d(vec![Value::Int32(1), Value::Null]));
+        let without_null =
+            Value::PgArray(ArrayValue::from_1d(vec![Value::Int32(1), Value::Int32(2)]));
+        assert_eq!(compare_bt_values(&with_null, &without_null), Ordering::Greater);
     }
 }

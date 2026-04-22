@@ -19185,6 +19185,27 @@ fn temp_trigger_function_is_resolved_from_temp_schema() {
 }
 
 #[test]
+fn temp_unique_array_columns_use_default_array_opclass() {
+    let dir = temp_dir("temp_unique_array_columns");
+    let db = Database::open(&dir, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table arr_tbl (f1 int[] unique)")
+        .unwrap();
+    session
+        .execute(&db, "insert into arr_tbl values ('{1,2,3}')")
+        .unwrap();
+
+    match session.execute(&db, "insert into arr_tbl values ('{1,2,3}')") {
+        Err(ExecError::UniqueViolation { constraint, .. }) => {
+            assert_eq!(constraint, "arr_tbl_f1_key");
+        }
+        other => panic!("expected unique violation, got {other:?}"),
+    }
+}
+
+#[test]
 fn delete_prepared_insert_and_copy_from_fire_triggers() {
     let dir = temp_dir("trigger_delete_prepared_copy");
     let db = Database::open(&dir, 64).unwrap();
