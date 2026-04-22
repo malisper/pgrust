@@ -112,6 +112,113 @@ fn build_whole_row_expr(fields: Vec<(String, Expr)>) -> Expr {
     }
 }
 
+fn bind_row_expr_fields(
+    items: &[SqlExpr],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Vec<(String, Expr)>, ParseError> {
+    let mut field_exprs = Vec::new();
+    for item in items {
+        if let SqlExpr::Column(name) = item
+            && let Some(relation_name) = name.strip_suffix(".*")
+        {
+            let fields = resolve_relation_row_expr_with_outer(scope, outer_scopes, relation_name)
+                .ok_or_else(|| ParseError::UnknownColumn(name.clone()))?;
+            for (_, expr) in fields {
+                let field_name = format!("f{}", field_exprs.len() + 1);
+                field_exprs.push((field_name, expr));
+            }
+            continue;
+        }
+        let expr = bind_expr_with_outer_and_ctes(
+            item,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?;
+        let field_name = format!("f{}", field_exprs.len() + 1);
+        field_exprs.push((field_name, expr));
+    }
+    Ok(field_exprs)
+}
+
+fn bind_named_composite_row_cast(
+    items: &[SqlExpr],
+    target_type: SqlType,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Option<Expr>, ParseError> {
+    if !matches!(target_type.kind, SqlTypeKind::Composite) || target_type.typrelid == 0 {
+        return Ok(None);
+    }
+    let relation = catalog
+        .lookup_relation_by_oid(target_type.typrelid)
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "named composite type",
+            actual: format!("type relation {} not found", target_type.typrelid),
+        })?;
+    let target_fields = relation
+        .desc
+        .columns
+        .iter()
+        .filter(|column| !column.dropped)
+        .map(|column| (column.name.clone(), column.sql_type))
+        .collect::<Vec<_>>();
+    let field_exprs = bind_row_expr_fields(
+        items,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    if field_exprs.len() != target_fields.len() {
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "cannot cast type record to {}",
+                sql_type_name(target_type)
+            ),
+            detail: Some(format!(
+                "Input has {} columns but target row type has {}.",
+                field_exprs.len(),
+                target_fields.len()
+            )),
+            hint: None,
+            sqlstate: "42846",
+        });
+    }
+    let fields = field_exprs
+        .into_iter()
+        .zip(target_fields.iter())
+        .map(|((_, expr), (field_name, field_type))| {
+            let source_type = expr_sql_type_hint(&expr).unwrap_or(SqlType::new(SqlTypeKind::Text));
+            (
+                field_name.clone(),
+                coerce_bound_expr(expr, source_type, *field_type),
+            )
+        })
+        .collect::<Vec<_>>();
+    Ok(Some(Expr::Row {
+        descriptor: crate::include::nodes::datum::RecordDescriptor::named(
+            target_type
+                .type_oid
+                .max(crate::include::catalog::RECORD_TYPE_OID),
+            target_type.typrelid,
+            target_type.typmod,
+            target_fields,
+        ),
+        fields,
+    }))
+}
+
 pub(super) fn raise_expr_varlevels(expr: Expr, levels: usize) -> Expr {
     if levels == 0 {
         return expr;
@@ -613,31 +720,8 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
         SqlExpr::IntegerLiteral(value) => Expr::Const(bind_integer_literal(value)?),
         SqlExpr::NumericLiteral(value) => Expr::Const(bind_numeric_literal(value)?),
         SqlExpr::Row(items) => {
-            let mut field_exprs = Vec::new();
-            for item in items {
-                if let SqlExpr::Column(name) = item
-                    && let Some(relation_name) = name.strip_suffix(".*")
-                {
-                    let fields =
-                        resolve_relation_row_expr_with_outer(scope, outer_scopes, relation_name)
-                            .ok_or_else(|| ParseError::UnknownColumn(name.clone()))?;
-                    for (_, expr) in fields {
-                        let field_name = format!("f{}", field_exprs.len() + 1);
-                        field_exprs.push((field_name, expr));
-                    }
-                    continue;
-                }
-                let expr = bind_expr_with_outer_and_ctes(
-                    item,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                )?;
-                let field_name = format!("f{}", field_exprs.len() + 1);
-                field_exprs.push((field_name, expr));
-            }
+            let field_exprs =
+                bind_row_expr_fields(items, scope, catalog, outer_scopes, grouped_outer, ctes)?;
             let descriptor = assign_anonymous_record_descriptor(
                 field_exprs
                     .iter()
@@ -1153,6 +1237,19 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     bind_regprocedure_literal_cast(inner, target_type, catalog)?
             {
                 return Ok(bound_regprocedure);
+            }
+            if let SqlExpr::Row(items) = inner.as_ref()
+                && let Some(bound_row) = bind_named_composite_row_cast(
+                    items,
+                    target_type,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            {
+                return Ok(bound_row);
             }
             if !matches!(inner.as_ref(), SqlExpr::Const(Value::Null)) {
                 validate_catalog_backed_explicit_cast(source_type, target_type, catalog)?;
