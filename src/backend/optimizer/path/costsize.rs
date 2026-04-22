@@ -1477,6 +1477,10 @@ fn set_returning_call_uses_immediate_outer_columns(call: &SetReturningCall) -> b
                 || expr_uses_immediate_outer_columns(stop)
                 || expr_uses_immediate_outer_columns(step)
         }
+        SetReturningCall::PartitionTree { relid, .. }
+        | SetReturningCall::PartitionAncestors { relid, .. } => {
+            expr_uses_immediate_outer_columns(relid)
+        }
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }

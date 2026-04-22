@@ -81,11 +81,26 @@ pub(crate) fn median_centroid(values: &[Value]) -> Result<Option<GeoBox>, Catalo
     if values.is_empty() {
         return Ok(None);
     }
-    let boxes = values.iter().map(expect_box).collect::<Result<Vec<_>, _>>()?;
-    let mut low_xs = boxes.iter().map(|geo_box| geo_box.low.x).collect::<Vec<_>>();
-    let mut high_xs = boxes.iter().map(|geo_box| geo_box.high.x).collect::<Vec<_>>();
-    let mut low_ys = boxes.iter().map(|geo_box| geo_box.low.y).collect::<Vec<_>>();
-    let mut high_ys = boxes.iter().map(|geo_box| geo_box.high.y).collect::<Vec<_>>();
+    let boxes = values
+        .iter()
+        .map(expect_box)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut low_xs = boxes
+        .iter()
+        .map(|geo_box| geo_box.low.x)
+        .collect::<Vec<_>>();
+    let mut high_xs = boxes
+        .iter()
+        .map(|geo_box| geo_box.high.x)
+        .collect::<Vec<_>>();
+    let mut low_ys = boxes
+        .iter()
+        .map(|geo_box| geo_box.low.y)
+        .collect::<Vec<_>>();
+    let mut high_ys = boxes
+        .iter()
+        .map(|geo_box| geo_box.high.y)
+        .collect::<Vec<_>>();
     low_xs.sort_by(f64::total_cmp);
     high_xs.sort_by(f64::total_cmp);
     low_ys.sort_by(f64::total_cmp);

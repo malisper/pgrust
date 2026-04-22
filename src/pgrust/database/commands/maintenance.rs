@@ -872,7 +872,8 @@ impl Database {
             .map(|result| (result.relation_oid, result))
             .collect::<BTreeMap<_, _>>();
         for result in vacuumed {
-            let effect = if let Some(analyze_result) = analyzed_by_oid.remove(&result.relation_oid) {
+            let effect = if let Some(analyze_result) = analyzed_by_oid.remove(&result.relation_oid)
+            {
                 let effect = store
                     .set_relation_maintenance_stats_mvcc(
                         result.relation_oid,

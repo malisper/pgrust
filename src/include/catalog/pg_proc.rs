@@ -9,9 +9,10 @@ use crate::include::catalog::{
     INT8RANGE_TYPE_OID, JSON_TYPE_OID, JSONB_TYPE_OID, JSONPATH_TYPE_OID, LINE_TYPE_OID,
     LSEG_TYPE_OID, MONEY_TYPE_OID, NAME_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID,
     OID_TYPE_OID, PATH_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID,
-    PG_NODE_TREE_TYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, RECORD_TYPE_OID, TEXT_ARRAY_TYPE_OID,
-    TEXT_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TSQUERY_TYPE_OID, TSRANGE_TYPE_OID,
-    TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID, aggregate_func_for_dynamic_range_proc_oid,
+    PG_NODE_TREE_TYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, RECORD_TYPE_OID, REGCLASS_TYPE_OID,
+    TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TSQUERY_TYPE_OID,
+    TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID,
+    aggregate_func_for_dynamic_range_proc_oid,
 };
 use crate::include::nodes::primnodes::{AggFunc, BuiltinScalarFunction, BuiltinWindowFunction};
 use std::sync::OnceLock;
@@ -207,6 +208,65 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'f',
             's',
         ),
+        proc_row(
+            3424,
+            "pg_partition_root",
+            REGCLASS_TYPE_OID,
+            &oid_argtypes(&[REGCLASS_TYPE_OID]),
+            "pg_partition_root",
+            1,
+            false,
+            true,
+            'f',
+            'v',
+        ),
+        PgProcRow {
+            proallargtypes: Some(vec![
+                REGCLASS_TYPE_OID,
+                REGCLASS_TYPE_OID,
+                REGCLASS_TYPE_OID,
+                BOOL_TYPE_OID,
+                INT4_TYPE_OID,
+            ]),
+            proargmodes: Some(vec![b'i', b'o', b'o', b'o', b'o']),
+            proargnames: Some(vec![
+                "rootrelid".into(),
+                "relid".into(),
+                "parentrelid".into(),
+                "isleaf".into(),
+                "level".into(),
+            ]),
+            ..proc_row(
+                3423,
+                "pg_partition_tree",
+                RECORD_TYPE_OID,
+                &oid_argtypes(&[REGCLASS_TYPE_OID]),
+                "pg_partition_tree",
+                1,
+                true,
+                true,
+                'f',
+                'v',
+            )
+        },
+        PgProcRow {
+            prorows: 10.0,
+            proallargtypes: Some(vec![REGCLASS_TYPE_OID, REGCLASS_TYPE_OID]),
+            proargmodes: Some(vec![b'i', b'o']),
+            proargnames: Some(vec!["partitionid".into(), "relid".into()]),
+            ..proc_row(
+                3425,
+                "pg_partition_ancestors",
+                REGCLASS_TYPE_OID,
+                &oid_argtypes(&[REGCLASS_TYPE_OID]),
+                "pg_partition_ancestors",
+                1,
+                true,
+                true,
+                'f',
+                'v',
+            )
+        },
         proc_row(
             6400,
             "pg_rust_internal_binary_coercible",
@@ -3341,6 +3401,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "getdatabaseencoding",
             BuiltinScalarFunction::GetDatabaseEncoding,
         ),
+        ("pg_partition_root", BuiltinScalarFunction::PgPartitionRoot),
         ("pg_my_temp_schema", BuiltinScalarFunction::PgMyTempSchema),
         (
             "pg_rust_internal_binary_coercible",
@@ -3688,6 +3749,9 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("replace", BuiltinScalarFunction::Replace),
         ("split_part", BuiltinScalarFunction::SplitPart),
         ("translate", BuiltinScalarFunction::Translate),
+        ("text_to_regclass", BuiltinScalarFunction::TextToRegClass),
+        ("regclass_to_text", BuiltinScalarFunction::RegClassToText),
+        ("regclassout", BuiltinScalarFunction::RegClassToText),
         ("regtype_to_text", BuiltinScalarFunction::RegTypeToText),
         ("regtypeout", BuiltinScalarFunction::RegTypeToText),
         (

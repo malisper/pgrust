@@ -1,6 +1,6 @@
 use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_next_visible};
 use crate::backend::access::index::buildkeys::{
-    materialize_heap_row_values, IndexBuildKeyProjector,
+    IndexBuildKeyProjector, materialize_heap_row_values,
 };
 use crate::backend::catalog::CatalogError;
 use crate::include::access::amapi::{

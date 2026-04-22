@@ -307,7 +307,8 @@ fn make_window_rel(
             .any(|path| bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys))
         && let [rtindex] = input_rel.relids.as_slice()
     {
-        let ordered_paths = relation_ordered_index_paths(root, *rtindex, &required_pathkeys, catalog);
+        let ordered_paths =
+            relation_ordered_index_paths(root, *rtindex, &required_pathkeys, catalog);
         if !ordered_paths.is_empty() {
             let base_target = root
                 .simple_rel_array
@@ -330,10 +331,9 @@ fn make_window_rel(
                 ordered_rel
             };
             ordered_input_paths.extend(
-                ordered_rel
-                    .pathlist
-                    .into_iter()
-                    .filter(|path| bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys)),
+                ordered_rel.pathlist.into_iter().filter(|path| {
+                    bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys)
+                }),
             );
         }
     }

@@ -306,13 +306,12 @@ fn record_expr_fields(
     };
 
     if matches!(sql_type.kind, SqlTypeKind::Composite) && sql_type.typrelid != 0 {
-        let relation =
-            catalog
-                .lookup_relation_by_oid(sql_type.typrelid)
-                .ok_or_else(|| ParseError::UnexpectedToken {
-                    expected: "named composite type",
-                    actual: format!("type relation {} not found", sql_type.typrelid),
-                })?;
+        let relation = catalog
+            .lookup_relation_by_oid(sql_type.typrelid)
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "named composite type",
+                actual: format!("type relation {} not found", sql_type.typrelid),
+            })?;
         return Ok(relation
             .desc
             .columns
@@ -1334,6 +1333,81 @@ fn bind_select_list_srf_call(
                         with_ordinality: false,
                     })
                 } else if let Some(resolved) = resolved.as_ref() {
+                    if let Some(srf_impl) = resolved.srf_impl {
+                        let bound_args = bind_user_defined_srf_args(
+                            &args,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                            &resolved.declared_arg_types,
+                        )?;
+                        let output_columns = match &resolved.row_shape {
+                            ResolvedFunctionRowShape::OutParameters(columns)
+                            | ResolvedFunctionRowShape::NamedComposite { columns, .. } => {
+                                columns.clone()
+                            }
+                            ResolvedFunctionRowShape::AnonymousRecord
+                            | ResolvedFunctionRowShape::None => match srf_impl {
+                                ResolvedSrfImpl::PartitionTree => vec![
+                                    QueryColumn {
+                                        name: "relid".into(),
+                                        sql_type: SqlType::new(SqlTypeKind::RegClass),
+                                        wire_type_oid: None,
+                                    },
+                                    QueryColumn {
+                                        name: "parentrelid".into(),
+                                        sql_type: SqlType::new(SqlTypeKind::RegClass),
+                                        wire_type_oid: None,
+                                    },
+                                    QueryColumn {
+                                        name: "isleaf".into(),
+                                        sql_type: SqlType::new(SqlTypeKind::Bool),
+                                        wire_type_oid: None,
+                                    },
+                                    QueryColumn {
+                                        name: "level".into(),
+                                        sql_type: SqlType::new(SqlTypeKind::Int4),
+                                        wire_type_oid: None,
+                                    },
+                                ],
+                                ResolvedSrfImpl::PartitionAncestors => vec![QueryColumn {
+                                    name: "relid".into(),
+                                    sql_type: SqlType::new(SqlTypeKind::RegClass),
+                                    wire_type_oid: None,
+                                }],
+                                _ => unreachable!(
+                                    "partition SRF branch only handles partition builtins"
+                                ),
+                            },
+                        };
+                        let relid = bound_args.into_iter().next().ok_or_else(|| {
+                            ParseError::UnexpectedToken {
+                                expected: "single regclass argument",
+                                actual: other.to_string(),
+                            }
+                        })?;
+                        return Ok(match srf_impl {
+                            ResolvedSrfImpl::PartitionTree => SetReturningCall::PartitionTree {
+                                func_oid: resolved.proc_oid,
+                                func_variadic: resolved.func_variadic,
+                                relid,
+                                output_columns,
+                            },
+                            ResolvedSrfImpl::PartitionAncestors => {
+                                SetReturningCall::PartitionAncestors {
+                                    func_oid: resolved.proc_oid,
+                                    func_variadic: resolved.func_variadic,
+                                    relid,
+                                    output_columns,
+                                }
+                            }
+                            _ => {
+                                unreachable!("partition SRF branch only handles partition builtins")
+                            }
+                        });
+                    }
                     if resolved.prokind != 'f' || !resolved.proretset {
                         return Err(ParseError::UnexpectedToken {
                             expected: "supported set-returning function",
@@ -1391,10 +1465,7 @@ fn bind_json_table_srf_args(
         .enumerate()
         .map(|(index, arg)| {
             let target_type = match (kind, index) {
-                (
-                    JsonTableFunction::JsonbPathQuery,
-                    0 | 2,
-                )
+                (JsonTableFunction::JsonbPathQuery, 0 | 2)
                 | (JsonTableFunction::JsonbObjectKeys, 0)
                 | (JsonTableFunction::JsonbEach, 0)
                 | (JsonTableFunction::JsonbEachText, 0)
@@ -1402,9 +1473,7 @@ fn bind_json_table_srf_args(
                 | (JsonTableFunction::JsonbArrayElementsText, 0) => {
                     Some(SqlType::new(SqlTypeKind::Jsonb))
                 }
-                (JsonTableFunction::JsonbPathQuery, 1) => {
-                    Some(SqlType::new(SqlTypeKind::JsonPath))
-                }
+                (JsonTableFunction::JsonbPathQuery, 1) => Some(SqlType::new(SqlTypeKind::JsonPath)),
                 (JsonTableFunction::JsonbPathQuery, 3) => Some(SqlType::new(SqlTypeKind::Bool)),
                 _ => None,
             };

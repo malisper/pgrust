@@ -1178,10 +1178,8 @@ fn compile_select_into_stmt(
     let mut targets = target_refs
         .iter()
         .map(|target| {
-            resolve_assign_target(target, env).map(|(slot, ty)| CompiledSelectIntoTarget {
-                slot,
-                ty,
-            })
+            resolve_assign_target(target, env)
+                .map(|(slot, ty)| CompiledSelectIntoTarget { slot, ty })
         })
         .collect::<Result<Vec<_>, _>>()?;
     if let [target] = targets.as_mut_slice()
@@ -1198,7 +1196,10 @@ fn compile_select_into_stmt(
         env.update_slot_type(target.slot, ty);
         target.ty = ty;
     }
-    Ok(CompiledStmt::SelectInto { plan: planned, targets })
+    Ok(CompiledStmt::SelectInto {
+        plan: planned,
+        targets,
+    })
 }
 
 fn compile_stmt_list(

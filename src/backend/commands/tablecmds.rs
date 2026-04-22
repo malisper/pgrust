@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use parking_lot::RwLock;
@@ -39,6 +39,7 @@ use super::explain::{
     format_buffer_usage, format_explain_lines_with_costs, format_explain_plan_with_subplans,
     push_explain_line,
 };
+use super::partition::route_partition_target;
 use super::trigger::RuntimeTriggers;
 use super::upsert::execute_insert_on_conflict_rows;
 use crate::backend::executor::exec_expr::{compile_predicate_with_decoder, eval_expr};
@@ -2103,7 +2104,8 @@ pub fn execute_insert(
             }
             returned_rows
         } else {
-            let returned_rows = execute_insert_rows(
+            let returned_rows = execute_insert_rows_with_routing(
+                catalog,
                 &stmt.relation_name,
                 stmt.relation_oid,
                 stmt.rel,
@@ -2140,6 +2142,126 @@ pub fn execute_insert(
     })();
     ctx.subplans = saved_subplans;
     result
+}
+
+fn first_toast_index_for_relation(
+    catalog: &dyn CatalogLookup,
+    toast: Option<ToastRelationRef>,
+) -> Option<BoundIndexRelation> {
+    let toast = toast?;
+    catalog
+        .index_relations_for_heap(toast.relation_oid)
+        .into_iter()
+        .next()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_insert_rows_with_routing(
+    catalog: &dyn CatalogLookup,
+    relation_name: &str,
+    relation_oid: u32,
+    rel: crate::backend::storage::smgr::RelFileLocator,
+    toast: Option<ToastRelationRef>,
+    toast_index: Option<&BoundIndexRelation>,
+    desc: &RelationDesc,
+    relation_constraints: &BoundRelationConstraints,
+    rls_write_checks: &[RlsWriteCheck],
+    indexes: &[BoundIndexRelation],
+    rows: &[Vec<Value>],
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    cid: CommandId,
+) -> Result<Vec<Vec<Value>>, ExecError> {
+    let Some(target_relation) = catalog.relation_by_oid(relation_oid) else {
+        return execute_insert_rows(
+            relation_name,
+            relation_oid,
+            rel,
+            toast,
+            toast_index,
+            desc,
+            relation_constraints,
+            rls_write_checks,
+            indexes,
+            rows,
+            ctx,
+            xid,
+            cid,
+        );
+    };
+    if target_relation.relkind != 'p' && !target_relation.relispartition {
+        return execute_insert_rows(
+            relation_name,
+            relation_oid,
+            rel,
+            toast,
+            toast_index,
+            desc,
+            relation_constraints,
+            rls_write_checks,
+            indexes,
+            rows,
+            ctx,
+            xid,
+            cid,
+        );
+    }
+
+    let mut routed = BTreeMap::<
+        u32,
+        (
+            String,
+            crate::backend::parser::BoundRelation,
+            Vec<Vec<Value>>,
+        ),
+    >::new();
+    for row in rows {
+        let leaf = route_partition_target(catalog, &target_relation, row, &ctx.datetime_config)?;
+        let leaf_name = catalog
+            .class_row_by_oid(leaf.relation_oid)
+            .map(|row| row.relname)
+            .unwrap_or_else(|| relation_name.to_string());
+        routed
+            .entry(leaf.relation_oid)
+            .or_insert_with(|| (leaf_name, leaf.clone(), Vec::new()))
+            .2
+            .push(row.clone());
+    }
+
+    let mut inserted_rows = Vec::new();
+    for (_, (leaf_name, leaf, leaf_rows)) in routed {
+        let leaf_constraints = if leaf.relation_oid == relation_oid {
+            relation_constraints.clone()
+        } else {
+            bind_relation_constraints(Some(&leaf_name), leaf.relation_oid, &leaf.desc, catalog)?
+        };
+        let leaf_indexes = if leaf.relation_oid == relation_oid {
+            indexes.to_vec()
+        } else {
+            catalog.index_relations_for_heap(leaf.relation_oid)
+        };
+        let leaf_toast_index = if leaf.relation_oid == relation_oid {
+            toast_index.cloned()
+        } else {
+            first_toast_index_for_relation(catalog, leaf.toast)
+        };
+        inserted_rows.extend(execute_insert_rows(
+            &leaf_name,
+            leaf.relation_oid,
+            leaf.rel,
+            leaf.toast,
+            leaf_toast_index.as_ref(),
+            &leaf.desc,
+            &leaf_constraints,
+            rls_write_checks,
+            &leaf_indexes,
+            &leaf_rows,
+            ctx,
+            xid,
+            cid,
+        )?);
+    }
+    Ok(inserted_rows)
 }
 
 fn parse_tid_text(value: &Value) -> Result<Option<ItemPointerData>, ExecError> {
@@ -3790,6 +3912,25 @@ pub(crate) fn execute_insert_values(
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<usize, ExecError> {
+    if let Some(catalog) = ctx.catalog.clone() {
+        return Ok(execute_insert_rows_with_routing(
+            &catalog,
+            relation_name,
+            relation_oid,
+            rel,
+            toast,
+            toast_index,
+            desc,
+            relation_constraints,
+            rls_write_checks,
+            indexes,
+            rows,
+            ctx,
+            xid,
+            cid,
+        )?
+        .len());
+    }
     Ok(execute_insert_rows(
         relation_name,
         relation_oid,
@@ -4121,8 +4262,11 @@ fn project_update_target_visible_values(
     tid: ItemPointerData,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<Value>, ExecError> {
-    let mut slot =
-        TupleSlot::virtual_row_with_metadata(row_values.to_vec(), Some(tid), Some(target.relation_oid));
+    let mut slot = TupleSlot::virtual_row_with_metadata(
+        row_values.to_vec(),
+        Some(tid),
+        Some(target.relation_oid),
+    );
     let mut values = target
         .parent_visible_exprs
         .iter()
@@ -4304,7 +4448,8 @@ fn execute_update_from_joined_input(
                         sqlstate: "XX000",
                     })?;
             let target = &stmt.targets[target_index];
-            let source_values = row_values[stmt.target_visible_count..stmt.visible_column_count].to_vec();
+            let source_values =
+                row_values[stmt.target_visible_count..stmt.visible_column_count].to_vec();
             let mut current_tid = target_tid;
             let mut current_old_values = fetch_update_target_values(target, current_tid, ctx)?;
             let mut current_values = evaluate_update_from_assignments(
@@ -4318,9 +4463,11 @@ fn execute_update_from_joined_input(
             loop {
                 ctx.check_for_interrupts()?;
                 let Some(triggered_values) = (match triggers[target_index].as_ref() {
-                    Some(trigger) => {
-                        trigger.before_row_update(&current_old_values, current_values.clone(), ctx)?
-                    }
+                    Some(trigger) => trigger.before_row_update(
+                        &current_old_values,
+                        current_values.clone(),
+                        ctx,
+                    )?,
                     None => Some(current_values.clone()),
                 }) else {
                     break;
@@ -4348,7 +4495,11 @@ fn execute_update_from_joined_input(
                             .write()
                             .note_relation_update(target.relation_oid);
                         if let Some(trigger) = triggers[target_index].as_ref() {
-                            trigger.after_row_update(&current_old_values, &triggered_values, ctx)?;
+                            trigger.after_row_update(
+                                &current_old_values,
+                                &triggered_values,
+                                ctx,
+                            )?;
                         }
                         if !stmt.returning.is_empty() {
                             returned_rows.push(project_update_from_returning_row(
@@ -4726,7 +4877,8 @@ fn materialize_update_from_joined_input_events(
                 sqlstate: "XX000",
             })?;
         let target = &stmt.targets[target_index];
-        let source_values = row_values[stmt.target_visible_count..stmt.visible_column_count].to_vec();
+        let source_values =
+            row_values[stmt.target_visible_count..stmt.visible_column_count].to_vec();
         let old_values = fetch_update_target_values(target, tid, ctx)?;
         let new_values =
             evaluate_update_from_assignments(target, &old_values, &source_values, tid, ctx)?;

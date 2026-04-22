@@ -145,6 +145,7 @@ fn test_catalog_entry(rel: RelFileLocator, desc: RelationDesc) -> CatalogEntry {
         relhastriggers: false,
         relhassubclass: false,
         relispartition: false,
+        relpartbound: None,
         relrowsecurity: false,
         relforcerowsecurity: false,
         relpages: 0,
@@ -153,6 +154,7 @@ fn test_catalog_entry(rel: RelFileLocator, desc: RelationDesc) -> CatalogEntry {
         relallfrozen: 0,
         relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
         desc,
+        partitioned_table: None,
         index_meta: None,
     }
 }
@@ -2653,7 +2655,11 @@ fn explain_const_false_scan_filter_uses_one_time_filter() {
                 })
                 .collect::<Vec<_>>();
             assert!(rendered.iter().any(|line| line.as_str() == "Result"));
-            assert!(rendered.iter().any(|line| line.trim() == "One-Time Filter: false"));
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.trim() == "One-Time Filter: false")
+            );
             assert!(
                 !rendered.iter().any(|line| line.contains("Seq Scan")),
                 "expected Result-only explain, got {rendered:?}"
@@ -13938,7 +13944,9 @@ fn jsonb_scalar_casts_match_pg_scalar_rules() {
     )
     .unwrap_err()
     {
-        ExecError::DetailedError { message, sqlstate, .. } => {
+        ExecError::DetailedError {
+            message, sqlstate, ..
+        } => {
             assert_eq!(message, "cannot cast jsonb array to type double precision");
             assert_eq!(sqlstate, "22023");
         }
@@ -13992,9 +14000,7 @@ fn jsonb_subscript_reads_match_basic_pg_cases() {
     .unwrap_err()
     {
         ExecError::Parse(ParseError::DetailedError {
-            message,
-            sqlstate,
-            ..
+            message, sqlstate, ..
         }) => {
             assert_eq!(message, "jsonb subscript does not support slices");
             assert_eq!(sqlstate, "0A000");

@@ -1,10 +1,10 @@
 use crate::backend::catalog::CatalogError;
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
+use crate::include::access::scankey::ScanKeyData;
 use crate::include::access::spgist::{
     SPGIST_CHOOSE_PROC, SPGIST_CONFIG_PROC, SPGIST_INNER_CONSISTENT_PROC,
     SPGIST_LEAF_CONSISTENT_PROC, SPGIST_PICKSPLIT_PROC,
 };
-use crate::include::access::scankey::ScanKeyData;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::RelationDesc;
 
@@ -34,14 +34,10 @@ impl SpgistState {
         for column_index in 0..desc.columns.len() {
             let config_proc = index_meta
                 .amproc_oid(desc, column_index, SPGIST_CONFIG_PROC)
-                .ok_or(CatalogError::Corrupt(
-                    "missing SP-GiST config support proc",
-                ))?;
+                .ok_or(CatalogError::Corrupt("missing SP-GiST config support proc"))?;
             let choose_proc = index_meta
                 .amproc_oid(desc, column_index, SPGIST_CHOOSE_PROC)
-                .ok_or(CatalogError::Corrupt(
-                    "missing SP-GiST choose support proc",
-                ))?;
+                .ok_or(CatalogError::Corrupt("missing SP-GiST choose support proc"))?;
             let picksplit_proc = index_meta
                 .amproc_oid(desc, column_index, SPGIST_PICKSPLIT_PROC)
                 .ok_or(CatalogError::Corrupt(
@@ -82,7 +78,12 @@ impl SpgistState {
         support::config(column.config_proc)
     }
 
-    pub(crate) fn choose(&self, column_index: usize, centroid: &Value, leaf: &Value) -> Result<u8, CatalogError> {
+    pub(crate) fn choose(
+        &self,
+        column_index: usize,
+        centroid: &Value,
+        leaf: &Value,
+    ) -> Result<u8, CatalogError> {
         let column = self
             .columns
             .get(column_index)
@@ -115,7 +116,12 @@ impl SpgistState {
             .columns
             .get(attno)
             .ok_or(CatalogError::Corrupt("SP-GiST column state missing"))?;
-        support::leaf_consistent(column.leaf_consistent_proc, key.strategy, tuple_value, &key.argument)
+        support::leaf_consistent(
+            column.leaf_consistent_proc,
+            key.strategy,
+            tuple_value,
+            &key.argument,
+        )
     }
 
     pub(crate) fn order_distance(

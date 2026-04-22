@@ -327,7 +327,9 @@ pub(crate) fn planner(query: Query, catalog: &dyn CatalogLookup) -> PlannedStmt 
     plan::planner(query, catalog)
 }
 
-pub(crate) fn fold_query_constants(query: Query) -> Result<Query, crate::backend::parser::ParseError> {
+pub(crate) fn fold_query_constants(
+    query: Query,
+) -> Result<Query, crate::backend::parser::ParseError> {
     constfold::fold_query_constants(query)
 }
 

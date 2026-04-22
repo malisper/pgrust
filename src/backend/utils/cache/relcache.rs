@@ -12,7 +12,8 @@ use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name, sql_type_oid};
 use crate::include::catalog::{
     ANYOID, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, PG_CATALOG_NAMESPACE_OID,
-    PG_CONSTRAINT_RELATION_OID, bootstrap_catalog_kinds, system_catalog_index_by_oid,
+    PG_CONSTRAINT_RELATION_OID, PgPartitionedTableRow, bootstrap_catalog_kinds,
+    system_catalog_index_by_oid,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -318,10 +319,13 @@ pub struct RelCacheEntry {
     pub reltoastrelid: u32,
     pub relpersistence: char,
     pub relkind: char,
+    pub relispartition: bool,
+    pub relpartbound: Option<String>,
     pub relhastriggers: bool,
     pub relrowsecurity: bool,
     pub relforcerowsecurity: bool,
     pub desc: RelationDesc,
+    pub partitioned_table: Option<PgPartitionedTableRow>,
     pub index: Option<IndexRelCacheEntry>,
 }
 
@@ -472,10 +476,13 @@ impl RelCache {
                 reltoastrelid: class.reltoastrelid,
                 relpersistence: class.relpersistence,
                 relkind: class.relkind,
+                relispartition: class.relispartition,
+                relpartbound: class.relpartbound.clone(),
                 relhastriggers: class.relhastriggers,
                 relrowsecurity: class.relrowsecurity,
                 relforcerowsecurity: class.relforcerowsecurity,
                 desc: RelationDesc { columns },
+                partitioned_table: catcache.partitioned_table_row(class.oid).cloned(),
                 index: class.relkind.eq(&'i').then(|| {
                     let Some(index) = index_rows.iter().find(|row| row.indexrelid == class.oid)
                     else {
@@ -658,10 +665,13 @@ fn from_catalog_entry(entry: &CatalogEntry, support_lookup: &IndexSupportLookup)
         reltoastrelid: entry.reltoastrelid,
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
+        relispartition: entry.relispartition,
+        relpartbound: entry.relpartbound.clone(),
         relhastriggers: entry.relhastriggers,
         relrowsecurity: entry.relrowsecurity,
         relforcerowsecurity: entry.relforcerowsecurity,
         desc: entry.desc.clone(),
+        partitioned_table: entry.partitioned_table.clone(),
         index: entry.index_meta.as_ref().map(|index| {
             let support = support_lookup.resolve(&index.indclass);
             IndexRelCacheEntry {
@@ -1070,6 +1080,7 @@ mod tests {
             rows.operators,
             rows.opclasses,
             rows.opfamilies,
+            rows.partitioned_tables,
             rows.procs,
             rows.aggregates,
             rows.casts,

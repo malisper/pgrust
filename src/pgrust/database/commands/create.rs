@@ -1,8 +1,14 @@
 use super::super::*;
+use crate::backend::commands::partition::{
+    validate_new_partition_bound, validate_partition_relation_compatibility,
+    validate_relation_rows_for_partition_bound,
+};
 use crate::backend::parser::{
     AggregateArgType, AggregateSignatureKind, CreateAggregateStatement, CreateFunctionReturnSpec,
     CreateFunctionStatement, FunctionArgMode, FunctionParallel, FunctionVolatility,
-    OwnedSequenceSpec, SequenceOptionsSpec, SqlTypeKind, resolve_raw_type_name,
+    OwnedSequenceSpec, PartitionBoundSpec, SequenceOptionsSpec, SqlTypeKind,
+    lower_partition_bound_for_relation, pg_partitioned_table_row, resolve_raw_type_name,
+    serialize_partition_bound,
 };
 use crate::include::catalog::{
     ANYOID, BOOTSTRAP_SUPERUSER_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID,
@@ -29,6 +35,31 @@ fn relation_exists_in_namespace(
     catalog
         .lookup_any_relation(name)
         .is_some_and(|relation| relation.namespace_oid == namespace_oid)
+}
+
+fn created_relkind(lowered: &crate::backend::parser::LoweredCreateTable) -> char {
+    if lowered.partition_spec.is_some() {
+        'p'
+    } else {
+        'r'
+    }
+}
+
+fn validate_partitioned_table_ddl(
+    table_name: &str,
+    lowered: &crate::backend::parser::LoweredCreateTable,
+) -> Result<(), ExecError> {
+    if lowered.partition_spec.is_some() && !lowered.constraint_actions.is_empty() {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+            "partitioned indexes on \"{table_name}\""
+        ))));
+    }
+    if lowered.partition_spec.is_some() && !lowered.foreign_key_actions.is_empty() {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+            "foreign keys on partitioned table \"{table_name}\""
+        ))));
+    }
+    Ok(())
 }
 
 fn existing_view_prefix_matches(
@@ -482,6 +513,121 @@ impl Database {
             catalog_effects.push(constraint_effect);
         }
 
+        Ok(())
+    }
+
+    pub(super) fn refresh_partitioned_relation_metadata(
+        &self,
+        client_id: ClientId,
+        relation_oid: u32,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        _catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<crate::backend::parser::BoundRelation, ExecError> {
+        self.invalidate_backend_cache_state(client_id);
+        let visible_cid = cid.saturating_add(1);
+        let catalog =
+            self.lazy_catalog_lookup(client_id, Some((xid, visible_cid)), configured_search_path);
+        catalog.relation_by_oid(relation_oid).ok_or_else(|| {
+            ExecError::Parse(ParseError::TableDoesNotExist(relation_oid.to_string()))
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn replace_relation_partition_metadata_in_transaction(
+        &self,
+        client_id: ClientId,
+        relation_oid: u32,
+        relispartition: bool,
+        relpartbound: Option<String>,
+        partitioned_table: Option<crate::include::catalog::PgPartitionedTableRow>,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<crate::backend::parser::BoundRelation, ExecError> {
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .replace_relation_partitioning_mvcc(
+                relation_oid,
+                relispartition,
+                relpartbound.clone(),
+                partitioned_table.clone(),
+                &ctx,
+            )
+            .map_err(map_catalog_error)?;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        catalog_effects.push(effect);
+
+        let relation = self.refresh_partitioned_relation_metadata(
+            client_id,
+            relation_oid,
+            xid,
+            cid,
+            configured_search_path,
+            catalog_effects,
+        )?;
+        if relation.relpersistence == 't' {
+            self.replace_temp_entry_partition_metadata(
+                client_id,
+                relation_oid,
+                relation.relkind,
+                relispartition,
+                relpartbound,
+                partitioned_table,
+            )?;
+        }
+        Ok(relation)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn update_partitioned_table_default_partition_in_transaction(
+        &self,
+        client_id: ClientId,
+        relation_oid: u32,
+        partdefid: u32,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<(), ExecError> {
+        let relation = self.refresh_partitioned_relation_metadata(
+            client_id,
+            relation_oid,
+            xid,
+            cid,
+            configured_search_path,
+            catalog_effects,
+        )?;
+        let Some(partitioned_table) = relation.partitioned_table.clone() else {
+            return Ok(());
+        };
+        let updated = crate::include::catalog::PgPartitionedTableRow {
+            partdefid,
+            ..partitioned_table
+        };
+        let _ = self.replace_relation_partition_metadata_in_transaction(
+            client_id,
+            relation_oid,
+            relation.relispartition,
+            relation.relpartbound.clone(),
+            Some(updated),
+            xid,
+            cid,
+            configured_search_path,
+            catalog_effects,
+        )?;
         Ok(())
     }
 
@@ -1171,6 +1317,15 @@ impl Database {
         {
             return Ok(StatementResult::AffectedRows(0));
         }
+        validate_partitioned_table_ddl(&table_name, &lowered)?;
+        if let Some(parent_oid) = lowered.partition_parent_oid
+            && let Some(bound) = lowered.partition_bound.as_ref()
+        {
+            let parent = catalog.relation_by_oid(parent_oid).ok_or_else(|| {
+                ExecError::Parse(ParseError::UnknownTable(parent_oid.to_string()))
+            })?;
+            validate_new_partition_bound(&catalog, &parent, &table_name, bound, None)?;
+        }
 
         let mut desc = lowered.relation_desc.clone();
         let mut used_sequence_names = std::collections::BTreeSet::new();
@@ -1204,6 +1359,7 @@ impl Database {
         }
 
         let table_cid = cid;
+        let relation_relkind = created_relkind(&lowered);
         match persistence {
             TablePersistence::Permanent => {
                 let mut catalog_guard = self.catalog.write();
@@ -1216,17 +1372,40 @@ impl Database {
                     waiter: None,
                     interrupts: Arc::clone(&interrupts),
                 };
-                let result = catalog_guard.create_table_mvcc_with_options(
-                    table_name.clone(),
-                    desc.clone(),
-                    namespace_oid,
-                    self.database_oid,
-                    'p',
-                    crate::include::catalog::PG_TOAST_NAMESPACE_OID,
-                    crate::backend::catalog::toasting::PG_TOAST_NAMESPACE,
-                    self.auth_state(client_id).current_user_oid(),
-                    &ctx,
-                );
+                let result = if relation_relkind == 'r' {
+                    catalog_guard.create_table_mvcc_with_options(
+                        table_name.clone(),
+                        desc.clone(),
+                        namespace_oid,
+                        self.database_oid,
+                        'p',
+                        crate::include::catalog::PG_TOAST_NAMESPACE_OID,
+                        crate::backend::catalog::toasting::PG_TOAST_NAMESPACE,
+                        self.auth_state(client_id).current_user_oid(),
+                        &ctx,
+                    )
+                } else {
+                    catalog_guard
+                        .create_relation_mvcc_with_relkind(
+                            table_name.clone(),
+                            desc.clone(),
+                            namespace_oid,
+                            self.database_oid,
+                            'p',
+                            relation_relkind,
+                            self.auth_state(client_id).current_user_oid(),
+                            &ctx,
+                        )
+                        .map(|(entry, effect)| {
+                            (
+                                crate::backend::catalog::store::CreateTableResult {
+                                    entry,
+                                    toast: None,
+                                },
+                                effect,
+                            )
+                        })
+                };
                 match result {
                     Err(CatalogError::TableAlreadyExists(name)) if create_stmt.if_not_exists => {
                         Ok(StatementResult::AffectedRows(0))
@@ -1258,21 +1437,54 @@ impl Database {
                             self.apply_catalog_mutation_effect_immediate(&inherit_effect)?;
                             catalog_effects.push(inherit_effect);
                         }
-                        let relation = crate::backend::parser::BoundRelation {
-                            rel: created.entry.rel,
-                            relation_oid: created.entry.relation_oid,
-                            namespace_oid: created.entry.namespace_oid,
-                            owner_oid: created.entry.owner_oid,
-                            relpersistence: created.entry.relpersistence,
-                            relkind: created.entry.relkind,
-                            toast: created.toast.as_ref().map(|toast| ToastRelationRef {
-                                rel: toast.toast_entry.rel,
-                                relation_oid: toast.toast_entry.relation_oid,
-                            }),
-                            desc: created.entry.desc.clone(),
-                        };
-                        let constraint_cid_base =
-                            table_cid.saturating_add(u32::from(!lowered.parent_oids.is_empty()));
+                        let relpartbound = lowered
+                            .partition_bound
+                            .as_ref()
+                            .map(serialize_partition_bound)
+                            .transpose()
+                            .map_err(ExecError::Parse)?;
+                        let partitioned_table = lowered.partition_spec.as_ref().map(|spec| {
+                            pg_partitioned_table_row(created.entry.relation_oid, spec, 0)
+                        });
+                        let relation = self.replace_relation_partition_metadata_in_transaction(
+                            client_id,
+                            created.entry.relation_oid,
+                            lowered.partition_parent_oid.is_some(),
+                            relpartbound,
+                            partitioned_table,
+                            xid,
+                            table_cid.saturating_add(2),
+                            configured_search_path,
+                            catalog_effects,
+                        )?;
+                        if lowered
+                            .partition_bound
+                            .as_ref()
+                            .is_some_and(PartitionBoundSpec::is_default)
+                            && let Some(parent_oid) = lowered.partition_parent_oid
+                        {
+                            self.update_partitioned_table_default_partition_in_transaction(
+                                client_id,
+                                parent_oid,
+                                created.entry.relation_oid,
+                                xid,
+                                table_cid.saturating_add(3),
+                                configured_search_path,
+                                catalog_effects,
+                            )?;
+                        }
+                        let constraint_cid_base = table_cid
+                            .saturating_add(u32::from(!lowered.parent_oids.is_empty()))
+                            .saturating_add(u32::from(
+                                lowered.partition_spec.is_some()
+                                    || lowered.partition_parent_oid.is_some(),
+                            ))
+                            .saturating_add(u32::from(
+                                lowered
+                                    .partition_bound
+                                    .as_ref()
+                                    .is_some_and(PartitionBoundSpec::is_default),
+                            ));
                         self.install_create_table_constraints_in_transaction(
                             client_id,
                             xid,
@@ -1288,13 +1500,14 @@ impl Database {
                 }
             }
             TablePersistence::Temporary => {
-                let created = self.create_temp_relation_in_transaction(
+                let created = self.create_temp_relation_with_relkind_in_transaction(
                     client_id,
                     table_name.clone(),
                     desc,
                     create_stmt.on_commit,
                     xid,
                     table_cid,
+                    relation_relkind,
                     catalog_effects,
                     temp_effects,
                 )?;
@@ -1320,21 +1533,54 @@ impl Database {
                     self.apply_catalog_mutation_effect_immediate(&inherit_effect)?;
                     catalog_effects.push(inherit_effect);
                 }
-                let relation = crate::backend::parser::BoundRelation {
-                    rel: created.entry.rel,
-                    relation_oid: created.entry.relation_oid,
-                    namespace_oid: created.entry.namespace_oid,
-                    owner_oid: created.entry.owner_oid,
-                    relpersistence: created.entry.relpersistence,
-                    relkind: created.entry.relkind,
-                    toast: created.toast.as_ref().map(|toast| ToastRelationRef {
-                        rel: toast.toast_entry.rel,
-                        relation_oid: toast.toast_entry.relation_oid,
-                    }),
-                    desc: created.entry.desc.clone(),
-                };
-                let constraint_cid_base =
-                    table_cid.saturating_add(u32::from(!lowered.parent_oids.is_empty()));
+                let relpartbound = lowered
+                    .partition_bound
+                    .as_ref()
+                    .map(serialize_partition_bound)
+                    .transpose()
+                    .map_err(ExecError::Parse)?;
+                let partitioned_table = lowered
+                    .partition_spec
+                    .as_ref()
+                    .map(|spec| pg_partitioned_table_row(created.entry.relation_oid, spec, 0));
+                let relation = self.replace_relation_partition_metadata_in_transaction(
+                    client_id,
+                    created.entry.relation_oid,
+                    lowered.partition_parent_oid.is_some(),
+                    relpartbound,
+                    partitioned_table,
+                    xid,
+                    table_cid.saturating_add(2),
+                    configured_search_path,
+                    catalog_effects,
+                )?;
+                if lowered
+                    .partition_bound
+                    .as_ref()
+                    .is_some_and(PartitionBoundSpec::is_default)
+                    && let Some(parent_oid) = lowered.partition_parent_oid
+                {
+                    self.update_partitioned_table_default_partition_in_transaction(
+                        client_id,
+                        parent_oid,
+                        created.entry.relation_oid,
+                        xid,
+                        table_cid.saturating_add(3),
+                        configured_search_path,
+                        catalog_effects,
+                    )?;
+                }
+                let constraint_cid_base = table_cid
+                    .saturating_add(u32::from(!lowered.parent_oids.is_empty()))
+                    .saturating_add(u32::from(
+                        lowered.partition_spec.is_some() || lowered.partition_parent_oid.is_some(),
+                    ))
+                    .saturating_add(u32::from(
+                        lowered
+                            .partition_bound
+                            .as_ref()
+                            .is_some_and(PartitionBoundSpec::is_default),
+                    ));
                 self.install_create_table_constraints_in_transaction(
                     client_id,
                     xid,
@@ -1601,6 +1847,9 @@ impl Database {
                         })
                         .collect(),
                     inherits: Vec::new(),
+                    partition_spec: None,
+                    partition_of: None,
+                    partition_bound: None,
                     if_not_exists: create_stmt.if_not_exists,
                 };
                 let mut catalog_guard = self.catalog.write();

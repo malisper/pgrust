@@ -515,6 +515,10 @@ fn collect_direct_set_returning_call_subplans<'a>(
             collect_direct_expr_subplans(stop, out);
             collect_direct_expr_subplans(step, out);
         }
+        SetReturningCall::PartitionTree { relid, .. }
+        | SetReturningCall::PartitionAncestors { relid, .. } => {
+            collect_direct_expr_subplans(relid, out);
+        }
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }

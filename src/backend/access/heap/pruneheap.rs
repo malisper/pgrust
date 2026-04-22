@@ -167,11 +167,17 @@ fn tuple_xmin_committed(tuple: &HeapTuple, txns: &TransactionManager) -> bool {
 
 fn tuple_xmin_aborted(tuple: &HeapTuple, txns: &TransactionManager) -> bool {
     tuple.header.infomask & HEAP_XMIN_INVALID != 0
-        || matches!(txns.status(tuple.header.xmin), Some(TransactionStatus::Aborted))
+        || matches!(
+            txns.status(tuple.header.xmin),
+            Some(TransactionStatus::Aborted)
+        )
 }
 
 fn tuple_xmax_invalid(tuple: &HeapTuple, txns: &TransactionManager) -> bool {
     tuple.header.xmax == 0
         || tuple.header.infomask & HEAP_XMAX_INVALID != 0
-        || matches!(txns.status(tuple.header.xmax), Some(TransactionStatus::Aborted))
+        || matches!(
+            txns.status(tuple.header.xmax),
+            Some(TransactionStatus::Aborted)
+        )
 }

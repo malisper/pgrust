@@ -332,6 +332,7 @@ pub enum Statement {
     AlterTableValidateConstraint(AlterTableValidateConstraintStatement),
     AlterTableInherit(AlterTableInheritStatement),
     AlterTableNoInherit(AlterTableNoInheritStatement),
+    AlterTableAttachPartition(AlterTableAttachPartitionStatement),
     AlterPublication(AlterPublicationStatement),
     AlterOperator(AlterOperatorStatement),
     CommentOnTable(CommentOnTableStatement),
@@ -1165,6 +1166,9 @@ pub struct CreateTableStatement {
     pub on_commit: OnCommitAction,
     pub elements: Vec<CreateTableElement>,
     pub inherits: Vec<String>,
+    pub partition_spec: Option<RawPartitionSpec>,
+    pub partition_of: Option<String>,
+    pub partition_bound: Option<RawPartitionBoundSpec>,
     pub if_not_exists: bool,
 }
 
@@ -1182,6 +1186,61 @@ impl CreateTableStatement {
             CreateTableElement::Constraint(constraint) => Some(constraint),
         })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartitionStrategy {
+    List,
+    Range,
+}
+
+impl PartitionStrategy {
+    pub fn catalog_code(self) -> char {
+        match self {
+            PartitionStrategy::List => 'l',
+            PartitionStrategy::Range => 'r',
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawPartitionSpec {
+    pub strategy: PartitionStrategy,
+    pub keys: Vec<RawPartitionKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RawPartitionKey {
+    Column(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RawPartitionBoundSpec {
+    List {
+        values: Vec<SqlExpr>,
+        is_default: bool,
+    },
+    Range {
+        from: Vec<RawPartitionRangeDatum>,
+        to: Vec<RawPartitionRangeDatum>,
+        is_default: bool,
+    },
+}
+
+impl RawPartitionBoundSpec {
+    pub fn is_default(&self) -> bool {
+        match self {
+            RawPartitionBoundSpec::List { is_default, .. }
+            | RawPartitionBoundSpec::Range { is_default, .. } => *is_default,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RawPartitionRangeDatum {
+    MinValue,
+    MaxValue,
+    Value(SqlExpr),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1624,6 +1683,15 @@ pub struct AlterTableInheritStatement {
     pub only: bool,
     pub table_name: String,
     pub parent_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableAttachPartitionStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub parent_table: String,
+    pub partition_table: String,
+    pub bound: RawPartitionBoundSpec,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

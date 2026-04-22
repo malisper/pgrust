@@ -29,6 +29,7 @@ enum DropTableDependency {
     Relation {
         relation_oid: u32,
         relkind: char,
+        is_partition: bool,
         display_name: String,
     },
     ForeignKey {
@@ -155,6 +156,10 @@ struct DropTableDependencyContext<'a> {
     rewrites_by_oid: BTreeMap<u32, PgRewriteRow>,
 }
 
+fn is_drop_table_relkind(relkind: char) -> bool {
+    matches!(relkind, 'r' | 'p')
+}
+
 fn drop_table_relation_kind_name(relkind: char) -> &'static str {
     match relkind {
         'm' => "materialized view",
@@ -220,6 +225,7 @@ fn drop_table_direct_dependencies(
                 deps.push(DropTableDependency::Relation {
                     relation_oid: row.objid,
                     relkind: class.relkind,
+                    is_partition: class.relispartition,
                     display_name: drop_table_display_relation_name(ctx.catcache, row.objid),
                 });
             }
@@ -259,6 +265,7 @@ fn drop_table_direct_dependencies(
                     deps.push(DropTableDependency::Relation {
                         relation_oid: owner.oid,
                         relkind: owner.relkind,
+                        is_partition: owner.relispartition,
                         display_name: drop_table_display_relation_name(ctx.catcache, owner.oid),
                     });
                 } else if rule_oids.insert(rewrite.oid) {
@@ -293,6 +300,7 @@ fn drop_table_direct_dependencies(
         deps.push(DropTableDependency::Relation {
             relation_oid: inherit.inhrelid,
             relkind: class.relkind,
+            is_partition: class.relispartition,
             display_name: drop_table_display_relation_name(ctx.catcache, inherit.inhrelid),
         });
     }
@@ -337,9 +345,11 @@ fn plan_drop_table_relation(
         match dep {
             DropTableDependency::Relation {
                 relation_oid: dependent_oid,
+                is_partition,
                 ..
             } => {
-                if explicit_relation_oids.contains(&dependent_oid)
+                if is_partition
+                    || explicit_relation_oids.contains(&dependent_oid)
                     || plan.relation_drop_oids.contains(&dependent_oid)
                 {
                     plan_drop_table_relation(
@@ -680,26 +690,32 @@ impl Database {
                     .catalog
                     .write()
                     .drop_view_by_oid_mvcc(relation.oid, &ctx)
-                    .map(|(_, effect)| effect),
+                    .map(|(entry, effect)| (vec![entry], effect)),
                 'i' => self
                     .catalog
                     .write()
                     .drop_relation_entry_by_oid_mvcc(relation.oid, &ctx)
-                    .map(|(_, effect)| effect),
+                    .map(|(entry, effect)| (vec![entry], effect)),
                 _ => self
                     .catalog
                     .write()
-                    .drop_relation_by_oid_mvcc(relation.oid, &ctx)
-                    .map(|(_, effect)| effect),
+                    .drop_relation_by_oid_mvcc(relation.oid, &ctx),
             };
-            let effect = drop_result.map_err(map_catalog_error)?;
+            let (dropped_relations, effect) = drop_result.map_err(map_catalog_error)?;
             if relation.relkind != 'v' {
                 self.apply_catalog_mutation_effect_immediate(&effect)?;
             }
-            if relation.relkind == 'r' {
-                self.session_stats_state(client_id)
-                    .write()
-                    .note_relation_drop(relation.oid, &self.stats);
+            if dropped_relations
+                .iter()
+                .any(|entry| is_drop_table_relkind(entry.relkind))
+            {
+                let stats_state = self.session_stats_state(client_id);
+                let mut stats = stats_state.write();
+                for entry in &dropped_relations {
+                    if is_drop_table_relkind(entry.relkind) {
+                        stats.note_relation_drop(entry.relation_oid, &self.stats);
+                    }
+                }
             }
             catalog_effects.push(effect);
         }
@@ -759,7 +775,7 @@ impl Database {
 
         for relation_name in &drop_stmt.table_names {
             let relation = match catalog.lookup_any_relation(relation_name) {
-                Some(relation) if relation.relkind == 'r' => relation,
+                Some(relation) if is_drop_table_relkind(relation.relkind) => relation,
                 Some(_) => {
                     return Err(ExecError::Parse(ParseError::WrongObjectType {
                         name: relation_name.clone(),
@@ -917,22 +933,29 @@ impl Database {
                         .catalog
                         .write()
                         .drop_view_by_oid_mvcc(*relation_oid, &ctx)
-                        .map(|(_, effect)| effect),
+                        .map(|(entry, effect)| (vec![entry], effect)),
                     _ => self
                         .catalog
                         .write()
-                        .drop_relation_by_oid_mvcc(*relation_oid, &ctx)
-                        .map(|(_, effect)| effect),
+                        .drop_relation_by_oid_mvcc(*relation_oid, &ctx),
                 }
                 .map_err(map_catalog_error)?;
+                let (dropped_relations, effect) = effect;
 
                 if relkind != 'v' {
                     self.apply_catalog_mutation_effect_immediate(&effect)?;
                 }
-                if relkind == 'r' {
-                    self.session_stats_state(client_id)
-                        .write()
-                        .note_relation_drop(*relation_oid, &self.stats);
+                if dropped_relations
+                    .iter()
+                    .any(|entry| is_drop_table_relkind(entry.relkind))
+                {
+                    let stats_state = self.session_stats_state(client_id);
+                    let mut stats = stats_state.write();
+                    for entry in &dropped_relations {
+                        if is_drop_table_relkind(entry.relkind) {
+                            stats.note_relation_drop(entry.relation_oid, &self.stats);
+                        }
+                    }
                 }
                 catalog_effects.push(effect);
                 next_cid = next_cid.saturating_add(1);

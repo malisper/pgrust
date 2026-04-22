@@ -836,12 +836,38 @@ fn lookup_modify_relation(
     name: &str,
 ) -> Result<BoundRelation, ParseError> {
     match catalog.lookup_any_relation(name) {
-        Some(entry) if matches!(entry.relkind, 'r' | 'v') => Ok(entry),
+        Some(entry) if matches!(entry.relkind, 'r' | 'p' | 'v') => Ok(entry),
         Some(_) => Err(ParseError::WrongObjectType {
             name: name.to_string(),
             expected: "table or view",
         }),
         None => Err(ParseError::UnknownTable(name.to_string())),
+    }
+}
+
+fn partitioned_update_target_oids(
+    catalog: &dyn CatalogLookup,
+    entry: &BoundRelation,
+    only: bool,
+) -> Vec<u32> {
+    if entry.relkind == 'p' {
+        if only {
+            return Vec::new();
+        }
+        return catalog
+            .find_all_inheritors(entry.relation_oid)
+            .into_iter()
+            .filter(|oid| {
+                catalog
+                    .relation_by_oid(*oid)
+                    .is_some_and(|child| child.relkind == 'r')
+            })
+            .collect();
+    }
+    if only {
+        vec![entry.relation_oid]
+    } else {
+        catalog.find_all_inheritors(entry.relation_oid)
     }
 }
 
@@ -1011,11 +1037,7 @@ fn build_update_target_from_joined_input(
     let rls_write_checks = parent_rls_write_checks
         .iter()
         .map(|check| RlsWriteCheck {
-            expr: rewrite_local_vars_for_output_exprs(
-                check.expr.clone(),
-                1,
-                &parent_visible_exprs,
-            ),
+            expr: rewrite_local_vars_for_output_exprs(check.expr.clone(), 1, &parent_visible_exprs),
             policy_name: check.policy_name.clone(),
             source: check.source.clone(),
         })
@@ -1565,6 +1587,11 @@ pub(crate) fn bind_insert_with_outer_scopes(
         &[],
     )?;
     let entry = lookup_modify_relation(catalog, &stmt.table_name)?;
+    if entry.relkind == 'p' && stmt.on_conflict.is_some() {
+        return Err(ParseError::FeatureNotSupported(
+            "INSERT ... ON CONFLICT on partitioned tables".into(),
+        ));
+    }
     if stmt.on_conflict.as_ref().is_some_and(|clause| {
         clause.action == crate::include::nodes::parsenodes::OnConflictAction::Update
     }) && relation_has_row_security(entry.relation_oid, catalog)
@@ -1757,6 +1784,20 @@ pub(crate) fn bind_update_with_outer_scopes(
         &[],
     )?;
     let entry = lookup_modify_relation(catalog, &stmt.table_name)?;
+    if entry.relkind == 'p'
+        && let Some(partitioned) = entry.partitioned_table.as_ref()
+    {
+        let assigned = assignments_partition_key_update(
+            &stmt.assignments,
+            &entry.desc,
+            partitioned.partattrs.as_slice(),
+        );
+        if assigned {
+            return Err(ParseError::FeatureNotSupported(
+                "updating partition key columns on partitioned tables".into(),
+            ));
+        }
+    }
     if stmt.from.is_some() {
         return bind_update_from(stmt, catalog, outer_scopes, &local_ctes, &entry);
     }
@@ -1832,27 +1873,23 @@ fn bind_simple_update(
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
 
-    let targets = if stmt.only {
-        vec![entry.relation_oid]
-    } else {
-        catalog.find_all_inheritors(entry.relation_oid)
-    }
-    .into_iter()
-    .map(|relation_oid| {
-        let child = catalog
-            .relation_by_oid(relation_oid)
-            .ok_or_else(|| ParseError::UnknownTable(stmt.table_name.clone()))?;
-        build_update_target(
-            &stmt.table_name,
-            &entry.desc,
-            &assignments,
-            predicate.as_ref(),
-            &target_rls.write_checks,
-            &child,
-            catalog,
-        )
-    })
-    .collect::<Result<Vec<_>, ParseError>>()?;
+    let targets = partitioned_update_target_oids(catalog, &entry, stmt.only)
+        .into_iter()
+        .map(|relation_oid| {
+            let child = catalog
+                .relation_by_oid(relation_oid)
+                .ok_or_else(|| ParseError::UnknownTable(stmt.table_name.clone()))?;
+            build_update_target(
+                &stmt.table_name,
+                &entry.desc,
+                &assignments,
+                predicate.as_ref(),
+                &target_rls.write_checks,
+                &child,
+                catalog,
+            )
+        })
+        .collect::<Result<Vec<_>, ParseError>>()?;
 
     Ok(BoundUpdateStatement {
         target_relation_name,
@@ -1911,11 +1948,8 @@ fn bind_update_from(
     );
     let target_visible_count = entry.desc.columns.len();
     let visible_column_count = target_visible_count + source_visible_count;
-    let projection = update_from_projection_targets(
-        &joined,
-        target_visible_count,
-        source_visible_count,
-    );
+    let projection =
+        update_from_projection_targets(&joined, target_visible_count, source_visible_count);
     let projected = joined.with_projection(projection);
     let mut eval_scope = combine_scopes(&target_scope, &source_scope);
     eval_scope.output_exprs = projected.output_exprs[..visible_column_count].to_vec();
@@ -1981,8 +2015,13 @@ fn bind_update_from(
             })
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
-    let returning =
-        bind_returning_targets(&stmt.returning, &eval_scope, catalog, outer_scopes, local_ctes)?;
+    let returning = bind_returning_targets(
+        &stmt.returning,
+        &eval_scope,
+        catalog,
+        outer_scopes,
+        local_ctes,
+    )?;
     let query = query_from_projection_with_qual(projected, predicate.clone());
     let input_plan = crate::backend::optimizer::fold_query_constants(query)
         .map(|query| planner(query, catalog))?;
@@ -2144,29 +2183,40 @@ pub(crate) fn bind_delete_with_outer_scopes(
         (None, None) => None,
     };
 
-    let targets = if stmt.only {
-        vec![entry.relation_oid]
-    } else {
-        catalog.find_all_inheritors(entry.relation_oid)
-    }
-    .into_iter()
-    .map(|relation_oid| {
-        let child = catalog
-            .relation_by_oid(relation_oid)
-            .ok_or_else(|| ParseError::UnknownTable(stmt.table_name.clone()))?;
-        build_delete_target(
-            &stmt.table_name,
-            &entry.desc,
-            predicate.as_ref(),
-            &child,
-            catalog,
-        )
-    })
-    .collect::<Result<Vec<_>, ParseError>>()?;
+    let targets = partitioned_update_target_oids(catalog, &entry, stmt.only)
+        .into_iter()
+        .map(|relation_oid| {
+            let child = catalog
+                .relation_by_oid(relation_oid)
+                .ok_or_else(|| ParseError::UnknownTable(stmt.table_name.clone()))?;
+            build_delete_target(
+                &stmt.table_name,
+                &entry.desc,
+                predicate.as_ref(),
+                &child,
+                catalog,
+            )
+        })
+        .collect::<Result<Vec<_>, ParseError>>()?;
 
     Ok(BoundDeleteStatement {
         targets,
         returning,
         subplans: Vec::new(),
     })
+}
+
+fn assignments_partition_key_update(
+    assignments: &[crate::include::nodes::parsenodes::Assignment],
+    desc: &RelationDesc,
+    partattrs: &[i16],
+) -> bool {
+    let key_columns = partattrs
+        .iter()
+        .filter_map(|attnum| desc.columns.get(attnum.saturating_sub(1) as usize))
+        .map(|column| column.name.to_ascii_lowercase())
+        .collect::<std::collections::BTreeSet<_>>();
+    assignments
+        .iter()
+        .any(|assignment| key_columns.contains(&assignment.target.column.to_ascii_lowercase()))
 }

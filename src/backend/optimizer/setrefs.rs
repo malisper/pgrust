@@ -1596,6 +1596,28 @@ fn lower_set_returning_call(
             output_columns,
             with_ordinality,
         },
+        SetReturningCall::PartitionTree {
+            func_oid,
+            func_variadic,
+            relid,
+            output_columns,
+        } => SetReturningCall::PartitionTree {
+            func_oid,
+            func_variadic,
+            relid: lower_expr(ctx, relid, mode),
+            output_columns,
+        },
+        SetReturningCall::PartitionAncestors {
+            func_oid,
+            func_variadic,
+            relid,
+            output_columns,
+        } => SetReturningCall::PartitionAncestors {
+            func_oid,
+            func_variadic,
+            relid: lower_expr(ctx, relid, mode),
+            output_columns,
+        },
         SetReturningCall::Unnest {
             func_oid,
             func_variadic,
@@ -1744,6 +1766,28 @@ fn fix_set_returning_call_upper_exprs(
             step: fix_upper_expr_for_input(root, step, path, input_tlist),
             output_columns,
             with_ordinality,
+        },
+        SetReturningCall::PartitionTree {
+            func_oid,
+            func_variadic,
+            relid,
+            output_columns,
+        } => SetReturningCall::PartitionTree {
+            func_oid,
+            func_variadic,
+            relid: fix_upper_expr_for_input(root, relid, path, input_tlist),
+            output_columns,
+        },
+        SetReturningCall::PartitionAncestors {
+            func_oid,
+            func_variadic,
+            relid,
+            output_columns,
+        } => SetReturningCall::PartitionAncestors {
+            func_oid,
+            func_variadic,
+            relid: fix_upper_expr_for_input(root, relid, path, input_tlist),
+            output_columns,
         },
         SetReturningCall::Unnest {
             func_oid,
@@ -2286,6 +2330,10 @@ fn validate_set_returning_call(
             validate_executable_expr(stop, plan_node, field);
             validate_executable_expr(step, plan_node, field);
         }
+        SetReturningCall::PartitionTree { relid, .. }
+        | SetReturningCall::PartitionAncestors { relid, .. } => {
+            validate_executable_expr(relid, plan_node, field);
+        }
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }
@@ -2607,6 +2655,10 @@ fn validate_planner_set_returning_call(
             validate_planner_expr(start, path_node, field);
             validate_planner_expr(stop, path_node, field);
             validate_planner_expr(step, path_node, field);
+        }
+        SetReturningCall::PartitionTree { relid, .. }
+        | SetReturningCall::PartitionAncestors { relid, .. } => {
+            validate_planner_expr(relid, path_node, field);
         }
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }

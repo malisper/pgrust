@@ -110,7 +110,9 @@ impl SpgistPageOpaqueData {
     }
 }
 
-pub fn spgist_page_get_opaque(page: &[u8; BLCKSZ]) -> Result<SpgistPageOpaqueData, SpgistPageError> {
+pub fn spgist_page_get_opaque(
+    page: &[u8; BLCKSZ],
+) -> Result<SpgistPageOpaqueData, SpgistPageError> {
     SpgistPageOpaqueData::decode(page_special(page)?)
 }
 
@@ -178,6 +180,9 @@ mod tests {
         gist_page_init(&mut page, F_LEAF).expect("gist page init");
 
         let err = spgist_page_get_opaque(&page).expect_err("legacy gist page should fail");
-        assert_eq!(err, super::SpgistPageError::Corrupt(SPGIST_REBUILD_REQUIRED));
+        assert_eq!(
+            err,
+            super::SpgistPageError::Corrupt(SPGIST_REBUILD_REQUIRED)
+        );
     }
 }

@@ -432,6 +432,12 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterTableAttachPartition(ref alter_stmt) => self
+                .execute_alter_table_attach_partition_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterTableSetRowSecurity(ref alter_stmt) => self
                 .execute_alter_table_set_row_security_stmt_with_search_path(
                     client_id,
@@ -1400,13 +1406,11 @@ impl Database {
                 }
                 result
             }
-            Statement::Vacuum(ref vacuum_stmt) => {
-                self.execute_vacuum_stmt_with_search_path(
-                    client_id,
-                    vacuum_stmt,
-                    configured_search_path,
-                )
-            }
+            Statement::Vacuum(ref vacuum_stmt) => self.execute_vacuum_stmt_with_search_path(
+                client_id,
+                vacuum_stmt,
+                configured_search_path,
+            ),
             Statement::Begin | Statement::Commit | Statement::Rollback => {
                 Ok(StatementResult::AffectedRows(0))
             }

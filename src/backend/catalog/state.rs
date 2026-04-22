@@ -12,6 +12,7 @@ use crate::backend::catalog::pg_depend::{
     trigger_depend_rows,
 };
 use crate::backend::catalog::pg_inherits::sort_pg_inherits_rows;
+use crate::backend::catalog::pg_partitioned_table::sort_pg_partitioned_table_rows;
 use crate::backend::catalog::pg_policy::sort_pg_policy_rows;
 use crate::backend::catalog::store::{DEFAULT_FIRST_REL_NUMBER, DEFAULT_FIRST_USER_OID};
 use crate::backend::executor::RelationDesc;
@@ -21,11 +22,11 @@ use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::backend::utils::misc::interrupts::InterruptReason;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_NOTNULL, PUBLIC_NAMESPACE_OID, PgAuthIdRow,
-    PgAuthMembersRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgInheritsRow, PgPolicyRow,
-    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
-    PgTablespaceRow, PgTriggerRow, bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows,
-    bootstrap_pg_database_rows, bootstrap_pg_tablespace_rows, builtin_range_name_for_sql_type,
-    builtin_type_rows, relkind_has_storage, sort_pg_rewrite_rows,
+    PgAuthMembersRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgInheritsRow,
+    PgPartitionedTableRow, PgPolicyRow, PgPublicationNamespaceRow, PgPublicationRelRow,
+    PgPublicationRow, PgRewriteRow, PgTablespaceRow, PgTriggerRow, bootstrap_pg_auth_members_rows,
+    bootstrap_pg_authid_rows, bootstrap_pg_database_rows, bootstrap_pg_tablespace_rows,
+    builtin_range_name_for_sql_type, builtin_type_rows, relkind_has_storage, sort_pg_rewrite_rows,
 };
 
 const DEFAULT_SPC_OID: u32 = 0;
@@ -76,6 +77,7 @@ pub struct CatalogEntry {
     pub relhassubclass: bool,
     pub relhastriggers: bool,
     pub relispartition: bool,
+    pub relpartbound: Option<String>,
     pub relrowsecurity: bool,
     pub relforcerowsecurity: bool,
     pub relpages: i32,
@@ -84,6 +86,7 @@ pub struct CatalogEntry {
     pub relallfrozen: i32,
     pub relfrozenxid: u32,
     pub desc: RelationDesc,
+    pub partitioned_table: Option<PgPartitionedTableRow>,
     pub index_meta: Option<CatalogIndexMeta>,
 }
 
@@ -105,6 +108,7 @@ pub struct Catalog {
     pub(crate) constraints: Vec<PgConstraintRow>,
     pub(crate) depends: Vec<PgDependRow>,
     pub(crate) inherits: Vec<PgInheritsRow>,
+    pub(crate) partitioned_tables: Vec<PgPartitionedTableRow>,
     pub(crate) rewrites: Vec<PgRewriteRow>,
     pub(crate) triggers: Vec<crate::include::catalog::PgTriggerRow>,
     pub(crate) policies: Vec<PgPolicyRow>,
@@ -126,6 +130,7 @@ impl Default for Catalog {
             constraints: Vec::new(),
             depends: Vec::new(),
             inherits: Vec::new(),
+            partitioned_tables: Vec::new(),
             rewrites: Vec::new(),
             triggers: Vec::new(),
             policies: Vec::new(),
@@ -223,6 +228,16 @@ impl Catalog {
 
     pub fn inherit_rows(&self) -> &[PgInheritsRow] {
         &self.inherits
+    }
+
+    pub fn partitioned_table_rows(&self) -> &[PgPartitionedTableRow] {
+        &self.partitioned_tables
+    }
+
+    pub fn partitioned_table_row(&self, relation_oid: u32) -> Option<&PgPartitionedTableRow> {
+        self.partitioned_tables
+            .iter()
+            .find(|row| row.partrelid == relation_oid)
     }
 
     pub fn inheritance_parents(&self, relation_oid: u32) -> Vec<PgInheritsRow> {
@@ -436,6 +451,7 @@ impl Catalog {
             relhassubclass: false,
             relhastriggers: false,
             relispartition: false,
+            relpartbound: None,
             relrowsecurity: false,
             relforcerowsecurity: false,
             relpages,
@@ -444,6 +460,7 @@ impl Catalog {
             relallfrozen: 0,
             relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
             desc,
+            partitioned_table: None,
             index_meta: None,
         };
         if relkind_has_storage(relkind) {
@@ -600,6 +617,7 @@ impl Catalog {
             relhassubclass: false,
             relhastriggers: false,
             relispartition: false,
+            relpartbound: None,
             relrowsecurity: false,
             relforcerowsecurity: false,
             relpages: 0,
@@ -610,6 +628,7 @@ impl Catalog {
             desc: RelationDesc {
                 columns: index_columns,
             },
+            partitioned_table: None,
             index_meta: Some(CatalogIndexMeta {
                 indrelid: table.relation_oid,
                 indkey,
@@ -2029,6 +2048,7 @@ impl Catalog {
     }
 
     fn replace_depend_rows_for_entry(&mut self, entry: &CatalogEntry) {
+        self.replace_partitioned_table_rows_for_entry(entry);
         let entry_object_oids = entry_owned_object_oids(entry);
         self.depends
             .retain(|row| !entry_object_oids.contains(&row.objid));
@@ -2060,6 +2080,15 @@ impl Catalog {
                 .collect::<Vec<_>>(),
         ));
         sort_pg_depend_rows(&mut self.depends);
+    }
+
+    fn replace_partitioned_table_rows_for_entry(&mut self, entry: &CatalogEntry) {
+        self.partitioned_tables
+            .retain(|row| row.partrelid != entry.relation_oid);
+        if let Some(row) = &entry.partitioned_table {
+            self.partitioned_tables.push(row.clone());
+            sort_pg_partitioned_table_rows(&mut self.partitioned_tables);
+        }
     }
 
     fn relation_name_for_oid(&self, relation_oid: u32) -> Result<String, CatalogError> {

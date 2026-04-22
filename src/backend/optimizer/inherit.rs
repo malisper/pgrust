@@ -20,7 +20,7 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
         else {
             continue;
         };
-        if !parent_rte.inh || relkind != 'r' {
+        if !parent_rte.inh || !matches!(relkind, 'r' | 'p') {
             continue;
         }
 
@@ -39,6 +39,9 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
             let Some(child) = catalog.relation_by_oid(child_oid) else {
                 continue;
             };
+            if relkind == 'p' && child.relkind != 'r' {
+                continue;
+            }
             let child_rtindex = root.parse.rtable.len() + 1;
             let translated_vars =
                 translate_parent_vars_to_child(&parent_rte.desc, child_rtindex, &child.desc);

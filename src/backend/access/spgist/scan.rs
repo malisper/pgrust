@@ -6,8 +6,8 @@ use crate::include::access::relscan::{
     IndexOrderByDistance, IndexScanDesc, IndexScanOpaque, ScanDirection, SpgistIndexScanOpaque,
     SpgistSearchItem,
 };
-use crate::include::access::spgist::spgist_page_items;
 use crate::include::access::scankey::ScanKeyData;
+use crate::include::access::spgist::spgist_page_items;
 
 use super::page::{page_opaque, read_buffered_page, relation_nblocks};
 use super::state::SpgistState;

@@ -104,6 +104,9 @@ mod tests {
         let with_null = Value::PgArray(ArrayValue::from_1d(vec![Value::Int32(1), Value::Null]));
         let without_null =
             Value::PgArray(ArrayValue::from_1d(vec![Value::Int32(1), Value::Int32(2)]));
-        assert_eq!(compare_bt_values(&with_null, &without_null), Ordering::Greater);
+        assert_eq!(
+            compare_bt_values(&with_null, &without_null),
+            Ordering::Greater
+        );
     }
 }

@@ -4,7 +4,9 @@ use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::page::bufpage::{
     MAXALIGN, PageError, SIZE_OF_PAGE_HEADER_DATA, page_init,
 };
-use crate::backend::storage::smgr::{BLCKSZ, ForkNumber, RelFileLocator, SmgrError, StorageManager};
+use crate::backend::storage::smgr::{
+    BLCKSZ, ForkNumber, RelFileLocator, SmgrError, StorageManager,
+};
 use crate::include::access::visibilitymapdefs::{
     BITS_PER_HEAPBLOCK, VISIBILITYMAP_ALL_FROZEN, VISIBILITYMAP_ALL_VISIBLE,
     VISIBILITYMAP_VALID_BITS,
@@ -105,7 +107,8 @@ pub fn visibilitymap_clear(
         return Err(VisibilityMapError::InvalidFlags(flags));
     }
     let buffer = require_map_buffer(heap_blk, vmbuf)?;
-    let pin = pool.pin_existing_block(client_id, rel, ForkNumber::VisibilityMap, buffer.map_block)?;
+    let pin =
+        pool.pin_existing_block(client_id, rel, ForkNumber::VisibilityMap, buffer.map_block)?;
     let mut guard = pool.lock_buffer_exclusive(pin.buffer_id())?;
     ensure_vm_page_initialized(&mut guard);
     let (map_byte, map_offset) = heapblk_to_byte_offset(heap_blk);
@@ -117,13 +120,7 @@ pub fn visibilitymap_clear(
     }
     guard[idx] &= !mask;
     let page = *guard;
-    pool.write_page_image_locked_with_rmgr(
-        pin.buffer_id(),
-        0,
-        &page,
-        &mut guard,
-        RM_HEAP2_ID,
-    )?;
+    pool.write_page_image_locked_with_rmgr(pin.buffer_id(), 0, &page, &mut guard, RM_HEAP2_ID)?;
     Ok(true)
 }
 
@@ -139,7 +136,8 @@ pub fn visibilitymap_set(
         return Err(VisibilityMapError::InvalidFlags(flags));
     }
     let buffer = require_map_buffer(heap_blk, vmbuf)?;
-    let pin = pool.pin_existing_block(client_id, rel, ForkNumber::VisibilityMap, buffer.map_block)?;
+    let pin =
+        pool.pin_existing_block(client_id, rel, ForkNumber::VisibilityMap, buffer.map_block)?;
     let mut guard = pool.lock_buffer_exclusive(pin.buffer_id())?;
     ensure_vm_page_initialized(&mut guard);
     let (map_byte, map_offset) = heapblk_to_byte_offset(heap_blk);
@@ -148,13 +146,7 @@ pub fn visibilitymap_set(
     if status != flags {
         guard[idx] |= flags << map_offset;
         let page = *guard;
-        pool.write_page_image_locked_with_rmgr(
-            pin.buffer_id(),
-            0,
-            &page,
-            &mut guard,
-            RM_HEAP2_ID,
-        )?;
+        pool.write_page_image_locked_with_rmgr(pin.buffer_id(), 0, &page, &mut guard, RM_HEAP2_ID)?;
     }
     Ok(status)
 }
@@ -168,7 +160,8 @@ pub fn visibilitymap_get_status(
 ) -> Result<u8, VisibilityMapError> {
     let map_block = heapblk_to_mapblock(heap_blk);
     if !visibilitymap_pin_ok(heap_blk, vmbuf) {
-        let nblocks = pool.with_storage_mut(|storage| storage.smgr.nblocks(rel, ForkNumber::VisibilityMap))?;
+        let nblocks =
+            pool.with_storage_mut(|storage| storage.smgr.nblocks(rel, ForkNumber::VisibilityMap))?;
         if map_block >= nblocks {
             *vmbuf = None;
             return Ok(0);
@@ -186,7 +179,8 @@ pub fn visibilitymap_count(
     client_id: ClientId,
     rel: RelFileLocator,
 ) -> Result<(u32, u32), VisibilityMapError> {
-    let nblocks = pool.with_storage_mut(|storage| storage.smgr.nblocks(rel, ForkNumber::VisibilityMap))?;
+    let nblocks =
+        pool.with_storage_mut(|storage| storage.smgr.nblocks(rel, ForkNumber::VisibilityMap))?;
     let mut all_visible = 0u32;
     let mut all_frozen = 0u32;
     for block in 0..nblocks {
@@ -211,7 +205,8 @@ pub fn visibilitymap_prepare_truncate(
     nheapblocks: u32,
 ) -> Result<Option<u32>, VisibilityMapError> {
     let newnblocks = visibilitymap_truncation_length(nheapblocks);
-    let current = pool.with_storage_mut(|storage| storage.smgr.nblocks(rel, ForkNumber::VisibilityMap))?;
+    let current =
+        pool.with_storage_mut(|storage| storage.smgr.nblocks(rel, ForkNumber::VisibilityMap))?;
     if current <= newnblocks {
         return Ok(None);
     }
@@ -222,20 +217,15 @@ pub fn visibilitymap_prepare_truncate(
     let trunc_block = heapblk_to_mapblock(nheapblocks);
     let (trunc_byte, trunc_offset) = heapblk_to_byte_offset(nheapblocks);
     if trunc_byte != 0 || trunc_offset != 0 {
-        let pin = pool.pin_existing_block(client_id, rel, ForkNumber::VisibilityMap, trunc_block)?;
+        let pin =
+            pool.pin_existing_block(client_id, rel, ForkNumber::VisibilityMap, trunc_block)?;
         let mut guard = pool.lock_buffer_exclusive(pin.buffer_id())?;
         ensure_vm_page_initialized(&mut guard);
         let start = MAP_HEADER_SIZE + trunc_byte + 1;
         guard[start..].fill(0);
         guard[MAP_HEADER_SIZE + trunc_byte] &= (1 << trunc_offset) - 1;
         let page = *guard;
-        pool.write_page_image_locked_with_rmgr(
-            pin.buffer_id(),
-            0,
-            &page,
-            &mut guard,
-            RM_HEAP2_ID,
-        )?;
+        pool.write_page_image_locked_with_rmgr(pin.buffer_id(), 0, &page, &mut guard, RM_HEAP2_ID)?;
     }
     Ok(Some(newnblocks))
 }
@@ -268,9 +258,7 @@ fn heapblk_to_mapblock(heap_block: u32) -> u32 {
 }
 
 fn heapblk_to_mapblock_limit(heap_block: u32) -> u32 {
-    heap_block
-        .saturating_add(HEAPBLOCKS_PER_PAGE as u32 - 1)
-        / HEAPBLOCKS_PER_PAGE as u32
+    heap_block.saturating_add(HEAPBLOCKS_PER_PAGE as u32 - 1) / HEAPBLOCKS_PER_PAGE as u32
 }
 
 fn heapblk_to_byte_offset(heap_block: u32) -> (usize, u8) {
@@ -291,9 +279,6 @@ mod tests {
         assert_eq!(heapblk_to_byte_offset(1), (0, 2));
         assert_eq!(heapblk_to_byte_offset(3), (0, 6));
         assert_eq!(heapblk_to_byte_offset(4), (1, 0));
-        assert_eq!(
-            heapblk_to_mapblock(HEAPBLOCKS_PER_PAGE as u32),
-            1
-        );
+        assert_eq!(heapblk_to_mapblock(HEAPBLOCKS_PER_PAGE as u32), 1);
     }
 }

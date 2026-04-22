@@ -218,6 +218,8 @@ fn relcache_entry_from_file(entry: RelCacheEntryFile) -> RelCacheEntry {
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
         relhastriggers: entry.relhastriggers,
+        relispartition: false,
+        relpartbound: None,
         relrowsecurity: entry.relrowsecurity,
         relforcerowsecurity: entry.relforcerowsecurity,
         desc: RelationDesc {
@@ -228,6 +230,7 @@ fn relcache_entry_from_file(entry: RelCacheEntryFile) -> RelCacheEntry {
                 .map(column_desc_from_file)
                 .collect(),
         },
+        partitioned_table: None,
         index: entry.index,
     }
 }

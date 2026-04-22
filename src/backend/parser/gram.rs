@@ -110,6 +110,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_statistics_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_partition_statement(&sql, options)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_alter_table_add_unnamed_foreign_key_statement(&sql, options)? {
         return Ok(stmt);
     }
@@ -230,6 +233,283 @@ fn try_parse_statistics_statement(sql: &str) -> Result<Option<Statement>, ParseE
             .map(|stmt| Some(Statement::CreateStatistics(stmt)));
     }
     Ok(None)
+}
+
+#[derive(Debug)]
+enum PartitionStatementParseError {
+    Parse(ParseError),
+    Unsupported,
+}
+
+impl From<ParseError> for PartitionStatementParseError {
+    fn from(value: ParseError) -> Self {
+        Self::Parse(value)
+    }
+}
+
+fn unsupported_partition_statement(sql: &str, feature: &'static str) -> Statement {
+    Statement::Unsupported(UnsupportedStatement {
+        sql: sql.trim().trim_end_matches(';').trim().into(),
+        feature,
+    })
+}
+
+fn try_parse_partition_statement(
+    sql: &str,
+    options: ParseOptions,
+) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+
+    if (lowered.starts_with("create table ")
+        || lowered.starts_with("create temp table ")
+        || lowered.starts_with("create temporary table "))
+        && find_next_top_level_keyword(trimmed, &["partition"]).is_some()
+    {
+        return match build_partition_create_table_statement(trimmed, options) {
+            Ok(stmt) => Ok(Some(stmt)),
+            Err(PartitionStatementParseError::Unsupported) => Ok(Some(
+                unsupported_partition_statement(trimmed, "CREATE TABLE form"),
+            )),
+            Err(PartitionStatementParseError::Parse(err)) => Err(err),
+        };
+    }
+
+    if lowered.starts_with("alter table ") && lowered.contains(" attach partition ") {
+        return match build_alter_table_attach_partition_statement(trimmed) {
+            Ok(stmt) => Ok(Some(Statement::AlterTableAttachPartition(stmt))),
+            Err(PartitionStatementParseError::Unsupported) => Ok(Some(
+                unsupported_partition_statement(trimmed, "ALTER TABLE form"),
+            )),
+            Err(PartitionStatementParseError::Parse(err)) => Err(err),
+        };
+    }
+
+    Ok(None)
+}
+
+fn build_partition_create_table_statement(
+    sql: &str,
+    options: ParseOptions,
+) -> Result<Statement, PartitionStatementParseError> {
+    let partition_idx = find_next_top_level_keyword(sql, &["partition"])
+        .ok_or(PartitionStatementParseError::Unsupported)?;
+    let partition_clause = sql[partition_idx..].trim_start();
+    if !keyword_at_start(partition_clause, "partition") {
+        return Err(PartitionStatementParseError::Unsupported);
+    }
+    let after_partition = consume_keyword(partition_clause, "partition").trim_start();
+    if keyword_at_start(after_partition, "by") {
+        let base_stmt = parse_statement_with_options_inner(
+            sql[..partition_idx].trim_end().to_string(),
+            options,
+        )
+        .map_err(PartitionStatementParseError::Parse)?;
+        let Statement::CreateTable(mut create_stmt) = base_stmt else {
+            return Err(PartitionStatementParseError::Unsupported);
+        };
+        let (partition_spec, rest) = parse_partition_spec_clause(partition_clause)?;
+        if !rest.trim().is_empty() {
+            return Err(PartitionStatementParseError::Unsupported);
+        }
+        create_stmt.partition_spec = Some(partition_spec);
+        return Ok(Statement::CreateTable(create_stmt));
+    }
+
+    if !keyword_at_start(after_partition, "of") {
+        return Err(PartitionStatementParseError::Unsupported);
+    }
+
+    let synthetic_base = format!("{} ()", sql[..partition_idx].trim_end());
+    let base_stmt = parse_statement_with_options_inner(synthetic_base, options)
+        .map_err(PartitionStatementParseError::Parse)?;
+    let Statement::CreateTable(mut create_stmt) = base_stmt else {
+        return Err(PartitionStatementParseError::Unsupported);
+    };
+    create_stmt.elements.clear();
+    create_stmt.inherits.clear();
+    let (parent_name, partition_bound, partition_spec, rest) =
+        parse_partition_of_clause(partition_clause)?;
+    if !rest.trim().is_empty() {
+        return Err(PartitionStatementParseError::Unsupported);
+    }
+    create_stmt.partition_of = Some(parent_name);
+    create_stmt.partition_bound = Some(partition_bound);
+    create_stmt.partition_spec = partition_spec;
+    Ok(Statement::CreateTable(create_stmt))
+}
+
+fn parse_partition_of_clause(
+    input: &str,
+) -> Result<
+    (
+        String,
+        RawPartitionBoundSpec,
+        Option<RawPartitionSpec>,
+        &str,
+    ),
+    PartitionStatementParseError,
+> {
+    let mut rest = consume_keyword(input.trim_start(), "partition").trim_start();
+    rest = consume_keyword(rest, "of").trim_start();
+    let (parts, next) = parse_qualified_identifier_parts(rest)?;
+    rest = next.trim_start();
+    if rest.starts_with('(') {
+        return Err(PartitionStatementParseError::Unsupported);
+    }
+    let (bound, next) = parse_partition_bound_clause(rest)?;
+    rest = next.trim_start();
+    let partition_spec = if rest.is_empty() {
+        None
+    } else {
+        let (partition_spec, next) = parse_partition_spec_clause(rest)?;
+        rest = next.trim_start();
+        Some(partition_spec)
+    };
+    Ok((parts.join("."), bound, partition_spec, rest))
+}
+
+fn parse_partition_spec_clause(
+    input: &str,
+) -> Result<(RawPartitionSpec, &str), PartitionStatementParseError> {
+    let mut rest = consume_keyword(input.trim_start(), "partition").trim_start();
+    rest = consume_keyword(rest, "by").trim_start();
+    let strategy = if keyword_at_start(rest, "list") {
+        rest = consume_keyword(rest, "list").trim_start();
+        PartitionStrategy::List
+    } else if keyword_at_start(rest, "range") {
+        rest = consume_keyword(rest, "range").trim_start();
+        PartitionStrategy::Range
+    } else {
+        return Err(PartitionStatementParseError::Unsupported);
+    };
+    let (keys_sql, rest) = take_parenthesized_segment(rest)?;
+    let mut keys = Vec::new();
+    for item in split_top_level_items(&keys_sql, ',')? {
+        let trimmed = item.trim();
+        if trimmed.is_empty() {
+            return Err(ParseError::UnexpectedEof.into());
+        }
+        let (column, remainder) = parse_unqualified_identifier(trimmed, "partition column")?;
+        if !remainder.trim().is_empty() {
+            return Err(PartitionStatementParseError::Unsupported);
+        }
+        keys.push(RawPartitionKey::Column(column));
+    }
+    Ok((RawPartitionSpec { strategy, keys }, rest))
+}
+
+fn parse_partition_bound_clause(
+    input: &str,
+) -> Result<(RawPartitionBoundSpec, &str), PartitionStatementParseError> {
+    let rest = input.trim_start();
+    if keyword_at_start(rest, "default") {
+        return Ok((
+            RawPartitionBoundSpec::List {
+                values: Vec::new(),
+                is_default: true,
+            },
+            consume_keyword(rest, "default"),
+        ));
+    }
+
+    if !keyword_at_start(rest, "for") {
+        return Err(PartitionStatementParseError::Unsupported);
+    }
+    let mut rest = consume_keyword(rest, "for").trim_start();
+    if !keyword_at_start(rest, "values") {
+        return Err(PartitionStatementParseError::Unsupported);
+    }
+    rest = consume_keyword(rest, "values").trim_start();
+    if keyword_at_start(rest, "in") {
+        rest = consume_keyword(rest, "in").trim_start();
+        let (values_sql, rest) = take_parenthesized_segment(rest)?;
+        let values = split_top_level_items(&values_sql, ',')?
+            .into_iter()
+            .map(|item| parse_expr(&item))
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok((
+            RawPartitionBoundSpec::List {
+                values,
+                is_default: false,
+            },
+            rest,
+        ));
+    }
+    if keyword_at_start(rest, "from") {
+        rest = consume_keyword(rest, "from").trim_start();
+        let (from_sql, next) = take_parenthesized_segment(rest)?;
+        let mut rest = next.trim_start();
+        rest = consume_keyword(rest, "to").trim_start();
+        let (to_sql, rest) = take_parenthesized_segment(rest)?;
+        return Ok((
+            RawPartitionBoundSpec::Range {
+                from: parse_partition_range_datums(&from_sql)?,
+                to: parse_partition_range_datums(&to_sql)?,
+                is_default: false,
+            },
+            rest,
+        ));
+    }
+    Err(PartitionStatementParseError::Unsupported)
+}
+
+fn parse_partition_range_datums(
+    input: &str,
+) -> Result<Vec<RawPartitionRangeDatum>, PartitionStatementParseError> {
+    split_top_level_items(input, ',')?
+        .into_iter()
+        .map(|item| {
+            let trimmed = item.trim();
+            if trimmed.eq_ignore_ascii_case("minvalue") {
+                Ok(RawPartitionRangeDatum::MinValue)
+            } else if trimmed.eq_ignore_ascii_case("maxvalue") {
+                Ok(RawPartitionRangeDatum::MaxValue)
+            } else {
+                Ok(RawPartitionRangeDatum::Value(parse_expr(trimmed)?))
+            }
+        })
+        .collect()
+}
+
+fn build_alter_table_attach_partition_statement(
+    sql: &str,
+) -> Result<AlterTableAttachPartitionStatement, PartitionStatementParseError> {
+    let mut rest = consume_keyword(sql.trim_start(), "alter").trim_start();
+    rest = consume_keyword(rest, "table").trim_start();
+    let mut if_exists = false;
+    let mut only = false;
+    if keyword_at_start(rest, "if") {
+        rest = consume_keyword(rest, "if").trim_start();
+        rest = consume_keyword(rest, "exists").trim_start();
+        if_exists = true;
+    }
+    if keyword_at_start(rest, "only") {
+        rest = consume_keyword(rest, "only").trim_start();
+        only = true;
+    }
+    let (parent_parts, next) = parse_qualified_identifier_parts(rest)?;
+    rest = next.trim_start();
+    if !keyword_at_start(rest, "attach") {
+        return Err(PartitionStatementParseError::Unsupported);
+    }
+    rest = consume_keyword(rest, "attach").trim_start();
+    if !keyword_at_start(rest, "partition") {
+        return Err(PartitionStatementParseError::Unsupported);
+    }
+    rest = consume_keyword(rest, "partition").trim_start();
+    let (partition_parts, next) = parse_qualified_identifier_parts(rest)?;
+    let (bound, rest) = parse_partition_bound_clause(next)?;
+    if !rest.trim().is_empty() {
+        return Err(PartitionStatementParseError::Unsupported);
+    }
+    Ok(AlterTableAttachPartitionStatement {
+        if_exists,
+        only,
+        parent_table: parent_parts.join("."),
+        partition_table: partition_parts.join("."),
+        bound,
+    })
 }
 
 fn try_parse_trigger_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
@@ -7164,6 +7444,9 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             on_commit,
             elements,
             inherits,
+            partition_spec: None,
+            partition_of: None,
+            partition_bound: None,
             if_not_exists,
         }))
     }

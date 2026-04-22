@@ -19,7 +19,6 @@ use std::time::Duration;
 
 use crate::backend::access::transam::CheckpointRecord;
 use crate::backend::access::transam::xloginsert::RegisteredXLogRecord;
-use crate::include::access::heapam_xlog::{XLOG_HEAP2_VISIBLE, XlHeapVisible};
 use crate::backend::access::transam::xlogreader::{
     BKPBLOCK_FORK_MASK, BKPBLOCK_HAS_DATA, BKPBLOCK_HAS_IMAGE, BKPBLOCK_SAME_REL,
     BKPBLOCK_WILL_INIT, BKPIMAGE_APPLY, BKPIMAGE_HAS_HOLE, CRC_OFFSET, DecodedBkpBlock,
@@ -31,6 +30,7 @@ use crate::backend::access::transam::xlogreader::{
 };
 use crate::backend::storage::buffer::{BufferTag, PAGE_SIZE};
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator};
+use crate::include::access::heapam_xlog::{XLOG_HEAP2_VISIBLE, XlHeapVisible};
 
 pub mod replay {
     pub use crate::backend::access::transam::xlogrecovery::*;

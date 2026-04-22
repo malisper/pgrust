@@ -159,8 +159,14 @@ pub fn perform_wal_recovery_from(
                         .clone();
                     ensure_block_exists(smgr, block.tag.rel, block.tag.fork, block.tag.block)?;
                     page[0..8].copy_from_slice(&record_lsn.to_le_bytes());
-                    smgr.write_block(block.tag.rel, block.tag.fork, block.tag.block, &page[..], true)
-                        .map_err(smgr_to_wal)?;
+                    smgr.write_block(
+                        block.tag.rel,
+                        block.tag.fork,
+                        block.tag.block,
+                        &page[..],
+                        true,
+                    )
+                    .map_err(smgr_to_wal)?;
                 }
             }
             (RM_XACT_ID, XLOG_XACT_COMMIT) => {
@@ -718,7 +724,10 @@ mod tests {
 
         assert_eq!(stats.commits, 1);
         assert_eq!(stats.aborted, 1);
-        assert_eq!(txns.status(committed_xid), Some(TransactionStatus::Committed));
+        assert_eq!(
+            txns.status(committed_xid),
+            Some(TransactionStatus::Committed)
+        );
         assert_eq!(txns.status(aborted_xid), Some(TransactionStatus::Aborted));
     }
 

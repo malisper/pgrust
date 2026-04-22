@@ -247,15 +247,11 @@ impl TransactionManager {
     }
 
     pub fn oldest_active_xid(&self) -> TransactionId {
-        self.in_progress
-            .iter()
-            .copied()
-            .min()
-            .unwrap_or_else(|| {
-                self.next_xid
-                    .saturating_add(1)
-                    .max(FIRST_NORMAL_TRANSACTION_ID)
-            })
+        self.in_progress.iter().copied().min().unwrap_or_else(|| {
+            self.next_xid
+                .saturating_add(1)
+                .max(FIRST_NORMAL_TRANSACTION_ID)
+        })
     }
 
     pub fn next_xid(&self) -> TransactionId {

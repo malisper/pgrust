@@ -19,6 +19,7 @@ mod maintenance;
 mod opclass;
 mod operator;
 mod owner;
+mod partition;
 mod policy;
 mod privilege;
 mod publication;

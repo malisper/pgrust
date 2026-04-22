@@ -8,8 +8,8 @@ use crate::include::access::spgist::{F_LEAF, spgist_page_append_tuple, spgist_pa
 use crate::include::nodes::datum::Value;
 
 use super::page::{
-    allocate_new_block, ensure_empty_spgist, read_buffered_page, relation_nblocks, write_logged_pages,
-    SpgistLoggedPage,
+    SpgistLoggedPage, allocate_new_block, ensure_empty_spgist, read_buffered_page,
+    relation_nblocks, write_logged_pages,
 };
 use super::state::SpgistState;
 use super::tuple::make_leaf_tuple;
