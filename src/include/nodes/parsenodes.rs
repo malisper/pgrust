@@ -2693,6 +2693,7 @@ pub struct Assignment {
 pub struct AssignmentTarget {
     pub column: String,
     pub subscripts: Vec<ArraySubscript>,
+    pub field_path: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

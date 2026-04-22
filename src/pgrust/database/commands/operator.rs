@@ -5,8 +5,8 @@ use crate::backend::parser::{
 };
 use crate::backend::utils::cache::syscache::backend_catcache;
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, INT2_TYPE_OID, INT4_TYPE_OID, OID_TYPE_OID,
-    PG_CATALOG_NAMESPACE_OID, PUBLIC_NAMESPACE_OID, PgOperatorRow,
+    BOOTSTRAP_SUPERUSER_OID, INT2_TYPE_OID, INT4_TYPE_OID, OID_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
+    PUBLIC_NAMESPACE_OID, PgOperatorRow,
 };
 use crate::include::nodes::parsenodes::RawTypeName;
 
@@ -265,11 +265,8 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let mut current_cid = cid;
-        let catalog = self.lazy_catalog_lookup(
-            client_id,
-            Some((xid, current_cid)),
-            configured_search_path,
-        );
+        let catalog =
+            self.lazy_catalog_lookup(client_id, Some((xid, current_cid)), configured_search_path);
         let namespace_oid = normalize_operator_namespace(
             self,
             client_id,

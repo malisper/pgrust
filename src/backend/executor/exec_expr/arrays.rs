@@ -737,7 +737,11 @@ fn array_position_value(
     }
 }
 
-fn append_array_value(array: &Value, element: &Value, prepend: bool) -> Result<Value, ExecError> {
+pub(crate) fn append_array_value(
+    array: &Value,
+    element: &Value,
+    prepend: bool,
+) -> Result<Value, ExecError> {
     let Some(array) = normalize_array_value(array) else {
         return Ok(Value::Null);
     };
@@ -772,7 +776,10 @@ fn append_array_value(array: &Value, element: &Value, prepend: bool) -> Result<V
     Ok(Value::PgArray(result))
 }
 
-fn concatenate_arrays(left: ArrayValue, right: ArrayValue) -> Result<ArrayValue, ExecError> {
+pub(crate) fn concatenate_arrays(
+    left: ArrayValue,
+    right: ArrayValue,
+) -> Result<ArrayValue, ExecError> {
     if left.ndim() == 0 {
         return Ok(right);
     }

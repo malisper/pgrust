@@ -129,14 +129,15 @@ fn build_alias_decl(pair: Pair<'_, Rule>) -> Result<AliasDecl, ParseError> {
             Rule::ident => name = Some(build_ident(part)),
             Rule::positional_param => {
                 let raw = part.as_str();
-                param_index = Some(
-                    raw[1..]
-                        .parse::<usize>()
-                        .map_err(|_| ParseError::UnexpectedToken {
-                            expected: "valid positional parameter reference",
-                            actual: raw.into(),
-                        })?,
-                );
+                param_index =
+                    Some(
+                        raw[1..]
+                            .parse::<usize>()
+                            .map_err(|_| ParseError::UnexpectedToken {
+                                expected: "valid positional parameter reference",
+                                actual: raw.into(),
+                            })?,
+                    );
             }
             _ => {}
         }
@@ -160,6 +161,7 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
         Rule::null_stmt => Ok(Stmt::Null),
         Rule::assign_stmt => build_assign_stmt(inner),
         Rule::if_stmt => build_if_stmt(inner),
+        Rule::while_stmt => build_while_stmt(inner),
         Rule::for_int_stmt => build_for_stmt(inner),
         Rule::raise_stmt => build_raise_stmt(inner),
         Rule::return_stmt => build_return_stmt(inner),
@@ -293,6 +295,24 @@ fn build_for_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
         var_name: var_name.ok_or(ParseError::UnexpectedEof)?,
         start_expr: start_expr.ok_or(ParseError::UnexpectedEof)?,
         end_expr: end_expr.ok_or(ParseError::UnexpectedEof)?,
+        body,
+    })
+}
+
+fn build_while_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let mut condition = None;
+    let mut body = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::expr_until_loop if condition.is_none() => {
+                condition = Some(part.as_str().trim().to_string());
+            }
+            Rule::stmt => body.push(build_stmt(part)?),
+            _ => {}
+        }
+    }
+    Ok(Stmt::While {
+        condition: condition.ok_or(ParseError::UnexpectedEof)?,
         body,
     })
 }
@@ -438,6 +458,26 @@ mod tests {
         assert_eq!(total_decl.name, "total");
         assert_eq!(total_decl.ty.kind, SqlTypeKind::Int4);
         assert_eq!(block.statements.len(), 3);
+    }
+
+    #[test]
+    fn parse_while_stmt() {
+        let block = parse_block(
+            "
+            begin
+                while current_value is not null loop
+                    null;
+                end loop;
+            end
+            ",
+        )
+        .unwrap();
+
+        let Stmt::While { condition, body } = &block.statements[0] else {
+            panic!("expected top-level while statement");
+        };
+        assert_eq!(condition, "current_value is not null");
+        assert_eq!(body.len(), 1);
     }
 
     #[test]

@@ -5,6 +5,7 @@ use crate::backend::rewrite::{
     RlsWriteCheck, ViewDmlEvent, ViewDmlRewriteError, build_target_relation_row_security,
     relation_has_row_security, resolve_auto_updatable_view_target,
 };
+use crate::backend::utils::record::lookup_anonymous_record_descriptor;
 use crate::include::catalog::PolicyCommand;
 use crate::include::nodes::primnodes::JoinType;
 use crate::include::nodes::primnodes::{SELF_ITEM_POINTER_ATTR_NO, TargetEntry, Var};
@@ -145,6 +146,8 @@ pub enum BoundMergeAction {
 pub struct BoundAssignment {
     pub column_index: usize,
     pub subscripts: Vec<BoundArraySubscript>,
+    pub field_path: Vec<String>,
+    pub target_sql_type: SqlType,
     pub expr: Expr,
 }
 
@@ -152,6 +155,8 @@ pub struct BoundAssignment {
 pub struct BoundAssignmentTarget {
     pub column_index: usize,
     pub subscripts: Vec<BoundArraySubscript>,
+    pub field_path: Vec<String>,
+    pub target_sql_type: SqlType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,6 +170,88 @@ fn merge_target_relation_name(stmt: &MergeStatement) -> String {
     stmt.target_alias
         .clone()
         .unwrap_or_else(|| stmt.target_table.clone())
+}
+
+fn resolve_assignment_field_type(
+    row_type: SqlType,
+    field: &str,
+    catalog: &dyn CatalogLookup,
+) -> Result<SqlType, ParseError> {
+    if matches!(row_type.kind, SqlTypeKind::Composite) && row_type.typrelid != 0 {
+        let relation = catalog
+            .lookup_relation_by_oid(row_type.typrelid)
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "named composite type",
+                actual: format!("type relation {} not found", row_type.typrelid),
+            })?;
+        if let Some(found) = relation
+            .desc
+            .columns
+            .iter()
+            .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(field))
+        {
+            return Ok(found.sql_type);
+        }
+    }
+
+    if matches!(row_type.kind, SqlTypeKind::Record)
+        && row_type.typmod > 0
+        && let Some(descriptor) = lookup_anonymous_record_descriptor(row_type.typmod)
+        && let Some(found) = descriptor
+            .fields
+            .iter()
+            .find(|candidate| candidate.name.eq_ignore_ascii_case(field))
+    {
+        return Ok(found.sql_type);
+    }
+
+    Err(ParseError::UnexpectedToken {
+        expected: "record field",
+        actual: format!("field selection .{field}"),
+    })
+}
+
+fn resolve_assignment_target_sql_type(
+    column_type: SqlType,
+    subscripts: &[crate::include::nodes::parsenodes::ArraySubscript],
+    field_path: &[String],
+    catalog: &dyn CatalogLookup,
+) -> Result<SqlType, ParseError> {
+    let mut current = column_type;
+    for subscript in subscripts {
+        if current.kind == SqlTypeKind::Point && !current.is_array {
+            current = SqlType::new(SqlTypeKind::Float8);
+            continue;
+        }
+        if !current.is_array {
+            return Err(ParseError::DetailedError {
+                message: format!(
+                    "cannot subscript type {} because it does not support subscripting",
+                    sql_type_name(current)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42804",
+            });
+        }
+        current = if subscript.is_slice {
+            SqlType::array_of(current.element_type())
+        } else {
+            current.element_type()
+        };
+    }
+
+    if !field_path.is_empty() && subscripts.iter().any(|subscript| subscript.is_slice) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "record field selection on a scalar composite value",
+            actual: format!("assignment target {}", field_path.join(".")),
+        });
+    }
+
+    for field in field_path {
+        current = resolve_assignment_field_type(current, field, catalog)?;
+    }
+    Ok(current)
 }
 
 fn merge_explain_target_name(stmt: &MergeStatement) -> String {
@@ -248,14 +335,22 @@ fn bind_merge_when_clause(
             let assignments = assignments
                 .iter()
                 .map(|assignment| {
+                    let column_index = resolve_column(target_scope, &assignment.target.column)?;
                     Ok(BoundAssignment {
-                        column_index: resolve_column(target_scope, &assignment.target.column)?,
+                        column_index,
                         subscripts: bind_assignment_subscripts(
                             &assignment.target.subscripts,
                             target_scope,
                             catalog,
                             local_ctes,
                             &[],
+                        )?,
+                        field_path: assignment.target.field_path.clone(),
+                        target_sql_type: resolve_assignment_target_sql_type(
+                            target_desc.columns[column_index].sql_type,
+                            &assignment.target.subscripts,
+                            &assignment.target.field_path,
+                            catalog,
                         )?,
                         expr: bind_expr_with_outer_and_ctes(
                             &assignment.expr,
@@ -275,9 +370,12 @@ fn bind_merge_when_clause(
                 columns
                     .iter()
                     .map(|column| {
+                        let column_index = resolve_column(target_scope, column)?;
                         Ok(BoundAssignmentTarget {
-                            column_index: resolve_column(target_scope, column)?,
+                            column_index,
                             subscripts: Vec::new(),
+                            field_path: Vec::new(),
+                            target_sql_type: target_desc.columns[column_index].sql_type,
                         })
                     })
                     .collect::<Result<Vec<_>, ParseError>>()?
@@ -677,6 +775,8 @@ fn build_update_target(
                     &assignment.subscripts,
                     &translation_exprs,
                 ),
+                field_path: assignment.field_path.clone(),
+                target_sql_type: assignment.target_sql_type,
                 expr: rewrite_local_vars_for_output_exprs(
                     assignment.expr.clone(),
                     1,
@@ -816,6 +916,8 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
                     &target.subscripts,
                     &resolved.visible_output_exprs,
                 ),
+                field_path: target.field_path.clone(),
+                target_sql_type: target.target_sql_type,
             })
         })
         .collect::<Result<Vec<_>, ViewDmlRewriteError>>()?;
@@ -915,6 +1017,8 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
                     &assignment.subscripts,
                     &resolved.visible_output_exprs,
                 ),
+                field_path: assignment.field_path.clone(),
+                target_sql_type: assignment.target_sql_type,
                 expr: rewrite_local_vars_for_output_exprs(
                     assignment.expr.clone(),
                     1,
@@ -946,25 +1050,24 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
         })
         .collect::<Result<Vec<_>, ViewDmlRewriteError>>()?;
 
-    let targets = targets
-        .into_iter()
-        .map(|mut target| {
-            target.rls_write_checks.extend(
-                resolved
-                    .view_check_options
-                    .iter()
-                    .cloned()
-                    .map(|check| RlsWriteCheck {
-                        expr: check.expr,
-                        policy_name: None,
-                        source: crate::backend::rewrite::RlsWriteCheckSource::ViewCheckOption(
-                            check.view_name,
-                        ),
-                    }),
-            );
-            target
-        })
-        .collect();
+    let targets =
+        targets
+            .into_iter()
+            .map(|mut target| {
+                target
+                    .rls_write_checks
+                    .extend(resolved.view_check_options.iter().cloned().map(|check| {
+                        RlsWriteCheck {
+                            expr: check.expr,
+                            policy_name: None,
+                            source: crate::backend::rewrite::RlsWriteCheckSource::ViewCheckOption(
+                                check.view_name,
+                            ),
+                        }
+                    }));
+                target
+            })
+            .collect();
 
     Ok(BoundUpdateStatement {
         targets,
@@ -1149,6 +1252,8 @@ fn visible_assignment_targets(desc: &RelationDesc) -> Vec<BoundAssignmentTarget>
         .map(|column_index| BoundAssignmentTarget {
             column_index,
             subscripts: Vec::new(),
+            field_path: Vec::new(),
+            target_sql_type: desc.columns[column_index].sql_type,
         })
         .collect()
 }
@@ -1455,14 +1560,22 @@ pub(crate) fn bind_update_with_outer_scopes(
         .assignments
         .iter()
         .map(|assignment| {
+            let column_index = resolve_column(&scope, &assignment.target.column)?;
             Ok(BoundAssignment {
-                column_index: resolve_column(&scope, &assignment.target.column)?,
+                column_index,
                 subscripts: bind_assignment_subscripts(
                     &assignment.target.subscripts,
                     &scope,
                     catalog,
                     &local_ctes,
                     outer_scopes,
+                )?,
+                field_path: assignment.target.field_path.clone(),
+                target_sql_type: resolve_assignment_target_sql_type(
+                    entry.desc.columns[column_index].sql_type,
+                    &assignment.target.subscripts,
+                    &assignment.target.field_path,
+                    catalog,
                 )?,
                 expr: bind_expr_with_outer_and_ctes(
                     &assignment.expr,
@@ -1511,14 +1624,22 @@ pub(super) fn bind_assignment_target(
     catalog: &dyn CatalogLookup,
     local_ctes: &[BoundCte],
 ) -> Result<BoundAssignmentTarget, ParseError> {
+    let column_index = resolve_column(scope, &target.column)?;
     Ok(BoundAssignmentTarget {
-        column_index: resolve_column(scope, &target.column)?,
+        column_index,
         subscripts: bind_assignment_subscripts(
             &target.subscripts,
             scope,
             catalog,
             local_ctes,
             &[],
+        )?,
+        field_path: target.field_path.clone(),
+        target_sql_type: resolve_assignment_target_sql_type(
+            scope.desc.columns[column_index].sql_type,
+            &target.subscripts,
+            &target.field_path,
+            catalog,
         )?,
     })
 }

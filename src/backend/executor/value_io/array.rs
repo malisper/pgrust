@@ -391,6 +391,9 @@ fn decode_array_bytes_internal(
 }
 
 fn array_header_type_matches_expected(actual: SqlType, expected: SqlType) -> bool {
+    if actual.type_oid != 0 && actual.type_oid == expected.type_oid {
+        return true;
+    }
     actual.kind == expected.kind && actual.is_array == expected.is_array
 }
 

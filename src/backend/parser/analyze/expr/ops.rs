@@ -310,7 +310,10 @@ pub(crate) fn bind_lowered_comparison_expr(
         catalog,
         CollationConsumer::StringComparison,
         &[
-            (expr_sql_type_hint(&left).unwrap_or(left_type), left_explicit_collation),
+            (
+                expr_sql_type_hint(&left).unwrap_or(left_type),
+                left_explicit_collation,
+            ),
             (
                 expr_sql_type_hint(&right).unwrap_or(right_type),
                 right_explicit_collation,
@@ -416,7 +419,10 @@ fn supports_array_comparison_operator(op: &str, left: SqlType, right: SqlType) -
     left.is_array
         && right.is_array
         && left == right
-        && matches!(op, "=" | "<>" | "<" | "<=" | ">" | ">=" | "@>" | "<@" | "&&")
+        && matches!(
+            op,
+            "=" | "<>" | "<" | "<=" | ">" | ">=" | "@>" | "<@" | "&&"
+        )
 }
 
 fn supports_builtin_datetime_comparison(op: &str, left: SqlType, right: SqlType) -> bool {
@@ -856,6 +862,7 @@ pub(crate) fn bind_concat_operands(
 
     if left_type.is_array || right_type.is_array {
         let element_type = resolve_array_concat_element_type(left_type, right_type)?;
+        let result_type = SqlType::array_of(element_type);
         let left_expr = if left_type.is_array {
             coerce_bound_expr(left_bound, left_type, SqlType::array_of(element_type))
         } else {
@@ -866,9 +873,11 @@ pub(crate) fn bind_concat_operands(
         } else {
             coerce_bound_expr(right_bound, right_type, element_type)
         };
-        return Ok(Expr::op_auto(
+        return Ok(Expr::binary_op(
             crate::include::nodes::primnodes::OpExprKind::Concat,
-            vec![left_expr, right_expr],
+            result_type,
+            left_expr,
+            right_expr,
         ));
     }
 
