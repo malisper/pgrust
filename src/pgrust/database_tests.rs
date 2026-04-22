@@ -12523,6 +12523,91 @@ fn unique_index_insert_rejects_duplicate_key() {
 }
 
 #[test]
+fn unique_array_column_supports_duplicates_and_index_quals() {
+    let base = temp_dir("unique_array_column_supports_duplicates_and_index_quals");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create temp table arr_tbl (f1 int[] unique)")
+        .unwrap();
+    db.execute(1, "insert into arr_tbl values ('{1,2,3}')")
+        .unwrap();
+    db.execute(1, "insert into arr_tbl values ('{1,2}')")
+        .unwrap();
+    db.execute(1, "insert into arr_tbl values ('{2,3,4}')")
+        .unwrap();
+    db.execute(1, "insert into arr_tbl values ('{1,5,3}')")
+        .unwrap();
+    db.execute(1, "insert into arr_tbl values ('{1,2,10}')")
+        .unwrap();
+
+    match db.execute(1, "insert into arr_tbl values ('{1,2,3}')") {
+        Err(ExecError::UniqueViolation { constraint }) => {
+            assert_eq!(constraint, "arr_tbl_f1_key");
+        }
+        other => panic!("expected unique violation, got {:?}", other),
+    }
+
+    db.execute(1, "set enable_seqscan to off").unwrap();
+    db.execute(1, "set enable_bitmapscan to off").unwrap();
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select * from arr_tbl where f1 > '{1,2,3}' and f1 <= '{1,5,3}'",
+        "arr_tbl_f1_key",
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select * from arr_tbl where f1 > '{1,2,3}' and f1 <= '{1,5,3}'"
+        ),
+        vec![
+            vec![Value::PgArray(
+                crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                    Value::Int32(1),
+                    Value::Int32(2),
+                    Value::Int32(10),
+                ])
+                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+            )],
+            vec![Value::PgArray(
+                crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                    Value::Int32(1),
+                    Value::Int32(5),
+                    Value::Int32(3),
+                ])
+                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+            )],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select * from arr_tbl where f1 >= '{1,2,3}' and f1 < '{1,5,3}'"
+        ),
+        vec![
+            vec![Value::PgArray(
+                crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                    Value::Int32(1),
+                    Value::Int32(2),
+                    Value::Int32(3),
+                ])
+                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+            )],
+            vec![Value::PgArray(
+                crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                    Value::Int32(1),
+                    Value::Int32(2),
+                    Value::Int32(10),
+                ])
+                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+            )],
+        ]
+    );
+}
+
+#[test]
 fn unique_index_update_rejects_duplicate_key() {
     let base = temp_dir("unique_index_update_rejects_duplicate_key");
     let db = Database::open(&base, 16).unwrap();
