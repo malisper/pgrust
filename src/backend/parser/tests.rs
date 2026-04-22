@@ -7158,6 +7158,22 @@ fn parse_create_table_primary_key_and_unique_constraints() {
 }
 
 #[test]
+fn parse_create_table_array_column_with_unique_constraint() {
+    let stmt = parse_statement("create temp table arr_tbl (f1 int[] unique)").unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let columns = ct.columns().collect::<Vec<_>>();
+    assert_eq!(columns.len(), 1);
+    assert_eq!(columns[0].name, "f1");
+    assert_eq!(
+        columns[0].ty,
+        RawTypeName::Builtin(SqlType::array_of(SqlType::new(SqlTypeKind::Int4)))
+    );
+    assert!(columns[0].unique());
+}
+
+#[test]
 fn parse_create_table_named_check_and_not_null_constraints() {
     let stmt = parse_statement(
         "create table items (id int4 constraint id_positive check (id > 0) not valid deferrable initially deferred not enforced, note text, constraint note_present not null note not valid, constraint note_nonempty check (note <> '') not deferrable initially immediate enforced)",

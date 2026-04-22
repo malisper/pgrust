@@ -364,6 +364,13 @@ pub fn default_opclass_for_am_and_type(
                 && row.opcintype == crate::include::catalog::ANYMULTIRANGEOID
         });
     }
+    if input_type.sql_type.is_array {
+        return opclasses.into_iter().find(|row| {
+            row.opcmethod == am_oid
+                && row.opcdefault
+                && row.opcintype == crate::include::catalog::ANYARRAYOID
+        });
+    }
     (am_oid == crate::include::catalog::GIST_AM_OID
         && crate::include::catalog::builtin_range_rows()
             .iter()
