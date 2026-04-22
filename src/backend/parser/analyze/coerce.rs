@@ -311,6 +311,10 @@ pub(super) fn coerce_unknown_string_literal_type(
         }
         match peer_type.element_type().kind {
             SqlTypeKind::Date => return SqlType::new(SqlTypeKind::Date),
+            SqlTypeKind::Time => return SqlType::new(SqlTypeKind::Time),
+            SqlTypeKind::TimeTz => return SqlType::new(SqlTypeKind::TimeTz),
+            SqlTypeKind::Timestamp => return SqlType::new(SqlTypeKind::Timestamp),
+            SqlTypeKind::TimestampTz => return SqlType::new(SqlTypeKind::TimestampTz),
             SqlTypeKind::Jsonb => return SqlType::new(SqlTypeKind::Jsonb),
             SqlTypeKind::InternalChar => return SqlType::new(SqlTypeKind::Text),
             SqlTypeKind::TsQuery => return SqlType::new(SqlTypeKind::TsQuery),
