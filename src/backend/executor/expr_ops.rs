@@ -40,15 +40,18 @@ pub(crate) fn compare_order_by_keys(
             item.descending,
         )?;
         if ordering != Ordering::Equal {
-            return Ok(if item.descending
-                && !matches!(
-                    (left_value, right_value),
-                    (Value::Null, _) | (_, Value::Null)
-                ) {
-                ordering.reverse()
-            } else {
-                ordering
-            });
+            return Ok(
+                if item.descending
+                    && !matches!(
+                        (left_value, right_value),
+                        (Value::Null, _) | (_, Value::Null)
+                    )
+                {
+                    ordering.reverse()
+                } else {
+                    ordering
+                },
+            );
         }
     }
     Ok(Ordering::Equal)
@@ -103,14 +106,16 @@ pub(crate) fn compare_order_values(
         )),
         (Value::Range(a), Value::Range(b)) => Ok(compare_range_values(a, b)),
         (Value::Multirange(a), Value::Multirange(b)) => Ok(compare_multirange_values(a, b)),
-        (Value::TsVector(a), Value::TsVector(b)) => Ok(crate::backend::executor::compare_tsvector(a, b)),
-        (Value::TsQuery(a), Value::TsQuery(b)) => Ok(crate::backend::executor::compare_tsquery(a, b)),
+        (Value::TsVector(a), Value::TsVector(b)) => {
+            Ok(crate::backend::executor::compare_tsvector(a, b))
+        }
+        (Value::TsQuery(a), Value::TsQuery(b)) => {
+            Ok(crate::backend::executor::compare_tsquery(a, b))
+        }
         (Value::Record(a), Value::Record(b)) => Ok(compare_record_values(a, b)),
-        (a, b) if a.as_text().is_some() && b.as_text().is_some() => compare_text_values(
-            a.as_text().unwrap(),
-            b.as_text().unwrap(),
-            collation_oid,
-        ),
+        (a, b) if a.as_text().is_some() && b.as_text().is_some() => {
+            compare_text_values(a.as_text().unwrap(), b.as_text().unwrap(), collation_oid)
+        }
         (Value::Bool(a), Value::Bool(b)) => Ok(a.cmp(b)),
         (a, b) if normalize_array_value(a).is_some() && normalize_array_value(b).is_some() => {
             Ok(compare_array_values(
@@ -721,9 +726,7 @@ pub(crate) fn order_values(
             op,
         ))),
         (Value::Timestamp(l), Value::Timestamp(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
-        (Value::TimestampTz(l), Value::TimestampTz(r)) => {
-            Ok(Value::Bool(compare_ord(*l, *r, op)))
-        }
+        (Value::TimestampTz(l), Value::TimestampTz(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(match op {
             "<" => pg_float_cmp(*l, *r) == Ordering::Less,
             "<=" => pg_float_cmp(*l, *r) != Ordering::Greater,
@@ -808,8 +811,7 @@ pub(crate) fn ensure_builtin_collation_supported(
     collation_oid: Option<u32>,
 ) -> Result<(), ExecError> {
     match collation_oid {
-        None
-        | Some(DEFAULT_COLLATION_OID | C_COLLATION_OID | POSIX_COLLATION_OID) => Ok(()),
+        None | Some(DEFAULT_COLLATION_OID | C_COLLATION_OID | POSIX_COLLATION_OID) => Ok(()),
         Some(oid) => Err(ExecError::DetailedError {
             message: format!("collation with OID {oid} is not supported"),
             detail: Some(

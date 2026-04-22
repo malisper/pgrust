@@ -946,25 +946,24 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
         })
         .collect::<Result<Vec<_>, ViewDmlRewriteError>>()?;
 
-    let targets = targets
-        .into_iter()
-        .map(|mut target| {
-            target.rls_write_checks.extend(
-                resolved
-                    .view_check_options
-                    .iter()
-                    .cloned()
-                    .map(|check| RlsWriteCheck {
-                        expr: check.expr,
-                        policy_name: None,
-                        source: crate::backend::rewrite::RlsWriteCheckSource::ViewCheckOption(
-                            check.view_name,
-                        ),
-                    }),
-            );
-            target
-        })
-        .collect();
+    let targets =
+        targets
+            .into_iter()
+            .map(|mut target| {
+                target
+                    .rls_write_checks
+                    .extend(resolved.view_check_options.iter().cloned().map(|check| {
+                        RlsWriteCheck {
+                            expr: check.expr,
+                            policy_name: None,
+                            source: crate::backend::rewrite::RlsWriteCheckSource::ViewCheckOption(
+                                check.view_name,
+                            ),
+                        }
+                    }));
+                target
+            })
+            .collect();
 
     Ok(BoundUpdateStatement {
         targets,

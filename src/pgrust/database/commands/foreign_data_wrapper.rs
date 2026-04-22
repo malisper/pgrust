@@ -60,7 +60,8 @@ fn resolve_fdw_proc_oid(
             hint: None,
             sqlstate: "42883",
         })?;
-    if expected_return_type_oid == FDW_HANDLER_TYPE_OID && row.prorettype != expected_return_type_oid
+    if expected_return_type_oid == FDW_HANDLER_TYPE_OID
+        && row.prorettype != expected_return_type_oid
     {
         return Err(ExecError::DetailedError {
             message: format!("function {name} must return type fdw_handler"),
@@ -101,13 +102,15 @@ fn ensure_superuser_capability(
     fdw_name: &str,
     action: &'static str,
 ) -> Result<(), ExecError> {
-    ensure_current_user_is_superuser(db, client_id, fdw_name).map_err(|_| ExecError::DetailedError {
-        message: format!("permission denied to {action} foreign-data wrapper \"{fdw_name}\""),
-        detail: None,
-        hint: Some(format!(
-            "Must be superuser to {action} a foreign-data wrapper."
-        )),
-        sqlstate: "42501",
+    ensure_current_user_is_superuser(db, client_id, fdw_name).map_err(|_| {
+        ExecError::DetailedError {
+            message: format!("permission denied to {action} foreign-data wrapper \"{fdw_name}\""),
+            detail: None,
+            hint: Some(format!(
+                "Must be superuser to {action} a foreign-data wrapper."
+            )),
+            sqlstate: "42501",
+        }
     })
 }
 
@@ -657,7 +660,10 @@ mod tests {
             .unwrap_err();
         match err {
             ExecError::DetailedError {
-                message, hint, sqlstate, ..
+                message,
+                hint,
+                sqlstate,
+                ..
             } => {
                 assert_eq!(
                     message,
@@ -684,7 +690,10 @@ mod tests {
         session.execute(&db, "create role target").unwrap();
 
         let missing_option = session
-            .execute(&db, "alter foreign data wrapper fdw1 options (drop missing)")
+            .execute(
+                &db,
+                "alter foreign data wrapper fdw1 options (drop missing)",
+            )
             .unwrap_err();
         match missing_option {
             ExecError::DetailedError {

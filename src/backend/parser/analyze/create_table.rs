@@ -7,6 +7,7 @@ use crate::backend::parser::{SerialKind, SqlType, SqlTypeKind};
 use crate::include::access::htup::{AttributeCompression, AttributeStorage};
 use crate::pgrust::database::ddl::format_sql_type_name;
 
+use super::collation::{bind_explicit_collation, resolve_collation_oid};
 use super::{
     CatalogLookup, CheckConstraintAction, CreateTableStatement, ForeignKeyConstraintAction,
     IndexBackedConstraintAction, NotNullConstraintAction, ParseError,
@@ -102,6 +103,17 @@ pub fn lower_create_table(
                 }
                 let nullable = not_null.is_none() && serial_kind.is_none();
                 let mut desc = column_desc(column.name.clone(), sql_type, nullable);
+                if let Some(collation) = column.collation.as_deref() {
+                    bind_explicit_collation(
+                        crate::include::nodes::primnodes::Expr::Const(
+                            crate::include::nodes::datum::Value::Text("".into()),
+                        ),
+                        sql_type,
+                        collation,
+                        catalog,
+                    )?;
+                    desc.collation_oid = Some(resolve_collation_oid(collation, catalog)?);
+                }
                 if let Some(not_null) = not_null {
                     desc.not_null_constraint_name = Some(not_null.constraint_name.clone());
                     desc.not_null_constraint_validated = !not_null.not_valid;
@@ -123,8 +135,16 @@ pub fn lower_create_table(
                         sql_type,
                     });
                 }
+                if let Some(storage) = column.storage {
+                    validate_create_column_storage(sql_type, storage)?;
+                    desc.storage.attstorage = storage;
+                }
                 if let Some(compression) = column.compression {
-                    validate_create_column_compression(sql_type, compression)?;
+                    validate_create_column_compression(
+                        sql_type,
+                        desc.storage.attstorage,
+                        compression,
+                    )?;
                     desc.storage.attcompression = compression;
                 }
                 Ok(desc)
@@ -143,8 +163,30 @@ pub fn lower_create_table(
     })
 }
 
+fn validate_create_column_storage(
+    sql_type: SqlType,
+    storage: AttributeStorage,
+) -> Result<(), ParseError> {
+    let type_default = column_desc("attstorage_check", sql_type, true)
+        .storage
+        .attstorage;
+    if storage != AttributeStorage::Plain && type_default == AttributeStorage::Plain {
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "column data type {} can only have storage PLAIN",
+                format_sql_type_name(sql_type)
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    Ok(())
+}
+
 fn validate_create_column_compression(
     sql_type: SqlType,
+    storage: AttributeStorage,
     compression: AttributeCompression,
 ) -> Result<(), ParseError> {
     ensure_attribute_compression_supported(compression).map_err(|err| match err {
@@ -162,10 +204,7 @@ fn validate_create_column_compression(
         other => ParseError::FeatureNotSupportedMessage(format!("{other:?}")),
     })?;
 
-    let type_default = column_desc("attcompression_check", sql_type, true)
-        .storage
-        .attstorage;
-    if compression != AttributeCompression::Default && type_default == AttributeStorage::Plain {
+    if compression != AttributeCompression::Default && storage == AttributeStorage::Plain {
         return Err(ParseError::DetailedError {
             message: format!(
                 "column data type {} does not support compression",
@@ -198,6 +237,8 @@ mod tests {
                 name: "a".into(),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::AnyArray)),
                 default_expr: None,
+                collation: None,
+                storage: None,
                 compression: None,
                 constraints: vec![],
             })],
@@ -226,6 +267,8 @@ mod tests {
                     name: "id".into(),
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
                     default_expr: None,
+                    collation: None,
+                    storage: None,
                     compression: None,
                     constraints: vec![crate::backend::parser::ColumnConstraint::PrimaryKey {
                         attributes: ConstraintAttributes::default(),
@@ -235,6 +278,8 @@ mod tests {
                     name: "note".into(),
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
                     default_expr: None,
+                    collation: None,
+                    storage: None,
                     compression: None,
                     constraints: vec![crate::backend::parser::ColumnConstraint::NotNull {
                         attributes: ConstraintAttributes {
@@ -286,6 +331,8 @@ mod tests {
                     name: "id".into(),
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
                     default_expr: None,
+                    collation: None,
+                    storage: None,
                     compression: None,
                     constraints: vec![crate::backend::parser::ColumnConstraint::PrimaryKey {
                         attributes: ConstraintAttributes::default(),
@@ -326,6 +373,8 @@ mod tests {
                 name: "id".into(),
                 ty: RawTypeName::Serial(SerialKind::Regular),
                 default_expr: None,
+                collation: None,
+                storage: None,
                 compression: None,
                 constraints: vec![],
             })],
@@ -360,6 +409,8 @@ mod tests {
                 name: "id".into(),
                 ty: RawTypeName::Serial(SerialKind::Regular),
                 default_expr: Some("7".into()),
+                collation: None,
+                storage: None,
                 compression: None,
                 constraints: vec![],
             })],
@@ -390,6 +441,8 @@ mod tests {
                 name: "f1".into(),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
                 default_expr: None,
+                collation: Some("C".into()),
+                storage: None,
                 compression: Some(AttributeCompression::Pglz),
                 constraints: vec![],
             })],
@@ -406,6 +459,10 @@ mod tests {
             lowered.relation_desc.columns[0].storage.attcompression,
             AttributeCompression::Pglz
         );
+        assert_eq!(
+            lowered.relation_desc.columns[0].collation_oid,
+            Some(crate::include::catalog::C_COLLATION_OID)
+        );
     }
 
     #[test]
@@ -419,6 +476,8 @@ mod tests {
                 name: "f1".into(),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
                 default_expr: None,
+                collation: Some("C".into()),
+                storage: None,
                 compression: Some(AttributeCompression::Pglz),
                 constraints: vec![],
             })],
@@ -434,6 +493,37 @@ mod tests {
             Err(ParseError::DetailedError { message, sqlstate, .. })
                 if message == "column data type integer does not support compression"
                     && sqlstate == "0A000"
+        ));
+    }
+
+    #[test]
+    fn lower_create_table_rejects_collation_for_noncollatable_type() {
+        let stmt = CreateTableStatement {
+            schema_name: None,
+            table_name: "bad_collation".into(),
+            persistence: TablePersistence::Permanent,
+            on_commit: OnCommitAction::PreserveRows,
+            elements: vec![CreateTableElement::Column(ColumnDef {
+                name: "a".into(),
+                ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                default_expr: None,
+                collation: Some("C".into()),
+                storage: None,
+                compression: None,
+                constraints: vec![],
+            })],
+            inherits: Vec::new(),
+            if_not_exists: false,
+        };
+
+        assert!(matches!(
+            lower_create_table(
+                &stmt,
+                &crate::backend::parser::analyze::LiteralDefaultCatalog
+            ),
+            Err(ParseError::DetailedError { message, sqlstate, .. })
+                if message == "collations are not supported by type integer"
+                    && sqlstate == "42804"
         ));
     }
 }

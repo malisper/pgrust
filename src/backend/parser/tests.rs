@@ -13,8 +13,8 @@ use crate::include::nodes::parsenodes::{
     DropTriggerStatement, DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, IndexColumnDef,
     InsertSource, InsertStatement, JoinTreeNode, PublicationObjectSpec, PublicationOption,
     PublicationSchemaName, RangeTblEntryKind, RawTypeName, SetSessionAuthorizationStatement,
-    SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerTiming,
-    ViewCheckOption,
+    SqlCallArgs, TableConstraint, TableLikeClause, TableLikeOptions, TriggerEvent,
+    TriggerEventSpec, TriggerLevel, TriggerTiming, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -1851,6 +1851,8 @@ fn parse_alter_table_add_column_statement() {
                 name: "note".into(),
                 ty: builtin_type(SqlType::new(SqlTypeKind::Text)),
                 default_expr: Some("'hello'".into()),
+                collation: None,
+                storage: None,
                 compression: None,
                 constraints: vec![],
             },
@@ -4706,12 +4708,14 @@ fn build_plan_accepts_catalog_backed_text_input_casts() {
 
 #[test]
 fn build_plan_accepts_catalog_backed_time_casts_and_comparisons() {
-    assert!(build_plan(
-        &parse_select("select time('05:06:07'), time '05:06:07', time '05:06:07' < '06:07:08'")
-            .unwrap(),
-        &catalog(),
-    )
-    .is_ok());
+    assert!(
+        build_plan(
+            &parse_select("select time('05:06:07'), time '05:06:07', time '05:06:07' < '06:07:08'")
+                .unwrap(),
+            &catalog(),
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -4747,8 +4751,11 @@ fn build_plan_coerces_time_comparison_string_literals() {
 
 #[test]
 fn build_plan_rejects_ambiguous_time_addition() {
-    match build_plan(&parse_select("select time '01:02' + time '03:04'").unwrap(), &catalog())
-        .unwrap_err()
+    match build_plan(
+        &parse_select("select time '01:02' + time '03:04'").unwrap(),
+        &catalog(),
+    )
+    .unwrap_err()
     {
         ParseError::DetailedError {
             message,
@@ -5683,8 +5690,49 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("create temp table withoutoid() with (oids = false)").unwrap(), Statement::CreateTable(ct) if ct.persistence == TablePersistence::Temporary && ct.table_name == "withoutoid" && ct.columns().count() == 0)
     );
     assert!(matches!(
-        parse_statement("create table widgets (like source_table)"),
-        Err(ParseError::FeatureNotSupported(feature)) if feature == "CREATE TABLE ... LIKE"
+        parse_statement("create table widgets (like source_table)").unwrap(),
+        Statement::CreateTable(CreateTableStatement { elements, .. })
+            if matches!(
+                elements.as_slice(),
+                [CreateTableElement::Like(TableLikeClause { relation_name, options })]
+                    if relation_name == "source_table"
+                        && options == &TableLikeOptions::default()
+            )
+    ));
+    assert!(matches!(
+        parse_statement("create table widgets (like public.source_table including defaults excluding defaults)").unwrap(),
+        Statement::CreateTable(CreateTableStatement { elements, .. })
+            if matches!(
+                elements.as_slice(),
+                [CreateTableElement::Like(TableLikeClause { relation_name, options })]
+                    if relation_name == "public.source_table"
+                        && !options.defaults
+                        && !options.constraints
+                        && !options.storage
+                        && !options.compression
+                        && !options.indexes
+                        && !options.comments
+                        && !options.statistics
+                        && !options.generated
+                        && !options.identity
+            )
+    ));
+    assert!(matches!(
+        parse_statement("create table widgets (like source_table including all excluding indexes)").unwrap(),
+        Statement::CreateTable(CreateTableStatement { elements, .. })
+            if matches!(
+                elements.as_slice(),
+                [CreateTableElement::Like(TableLikeClause { options, .. })]
+                    if options.defaults
+                        && options.constraints
+                        && options.storage
+                        && options.compression
+                        && !options.indexes
+                        && options.comments
+                        && options.statistics
+                        && options.generated
+                        && options.identity
+            )
     ));
     assert!(matches!(
         parse_statement("create table withoid() with (oids)"),
@@ -9918,6 +9966,18 @@ fn parse_create_table_column_defaults() {
     let columns = ct.columns().collect::<Vec<_>>();
     assert_eq!(columns[0].default_expr.as_deref(), Some("'1001'"));
     assert_eq!(columns[1].default_expr.as_deref(), Some("B'0101'"));
+}
+
+#[test]
+fn parse_create_table_column_collation() {
+    let stmt = parse_statement("create table collate_test (a int, b text collate \"C\" not null)")
+        .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let columns = ct.columns().collect::<Vec<_>>();
+    assert_eq!(columns[0].collation, None);
+    assert_eq!(columns[1].collation.as_deref(), Some("C"));
 }
 
 #[test]

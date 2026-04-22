@@ -63,9 +63,7 @@ fn expr_uses_outer_columns(expr: &Expr) -> bool {
         Expr::Cast(inner, _)
         | Expr::Collate { expr: inner, .. }
         | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => {
-            expr_uses_outer_columns(inner)
-        }
+        | Expr::IsNotNull(inner) => expr_uses_outer_columns(inner),
         Expr::Like {
             expr,
             pattern,

@@ -788,7 +788,8 @@ fn view_definition_and_check_option(
         .find(|row| row.rulename == "_RETURN")
         .map(|row| row.ev_action)
         .unwrap_or_default();
-    let (definition, check_option) = crate::backend::rewrite::split_stored_view_definition_sql(&sql);
+    let (definition, check_option) =
+        crate::backend::rewrite::split_stored_view_definition_sql(&sql);
     (
         definition.to_string(),
         match check_option {
