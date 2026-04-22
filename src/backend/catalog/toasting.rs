@@ -238,6 +238,7 @@ pub fn new_relation_create_toast_table(
             indclass: vec![OID_BTREE_OPCLASS_OID, INT4_BTREE_OPCLASS_OID],
             indcollation: vec![0, 0],
             indoption: vec![0, 0],
+            indnullsnotdistinct: false,
         },
     )?;
     let (_index_name, _old_index, index_entry) =

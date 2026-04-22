@@ -710,6 +710,7 @@ fn catalog_with_people_id_index() -> Catalog {
             index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
                 indrelid: 65000,
                 indisunique: false,
+                indnullsnotdistinct: false,
                 indisprimary: false,
                 indisvalid: true,
                 indisready: true,
@@ -762,6 +763,7 @@ fn catalog_with_people_primary_key_opclass(opclass_oid: u32) -> Catalog {
             index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
                 indrelid: 65000,
                 indisunique: true,
+                indnullsnotdistinct: false,
                 indisprimary: true,
                 indisvalid: true,
                 indisready: true,
@@ -843,6 +845,7 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
             index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
                 indrelid: people.relation_oid,
                 indisunique: true,
+                indnullsnotdistinct: false,
                 indisprimary: false,
                 indisvalid: true,
                 indisready: true,
@@ -892,6 +895,7 @@ fn catalog_with_people_expression_unique_index() -> Catalog {
             index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
                 indrelid: people.relation_oid,
                 indisunique: true,
+                indnullsnotdistinct: false,
                 indisprimary: false,
                 indisvalid: true,
                 indisready: true,
@@ -941,6 +945,7 @@ fn catalog_with_people_name_c_collation_index() -> Catalog {
             index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
                 indrelid: people.relation_oid,
                 indisunique: true,
+                indnullsnotdistinct: false,
                 indisprimary: false,
                 indisvalid: true,
                 indisready: true,
@@ -998,6 +1003,7 @@ fn catalog_with_text_parent_primary_key() -> Catalog {
             index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
                 indrelid: 65030,
                 indisunique: true,
+                indnullsnotdistinct: false,
                 indisprimary: true,
                 indisvalid: true,
                 indisready: true,
@@ -1784,6 +1790,19 @@ fn parse_create_index_if_not_exists_requires_name() {
 }
 
 #[test]
+fn parse_create_table_rejects_malformed_tuple_default_expression() {
+    let err = parse_statement("CREATE TABLE error_tbl (i int DEFAULT (100, ))").unwrap_err();
+    assert_eq!(err.to_string(), "syntax error at or near \")\"");
+}
+
+#[test]
+fn parse_create_table_rejects_unparenthesized_in_default_expression() {
+    let err =
+        parse_statement("CREATE TABLE error_tbl (b1 bool DEFAULT 1 IN (1, 2))").unwrap_err();
+    assert_eq!(err.to_string(), "syntax error at or near \"IN\"");
+}
+
+#[test]
 fn parse_create_operator_class_hash_support() {
     let stmt = parse_statement(
         "create operator class part_test_int4_ops for type int4 using hash as operator 1 =, function 2 part_hashint4_noop(int4, int8)",
@@ -1901,6 +1920,7 @@ fn parse_alter_table_constraint_statements() {
                     deferrable: None,
                     initially_deferred: None,
                     enforced: None,
+                    nulls_not_distinct: false,
                 },
                 expr_sql: "id > 0".into(),
             },
@@ -1925,6 +1945,7 @@ fn parse_alter_table_constraint_statements() {
                     deferrable: None,
                     initially_deferred: None,
                     enforced: None,
+                    nulls_not_distinct: false,
                 },
                 column: "note".into(),
             },
@@ -7228,6 +7249,23 @@ fn parse_create_table_primary_key_and_unique_constraints() {
             columns: vec!["id".into()],
         }]
     );
+
+    let stmt =
+        parse_statement("create table items (id int4 unique nulls not distinct, note text)")
+            .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let columns = ct.columns().collect::<Vec<_>>();
+    assert_eq!(
+        columns[0].constraints,
+        vec![ColumnConstraint::Unique {
+            attributes: ConstraintAttributes {
+                nulls_not_distinct: true,
+                ..attrs()
+            }
+        }]
+    );
 }
 
 #[test]
@@ -7251,6 +7289,7 @@ fn parse_create_table_named_check_and_not_null_constraints() {
                 deferrable: Some(true),
                 initially_deferred: Some(true),
                 enforced: Some(false),
+                nulls_not_distinct: false,
             },
             expr_sql: "id > 0".into(),
         }]
@@ -7266,6 +7305,7 @@ fn parse_create_table_named_check_and_not_null_constraints() {
                     deferrable: None,
                     initially_deferred: None,
                     enforced: None,
+                    nulls_not_distinct: false,
                 },
                 column: "note".into(),
             },
@@ -7277,6 +7317,7 @@ fn parse_create_table_named_check_and_not_null_constraints() {
                     deferrable: Some(false),
                     initially_deferred: Some(false),
                     enforced: Some(true),
+                    nulls_not_distinct: false,
                 },
                 expr_sql: "note <> ''".into(),
             },
@@ -7394,6 +7435,21 @@ fn lower_create_table_rejects_invalid_key_constraints() {
             if expected == "distinct PRIMARY KEY/UNIQUE definitions"
                 && actual == "duplicate key definition on (id)"
     ));
+}
+
+#[test]
+fn lower_create_table_accepts_check_not_enforced() {
+    let stmt =
+        parse_statement("create table items (id int4 check (id > 0) not enforced)").unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+
+    let lowered = lower_create_table(&ct, &crate::backend::parser::analyze::LiteralDefaultCatalog)
+        .expect("lower create table");
+    assert_eq!(lowered.check_actions.len(), 1);
+    assert_eq!(lowered.check_actions[0].constraint_name, "items_id_check");
+    assert!(!lowered.check_actions[0].enforced);
 }
 
 #[test]

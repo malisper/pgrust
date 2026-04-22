@@ -16,6 +16,7 @@ pub struct IndexBackedConstraintAction {
     pub constraint_name: Option<String>,
     pub columns: Vec<String>,
     pub primary: bool,
+    pub nulls_not_distinct: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +34,7 @@ pub struct CheckConstraintAction {
     pub expr_sql: String,
     pub not_valid: bool,
     pub no_inherit: bool,
+    pub enforced: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +73,7 @@ pub struct BoundNotNullConstraint {
 pub struct BoundCheckConstraint {
     pub constraint_name: String,
     pub expr: Expr,
+    pub enforced: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,6 +144,7 @@ struct PendingIndexConstraint {
     generated_base: String,
     columns: Vec<String>,
     primary: bool,
+    nulls_not_distinct: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -150,6 +154,7 @@ struct PendingCheckConstraint {
     expr_sql: String,
     not_valid: bool,
     no_inherit: bool,
+    enforced: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -252,6 +257,7 @@ pub fn normalize_create_table_constraints(
                         expr_sql: expr_sql.clone(),
                         not_valid: attributes.not_valid,
                         no_inherit: attributes.no_inherit,
+                        enforced: attributes.enforced.unwrap_or(true),
                     });
                 }
                 ColumnConstraint::PrimaryKey { attributes } => {
@@ -261,6 +267,7 @@ pub fn normalize_create_table_constraints(
                         generated_base: format!("{}_pkey", stmt.table_name),
                         columns: vec![column.name.clone()],
                         primary: true,
+                        nulls_not_distinct: false,
                     });
                 }
                 ColumnConstraint::Unique { attributes } => {
@@ -270,6 +277,7 @@ pub fn normalize_create_table_constraints(
                         generated_base: format!("{}_{}_key", stmt.table_name, column.name),
                         columns: vec![column.name.clone()],
                         primary: false,
+                        nulls_not_distinct: attributes.nulls_not_distinct,
                     });
                 }
                 ColumnConstraint::References {
@@ -330,6 +338,7 @@ pub fn normalize_create_table_constraints(
                     expr_sql: expr_sql.clone(),
                     not_valid: attributes.not_valid,
                     no_inherit: attributes.no_inherit,
+                    enforced: attributes.enforced.unwrap_or(true),
                 });
             }
             TableConstraint::PrimaryKey {
@@ -342,6 +351,7 @@ pub fn normalize_create_table_constraints(
                     generated_base: format!("{}_pkey", stmt.table_name),
                     columns: resolve_constraint_columns(key_columns, &columns, &column_lookup)?,
                     primary: true,
+                    nulls_not_distinct: false,
                 });
             }
             TableConstraint::Unique {
@@ -355,6 +365,7 @@ pub fn normalize_create_table_constraints(
                     generated_base: format!("{}_{}_key", stmt.table_name, resolved.join("_")),
                     columns: resolved,
                     primary: false,
+                    nulls_not_distinct: attributes.nulls_not_distinct,
                 });
             }
             TableConstraint::ForeignKey {
@@ -470,6 +481,7 @@ pub fn normalize_create_table_constraints(
             expr_sql: constraint.expr_sql,
             not_valid: constraint.not_valid,
             no_inherit: constraint.no_inherit,
+            enforced: constraint.enforced,
         })
         .collect();
 
@@ -481,6 +493,7 @@ pub fn normalize_create_table_constraints(
             })),
             columns: constraint.columns,
             primary: constraint.primary,
+            nulls_not_distinct: constraint.nulls_not_distinct,
         })
         .collect();
 
@@ -607,6 +620,7 @@ pub fn bind_relation_constraints(
                 checks.push(BoundCheckConstraint {
                     constraint_name: row.conname,
                     expr: bind_check_constraint_expr(&expr_sql, relation_name, desc, catalog)?,
+                    enforced: row.conenforced,
                 });
             }
             crate::include::catalog::CONSTRAINT_FOREIGN => {
@@ -718,6 +732,7 @@ pub fn normalize_alter_table_add_constraint(
                     expr_sql: expr_sql.clone(),
                     not_valid: attributes.not_valid,
                     no_inherit: attributes.no_inherit,
+                    enforced: attributes.enforced.unwrap_or(true),
                 },
             ))
         }
@@ -745,6 +760,7 @@ pub fn normalize_alter_table_add_constraint(
                     constraint_name: Some(constraint_name),
                     columns: resolve_relation_constraint_columns(columns, desc, &column_lookup)?,
                     primary: true,
+                    nulls_not_distinct: false,
                 },
             ))
         }
@@ -764,6 +780,7 @@ pub fn normalize_alter_table_add_constraint(
                     constraint_name: Some(constraint_name),
                     columns: resolved,
                     primary: false,
+                    nulls_not_distinct: attributes.nulls_not_distinct,
                 },
             ))
         }
@@ -870,6 +887,7 @@ pub fn normalize_alter_table_add_column_constraints(
                     expr_sql: expr_sql.clone(),
                     not_valid: attributes.not_valid,
                     no_inherit: attributes.no_inherit,
+                    enforced: attributes.enforced.unwrap_or(true),
                 });
             }
             ColumnConstraint::PrimaryKey { .. }
@@ -913,6 +931,7 @@ pub fn normalize_alter_table_add_column_constraints(
             expr_sql: constraint.expr_sql,
             not_valid: constraint.not_valid,
             no_inherit: constraint.no_inherit,
+            enforced: constraint.enforced,
         })
         .collect();
 
@@ -1018,11 +1037,6 @@ fn validate_check_attributes(attributes: &ConstraintAttributes) -> Result<(), Pa
     }
     if attributes.initially_deferred.is_some() {
         return Err(ParseError::FeatureNotSupported("CHECK INITIALLY".into()));
-    }
-    if attributes.enforced.is_some() {
-        return Err(ParseError::FeatureNotSupported(
-            "CHECK ENFORCED/NOT ENFORCED".into(),
-        ));
     }
     Ok(())
 }

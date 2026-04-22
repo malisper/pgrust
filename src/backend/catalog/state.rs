@@ -40,6 +40,7 @@ pub struct CatalogIndexMeta {
     pub indrelid: u32,
     pub indkey: Vec<i16>,
     pub indisunique: bool,
+    pub indnullsnotdistinct: bool,
     pub indisprimary: bool,
     pub indisvalid: bool,
     pub indisready: bool,
@@ -57,6 +58,7 @@ pub struct CatalogIndexBuildOptions {
     pub indclass: Vec<u32>,
     pub indcollation: Vec<u32>,
     pub indoption: Vec<i16>,
+    pub indnullsnotdistinct: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -600,6 +602,7 @@ impl Catalog {
                 indrelid: table.relation_oid,
                 indkey,
                 indisunique: unique,
+                indnullsnotdistinct: options.indnullsnotdistinct,
                 indisprimary: primary,
                 indisvalid: false,
                 indisready: false,
@@ -706,6 +709,7 @@ impl Catalog {
         &mut self,
         relation_oid: u32,
         conname: impl Into<String>,
+        conenforced: bool,
         convalidated: bool,
         conbin: impl Into<String>,
     ) -> Result<PgConstraintRow, CatalogError> {
@@ -732,7 +736,7 @@ impl Catalog {
             contype: crate::include::catalog::CONSTRAINT_CHECK,
             condeferrable: false,
             condeferred: false,
-            conenforced: true,
+            conenforced,
             convalidated,
             conrelid: relation_oid,
             contypid: 0,
@@ -1230,6 +1234,7 @@ impl Catalog {
             indclass,
             indcollation,
             indoption,
+            indnullsnotdistinct: false,
         })
     }
 

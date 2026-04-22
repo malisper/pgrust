@@ -310,6 +310,7 @@ impl Database {
                 indclass,
                 indcollation,
                 indoption,
+                indnullsnotdistinct: false,
             },
         ))
     }
@@ -323,6 +324,7 @@ impl Database {
         columns: &[crate::backend::parser::IndexColumnDef],
         unique: bool,
         primary: bool,
+        nulls_not_distinct: bool,
         xid: TransactionId,
         cid: CommandId,
         access_method_oid: u32,
@@ -349,7 +351,10 @@ impl Database {
                 unique,
                 primary,
                 columns,
-                build_options,
+                &CatalogIndexBuildOptions {
+                    indnullsnotdistinct: nulls_not_distinct,
+                    ..build_options.clone()
+                },
                 &ctx,
             )
             .map_err(map_catalog_error)?;
@@ -850,6 +855,7 @@ impl Database {
             catalog.materialize_visible_catalog(),
             &index_columns,
             create_stmt.unique,
+            false,
             false,
             xid,
             cid,

@@ -129,9 +129,8 @@ fn parse_statement_with_options_inner(
     }
     match SqlParser::parse(Rule::statement, &sql) {
         Ok(mut pairs) => build_statement(pairs.next().ok_or(ParseError::UnexpectedEof)?),
-        Err(err) => {
-            try_parse_unsupported_statement(&sql).ok_or_else(|| map_pest_error("statement", err))
-        }
+        Err(err) => try_parse_unsupported_statement(&sql)
+            .ok_or_else(|| map_pest_error("statement", &sql, err)),
     }
 }
 
@@ -1009,7 +1008,7 @@ fn build_create_tablespace_statement(sql: &str) -> Result<CreateTablespaceStatem
 pub fn parse_expr(sql: &str) -> Result<SqlExpr, ParseError> {
     let sql = strip_sql_comments_preserving_layout(sql);
     SqlParser::parse(Rule::expr, &sql)
-        .map_err(|e| map_pest_error("expression", e))
+        .map_err(|e| map_pest_error("expression", &sql, e))
         .and_then(|mut pairs| {
             let pair = pairs.next().ok_or(ParseError::UnexpectedEof)?;
             if pairs.next().is_some() {
@@ -1050,7 +1049,7 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
         _ => {}
     }
     SqlParser::parse(Rule::type_name, &sql)
-        .map_err(|e| map_pest_error("type name", e))
+        .map_err(|e| map_pest_error("type name", &sql, e))
         .and_then(|mut pairs| {
             let pair = pairs.next().ok_or(ParseError::UnexpectedEof)?;
             if pairs.next().is_some() {
@@ -1123,8 +1122,6 @@ fn try_parse_unsupported_statement(sql: &str) -> Option<Statement> {
         Some("CREATE VIEW form")
     } else if lowered.starts_with("create temp table ") {
         Some("CREATE TEMP TABLE form")
-    } else if lowered.starts_with("create table ") {
-        Some("CREATE TABLE form")
     } else if lowered.starts_with("select ") || lowered.starts_with("with ") {
         Some("SELECT form")
     } else if lowered.starts_with("delete from ") {
@@ -4893,7 +4890,8 @@ fn build_comment_on_conversion_statement(
 
 #[cfg(test)]
 pub(crate) fn pest_parse_keyword(rule: Rule, input: &str) -> Result<String, ParseError> {
-    let mut pairs = SqlParser::parse(rule, input).map_err(|e| map_pest_error("keyword", e))?;
+    let mut pairs =
+        SqlParser::parse(rule, input).map_err(|e| map_pest_error("keyword", input, e))?;
     Ok(pairs
         .next()
         .ok_or(ParseError::UnexpectedEof)?
@@ -4901,19 +4899,77 @@ pub(crate) fn pest_parse_keyword(rule: Rule, input: &str) -> Result<String, Pars
         .to_string())
 }
 
-fn map_pest_error(expected: &'static str, err: pest::error::Error<Rule>) -> ParseError {
-    use pest::error::ErrorVariant;
+fn map_pest_error(
+    expected: &'static str,
+    input: &str,
+    err: pest::error::Error<Rule>,
+) -> ParseError {
+    use pest::error::{ErrorVariant, InputLocation};
 
     match err.variant {
-        ErrorVariant::ParsingError { .. } => ParseError::UnexpectedToken {
-            expected,
-            actual: err.to_string(),
-        },
+        ErrorVariant::ParsingError { .. } => {
+            let token = match err.location {
+                InputLocation::Pos(pos) => syntax_error_token_at(input, pos),
+                InputLocation::Span((start, _)) => syntax_error_token_at(input, start),
+            };
+            ParseError::UnexpectedToken {
+                expected,
+                actual: format!("syntax error at or near \"{token}\""),
+            }
+        }
         ErrorVariant::CustomError { message } => ParseError::UnexpectedToken {
             expected,
             actual: message,
         },
     }
+}
+
+fn syntax_error_token_at(input: &str, pos: usize) -> String {
+    if pos >= input.len() {
+        return "end of input".into();
+    }
+
+    let ch = input[pos..].chars().next().expect("valid utf-8");
+    if ch.is_whitespace() {
+        return syntax_error_token_at(input, pos + ch.len_utf8());
+    }
+    if ch == ',' {
+        let next = pos + ch.len_utf8();
+        if next < input.len() {
+            let next_token = syntax_error_token_at(input, next);
+            if next_token == ")" || next_token == "]" || next_token == "}" {
+                return next_token;
+            }
+        }
+    }
+    if ch == '"' || ch == '\'' {
+        let mut end = pos + ch.len_utf8();
+        while end < input.len() {
+            let next = input[end..].chars().next().expect("valid utf-8");
+            end += next.len_utf8();
+            if next == ch {
+                if end < input.len() && input[end..].starts_with(ch) {
+                    end += ch.len_utf8();
+                    continue;
+                }
+                break;
+            }
+        }
+        return input[pos..end].to_string();
+    }
+    if ch.is_ascii_alphanumeric() || ch == '_' {
+        let mut end = pos + ch.len_utf8();
+        while end < input.len() {
+            let next = input[end..].chars().next().expect("valid utf-8");
+            if next.is_ascii_alphanumeric() || next == '_' {
+                end += next.len_utf8();
+            } else {
+                break;
+            }
+        }
+        return input[pos..end].to_string();
+    }
+    ch.to_string()
 }
 
 fn validate_unicode_string_literals(sql: &str, options: ParseOptions) -> Result<(), ParseError> {
@@ -7413,6 +7469,12 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
                 .into_inner()
                 .find(|part| part.as_rule() == Rule::unique_table_constraint_body)
                 .ok_or(ParseError::UnexpectedEof)?;
+            let nulls_not_distinct = body
+                .clone()
+                .into_inner()
+                .any(|part| part.as_rule() == Rule::unique_nulls_not_distinct_clause);
+            let mut attributes = attributes;
+            attributes.nulls_not_distinct = nulls_not_distinct;
             Ok(TableConstraint::Unique {
                 attributes,
                 columns: body
@@ -7579,7 +7641,17 @@ fn build_column_constraint(pair: Pair<'_, Rule>) -> Result<ColumnConstraint, Par
             })
         }
         Rule::primary_key_column_constraint => Ok(ColumnConstraint::PrimaryKey { attributes }),
-        Rule::unique_column_constraint => Ok(ColumnConstraint::Unique { attributes }),
+        Rule::unique_column_constraint => {
+            let body = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::unique_column_constraint_body)
+                .ok_or(ParseError::UnexpectedEof)?;
+            let mut attributes = attributes;
+            attributes.nulls_not_distinct = body
+                .into_inner()
+                .any(|part| part.as_rule() == Rule::unique_nulls_not_distinct_clause);
+            Ok(ColumnConstraint::Unique { attributes })
+        }
         Rule::references_column_constraint => {
             let body = pair
                 .into_inner()
@@ -8821,7 +8893,7 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
             Rule::column_default => {
                 default_expr = flag
                     .into_inner()
-                    .find(|part| part.as_rule() == Rule::expr)
+                    .find(|part| matches!(part.as_rule(), Rule::expr | Rule::b_expr))
                     .map(|expr| expr.as_str().to_string());
             }
             Rule::nullable => {}

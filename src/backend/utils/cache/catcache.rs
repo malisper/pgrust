@@ -352,7 +352,7 @@ impl CatCache {
                     indnatts: index_meta.indkey.len() as i16,
                     indnkeyatts: index_meta.indkey.len() as i16,
                     indisunique: index_meta.indisunique,
-                    indnullsnotdistinct: false,
+                    indnullsnotdistinct: index_meta.indnullsnotdistinct,
                     indisprimary: index_meta.indisprimary,
                     indisexclusion: false,
                     indimmediate: true,

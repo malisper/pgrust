@@ -1043,7 +1043,8 @@ impl Database {
                     .create_check_constraint_mvcc(
                         target.relation.relation_oid,
                         action.constraint_name.clone(),
-                        !action.not_valid,
+                        action.enforced,
+                        action.enforced && !action.not_valid,
                         action.no_inherit,
                         action.expr_sql.clone(),
                         &constraint_ctx,
