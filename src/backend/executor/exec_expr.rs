@@ -17,6 +17,7 @@ use super::expr_bit::{
 use super::expr_bool::{eval_booleq, eval_boolne};
 use super::expr_casts::{
     cast_value, cast_value_with_config, cast_value_with_source_type_and_config,
+    cast_value_with_source_type_catalog_and_config,
     soft_input_error_info_with_config,
 };
 pub(crate) use super::expr_compile::{
@@ -1919,10 +1920,11 @@ pub fn eval_expr(
             let value = eval_expr(expr, slot, ctx)?;
             eval_record_field(value, field)
         }
-        Expr::Cast(inner, ty) => cast_value_with_source_type_and_config(
+        Expr::Cast(inner, ty) => cast_value_with_source_type_catalog_and_config(
             eval_expr(inner, slot, ctx)?,
             expr_sql_type_hint(inner),
             *ty,
+            ctx.catalog.as_ref().map(|catalog| catalog as &dyn crate::backend::parser::CatalogLookup),
             &ctx.datetime_config,
         ),
         Expr::Collate { expr, .. } => eval_expr(expr, slot, ctx),

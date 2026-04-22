@@ -5833,6 +5833,12 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("create temp table tempy(id) as select 1").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { table_name, column_names, persistence: TablePersistence::Temporary, .. }) if table_name == "tempy" && column_names == vec!["id"])
     );
     assert!(
+        matches!(parse_statement("select * into cmmove1 from cmdata").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { schema_name: None, table_name, persistence: TablePersistence::Permanent, column_names, query: SelectStatement { from: Some(FromItem::Table { name, .. }), .. }, .. }) if table_name == "cmmove1" && column_names.is_empty() && name == "cmdata")
+    );
+    assert!(
+        matches!(parse_statement("select * into temp table tempy from cmdata").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { table_name, persistence: TablePersistence::Temporary, .. }) if table_name == "tempy")
+    );
+    assert!(
         matches!(parse_statement("drop table widgets").unwrap(), Statement::DropTable(DropTableStatement { if_exists: false, table_names, .. }) if table_names == vec!["widgets"])
     );
     assert!(
