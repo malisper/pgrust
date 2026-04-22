@@ -870,6 +870,7 @@ fn func_call_is_set_returning(
         || resolve_json_table_function(&normalized).is_some()
         || resolve_json_record_function(&normalized).is_some_and(|kind| kind.is_set_returning())
         || resolve_regex_table_function(&normalized).is_some()
+        || resolve_string_table_function(&normalized).is_some()
     {
         return true;
     }
@@ -1205,6 +1206,29 @@ fn bind_select_list_srf_call(
                         }
                     };
                     Ok(SetReturningCall::RegexTableFunction {
+                        func_oid: resolved_proc_oid,
+                        func_variadic: resolved_func_variadic,
+                        kind,
+                        args: bound_args,
+                        output_columns,
+                        with_ordinality: false,
+                    })
+                } else if let Some(kind) = resolve_string_table_function(other) {
+                    let bound_args = args
+                        .iter()
+                        .map(|arg| {
+                            bind_expr_with_outer_and_ctes(
+                                arg,
+                                scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer,
+                                ctes,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let output_columns = vec![QueryColumn::text("string_to_table")];
+                    Ok(SetReturningCall::StringTableFunction {
                         func_oid: resolved_proc_oid,
                         func_variadic: resolved_func_variadic,
                         kind,

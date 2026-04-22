@@ -4,7 +4,7 @@ use crate::include::catalog::{
     builtin_window_function_for_proc_oid,
 };
 use crate::include::nodes::primnodes::{
-    BuiltinWindowFunction, JsonRecordFunction, RegexTableFunction,
+    BuiltinWindowFunction, JsonRecordFunction, RegexTableFunction, StringTableFunction,
 };
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -29,6 +29,7 @@ pub(super) enum ResolvedSrfImpl {
     Unnest,
     JsonTable(JsonTableFunction),
     RegexTable(RegexTableFunction),
+    StringTable(StringTableFunction),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,6 +206,13 @@ pub(super) fn resolve_regex_table_function(name: &str) -> Option<RegexTableFunct
     }
 }
 
+pub(super) fn resolve_string_table_function(name: &str) -> Option<StringTableFunction> {
+    match normalize_builtin_function_name(name) {
+        "string_to_table" => Some(StringTableFunction::StringToTable),
+        _ => None,
+    }
+}
+
 pub(super) fn resolve_json_record_function(name: &str) -> Option<JsonRecordFunction> {
     match normalize_builtin_function_name(name) {
         "json_populate_record" => Some(JsonRecordFunction::PopulateRecord),
@@ -234,7 +242,8 @@ fn builtin_srf_impl_for_proc_row(row: &PgProcRow) -> Option<ResolvedSrfImpl> {
         "unnest" => Some(ResolvedSrfImpl::Unnest),
         other => resolve_json_table_function(other)
             .map(ResolvedSrfImpl::JsonTable)
-            .or_else(|| resolve_regex_table_function(other).map(ResolvedSrfImpl::RegexTable)),
+            .or_else(|| resolve_regex_table_function(other).map(ResolvedSrfImpl::RegexTable))
+            .or_else(|| resolve_string_table_function(other).map(ResolvedSrfImpl::StringTable)),
     }
 }
 
@@ -1333,7 +1342,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgGetSerialSequence,
         ),
         ("pg_size_pretty", BuiltinScalarFunction::PgSizePretty),
-        ("pg_size_pretty_numeric", BuiltinScalarFunction::PgSizePretty),
+        (
+            "pg_size_pretty_numeric",
+            BuiltinScalarFunction::PgSizePretty,
+        ),
         ("pg_size_bytes", BuiltinScalarFunction::PgSizeBytes),
         ("pg_get_userbyid", BuiltinScalarFunction::PgGetUserById),
         ("obj_description", BuiltinScalarFunction::ObjDescription),

@@ -1255,6 +1255,48 @@ fn bind_function_from_item_with_ctes(
                     scope,
                     alias_single_function_output,
                 ))
+            } else if let Some(kind) = resolve_string_table_function(other) {
+                let empty_scope = empty_scope();
+                let bound_args = args
+                    .iter()
+                    .map(|arg| {
+                        bind_expr_with_outer_and_ctes(
+                            arg,
+                            &empty_scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut output_columns = vec![QueryColumn::text("string_to_table")];
+                let mut desc_columns = output_columns
+                    .iter()
+                    .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+                    .collect::<Vec<_>>();
+                maybe_append_function_ordinality(
+                    with_ordinality,
+                    &mut output_columns,
+                    &mut desc_columns,
+                );
+                let desc = RelationDesc {
+                    columns: desc_columns,
+                };
+                let scope = scope_for_relation(Some(name), &desc);
+                let alias_single_function_output = output_columns.len() == 1;
+                Ok((
+                    AnalyzedFrom::function(SetReturningCall::StringTableFunction {
+                        func_oid: resolved_proc_oid,
+                        func_variadic: resolved_func_variadic,
+                        kind,
+                        args: bound_args,
+                        output_columns,
+                        with_ordinality,
+                    }),
+                    scope,
+                    alias_single_function_output,
+                ))
             } else if let Some(resolved) = resolved.as_ref() {
                 if resolved.prokind != 'f' || !resolved.proretset {
                     return Err(ParseError::UnknownTable(other.to_string()));

@@ -306,9 +306,7 @@ fn expr_contains_sublink_for_minmax_rewrite(expr: &Expr) -> bool {
         Expr::Cast(inner, _)
         | Expr::Collate { expr: inner, .. }
         | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => {
-            expr_contains_sublink_for_minmax_rewrite(inner)
-        }
+        | Expr::IsNotNull(inner) => expr_contains_sublink_for_minmax_rewrite(inner),
         Expr::Like {
             expr,
             pattern,
@@ -499,7 +497,10 @@ fn rewrite_minmax_aggrefs(expr: Expr, rewritten_aggs: &[Expr]) -> Expr {
         Expr::Cast(inner, ty) => {
             Expr::Cast(Box::new(rewrite_minmax_aggrefs(*inner, rewritten_aggs)), ty)
         }
-        Expr::Collate { expr, collation_oid } => Expr::Collate {
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => Expr::Collate {
             expr: Box::new(rewrite_minmax_aggrefs(*expr, rewritten_aggs)),
             collation_oid,
         },
@@ -666,9 +667,7 @@ fn expr_contains_local_var_outside_subquery(expr: &Expr) -> bool {
         Expr::Cast(inner, _)
         | Expr::Collate { expr: inner, .. }
         | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => {
-            expr_contains_local_var_outside_subquery(inner)
-        }
+        | Expr::IsNotNull(inner) => expr_contains_local_var_outside_subquery(inner),
         Expr::Like {
             expr,
             pattern,
@@ -853,6 +852,7 @@ fn collect_set_returning_call_supporting_inputs(call: &SetReturningCall, exprs: 
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }
         | SetReturningCall::RegexTableFunction { args, .. }
+        | SetReturningCall::StringTableFunction { args, .. }
         | SetReturningCall::TextSearchTableFunction { args, .. }
         | SetReturningCall::UserDefined { args, .. } => {
             for arg in args {
@@ -1067,9 +1067,7 @@ fn expr_contains_window_func(expr: &Expr) -> bool {
         Expr::Cast(inner, _)
         | Expr::Collate { expr: inner, .. }
         | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => {
-            expr_contains_window_func(inner)
-        }
+        | Expr::IsNotNull(inner) => expr_contains_window_func(inner),
         Expr::Param(_)
         | Expr::Var(_)
         | Expr::CaseTest(_)
@@ -1514,6 +1512,7 @@ fn collect_set_returning_call_outer_refs(
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }
         | SetReturningCall::RegexTableFunction { args, .. }
+        | SetReturningCall::StringTableFunction { args, .. }
         | SetReturningCall::TextSearchTableFunction { args, .. }
         | SetReturningCall::UserDefined { args, .. } => {
             for arg in args {
@@ -1605,8 +1604,7 @@ fn collect_query_outer_refs_expr(expr: &Expr, levelsup: usize, exprs: &mut Vec<E
             collect_query_outer_refs_expr(&saop.left, levelsup, exprs);
             collect_query_outer_refs_expr(&saop.right, levelsup, exprs);
         }
-        Expr::Cast(inner, _) | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => {
+        Expr::Cast(inner, _) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
             collect_query_outer_refs_expr(inner, levelsup, exprs);
         }
         Expr::Like {

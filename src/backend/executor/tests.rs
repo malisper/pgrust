@@ -12948,6 +12948,63 @@ fn regexp_set_returning_functions_work() {
 }
 
 #[test]
+fn string_to_table_works_in_from_clause() {
+    let base = temp_dir("string_to_table_from");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select v, v is null as is_null from string_to_table('1,2,*,4', ',', '*') as t(v)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["v", "is_null"]);
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Text("1".into()), Value::Bool(false)],
+                    vec![Value::Text("2".into()), Value::Bool(false)],
+                    vec![Value::Null, Value::Bool(true)],
+                    vec![Value::Text("4".into()), Value::Bool(false)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn string_to_table_select_list_expands_rows() {
+    let base = temp_dir("string_to_table_select_list");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select string_to_table('ab', null)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["string_to_table"]);
+            assert_eq!(
+                rows,
+                vec![vec![Value::Text("a".into())], vec![Value::Text("b".into())],]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn integer_base_rendering_matches_postgres() {
     let base = temp_dir("strings_integer_base_rendering");
     let txns = TransactionManager::new_durable(&base).unwrap();

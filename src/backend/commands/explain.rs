@@ -347,9 +347,7 @@ fn collect_direct_expr_subplans<'a>(expr: &'a Expr, out: &mut Vec<&'a SubPlan>) 
         Expr::Cast(inner, _)
         | Expr::Collate { expr: inner, .. }
         | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => {
-            collect_direct_expr_subplans(inner, out)
-        }
+        | Expr::IsNotNull(inner) => collect_direct_expr_subplans(inner, out),
         Expr::Like {
             expr,
             pattern,
@@ -486,6 +484,7 @@ fn collect_direct_set_returning_call_subplans<'a>(
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }
         | SetReturningCall::RegexTableFunction { args, .. }
+        | SetReturningCall::StringTableFunction { args, .. }
         | SetReturningCall::TextSearchTableFunction { args, .. }
         | SetReturningCall::UserDefined { args, .. } => {
             for arg in args {

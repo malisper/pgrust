@@ -63,9 +63,7 @@ fn expr_uses_outer_columns(expr: &Expr) -> bool {
         Expr::Cast(inner, _)
         | Expr::Collate { expr: inner, .. }
         | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => {
-            expr_uses_outer_columns(inner)
-        }
+        | Expr::IsNotNull(inner) => expr_uses_outer_columns(inner),
         Expr::Like {
             expr,
             pattern,
@@ -137,6 +135,7 @@ fn set_returning_call_uses_outer_columns(call: &SetReturningCall) -> bool {
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }
         | SetReturningCall::RegexTableFunction { args, .. }
+        | SetReturningCall::StringTableFunction { args, .. }
         | SetReturningCall::TextSearchTableFunction { args, .. }
         | SetReturningCall::UserDefined { args, .. } => args.iter().any(expr_uses_outer_columns),
     }
