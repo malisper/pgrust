@@ -18,7 +18,9 @@ use crate::backend::executor::jsonb::{
     parse_json_text_input, parse_jsonb_text, parse_jsonb_text_with_limit, render_jsonb_bytes,
 };
 use crate::backend::libpq::pqformat::{FloatFormatOptions, format_float4_text, format_float8_text};
-use crate::backend::parser::{RawTypeName, SqlType, SqlTypeKind, parse_type_name};
+use crate::backend::parser::{
+    CatalogLookup, ParseError, RawTypeName, SqlType, SqlTypeKind, parse_type_name,
+};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::time::date::{
     DateParseError, parse_date_text, parse_time_text, parse_timetz_text,
@@ -181,6 +183,38 @@ fn cast_text_to_xid(text: &str) -> Result<Value, ExecError> {
         value: text.to_string(),
     })?;
     Ok(Value::Int64(xid as i64))
+}
+
+fn cast_text_to_regclass(
+    text: &str,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<Value, ExecError> {
+    if let Ok(Value::Int64(oid)) = cast_text_to_oid(text) {
+        return Ok(Value::Int64(oid));
+    }
+
+    let catalog = catalog.ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(text.into())))?;
+    let relation_oid = catalog
+        .lookup_any_relation(text)
+        .map(|entry| entry.relation_oid)
+        .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(text.into())))?;
+    Ok(Value::Int64(relation_oid as i64))
+}
+
+fn regclass_text_input(value: &Value, source_type: Option<SqlType>) -> Option<&str> {
+    let source_is_text_like = source_type.is_some_and(|ty| {
+        matches!(
+            ty.element_type().kind,
+            SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar
+        )
+    });
+    let source_is_internal_char =
+        source_type.is_some_and(|ty| matches!(ty.element_type().kind, SqlTypeKind::InternalChar));
+    if source_is_text_like || source_is_internal_char {
+        value.as_text()
+    } else {
+        None
+    }
 }
 
 const NUMERIC_MAX_INPUT_DIGITS_BEFORE_DECIMAL: i32 = 131072;
@@ -1383,7 +1417,13 @@ pub(crate) fn soft_input_error_info_with_config(
 }
 
 pub(crate) fn cast_value(value: Value, ty: SqlType) -> Result<Value, ExecError> {
-    cast_value_with_source_type_and_config(value, None, ty, &DateTimeConfig::default())
+    cast_value_with_source_type_catalog_and_config(
+        value,
+        None,
+        ty,
+        None,
+        &DateTimeConfig::default(),
+    )
 }
 
 pub(crate) fn cast_value_with_config(
@@ -1391,13 +1431,23 @@ pub(crate) fn cast_value_with_config(
     ty: SqlType,
     config: &DateTimeConfig,
 ) -> Result<Value, ExecError> {
-    cast_value_with_source_type_and_config(value, None, ty, config)
+    cast_value_with_source_type_catalog_and_config(value, None, ty, None, config)
 }
 
 pub(crate) fn cast_value_with_source_type_and_config(
     value: Value,
     source_type: Option<SqlType>,
     ty: SqlType,
+    config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
+    cast_value_with_source_type_catalog_and_config(value, source_type, ty, None, config)
+}
+
+pub(crate) fn cast_value_with_source_type_catalog_and_config(
+    value: Value,
+    source_type: Option<SqlType>,
+    ty: SqlType,
+    catalog: Option<&dyn CatalogLookup>,
     config: &DateTimeConfig,
 ) -> Result<Value, ExecError> {
     if ty.is_array {
@@ -1462,6 +1512,12 @@ pub(crate) fn cast_value_with_source_type_and_config(
                 }),
             },
         };
+    }
+
+    if matches!(ty.kind, SqlTypeKind::RegClass) && !ty.is_array {
+        if let Some(text) = regclass_text_input(&value, source_type) {
+            return cast_text_to_regclass(text, catalog);
+        }
     }
 
     if let Some(result) = cast_geometry_value(value.clone(), ty) {

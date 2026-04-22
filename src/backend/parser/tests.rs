@@ -13,9 +13,9 @@ use crate::include::nodes::parsenodes::{
     DropTriggerStatement, DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, IndexColumnDef,
     InsertSource, InsertStatement, JoinTreeNode, ListenStatement, NotifyStatement,
     PublicationObjectSpec, PublicationOption, PublicationSchemaName, RangeTblEntryKind,
-    PublicationSchemaName, RangeTblEntryKind, RawTypeName, SetSessionAuthorizationStatement,
-    SqlCallArgs, TableConstraint, TableLikeClause, TableLikeOptions, TriggerEvent,
-    TriggerEventSpec, TriggerLevel, TriggerTiming, UnlistenStatement, ViewCheckOption,
+    RawTypeName, SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint,
+    TableLikeClause, TableLikeOptions, TriggerEvent, TriggerEventSpec, TriggerLevel,
+    TriggerTiming, UnlistenStatement, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
