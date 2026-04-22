@@ -229,6 +229,7 @@ fn collect_relation_access_paths(
                 estimate_index_candidate(
                     rtindex,
                     heap_rel,
+                    relation_name.clone(),
                     relation_oid,
                     toast,
                     desc.clone(),
@@ -247,6 +248,7 @@ fn collect_relation_access_paths(
                 estimate_index_candidate(
                     rtindex,
                     heap_rel,
+                    relation_name.clone(),
                     relation_oid,
                     toast,
                     desc.clone(),

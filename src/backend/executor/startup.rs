@@ -338,7 +338,9 @@ pub fn executor_start(plan: Plan) -> PlanState {
             plan_info,
             source_id,
             rel,
+            relation_name,
             index_rel,
+            index_name,
             am_oid,
             relation_oid,
             toast,
@@ -362,8 +364,10 @@ pub fn executor_start(plan: Plan) -> PlanState {
             slot.decoder = Some(decoder);
             Box::new(IndexScanState {
                 rel,
+                relation_name,
                 toast_relation: toast,
                 index_rel,
+                index_name,
                 am_oid,
                 column_names,
                 desc,

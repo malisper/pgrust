@@ -5,6 +5,7 @@ use crate::backend::access::heap::heapam::{
 };
 use crate::backend::access::index::indexam;
 use crate::backend::commands::explain::format_explain_lines_with_costs;
+use crate::backend::executor::expr_geometry::render_geometry_text;
 use crate::backend::executor::exec_expr::{compare_order_by_keys, eval_expr};
 use crate::backend::executor::pg_regex::explain_similar_pattern;
 use crate::backend::executor::srf::{
@@ -12,6 +13,7 @@ use crate::backend::executor::srf::{
 };
 use crate::backend::executor::value_io::{decode_value_with_toast, missing_column_value};
 use crate::backend::executor::window::execute_window_clause;
+use crate::backend::libpq::pqformat::FloatFormatOptions;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::time::date::format_date_text;
@@ -27,7 +29,7 @@ use crate::include::nodes::execnodes::{
     ValuesState, WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::primnodes::{
-    Expr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR, Var, attrno_index,
+    Expr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR, RelationDesc, Var, attrno_index,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -816,9 +818,35 @@ impl PlanNode for IndexScanState {
     }
     fn node_label(&self) -> String {
         format!(
-            "Index Scan using rel {} on rel {}",
-            self.index_rel.rel_number, self.rel.rel_number
+            "Index Scan using {} on {}",
+            self.index_name, self.relation_name
         )
+    }
+    fn explain_details(
+        &self,
+        indent: usize,
+        _analyze: bool,
+        _show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        if self.keys.is_empty() {
+            return;
+        }
+        let rendered = self
+            .keys
+            .iter()
+            .filter_map(|key| render_index_scan_key(key, &self.desc, &self.index_meta))
+            .collect::<Vec<_>>();
+        if rendered.is_empty() {
+            return;
+        }
+        let prefix = "  ".repeat(indent + 1);
+        let detail = if rendered.len() == 1 {
+            rendered[0].clone()
+        } else {
+            format!("({})", rendered.join(" AND "))
+        };
+        lines.push(format!("{prefix}Index Cond: ({detail})"));
     }
     fn explain_children(
         &self,
@@ -828,6 +856,55 @@ impl PlanNode for IndexScanState {
         _lines: &mut Vec<String>,
     ) {
     }
+}
+
+fn render_index_scan_key(
+    key: &crate::include::access::scankey::ScanKeyData,
+    desc: &RelationDesc,
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+) -> Option<String> {
+    let index_attno = usize::try_from(key.attribute_number.checked_sub(1)?).ok()?;
+    let heap_attno = usize::try_from(*index_meta.indkey.get(index_attno)?)
+        .ok()?
+        .checked_sub(1)?;
+    let column_name = desc.columns.get(heap_attno)?.name.clone();
+    let right_type_oid = key.argument.sql_type_hint().map(crate::backend::utils::cache::catcache::sql_type_oid);
+    let operator = index_meta
+        .amop_entries
+        .get(index_attno)?
+        .iter()
+        .filter(|entry| entry.purpose == 's' && u16::try_from(entry.strategy).ok() == Some(key.strategy))
+        .filter(|entry| {
+            right_type_oid.is_none()
+                || Some(entry.righttype) == right_type_oid
+                || entry.righttype == crate::include::catalog::ANYOID
+        })
+        .max_by_key(|entry| {
+            if Some(entry.righttype) == right_type_oid {
+                2
+            } else if entry.righttype == crate::include::catalog::ANYOID {
+                1
+            } else {
+                0
+            }
+        })?;
+    let operator_name = crate::include::catalog::bootstrap_pg_operator_rows()
+        .into_iter()
+        .find(|row| row.oid == operator.operator_oid)
+        .map(|row| row.oprname)
+        .unwrap_or_else(|| format!("op{}", operator.operator_oid));
+    let value_sql = match right_type_oid {
+        Some(_type_oid) => {
+            let sql_type = key.argument.sql_type_hint()?;
+            format!(
+                "{}::{}",
+                render_explain_literal(&key.argument),
+                render_explain_sql_type_name(sql_type)
+            )
+        }
+        None => render_explain_literal(&key.argument),
+    };
+    Some(format!("{column_name} {operator_name} {value_sql}"))
 }
 
 pub(crate) fn render_explain_expr(expr: &Expr, column_names: &[String]) -> String {
@@ -1308,6 +1385,12 @@ fn render_explain_literal(value: &Value) -> String {
         Value::Text(_) | Value::TextRef(_, _) => {
             format!("'{}'", value.as_text().unwrap().replace('\'', "''"))
         }
+        Value::Point(_) | Value::Lseg(_) | Value::Path(_) | Value::Line(_) | Value::Box(_)
+        | Value::Polygon(_) | Value::Circle(_) => {
+            let rendered = render_geometry_text(value, FloatFormatOptions::default())
+                .unwrap_or_else(|| format!("{value:?}"));
+            format!("'{rendered}'")
+        }
         Value::Date(date) => {
             format!("'{}'", format_date_text(*date, &DateTimeConfig::default()))
         }
@@ -1344,6 +1427,8 @@ fn render_explain_sql_type_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Date => "date",
         SqlTypeKind::Json => "json",
         SqlTypeKind::Jsonb => "jsonb",
+        SqlTypeKind::Box => "box",
+        SqlTypeKind::Point => "point",
         _ => "text",
     }
 }
