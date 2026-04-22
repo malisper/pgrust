@@ -4101,6 +4101,105 @@ fn information_schema_view_metadata_tracks_updatable_views() {
 }
 
 #[test]
+fn create_view_supports_check_option_and_or_replace() {
+    let dir = temp_dir("create_view_check_option_replace");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create table base_tbl(a int)").unwrap();
+    session
+        .execute(&db, "create view rw_view1 as select * from base_tbl where a > 0")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view rw_view2 as select * from rw_view1 where a < 10 with check option",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select table_name, check_option from information_schema.views where table_name in ('rw_view1', 'rw_view2') order by table_name",
+        ),
+        vec![
+            vec![Value::Text("rw_view1".into()), Value::Text("NONE".into())],
+            vec![
+                Value::Text("rw_view2".into()),
+                Value::Text("CASCADED".into()),
+            ],
+        ]
+    );
+
+    session.execute(&db, "insert into rw_view2 values (5)").unwrap();
+    match session.execute(&db, "insert into rw_view2 values (-5)") {
+        Err(ExecError::DetailedError {
+            message, detail, sqlstate, ..
+        }) => {
+            assert_eq!(message, "new row violates check option for view \"rw_view1\"");
+            assert_eq!(detail.as_deref(), Some("Failing row contains (-5)."));
+            assert_eq!(sqlstate, "44000");
+        }
+        other => panic!("expected rw_view1 check-option violation, got {other:?}"),
+    }
+    match session.execute(&db, "insert into rw_view2 values (15)") {
+        Err(ExecError::DetailedError {
+            message, detail, sqlstate, ..
+        }) => {
+            assert_eq!(message, "new row violates check option for view \"rw_view2\"");
+            assert_eq!(detail.as_deref(), Some("Failing row contains (15)."));
+            assert_eq!(sqlstate, "44000");
+        }
+        other => panic!("expected rw_view2 check-option violation, got {other:?}"),
+    }
+
+    session
+        .execute(
+            &db,
+            "create or replace view rw_view2 as select * from rw_view1 where a < 10 with local check option",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into rw_view2 values (-10)")
+        .unwrap();
+    match session.execute(&db, "insert into rw_view2 values (20)") {
+        Err(ExecError::DetailedError {
+            message, detail, sqlstate, ..
+        }) => {
+            assert_eq!(message, "new row violates check option for view \"rw_view2\"");
+            assert_eq!(detail.as_deref(), Some("Failing row contains (20)."));
+            assert_eq!(sqlstate, "44000");
+        }
+        other => panic!("expected local check-option violation, got {other:?}"),
+    }
+
+    session.execute(&db, "create table t1(a int, b text)").unwrap();
+    session
+        .execute(&db, "create view v1 as select null::int as a")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create or replace view v1 as select * from t1 where a > 0 with check option",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into v1 values (1, 'ok')")
+        .unwrap();
+    match session.execute(&db, "insert into v1 values (-1, 'bad')") {
+        Err(ExecError::DetailedError {
+            message, detail, sqlstate, ..
+        }) => {
+            assert_eq!(message, "new row violates check option for view \"v1\"");
+            assert_eq!(detail.as_deref(), Some("Failing row contains (-1, bad)."));
+            assert_eq!(sqlstate, "44000");
+        }
+        other => panic!("expected replaced-view check-option violation, got {other:?}"),
+    }
+}
+
+#[test]
 fn view_relfilenode_is_zero_and_drop_table_rejects_view_name() {
     let dir = temp_dir("view_relfilenode_zero");
     let db = Database::open(&dir, 128).unwrap();
