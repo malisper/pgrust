@@ -1137,6 +1137,12 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             {
                 return Ok(bound_regrole);
             }
+            if target_type.kind == SqlTypeKind::RegClass
+                && let Some(bound_regclass) =
+                    bind_regclass_literal_cast(inner, target_type, catalog)?
+            {
+                return Ok(bound_regclass);
+            }
             if target_type.kind == SqlTypeKind::RegType
                 && let Some(bound_regtype) = bind_regtype_literal_cast(inner, target_type, catalog)?
             {
@@ -1154,8 +1160,14 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             coerce_bound_expr(bound_inner, source_type, target_type)
         }
         SqlExpr::Collate { expr, collation } => {
-            let inner_type =
-                infer_sql_expr_type_with_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes);
+            let inner_type = infer_sql_expr_type_with_ctes(
+                expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             let bound_inner = bind_expr_with_outer_and_ctes(
                 expr,
                 scope,
@@ -2985,6 +2997,25 @@ fn bind_regprocedure_literal_cast(
     )))
 }
 
+fn bind_regclass_literal_cast(
+    expr: &SqlExpr,
+    target_type: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<Expr>, ParseError> {
+    let Some(relation_name) = regclass_literal_text(expr) else {
+        return Ok(None);
+    };
+    let relation_oid = relation_name
+        .parse::<u32>()
+        .ok()
+        .or_else(|| catalog.lookup_any_relation(relation_name).map(|entry| entry.relation_oid))
+        .ok_or_else(|| ParseError::UnknownTable(relation_name.to_string()))?;
+    Ok(Some(Expr::Cast(
+        Box::new(Expr::Const(Value::Int64(relation_oid as i64))),
+        target_type,
+    )))
+}
+
 fn bind_regtype_literal_cast(
     expr: &SqlExpr,
     target_type: SqlType,
@@ -3028,6 +3059,14 @@ fn bind_regrole_literal_cast(
 }
 
 fn regrole_literal_text(expr: &SqlExpr) -> Option<&str> {
+    match expr {
+        SqlExpr::Const(Value::Text(text)) => Some(text.as_str()),
+        SqlExpr::Const(Value::TextRef(_, _)) => None,
+        _ => None,
+    }
+}
+
+fn regclass_literal_text(expr: &SqlExpr) -> Option<&str> {
     match expr {
         SqlExpr::Const(Value::Text(text)) => Some(text.as_str()),
         SqlExpr::Const(Value::TextRef(_, _)) => None,
