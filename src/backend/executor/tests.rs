@@ -13348,6 +13348,63 @@ fn jsonb_scalar_casts_match_pg_scalar_rules() {
 }
 
 #[test]
+fn jsonb_subscript_reads_match_basic_pg_cases() {
+    let base = temp_dir("jsonb_subscript_reads");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select ('123'::jsonb)['a'], ('123'::jsonb)[0], ('123'::jsonb)[NULL], ('{\"a\":1}'::jsonb)['a'], ('{\"a\":1}'::jsonb)[0], ('[10,20,30]'::jsonb)[1]",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                    crate::backend::executor::jsonb::jsonb_to_value(
+                        &crate::backend::executor::jsonb::JsonbValue::Numeric(
+                            crate::backend::executor::exec_expr::parse_numeric_text("1").unwrap(),
+                        ),
+                    ),
+                    Value::Null,
+                    crate::backend::executor::jsonb::jsonb_to_value(
+                        &crate::backend::executor::jsonb::JsonbValue::Numeric(
+                            crate::backend::executor::exec_expr::parse_numeric_text("20").unwrap(),
+                        ),
+                    ),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select ('[1,2,3]'::jsonb)[1:]",
+    )
+    .unwrap_err()
+    {
+        ExecError::Parse(ParseError::DetailedError {
+            message,
+            sqlstate,
+            ..
+        }) => {
+            assert_eq!(message, "jsonb subscript does not support slices");
+            assert_eq!(sqlstate, "0A000");
+        }
+        other => panic!("expected slice failure, got {:?}", other),
+    }
+}
+
+#[test]
 fn jsonb_path_query_works_in_select_list_and_from() {
     let base = temp_dir("jsonb_path_query_srf");
     let txns = TransactionManager::new_durable(&base).unwrap();

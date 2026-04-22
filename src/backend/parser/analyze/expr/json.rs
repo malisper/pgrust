@@ -15,6 +15,52 @@ fn bind_json_binary_operands(
     ))
 }
 
+pub(super) fn bind_jsonb_subscript_expr(
+    array: &SqlExpr,
+    subscripts: &[crate::include::nodes::parsenodes::ArraySubscript],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    if subscripts.iter().any(|subscript| subscript.is_slice) {
+        return Err(ParseError::DetailedError {
+            message: "jsonb subscript does not support slices".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+
+    let mut bound = bind_expr_with_outer_and_ctes(
+        array,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    for subscript in subscripts {
+        let key = if let Some(lower) = &subscript.lower {
+            bind_expr_with_outer_and_ctes(
+                lower,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?
+        } else {
+            Expr::Const(Value::Int64(1))
+        };
+        bound = Expr::op_auto(crate::include::nodes::primnodes::OpExprKind::JsonGet, vec![
+            bound, key,
+        ]);
+    }
+    Ok(bound)
+}
+
 pub(super) fn bind_maybe_jsonb_delete(
     left: &SqlExpr,
     right: &SqlExpr,
