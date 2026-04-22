@@ -43,7 +43,7 @@ use crate::include::access::relscan::{
     BtIndexScanOpaque, IndexScanDesc, IndexScanOpaque, ScanDirection,
 };
 use crate::include::access::scankey::ScanKeyData;
-use crate::include::nodes::datum::{ArrayValue, Value};
+use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::{ColumnDesc, RelationDesc};
 use crate::include::storage::buf_internals::Page;
 use crate::{BufferPool, ClientId, OwnedBufferPin, PinnedBuffer, SmgrStorageBackend};
@@ -168,19 +168,19 @@ fn encode_index_value(
         ))),
         Value::Multirange(v) => crate::backend::executor::encode_multirange_bytes(v)
             .map_err(|err| CatalogError::Io(format!("{err:?}"))),
-        Value::Array(items) if sql_type.kind == crate::backend::parser::SqlTypeKind::AnyArray => {
-            encode_anyarray_bytes(&ArrayValue::from_1d(items.clone()))
-                .map_err(|err| CatalogError::Io(format!("{err:?}")))
+        Value::Array(_) | Value::PgArray(_)
+            if sql_type.kind == crate::backend::parser::SqlTypeKind::AnyArray =>
+        {
+            let array = value
+                .as_array_value()
+                .ok_or_else(|| CatalogError::Io("array index key must materialize".into()))?;
+            encode_anyarray_bytes(&array).map_err(|err| CatalogError::Io(format!("{err:?}")))
         }
-        Value::PgArray(array) if sql_type.kind == crate::backend::parser::SqlTypeKind::AnyArray => {
-            encode_anyarray_bytes(array).map_err(|err| CatalogError::Io(format!("{err:?}")))
-        }
-        Value::Array(items) if sql_type.is_array => {
-            encode_array_bytes(sql_type.element_type(), &ArrayValue::from_1d(items.clone()))
-                .map_err(|err| CatalogError::Io(format!("{err:?}")))
-        }
-        Value::PgArray(array) if sql_type.is_array => {
-            encode_array_bytes(sql_type.element_type(), array)
+        Value::Array(_) | Value::PgArray(_) if sql_type.is_array => {
+            let array = value
+                .as_array_value()
+                .ok_or_else(|| CatalogError::Io("array index key must materialize".into()))?;
+            encode_array_bytes(sql_type.element_type(), &array)
                 .map_err(|err| CatalogError::Io(format!("{err:?}")))
         }
         Value::Array(_) | Value::PgArray(_) => Err(CatalogError::Io(format!(
