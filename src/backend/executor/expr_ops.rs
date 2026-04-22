@@ -617,6 +617,12 @@ pub(crate) fn concat_values(left: Value, right: Value) -> Result<Value, ExecErro
     }
     match (&left, &right) {
         (Value::Bit(l), Value::Bit(r)) => Ok(Value::Bit(concat_bit_strings(l, r))),
+        (Value::Bytea(l), Value::Bytea(r)) => {
+            let mut bytes = Vec::with_capacity(l.len() + r.len());
+            bytes.extend_from_slice(l);
+            bytes.extend_from_slice(r);
+            Ok(Value::Bytea(bytes))
+        }
         (Value::Jsonb(l), Value::Jsonb(r)) => Ok(Value::Jsonb(encode_jsonb(&jsonb_concat(
             &decode_jsonb(l)?,
             &decode_jsonb(r)?,

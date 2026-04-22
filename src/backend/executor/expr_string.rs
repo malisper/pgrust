@@ -834,6 +834,9 @@ pub(super) fn eval_length_function(values: &[Value]) -> Result<Value, ExecError>
     if let Value::TsVector(vector) = value {
         return Ok(Value::Int32(vector.lexemes.len() as i32));
     }
+    if let Value::Bytea(bytes) = value {
+        return Ok(Value::Int32(bytes.len() as i32));
+    }
     let text = value.as_text().ok_or_else(|| ExecError::TypeMismatch {
         op: "length",
         left: value.clone(),

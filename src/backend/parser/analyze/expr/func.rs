@@ -301,6 +301,51 @@ pub(super) fn bind_user_defined_scalar_function_call(
     ))
 }
 
+pub(super) fn bind_resolved_scalar_function_call(
+    resolved: &ResolvedFunctionCall,
+    args: &[SqlExpr],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    if let Some(func) = resolved.scalar_impl {
+        return bind_scalar_function_call(
+            func,
+            resolved.proc_oid,
+            Some(resolved.result_type),
+            resolved.func_variadic,
+            resolved.nvargs,
+            resolved.vatype_oid,
+            &resolved.declared_arg_types,
+            args,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        );
+    }
+
+    let positional_args = args
+        .iter()
+        .cloned()
+        .map(|value| SqlFunctionArg { name: None, value })
+        .collect::<Vec<_>>();
+    bind_user_defined_scalar_function_call(
+        resolved.proc_oid,
+        resolved.result_type,
+        &resolved.declared_arg_types,
+        &positional_args,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )
+}
+
 pub(super) fn bind_scalar_function_call(
     func: BuiltinScalarFunction,
     func_oid: u32,
@@ -589,10 +634,11 @@ pub(super) fn bind_scalar_function_call(
             );
             if !matches!(arg_type.kind, SqlTypeKind::TsVector)
                 && !is_bit_string_type(arg_type)
+                && arg_type.kind != SqlTypeKind::Bytea
                 && !should_use_text_concat(&args[0], arg_type, &args[0], arg_type)
             {
                 return Err(ParseError::UnexpectedToken {
-                    expected: "text, bit, or tsvector argument",
+                    expected: "text, bytea, bit, or tsvector argument",
                     actual: format!("{func:?}({})", sql_type_name(arg_type)),
                 });
             }

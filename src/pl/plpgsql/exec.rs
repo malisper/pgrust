@@ -15,8 +15,9 @@ use crate::include::nodes::primnodes::QueryColumn;
 
 use super::ast::RaiseLevel;
 use super::compile::{
-    CompiledBlock, CompiledExpr, CompiledFunction, CompiledStmt, FunctionReturnContract,
-    TriggerReturnedRow, compile_function_from_proc, compile_trigger_function_from_proc,
+    CompiledBlock, CompiledExpr, CompiledFunction, CompiledSelectIntoTarget, CompiledStmt,
+    FunctionReturnContract, TriggerReturnedRow, compile_function_from_proc,
+    compile_trigger_function_from_proc,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -661,10 +662,9 @@ fn exec_function_stmt(
         }
         CompiledStmt::SelectInto {
             plan,
-            target_slot,
-            target_ty,
+            targets,
         } => {
-            exec_function_select_into(plan, *target_slot, *target_ty, compiled, state, ctx)?;
+            exec_function_select_into(plan, targets, compiled, state, ctx)?;
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::ExecInsert { stmt } => {
@@ -824,22 +824,25 @@ fn exec_function_perform(
 
 fn exec_function_select_into(
     plan: &crate::include::nodes::plannodes::PlannedStmt,
-    target_slot: usize,
-    target_ty: SqlType,
+    targets: &[CompiledSelectIntoTarget],
     compiled: &CompiledFunction,
     state: &mut FunctionState,
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     let rows = execute_function_query_rows(plan, compiled, state, ctx)?;
     let Some(row) = rows.first() else {
-        state.values[target_slot] = Value::Null;
+        for target in targets {
+            state.values[target.slot] = Value::Null;
+        }
         state.values[compiled.found_slot] = Value::Bool(false);
         return Ok(());
     };
 
-    state.values[target_slot] =
-        if matches!(target_ty.kind, SqlTypeKind::Record | SqlTypeKind::Composite) {
-            Value::Record(RecordValue::from_descriptor(
+    match targets {
+        [CompiledSelectIntoTarget { slot, ty }]
+            if matches!(ty.kind, SqlTypeKind::Record | SqlTypeKind::Composite) =>
+        {
+            state.values[*slot] = Value::Record(RecordValue::from_descriptor(
                 RecordDescriptor::anonymous(
                     plan.columns()
                         .into_iter()
@@ -848,11 +851,25 @@ fn exec_function_select_into(
                     -1,
                 ),
                 row.clone(),
-            ))
-        } else {
+            ));
+        }
+        [CompiledSelectIntoTarget { slot, ty }] => {
             let value = row.first().cloned().unwrap_or(Value::Null);
-            cast_value(value, target_ty)?
-        };
+            state.values[*slot] = cast_value(value, *ty)?;
+        }
+        _ => {
+            if row.len() != targets.len() {
+                return Err(function_runtime_error(
+                    "query returned an unexpected row shape",
+                    Some(format!("expected {} columns, got {}", targets.len(), row.len())),
+                    "42804",
+                ));
+            }
+            for (target, value) in targets.iter().zip(row.iter()) {
+                state.values[target.slot] = cast_value(value.clone(), target.ty)?;
+            }
+        }
+    }
     state.values[compiled.found_slot] = Value::Bool(true);
     Ok(())
 }
