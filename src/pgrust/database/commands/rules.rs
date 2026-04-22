@@ -422,6 +422,11 @@ pub(crate) fn prepare_bound_update_for_execution(
     stmt: crate::backend::parser::BoundUpdateStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<PreparedBoundStatement<crate::backend::parser::BoundUpdateStatement>, ExecError> {
+    if stmt.input_plan.is_some() && stmt.targets.iter().any(|target| target.relkind != 'r') {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+            "UPDATE ... FROM is not yet supported for views".into(),
+        )));
+    }
     let Some(view_target) = stmt.targets.iter().find(|target| target.relkind == 'v') else {
         return Ok(PreparedBoundStatement {
             stmt,
@@ -668,8 +673,15 @@ pub(crate) fn execute_bound_update_with_rules(
 
             for event in materialize_update_row_events(
                 &crate::backend::parser::BoundUpdateStatement {
+                    target_relation_name: target.relation_name.clone(),
+                    explain_target_name: target.relation_name.clone(),
                     targets: vec![target.clone()],
                     returning: Vec::new(),
+                    input_plan: None,
+                    target_visible_count: target.desc.columns.len(),
+                    visible_column_count: target.desc.columns.len(),
+                    target_ctid_index: target.desc.columns.len(),
+                    target_tableoid_index: target.desc.columns.len() + 1,
                     subplans: Vec::new(),
                 },
                 ctx,

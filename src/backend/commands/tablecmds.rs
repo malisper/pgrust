@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use parking_lot::RwLock;
@@ -155,7 +155,11 @@ fn finalize_bound_update(
     mut stmt: BoundUpdateStatement,
     catalog: &dyn CatalogLookup,
 ) -> BoundUpdateStatement {
-    let mut subplans = Vec::new();
+    let mut subplans = stmt
+        .input_plan
+        .as_mut()
+        .map(|plan| std::mem::take(&mut plan.subplans))
+        .unwrap_or_default();
     stmt.targets = stmt
         .targets
         .into_iter()
@@ -203,6 +207,9 @@ fn finalize_bound_update(
             ..target
         })
         .collect();
+    if let Some(input_plan) = &mut stmt.input_plan {
+        input_plan.subplans = subplans.clone();
+    }
     stmt.subplans = subplans;
     stmt
 }
@@ -459,7 +466,7 @@ fn explain_update_lines(
     push_explain_line(
         &format!(
             "Update on {}",
-            explain_update_target_name(&stmt.table_name, verbose)
+            explain_update_target_name(&bound.explain_target_name, verbose)
         ),
         crate::include::nodes::plannodes::PlanEstimate::default(),
         show_costs,
@@ -468,8 +475,18 @@ fn explain_update_lines(
     if verbose && !bound.returning.is_empty() {
         lines.push(format!(
             "  Output: {}",
-            render_update_returning_targets(&stmt.table_name, &bound.returning)
+            render_update_returning_targets(&bound.target_relation_name, &bound.returning)
         ));
+    }
+    if let Some(input_plan) = &bound.input_plan {
+        format_explain_plan_with_subplans(
+            &input_plan.plan_tree,
+            &input_plan.subplans,
+            1,
+            show_costs,
+            &mut lines,
+        );
+        return lines;
     }
 
     let child_targets = bound
@@ -2096,7 +2113,7 @@ fn parse_tid_text(value: &Value) -> Result<Option<ItemPointerData>, ExecError> {
         Value::Text(text) => text.as_str(),
         Value::TextRef(_, _) => {
             return Err(ExecError::DetailedError {
-                message: "merge ctid marker must be materialized".into(),
+                message: "row ctid marker must be materialized".into(),
                 detail: None,
                 hint: None,
                 sqlstate: "XX000",
@@ -2104,7 +2121,7 @@ fn parse_tid_text(value: &Value) -> Result<Option<ItemPointerData>, ExecError> {
         }
         other => {
             return Err(ExecError::DetailedError {
-                message: format!("merge ctid marker has unexpected value {:?}", other),
+                message: format!("row ctid marker has unexpected value {:?}", other),
                 detail: None,
                 hint: None,
                 sqlstate: "XX000",
@@ -2115,31 +2132,60 @@ fn parse_tid_text(value: &Value) -> Result<Option<ItemPointerData>, ExecError> {
         .strip_prefix('(')
         .and_then(|rest| rest.strip_suffix(')'))
         .ok_or(ExecError::DetailedError {
-            message: format!("invalid merge ctid marker: {text}"),
+            message: format!("invalid row ctid marker: {text}"),
             detail: None,
             hint: None,
             sqlstate: "XX000",
         })?;
     let (block, offset) = inner.split_once(',').ok_or(ExecError::DetailedError {
-        message: format!("invalid merge ctid marker: {text}"),
+        message: format!("invalid row ctid marker: {text}"),
         detail: None,
         hint: None,
         sqlstate: "XX000",
     })?;
     Ok(Some(ItemPointerData {
         block_number: block.parse().map_err(|_| ExecError::DetailedError {
-            message: format!("invalid merge ctid marker: {text}"),
+            message: format!("invalid row ctid marker: {text}"),
             detail: None,
             hint: None,
             sqlstate: "XX000",
         })?,
         offset_number: offset.parse().map_err(|_| ExecError::DetailedError {
-            message: format!("invalid merge ctid marker: {text}"),
+            message: format!("invalid row ctid marker: {text}"),
             detail: None,
             hint: None,
             sqlstate: "XX000",
         })?,
     }))
+}
+
+fn parse_update_tableoid(value: &Value) -> Result<u32, ExecError> {
+    match value {
+        Value::Int32(value) => u32::try_from(*value).map_err(|_| ExecError::DetailedError {
+            message: format!("invalid update tableoid marker: {value}"),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        }),
+        Value::Int64(value) => u32::try_from(*value).map_err(|_| ExecError::DetailedError {
+            message: format!("invalid update tableoid marker: {value}"),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        }),
+        Value::Null => Err(ExecError::DetailedError {
+            message: "update input row is missing target tableoid marker".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        }),
+        other => Err(ExecError::DetailedError {
+            message: format!("update tableoid marker has unexpected value {:?}", other),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        }),
+    }
 }
 
 fn merge_source_present(value: &Value) -> Result<bool, ExecError> {
@@ -3409,7 +3455,17 @@ fn project_returning_row(
     row: &[Value],
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<Value>, ExecError> {
-    let mut slot = TupleSlot::virtual_row(row.to_vec());
+    project_returning_row_with_metadata(targets, row, None, None, ctx)
+}
+
+fn project_returning_row_with_metadata(
+    targets: &[TargetEntry],
+    row: &[Value],
+    tid: Option<ItemPointerData>,
+    table_oid: Option<u32>,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    let mut slot = TupleSlot::virtual_row_with_metadata(row.to_vec(), tid, table_oid);
     let mut values = targets
         .iter()
         .map(|target| eval_expr(&target.expr, &mut slot, ctx).map(|value| value.to_owned_value()))
@@ -3629,6 +3685,9 @@ pub fn execute_update_with_waiter(
     let stmt = finalize_bound_update(stmt, catalog);
     let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
     let result = (|| {
+        if stmt.input_plan.is_some() {
+            return execute_update_from_joined_input(&stmt, ctx, xid, cid, waiter);
+        }
         let mut affected_rows = 0;
         let mut returned_rows = Vec::new();
 
@@ -3812,6 +3871,309 @@ pub fn execute_update_with_waiter(
         }
     })();
     ctx.subplans = saved_subplans;
+    result
+}
+
+fn fetch_update_target_values(
+    target: &BoundUpdateTarget,
+    tid: ItemPointerData,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    let desc = Rc::new(target.desc.clone());
+    let attr_descs: Rc<[_]> = desc.attribute_descs().into();
+    let tuple = heap_fetch(&*ctx.pool, ctx.client_id, target.rel, tid)?;
+    let mut slot = TupleSlot::from_heap_tuple(desc, attr_descs, tid, tuple);
+    slot.toast = slot_toast_context(target.toast, ctx);
+    slot.into_values()
+}
+
+fn project_update_target_visible_values(
+    target: &BoundUpdateTarget,
+    row_values: &[Value],
+    tid: ItemPointerData,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    let mut slot =
+        TupleSlot::virtual_row_with_metadata(row_values.to_vec(), Some(tid), Some(target.relation_oid));
+    let mut values = target
+        .parent_visible_exprs
+        .iter()
+        .map(|expr| eval_expr(expr, &mut slot, ctx).map(|value| value.to_owned_value()))
+        .collect::<Result<Vec<_>, _>>()?;
+    Value::materialize_all(&mut values);
+    Ok(values)
+}
+
+fn build_update_from_eval_row(
+    target: &BoundUpdateTarget,
+    old_values: &[Value],
+    source_values: &[Value],
+    tid: ItemPointerData,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    let mut values = project_update_target_visible_values(target, old_values, tid, ctx)?;
+    values.extend(source_values.iter().cloned());
+    Ok(values)
+}
+
+fn evaluate_update_from_assignments(
+    target: &BoundUpdateTarget,
+    old_values: &[Value],
+    source_values: &[Value],
+    tid: ItemPointerData,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    let eval_row = build_update_from_eval_row(target, old_values, source_values, tid, ctx)?;
+    let mut eval_slot =
+        TupleSlot::virtual_row_with_metadata(eval_row, Some(tid), Some(target.relation_oid));
+    let mut updated_values = old_values.to_vec();
+    for assignment in &target.assignments {
+        let value = eval_expr(&assignment.expr, &mut eval_slot, ctx)?;
+        apply_assignment_target(
+            &target.desc,
+            &mut updated_values,
+            &BoundAssignmentTarget {
+                column_index: assignment.column_index,
+                subscripts: assignment.subscripts.clone(),
+            },
+            value,
+            &mut eval_slot,
+            ctx,
+        )?;
+    }
+    Ok(updated_values)
+}
+
+fn update_from_predicate_matches(
+    target: &BoundUpdateTarget,
+    old_values: &[Value],
+    source_values: &[Value],
+    tid: ItemPointerData,
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    let Some(predicate) = &target.predicate else {
+        return Ok(true);
+    };
+    let eval_row = build_update_from_eval_row(target, old_values, source_values, tid, ctx)?;
+    let mut eval_slot =
+        TupleSlot::virtual_row_with_metadata(eval_row, Some(tid), Some(target.relation_oid));
+    Ok(matches!(
+        eval_expr(predicate, &mut eval_slot, ctx)?,
+        Value::Bool(true)
+    ))
+}
+
+fn project_update_from_returning_row(
+    stmt: &BoundUpdateStatement,
+    target: &BoundUpdateTarget,
+    new_values: &[Value],
+    source_values: &[Value],
+    tid: ItemPointerData,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<Value>, ExecError> {
+    let mut visible_values = project_update_target_visible_values(target, new_values, tid, ctx)?;
+    visible_values.extend(source_values.iter().cloned());
+    project_returning_row_with_metadata(
+        &stmt.returning,
+        &visible_values,
+        Some(tid),
+        Some(target.relation_oid),
+        ctx,
+    )
+}
+
+fn execute_update_from_joined_input(
+    stmt: &BoundUpdateStatement,
+    ctx: &mut ExecutorContext,
+    xid: TransactionId,
+    cid: CommandId,
+    waiter: Option<(
+        &RwLock<TransactionManager>,
+        &TransactionWaiter,
+        &crate::backend::utils::misc::interrupts::InterruptState,
+    )>,
+) -> Result<StatementResult, ExecError> {
+    let input_plan = stmt.input_plan.as_ref().ok_or(ExecError::DetailedError {
+        message: "UPDATE ... FROM is missing its input plan".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    let target_indexes = stmt
+        .targets
+        .iter()
+        .enumerate()
+        .map(|(index, target)| (target.relation_oid, index))
+        .collect::<HashMap<_, _>>();
+    let mut triggers = stmt
+        .targets
+        .iter()
+        .map(|target| {
+            let modified_attnums = modified_attnums_for_update(&target.assignments);
+            ctx.catalog
+                .as_ref()
+                .map(|catalog| {
+                    RuntimeTriggers::load(
+                        catalog,
+                        target.relation_oid,
+                        &target.relation_name,
+                        &target.desc,
+                        TriggerOperation::Update,
+                        &modified_attnums,
+                    )
+                })
+                .transpose()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for trigger in triggers.iter().flatten() {
+        trigger.before_statement(ctx)?;
+    }
+
+    let result = (|| {
+        let mut state = executor_start(input_plan.plan_tree.clone());
+        let mut affected_rows = 0usize;
+        let mut returned_rows = Vec::new();
+
+        while let Some(slot) = state.exec_proc_node(ctx)? {
+            ctx.check_for_interrupts()?;
+            let mut row_values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+            Value::materialize_all(&mut row_values);
+            let target_tid = row_values
+                .get(stmt.target_ctid_index)
+                .ok_or(ExecError::DetailedError {
+                    message: "update input row is missing target ctid marker".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                })
+                .and_then(parse_tid_text)?
+                .ok_or(ExecError::DetailedError {
+                    message: "update input row is missing target ctid marker".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                })?;
+            let target_tableoid = row_values
+                .get(stmt.target_tableoid_index)
+                .ok_or(ExecError::DetailedError {
+                    message: "update input row is missing target tableoid marker".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                })
+                .and_then(parse_update_tableoid)?;
+            let target_index =
+                *target_indexes
+                    .get(&target_tableoid)
+                    .ok_or(ExecError::DetailedError {
+                        message: format!(
+                            "update input row referenced unexpected target relation OID {target_tableoid}"
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "XX000",
+                    })?;
+            let target = &stmt.targets[target_index];
+            let source_values = row_values[stmt.target_visible_count..stmt.visible_column_count].to_vec();
+            let mut current_tid = target_tid;
+            let mut current_old_values = fetch_update_target_values(target, current_tid, ctx)?;
+            let mut current_values = evaluate_update_from_assignments(
+                target,
+                &current_old_values,
+                &source_values,
+                current_tid,
+                ctx,
+            )?;
+
+            loop {
+                ctx.check_for_interrupts()?;
+                let Some(triggered_values) = (match triggers[target_index].as_ref() {
+                    Some(trigger) => {
+                        trigger.before_row_update(&current_old_values, current_values.clone(), ctx)?
+                    }
+                    None => Some(current_values.clone()),
+                }) else {
+                    break;
+                };
+                match write_updated_row(
+                    &target.relation_name,
+                    target.rel,
+                    target.toast,
+                    target.toast_index.as_ref(),
+                    &target.desc,
+                    &target.relation_constraints,
+                    &target.rls_write_checks,
+                    &target.referenced_by_foreign_keys,
+                    &target.indexes,
+                    current_tid,
+                    &current_old_values,
+                    &triggered_values,
+                    ctx,
+                    xid,
+                    cid,
+                    waiter,
+                )? {
+                    WriteUpdatedRowResult::Updated(new_tid) => {
+                        ctx.session_stats
+                            .write()
+                            .note_relation_update(target.relation_oid);
+                        if let Some(trigger) = triggers[target_index].as_ref() {
+                            trigger.after_row_update(&current_old_values, &triggered_values, ctx)?;
+                        }
+                        if !stmt.returning.is_empty() {
+                            returned_rows.push(project_update_from_returning_row(
+                                stmt,
+                                target,
+                                &triggered_values,
+                                &source_values,
+                                new_tid,
+                                ctx,
+                            )?);
+                        }
+                        affected_rows += 1;
+                        break;
+                    }
+                    WriteUpdatedRowResult::TupleUpdated(new_ctid) => {
+                        let new_old_values = fetch_update_target_values(target, new_ctid, ctx)?;
+                        if !update_from_predicate_matches(
+                            target,
+                            &new_old_values,
+                            &source_values,
+                            new_ctid,
+                            ctx,
+                        )? {
+                            break;
+                        }
+                        current_values = evaluate_update_from_assignments(
+                            target,
+                            &new_old_values,
+                            &source_values,
+                            new_ctid,
+                            ctx,
+                        )?;
+                        current_old_values = new_old_values;
+                        current_tid = new_ctid;
+                    }
+                    WriteUpdatedRowResult::AlreadyModified => {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if stmt.returning.is_empty() {
+            Ok(StatementResult::AffectedRows(affected_rows))
+        } else {
+            Ok(build_returning_result(
+                returning_result_columns(&stmt.returning),
+                returned_rows,
+            ))
+        }
+    })();
+
+    for trigger in triggers.iter_mut().flatten() {
+        trigger.after_statement(ctx)?;
+    }
     result
 }
 
@@ -4022,6 +4384,9 @@ pub(crate) fn materialize_update_row_events(
     stmt: &BoundUpdateStatement,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<UpdateRowEvent>, ExecError> {
+    if stmt.input_plan.is_some() {
+        return materialize_update_from_joined_input_events(stmt, ctx);
+    }
     let mut events = Vec::new();
     for target in &stmt.targets {
         let target_rows = match &target.row_source {
@@ -4068,6 +4433,77 @@ pub(crate) fn materialize_update_row_events(
                 new_values: values,
             });
         }
+    }
+    Ok(events)
+}
+
+fn materialize_update_from_joined_input_events(
+    stmt: &BoundUpdateStatement,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<UpdateRowEvent>, ExecError> {
+    let input_plan = stmt.input_plan.as_ref().ok_or(ExecError::DetailedError {
+        message: "UPDATE ... FROM is missing its input plan".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    let target_indexes = stmt
+        .targets
+        .iter()
+        .enumerate()
+        .map(|(index, target)| (target.relation_oid, index))
+        .collect::<HashMap<_, _>>();
+    let mut state = executor_start(input_plan.plan_tree.clone());
+    let mut events = Vec::new();
+    while let Some(slot) = state.exec_proc_node(ctx)? {
+        ctx.check_for_interrupts()?;
+        let mut row_values = slot.values()?.iter().cloned().collect::<Vec<_>>();
+        Value::materialize_all(&mut row_values);
+        let tid = row_values
+            .get(stmt.target_ctid_index)
+            .ok_or(ExecError::DetailedError {
+                message: "update input row is missing target ctid marker".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })
+            .and_then(parse_tid_text)?
+            .ok_or(ExecError::DetailedError {
+                message: "update input row is missing target ctid marker".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })?;
+        let relation_oid = row_values
+            .get(stmt.target_tableoid_index)
+            .ok_or(ExecError::DetailedError {
+                message: "update input row is missing target tableoid marker".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })
+            .and_then(parse_update_tableoid)?;
+        let target_index = *target_indexes
+            .get(&relation_oid)
+            .ok_or(ExecError::DetailedError {
+                message: format!(
+                    "update input row referenced unexpected target relation OID {relation_oid}"
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            })?;
+        let target = &stmt.targets[target_index];
+        let source_values = row_values[stmt.target_visible_count..stmt.visible_column_count].to_vec();
+        let old_values = fetch_update_target_values(target, tid, ctx)?;
+        let new_values =
+            evaluate_update_from_assignments(target, &old_values, &source_values, tid, ctx)?;
+        events.push(UpdateRowEvent {
+            target: target.clone(),
+            tid,
+            old_values,
+            new_values,
+        });
     }
     Ok(events)
 }

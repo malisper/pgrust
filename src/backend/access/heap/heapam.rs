@@ -767,6 +767,9 @@ pub fn heap_delete_with_waiter(
             pool.write_page_image_locked(buffer_id, xid, &new_page, &mut guard)?;
             return Ok(());
         }
+        if xmax == xid {
+            return Err(HeapError::TupleAlreadyModified(tid));
+        }
 
         drop(guard);
         drop(pin);
@@ -933,6 +936,9 @@ fn try_claim_tuple(
     }
 
     let xmax = tuple.header.xmax;
+    if xmax == xid {
+        return Ok((ClaimResult::Deleted, target_tid));
+    }
 
     drop(guard);
     drop(pin);
