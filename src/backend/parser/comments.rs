@@ -138,7 +138,33 @@ pub(crate) fn normalize_string_continuation_preserving_layout(sql: &str) -> Stri
     let mut i = 0usize;
 
     while i < bytes.len() {
-        if bytes[i] == b'\'' {
+        if starts_line_comment(bytes, i) {
+            let start = i;
+            i += 2;
+            while i < bytes.len() && !matches!(bytes[i], b'\r' | b'\n') {
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1;
+            }
+            out.push_str(&sql[start..i]);
+        } else if starts_block_comment(bytes, i) {
+            let start = i;
+            i += 2;
+            let mut depth = 1usize;
+            while i < bytes.len() && depth > 0 {
+                if starts_block_comment(bytes, i) {
+                    depth += 1;
+                    i += 2;
+                } else if ends_block_comment(bytes, i) {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += sql[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                }
+            }
+            out.push_str(&sql[start..i]);
+        } else if bytes[i] == b'\'' {
             let (mut merged, next) = parse_plain_string_literal(sql, i);
             i = next;
 
@@ -198,9 +224,63 @@ pub(crate) fn find_comment_blocked_string_continuation(sql: &str) -> Option<Stri
     let mut i = 0usize;
 
     while i < bytes.len() {
+        if starts_line_comment(bytes, i) {
+            i += 2;
+            while i < bytes.len() && !matches!(bytes[i], b'\r' | b'\n') {
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1;
+            }
+            continue;
+        }
+
+        if starts_block_comment(bytes, i) {
+            i += 2;
+            let mut depth = 1usize;
+            while i < bytes.len() && depth > 0 {
+                if starts_block_comment(bytes, i) {
+                    depth += 1;
+                    i += 2;
+                } else if ends_block_comment(bytes, i) {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += sql[i..].chars().next().expect("valid utf-8").len_utf8();
+                }
+            }
+            continue;
+        }
+
+        if starts_escape_string(bytes, i) || starts_unicode_string(bytes, i) {
+            let quote = i + 1 + usize::from(bytes[i + 1] == b'&');
+            i = parse_delimited_token_end(bytes, quote, b'\'');
+            continue;
+        }
+
+        if starts_unicode_identifier(bytes, i) {
+            i = parse_delimited_token_end(bytes, i + 2, b'"');
+            continue;
+        }
+
+        if bytes[i] == b'"' {
+            i = parse_delimited_token_end(bytes, i, b'"');
+            continue;
+        }
+
+        if let Some((tag, len)) = parse_dollar_tag(bytes, i) {
+            i += len;
+            while i < bytes.len() && !matches_dollar_end(bytes, i, &tag) {
+                i += sql[i..].chars().next().expect("valid utf-8").len_utf8();
+            }
+            if i < bytes.len() {
+                i += tag.len() + 2;
+            }
+            continue;
+        }
+
         if bytes[i] != b'\'' {
-            let ch = sql[i..].chars().next().expect("valid utf-8");
-            i += ch.len_utf8();
+            i += sql[i..].chars().next().expect("valid utf-8").len_utf8();
             continue;
         }
 
@@ -581,7 +661,8 @@ fn is_identifier_continue(byte: u8) -> bool {
 mod tests {
     use super::{
         find_comment_blocked_string_continuation, normalize_position_syntax_preserving_layout,
-        sql_is_effectively_empty_after_comments, strip_sql_comments_preserving_layout,
+        normalize_string_continuation_preserving_layout, sql_is_effectively_empty_after_comments,
+        strip_sql_comments_preserving_layout,
     };
 
     #[test]
@@ -626,5 +707,17 @@ mod tests {
             find_comment_blocked_string_continuation(sql).as_deref(),
             Some("' - third line'")
         );
+    }
+
+    #[test]
+    fn string_continuation_normalization_ignores_apostrophes_in_comments() {
+        let sql = "/* comment with doesn't in it */\ncreate schema collate_tests;";
+        assert_eq!(normalize_string_continuation_preserving_layout(sql), sql);
+    }
+
+    #[test]
+    fn blocked_string_continuation_scan_ignores_apostrophes_in_comments() {
+        let sql = "/* comment with doesn't in it */\ncreate schema collate_tests;";
+        assert_eq!(find_comment_blocked_string_continuation(sql), None);
     }
 }
