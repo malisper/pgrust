@@ -388,6 +388,9 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                 relforcerowsecurity: row.relforcerowsecurity,
                 relpages: row.relpages,
                 reltuples: row.reltuples,
+                relallvisible: row.relallvisible,
+                relallfrozen: row.relallfrozen,
+                relfrozenxid: row.relfrozenxid,
                 desc: RelationDesc { columns },
                 index_meta: indexes_by_relid
                     .get(&row.oid)

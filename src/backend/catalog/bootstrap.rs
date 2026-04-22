@@ -44,6 +44,9 @@ pub fn bootstrap_catalog_entry(kind: BootstrapCatalogKind) -> CatalogEntry {
         relforcerowsecurity: false,
         relpages: 0,
         reltuples: 0.0,
+        relallvisible: 0,
+        relallfrozen: 0,
+        relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
         desc: bootstrap_relation_desc(kind),
         index_meta: None,
     }
@@ -71,16 +74,10 @@ mod tests {
     #[test]
     fn pg_class_bootstrap_desc_contains_relkind() {
         let desc = bootstrap_relation_desc(BootstrapCatalogKind::PgClass);
+        let relkind = desc.columns.iter().find(|col| col.name == "relkind");
+        assert_eq!(relkind.map(|col| col.name.as_str()), Some("relkind"));
         assert_eq!(
-            desc.columns
-                .iter()
-                .rev()
-                .nth(8)
-                .map(|col| col.name.as_str()),
-            Some("relkind")
-        );
-        assert_eq!(
-            desc.columns.iter().rev().nth(8).map(|col| col.sql_type),
+            relkind.map(|col| col.sql_type),
             Some(SqlType::new(SqlTypeKind::InternalChar))
         );
     }
