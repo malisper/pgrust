@@ -176,7 +176,10 @@ fn path_relids(path: &Path) -> Vec<usize> {
         Path::Result { .. } => Vec::new(),
         Path::Append { source_id, .. } => vec![*source_id],
         Path::SetOp { slot_id, .. } => vec![*slot_id],
-        Path::SeqScan { source_id, .. } | Path::IndexScan { source_id, .. } => vec![*source_id],
+        Path::SeqScan { source_id, .. }
+        | Path::IndexScan { source_id, .. }
+        | Path::BitmapIndexScan { source_id, .. }
+        | Path::BitmapHeapScan { source_id, .. } => vec![*source_id],
         Path::Filter { input, .. }
         | Path::Projection { input, .. }
         | Path::OrderBy { input, .. }

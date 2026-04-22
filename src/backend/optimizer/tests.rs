@@ -490,6 +490,7 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
         Plan::Result { .. }
         | Plan::SeqScan { .. }
         | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
         | Plan::Values { .. }
         | Plan::FunctionScan { .. }
         | Plan::WorkTableScan { .. } => false,
@@ -505,6 +506,9 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
         | Plan::WindowAgg { input, .. }
         | Plan::ProjectSet { input, .. }
         | Plan::SubqueryScan { input, .. }
+        | Plan::BitmapHeapScan {
+            bitmapqual: input, ..
+        }
         | Plan::CteScan {
             cte_plan: input, ..
         } => plan_contains(input, predicate),
@@ -529,7 +533,10 @@ fn find_seq_scan(plan: &Plan) -> Option<&Plan> {
         | Plan::Aggregate { input, .. }
         | Plan::WindowAgg { input, .. }
         | Plan::ProjectSet { input, .. }
-        | Plan::SubqueryScan { input, .. } => find_seq_scan(input),
+        | Plan::SubqueryScan { input, .. }
+        | Plan::BitmapHeapScan {
+            bitmapqual: input, ..
+        } => find_seq_scan(input),
         Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
             children.iter().find_map(find_seq_scan)
         }
@@ -538,6 +545,7 @@ fn find_seq_scan(plan: &Plan) -> Option<&Plan> {
         }
         Plan::Result { .. }
         | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
         | Plan::Values { .. }
         | Plan::FunctionScan { .. }
         | Plan::WorkTableScan { .. }
@@ -552,6 +560,7 @@ fn count_plan_nodes(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> us
         Plan::Result { .. }
         | Plan::SeqScan { .. }
         | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
         | Plan::Values { .. }
         | Plan::FunctionScan { .. }
         | Plan::WorkTableScan { .. } => 0,
@@ -568,6 +577,9 @@ fn count_plan_nodes(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> us
         | Plan::WindowAgg { input, .. }
         | Plan::ProjectSet { input, .. }
         | Plan::SubqueryScan { input, .. }
+        | Plan::BitmapHeapScan {
+            bitmapqual: input, ..
+        }
         | Plan::CteScan {
             cte_plan: input, ..
         } => count_plan_nodes(input, predicate),
@@ -1329,7 +1341,10 @@ fn planned_lockstep_project_set_keeps_both_visible_targets_as_sets() {
             | Plan::OrderBy { input, .. }
             | Plan::Limit { input, .. }
             | Plan::Aggregate { input, .. }
-            | Plan::WindowAgg { input, .. } => find_project_set(input),
+            | Plan::WindowAgg { input, .. }
+            | Plan::BitmapHeapScan {
+                bitmapqual: input, ..
+            } => find_project_set(input),
             Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
                 children.iter().find_map(find_project_set)
             }
@@ -1339,6 +1354,7 @@ fn planned_lockstep_project_set_keeps_both_visible_targets_as_sets() {
             Plan::Result { .. }
             | Plan::SeqScan { .. }
             | Plan::IndexScan { .. }
+            | Plan::BitmapIndexScan { .. }
             | Plan::Values { .. }
             | Plan::FunctionScan { .. }
             | Plan::WorkTableScan { .. }

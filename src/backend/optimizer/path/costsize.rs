@@ -193,6 +193,88 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     pathkeys,
                 }
             }
+            Path::BitmapIndexScan {
+                pathtarget,
+                source_id,
+                rel,
+                relation_oid,
+                index_rel,
+                am_oid,
+                desc,
+                index_desc,
+                index_meta,
+                keys,
+                index_quals,
+                ..
+            } => {
+                let stats = relation_stats(catalog, index_meta.indrelid, &desc);
+                let rows = clamp_rows(stats.reltuples * DEFAULT_EQ_SEL);
+                Path::BitmapIndexScan {
+                    plan_info: PlanEstimate::new(
+                        CPU_OPERATOR_COST,
+                        RANDOM_PAGE_COST + rows * CPU_INDEX_TUPLE_COST,
+                        rows,
+                        0,
+                    ),
+                    pathtarget,
+                    source_id,
+                    rel,
+                    relation_oid,
+                    index_rel,
+                    am_oid,
+                    desc,
+                    index_desc,
+                    index_meta,
+                    keys,
+                    index_quals,
+                }
+            }
+            Path::BitmapHeapScan {
+                pathtarget,
+                source_id,
+                rel,
+                relation_name,
+                relation_oid,
+                toast,
+                desc,
+                bitmapqual,
+                recheck_qual,
+                ..
+            } => {
+                let bitmapqual = optimize_path(*bitmapqual, catalog);
+                let stats = relation_stats(catalog, relation_oid, &desc);
+                let recheck_expr = and_exprs(recheck_qual.clone());
+                let selectivity = recheck_expr
+                    .as_ref()
+                    .map(|expr| clause_selectivity(expr, Some(&stats), stats.reltuples))
+                    .unwrap_or(1.0);
+                let rows = clamp_rows(stats.reltuples * selectivity);
+                let recheck_cost = recheck_expr
+                    .as_ref()
+                    .map(|expr| predicate_cost(expr) * rows * CPU_OPERATOR_COST)
+                    .unwrap_or(0.0);
+                let total_cost = bitmapqual.plan_info().total_cost.as_f64()
+                    + rows * CPU_TUPLE_COST
+                    + stats.relpages.min(rows.max(1.0)) * RANDOM_PAGE_COST
+                    + recheck_cost;
+                Path::BitmapHeapScan {
+                    plan_info: PlanEstimate::new(
+                        bitmapqual.plan_info().startup_cost.as_f64(),
+                        total_cost,
+                        rows,
+                        stats.width,
+                    ),
+                    pathtarget,
+                    source_id,
+                    rel,
+                    relation_name,
+                    relation_oid,
+                    toast,
+                    desc,
+                    bitmapqual: Box::new(bitmapqual),
+                    recheck_qual,
+                }
+            }
             Path::Filter {
                 pathtarget,
                 input,
@@ -1489,7 +1571,18 @@ fn path_uses_immediate_outer_columns(path: &Path) -> bool {
         Path::Result { .. }
         | Path::SeqScan { .. }
         | Path::IndexScan { .. }
+        | Path::BitmapIndexScan { .. }
         | Path::WorkTableScan { .. } => false,
+        Path::BitmapHeapScan {
+            bitmapqual,
+            recheck_qual,
+            ..
+        } => {
+            path_uses_immediate_outer_columns(bitmapqual)
+                || recheck_qual
+                    .iter()
+                    .any(expr_uses_immediate_outer_columns)
+        }
         Path::Append { children, .. } | Path::SetOp { children, .. } => {
             children.iter().any(path_uses_immediate_outer_columns)
         }
