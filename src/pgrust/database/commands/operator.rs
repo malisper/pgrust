@@ -32,9 +32,8 @@ fn normalize_operator_namespace(
             let search_path = db.effective_search_path(client_id, configured_search_path);
             for schema in search_path {
                 match schema.as_str() {
-                    "" | "$user" | "pg_temp" => continue,
+                    "" | "$user" | "pg_temp" | "pg_catalog" => continue,
                     "public" => return Ok(PUBLIC_NAMESPACE_OID),
-                    "pg_catalog" => return Ok(PG_CATALOG_NAMESPACE_OID),
                     _ => {
                         if let Some(namespace_oid) =
                             db.visible_namespace_oid_by_name(client_id, txn_ctx, &schema)
@@ -435,6 +434,24 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        for option in &stmt.options {
+            match option {
+                AlterOperatorOption::Restrict { option_name, .. }
+                | AlterOperatorOption::Join { option_name, .. }
+                | AlterOperatorOption::Commutator { option_name, .. }
+                | AlterOperatorOption::Negator { option_name, .. }
+                | AlterOperatorOption::Merges { option_name, .. }
+                | AlterOperatorOption::Hashes { option_name, .. }
+                | AlterOperatorOption::Unrecognized { option_name } => {
+                    if !matches!(
+                        option_name.as_str(),
+                        "restrict" | "join" | "commutator" | "negator" | "merges" | "hashes"
+                    ) {
+                        return Err(attribute_not_recognized_error(option_name));
+                    }
+                }
+            }
+        }
         let left_type = resolve_operator_type_oid(&catalog, &stmt.left_arg)?;
         let right_type = resolve_operator_type_oid(&catalog, &stmt.right_arg)?;
         let current = lookup_operator_row(
@@ -532,7 +549,7 @@ impl Database {
                         return Err(ExecError::Parse(ParseError::DetailedError {
                             message: format!(
                                 "commutator operator {} is already the commutator of operator {}",
-                                stmt.operator_name, existing.oprname
+                                partner.oprname, existing.oprname
                             ),
                             detail: None,
                             hint: None,
@@ -592,7 +609,7 @@ impl Database {
                         return Err(ExecError::Parse(ParseError::DetailedError {
                             message: format!(
                                 "negator operator {} is already the negator of operator {}",
-                                stmt.operator_name, existing.oprname
+                                partner.oprname, existing.oprname
                             ),
                             detail: None,
                             hint: None,

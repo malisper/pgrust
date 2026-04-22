@@ -1232,7 +1232,10 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
                 column.sql_type.kind,
                 SqlTypeKind::Oid
                     | SqlTypeKind::RegClass
+                    | SqlTypeKind::RegType
+                    | SqlTypeKind::RegRole
                     | SqlTypeKind::RegOperator
+                    | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid
                     | SqlTypeKind::RegConfig
                     | SqlTypeKind::RegDictionary
@@ -1606,7 +1609,10 @@ pub(crate) fn decode_value_with_toast(
                 column.sql_type.kind,
                 SqlTypeKind::Oid
                     | SqlTypeKind::RegClass
+                    | SqlTypeKind::RegType
+                    | SqlTypeKind::RegRole
                     | SqlTypeKind::RegOperator
+                    | SqlTypeKind::RegProcedure
                     | SqlTypeKind::RegConfig
                     | SqlTypeKind::RegDictionary
             ) {

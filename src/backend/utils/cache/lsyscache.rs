@@ -20,9 +20,9 @@ use crate::backend::utils::cache::system_views::{
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
     PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow,
-    PgCollationRow, PgConstraintRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgOpclassRow,
-    PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTriggerRow,
-    PgTypeRow,
+    PgCollationRow, PgConstraintRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
+    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticRow,
+    PgTriggerRow, PgTypeRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::pgrust::database::{
@@ -791,6 +791,14 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             })
     }
 
+    fn operator_by_oid(&self, oid: u32) -> Option<PgOperatorRow> {
+        backend_catcache(self.db, self.client_id, self.txn_ctx)
+            .ok()?
+            .operator_rows()
+            .into_iter()
+            .find(|row| row.oid == oid)
+    }
+
     fn current_user_oid(&self) -> u32 {
         self.db.auth_state(self.client_id).current_user_oid()
     }
@@ -811,6 +819,10 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             .auth_catalog(self.client_id, self.txn_ctx)
             .map(|catalog| catalog.memberships().to_vec())
             .unwrap_or_default()
+    }
+
+    fn namespace_row_by_oid(&self, oid: u32) -> Option<PgNamespaceRow> {
+        namespace_row_by_oid(self.db, self.client_id, self.txn_ctx, oid)
     }
 
     fn row_security_enabled(&self) -> bool {
