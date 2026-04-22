@@ -3008,7 +3008,11 @@ fn bind_regclass_literal_cast(
     let relation_oid = relation_name
         .parse::<u32>()
         .ok()
-        .or_else(|| catalog.lookup_any_relation(relation_name).map(|entry| entry.relation_oid))
+        .or_else(|| {
+            catalog
+                .lookup_any_relation(relation_name)
+                .map(|entry| entry.relation_oid)
+        })
         .ok_or_else(|| ParseError::UnknownTable(relation_name.to_string()))?;
     Ok(Some(Expr::Cast(
         Box::new(Expr::Const(Value::Int64(relation_oid as i64))),

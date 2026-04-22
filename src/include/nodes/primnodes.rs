@@ -53,6 +53,7 @@ pub struct ColumnDesc {
     pub storage: AttributeDesc,
     pub ty: ScalarType,
     pub sql_type: SqlType,
+    pub collation_oid: Option<u32>,
     pub dropped: bool,
     pub attstattarget: i16,
     pub attinhcount: i16,

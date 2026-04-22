@@ -1,11 +1,12 @@
 mod agg;
 mod agg_output;
 mod agg_output_special;
-mod collation;
 mod coerce;
+mod collation;
 mod constraints;
 mod create_table;
 mod create_table_inherits;
+mod create_table_like;
 mod expr;
 mod functions;
 mod geometry;
@@ -60,9 +61,9 @@ use crate::backend::utils::cache::system_views::{
 };
 use agg::*;
 use agg_output::*;
-use collation::*;
 pub use coerce::is_binary_coercible_type;
 use coerce::*;
+use collation::*;
 pub(crate) use constraints::*;
 pub(crate) use constraints::{BoundReferencedByForeignKey, BoundRelationConstraints};
 pub use create_table::*;

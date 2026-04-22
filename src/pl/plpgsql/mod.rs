@@ -184,10 +184,7 @@ mod tests {
         assert_eq!(n_decl.name, "n");
         assert_eq!(n_decl.default_expr.as_deref(), Some("1000"));
         assert_eq!(c_decl.name, "c");
-        assert_eq!(
-            c_decl.default_expr.as_deref(),
-            Some("1.94947")
-        );
+        assert_eq!(c_decl.default_expr.as_deref(), Some("1.94947"));
     }
 
     #[test]

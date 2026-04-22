@@ -347,9 +347,7 @@ fn collect_direct_expr_subplans<'a>(expr: &'a Expr, out: &mut Vec<&'a SubPlan>) 
         Expr::Cast(inner, _)
         | Expr::Collate { expr: inner, .. }
         | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => {
-            collect_direct_expr_subplans(inner, out)
-        }
+        | Expr::IsNotNull(inner) => collect_direct_expr_subplans(inner, out),
         Expr::Like {
             expr,
             pattern,

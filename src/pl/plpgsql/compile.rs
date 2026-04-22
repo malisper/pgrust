@@ -2,17 +2,17 @@
 
 use std::collections::HashMap;
 
+use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::Expr;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{
     BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, CatalogLookup, ParseError,
-    SlotScopeColumn, SqlType, SqlTypeKind, Statement, bind_delete_with_outer_scopes,
-    bind_insert_with_outer_scopes, bind_update_with_outer_scopes,
-    bind_scalar_expr_in_named_slot_scope, parse_expr, parse_statement, parse_type_name,
-    pg_plan_query_with_outer_scopes, pg_plan_values_query_with_outer_scopes, SqlExpr,
+    SlotScopeColumn, SqlExpr, SqlType, SqlTypeKind, Statement, bind_delete_with_outer_scopes,
+    bind_insert_with_outer_scopes, bind_scalar_expr_in_named_slot_scope,
+    bind_update_with_outer_scopes, parse_expr, parse_statement, parse_type_name,
+    pg_plan_query_with_outer_scopes, pg_plan_values_query_with_outer_scopes,
 };
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
-use crate::backend::catalog::catalog::column_desc;
 use crate::include::catalog::{PgProcRow, RECORD_TYPE_OID};
 use crate::include::nodes::plannodes::PlannedStmt;
 use crate::include::nodes::primnodes::{QueryColumn, Var, user_attrno};
@@ -1054,12 +1054,8 @@ fn normalize_plpgsql_expr(expr: SqlExpr, env: &CompileEnv) -> SqlExpr {
         SqlExpr::UnaryPlus(inner) => {
             SqlExpr::UnaryPlus(Box::new(normalize_plpgsql_expr(*inner, env)))
         }
-        SqlExpr::Negate(inner) => {
-            SqlExpr::Negate(Box::new(normalize_plpgsql_expr(*inner, env)))
-        }
-        SqlExpr::BitNot(inner) => {
-            SqlExpr::BitNot(Box::new(normalize_plpgsql_expr(*inner, env)))
-        }
+        SqlExpr::Negate(inner) => SqlExpr::Negate(Box::new(normalize_plpgsql_expr(*inner, env))),
+        SqlExpr::BitNot(inner) => SqlExpr::BitNot(Box::new(normalize_plpgsql_expr(*inner, env))),
         SqlExpr::Subscript { expr, index } => SqlExpr::Subscript {
             expr: Box::new(normalize_plpgsql_expr(*expr, env)),
             index,
@@ -1108,9 +1104,7 @@ fn normalize_plpgsql_expr(expr: SqlExpr, env: &CompileEnv) -> SqlExpr {
             Box::new(normalize_plpgsql_expr(*right, env)),
         ),
         SqlExpr::Not(inner) => SqlExpr::Not(Box::new(normalize_plpgsql_expr(*inner, env))),
-        SqlExpr::IsNull(inner) => {
-            SqlExpr::IsNull(Box::new(normalize_plpgsql_expr(*inner, env)))
-        }
+        SqlExpr::IsNull(inner) => SqlExpr::IsNull(Box::new(normalize_plpgsql_expr(*inner, env))),
         SqlExpr::IsNotNull(inner) => {
             SqlExpr::IsNotNull(Box::new(normalize_plpgsql_expr(*inner, env)))
         }

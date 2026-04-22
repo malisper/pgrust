@@ -649,9 +649,7 @@ fn collect_expr_relids(expr: &Expr, relids: &mut Vec<usize>) {
         Expr::Cast(inner, _)
         | Expr::Collate { expr: inner, .. }
         | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => {
-            collect_expr_relids(inner, relids)
-        }
+        | Expr::IsNotNull(inner) => collect_expr_relids(inner, relids),
         Expr::Like {
             expr,
             pattern,

@@ -186,9 +186,7 @@ fn expr_references_local_cte(expr: &Expr, local_ctes: &HashMap<usize, String>) -
         Expr::Cast(inner, _)
         | Expr::Collate { expr: inner, .. }
         | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => {
-            expr_references_local_cte(inner, local_ctes)
-        }
+        | Expr::IsNotNull(inner) => expr_references_local_cte(inner, local_ctes),
         Expr::Like {
             expr,
             pattern,
