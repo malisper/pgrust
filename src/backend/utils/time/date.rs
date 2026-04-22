@@ -1,9 +1,10 @@
 use crate::backend::utils::misc::guc_datetime::{DateOrder, DateStyleFormat, DateTimeConfig};
 use crate::backend::utils::time::datetime::{
-    DateTimeKeyword, DateTimeParseError, days_from_ymd, format_offset, format_time_usecs,
-    month_number, parse_date_token_with_config, parse_keyword, parse_offset_seconds,
-    parse_time_components, split_time_and_offset, time_usecs_from_hms, timezone_offset_seconds,
-    today_pg_days, ymd_from_days,
+    DateTimeKeyword, DateTimeParseError, TimeZoneSpec, days_from_ymd, format_offset,
+    format_time_usecs, month_number, parse_date_token_with_config, parse_fraction_to_usecs,
+    parse_keyword, parse_offset_seconds, parse_time_components, parse_timezone_spec,
+    split_time_and_offset, time_usecs_from_hms, timezone_offset_seconds, today_pg_days,
+    ymd_from_days,
 };
 use crate::include::nodes::datetime::{
     DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, POSTGRES_EPOCH_JDATE, TimeADT, TimeTzADT,
@@ -385,10 +386,251 @@ pub fn parse_date_text(text: &str, config: &DateTimeConfig) -> Result<DateADT, D
     Ok(value)
 }
 
-pub fn parse_time_text(text: &str) -> Option<TimeADT> {
-    let (time_text, _) = split_time_and_offset(text);
-    let (hour, minute, second, micros) = parse_time_components(time_text)?;
-    Some(TimeADT(time_usecs_from_hms(hour, minute, second, micros)?))
+fn tokenize_time_input<'a>(text: &'a str, config: &DateTimeConfig) -> Vec<&'a str> {
+    let mut tokens = Vec::new();
+    for token in text.split_whitespace() {
+        if let Some((date, time)) = token.split_once('T') {
+            if !date.is_empty()
+                && !time.is_empty()
+                && parse_date_token_with_config(date, config)
+                    .ok()
+                    .flatten()
+                    .is_some()
+            {
+                tokens.push(date);
+                tokens.push(time);
+                continue;
+            }
+        }
+        tokens.push(token);
+    }
+    tokens
+}
+
+fn split_meridiem_suffix(text: &str) -> (&str, Option<&str>) {
+    if text.len() >= 2 {
+        let suffix = &text[text.len() - 2..];
+        if suffix.eq_ignore_ascii_case("am") || suffix.eq_ignore_ascii_case("pm") {
+            return (&text[..text.len() - 2], Some(suffix));
+        }
+    }
+    (text, None)
+}
+
+fn apply_meridiem(hour: u32, meridiem: Option<&str>) -> Option<u32> {
+    match meridiem.map(|value| value.to_ascii_lowercase()) {
+        None => Some(hour),
+        Some(value) if !(1..=12).contains(&hour) => None,
+        Some(value) if value == "am" => Some(if hour == 12 { 0 } else { hour }),
+        Some(value) if value == "pm" => Some(if hour == 12 { 12 } else { hour + 12 }),
+        _ => None,
+    }
+}
+
+fn parse_fraction_to_usecs_rounded(text: &str) -> Option<(i64, bool)> {
+    if text.is_empty() || !text.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    let trimmed = if text.len() > 6 { &text[..6] } else { text };
+    let mut micros = parse_fraction_to_usecs(trimmed)?;
+    let mut carry = false;
+    if text.len() > 6 && text.as_bytes().get(6).copied().is_some_and(|digit| digit >= b'5') {
+        micros += 1;
+        if micros >= 1_000_000 {
+            micros = 0;
+            carry = true;
+        }
+    }
+    Some((micros, carry))
+}
+
+fn parse_compact_time_components_rounded(text: &str) -> Option<(u32, u32, u32, i64)> {
+    let (main, fraction) = match text.split_once('.') {
+        Some((main, fraction)) => (main, Some(fraction)),
+        None => (text, None),
+    };
+    if !main.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    let (hour, minute, second) = match main.len() {
+        4 => (
+            main[0..2].parse::<u32>().ok()?,
+            main[2..4].parse::<u32>().ok()?,
+            0,
+        ),
+        6 => (
+            main[0..2].parse::<u32>().ok()?,
+            main[2..4].parse::<u32>().ok()?,
+            main[4..6].parse::<u32>().ok()?,
+        ),
+        _ => return None,
+    };
+    let (micros, carry_second) = match fraction {
+        Some(fraction) => parse_fraction_to_usecs_rounded(fraction)?,
+        None => (0, false),
+    };
+    Some((hour, minute, second + u32::from(carry_second), micros))
+}
+
+fn parse_time_fields_raw(text: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = text.split(':');
+    let hour = parts.next()?.parse::<u32>().ok()?;
+    let minute = parts.next()?.parse::<u32>().ok()?;
+    let second = parts.next()?.parse::<u32>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((hour, minute, second))
+}
+
+fn standalone_meridiem(token: &str) -> bool {
+    token.eq_ignore_ascii_case("am") || token.eq_ignore_ascii_case("pm")
+}
+
+fn parse_time_token(text: &str) -> Result<Option<(i64, Option<TimeZoneSpec>)>, DateTimeParseError> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let (main, inline_offset) = split_time_and_offset(trimmed);
+    let (main, meridiem) = split_meridiem_suffix(main);
+    let components = if main.contains(':') {
+        let (main_time, fraction) = match main.split_once('.') {
+            Some((main_time, fraction)) => (main_time, Some(fraction)),
+            None => (main, None),
+        };
+        let (hour, minute, second) = match parse_time_components(main_time) {
+            Some((hour, minute, second, _)) => (hour, minute, second),
+            None => {
+                let Some((hour, minute, second)) = parse_time_fields_raw(main_time) else {
+                    return Ok(None);
+                };
+                if hour > 24 || minute > 59 || second > 60 {
+                    return Err(DateTimeParseError::FieldOutOfRange);
+                }
+                (hour, minute, second)
+            }
+        };
+        let (micros, carry_second) = match fraction {
+            Some(fraction) => parse_fraction_to_usecs_rounded(fraction)
+                .ok_or(DateTimeParseError::Invalid)?,
+            None => (0, false),
+        };
+        (hour, minute, second + u32::from(carry_second), micros)
+    } else {
+        let Some(components) = parse_compact_time_components_rounded(main) else {
+            return Ok(None);
+        };
+        components
+    };
+
+    let hour = apply_meridiem(components.0, meridiem).ok_or(DateTimeParseError::Invalid)?;
+    let mut usecs = hour as i64 * crate::include::nodes::datetime::USECS_PER_HOUR
+        + components.1 as i64 * crate::include::nodes::datetime::USECS_PER_MINUTE
+        + components.2 as i64 * crate::include::nodes::datetime::USECS_PER_SEC
+        + components.3;
+    if components.0 == 24 && (components.1 != 0 || components.2 != 0 || components.3 != 0) {
+        return Err(DateTimeParseError::FieldOutOfRange);
+    }
+    if components.2 == 60 && components.3 != 0 {
+        return Err(DateTimeParseError::FieldOutOfRange);
+    }
+    if !(0..=crate::include::nodes::datetime::USECS_PER_DAY).contains(&usecs) {
+        return Err(DateTimeParseError::FieldOutOfRange);
+    }
+    if components.2 == 60 {
+        usecs = (hour as i64 * crate::include::nodes::datetime::USECS_PER_HOUR)
+            + (components.1 as i64 + 1) * crate::include::nodes::datetime::USECS_PER_MINUTE;
+    }
+    let zone = match inline_offset {
+        Some(zone_text) => parse_timezone_spec(zone_text)?,
+        None => None,
+    };
+    Ok(Some((usecs, zone)))
+}
+
+pub fn parse_time_text(text: &str, config: &DateTimeConfig) -> Result<TimeADT, DateTimeParseError> {
+    let mut tokens = tokenize_time_input(text, config);
+    if tokens.is_empty() {
+        return Err(DateTimeParseError::Invalid);
+    }
+
+    let mut zone = None;
+    let mut zone_requires_date = false;
+    if tokens.len() > 1 {
+        if let Some(last) = tokens.last().copied() {
+            if !standalone_meridiem(last) {
+                if let Some(spec) = parse_timezone_spec(last)? {
+                    zone_requires_date = last.contains('/');
+                    zone = Some(spec);
+                    tokens.pop();
+                }
+            }
+        }
+    }
+
+    let time_index = tokens
+        .iter()
+        .position(|token| {
+            let trimmed = token.trim();
+            trimmed.contains(':') || split_meridiem_suffix(trimmed).1.is_some()
+        })
+        .or_else(|| {
+            (tokens.len() >= 2).then(|| {
+                tokens.iter().enumerate().rev().find_map(|(index, token)| {
+                    token
+                        .trim()
+                        .chars()
+                        .all(|ch| ch.is_ascii_digit() || matches!(ch, '.' | '+' | '-'))
+                        .then_some(index)
+                })
+            })?
+        });
+    let Some(mut time_index) = time_index else {
+        return Err(DateTimeParseError::Invalid);
+    };
+
+    let mut owned_time = None;
+    if let Some(next) = tokens.get(time_index + 1).copied() {
+        if standalone_meridiem(next) {
+            owned_time = Some(format!("{}{}", tokens[time_index], next));
+            time_index += 1;
+        }
+    }
+    let time_token = owned_time.as_deref().unwrap_or(tokens[time_index]);
+    let (time_usecs, inline_zone) =
+        parse_time_token(time_token)?.ok_or(DateTimeParseError::Invalid)?;
+    if zone.is_some() && inline_zone.is_some() {
+        return Err(DateTimeParseError::Invalid);
+    }
+    zone = zone.or(inline_zone);
+
+    let mut remaining = Vec::with_capacity(tokens.len().saturating_sub(1));
+    for (index, token) in tokens.iter().enumerate() {
+        if index == time_index || (owned_time.is_some() && index + 1 == time_index) {
+            continue;
+        }
+        remaining.push(*token);
+    }
+
+    let has_date = if remaining.is_empty() {
+        false
+    } else if remaining.len() == 1 {
+        parse_date_token_with_config(remaining[0], config)?
+            .map(|_| true)
+            .ok_or(DateTimeParseError::Invalid)?
+    } else {
+        parse_date_token_with_config(&remaining.join("-"), config)?
+            .map(|_| true)
+            .ok_or(DateTimeParseError::Invalid)?
+    };
+
+    if (matches!(zone, Some(TimeZoneSpec::Named(_))) || zone_requires_date) && !has_date {
+        return Err(DateTimeParseError::Invalid);
+    }
+
+    Ok(TimeADT(time_usecs))
 }
 
 pub fn parse_timetz_text(text: &str, config: &DateTimeConfig) -> Option<TimeTzADT> {
@@ -855,5 +1097,55 @@ mod tests {
         );
         assert_eq!(parse_date_text("99 08 Jan", &dmy), invalid);
         assert_eq!(parse_date_text("99 08 Jan", &mdy), invalid);
+    }
+
+    #[test]
+    fn parse_time_text_accepts_postgres_time_forms() {
+        let config = DateTimeConfig::default();
+        assert_eq!(
+            parse_time_text("02:03 PST", &config),
+            Ok(TimeADT(2 * 60 * 60 * 1_000_000 + 3 * 60 * 1_000_000))
+        );
+        assert_eq!(
+            parse_time_text("11:59 EDT", &config),
+            Ok(TimeADT(11 * 60 * 60 * 1_000_000 + 59 * 60 * 1_000_000))
+        );
+        assert_eq!(
+            parse_time_text("11:59:59.99 PM", &config),
+            Ok(TimeADT(
+                23 * 60 * 60 * 1_000_000 + 59 * 60 * 1_000_000 + 59 * 1_000_000 + 990_000
+            ))
+        );
+        assert_eq!(
+            parse_time_text("2003-03-07 15:36:39 America/New_York", &config),
+            Ok(TimeADT(
+                15 * 60 * 60 * 1_000_000 + 36 * 60 * 1_000_000 + 39 * 1_000_000
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_time_text_handles_rounding_and_named_timezone_rules() {
+        let config = DateTimeConfig::default();
+        assert_eq!(
+            parse_time_text("23:59:59.9999999", &config),
+            Ok(TimeADT(crate::include::nodes::datetime::USECS_PER_DAY))
+        );
+        assert_eq!(
+            parse_time_text("23:59:60", &config),
+            Ok(TimeADT(crate::include::nodes::datetime::USECS_PER_DAY))
+        );
+        assert_eq!(
+            parse_time_text("15:36:39 America/New_York", &config),
+            Err(DateTimeParseError::Invalid)
+        );
+        assert_eq!(
+            parse_time_text("24:00:00.01", &config),
+            Err(DateTimeParseError::FieldOutOfRange)
+        );
+        assert_eq!(
+            parse_time_text("23:59:60.01", &config),
+            Err(DateTimeParseError::FieldOutOfRange)
+        );
     }
 }
