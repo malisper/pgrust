@@ -379,7 +379,7 @@ pub(crate) fn eval_json_builtin_function(
                     ParsedJsonValue::Jsonb(jsonb) => jsonb.to_serde(),
                 };
                 Ok(Value::Json(CompactString::from_owned(
-                    strip_json_nulls(&parsed, strip_in_arrays).to_string(),
+                    render_serde_json_value_text(&strip_json_nulls(&parsed, strip_in_arrays)),
                 )))
             }
             BuiltinScalarFunction::JsonTypeof => {
@@ -1071,7 +1071,7 @@ fn json_record_array_nested_value(
 fn json_record_scalar_text(value: &SerdeJsonValue) -> Result<String, ExecError> {
     match value {
         SerdeJsonValue::String(text) => Ok(text.clone()),
-        _ => Ok(JsonbValue::from_serde(value.clone())?.render()),
+        _ => Ok(render_serde_json_value_text(value)),
     }
 }
 
@@ -2723,7 +2723,7 @@ fn json_value_to_text(value: &SerdeJsonValue) -> Option<String> {
     match value {
         SerdeJsonValue::Null => None,
         SerdeJsonValue::String(text) => Some(text.clone()),
-        other => Some(other.to_string()),
+        other => Some(render_serde_json_value_text(other)),
     }
 }
 
@@ -2733,7 +2733,41 @@ fn json_value_to_value(value: &SerdeJsonValue, as_text: bool) -> Value {
             .map(|text| Value::Text(CompactString::from_owned(text)))
             .unwrap_or(Value::Null)
     } else {
-        Value::Json(CompactString::from_owned(value.to_string()))
+        Value::Json(CompactString::from_owned(render_serde_json_value_text(value)))
+    }
+}
+
+fn render_serde_json_value_text(value: &SerdeJsonValue) -> String {
+    match value {
+        SerdeJsonValue::Null => "null".into(),
+        SerdeJsonValue::Bool(true) => "true".into(),
+        SerdeJsonValue::Bool(false) => "false".into(),
+        SerdeJsonValue::Number(number) => number.to_string(),
+        SerdeJsonValue::String(text) => serde_json::to_string(text).unwrap(),
+        SerdeJsonValue::Array(items) => {
+            let mut out = String::from("[");
+            for (idx, item) in items.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&render_serde_json_value_text(item));
+            }
+            out.push(']');
+            out
+        }
+        SerdeJsonValue::Object(map) => {
+            let mut out = String::from("{");
+            for (idx, (key, value)) in map.iter().enumerate() {
+                if idx > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&serde_json::to_string(key).unwrap());
+                out.push_str(": ");
+                out.push_str(&render_serde_json_value_text(value));
+            }
+            out.push('}');
+            out
+        }
     }
 }
 
@@ -2913,7 +2947,7 @@ fn render_json_value_text_with_config(
             let mut out = String::from("[");
             for (idx, item) in items.iter().enumerate() {
                 if idx > 0 {
-                    out.push(',');
+                    out.push_str(", ");
                 }
                 out.push_str(&render_json_value_text_with_config(
                     item,
@@ -2928,10 +2962,10 @@ fn render_json_value_text_with_config(
             let mut out = String::from("{");
             for (idx, (field, item)) in record.iter().enumerate() {
                 if idx > 0 {
-                    out.push(',');
+                    out.push_str(", ");
                 }
                 out.push_str(&serde_json::to_string(&field.name).unwrap());
-                out.push(':');
+                out.push_str(": ");
                 out.push_str(&render_json_field_value_text(
                     item,
                     field.sql_type,
@@ -2946,7 +2980,7 @@ fn render_json_value_text_with_config(
             let mut out = String::from("[");
             for (idx, item) in array.to_nested_values().iter().enumerate() {
                 if idx > 0 {
-                    out.push(',');
+                    out.push_str(", ");
                 }
                 out.push_str(&render_json_value_text_with_config(
                     item,

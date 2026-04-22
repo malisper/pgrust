@@ -29,10 +29,11 @@ use crate::pgrust::compact_string::CompactString;
 
 mod array;
 
-pub use array::format_array_value_text;
+pub use array::{format_array_value_text, format_array_value_text_with_config};
 pub(crate) use array::{
     builtin_type_oid_for_sql_type, decode_anyarray_bytes, decode_array_bytes,
     encode_anyarray_bytes, encode_array_bytes, format_array_text,
+    format_array_text_with_config,
 };
 
 const INTERNAL_VALUE_TAG_NULL: u8 = 0;
@@ -72,6 +73,13 @@ const INTERNAL_VALUE_TAG_MULTIRANGE: u8 = 32;
 const COMPOSITE_DATUM_VERSION: u8 = 1;
 
 pub(crate) fn format_record_text(record: &crate::include::nodes::datum::RecordValue) -> String {
+    format_record_text_with_config(record, &DateTimeConfig::default())
+}
+
+pub(crate) fn format_record_text_with_config(
+    record: &crate::include::nodes::datum::RecordValue,
+    datetime_config: &DateTimeConfig,
+) -> String {
     let mut out = String::from("(");
     for (index, value) in record.fields.iter().enumerate() {
         if index > 0 {
@@ -81,9 +89,9 @@ pub(crate) fn format_record_text(record: &crate::include::nodes::datum::RecordVa
             continue;
         }
         let rendered = match value {
-            Value::Record(record) => format_record_text(record),
-            Value::PgArray(array) => format_array_value_text(array),
-            Value::Array(values) => format_array_text(values),
+            Value::Record(record) => format_record_text_with_config(record, datetime_config),
+            Value::PgArray(array) => format_array_value_text_with_config(array, datetime_config),
+            Value::Array(values) => format_array_text_with_config(values, datetime_config),
             Value::Range(_) => render_range_text(value).unwrap_or_default(),
             Value::InternalChar(byte) => render_internal_char_text(*byte),
             Value::Jsonb(bytes) => render_jsonb_bytes(bytes).unwrap_or_default(),
@@ -91,7 +99,7 @@ pub(crate) fn format_record_text(record: &crate::include::nodes::datum::RecordVa
                 if let Some(text) = other.as_text() {
                     text.to_string()
                 } else {
-                    render_datetime_value_text_with_config(other, &DateTimeConfig::default())
+                    render_datetime_value_text_with_config(other, datetime_config)
                         .or_else(|| render_geometry_text(other, FloatFormatOptions::default()))
                         .unwrap_or_else(|| match other {
                             Value::Bool(true) => "t".to_string(),
@@ -218,9 +226,9 @@ fn format_failing_row_value(value: &Value, datetime_config: &DateTimeConfig) -> 
         | Value::Circle(_) => {
             render_geometry_text(value, FloatFormatOptions::default()).unwrap_or_default()
         }
-        Value::Array(values) => format_array_text(values),
-        Value::PgArray(array) => format_array_value_text(array),
-        Value::Record(record) => format_record_text(record),
+        Value::Array(values) => format_array_text_with_config(values, datetime_config),
+        Value::PgArray(array) => format_array_value_text_with_config(array, datetime_config),
+        Value::Record(record) => format_record_text_with_config(record, datetime_config),
     }
 }
 
@@ -2069,6 +2077,8 @@ mod tests {
     use super::*;
     use crate::backend::catalog::catalog::column_desc;
     use crate::backend::executor::expr_range::parse_range_text;
+    use crate::backend::utils::misc::guc_datetime::{DateOrder, DateStyleFormat, DateTimeConfig};
+    use crate::backend::utils::time::timestamp::parse_timestamp_text;
     use crate::include::catalog::{INT4_TYPE_OID, INT4RANGE_TYPE_OID};
     use crate::include::nodes::datum::{ArrayDimension, RecordDescriptor, RecordValue};
 
@@ -2335,5 +2345,42 @@ mod tests {
             }
             other => panic!("expected invalid storage value, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn format_record_text_uses_datetime_config() {
+        let config = DateTimeConfig {
+            date_style_format: DateStyleFormat::Postgres,
+            date_order: DateOrder::Mdy,
+            ..DateTimeConfig::default()
+        };
+        let timestamp = parse_timestamp_text("2012-12-31 15:30:56", &DateTimeConfig::default())
+            .expect("parse timestamp");
+        let record = RecordValue::anonymous(vec![("c".into(), Value::Timestamp(timestamp))]);
+
+        assert_eq!(
+            format_record_text_with_config(&record, &config),
+            "(\"Mon Dec 31 15:30:56 2012\")"
+        );
+    }
+
+    #[test]
+    fn format_array_text_uses_datetime_config_for_record_elements() {
+        let config = DateTimeConfig {
+            date_style_format: DateStyleFormat::Postgres,
+            date_order: DateOrder::Mdy,
+            ..DateTimeConfig::default()
+        };
+        let timestamp = parse_timestamp_text("2003-01-02 00:00:00", &DateTimeConfig::default())
+            .expect("parse timestamp");
+        let array = ArrayValue::from_1d(vec![Value::Record(RecordValue::anonymous(vec![(
+            "c".into(),
+            Value::Timestamp(timestamp),
+        )]))]);
+
+        assert_eq!(
+            format_array_value_text_with_config(&array, &config),
+            "{\"(\\\"Thu Jan 02 00:00:00 2003\\\")\"}"
+        );
     }
 }
