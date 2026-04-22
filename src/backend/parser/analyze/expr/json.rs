@@ -78,7 +78,11 @@ pub(super) fn bind_json_binary_expr(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
-    let (left, right) = bind_json_binary_operands(
+    let raw_left_type =
+        infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let raw_right_type =
+        infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let (left_bound, right_bound) = bind_json_binary_operands(
         left,
         right,
         scope,
@@ -87,6 +91,21 @@ pub(super) fn bind_json_binary_expr(
         grouped_outer,
         ctes,
     )?;
+    let right = match op {
+        crate::include::nodes::primnodes::OpExprKind::JsonPath
+        | crate::include::nodes::primnodes::OpExprKind::JsonPathText => {
+            let target = SqlType::array_of(SqlType::new(SqlTypeKind::Text));
+            let resolved = coerce_unknown_string_literal_type(right, raw_right_type, target);
+            if resolved == target && raw_right_type != target {
+                coerce_bound_expr(right_bound, raw_right_type, target)
+            } else {
+                right_bound
+            }
+        }
+        _ => right_bound,
+    };
+    let left = left_bound;
+    let _ = raw_left_type;
     Ok(Expr::op_auto(op, vec![left, right]))
 }
 
