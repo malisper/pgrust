@@ -280,6 +280,7 @@ fn record_simulated_row_state(
             if *existing_row_id != row_id {
                 return Err(ExecError::UniqueViolation {
                     constraint: key.index_name.clone(),
+                    detail: None,
                 });
             }
         }
@@ -486,7 +487,10 @@ pub(crate) fn execute_insert_on_conflict_rows(
                 match insert_index_entry_for_row(stmt.rel, &stmt.desc, index, values, heap_tid, ctx)
                 {
                     Ok(()) => {}
-                    Err(ExecError::UniqueViolation { constraint })
+                    Err(ExecError::UniqueViolation {
+                        constraint,
+                        detail: _,
+                    })
                         if constraint.eq_ignore_ascii_case(&index.name) =>
                     {
                         rollback_inserted_row(

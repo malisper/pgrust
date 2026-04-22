@@ -132,6 +132,7 @@ fn exec_error_detail(e: &ExecError) -> Option<&str> {
         ExecError::JsonInput { detail, .. } => detail.as_deref(),
         ExecError::XmlInput { detail, .. } => detail.as_deref(),
         ExecError::DetailedError { detail, .. } => detail.as_deref(),
+        ExecError::UniqueViolation { detail, .. } => detail.as_deref(),
         ExecError::Parse(crate::backend::parser::ParseError::DetailedError { detail, .. }) => {
             detail.as_deref()
         }
@@ -5762,6 +5763,53 @@ mod tests {
             "cannot subscript type timestamp with time zone because it does not support subscripting"
         ));
         assert_eq!(first_error_response_position(&output), Some(8));
+    }
+
+    #[test]
+    fn simple_query_reports_duplicate_key_detail_for_unique_array() {
+        let db = Database::open(temp_dir("unique_array_detail_simple_query"), 16).unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            "create temp table arr_tbl (f1 int[] unique);",
+        )
+        .unwrap();
+
+        output.clear();
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            "insert into arr_tbl values ('{1,2,3}');",
+        )
+        .unwrap();
+
+        output.clear();
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            "insert into arr_tbl values ('{1,2,3}');",
+        )
+        .unwrap();
+
+        assert!(output_contains_message(
+            &output,
+            "duplicate key value violates unique constraint \"arr_tbl_f1_key\""
+        ));
+        assert!(output_contains_message(
+            &output,
+            "Key (f1)=({1,2,3}) already exists."
+        ));
     }
 
     #[test]

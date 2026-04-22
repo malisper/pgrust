@@ -8927,7 +8927,8 @@ fn unique_expression_index_rejects_duplicate_expression_value() {
     db.execute(1, "insert into items values ('Alpha')").unwrap();
 
     match db.execute(1, "insert into items values ('alpha')") {
-        Err(ExecError::UniqueViolation { constraint }) if constraint == "items_name_lower_key" => {}
+        Err(ExecError::UniqueViolation { constraint, .. })
+            if constraint == "items_name_lower_key" => {}
         other => panic!("expected unique expression violation, got {other:?}"),
     }
 }
@@ -9601,7 +9602,7 @@ fn create_unique_index_rejects_duplicate_live_keys() {
         .unwrap();
 
     match db.execute(1, "create unique index items_id_key on items (id)") {
-        Err(ExecError::UniqueViolation { constraint }) => {
+        Err(ExecError::UniqueViolation { constraint, .. }) => {
             assert_eq!(constraint, "items_id_key");
         }
         other => panic!("expected unique violation, got {:?}", other),
@@ -9651,14 +9652,14 @@ fn create_table_primary_key_and_unique_constraints_are_enforced_and_persisted() 
     db.execute(1, "insert into items values (3, null)").unwrap();
 
     match db.execute(1, "insert into items values (1, 11)") {
-        Err(ExecError::UniqueViolation { constraint }) => {
+        Err(ExecError::UniqueViolation { constraint, .. }) => {
             assert_eq!(constraint, "items_pkey");
         }
         other => panic!("expected primary-key duplicate rejection, got {other:?}"),
     }
 
     match db.execute(1, "insert into items values (4, 10)") {
-        Err(ExecError::UniqueViolation { constraint }) => {
+        Err(ExecError::UniqueViolation { constraint, .. }) => {
             assert_eq!(constraint, "items_code_key");
         }
         other => panic!("expected unique duplicate rejection, got {other:?}"),
@@ -9745,14 +9746,14 @@ fn create_table_table_level_primary_key_and_unique_constraints_work() {
         .unwrap();
 
     match db.execute(1, "insert into memberships values (1, 10, 101)") {
-        Err(ExecError::UniqueViolation { constraint }) => {
+        Err(ExecError::UniqueViolation { constraint, .. }) => {
             assert_eq!(constraint, "memberships_pkey");
         }
         other => panic!("expected composite primary-key rejection, got {other:?}"),
     }
 
     match db.execute(1, "insert into memberships values (4, 10, 100)") {
-        Err(ExecError::UniqueViolation { constraint }) => {
+        Err(ExecError::UniqueViolation { constraint, .. }) => {
             assert_eq!(constraint, "memberships_tag_note_key");
         }
         other => panic!("expected composite unique rejection, got {other:?}"),
@@ -12408,7 +12409,8 @@ fn create_temp_table_constraints_are_supported_with_postgres_persistence_rules()
     }
 
     match db.execute(1, "insert into department values (2, 0, 'A')") {
-        Err(ExecError::UniqueViolation { constraint }) if constraint == "department_name_key" => {}
+        Err(ExecError::UniqueViolation { constraint, .. })
+            if constraint == "department_name_key" => {}
         other => panic!("expected temp unique violation, got {other:?}"),
     }
 
@@ -12509,11 +12511,13 @@ fn unique_index_insert_rejects_duplicate_key() {
         .unwrap();
 
     match db.execute(1, "insert into items values (1, 'beta')") {
-        Err(ExecError::UniqueViolation { constraint }) => {
+        Err(ExecError::UniqueViolation { constraint, detail }) => {
             assert_eq!(constraint, "items_id_key");
+            assert_eq!(detail.as_deref(), Some("Key (id)=(1) already exists."));
             assert_eq!(
                 crate::backend::libpq::pqformat::format_exec_error(&ExecError::UniqueViolation {
-                    constraint: constraint.clone()
+                    constraint: constraint.clone(),
+                    detail: detail.clone(),
                 }),
                 "duplicate key value violates unique constraint \"items_id_key\""
             );
@@ -12541,8 +12545,9 @@ fn unique_array_column_supports_duplicates_and_index_quals() {
         .unwrap();
 
     match db.execute(1, "insert into arr_tbl values ('{1,2,3}')") {
-        Err(ExecError::UniqueViolation { constraint }) => {
+        Err(ExecError::UniqueViolation { constraint, detail }) => {
             assert_eq!(constraint, "arr_tbl_f1_key");
+            assert_eq!(detail.as_deref(), Some("Key (f1)=({1,2,3}) already exists."));
         }
         other => panic!("expected unique violation, got {:?}", other),
     }
@@ -12620,7 +12625,7 @@ fn unique_index_update_rejects_duplicate_key() {
         .unwrap();
 
     match db.execute(1, "update items set id = 1 where id = 2") {
-        Err(ExecError::UniqueViolation { constraint }) => {
+        Err(ExecError::UniqueViolation { constraint, .. }) => {
             assert_eq!(constraint, "items_id_key");
         }
         other => panic!("expected unique violation, got {:?}", other),
@@ -12944,7 +12949,7 @@ fn concurrent_unique_index_inserts_only_allow_one_live_key() {
     for handle in handles {
         match handle.join().unwrap() {
             Ok(StatementResult::AffectedRows(1)) => successes += 1,
-            Err(ExecError::UniqueViolation { constraint }) => {
+            Err(ExecError::UniqueViolation { constraint, .. }) => {
                 assert_eq!(constraint, "items_id_key");
                 violations += 1;
             }
