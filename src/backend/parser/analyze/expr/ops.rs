@@ -878,6 +878,14 @@ pub(crate) fn bind_concat_operands(
         ));
     }
 
+    if left_type.kind == SqlTypeKind::Bytea
+        && !left_type.is_array
+        && right_type.kind == SqlTypeKind::Bytea
+        && !right_type.is_array
+    {
+        return Ok(Expr::op_auto(OpExprKind::Concat, vec![left_bound, right_bound]));
+    }
+
     if is_bit_string_type(left_type) && is_bit_string_type(right_type) {
         let common = resolve_common_scalar_type(left_type, right_type)
             .unwrap_or(SqlType::new(SqlTypeKind::VarBit));

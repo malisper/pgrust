@@ -18807,6 +18807,28 @@ fn plpgsql_alias_record_select_into_and_update_work() {
 }
 
 #[test]
+fn plpgsql_select_into_multiple_scalars_work() {
+    let dir = temp_dir("plpgsql_select_into_multiple_scalars");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function pair_source(x int4, y text, out a int4, out b text) language plpgsql as $$ begin a = x; b = y; return; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function assign_pair(out a int4, out b text) language plpgsql as $$ begin select * into a, b from pair_source(42, 'ok'); return; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select (assign_pair()).*"),
+        vec![vec![Value::Int32(42), Value::Text("ok".into())]]
+    );
+}
+
+#[test]
 fn after_insert_triggers_fire_per_row_in_alphabetical_order() {
     let dir = temp_dir("after_insert_trigger_notices");
     let db = Database::open(&dir, 64).unwrap();
