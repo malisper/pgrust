@@ -459,7 +459,10 @@ impl Database {
         crate::backend::access::index::indexam::index_build_stub(&build_ctx, access_method_oid)
             .map_err(|err| match err {
                 CatalogError::UniqueViolation(constraint) => {
-                    ExecError::UniqueViolation { constraint }
+                    ExecError::UniqueViolation {
+                        constraint,
+                        detail: None,
+                    }
                 }
                 CatalogError::Interrupted(reason) => ExecError::Interrupted(reason),
                 _ => ExecError::Parse(ParseError::UnexpectedToken {
@@ -632,6 +635,12 @@ impl Database {
             for (heap_tid, values) in rows {
                 let key_values =
                     index_key_values_for_row(&bound_index, &relation.desc, &values, &mut ctx)?;
+                let unique_detail = index_meta.indisunique.then(|| {
+                    crate::backend::executor::value_io::format_unique_key_detail(
+                        &index_entry.desc.columns,
+                        &key_values,
+                    )
+                });
                 crate::backend::access::index::indexam::index_insert_stub(
                     &IndexInsertContext {
                         pool: self.pool.clone(),
@@ -659,7 +668,10 @@ impl Database {
                 )
                 .map_err(|err| match err {
                     CatalogError::UniqueViolation(constraint) => {
-                        ExecError::UniqueViolation { constraint }
+                        ExecError::UniqueViolation {
+                            constraint,
+                            detail: unique_detail.clone(),
+                        }
                     }
                     _ => map_catalog_error(err),
                 })?;

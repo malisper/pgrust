@@ -1128,7 +1128,10 @@ pub(super) fn map_catalog_error(err: CatalogError) -> ExecError {
         CatalogError::UnknownTable(name) => ExecError::Parse(ParseError::TableDoesNotExist(name)),
         CatalogError::UnknownColumn(name) => ExecError::Parse(ParseError::UnknownColumn(name)),
         CatalogError::UnknownType(name) => ExecError::Parse(ParseError::UnsupportedType(name)),
-        CatalogError::UniqueViolation(constraint) => ExecError::UniqueViolation { constraint },
+        CatalogError::UniqueViolation(constraint) => ExecError::UniqueViolation {
+            constraint,
+            detail: None,
+        },
         CatalogError::Interrupted(reason) => ExecError::Interrupted(reason),
         CatalogError::Io(message) if message.starts_with("index row size ") => {
             ExecError::DetailedError {
