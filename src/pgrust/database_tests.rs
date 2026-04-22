@@ -15677,6 +15677,44 @@ fn temp_slot_reuse_starts_from_clean_namespace_contents() {
 }
 
 #[test]
+fn temp_slot_reuse_cleans_inherited_temp_relations() {
+    let base = temp_dir("temp_slot_reuse_inherits_cleanup");
+    let db = Database::open(&base, 16).unwrap();
+    let mut first_session = Session::with_temp_backend_id(10, 1);
+    let mut reused_session = Session::with_temp_backend_id(11, 1);
+
+    first_session
+        .execute(&db, "create temp table temp_parent (id int4 not null)")
+        .unwrap();
+    first_session
+        .execute(
+            &db,
+            "create temp table temp_child () inherits (temp_parent)",
+        )
+        .unwrap();
+
+    db.cleanup_client_temp_relations(10);
+    db.clear_temp_backend_id(10);
+
+    reused_session
+        .execute(&db, "create temp table temp_new (id int4 not null)")
+        .unwrap();
+    reused_session
+        .execute(&db, "insert into temp_new (id) values (9)")
+        .unwrap();
+
+    match reused_session
+        .execute(&db, "select count(*) from temp_new")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int64(1)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn copy_from_rows_parses_extended_numeric_types() {
     let base = temp_dir("copy_from_rows_extended_numeric");
     let db = Database::open(&base, 16).unwrap();
