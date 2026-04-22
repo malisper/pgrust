@@ -247,6 +247,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             }
         }
         ExecError::DetailedError { message, .. } => {
+            if message.starts_with("invalid value for parameter \"default_toast_compression\"") {
+                return None;
+            }
             if message.starts_with("invalid size: \"") {
                 return None;
             }
@@ -5698,6 +5701,19 @@ mod tests {
                 "Valid units are \"bytes\", \"B\", \"kB\", \"MB\", \"GB\", \"TB\", and \"PB\"."
                     .into(),
             ),
+            sqlstate: "22023",
+        };
+
+        assert_eq!(exec_error_position(sql, &err), None);
+    }
+
+    #[test]
+    fn exec_error_position_omits_default_toast_compression_guc_errors() {
+        let sql = "SET default_toast_compression = 'lz4';";
+        let err = ExecError::DetailedError {
+            message: "invalid value for parameter \"default_toast_compression\": \"lz4\"".into(),
+            detail: None,
+            hint: Some("Available values: pglz.".into()),
             sqlstate: "22023",
         };
 

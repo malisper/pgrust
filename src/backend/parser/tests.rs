@@ -1871,6 +1871,49 @@ fn parse_create_table_column_compression() {
 }
 
 #[test]
+fn parse_create_table_invalid_compression_name_lowercases_identifier() {
+    let err =
+        parse_statement("create table badcompresstbl (a text compression I_Do_Not_Exist_Compression)")
+            .unwrap_err();
+    match err {
+        ParseError::DetailedError {
+            message, sqlstate, ..
+        } => {
+            assert_eq!(
+                message,
+                "invalid compression method \"i_do_not_exist_compression\""
+            );
+            assert_eq!(sqlstate, "22023");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[cfg(not(feature = "lz4"))]
+#[test]
+fn unsupported_create_table_with_lz4_reports_compression_error() {
+    let err =
+        parse_statement("create table cmpart(f1 text compression lz4) partition by hash(f1)")
+            .unwrap_err();
+    match err {
+        ParseError::DetailedError {
+            message,
+            detail,
+            sqlstate,
+            ..
+        } => {
+            assert_eq!(message, "compression method lz4 not supported");
+            assert_eq!(
+                detail.as_deref(),
+                Some("This functionality requires the server to be built with lz4 support.")
+            );
+            assert_eq!(sqlstate, "0A000");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[test]
 fn parse_alter_table_constraint_statements() {
     let stmt =
         parse_statement("alter table items add constraint items_id_check check (id > 0) not valid")
