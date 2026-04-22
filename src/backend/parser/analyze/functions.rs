@@ -1,4 +1,5 @@
 use super::*;
+use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::{
     ANYARRAYOID, ANYOID, TEXT_TYPE_OID, bootstrap_pg_proc_rows, builtin_type_rows,
     builtin_window_function_for_proc_oid,
@@ -91,6 +92,19 @@ pub(super) fn resolve_function_call(
         };
         let Some(row_shape) = resolve_function_row_shape(catalog, &row, result_type) else {
             continue;
+        };
+
+        let result_type = match (&result_type.kind, &row_shape) {
+            (SqlTypeKind::Record, ResolvedFunctionRowShape::OutParameters(columns)) => {
+                assign_anonymous_record_descriptor(
+                    columns
+                        .iter()
+                        .map(|column| (column.name.clone(), column.sql_type))
+                        .collect(),
+                )
+                .sql_type()
+            }
+            _ => result_type,
         };
 
         let resolved = ResolvedFunctionCall {

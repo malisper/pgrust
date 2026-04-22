@@ -4093,6 +4093,18 @@ fn parse_create_function_args(input: &str) -> Result<Vec<CreateFunctionArg>, Par
 }
 
 fn parse_create_function_arg(input: &str) -> Result<CreateFunctionArg, ParseError> {
+    fn parse_mode(sql: &str) -> Option<(FunctionArgMode, &str)> {
+        if keyword_at_start(sql, "inout") {
+            Some((FunctionArgMode::InOut, consume_keyword(sql, "inout")))
+        } else if keyword_at_start(sql, "out") {
+            Some((FunctionArgMode::Out, consume_keyword(sql, "out")))
+        } else if keyword_at_start(sql, "in") {
+            Some((FunctionArgMode::In, consume_keyword(sql, "in")))
+        } else {
+            None
+        }
+    }
+
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err(ParseError::UnexpectedToken {
@@ -4111,19 +4123,24 @@ fn parse_create_function_arg(input: &str) -> Result<CreateFunctionArg, ParseErro
         ));
     }
 
-    let (mode, rest) = if keyword_at_start(trimmed, "inout") {
-        (FunctionArgMode::InOut, consume_keyword(trimmed, "inout"))
-    } else if keyword_at_start(trimmed, "out") {
-        (FunctionArgMode::Out, consume_keyword(trimmed, "out"))
-    } else if keyword_at_start(trimmed, "in") {
-        (FunctionArgMode::In, consume_keyword(trimmed, "in"))
+    let (mode, name, type_sql) = if let Some((mode, rest)) = parse_mode(trimmed) {
+        let rest = rest.trim_start();
+        match parse_sql_identifier(rest) {
+            Ok((name, rest)) if !rest.trim().is_empty() => (mode, Some(name), rest.trim()),
+            _ => (mode, None, rest),
+        }
     } else {
-        (FunctionArgMode::In, trimmed)
-    };
-    let rest = rest.trim_start();
-    let (name, type_sql) = match parse_sql_identifier(rest) {
-        Ok((name, rest)) if !rest.trim().is_empty() => (Some(name), rest.trim()),
-        _ => (None, rest),
+        match parse_sql_identifier(trimmed) {
+            Ok((name, rest)) if !rest.trim().is_empty() => {
+                let rest = rest.trim_start();
+                if let Some((mode, type_sql)) = parse_mode(rest) {
+                    (mode, Some(name), type_sql.trim_start())
+                } else {
+                    (FunctionArgMode::In, Some(name), rest)
+                }
+            }
+            _ => (FunctionArgMode::In, None, trimmed),
+        }
     };
     if type_sql.trim().is_empty() {
         return Err(ParseError::UnexpectedToken {
@@ -9920,8 +9937,11 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     Rule::field_select_suffix => {
                         let field = suffix
                             .into_inner()
-                            .find(|part| part.as_rule() == Rule::identifier)
-                            .map(build_identifier)
+                            .find_map(|part| match part.as_rule() {
+                                Rule::identifier => Some(build_identifier(part)),
+                                Rule::star => Some("*".into()),
+                                _ => None,
+                            })
                             .ok_or(ParseError::UnexpectedEof)?;
                         expr = SqlExpr::FieldSelect {
                             expr: Box::new(expr),

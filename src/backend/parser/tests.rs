@@ -3438,6 +3438,64 @@ fn parse_create_function_statement_with_unnamed_args() {
 }
 
 #[test]
+fn parse_create_function_statement_with_named_in_out_args() {
+    let stmt = parse_statement(
+        "create function test_conv(input in bytea, src_encoding in text, dst_encoding in text, result out bytea, errorat out bytea, error out text) language plpgsql as $$ begin return; end $$",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateFunction(CreateFunctionStatement {
+            schema_name: None,
+            function_name: "test_conv".into(),
+            replace_existing: false,
+            args: vec![
+                CreateFunctionArg {
+                    mode: FunctionArgMode::In,
+                    name: Some("input".into()),
+                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bytea)),
+                },
+                CreateFunctionArg {
+                    mode: FunctionArgMode::In,
+                    name: Some("src_encoding".into()),
+                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+                },
+                CreateFunctionArg {
+                    mode: FunctionArgMode::In,
+                    name: Some("dst_encoding".into()),
+                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+                },
+                CreateFunctionArg {
+                    mode: FunctionArgMode::Out,
+                    name: Some("result".into()),
+                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bytea)),
+                },
+                CreateFunctionArg {
+                    mode: FunctionArgMode::Out,
+                    name: Some("errorat".into()),
+                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bytea)),
+                },
+                CreateFunctionArg {
+                    mode: FunctionArgMode::Out,
+                    name: Some("error".into()),
+                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+                },
+            ],
+            return_spec: CreateFunctionReturnSpec::DerivedFromOutArgs {
+                setof_record: false,
+            },
+            strict: false,
+            leakproof: false,
+            volatility: FunctionVolatility::Volatile,
+            parallel: FunctionParallel::Unsafe,
+            language: "plpgsql".into(),
+            body: " begin return; end ".into(),
+            link_symbol: None,
+        })
+    );
+}
+
+#[test]
 fn parse_create_function_statement_with_pg_clauses_and_link_symbol() {
     let stmt = parse_statement(
         "create function binary_coercible(oid, oid) returns bool as 'regress', 'binary_coercible' language c strict stable parallel safe",
@@ -3506,6 +3564,18 @@ fn parse_create_function_statement_with_sql_return_shorthand() {
             link_symbol: None,
         })
     );
+}
+
+#[test]
+fn parse_select_statement_with_record_expansion_target() {
+    let stmt = parse_select("select (pair(1)).*").unwrap();
+    assert!(matches!(
+        stmt.targets.as_slice(),
+        [SelectItem {
+            output_name,
+            expr: SqlExpr::FieldSelect { field, .. }
+        }] if output_name == "*" && field == "*"
+    ));
 }
 
 #[test]
