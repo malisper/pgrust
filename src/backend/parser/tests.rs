@@ -14,6 +14,7 @@ use crate::include::nodes::parsenodes::{
     InsertSource, InsertStatement, JoinTreeNode, PublicationObjectSpec, PublicationOption,
     PublicationSchemaName, RangeTblEntryKind, RawTypeName, SetSessionAuthorizationStatement,
     SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerTiming,
+    ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -5473,7 +5474,21 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("drop schema if exists tenant_a cascade").unwrap(), Statement::DropSchema(DropSchemaStatement { if_exists: true, schema_names, cascade: true }) if schema_names == vec!["tenant_a"])
     );
     assert!(
-        matches!(parse_statement("create view item_names as select id, name from people").unwrap(), Statement::CreateView(CreateViewStatement { schema_name: None, view_name, query_sql, .. }) if view_name == "item_names" && query_sql == "select id, name from people")
+        matches!(parse_statement("create view item_names as select id, name from people").unwrap(), Statement::CreateView(CreateViewStatement { schema_name: None, view_name, query_sql, or_replace: false, check_option: ViewCheckOption::None, .. }) if view_name == "item_names" && query_sql == "select id, name from people")
+    );
+    assert!(
+        matches!(
+            parse_statement("create or replace view item_names as select id from people with local check option").unwrap(),
+            Statement::CreateView(CreateViewStatement {
+                schema_name: None,
+                view_name,
+                query_sql,
+                or_replace: true,
+                check_option: ViewCheckOption::Local,
+                ..
+            }) if view_name == "item_names"
+                && query_sql == "select id from people with local check option"
+        )
     );
     assert!(
         matches!(parse_statement("create schema tenant").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: Some(schema_name), auth_role: None, if_not_exists: false }) if schema_name == "tenant")

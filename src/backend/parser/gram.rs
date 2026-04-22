@@ -6732,14 +6732,31 @@ fn build_create_view(pair: Pair<'_, Rule>) -> Result<CreateViewStatement, ParseE
     let mut relation_name = None;
     let mut query = None;
     let mut query_sql = None;
+    let mut or_replace = false;
+    let mut check_option = ViewCheckOption::None;
     for part in pair.into_inner() {
         match part.as_rule() {
+            Rule::create_or_replace_clause => or_replace = true,
             Rule::identifier if relation_name.is_none() => {
                 relation_name = Some(build_relation_name(part))
             }
             Rule::select_stmt => {
                 query_sql = Some(part.as_str().trim().to_string());
                 query = Some(build_select(part)?);
+            }
+            Rule::view_check_option_clause => {
+                let raw = part.as_str().trim();
+                query_sql = Some(match query_sql.take() {
+                    Some(sql) => format!("{sql} {raw}"),
+                    None => raw.to_string(),
+                });
+                let lowered = raw.to_ascii_lowercase();
+                check_option = if lowered.contains(" local ") || lowered.starts_with("with local ")
+                {
+                    ViewCheckOption::Local
+                } else {
+                    ViewCheckOption::Cascaded
+                };
             }
             _ => {}
         }
@@ -6750,6 +6767,8 @@ fn build_create_view(pair: Pair<'_, Rule>) -> Result<CreateViewStatement, ParseE
         view_name,
         query: query.ok_or(ParseError::UnexpectedEof)?,
         query_sql: query_sql.ok_or(ParseError::UnexpectedEof)?,
+        or_replace,
+        check_option,
     })
 }
 

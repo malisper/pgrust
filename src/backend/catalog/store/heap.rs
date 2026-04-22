@@ -3756,6 +3756,37 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn alter_view_relation_desc_mvcc(
+        &mut self,
+        relation_oid: u32,
+        desc: RelationDesc,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (old_entry, new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
+                if entry.relkind != 'v' {
+                    return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+                }
+                entry.desc = desc;
+                Ok((
+                    (),
+                    vec![
+                        BootstrapCatalogKind::PgClass,
+                        BootstrapCatalogKind::PgAttribute,
+                        BootstrapCatalogKind::PgType,
+                    ],
+                ))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        if old_entry.row_type_oid != 0 || new_entry.row_type_oid != 0 {
+            effect_record_oid(&mut effect.type_oids, new_entry.row_type_oid);
+        }
+        Ok(effect)
+    }
+
     pub fn set_relation_analyze_stats_mvcc(
         &mut self,
         relation_oid: u32,
