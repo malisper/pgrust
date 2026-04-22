@@ -5137,6 +5137,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::comment_on_table_stmt => {
             Ok(Statement::CommentOnTable(build_comment_on_table(inner)?))
         }
+        Rule::comment_on_index_stmt => {
+            Ok(Statement::CommentOnIndex(build_comment_on_index(inner)?))
+        }
         Rule::comment_on_rule_stmt => Ok(Statement::CommentOnRule(build_comment_on_rule(inner)?)),
         Rule::comment_on_trigger_stmt => Ok(Statement::CommentOnTrigger(build_comment_on_trigger(
             inner,
@@ -7959,6 +7962,29 @@ fn build_comment_on_table(pair: Pair<'_, Rule>) -> Result<CommentOnTableStatemen
     }
     Ok(CommentOnTableStatement {
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        comment: comment.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_comment_on_index(pair: Pair<'_, Rule>) -> Result<CommentOnIndexStatement, ParseError> {
+    let mut index_name = None;
+    let mut comment = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => index_name = Some(build_identifier(part)),
+            Rule::quoted_string_literal
+            | Rule::string_literal
+            | Rule::unicode_string_literal
+            | Rule::escape_string_literal
+            | Rule::dollar_string_literal => {
+                comment = Some(Some(decode_string_literal_pair(part)?))
+            }
+            Rule::kw_null => comment = Some(None),
+            _ => {}
+        }
+    }
+    Ok(CommentOnIndexStatement {
+        index_name: index_name.ok_or(ParseError::UnexpectedEof)?,
         comment: comment.ok_or(ParseError::UnexpectedEof)?,
     })
 }

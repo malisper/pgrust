@@ -232,6 +232,10 @@ fn execute_statement_with_source(
             expected: "COMMENT ON TABLE handled by database/session layer",
             actual: "COMMENT ON TABLE".into(),
         })),
+        Statement::CommentOnIndex(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "COMMENT ON INDEX handled by database/session layer",
+            actual: "COMMENT ON INDEX".into(),
+        })),
         Statement::CommentOnConstraint(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "COMMENT ON CONSTRAINT handled by database/session layer",
             actual: "COMMENT ON CONSTRAINT".into(),
@@ -444,6 +448,10 @@ pub fn execute_readonly_statement(
         Statement::CommentOnTable(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "COMMENT ON TABLE".into(),
+        })),
+        Statement::CommentOnIndex(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "COMMENT ON INDEX".into(),
         })),
         Statement::CommentOnConstraint(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",

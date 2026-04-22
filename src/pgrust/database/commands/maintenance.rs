@@ -7,10 +7,10 @@ use crate::backend::executor::{ExecutorContext, RelationDesc};
 use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::{PG_CATALOG_NAMESPACE_OID, relkind_is_analyzable};
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::parsenodes::MaintenanceTarget;
+use crate::include::nodes::parsenodes::{CommentOnIndexStatement, MaintenanceTarget};
 use crate::pgrust::database::ddl::{
     lookup_analyzable_relation_for_ddl, lookup_heap_relation_for_alter_table,
-    lookup_heap_relation_for_ddl,
+    lookup_heap_relation_for_ddl, lookup_index_relation_for_alter_index,
 };
 use std::collections::BTreeSet;
 
@@ -328,6 +328,40 @@ impl Database {
         result
     }
 
+    pub(crate) fn execute_comment_on_index_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        comment_stmt: &CommentOnIndexStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let relation =
+            lookup_index_relation_for_alter_index(&catalog, &comment_stmt.index_name, false)?
+                .expect("index lookup without if_exists should return relation or error");
+        self.table_locks.lock_table_interruptible(
+            relation.rel,
+            TableLockMode::AccessExclusive,
+            client_id,
+            interrupts.as_ref(),
+        )?;
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_comment_on_index_stmt_in_transaction_with_search_path(
+            client_id,
+            comment_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        self.table_locks.unlock_table(relation.rel, client_id);
+        result
+    }
+
     pub(crate) fn execute_alter_table_add_column_stmt_with_search_path(
         &self,
         client_id: ClientId,
@@ -597,6 +631,40 @@ impl Database {
             .catalog
             .write()
             .comment_constraint_mvcc(row.oid, comment_stmt.comment.as_deref(), &ctx)
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    pub(crate) fn execute_comment_on_index_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        comment_stmt: &CommentOnIndexStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let relation =
+            lookup_index_relation_for_alter_index(&catalog, &comment_stmt.index_name, false)?
+                .expect("index lookup without if_exists should return relation or error");
+        ensure_relation_owner(self, client_id, &relation, &comment_stmt.index_name)?;
+
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: Arc::clone(&interrupts),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .comment_relation_mvcc(relation.relation_oid, comment_stmt.comment.as_deref(), &ctx)
             .map_err(map_catalog_error)?;
         catalog_effects.push(effect);
         Ok(StatementResult::AffectedRows(0))
