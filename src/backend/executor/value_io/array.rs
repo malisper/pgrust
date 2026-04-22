@@ -1,5 +1,6 @@
 use super::*;
 use crate::backend::executor::expr_casts::canonicalize_interval_text;
+use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::storage::page::bufpage::max_align;
 use crate::include::access::htup::AttributeAlign;
 use crate::include::catalog::{
@@ -1122,13 +1123,27 @@ fn decode_array_element_value(
 }
 
 pub(crate) fn format_array_text(items: &[Value]) -> String {
+    format_array_text_with_config(items, &DateTimeConfig::default())
+}
+
+pub(crate) fn format_array_text_with_config(
+    items: &[Value],
+    datetime_config: &DateTimeConfig,
+) -> String {
     match ArrayValue::from_nested_values(items.to_vec(), vec![1]) {
-        Ok(array) => format_array_value_text(&array),
-        Err(_) => format_array_value_text(&ArrayValue::from_1d(items.to_vec())),
+        Ok(array) => format_array_value_text_with_config(&array, datetime_config),
+        Err(_) => format_array_value_text_with_config(&ArrayValue::from_1d(items.to_vec()), datetime_config),
     }
 }
 
 pub fn format_array_value_text(array: &ArrayValue) -> String {
+    format_array_value_text_with_config(array, &DateTimeConfig::default())
+}
+
+pub fn format_array_value_text_with_config(
+    array: &ArrayValue,
+    datetime_config: &DateTimeConfig,
+) -> String {
     if array.dimensions.is_empty() {
         return "{}".into();
     }
@@ -1144,11 +1159,21 @@ pub fn format_array_value_text(array: &ArrayValue) -> String {
         }
         out.push('=');
     }
-    out.push_str(&format_array_values_nested(array, 0, &mut 0usize));
+    out.push_str(&format_array_values_nested(
+        array,
+        0,
+        &mut 0usize,
+        datetime_config,
+    ));
     out
 }
 
-fn format_array_values_nested(array: &ArrayValue, depth: usize, offset: &mut usize) -> String {
+fn format_array_values_nested(
+    array: &ArrayValue,
+    depth: usize,
+    offset: &mut usize,
+    datetime_config: &DateTimeConfig,
+) -> String {
     let mut out = String::from("{");
     let len = array.dimensions[depth].length;
     for idx in 0..len {
@@ -1156,7 +1181,12 @@ fn format_array_values_nested(array: &ArrayValue, depth: usize, offset: &mut usi
             out.push(',');
         }
         if depth + 1 < array.dimensions.len() {
-            out.push_str(&format_array_values_nested(array, depth + 1, offset));
+            out.push_str(&format_array_values_nested(
+                array,
+                depth + 1,
+                offset,
+                datetime_config,
+            ));
             continue;
         }
         let item = &array.elements[*offset];
@@ -1175,7 +1205,8 @@ fn format_array_values_nested(array: &ArrayValue, depth: usize, offset: &mut usi
             | Value::Timestamp(_)
             | Value::TimestampTz(_) => push_array_text_element(
                 &mut out,
-                &render_datetime_value_text(item).expect("datetime values render"),
+                &render_datetime_value_text_with_config(item, datetime_config)
+                    .expect("datetime values render"),
             ),
             Value::Bit(v) => out.push_str(&render_bit_text(v)),
             Value::Bytea(v) => {
@@ -1307,10 +1338,15 @@ fn format_array_values_nested(array: &ArrayValue, depth: usize, offset: &mut usi
                 let rendered = render_internal_char_text(*byte);
                 push_array_text_element(&mut out, &rendered);
             }
-            Value::Array(nested) => out.push_str(&format_array_text(nested)),
-            Value::PgArray(nested) => out.push_str(&format_array_value_text(nested)),
+            Value::Array(nested) => {
+                out.push_str(&format_array_text_with_config(nested, datetime_config))
+            }
+            Value::PgArray(nested) => out.push_str(&format_array_value_text_with_config(
+                nested,
+                datetime_config,
+            )),
             Value::Record(record) => {
-                let rendered = format_record_text(record);
+                let rendered = format_record_text_with_config(record, datetime_config);
                 push_array_text_element(&mut out, &rendered);
             }
         }
