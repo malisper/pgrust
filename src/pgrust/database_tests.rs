@@ -7270,6 +7270,72 @@ fn regclass_literal_cast_resolves_relation_name() {
 }
 
 #[test]
+fn regoperator_literal_cast_resolves_operator_signature() {
+    let base = temp_dir("regoperator_literal_cast");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function regoperator_test_fn(boolean, boolean) returns boolean as $$ select null::boolean; $$ language sql immutable",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create operator === (leftarg = boolean, rightarg = boolean, procedure = regoperator_test_fn)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select oprleft, oprright from pg_operator where oid = '===(boolean,boolean)'::regoperator"
+        ),
+        vec![vec![Value::Int64(16), Value::Int64(16)]]
+    );
+}
+
+#[test]
+fn pg_describe_object_formats_operator_dependencies() {
+    let base = temp_dir("pg_describe_object_operator_deps");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function alter_op_test_fn(boolean, boolean) returns boolean as $$ select null::boolean; $$ language sql immutable",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function customcontsel(internal, oid, internal, integer) returns float8 as 'contsel' language internal stable strict",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create operator === (leftarg = boolean, rightarg = boolean, procedure = alter_op_test_fn, restrict = customcontsel, join = contjoinsel)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select \
+                pg_describe_object('pg_proc'::regclass, 'alter_op_test_fn(boolean,boolean)'::regprocedure::oid, 0), \
+                pg_describe_object('pg_proc'::regclass, 'customcontsel(internal,oid,internal,integer)'::regprocedure::oid, 0), \
+                pg_describe_object('pg_namespace'::regclass, 2200, 0), \
+                pg_describe_object('pg_operator'::regclass, '===(boolean,boolean)'::regoperator::oid, 0)"
+        ),
+        vec![vec![
+            Value::Text("function alter_op_test_fn(boolean,boolean)".into()),
+            Value::Text("function customcontsel(internal,oid,internal,integer)".into()),
+            Value::Text("schema public".into()),
+            Value::Text("operator ===(boolean,boolean)".into()),
+        ]]
+    );
+}
+
+#[test]
 fn alter_index_rename_supports_if_exists_and_rename() {
     let base = temp_dir("alter_index_rename");
     let db = Database::open(&base, 16).unwrap();

@@ -476,6 +476,7 @@ pub enum BuiltinScalarFunction {
     PgGetSerialSequence,
     PgGetUserById,
     ObjDescription,
+    PgDescribeObject,
     PgGetExpr,
     PgRelationIsPublishable,
     PgIndexAmHasProperty,

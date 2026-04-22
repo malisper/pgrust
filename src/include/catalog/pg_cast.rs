@@ -18,8 +18,9 @@ use crate::include::catalog::{
     NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, NUMMULTIRANGE_TYPE_OID, NUMRANGE_TYPE_OID,
     OID_ARRAY_TYPE_OID, OID_TYPE_OID, PATH_TYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID,
     REGCLASS_TYPE_OID, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID,
-    REGDICTIONARY_TYPE_OID, REGPROCEDURE_ARRAY_TYPE_OID, REGPROCEDURE_TYPE_OID, REGROLE_TYPE_OID,
-    REGTYPE_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID,
+    REGDICTIONARY_TYPE_OID, REGOPERATOR_ARRAY_TYPE_OID, REGOPERATOR_TYPE_OID,
+    REGPROCEDURE_ARRAY_TYPE_OID, REGPROCEDURE_TYPE_OID, REGROLE_TYPE_OID, REGTYPE_TYPE_OID,
+    TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID,
     TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TIMETZ_TYPE_OID, TSMULTIRANGE_TYPE_OID,
     TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSRANGE_TYPE_OID, TSTZMULTIRANGE_TYPE_OID,
     TSTZRANGE_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, VARBIT_ARRAY_TYPE_OID,
@@ -112,6 +113,8 @@ pub fn bootstrap_pg_cast_rows() -> Vec<PgCastRow> {
         cast_row(4106_0_1, REGROLE_TYPE_OID, OID_TYPE_OID, 0, 'a', 'b'),
         cast_row(4106_1, OID_TYPE_OID, REGPROCEDURE_TYPE_OID, 0, 'i', 'b'),
         cast_row(4106_2, REGPROCEDURE_TYPE_OID, OID_TYPE_OID, 0, 'a', 'b'),
+        cast_row(4106_2_0, OID_TYPE_OID, REGOPERATOR_TYPE_OID, 0, 'i', 'b'),
+        cast_row(4106_2_1, REGOPERATOR_TYPE_OID, OID_TYPE_OID, 0, 'a', 'b'),
         cast_row(
             4107,
             INT8_TYPE_OID,
@@ -209,6 +212,7 @@ fn text_input_cast_rows(first_oid: u32) -> Vec<PgCastRow> {
         REGDICTIONARY_TYPE_OID,
         REGTYPE_TYPE_OID,
         REGROLE_TYPE_OID,
+        REGOPERATOR_TYPE_OID,
         REGPROCEDURE_TYPE_OID,
         NAME_TYPE_OID,
         INTERNAL_CHAR_TYPE_OID,
@@ -292,6 +296,7 @@ fn text_input_array_cast_rows(first_oid: u32) -> Vec<PgCastRow> {
         REGCONFIG_ARRAY_TYPE_OID,
         REGDICTIONARY_ARRAY_TYPE_OID,
         REGPROCEDURE_ARRAY_TYPE_OID,
+        REGOPERATOR_ARRAY_TYPE_OID,
         NAME_ARRAY_TYPE_OID,
         INTERNAL_CHAR_ARRAY_TYPE_OID,
         BPCHAR_ARRAY_TYPE_OID,
@@ -416,6 +421,13 @@ mod tests {
         assert!(rows.iter().any(|row| {
             row.castsource == OID_TYPE_OID
                 && row.casttarget == REGPROCEDURE_TYPE_OID
+                && row.castfunc == 0
+                && row.castcontext == 'i'
+                && row.castmethod == 'b'
+        }));
+        assert!(rows.iter().any(|row| {
+            row.castsource == OID_TYPE_OID
+                && row.casttarget == REGOPERATOR_TYPE_OID
                 && row.castfunc == 0
                 && row.castcontext == 'i'
                 && row.castmethod == 'b'

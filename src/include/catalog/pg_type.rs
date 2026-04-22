@@ -27,8 +27,9 @@ use crate::include::catalog::{
     PG_PROC_RELATION_OID, PG_PROC_ROWTYPE_OID, PG_TYPE_RELATION_OID, PG_TYPE_ROWTYPE_OID,
     POINT_TYPE_OID, POLYGON_TYPE_OID, RECORD_ARRAY_TYPE_OID, RECORD_TYPE_OID,
     REGCLASS_ARRAY_TYPE_OID, REGCLASS_TYPE_OID, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID,
-    REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, REGPROCEDURE_ARRAY_TYPE_OID,
-    REGPROCEDURE_TYPE_OID, REGROLE_TYPE_OID, REGTYPE_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
+    REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, REGOPERATOR_ARRAY_TYPE_OID,
+    REGOPERATOR_TYPE_OID, REGPROCEDURE_ARRAY_TYPE_OID, REGPROCEDURE_TYPE_OID, REGROLE_TYPE_OID,
+    REGTYPE_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
     TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIME_ARRAY_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID,
     TIMESTAMP_TYPE_OID, TIMESTAMPTZ_ARRAY_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TIMETZ_ARRAY_TYPE_OID,
     TIMETZ_TYPE_OID, TRIGGER_TYPE_OID, TSMULTIRANGE_ARRAY_TYPE_OID, TSMULTIRANGE_TYPE_OID,
@@ -219,6 +220,11 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             REGPROCEDURE_TYPE_OID,
             SqlType::new(SqlTypeKind::RegProcedure),
         ),
+        builtin_type_row(
+            "regoperator",
+            REGOPERATOR_TYPE_OID,
+            SqlType::new(SqlTypeKind::RegOperator),
+        ),
         builtin_type_row("tid", TID_TYPE_OID, SqlType::new(SqlTypeKind::Tid)),
         builtin_type_row(
             "_tid",
@@ -250,6 +256,11 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             "_regprocedure",
             REGPROCEDURE_ARRAY_TYPE_OID,
             SqlType::array_of(SqlType::new(SqlTypeKind::RegProcedure)),
+        ),
+        builtin_type_row(
+            "_regoperator",
+            REGOPERATOR_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::RegOperator)),
         ),
         builtin_type_row("float4", FLOAT4_TYPE_OID, SqlType::new(SqlTypeKind::Float4)),
         builtin_type_row(

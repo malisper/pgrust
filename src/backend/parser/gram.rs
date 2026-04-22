@@ -1071,6 +1071,11 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
         "void" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Void))),
         "fdw_handler" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::FdwHandler))),
         "regrole" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegRole))),
+        "regoperator" => {
+            return Ok(RawTypeName::Builtin(SqlType::new(
+                SqlTypeKind::RegOperator,
+            )));
+        }
         "regproc" => {
             return Ok(RawTypeName::Builtin(SqlType::new(
                 SqlTypeKind::RegProcedure,
@@ -8774,6 +8779,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::RegClass => "regclass",
         SqlTypeKind::RegType => "regtype",
         SqlTypeKind::RegRole => "regrole",
+        SqlTypeKind::RegOperator => "regoperator",
         SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::Tid => "tid",
         SqlTypeKind::Xid => "xid",

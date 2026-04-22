@@ -684,15 +684,18 @@ fn regproc_type_name(sql_type: SqlType) -> &'static str {
     match sql_type.element_type().kind {
         SqlTypeKind::Bool => "boolean",
         SqlTypeKind::Bytea => "bytea",
+        SqlTypeKind::Float4 => "real",
         SqlTypeKind::Float8 => "double precision",
         SqlTypeKind::Int2 => "smallint",
         SqlTypeKind::Int4 => "integer",
         SqlTypeKind::Int8 => "bigint",
+        SqlTypeKind::Internal => "internal",
         SqlTypeKind::Name => "name",
         SqlTypeKind::Oid => "oid",
         SqlTypeKind::RegClass => "regclass",
         SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::RegRole => "regrole",
+        SqlTypeKind::RegOperator => "regoperator",
         SqlTypeKind::Text => "text",
         SqlTypeKind::FdwHandler => "fdw_handler",
         _ => "text",
@@ -704,23 +707,55 @@ fn eval_regprocedure_to_text(value: &Value, ctx: &ExecutorContext) -> Result<Val
     let Some(proc_row) = role_catalog(ctx)?.proc_row_by_oid(oid) else {
         return Ok(Value::Null);
     };
+    Ok(Value::Text(
+        function_identity_text(&proc_row, role_catalog(ctx)?).into(),
+    ))
+}
+
+fn sql_type_identity_text(sql_type: SqlType) -> String {
+    let mut name = regproc_type_name(sql_type).to_string();
+    if sql_type.is_array {
+        name.push_str("[]");
+    }
+    name
+}
+
+fn type_identity_text(catalog: &dyn CatalogLookup, type_oid: u32) -> String {
+    catalog
+        .type_by_oid(type_oid)
+        .map(|row| sql_type_identity_text(row.sql_type))
+        .unwrap_or_else(|| type_oid.to_string())
+}
+
+fn function_identity_text(
+    proc_row: &crate::include::catalog::PgProcRow,
+    catalog: &dyn CatalogLookup,
+) -> String {
     let arg_types = proc_row
         .proargtypes
         .split_whitespace()
         .filter_map(|oid| oid.parse::<u32>().ok())
-        .filter_map(sql_type_from_builtin_oid)
-        .map(|sql_type| {
-            let mut name = regproc_type_name(sql_type).to_string();
-            if sql_type.is_array {
-                name.push_str("[]");
-            }
-            name
-        })
+        .map(|oid| type_identity_text(catalog, oid))
         .collect::<Vec<_>>()
-        .join(", ");
-    Ok(Value::Text(
-        format!("{}({arg_types})", proc_row.proname).into(),
-    ))
+        .join(",");
+    format!("function {}({arg_types})", proc_row.proname)
+}
+
+fn operator_identity_text(
+    operator_row: &crate::include::catalog::PgOperatorRow,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    let left = if operator_row.oprleft == 0 {
+        "none".to_string()
+    } else {
+        type_identity_text(catalog, operator_row.oprleft)
+    };
+    let right = if operator_row.oprright == 0 {
+        "none".to_string()
+    } else {
+        type_identity_text(catalog, operator_row.oprright)
+    };
+    format!("operator {}({left},{right})", operator_row.oprname)
 }
 
 fn eval_pg_rust_internal_binary_coercible(values: &[Value]) -> Result<Value, ExecError> {
@@ -1096,6 +1131,44 @@ fn eval_obj_description(values: &[Value], ctx: &ExecutorContext) -> Result<Value
         _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "obj_description(oid, catalog_name)",
             actual: format!("ObjDescription({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_pg_describe_object(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _, _] | [_, Value::Null, _] | [_, _, Value::Null] => Ok(Value::Null),
+        [classid, objid, objsubid] => {
+            let classid = oid_arg_to_u32(classid, "pg_describe_object")?;
+            let objid = oid_arg_to_u32(objid, "pg_describe_object")?;
+            let objsubid = oid_arg_to_u32(objsubid, "pg_describe_object")?;
+            if classid == 0 && objid == 0 {
+                return Ok(Value::Null);
+            }
+            let catalog = executor_catalog(ctx)?;
+            let Some(class_row) = catalog.class_row_by_oid(classid) else {
+                return Ok(Value::Null);
+            };
+            if objsubid != 0 {
+                return Ok(Value::Null);
+            }
+            let description = match class_row.relname.as_str() {
+                "pg_namespace" => catalog
+                    .namespace_row_by_oid(objid)
+                    .map(|row| format!("schema {}", row.nspname)),
+                "pg_proc" => catalog
+                    .proc_row_by_oid(objid)
+                    .map(|row| function_identity_text(&row, catalog)),
+                "pg_operator" => catalog
+                    .operator_by_oid(objid)
+                    .map(|row| operator_identity_text(&row, catalog)),
+                _ => None,
+            };
+            Ok(description.map(|text| Value::Text(text.into())).unwrap_or(Value::Null))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_describe_object(classid, objid, objsubid)",
+            actual: format!("PgDescribeObject({} args)", values.len()),
         })),
     }
 }
@@ -2657,6 +2730,7 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::GetDatabaseEncoding
         | BuiltinScalarFunction::PgGetUserById
         | BuiltinScalarFunction::ObjDescription
+        | BuiltinScalarFunction::PgDescribeObject
         | BuiltinScalarFunction::PgGetExpr
         | BuiltinScalarFunction::PgRelationIsPublishable
         | BuiltinScalarFunction::PgIndexAmHasProperty
@@ -3531,6 +3605,7 @@ fn eval_builtin_function(
         }
         BuiltinScalarFunction::PgColumnCompression => eval_pg_column_compression_values(&values),
         BuiltinScalarFunction::ObjDescription => eval_obj_description(&values, ctx),
+        BuiltinScalarFunction::PgDescribeObject => eval_pg_describe_object(&values, ctx),
         BuiltinScalarFunction::PgGetExpr => eval_pg_get_expr(&values),
         BuiltinScalarFunction::PgRelationIsPublishable => {
             eval_pg_relation_is_publishable(&values, ctx)

@@ -32,14 +32,14 @@ use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
-    PgCollationRow, PgConstraintRow, PgInheritsRow, PgLanguageRow, PgOpclassRow, PgOperatorRow,
-    PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow, PgTypeRow, RECORD_TYPE_OID,
-    bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
-    bootstrap_pg_language_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
-    bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
-    multirange_type_ref_for_sql_type, proc_oid_for_builtin_aggregate_function,
-    range_type_ref_for_sql_type, relkind_is_analyzable, synthetic_range_proc_row_by_oid,
-    synthetic_range_proc_rows_by_name,
+    PgCollationRow, PgConstraintRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
+    PgOperatorRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow, PgTypeRow,
+    RECORD_TYPE_OID, bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows,
+    bootstrap_pg_collation_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
+    bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
+    builtin_range_rows, builtin_type_rows, multirange_type_ref_for_sql_type,
+    proc_oid_for_builtin_aggregate_function, range_type_ref_for_sql_type, relkind_is_analyzable,
+    synthetic_range_proc_row_by_oid, synthetic_range_proc_rows_by_name,
 };
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
@@ -256,6 +256,12 @@ pub trait CatalogLookup {
         Vec::new()
     }
 
+    fn namespace_row_by_oid(&self, oid: u32) -> Option<PgNamespaceRow> {
+        bootstrap_pg_namespace_rows()
+            .into_iter()
+            .find(|row| row.oid == oid)
+    }
+
     fn row_security_enabled(&self) -> bool {
         true
     }
@@ -330,6 +336,12 @@ pub trait CatalogLookup {
                 && row.oprleft == left_type_oid
                 && row.oprright == right_type_oid
         })
+    }
+
+    fn operator_by_oid(&self, oid: u32) -> Option<PgOperatorRow> {
+        bootstrap_pg_operator_rows()
+            .into_iter()
+            .find(|row| row.oid == oid)
     }
 
     fn cast_by_source_target(
@@ -557,6 +569,10 @@ impl CatalogLookup for Catalog {
         CatCache::from_catalog(self).auth_members_rows()
     }
 
+    fn namespace_row_by_oid(&self, oid: u32) -> Option<PgNamespaceRow> {
+        CatCache::from_catalog(self).namespace_by_oid(oid).cloned()
+    }
+
     fn index_relations_for_heap(&self, relation_oid: u32) -> Vec<BoundIndexRelation> {
         let relcache = RelCache::from_catalog(self);
         relcache
@@ -606,6 +622,30 @@ impl CatalogLookup for Catalog {
 
     fn collation_rows(&self) -> Vec<PgCollationRow> {
         CatCache::from_catalog(self).collation_rows()
+    }
+
+    fn operator_by_name_left_right(
+        &self,
+        name: &str,
+        left_type_oid: u32,
+        right_type_oid: u32,
+    ) -> Option<PgOperatorRow> {
+        let normalized = normalize_catalog_lookup_name(name);
+        CatCache::from_catalog(self)
+            .operator_rows()
+            .into_iter()
+            .find(|row| {
+                row.oprname.eq_ignore_ascii_case(normalized)
+                    && row.oprleft == left_type_oid
+                    && row.oprright == right_type_oid
+            })
+    }
+
+    fn operator_by_oid(&self, oid: u32) -> Option<PgOperatorRow> {
+        CatCache::from_catalog(self)
+            .operator_rows()
+            .into_iter()
+            .find(|row| row.oid == oid)
     }
 
     fn aggregate_by_fnoid(&self, aggfnoid: u32) -> Option<PgAggregateRow> {
@@ -825,6 +865,18 @@ impl CatalogLookup for RelCache {
         rows
     }
 
+    fn namespace_row_by_oid(&self, oid: u32) -> Option<PgNamespaceRow> {
+        bootstrap_pg_namespace_rows()
+            .into_iter()
+            .find(|row| row.oid == oid)
+    }
+
+    fn operator_by_oid(&self, oid: u32) -> Option<PgOperatorRow> {
+        bootstrap_pg_operator_rows()
+            .into_iter()
+            .find(|row| row.oid == oid)
+    }
+
     fn language_rows(&self) -> Vec<PgLanguageRow> {
         bootstrap_pg_language_rows().to_vec()
     }
@@ -834,7 +886,7 @@ impl CatalogLookup for RelCache {
     }
 }
 
-fn normalize_catalog_lookup_name(name: &str) -> &str {
+pub(crate) fn normalize_catalog_lookup_name(name: &str) -> &str {
     name.strip_prefix("pg_catalog.").unwrap_or(name)
 }
 
@@ -1022,6 +1074,8 @@ fn builtin_named_type_alias(name: &str) -> Option<SqlType> {
         Some(SqlType::new(SqlTypeKind::RegType))
     } else if name.eq_ignore_ascii_case("regproc") {
         Some(SqlType::new(SqlTypeKind::RegProcedure))
+    } else if name.eq_ignore_ascii_case("regoperator") {
+        Some(SqlType::new(SqlTypeKind::RegOperator))
     } else if name.eq_ignore_ascii_case("regnamespace") {
         // :HACK: PostgreSQL's `regnamespace` is an OID-backed catalog type with
         // namespace-aware I/O. pgrust only needs enough surface area for
