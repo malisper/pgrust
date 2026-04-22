@@ -48,6 +48,9 @@ SQL_DIR="$PG_REGRESS/sql"
 EXPECTED_DIR="$PG_REGRESS/expected"
 PG_REGRESS_ABS="$(cd "$PG_REGRESS" && pwd)"
 WORKTREE_NAME="$(basename "$PGRUST_DIR")"
+TABLESPACE_VERSION_DIRECTORY="PG_18_202406281"
+REGRESS_TABLESPACE_DIR=""
+PREPARED_SETUP_SQL=""
 
 setup_pg_regress_env() {
     if command -v pg_config >/dev/null 2>&1; then
@@ -93,6 +96,26 @@ transform_triggers_fixture() {
     perl -0pe "
         s/CREATE FUNCTION trigger_return_old \\(\\)\\n\\s+RETURNS trigger\\n\\s+AS :'regresslib'\\n\\s+LANGUAGE C;/CREATE FUNCTION trigger_return_old ()\\n        RETURNS trigger\\n        AS \\\$\\\$\\nBEGIN\\n    IF TG_OP = 'INSERT' THEN\\n        RETURN NEW;\\n    END IF;\\n    RETURN OLD;\\nEND\\n\\\$\\\$\\n        LANGUAGE plpgsql;/s;
     " "$input_path" > "$output_path"
+}
+
+prepare_setup_fixture() {
+    local input_path="$1"
+    local output_path="$2"
+
+    perl -0pe '
+        my $tablespace_dir = $ENV{"PGRUST_REGRESS_TABLESPACE_DIR"};
+        my $version_dir = $tablespace_dir . "/" . $ENV{"PGRUST_TABLESPACE_VERSION_DIRECTORY"};
+        s{CREATE TABLESPACE regress_tblspace LOCATION '\''/tmp/pgrust_regress_tblspace'\'';}
+         {"CREATE TABLESPACE regress_tblspace LOCATION '\''$tablespace_dir'\'';"}ge;
+        END {
+            if ($tablespace_dir eq q{}) {
+                die "PGRUST_REGRESS_TABLESPACE_DIR must be set\n";
+            }
+        }
+    ' "$input_path" > "$output_path"
+
+    rm -rf "$REGRESS_TABLESPACE_DIR/$TABLESPACE_VERSION_DIRECTORY"
+    mkdir -p "$REGRESS_TABLESPACE_DIR"
 }
 
 prepare_test_fixture() {
@@ -169,6 +192,11 @@ fi
 if [[ -z "$DATA_DIR" ]]; then
     DATA_DIR="$(make_temp_dir pgrust_regress_data)"
 fi
+
+REGRESS_TABLESPACE_DIR="$RESULTS_DIR/regress_tblspace"
+export PGRUST_REGRESS_TABLESPACE_DIR="$REGRESS_TABLESPACE_DIR"
+export PGRUST_TABLESPACE_VERSION_DIRECTORY="$TABLESPACE_VERSION_DIRECTORY"
+PREPARED_SETUP_SQL="$RESULTS_DIR/fixtures/test_setup_pgrust.sql"
 
 cleanup() {
     if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
@@ -296,6 +324,9 @@ run_bootstrap_setup() {
         setup_sql="$PGRUST_DIR/scripts/test_setup_pgrust.sql"
         setup_out="$RESULTS_DIR/output/test_setup_pgrust.out"
         setup_label="pgrust setup bootstrap"
+        mkdir -p "$RESULTS_DIR/fixtures"
+        prepare_setup_fixture "$setup_sql" "$PREPARED_SETUP_SQL"
+        setup_sql="$PREPARED_SETUP_SQL"
     else
         setup_sql="$SQL_DIR/test_setup.sql"
         setup_out="$RESULTS_DIR/output/test_setup.out"
