@@ -242,6 +242,9 @@ pub(super) fn is_numeric_family(ty: SqlType) -> bool {
                 | SqlTypeKind::RegType
                 | SqlTypeKind::RegRole
                 | SqlTypeKind::RegOperator
+                | SqlTypeKind::RegProcedure
+                | SqlTypeKind::RegConfig
+                | SqlTypeKind::RegDictionary
                 | SqlTypeKind::Float4
                 | SqlTypeKind::Float8
                 | SqlTypeKind::Numeric
@@ -260,6 +263,9 @@ pub(super) fn is_integer_family(ty: SqlType) -> bool {
                 | SqlTypeKind::RegType
                 | SqlTypeKind::RegRole
                 | SqlTypeKind::RegOperator
+                | SqlTypeKind::RegProcedure
+                | SqlTypeKind::RegConfig
+                | SqlTypeKind::RegDictionary
         )
 }
 

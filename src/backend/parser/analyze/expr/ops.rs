@@ -462,11 +462,31 @@ fn is_oid_integer_comparison(left: SqlType, right: SqlType) -> bool {
         && !right.is_array
         && matches!(
             left.kind,
-            SqlTypeKind::Oid | SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8
+            SqlTypeKind::Oid
+                | SqlTypeKind::Int2
+                | SqlTypeKind::Int4
+                | SqlTypeKind::Int8
+                | SqlTypeKind::RegClass
+                | SqlTypeKind::RegType
+                | SqlTypeKind::RegRole
+                | SqlTypeKind::RegOperator
+                | SqlTypeKind::RegProcedure
+                | SqlTypeKind::RegConfig
+                | SqlTypeKind::RegDictionary
         )
         && matches!(
             right.kind,
-            SqlTypeKind::Oid | SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8
+            SqlTypeKind::Oid
+                | SqlTypeKind::Int2
+                | SqlTypeKind::Int4
+                | SqlTypeKind::Int8
+                | SqlTypeKind::RegClass
+                | SqlTypeKind::RegType
+                | SqlTypeKind::RegRole
+                | SqlTypeKind::RegOperator
+                | SqlTypeKind::RegProcedure
+                | SqlTypeKind::RegConfig
+                | SqlTypeKind::RegDictionary
         )
         && (matches!(left.kind, SqlTypeKind::Oid) || matches!(right.kind, SqlTypeKind::Oid))
 }
