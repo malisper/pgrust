@@ -13642,6 +13642,160 @@ fn json_jsonb_table_functions_accept_named_sql_args() {
 }
 
 #[test]
+fn jsonb_table_functions_coerce_unknown_literal_inputs() {
+    let base = temp_dir("jsonb_table_functions_unknown_literals");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_array_elements_text('[1,true,null]')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Text("1".into())],
+                    vec![Value::Text("true".into())],
+                    vec![Value::Null],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn jsonb_path_operators_coerce_unknown_path_literals() {
+    let base = temp_dir("jsonb_path_literal_coercion");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select '{\"a\":{\"b\":2}}'::jsonb #> '{a,b}', '{\"a\":{\"b\":2}}'::jsonb #>> '{a,b}'",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Jsonb(crate::backend::executor::jsonb::parse_jsonb_text("2").unwrap()),
+                    Value::Text("2".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn jsonb_scalar_casts_match_pg_scalar_rules() {
+    let base = temp_dir("jsonb_scalar_casts");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select 'true'::jsonb::bool, '12345'::jsonb::int4, '1.0'::jsonb::float8, '12345.05'::jsonb::numeric, 'null'::jsonb::int4",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Bool(true),
+                    Value::Int32(12345),
+                    Value::Float64(1.0),
+                    Value::Numeric(crate::backend::executor::exec_expr::parse_numeric_text("12345.05").unwrap()),
+                    Value::Null,
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select '[1.0]'::jsonb::float8",
+    )
+    .unwrap_err()
+    {
+        ExecError::DetailedError { message, sqlstate, .. } => {
+            assert_eq!(message, "cannot cast jsonb array to type double precision");
+            assert_eq!(sqlstate, "22023");
+        }
+        other => panic!("expected cast failure, got {:?}", other),
+    }
+}
+
+#[test]
+fn jsonb_subscript_reads_match_basic_pg_cases() {
+    let base = temp_dir("jsonb_subscript_reads");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select ('123'::jsonb)['a'], ('123'::jsonb)[0], ('123'::jsonb)[NULL], ('{\"a\":1}'::jsonb)['a'], ('{\"a\":1}'::jsonb)[0], ('[10,20,30]'::jsonb)[1]",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                    crate::backend::executor::jsonb::jsonb_to_value(
+                        &crate::backend::executor::jsonb::JsonbValue::Numeric(
+                            crate::backend::executor::exec_expr::parse_numeric_text("1").unwrap(),
+                        ),
+                    ),
+                    Value::Null,
+                    crate::backend::executor::jsonb::jsonb_to_value(
+                        &crate::backend::executor::jsonb::JsonbValue::Numeric(
+                            crate::backend::executor::exec_expr::parse_numeric_text("20").unwrap(),
+                        ),
+                    ),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select ('[1,2,3]'::jsonb)[1:]",
+    )
+    .unwrap_err()
+    {
+        ExecError::Parse(ParseError::DetailedError {
+            message,
+            sqlstate,
+            ..
+        }) => {
+            assert_eq!(message, "jsonb subscript does not support slices");
+            assert_eq!(sqlstate, "0A000");
+        }
+        other => panic!("expected slice failure, got {:?}", other),
+    }
+}
+
+#[test]
 fn jsonb_path_query_works_in_select_list_and_from() {
     let base = temp_dir("jsonb_path_query_srf");
     let txns = TransactionManager::new_durable(&base).unwrap();

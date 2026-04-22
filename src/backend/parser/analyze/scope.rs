@@ -1427,14 +1427,27 @@ fn bind_json_table_function_args(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<Vec<Expr>, ParseError> {
-    let target_type = match kind {
-        JsonTableFunction::JsonbEach | JsonTableFunction::JsonbEachText => {
-            Some(SqlType::new(SqlTypeKind::Jsonb))
-        }
-        _ => None,
-    };
     args.iter()
-        .map(|arg| {
+        .enumerate()
+        .map(|(index, arg)| {
+            let target_type = match (kind, index) {
+                (
+                    JsonTableFunction::JsonbPathQuery,
+                    0 | 2,
+                )
+                | (JsonTableFunction::JsonbObjectKeys, 0)
+                | (JsonTableFunction::JsonbEach, 0)
+                | (JsonTableFunction::JsonbEachText, 0)
+                | (JsonTableFunction::JsonbArrayElements, 0)
+                | (JsonTableFunction::JsonbArrayElementsText, 0) => {
+                    Some(SqlType::new(SqlTypeKind::Jsonb))
+                }
+                (JsonTableFunction::JsonbPathQuery, 1) => {
+                    Some(SqlType::new(SqlTypeKind::JsonPath))
+                }
+                (JsonTableFunction::JsonbPathQuery, 3) => Some(SqlType::new(SqlTypeKind::Bool)),
+                _ => None,
+            };
             let raw_arg_type = infer_sql_expr_type_with_ctes(
                 arg,
                 scope,
