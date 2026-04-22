@@ -6,6 +6,7 @@ use crate::include::catalog::{
 };
 
 pub const BTREE_INTEGER_FAMILY_OID: u32 = 1976;
+pub const BTREE_ARRAY_FAMILY_OID: u32 = 397;
 pub const BTREE_CHAR_FAMILY_OID: u32 = 429;
 pub const BTREE_OIDVECTOR_FAMILY_OID: u32 = 1991;
 pub const BTREE_TEXT_FAMILY_OID: u32 = 1994;
@@ -47,6 +48,13 @@ pub fn pg_opfamily_desc() -> RelationDesc {
 
 pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
     vec![
+        PgOpfamilyRow {
+            oid: BTREE_ARRAY_FAMILY_OID,
+            opfmethod: BTREE_AM_OID,
+            opfname: "array_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
         PgOpfamilyRow {
             oid: BTREE_BOOL_FAMILY_OID,
             opfmethod: BTREE_AM_OID,
