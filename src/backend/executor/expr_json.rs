@@ -2733,7 +2733,9 @@ fn json_value_to_value(value: &SerdeJsonValue, as_text: bool) -> Value {
             .map(|text| Value::Text(CompactString::from_owned(text)))
             .unwrap_or(Value::Null)
     } else {
-        Value::Json(CompactString::from_owned(render_serde_json_value_text(value)))
+        Value::Json(CompactString::from_owned(render_serde_json_value_text(
+            value,
+        )))
     }
 }
 

@@ -20,8 +20,7 @@ mod subquery;
 mod targets;
 
 use self::func::{
-    bind_row_to_json_call, bind_scalar_function_call,
-    bind_user_defined_scalar_function_call,
+    bind_row_to_json_call, bind_scalar_function_call, bind_user_defined_scalar_function_call,
 };
 use self::json::{
     bind_json_binary_expr, bind_jsonb_contained_expr, bind_jsonb_contains_expr,
@@ -154,14 +153,8 @@ fn bind_row_expr_fields(
             }
             continue;
         }
-        let expr = bind_expr_with_outer_and_ctes(
-            item,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?;
+        let expr =
+            bind_expr_with_outer_and_ctes(item, scope, catalog, outer_scopes, grouped_outer, ctes)?;
         let field_name = format!("f{}", field_exprs.len() + 1);
         field_exprs.push((field_name, expr));
     }
@@ -193,20 +186,11 @@ fn bind_named_composite_row_cast(
         .filter(|column| !column.dropped)
         .map(|column| (column.name.clone(), column.sql_type))
         .collect::<Vec<_>>();
-    let field_exprs = bind_row_expr_fields(
-        items,
-        scope,
-        catalog,
-        outer_scopes,
-        grouped_outer,
-        ctes,
-    )?;
+    let field_exprs =
+        bind_row_expr_fields(items, scope, catalog, outer_scopes, grouped_outer, ctes)?;
     if field_exprs.len() != target_fields.len() {
         return Err(ParseError::DetailedError {
-            message: format!(
-                "cannot cast type record to {}",
-                sql_type_name(target_type)
-            ),
+            message: format!("cannot cast type record to {}", sql_type_name(target_type)),
             detail: Some(format!(
                 "Input has {} columns but target row type has {}.",
                 field_exprs.len(),

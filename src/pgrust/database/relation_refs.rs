@@ -242,6 +242,12 @@ fn collect_rels_from_set_returning_call(
             collect_rels_from_expr(stop, rels);
             collect_rels_from_expr(step, rels);
         }
+        crate::include::nodes::primnodes::SetReturningCall::PartitionTree { relid, .. }
+        | crate::include::nodes::primnodes::SetReturningCall::PartitionAncestors {
+            relid, ..
+        } => {
+            collect_rels_from_expr(relid, rels);
+        }
         crate::include::nodes::primnodes::SetReturningCall::Unnest { args, .. }
         | crate::include::nodes::primnodes::SetReturningCall::JsonTableFunction { args, .. }
         | crate::include::nodes::primnodes::SetReturningCall::JsonRecordFunction { args, .. }
@@ -394,6 +400,13 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                 collect_rels_from_expr(stop, rels);
                 collect_rels_from_expr(step, rels);
             }
+            crate::include::nodes::primnodes::SetReturningCall::PartitionTree { relid, .. }
+            | crate::include::nodes::primnodes::SetReturningCall::PartitionAncestors {
+                relid,
+                ..
+            } => {
+                collect_rels_from_expr(relid, rels);
+            }
             crate::include::nodes::primnodes::SetReturningCall::Unnest { args, .. }
             | crate::include::nodes::primnodes::SetReturningCall::JsonTableFunction {
                 args, ..
@@ -455,6 +468,14 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                                 collect_rels_from_expr(start, rels);
                                 collect_rels_from_expr(stop, rels);
                                 collect_rels_from_expr(step, rels);
+                            }
+                            crate::include::nodes::primnodes::SetReturningCall::PartitionTree {
+                                relid, ..
+                            }
+                            | crate::include::nodes::primnodes::SetReturningCall::PartitionAncestors {
+                                relid, ..
+                            } => {
+                                collect_rels_from_expr(relid, rels);
                             }
                             crate::include::nodes::primnodes::SetReturningCall::Unnest {
                                 args, ..

@@ -48,6 +48,32 @@ fn lower_special_cast(expr: &Expr, from: SqlType, to: SqlType) -> Option<Expr> {
             vec![expr.clone()],
         ));
     }
+    if matches!(
+        from.element_type().kind,
+        SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar
+    ) && matches!(to.element_type().kind, SqlTypeKind::RegClass)
+        && !from.is_array
+        && !to.is_array
+    {
+        return Some(Expr::builtin_func(
+            BuiltinScalarFunction::TextToRegClass,
+            Some(SqlType::new(SqlTypeKind::RegClass)),
+            false,
+            vec![expr.clone()],
+        ));
+    }
+    if matches!(from.element_type().kind, SqlTypeKind::RegClass)
+        && matches!(to.element_type().kind, SqlTypeKind::Text)
+        && !from.is_array
+        && !to.is_array
+    {
+        return Some(Expr::builtin_func(
+            BuiltinScalarFunction::RegClassToText,
+            Some(SqlType::new(SqlTypeKind::Text)),
+            false,
+            vec![expr.clone()],
+        ));
+    }
     if matches!(from.element_type().kind, SqlTypeKind::RegRole)
         && matches!(to.element_type().kind, SqlTypeKind::Text)
         && !from.is_array

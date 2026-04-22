@@ -159,9 +159,12 @@ fn main() -> Result<(), ExecError> {
             relpersistence: 'p',
             relkind: 'r',
             relhastriggers: false,
+            relispartition: false,
+            relpartbound: None,
             relrowsecurity: false,
             relforcerowsecurity: false,
             desc: desc(),
+            partitioned_table: None,
             index: None,
         },
     );

@@ -8,9 +8,9 @@ use crate::backend::access::transam::xact::{
 };
 use crate::backend::storage::buffer::Page;
 use crate::backend::storage::page::bufpage::{
-    ItemIdFlags, MAX_HEAP_TUPLE_SIZE, PageError, page_get_item, page_get_item_id,
-    page_get_item_id_unchecked, page_get_item_unchecked, page_get_max_offset_number,
-    page_clear_all_visible, page_is_all_visible,
+    ItemIdFlags, MAX_HEAP_TUPLE_SIZE, PageError, page_clear_all_visible, page_get_item,
+    page_get_item_id, page_get_item_id_unchecked, page_get_item_unchecked,
+    page_get_max_offset_number, page_is_all_visible,
 };
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, SmgrError, StorageManager};
 use crate::backend::utils::misc::interrupts::InterruptReason;
@@ -710,8 +710,14 @@ pub fn heap_delete(
         }
     }
 
-    let _ =
-        clear_page_visibility_if_needed(pool, client_id, rel, tid.block_number, &mut new_page, &vmbuf)?;
+    let _ = clear_page_visibility_if_needed(
+        pool,
+        client_id,
+        rel,
+        tid.block_number,
+        &mut new_page,
+        &vmbuf,
+    )?;
     tuple.header.xmax = xid;
     // Clear HEAP_XMAX_INVALID — xmax is now a real transaction.
     tuple.header.infomask &= !crate::include::access::htup::HEAP_XMAX_INVALID;
@@ -881,8 +887,14 @@ pub fn heap_update_with_cid(
     let mut guard = pool.lock_buffer_exclusive(buffer_id)?;
     let mut new_page = *guard;
     let mut old_version = heap_page_get_tuple(&new_page, tid.offset_number)?;
-    let _ =
-        clear_page_visibility_if_needed(pool, client_id, rel, tid.block_number, &mut new_page, &vmbuf)?;
+    let _ = clear_page_visibility_if_needed(
+        pool,
+        client_id,
+        rel,
+        tid.block_number,
+        &mut new_page,
+        &vmbuf,
+    )?;
     old_version.header.xmax = xid;
     old_version.header.ctid = new_tid;
     // Clear HEAP_XMAX_INVALID — xmax is now a real transaction, not invalid.

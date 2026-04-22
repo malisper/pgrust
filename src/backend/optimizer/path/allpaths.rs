@@ -186,6 +186,9 @@ fn collect_relation_access_paths(
     query_order_items: Option<Vec<OrderByEntry>>,
     catalog: &dyn CatalogLookup,
 ) -> Vec<Path> {
+    if relkind == 'p' {
+        return Vec::new();
+    }
     let stats = relation_stats(catalog, relation_oid, &desc);
     let mut paths = vec![
         estimate_seqscan_candidate(
@@ -326,11 +329,7 @@ pub(super) fn relation_ordered_index_paths(
     let Some(order_items) = order_items_for_base_rel_pathkeys(root, rtindex, pathkeys) else {
         return Vec::new();
     };
-    let Some(rel) = root
-        .simple_rel_array
-        .get(rtindex)
-        .and_then(Option::as_ref)
-    else {
+    let Some(rel) = root.simple_rel_array.get(rtindex).and_then(Option::as_ref) else {
         return Vec::new();
     };
     let Some(rte) = root.parse.rtable.get(rtindex - 1) else {
@@ -626,37 +625,40 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
         return;
     }
     let child_rtindexes = append_child_rtindexes(root, rtindex);
-    if !child_rtindexes.is_empty()
-        && let RangeTblEntryKind::Relation {
-            rel: heap_rel,
-            relation_oid,
-            relkind,
-            toast,
-        } = rte.kind.clone()
+    if let RangeTblEntryKind::Relation {
+        rel: heap_rel,
+        relation_oid,
+        relkind,
+        toast,
+    } = rte.kind.clone()
+        && (relkind == 'p' || !child_rtindexes.is_empty())
     {
         let filter = root
             .simple_rel_array
             .get(rtindex)
             .and_then(Option::as_ref)
             .and_then(base_filter_expr);
-        let mut children = vec![normalize_rte_path(
-            rtindex,
-            &rte.desc,
-            cheapest_relation_access_path(
+        let mut children = Vec::new();
+        if relkind != 'p' {
+            children.push(normalize_rte_path(
                 rtindex,
-                heap_rel,
-                rte.alias
-                    .clone()
-                    .unwrap_or_else(|| format!("rel {}", heap_rel.rel_number)),
-                relation_oid,
-                relkind,
-                toast,
-                rte.desc.clone(),
-                filter,
+                &rte.desc,
+                cheapest_relation_access_path(
+                    rtindex,
+                    heap_rel,
+                    rte.alias
+                        .clone()
+                        .unwrap_or_else(|| format!("rel {}", heap_rel.rel_number)),
+                    relation_oid,
+                    relkind,
+                    toast,
+                    rte.desc.clone(),
+                    filter.clone(),
+                    catalog,
+                ),
                 catalog,
-            ),
-            catalog,
-        )];
+            ));
+        }
         for child_rtindex in child_rtindexes {
             set_base_rel_pathlist(root, child_rtindex, catalog);
             let Some(child_path) = root

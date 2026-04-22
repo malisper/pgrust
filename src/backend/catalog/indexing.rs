@@ -65,6 +65,7 @@ pub fn system_catalog_index_entry_for_db(
         relhassubclass: false,
         relhastriggers: false,
         relispartition: false,
+        relpartbound: None,
         relrowsecurity: false,
         relforcerowsecurity: false,
         relpages: 0,
@@ -73,6 +74,7 @@ pub fn system_catalog_index_entry_for_db(
         relallfrozen: 0,
         relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
         desc: system_catalog_index_desc(descriptor),
+        partitioned_table: None,
         index_meta: Some(system_catalog_index_meta(descriptor)),
     }
 }
@@ -402,8 +404,9 @@ pub fn vacuum_system_catalog_indexes_for_kinds_in_db(
                 index_desc: system_catalog_index_desc(*descriptor),
                 index_meta: system_catalog_index_relcache(*descriptor),
             };
-            let scan = vacuum_relation_scan(pool, 0, ctx.heap_relation, txns)
-                .map_err(|err| CatalogError::Io(format!("catalog heap vacuum scan failed: {err:?}")))?;
+            let scan = vacuum_relation_scan(pool, 0, ctx.heap_relation, txns).map_err(|err| {
+                CatalogError::Io(format!("catalog heap vacuum scan failed: {err:?}"))
+            })?;
             let dead_item_callback = |tid| scan.dead_tids.contains(&tid);
             let stats = index_bulk_delete(&ctx, BTREE_AM_OID, &dead_item_callback, None)?;
             let _ = index_vacuum_cleanup(&ctx, BTREE_AM_OID, Some(stats))?;

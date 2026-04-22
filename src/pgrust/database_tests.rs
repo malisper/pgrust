@@ -374,7 +374,8 @@ fn named_composite_row_cast_coerces_fields() {
         .execute(&db, "select timestamp '2012-12-31 15:30:56'")
         .expect("select timestamp literal");
     let StatementResult::Query {
-        rows: expected_rows, ..
+        rows: expected_rows,
+        ..
     } = timestamp_row
     else {
         panic!("expected query result");
@@ -1464,7 +1465,10 @@ fn update_from_updates_inherited_children() {
         .execute(&db, "create table parent_inh (id int, name text)")
         .unwrap();
     session
-        .execute(&db, "create table child_inh (extra int) inherits (parent_inh)")
+        .execute(
+            &db,
+            "create table child_inh (extra int) inherits (parent_inh)",
+        )
         .unwrap();
     session
         .execute(&db, "create table src_inh (id int, name text)")
@@ -1542,7 +1546,10 @@ fn update_from_rejects_view_targets() {
         .execute(&db, "create table base_view_target (id int, name text)")
         .unwrap();
     session
-        .execute(&db, "create view view_target as select * from base_view_target")
+        .execute(
+            &db,
+            "create view view_target as select * from base_view_target",
+        )
         .unwrap();
     session
         .execute(&db, "create table src_view_target (id int, name text)")
@@ -2713,10 +2720,7 @@ fn vacuum_populates_pg_class_visibility_stats() {
 
     session.execute(&db, "create table vac_t(a int4)").unwrap();
     session
-        .execute(
-            &db,
-            "insert into vac_t values (1), (2), (3), (4), (5), (6)",
-        )
+        .execute(&db, "insert into vac_t values (1), (2), (3), (4), (5), (6)")
         .unwrap();
 
     match session.execute(&db, "vacuum vac_t").unwrap() {
@@ -2762,7 +2766,10 @@ fn vacuum_analyze_updates_visibility_and_analyze_stats() {
         )
         .unwrap();
 
-    match session.execute(&db, "vacuum analyze vac_analyze_t").unwrap() {
+    match session
+        .execute(&db, "vacuum analyze vac_analyze_t")
+        .unwrap()
+    {
         StatementResult::AffectedRows(count) => assert_eq!(count, 0),
         other => panic!("expected affected rows, got {other:?}"),
     }
@@ -2980,6 +2987,104 @@ fn collect_analyze_stats_treats_partitioned_relkind_as_inherited_only() {
     assert!(stats[0].statistics.iter().all(|row| row.stainherit));
 
     db.txns.write().abort(xid).unwrap();
+}
+
+#[test]
+fn drop_table_drops_partitioned_roots_and_subpartitioned_children() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table orders(id int4, region text) partition by list (region)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table orders_eu partition of orders for values in ('eu') partition by range (id)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table orders_eu_small partition of orders_eu for values from (minvalue) to (100)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table orders_eu_large partition of orders_eu for values from (100) to (maxvalue)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table orders_us partition of orders for values in ('us')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into orders values (1, 'eu'), (150, 'eu'), (5, 'us')",
+        )
+        .unwrap();
+
+    session.execute(&db, "drop table orders_eu").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, region from orders order by id"),
+        vec![vec![Value::Int32(5), Value::Text("us".into())]]
+    );
+    assert!(
+        query_rows(
+            &db,
+            1,
+            "select relname from pg_class where relname in ('orders_eu', 'orders_eu_small', 'orders_eu_large')",
+        )
+        .is_empty()
+    );
+
+    session.execute(&db, "drop table orders").unwrap();
+
+    assert!(
+        query_rows(
+            &db,
+            1,
+            "select relname from pg_class where relname like 'orders%'",
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn drop_table_still_rejects_legacy_inheritance_parents() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table parent_inh(a int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table child_inh(extra int4) inherits (parent_inh)",
+        )
+        .unwrap();
+
+    match session.execute(&db, "drop table parent_inh") {
+        Err(ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            hint: Some(hint),
+            sqlstate,
+        }) if message == "cannot drop table parent_inh because other objects depend on it"
+            && detail.contains("table child_inh depends on table parent_inh")
+            && hint == "Use DROP ... CASCADE to drop the dependent objects too."
+            && sqlstate == "2BP01" => {}
+        other => panic!("expected legacy inheritance drop-table blocker, got {other:?}"),
+    }
 }
 
 #[test]
@@ -9504,7 +9609,10 @@ fn create_spgist_rejects_multicolumn_indexes() {
 
     db.execute(1, "create table boxes (a box, b box)").unwrap();
 
-    match db.execute(1, "create index boxes_ab_spgist on boxes using spgist (a, b)") {
+    match db.execute(
+        1,
+        "create index boxes_ab_spgist on boxes using spgist (a, b)",
+    ) {
         Err(ExecError::DetailedError {
             message, sqlstate, ..
         }) => {
@@ -9637,14 +9745,10 @@ fn spgist_box_index_matches_seq_scan_on_medium_dataset() {
         }
     }
 
-    let overlap_sql =
-        "select id from boxes where b && '(15,10),(32,23)'::box order by id";
-    let left_sql =
-        "select id from boxes where b << '(40,0),(80,80)'::box order by id";
-    let contained_sql =
-        "select id from boxes where b <@ '(0,0),(35,26)'::box order by id";
-    let knn_sql =
-        "select id from boxes order by b <-> '(23,19)'::point limit 10";
+    let overlap_sql = "select id from boxes where b && '(15,10),(32,23)'::box order by id";
+    let left_sql = "select id from boxes where b << '(40,0),(80,80)'::box order by id";
+    let contained_sql = "select id from boxes where b <@ '(0,0),(35,26)'::box order by id";
+    let knn_sql = "select id from boxes order by b <-> '(23,19)'::point limit 10";
 
     let expected_overlap = query_rows(&db, 1, overlap_sql);
     let expected_left = query_rows(&db, 1, left_sql);
@@ -9712,7 +9816,9 @@ fn spgist_box_window_knn_avoids_sort_when_index_can_supply_order() {
         "expected filtered ordered window query to use SP-GiST index, got {filtered_window_lines:?}"
     );
     assert!(
-        !filtered_window_lines.iter().any(|line| line.contains("Sort")),
+        !filtered_window_lines
+            .iter()
+            .any(|line| line.contains("Sort")),
         "expected filtered ordered window query to avoid Sort, got {filtered_window_lines:?}"
     );
 }
@@ -12057,8 +12163,9 @@ fn create_table_check_not_enforced_skips_write_enforcement_and_cannot_validate()
     );
 
     match db.execute(1, "alter table items validate constraint items_id_check") {
-        Err(ExecError::DetailedError { message, sqlstate, .. })
-            if message == "cannot validate NOT ENFORCED constraint" && sqlstate == "0A000" => {}
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message == "cannot validate NOT ENFORCED constraint" && sqlstate == "0A000" => {}
         other => panic!("expected validate-not-enforced failure, got {other:?}"),
     }
 }
@@ -12487,7 +12594,8 @@ fn create_table_unique_nulls_not_distinct_treats_nulls_as_conflicting() {
         "create table items (id int4 unique nulls not distinct, note text)",
     )
     .unwrap();
-    db.execute(1, "insert into items (note) values ('first')").unwrap();
+    db.execute(1, "insert into items (note) values ('first')")
+        .unwrap();
 
     match db.execute(1, "insert into items (note) values ('second')") {
         Err(ExecError::UniqueViolation { constraint }) if constraint == "items_id_key" => {}
@@ -17141,7 +17249,9 @@ fn select_into_creates_table_from_query() {
     let db = Database::open(&base, 16).unwrap();
     let mut session = Session::new(1);
 
-    session.execute(&db, "create table cmdata (f1 text)").unwrap();
+    session
+        .execute(&db, "create table cmdata (f1 text)")
+        .unwrap();
     session
         .execute(
             &db,
@@ -17156,7 +17266,10 @@ fn select_into_creates_table_from_query() {
         StatementResult::AffectedRows(1)
     );
 
-    match session.execute(&db, "select length(f1) from cmmove1").unwrap() {
+    match session
+        .execute(&db, "select length(f1) from cmmove1")
+        .unwrap()
+    {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Int32(10_000)]]);
         }

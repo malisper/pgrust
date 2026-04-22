@@ -1,7 +1,7 @@
 use super::*;
 use crate::backend::executor::expr_casts::canonicalize_interval_text;
-use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::storage::page::bufpage::max_align;
+use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::access::htup::AttributeAlign;
 use crate::include::catalog::{
     INTERVAL_TYPE_OID, builtin_type_rows, multirange_type_ref_for_sql_type,
@@ -1141,7 +1141,10 @@ pub(crate) fn format_array_text_with_config(
 ) -> String {
     match ArrayValue::from_nested_values(items.to_vec(), vec![1]) {
         Ok(array) => format_array_value_text_with_config(&array, datetime_config),
-        Err(_) => format_array_value_text_with_config(&ArrayValue::from_1d(items.to_vec()), datetime_config),
+        Err(_) => format_array_value_text_with_config(
+            &ArrayValue::from_1d(items.to_vec()),
+            datetime_config,
+        ),
     }
 }
 

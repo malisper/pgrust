@@ -848,6 +848,10 @@ fn collect_set_returning_call_supporting_inputs(call: &SetReturningCall, exprs: 
             collect_supporting_inputs(stop, exprs);
             collect_supporting_inputs(step, exprs);
         }
+        SetReturningCall::PartitionTree { relid, .. }
+        | SetReturningCall::PartitionAncestors { relid, .. } => {
+            collect_supporting_inputs(relid, exprs);
+        }
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }
@@ -1507,6 +1511,10 @@ fn collect_set_returning_call_outer_refs(
             collect_query_outer_refs_expr(start, levelsup, exprs);
             collect_query_outer_refs_expr(stop, levelsup, exprs);
             collect_query_outer_refs_expr(step, levelsup, exprs);
+        }
+        SetReturningCall::PartitionTree { relid, .. }
+        | SetReturningCall::PartitionAncestors { relid, .. } => {
+            collect_query_outer_refs_expr(relid, levelsup, exprs);
         }
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }

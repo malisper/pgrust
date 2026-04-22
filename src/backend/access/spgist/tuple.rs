@@ -20,9 +20,9 @@ pub(crate) fn encode_key_payload(
             }
             _ => {
                 payload.push(0);
-                let bytes = match encode_value(column, value).map_err(|err| {
-                    CatalogError::Io(format!("spgist encode key failed: {err:?}"))
-                })? {
+                let bytes = match encode_value(column, value)
+                    .map_err(|err| CatalogError::Io(format!("spgist encode key failed: {err:?}")))?
+                {
                     TupleValue::Null => Vec::new(),
                     TupleValue::Bytes(bytes) => bytes,
                     TupleValue::EncodedVarlena(bytes) => bytes,
@@ -65,9 +65,8 @@ pub(crate) fn decode_key_payload(
             return Err(CatalogError::Corrupt("spgist tuple payload overflow"));
         }
         values.push(
-            decode_value(column, Some(&payload[offset..offset + len])).map_err(|err| {
-                CatalogError::Io(format!("spgist decode key failed: {err:?}"))
-            })?,
+            decode_value(column, Some(&payload[offset..offset + len]))
+                .map_err(|err| CatalogError::Io(format!("spgist decode key failed: {err:?}")))?,
         );
         offset += len;
     }

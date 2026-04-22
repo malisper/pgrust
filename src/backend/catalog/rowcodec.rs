@@ -10,10 +10,10 @@ use crate::include::catalog::{
     PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
     PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow,
     PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
-    PgOpfamilyRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
-    PgPublicationRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow,
-    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
-    bootstrap_composite_type_rows, builtin_type_rows,
+    PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow,
+    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow,
+    PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
+    PgTypeRow, bootstrap_composite_type_rows, builtin_type_rows,
 };
 use crate::include::nodes::datum::{ArrayValue, Value};
 
@@ -180,6 +180,12 @@ pub(crate) fn catalog_row_values_for_kind(
             .cloned()
             .map(pg_index_row_values)
             .collect(),
+        BootstrapCatalogKind::PgPartitionedTable => rows
+            .partitioned_tables
+            .iter()
+            .cloned()
+            .map(pg_partitioned_table_row_values)
+            .collect(),
         BootstrapCatalogKind::PgRewrite => rows
             .rewrites
             .iter()
@@ -307,6 +313,22 @@ pub(crate) fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow,
         relforcerowsecurity: expect_bool(&values[19])?,
         relispartition: expect_bool(&values[20])?,
         relfrozenxid: expect_oid(&values[21])?,
+        relpartbound: nullable_text(&values[22])?,
+    })
+}
+
+pub(crate) fn pg_partitioned_table_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgPartitionedTableRow, CatalogError> {
+    Ok(PgPartitionedTableRow {
+        partrelid: expect_oid(&values[0])?,
+        partstrat: expect_char(&values[1], "partstrat")?,
+        partnatts: expect_int16(&values[2])?,
+        partdefid: expect_oid(&values[3])?,
+        partattrs: parse_indkey(&expect_text(&values[4])?),
+        partclass: parse_oidvector(&expect_text(&values[5])?),
+        partcollation: parse_oidvector(&expect_text(&values[6])?),
+        partexprs: nullable_text(&values[7])?,
     })
 }
 
@@ -966,6 +988,35 @@ fn pg_class_row_values(row: PgClassRow) -> Vec<Value> {
         Value::Bool(row.relforcerowsecurity),
         Value::Bool(row.relispartition),
         Value::Int32(row.relfrozenxid as i32),
+        row.relpartbound
+            .map_or(Value::Null, |value| Value::Text(value.into())),
+    ]
+}
+
+fn pg_partitioned_table_row_values(row: PgPartitionedTableRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.partrelid as i32),
+        Value::Text(row.partstrat.to_string().into()),
+        Value::Int16(row.partnatts),
+        Value::Int32(row.partdefid as i32),
+        Value::Text(format_indkey(&row.partattrs).into()),
+        Value::Text(
+            row.partclass
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+                .into(),
+        ),
+        Value::Text(
+            row.partcollation
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+                .into(),
+        ),
+        nullable_text_value(row.partexprs),
     ]
 }
 

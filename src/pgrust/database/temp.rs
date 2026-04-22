@@ -132,6 +132,37 @@ impl Database {
         Ok(())
     }
 
+    pub(super) fn replace_temp_entry_partition_metadata(
+        &self,
+        client_id: ClientId,
+        relation_oid: u32,
+        relkind: char,
+        relispartition: bool,
+        relpartbound: Option<String>,
+        partitioned_table: Option<crate::include::catalog::PgPartitionedTableRow>,
+    ) -> Result<(), ExecError> {
+        let temp_backend_id = self.temp_backend_id(client_id);
+        let mut namespaces = self.temp_relations.write();
+        let namespace = namespaces.get_mut(&temp_backend_id).ok_or_else(|| {
+            ExecError::Parse(ParseError::TableDoesNotExist(relation_oid.to_string()))
+        })?;
+        let entry = namespace
+            .tables
+            .values_mut()
+            .find(|entry| entry.entry.relation_oid == relation_oid)
+            .ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(relation_oid.to_string()))
+            })?;
+        entry.entry.relkind = relkind;
+        entry.entry.relispartition = relispartition;
+        entry.entry.relpartbound = relpartbound;
+        entry.entry.partitioned_table = partitioned_table;
+        namespace.generation = namespace.generation.saturating_add(1);
+        drop(namespaces);
+        self.invalidate_backend_cache_state(client_id);
+        Ok(())
+    }
+
     pub(super) fn temp_relation_name_for_oid(
         &self,
         client_id: ClientId,
@@ -298,11 +329,14 @@ impl Database {
                 relpersistence: 't',
                 relkind: 'n',
                 relhastriggers: false,
+                relispartition: false,
+                relpartbound: None,
                 relrowsecurity: false,
                 relforcerowsecurity: false,
                 desc: crate::backend::executor::RelationDesc {
                     columns: Vec::new(),
                 },
+                partitioned_table: None,
                 index: None,
             },
             on_commit: OnCommitAction::PreserveRows,
@@ -414,9 +448,12 @@ impl Database {
             relpersistence: created.entry.relpersistence,
             relkind: created.entry.relkind,
             relhastriggers: created.entry.relhastriggers,
+            relispartition: created.entry.relispartition,
+            relpartbound: created.entry.relpartbound.clone(),
             relrowsecurity: created.entry.relrowsecurity,
             relforcerowsecurity: created.entry.relforcerowsecurity,
             desc: created.entry.desc.clone(),
+            partitioned_table: created.entry.partitioned_table.clone(),
             index: None,
         };
         {
@@ -597,8 +634,10 @@ impl Database {
                 .with_storage_mut(|s| {
                     s.smgr
                         .truncate(rel, crate::backend::storage::smgr::ForkNumber::Main, 0)?;
-                    if s.smgr.exists(rel, crate::backend::storage::smgr::ForkNumber::VisibilityMap)
-                    {
+                    if s.smgr.exists(
+                        rel,
+                        crate::backend::storage::smgr::ForkNumber::VisibilityMap,
+                    ) {
                         s.smgr.truncate(
                             rel,
                             crate::backend::storage::smgr::ForkNumber::VisibilityMap,

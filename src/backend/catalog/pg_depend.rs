@@ -6,9 +6,9 @@ use crate::include::catalog::{
     DEPENDENCY_AUTO, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_ATTRDEF_RELATION_OID,
     PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
     PG_NAMESPACE_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID,
-    PG_PUBLICATION_NAMESPACE_RELATION_OID,
-    PG_PUBLICATION_REL_RELATION_OID, PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID,
-    PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PgDependRow,
+    PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
+    PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TRIGGER_RELATION_OID,
+    PG_TYPE_RELATION_OID, PgDependRow,
 };
 use std::collections::BTreeSet;
 
@@ -319,9 +319,7 @@ pub fn aggregate_depend_rows(
     rows
 }
 
-pub fn operator_depend_rows(
-    row: &crate::include::catalog::PgOperatorRow,
-) -> Vec<PgDependRow> {
+pub fn operator_depend_rows(row: &crate::include::catalog::PgOperatorRow) -> Vec<PgDependRow> {
     let mut rows = vec![PgDependRow {
         classid: PG_OPERATOR_RELATION_OID,
         objid: row.oid,

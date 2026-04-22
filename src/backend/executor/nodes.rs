@@ -30,8 +30,8 @@ use crate::include::nodes::execnodes::{
     ValuesState, WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::primnodes::{
-    BuiltinScalarFunction, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR,
-    RelationDesc, ScalarFunctionImpl, Var, attrno_index,
+    BuiltinScalarFunction, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR, RelationDesc,
+    ScalarFunctionImpl, Var, attrno_index,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -2234,8 +2234,8 @@ fn projection_is_explain_passthrough(state: &ProjectionState) -> bool {
     if identity_projection {
         return true;
     }
-    let full_width_projection =
-        state.targets.len() == input_names.len() && state.targets.iter().all(|target| !target.resjunk);
+    let full_width_projection = state.targets.len() == input_names.len()
+        && state.targets.iter().all(|target| !target.resjunk);
     if state.input.node_label() == "WindowAgg" && full_width_projection {
         return true;
     }

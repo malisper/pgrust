@@ -9,10 +9,9 @@ use crate::include::nodes::parsenodes::{
     JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind, RecursiveUnionQuery, SetOperationQuery,
 };
 use crate::include::nodes::primnodes::{
-    AggAccum, Aggref, BoolExpr, BoolExprType, CaseExpr, CaseWhen, Expr, ExprArraySubscript,
-    OpExpr, OpExprKind, OrderByEntry, ProjectSetTarget, SetReturningCall, SortGroupClause,
-    TargetEntry, WindowClause, WindowFrame, WindowFrameBound, WindowFuncExpr, WindowFuncKind,
-    XmlExpr,
+    AggAccum, Aggref, BoolExpr, BoolExprType, CaseExpr, CaseWhen, Expr, ExprArraySubscript, OpExpr,
+    OpExprKind, OrderByEntry, ProjectSetTarget, SetReturningCall, SortGroupClause, TargetEntry,
+    WindowClause, WindowFrame, WindowFrameBound, WindowFuncExpr, WindowFuncKind, XmlExpr,
 };
 
 pub(crate) fn fold_query_constants(query: Query) -> Result<Query, ParseError> {
@@ -39,7 +38,10 @@ fn simplify_query(query: Query) -> Result<Query, ParseError> {
             .into_iter()
             .map(simplify_target_entry)
             .collect::<Result<Vec<_>, _>>()?,
-        where_qual: query.where_qual.map(|expr| simplify_expr(expr, None)).transpose()?,
+        where_qual: query
+            .where_qual
+            .map(|expr| simplify_expr(expr, None))
+            .transpose()?,
         group_by: query
             .group_by
             .into_iter()
@@ -55,7 +57,10 @@ fn simplify_query(query: Query) -> Result<Query, ParseError> {
             .into_iter()
             .map(simplify_window_clause)
             .collect::<Result<Vec<_>, _>>()?,
-        having_qual: query.having_qual.map(|expr| simplify_expr(expr, None)).transpose()?,
+        having_qual: query
+            .having_qual
+            .map(|expr| simplify_expr(expr, None))
+            .transpose()?,
         sort_clause: query
             .sort_clause
             .into_iter()
@@ -202,7 +207,9 @@ fn simplify_order_by_entry(item: OrderByEntry) -> Result<OrderByEntry, ParseErro
 
 fn simplify_project_set_target(target: ProjectSetTarget) -> Result<ProjectSetTarget, ParseError> {
     match target {
-        ProjectSetTarget::Scalar(entry) => Ok(ProjectSetTarget::Scalar(simplify_target_entry(entry)?)),
+        ProjectSetTarget::Scalar(entry) => {
+            Ok(ProjectSetTarget::Scalar(simplify_target_entry(entry)?))
+        }
         ProjectSetTarget::Set {
             name,
             call,
@@ -311,6 +318,28 @@ fn simplify_set_returning_call(call: SetReturningCall) -> Result<SetReturningCal
             output_columns,
             with_ordinality,
         },
+        SetReturningCall::PartitionTree {
+            func_oid,
+            func_variadic,
+            relid,
+            output_columns,
+        } => SetReturningCall::PartitionTree {
+            func_oid,
+            func_variadic,
+            relid: simplify_expr(relid, None)?,
+            output_columns,
+        },
+        SetReturningCall::PartitionAncestors {
+            func_oid,
+            func_variadic,
+            relid,
+            output_columns,
+        } => SetReturningCall::PartitionAncestors {
+            func_oid,
+            func_variadic,
+            relid: simplify_expr(relid, None)?,
+            output_columns,
+        },
         SetReturningCall::TextSearchTableFunction {
             kind,
             args,
@@ -346,7 +375,10 @@ fn simplify_agg_accum(accum: AggAccum) -> Result<AggAccum, ParseError> {
             .into_iter()
             .map(simplify_order_by_entry)
             .collect::<Result<Vec<_>, _>>()?,
-        filter: accum.filter.map(|expr| simplify_expr(expr, None)).transpose()?,
+        filter: accum
+            .filter
+            .map(|expr| simplify_expr(expr, None))
+            .transpose()?,
         ..accum
     })
 }
@@ -415,7 +447,9 @@ fn simplify_window_frame_bound(bound: WindowFrameBound) -> Result<WindowFrameBou
 fn simplify_window_func_expr(window_func: WindowFuncExpr) -> Result<WindowFuncExpr, ParseError> {
     Ok(WindowFuncExpr {
         kind: match window_func.kind {
-            WindowFuncKind::Aggregate(aggref) => WindowFuncKind::Aggregate(simplify_aggref(aggref)?),
+            WindowFuncKind::Aggregate(aggref) => {
+                WindowFuncKind::Aggregate(simplify_aggref(aggref)?)
+            }
             other => other,
         },
         args: simplify_exprs(window_func.args)?,
@@ -465,40 +499,46 @@ fn simplify_expr(expr: Expr, case_test_value: Option<&Value>) -> Result<Expr, Pa
             .map(Expr::Const)
             .unwrap_or(Expr::CaseTest(case_test))),
         Expr::Aggref(aggref) => Ok(Expr::Aggref(Box::new(simplify_aggref(*aggref)?))),
-        Expr::WindowFunc(window_func) => {
-            Ok(Expr::WindowFunc(Box::new(simplify_window_func_expr(*window_func)?)))
-        }
+        Expr::WindowFunc(window_func) => Ok(Expr::WindowFunc(Box::new(simplify_window_func_expr(
+            *window_func,
+        )?))),
         Expr::Op(op) => simplify_op_expr(*op, case_test_value),
         Expr::Bool(bool_expr) => simplify_bool_expr(*bool_expr, case_test_value),
         Expr::Case(case_expr) => simplify_case_expr(*case_expr, case_test_value),
-        Expr::Func(func) => Ok(Expr::Func(Box::new(crate::include::nodes::primnodes::FuncExpr {
-            args: func
-                .args
-                .into_iter()
-                .map(|expr| simplify_expr(expr, case_test_value))
-                .collect::<Result<Vec<_>, _>>()?,
-            ..*func
-        }))),
-        Expr::SubLink(sublink) => Ok(Expr::SubLink(Box::new(crate::include::nodes::primnodes::SubLink {
-            testexpr: sublink
-                .testexpr
-                .map(|expr| simplify_expr(*expr, case_test_value).map(Box::new))
-                .transpose()?,
-            subselect: Box::new(simplify_query(*sublink.subselect)?),
-            ..*sublink
-        }))),
-        Expr::SubPlan(subplan) => Ok(Expr::SubPlan(Box::new(crate::include::nodes::primnodes::SubPlan {
-            testexpr: subplan
-                .testexpr
-                .map(|expr| simplify_expr(*expr, case_test_value).map(Box::new))
-                .transpose()?,
-            args: subplan
-                .args
-                .into_iter()
-                .map(|expr| simplify_expr(expr, case_test_value))
-                .collect::<Result<Vec<_>, _>>()?,
-            ..*subplan
-        }))),
+        Expr::Func(func) => Ok(Expr::Func(Box::new(
+            crate::include::nodes::primnodes::FuncExpr {
+                args: func
+                    .args
+                    .into_iter()
+                    .map(|expr| simplify_expr(expr, case_test_value))
+                    .collect::<Result<Vec<_>, _>>()?,
+                ..*func
+            },
+        ))),
+        Expr::SubLink(sublink) => Ok(Expr::SubLink(Box::new(
+            crate::include::nodes::primnodes::SubLink {
+                testexpr: sublink
+                    .testexpr
+                    .map(|expr| simplify_expr(*expr, case_test_value).map(Box::new))
+                    .transpose()?,
+                subselect: Box::new(simplify_query(*sublink.subselect)?),
+                ..*sublink
+            },
+        ))),
+        Expr::SubPlan(subplan) => Ok(Expr::SubPlan(Box::new(
+            crate::include::nodes::primnodes::SubPlan {
+                testexpr: subplan
+                    .testexpr
+                    .map(|expr| simplify_expr(*expr, case_test_value).map(Box::new))
+                    .transpose()?,
+                args: subplan
+                    .args
+                    .into_iter()
+                    .map(|expr| simplify_expr(expr, case_test_value))
+                    .collect::<Result<Vec<_>, _>>()?,
+                ..*subplan
+            },
+        ))),
         Expr::ScalarArrayOp(saop) => Ok(Expr::ScalarArrayOp(Box::new(
             crate::include::nodes::primnodes::ScalarArrayOpExpr {
                 left: Box::new(simplify_expr(*saop.left, case_test_value)?),
@@ -506,7 +546,10 @@ fn simplify_expr(expr: Expr, case_test_value: Option<&Value>) -> Result<Expr, Pa
                 ..*saop
             },
         ))),
-        Expr::Xml(xml) => Ok(Expr::Xml(Box::new(simplify_xml_expr(*xml, case_test_value)?))),
+        Expr::Xml(xml) => Ok(Expr::Xml(Box::new(simplify_xml_expr(
+            *xml,
+            case_test_value,
+        )?))),
         Expr::Cast(inner, ty) => {
             let inner = simplify_expr(*inner, case_test_value)?;
             if let Expr::Const(value) = &inner {
@@ -516,7 +559,10 @@ fn simplify_expr(expr: Expr, case_test_value: Option<&Value>) -> Result<Expr, Pa
             }
             Ok(Expr::Cast(Box::new(inner), ty))
         }
-        Expr::Collate { expr, collation_oid } => {
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => {
             let expr = simplify_expr(*expr, case_test_value)?;
             if matches!(expr, Expr::Const(_)) {
                 Ok(expr)
@@ -683,7 +729,10 @@ fn simplify_case_expr(
 
     for arm in case_expr.args {
         let cond = simplify_expr(arm.expr, case_test_value.as_ref())?;
-        if matches!(cond, Expr::Const(Value::Null) | Expr::Const(Value::Bool(false))) {
+        if matches!(
+            cond,
+            Expr::Const(Value::Null) | Expr::Const(Value::Bool(false))
+        ) {
             continue;
         }
         if matches!(cond, Expr::Const(Value::Bool(true))) {
@@ -717,9 +766,9 @@ fn simplify_bool_expr(
 ) -> Result<Expr, ParseError> {
     match bool_expr.boolop {
         BoolExprType::Not => {
-            let [inner] = bool_expr.args.try_into().map_err(|_| ParseError::FeatureNotSupportedMessage(
-                "malformed NOT expression".into(),
-            ))?;
+            let [inner] = bool_expr.args.try_into().map_err(|_| {
+                ParseError::FeatureNotSupportedMessage("malformed NOT expression".into())
+            })?;
             let inner = simplify_expr(inner, case_test_value)?;
             Ok(match inner {
                 Expr::Const(Value::Bool(value)) => Expr::Const(Value::Bool(!value)),
@@ -829,14 +878,12 @@ fn evaluate_const_op(
         (OpExprKind::Div, [left, right]) => div_values(left.clone(), right.clone())?,
         (OpExprKind::Mod, [left, right]) => mod_values(left.clone(), right.clone())?,
         (OpExprKind::Concat, [left, right]) => concat_values(left.clone(), right.clone())?,
-        (OpExprKind::Eq, [left, right]) => {
-            crate::backend::executor::expr_ops::compare_values(
-                "=",
-                left.clone(),
-                right.clone(),
-                collation_oid,
-            )?
-        }
+        (OpExprKind::Eq, [left, right]) => crate::backend::executor::expr_ops::compare_values(
+            "=",
+            left.clone(),
+            right.clone(),
+            collation_oid,
+        )?,
         (OpExprKind::NotEq, [left, right]) => {
             not_equal_values(left.clone(), right.clone(), collation_oid)?
         }
@@ -865,7 +912,9 @@ fn try_fold_eval(result: Result<Value, ExecError>) -> Result<Option<Expr>, Parse
     }
 }
 
-fn try_fold_optional_eval(result: Result<Option<Value>, ExecError>) -> Result<Option<Expr>, ParseError> {
+fn try_fold_optional_eval(
+    result: Result<Option<Value>, ExecError>,
+) -> Result<Option<Expr>, ParseError> {
     match result {
         Ok(Some(value)) => Ok(Some(Expr::Const(value))),
         Ok(None) => Ok(None),
@@ -898,9 +947,9 @@ fn parse_error_from_exec(err: ExecError) -> ParseError {
             hint: None,
             sqlstate: "22012",
         },
-        other => ParseError::FeatureNotSupportedMessage(format!(
-            "constant folding failed: {other:?}"
-        )),
+        other => {
+            ParseError::FeatureNotSupportedMessage(format!("constant folding failed: {other:?}"))
+        }
     }
 }
 
@@ -912,5 +961,8 @@ fn const_expr_value(expr: &Expr) -> Option<&Value> {
 }
 
 fn const_expr_values(exprs: &[Expr]) -> Option<Vec<Value>> {
-    exprs.iter().map(|expr| const_expr_value(expr).cloned()).collect()
+    exprs
+        .iter()
+        .map(|expr| const_expr_value(expr).cloned())
+        .collect()
 }

@@ -1,8 +1,9 @@
+use super::expr::bind_resolved_scalar_function_call;
 use super::query::{AnalyzedFrom, JoinAliasInfo, shift_expr_rtindexes};
 use super::*;
-use super::expr::bind_resolved_scalar_function_call;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::record::lookup_anonymous_record_descriptor;
+use crate::include::catalog::PgPartitionedTableRow;
 use crate::include::nodes::primnodes::{
     AttrNumber, ColumnDesc, JoinType, JsonRecordFunction, SELF_ITEM_POINTER_ATTR_NO,
     TABLE_OID_ATTR_NO, Var, user_attrno,
@@ -59,7 +60,10 @@ pub struct BoundRelation {
     pub owner_oid: u32,
     pub relpersistence: char,
     pub relkind: char,
+    pub relispartition: bool,
+    pub relpartbound: Option<String>,
     pub desc: RelationDesc,
+    pub partitioned_table: Option<PgPartitionedTableRow>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -570,7 +574,7 @@ pub(super) fn bind_from_item_with_ctes(
             let entry = catalog
                 .lookup_any_relation(name)
                 .ok_or_else(|| ParseError::UnknownTable(name.to_string()))?;
-            if !matches!(entry.relkind, 'r' | 'v' | 'S') {
+            if !matches!(entry.relkind, 'r' | 'p' | 'v' | 'S') {
                 return Err(ParseError::WrongObjectType {
                     name: name.to_string(),
                     expected: "table, view, or sequence",
@@ -584,7 +588,7 @@ pub(super) fn bind_from_item_with_ctes(
                     entry.relation_oid,
                     entry.relkind,
                     entry.toast,
-                    !*only && entry.relkind == 'r',
+                    !*only && matches!(entry.relkind, 'r' | 'p'),
                     desc.clone(),
                 ),
                 scope_for_base_relation(name, &desc),
@@ -1302,6 +1306,92 @@ fn bind_function_from_item_with_ctes(
                 if resolved.prokind != 'f' {
                     return Err(ParseError::UnknownTable(other.to_string()));
                 }
+                if let Some(srf_impl) = resolved.srf_impl {
+                    if with_ordinality {
+                        return Err(ParseError::FeatureNotSupported(format!(
+                            "WITH ORDINALITY on {other}"
+                        )));
+                    }
+                    let bound_args = bind_user_defined_table_function_args(
+                        &args,
+                        &call_scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        &resolved.declared_arg_types,
+                    )?;
+                    let output_columns =
+                        resolved_row_columns
+                            .clone()
+                            .unwrap_or_else(|| match srf_impl {
+                                ResolvedSrfImpl::PartitionTree => vec![
+                                    QueryColumn {
+                                        name: "relid".into(),
+                                        sql_type: SqlType::new(SqlTypeKind::RegClass),
+                                        wire_type_oid: None,
+                                    },
+                                    QueryColumn {
+                                        name: "parentrelid".into(),
+                                        sql_type: SqlType::new(SqlTypeKind::RegClass),
+                                        wire_type_oid: None,
+                                    },
+                                    QueryColumn {
+                                        name: "isleaf".into(),
+                                        sql_type: SqlType::new(SqlTypeKind::Bool),
+                                        wire_type_oid: None,
+                                    },
+                                    QueryColumn {
+                                        name: "level".into(),
+                                        sql_type: SqlType::new(SqlTypeKind::Int4),
+                                        wire_type_oid: None,
+                                    },
+                                ],
+                                ResolvedSrfImpl::PartitionAncestors => vec![QueryColumn {
+                                    name: "relid".into(),
+                                    sql_type: SqlType::new(SqlTypeKind::RegClass),
+                                    wire_type_oid: None,
+                                }],
+                                _ => unreachable!(
+                                    "partition SRF branch only handles partition builtins"
+                                ),
+                            });
+                    let desc = RelationDesc {
+                        columns: output_columns
+                            .iter()
+                            .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+                            .collect(),
+                    };
+                    let scope = scope_for_relation(Some(name), &desc);
+                    let relid = bound_args.into_iter().next().ok_or_else(|| {
+                        ParseError::UnexpectedToken {
+                            expected: "single regclass argument",
+                            actual: other.to_string(),
+                        }
+                    })?;
+                    let call = match srf_impl {
+                        ResolvedSrfImpl::PartitionTree => SetReturningCall::PartitionTree {
+                            func_oid: resolved.proc_oid,
+                            func_variadic: resolved.func_variadic,
+                            relid,
+                            output_columns,
+                        },
+                        ResolvedSrfImpl::PartitionAncestors => {
+                            SetReturningCall::PartitionAncestors {
+                                func_oid: resolved.proc_oid,
+                                func_variadic: resolved.func_variadic,
+                                relid,
+                                output_columns,
+                            }
+                        }
+                        _ => unreachable!("partition SRF branch only handles partition builtins"),
+                    };
+                    let alias_single_function_output = call.output_columns().len() == 1;
+                    return Ok((
+                        AnalyzedFrom::function(call),
+                        scope,
+                        alias_single_function_output,
+                    ));
+                }
                 if !resolved.proretset {
                     return bind_single_row_function_from_item_with_ctes(
                         name,
@@ -1423,12 +1513,7 @@ fn bind_single_row_function_from_item_with_ctes(
         let base_expr = plan.output_exprs[0].clone();
         let ordinality_type = SqlType::new(SqlTypeKind::Int8);
         plan = plan.with_projection(vec![
-            TargetEntry::new(
-                name.to_string(),
-                base_expr,
-                resolved.result_type,
-                1,
-            ),
+            TargetEntry::new(name.to_string(), base_expr, resolved.result_type, 1),
             TargetEntry::new(
                 "ordinality",
                 Expr::Const(Value::Int64(1)),
@@ -1473,10 +1558,7 @@ fn bind_json_table_function_args(
         .enumerate()
         .map(|(index, arg)| {
             let target_type = match (kind, index) {
-                (
-                    JsonTableFunction::JsonbPathQuery,
-                    0 | 2,
-                )
+                (JsonTableFunction::JsonbPathQuery, 0 | 2)
                 | (JsonTableFunction::JsonbObjectKeys, 0)
                 | (JsonTableFunction::JsonbEach, 0)
                 | (JsonTableFunction::JsonbEachText, 0)
@@ -1484,9 +1566,7 @@ fn bind_json_table_function_args(
                 | (JsonTableFunction::JsonbArrayElementsText, 0) => {
                     Some(SqlType::new(SqlTypeKind::Jsonb))
                 }
-                (JsonTableFunction::JsonbPathQuery, 1) => {
-                    Some(SqlType::new(SqlTypeKind::JsonPath))
-                }
+                (JsonTableFunction::JsonbPathQuery, 1) => Some(SqlType::new(SqlTypeKind::JsonPath)),
                 (JsonTableFunction::JsonbPathQuery, 3) => Some(SqlType::new(SqlTypeKind::Bool)),
                 _ => None,
             };
@@ -1799,7 +1879,7 @@ pub(super) fn lookup_relation(
     name: &str,
 ) -> Result<BoundRelation, ParseError> {
     match catalog.lookup_any_relation(name) {
-        Some(entry) if entry.relkind == 'r' => Ok(entry),
+        Some(entry) if matches!(entry.relkind, 'r' | 'p') => Ok(entry),
         Some(_) => Err(ParseError::WrongObjectType {
             name: name.to_string(),
             expected: "table",

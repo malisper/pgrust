@@ -29,12 +29,11 @@ use crate::pgrust::compact_string::CompactString;
 
 mod array;
 
-pub use array::{format_array_value_text, format_array_value_text_with_config};
 pub(crate) use array::{
     builtin_type_oid_for_sql_type, decode_anyarray_bytes, decode_array_bytes,
-    encode_anyarray_bytes, encode_array_bytes, format_array_text,
-    format_array_text_with_config,
+    encode_anyarray_bytes, encode_array_bytes, format_array_text, format_array_text_with_config,
 };
+pub use array::{format_array_value_text, format_array_value_text_with_config};
 
 const INTERNAL_VALUE_TAG_NULL: u8 = 0;
 const INTERNAL_VALUE_TAG_INT16: u8 = 1;

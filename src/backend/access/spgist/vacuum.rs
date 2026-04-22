@@ -5,8 +5,8 @@ use crate::include::access::amapi::{
     IndexBulkDeleteCallback, IndexBulkDeleteResult, IndexVacuumContext,
 };
 use crate::include::access::spgist::{
-    spgist_page_items, spgist_page_items_with_offsets, spgist_page_replace_items, F_HAS_GARBAGE,
-    F_TUPLES_DELETED,
+    F_HAS_GARBAGE, F_TUPLES_DELETED, spgist_page_items, spgist_page_items_with_offsets,
+    spgist_page_replace_items,
 };
 
 use super::page::{page_opaque, read_buffered_page, relation_nblocks, write_buffered_page};

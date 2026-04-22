@@ -727,10 +727,7 @@ fn exec_function_stmt(
             exec_function_perform(plan, compiled, state, ctx)?;
             Ok(FunctionControl::Continue)
         }
-        CompiledStmt::SelectInto {
-            plan,
-            targets,
-        } => {
+        CompiledStmt::SelectInto { plan, targets } => {
             exec_function_select_into(plan, targets, compiled, state, ctx)?;
             Ok(FunctionControl::Continue)
         }
@@ -922,7 +919,11 @@ fn exec_function_select_into(
             if row.len() != targets.len() {
                 return Err(function_runtime_error(
                     "query returned an unexpected row shape",
-                    Some(format!("expected {} columns, got {}", targets.len(), row.len())),
+                    Some(format!(
+                        "expected {} columns, got {}",
+                        targets.len(),
+                        row.len()
+                    )),
                     "42804",
                 ));
             }

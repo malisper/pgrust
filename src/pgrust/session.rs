@@ -161,9 +161,7 @@ fn available_default_toast_compression_values() -> &'static str {
 
 fn invalid_default_toast_compression_value(value: &str) -> ExecError {
     ExecError::DetailedError {
-        message: format!(
-            "invalid value for parameter \"default_toast_compression\": \"{value}\""
-        ),
+        message: format!("invalid value for parameter \"default_toast_compression\": \"{value}\""),
         detail: None,
         hint: Some(format!(
             "Available values: {}.",
@@ -1372,6 +1370,24 @@ impl Session {
                 } else {
                     let search_path = self.configured_search_path();
                     db.execute_alter_table_no_inherit_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::AlterTableAttachPartition(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_table_attach_partition_stmt_with_search_path(
                         self.client_id,
                         alter_stmt,
                         search_path.as_deref(),
@@ -2726,6 +2742,18 @@ impl Session {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_alter_table_no_inherit_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::AlterTableAttachPartition(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_table_attach_partition_stmt_in_transaction_with_search_path(
                     client_id,
                     alter_stmt,
                     xid,

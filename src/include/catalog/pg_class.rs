@@ -30,6 +30,7 @@ pub struct PgClassRow {
     pub relforcerowsecurity: bool,
     pub relispartition: bool,
     pub relfrozenxid: u32,
+    pub relpartbound: Option<String>,
 }
 
 pub fn pg_class_desc() -> RelationDesc {
@@ -65,12 +66,13 @@ pub fn pg_class_desc() -> RelationDesc {
             ),
             column_desc("relispartition", SqlType::new(SqlTypeKind::Bool), false),
             column_desc("relfrozenxid", SqlType::new(SqlTypeKind::Xid), false),
+            column_desc("relpartbound", SqlType::new(SqlTypeKind::PgNodeTree), true),
         ],
     }
 }
 
 pub const fn relkind_has_storage(relkind: char) -> bool {
-    !matches!(relkind, 'v' | 'c')
+    !matches!(relkind, 'v' | 'c' | 'p')
 }
 
 pub const fn relkind_is_analyzable(relkind: char) -> bool {
@@ -85,7 +87,7 @@ pub const fn relam_for_relkind(relkind: char) -> u32 {
     }
 }
 
-pub fn bootstrap_pg_class_rows() -> [PgClassRow; 28] {
+pub fn bootstrap_pg_class_rows() -> [PgClassRow; 29] {
     [
         bootstrap_pg_class_row(BootstrapCatalogKind::PgNamespace),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgType),
@@ -107,6 +109,7 @@ pub fn bootstrap_pg_class_rows() -> [PgClassRow; 28] {
         bootstrap_pg_class_row(BootstrapCatalogKind::PgForeignDataWrapper),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgIndex),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgInherits),
+        bootstrap_pg_class_row(BootstrapCatalogKind::PgPartitionedTable),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgRewrite),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgStatistic),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgTrigger),
@@ -142,5 +145,6 @@ fn bootstrap_pg_class_row(kind: BootstrapCatalogKind) -> PgClassRow {
         relforcerowsecurity: false,
         relispartition: false,
         relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
+        relpartbound: None,
     }
 }

@@ -33,30 +33,18 @@ pub(super) fn bind_jsonb_subscript_expr(
         });
     }
 
-    let mut bound = bind_expr_with_outer_and_ctes(
-        array,
-        scope,
-        catalog,
-        outer_scopes,
-        grouped_outer,
-        ctes,
-    )?;
+    let mut bound =
+        bind_expr_with_outer_and_ctes(array, scope, catalog, outer_scopes, grouped_outer, ctes)?;
     for subscript in subscripts {
         let key = if let Some(lower) = &subscript.lower {
-            bind_expr_with_outer_and_ctes(
-                lower,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?
+            bind_expr_with_outer_and_ctes(lower, scope, catalog, outer_scopes, grouped_outer, ctes)?
         } else {
             Expr::Const(Value::Int64(1))
         };
-        bound = Expr::op_auto(crate::include::nodes::primnodes::OpExprKind::JsonGet, vec![
-            bound, key,
-        ]);
+        bound = Expr::op_auto(
+            crate::include::nodes::primnodes::OpExprKind::JsonGet,
+            vec![bound, key],
+        );
     }
     Ok(bound)
 }
