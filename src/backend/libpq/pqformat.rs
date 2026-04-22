@@ -3,7 +3,6 @@ use std::io::{self, Write};
 use std::str::FromStr;
 
 use crate::backend::access::heap::heapam::HeapError;
-use crate::backend::executor::exec_expr::format_array_text;
 use crate::backend::executor::value_io::builtin_type_oid_for_sql_type;
 use crate::backend::executor::{
     ArrayValue, ExecError, QueryColumn, Value, geometry_input_error_message,
@@ -804,21 +803,40 @@ pub(crate) fn send_typed_data_row(
                     );
                     array
                         .as_ref()
-                        .map(crate::backend::executor::value_io::format_array_value_text)
-                        .unwrap_or_else(|| format_array_text(items))
+                        .map(|array| {
+                            crate::backend::executor::value_io::format_array_value_text_with_config(
+                                array,
+                                &float_format.datetime_config,
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            crate::backend::executor::value_io::format_array_text_with_config(
+                                items,
+                                &float_format.datetime_config,
+                            )
+                        })
                 } else {
-                    format_array_text(items)
+                    crate::backend::executor::value_io::format_array_text_with_config(
+                        items,
+                        &float_format.datetime_config,
+                    )
                 };
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }
             Value::PgArray(array) => {
-                let rendered = crate::backend::executor::value_io::format_array_value_text(array);
+                let rendered = crate::backend::executor::value_io::format_array_value_text_with_config(
+                    array,
+                    &float_format.datetime_config,
+                );
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }
             Value::Record(record) => {
-                let rendered = crate::backend::executor::value_io::format_record_text(record);
+                let rendered = crate::backend::executor::value_io::format_record_text_with_config(
+                    record,
+                    &float_format.datetime_config,
+                );
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }
