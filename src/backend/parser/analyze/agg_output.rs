@@ -2451,61 +2451,113 @@ pub(super) fn bind_agg_output_expr_in_clause(
             agg_list,
             n_keys,
         ),
-        SqlExpr::ArraySubscript { array, subscripts } => Ok(Expr::ArraySubscript {
-            array: Box::new(bind_agg_output_expr(
+        SqlExpr::ArraySubscript { array, subscripts } => {
+            let array_type = infer_sql_expr_type_with_ctes(
                 array,
-                group_by_exprs,
-                group_key_exprs,
                 input_scope,
                 catalog,
                 outer_scopes,
                 grouped_outer,
-                agg_list,
-                n_keys,
-            )?),
-            subscripts: subscripts
-                .iter()
-                .map(|subscript| {
-                    Ok(crate::include::nodes::primnodes::ExprArraySubscript {
-                        is_slice: subscript.is_slice,
-                        lower: subscript
-                            .lower
-                            .as_deref()
-                            .map(|expr| {
-                                bind_agg_output_expr(
-                                    expr,
-                                    group_by_exprs,
-                                    group_key_exprs,
-                                    input_scope,
-                                    catalog,
-                                    outer_scopes,
-                                    grouped_outer,
-                                    agg_list,
-                                    n_keys,
-                                )
-                            })
-                            .transpose()?,
-                        upper: subscript
-                            .upper
-                            .as_deref()
-                            .map(|expr| {
-                                bind_agg_output_expr(
-                                    expr,
-                                    group_by_exprs,
-                                    group_key_exprs,
-                                    input_scope,
-                                    catalog,
-                                    outer_scopes,
-                                    grouped_outer,
-                                    agg_list,
-                                    n_keys,
-                                )
-                            })
-                            .transpose()?,
+                &[],
+            );
+            if array_type.kind == SqlTypeKind::Jsonb && !array_type.is_array {
+                if subscripts.iter().any(|subscript| subscript.is_slice) {
+                    Err(ParseError::DetailedError {
+                        message: "jsonb subscript does not support slices".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "0A000",
                     })
+                } else {
+                    let mut bound = bind_agg_output_expr(
+                        array,
+                        group_by_exprs,
+                        group_key_exprs,
+                        input_scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        agg_list,
+                        n_keys,
+                    )?;
+                    for subscript in subscripts {
+                        let key = if let Some(lower) = &subscript.lower {
+                            bind_agg_output_expr(
+                                lower,
+                                group_by_exprs,
+                                group_key_exprs,
+                                input_scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer,
+                                agg_list,
+                                n_keys,
+                            )?
+                        } else {
+                            Expr::Const(Value::Int64(1))
+                        };
+                        bound = Expr::op_auto(OpExprKind::JsonGet, vec![bound, key]);
+                    }
+                    Ok(bound)
+                }
+            } else {
+                Ok(Expr::ArraySubscript {
+                    array: Box::new(bind_agg_output_expr(
+                        array,
+                        group_by_exprs,
+                        group_key_exprs,
+                        input_scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        agg_list,
+                        n_keys,
+                    )?),
+                    subscripts: subscripts
+                        .iter()
+                        .map(|subscript| {
+                            Ok(crate::include::nodes::primnodes::ExprArraySubscript {
+                                is_slice: subscript.is_slice,
+                                lower: subscript
+                                    .lower
+                                    .as_deref()
+                                    .map(|expr| {
+                                        bind_agg_output_expr(
+                                            expr,
+                                            group_by_exprs,
+                                            group_key_exprs,
+                                            input_scope,
+                                            catalog,
+                                            outer_scopes,
+                                            grouped_outer,
+                                            agg_list,
+                                            n_keys,
+                                        )
+                                    })
+                                    .transpose()?,
+                                upper: subscript
+                                    .upper
+                                    .as_deref()
+                                    .map(|expr| {
+                                        bind_agg_output_expr(
+                                            expr,
+                                            group_by_exprs,
+                                            group_key_exprs,
+                                            input_scope,
+                                            catalog,
+                                            outer_scopes,
+                                            grouped_outer,
+                                            agg_list,
+                                            n_keys,
+                                        )
+                                    })
+                                    .transpose()?,
+                            })
+                        })
+                        .collect::<Result<_, ParseError>>()?,
                 })
-                .collect::<Result<_, ParseError>>()?,
-        }),
+            }
+        }
         SqlExpr::Random => Ok(Expr::Random),
         SqlExpr::Subscript { expr, index } => {
             let expr_type =

@@ -25,7 +25,7 @@ use self::func::{
 use self::json::{
     bind_json_binary_expr, bind_jsonb_contained_expr, bind_jsonb_contains_expr,
     bind_jsonb_exists_all_expr, bind_jsonb_exists_any_expr, bind_jsonb_exists_expr,
-    bind_jsonb_path_binary_expr, bind_maybe_jsonb_delete,
+    bind_jsonb_path_binary_expr, bind_jsonb_subscript_expr, bind_maybe_jsonb_delete,
 };
 pub(crate) use self::ops::bind_concat_operands;
 pub(super) use self::ops::bind_lowered_comparison_expr;
@@ -1812,6 +1812,17 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 grouped_outer,
                 ctes,
             );
+            if array_type.kind == SqlTypeKind::Jsonb && !array_type.is_array {
+                return bind_jsonb_subscript_expr(
+                    array,
+                    subscripts,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+            }
             if array_type.kind == SqlTypeKind::Point
                 && subscripts.iter().any(|subscript| subscript.is_slice)
             {
