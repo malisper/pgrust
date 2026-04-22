@@ -161,6 +161,7 @@ pub(super) fn sql_type_name(ty: SqlType) -> String {
             SqlTypeKind::AnyCompatibleMultirange => "anycompatiblemultirange",
             SqlTypeKind::Record => "record",
             SqlTypeKind::Composite => "record",
+            SqlTypeKind::Internal => "internal",
             SqlTypeKind::Trigger => "trigger",
             SqlTypeKind::Void => "void",
             SqlTypeKind::FdwHandler => "fdw_handler",

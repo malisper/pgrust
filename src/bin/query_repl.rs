@@ -503,6 +503,7 @@ fn run_statement(
         | Statement::AlterTableSetRowSecurity(_)
         | Statement::CreatePolicy(_)
         | Statement::AlterPolicy(_)
+        | Statement::AlterOperator(_)
         | Statement::DropPolicy(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::AlterTableOwner(stmt) => {
             Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
@@ -839,6 +840,7 @@ fn run_statement(
         | Statement::CreateConversion(_)
         | Statement::CommentOnRule(_)
         | Statement::CreateFunction(_)
+        | Statement::CreateOperator(_)
         | Statement::CreateOperatorClass(_)
         | Statement::CreateRule(_)
         | Statement::CreateSchema(_)
@@ -847,6 +849,7 @@ fn run_statement(
         | Statement::CreateType(_)
         | Statement::CreateSequence(_)
         | Statement::DropFunction(_)
+        | Statement::DropOperator(_)
         | Statement::DropDomain(_)
         | Statement::DropConversion(_)
         | Statement::DropRule(_)

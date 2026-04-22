@@ -103,6 +103,7 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         | SqlTypeKind::AnyCompatible
         | SqlTypeKind::Int2Vector
         | SqlTypeKind::OidVector
+        | SqlTypeKind::Internal
         | SqlTypeKind::Date
         | SqlTypeKind::Time
         | SqlTypeKind::TimeTz
@@ -253,6 +254,7 @@ pub(crate) fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         SqlTypeKind::RegConfig | SqlTypeKind::RegDictionary => ScalarType::Int32,
         SqlTypeKind::Record | SqlTypeKind::Composite => ScalarType::Record,
         SqlTypeKind::Text
+        | SqlTypeKind::Internal
         | SqlTypeKind::PgNodeTree
         | SqlTypeKind::InternalChar
         | SqlTypeKind::Char

@@ -90,6 +90,8 @@ pub const RANGE_GIST_SAME_PROC_OID: u32 = 3881;
 pub const GIST_BOX_DISTANCE_PROC_OID: u32 = 3998;
 pub const GIST_TRANSLATE_CMPTYPE_COMMON_PROC_OID: u32 = 6347;
 pub const RANGE_SORTSUPPORT_PROC_OID: u32 = 6391;
+pub const CONTSEL_PROC_OID: u32 = 6412;
+pub const CONTJOINSEL_PROC_OID: u32 = 6413;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PgProcRow {
@@ -269,6 +271,41 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "pg_rust_test_enc_conversion",
             4,
             &[("validlen", INT4_TYPE_OID), ("result", BYTEA_TYPE_OID)],
+        ),
+        proc_row(
+            CONTSEL_PROC_OID,
+            "contsel",
+            FLOAT8_TYPE_OID,
+            &oid_argtypes(&[
+                INTERNAL_TYPE_OID,
+                OID_TYPE_OID,
+                INTERNAL_TYPE_OID,
+                INT4_TYPE_OID,
+            ]),
+            "contsel",
+            4,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
+            CONTJOINSEL_PROC_OID,
+            "contjoinsel",
+            FLOAT8_TYPE_OID,
+            &oid_argtypes(&[
+                INTERNAL_TYPE_OID,
+                OID_TYPE_OID,
+                INTERNAL_TYPE_OID,
+                INT2_TYPE_OID,
+                INTERNAL_TYPE_OID,
+            ]),
+            "contjoinsel",
+            5,
+            false,
+            true,
+            'f',
+            's',
         ),
         proc_row(
             3100,

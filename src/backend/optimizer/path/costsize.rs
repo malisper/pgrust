@@ -1397,9 +1397,7 @@ fn expr_uses_immediate_outer_columns(expr: &Expr) -> bool {
         Expr::Cast(inner, _)
         | Expr::Collate { expr: inner, .. }
         | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => {
-            expr_uses_immediate_outer_columns(inner)
-        }
+        | Expr::IsNotNull(inner) => expr_uses_immediate_outer_columns(inner),
         Expr::Like {
             expr,
             pattern,
@@ -2140,6 +2138,7 @@ pub(super) fn estimate_sql_type_width(sql_type: SqlType) -> usize {
         | SqlTypeKind::TsVector
         | SqlTypeKind::TsQuery
         | SqlTypeKind::Void
+        | SqlTypeKind::Internal
         | SqlTypeKind::FdwHandler
         | SqlTypeKind::RegConfig
         | SqlTypeKind::RegDictionary
