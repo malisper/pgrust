@@ -6098,6 +6098,148 @@ fn publication_describe_builtins_run_via_normal_sql() {
 }
 
 #[test]
+fn index_property_builtins_report_am_and_index_capabilities() {
+    let base = temp_dir("index_property_builtins");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let mut catalog = Catalog::default();
+    catalog.insert(
+        "ints",
+        test_catalog_entry(
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: 14_040,
+            },
+            RelationDesc {
+                columns: vec![
+                    crate::backend::catalog::catalog::column_desc(
+                        "a",
+                        crate::backend::parser::SqlType::new(
+                            crate::backend::parser::SqlTypeKind::Int4,
+                        ),
+                        false,
+                    ),
+                    crate::backend::catalog::catalog::column_desc(
+                        "b",
+                        crate::backend::parser::SqlType::new(
+                            crate::backend::parser::SqlTypeKind::Int4,
+                        ),
+                        true,
+                    ),
+                ],
+            },
+        ),
+    );
+    catalog.insert(
+        "boxes",
+        test_catalog_entry(
+            RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: 14_041,
+            },
+            RelationDesc {
+                columns: vec![crate::backend::catalog::catalog::column_desc(
+                    "b",
+                    crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Box),
+                    false,
+                )],
+            },
+        ),
+    );
+    let ints_oid = catalog.lookup_any_relation("ints").unwrap().relation_oid;
+    let boxes_oid = catalog.lookup_any_relation("boxes").unwrap().relation_oid;
+    catalog
+        .create_index_for_relation_with_options_and_flags(
+            "ints_a_idx",
+            ints_oid,
+            false,
+            false,
+            &[IndexColumnDef::from("a")],
+            &crate::backend::catalog::CatalogIndexBuildOptions {
+                am_oid: crate::include::catalog::BTREE_AM_OID,
+                indclass: vec![crate::include::catalog::INT4_BTREE_OPCLASS_OID],
+                indcollation: vec![0],
+                indoption: vec![0],
+            },
+        )
+        .unwrap();
+    catalog
+        .create_index_for_relation_with_options_and_flags(
+            "boxes_gist_idx",
+            boxes_oid,
+            false,
+            false,
+            &[IndexColumnDef::from("b")],
+            &crate::backend::catalog::CatalogIndexBuildOptions {
+                am_oid: crate::include::catalog::GIST_AM_OID,
+                indclass: vec![crate::include::catalog::BOX_GIST_OPCLASS_OID],
+                indcollation: vec![0],
+                indoption: vec![0],
+            },
+        )
+        .unwrap();
+    catalog
+        .create_index_for_relation_with_options_and_flags(
+            "boxes_spgist_idx",
+            boxes_oid,
+            false,
+            false,
+            &[IndexColumnDef::from("b")],
+            &crate::backend::catalog::CatalogIndexBuildOptions {
+                am_oid: crate::include::catalog::SPGIST_AM_OID,
+                indclass: vec![crate::include::catalog::BOX_SPGIST_OPCLASS_OID],
+                indcollation: vec![0],
+                indoption: vec![0],
+            },
+        )
+        .unwrap();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select
+                 pg_indexam_has_property((select oid from pg_am where amname = 'btree'), 'can_order'),
+                 pg_indexam_has_property((select oid from pg_am where amname = 'hash'), 'can_multi_col'),
+                 pg_indexam_has_property((select oid from pg_am where amname = 'gin'), 'can_multi_col'),
+                 pg_indexam_has_property((select oid from pg_am where amname = 'spgist'), 'can_include'),
+                 pg_indexam_has_property((select oid from pg_am where amname = 'brin'), 'bogus'),
+                 pg_index_has_property('ints_a_idx'::regclass, 'clusterable'),
+                 pg_index_has_property('boxes_gist_idx'::regclass, 'backward_scan'),
+                 pg_index_has_property('boxes_spgist_idx'::regclass, 'index_scan'),
+                 pg_index_column_has_property('ints_a_idx'::regclass, 1, 'asc'),
+                 pg_index_column_has_property('ints_a_idx'::regclass, 1, 'nulls_last'),
+                 pg_index_column_has_property('boxes_gist_idx'::regclass, 1, 'distance_orderable'),
+                 pg_index_column_has_property('boxes_spgist_idx'::regclass, 1, 'returnable'),
+                 pg_index_column_has_property('ints_a_idx'::regclass, 0, 'asc'),
+                 pg_index_column_has_property('ints_a_idx'::regclass, 2, 'asc'),
+                 pg_index_column_has_property('ints'::regclass, 1, 'asc')",
+            catalog,
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Null,
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Null,
+            Value::Null,
+            Value::Null,
+        ]],
+    );
+}
+
+#[test]
 fn int2vector_casts_to_int2_array() {
     assert_eq!(
         crate::backend::executor::expr_casts::cast_value(

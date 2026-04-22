@@ -93,11 +93,12 @@ use crate::backend::parser::analyze::is_binary_coercible_type;
 use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp,
 };
-use crate::backend::utils::misc::guc::normalize_guc_name;
 use crate::backend::utils::misc::checkpoint::checkpoint_stats_value;
+use crate::backend::utils::misc::guc::normalize_guc_name;
 use crate::include::catalog::{
-    CURRENT_DATABASE_OID, FLOAT8_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID,
-    builtin_scalar_function_for_proc_oid,
+    BOX_SPGIST_OPCLASS_OID, BRIN_AM_OID, BTREE_AM_OID, CURRENT_DATABASE_OID, FLOAT8_TYPE_OID,
+    GIN_AM_OID, GIST_AM_OID, HASH_AM_OID, PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID,
+    SPGIST_AM_OID, builtin_scalar_function_for_proc_oid,
 };
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
 use crate::include::nodes::primnodes::{
@@ -112,14 +113,14 @@ mod arrays;
 mod subquery;
 
 use arrays::{
-    eval_array_append_function, eval_array_cat_function, eval_array_contained,
-    eval_array_contains, eval_array_dims_function, eval_array_fill_function,
-    eval_array_length_function, eval_array_lower_function, eval_array_ndims_function,
-    eval_array_overlap, eval_array_position_function, eval_array_positions_function,
-    eval_array_prepend_function, eval_array_remove_function, eval_array_replace_function,
-    eval_array_sort_function, eval_array_subscript, eval_array_subscript_plpgsql,
-    eval_array_to_string_function, eval_array_upper_function, eval_cardinality_function,
-    eval_quantified_array, eval_string_to_array_function, eval_width_bucket_thresholds,
+    eval_array_append_function, eval_array_cat_function, eval_array_contained, eval_array_contains,
+    eval_array_dims_function, eval_array_fill_function, eval_array_length_function,
+    eval_array_lower_function, eval_array_ndims_function, eval_array_overlap,
+    eval_array_position_function, eval_array_positions_function, eval_array_prepend_function,
+    eval_array_remove_function, eval_array_replace_function, eval_array_sort_function,
+    eval_array_subscript, eval_array_subscript_plpgsql, eval_array_to_string_function,
+    eval_array_upper_function, eval_cardinality_function, eval_quantified_array,
+    eval_string_to_array_function, eval_width_bucket_thresholds,
 };
 use subquery::{
     eval_array_subquery, eval_exists_subquery, eval_quantified_subquery, eval_scalar_subquery,
@@ -288,6 +289,392 @@ fn oid_arg_to_u32(value: &Value, op: &'static str) -> Result<u32, ExecError> {
             left: value.clone(),
             right: Value::Int64(i64::from(crate::include::catalog::OID_TYPE_OID)),
         }),
+    }
+}
+
+fn int32_arg(value: &Value, op: &'static str) -> Result<i32, ExecError> {
+    match value {
+        Value::Int16(v) => Ok(i32::from(*v)),
+        Value::Int32(v) => Ok(*v),
+        Value::Int64(v) => i32::try_from(*v).map_err(|_| ExecError::TypeMismatch {
+            op,
+            left: value.clone(),
+            right: Value::Int32(0),
+        }),
+        _ => Err(ExecError::TypeMismatch {
+            op,
+            left: value.clone(),
+            right: Value::Int32(0),
+        }),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IndexPropertyKind {
+    Asc,
+    Desc,
+    NullsFirst,
+    NullsLast,
+    Orderable,
+    DistanceOrderable,
+    Returnable,
+    SearchArray,
+    SearchNulls,
+    Clusterable,
+    IndexScan,
+    BitmapScan,
+    BackwardScan,
+    CanOrder,
+    CanUnique,
+    CanMultiCol,
+    CanExclude,
+    CanInclude,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IndexReturnability {
+    Never,
+    Always,
+    SpgistBox,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct IndexAmPropertyProfile {
+    amcanorder: bool,
+    amcanorderbyop: bool,
+    amcanbackward: bool,
+    amcanunique: bool,
+    amcanmulticol: bool,
+    amsearcharray: bool,
+    amsearchnulls: bool,
+    amclusterable: bool,
+    amcanexclude: bool,
+    amcaninclude: bool,
+    amindexscan: bool,
+    ambitmapscan: bool,
+    returnability: IndexReturnability,
+}
+
+const INDOPTION_DESC: i16 = 0x0001;
+const INDOPTION_NULLS_FIRST: i16 = 0x0002;
+
+fn parse_index_property(name: &str) -> Option<IndexPropertyKind> {
+    match name.to_ascii_lowercase().as_str() {
+        "asc" => Some(IndexPropertyKind::Asc),
+        "desc" => Some(IndexPropertyKind::Desc),
+        "nulls_first" => Some(IndexPropertyKind::NullsFirst),
+        "nulls_last" => Some(IndexPropertyKind::NullsLast),
+        "orderable" => Some(IndexPropertyKind::Orderable),
+        "distance_orderable" => Some(IndexPropertyKind::DistanceOrderable),
+        "returnable" => Some(IndexPropertyKind::Returnable),
+        "search_array" => Some(IndexPropertyKind::SearchArray),
+        "search_nulls" => Some(IndexPropertyKind::SearchNulls),
+        "clusterable" => Some(IndexPropertyKind::Clusterable),
+        "index_scan" => Some(IndexPropertyKind::IndexScan),
+        "bitmap_scan" => Some(IndexPropertyKind::BitmapScan),
+        "backward_scan" => Some(IndexPropertyKind::BackwardScan),
+        "can_order" => Some(IndexPropertyKind::CanOrder),
+        "can_unique" => Some(IndexPropertyKind::CanUnique),
+        "can_multi_col" => Some(IndexPropertyKind::CanMultiCol),
+        "can_exclude" => Some(IndexPropertyKind::CanExclude),
+        "can_include" => Some(IndexPropertyKind::CanInclude),
+        _ => None,
+    }
+}
+
+fn index_am_profile(am_oid: u32) -> Option<IndexAmPropertyProfile> {
+    match am_oid {
+        BTREE_AM_OID => Some(IndexAmPropertyProfile {
+            amcanorder: true,
+            amcanorderbyop: false,
+            amcanbackward: true,
+            amcanunique: true,
+            amcanmulticol: true,
+            amsearcharray: true,
+            amsearchnulls: true,
+            amclusterable: true,
+            amcanexclude: true,
+            amcaninclude: true,
+            amindexscan: true,
+            ambitmapscan: true,
+            returnability: IndexReturnability::Always,
+        }),
+        HASH_AM_OID => Some(IndexAmPropertyProfile {
+            amcanorder: false,
+            amcanorderbyop: false,
+            amcanbackward: true,
+            amcanunique: false,
+            amcanmulticol: false,
+            amsearcharray: false,
+            amsearchnulls: false,
+            amclusterable: false,
+            amcanexclude: true,
+            amcaninclude: false,
+            amindexscan: true,
+            ambitmapscan: true,
+            returnability: IndexReturnability::Never,
+        }),
+        GIST_AM_OID => Some(IndexAmPropertyProfile {
+            amcanorder: false,
+            amcanorderbyop: true,
+            amcanbackward: false,
+            amcanunique: false,
+            amcanmulticol: true,
+            amsearcharray: false,
+            amsearchnulls: true,
+            amclusterable: true,
+            amcanexclude: true,
+            amcaninclude: true,
+            amindexscan: true,
+            ambitmapscan: true,
+            returnability: IndexReturnability::Never,
+        }),
+        GIN_AM_OID => Some(IndexAmPropertyProfile {
+            amcanorder: false,
+            amcanorderbyop: false,
+            amcanbackward: false,
+            amcanunique: false,
+            amcanmulticol: true,
+            amsearcharray: false,
+            amsearchnulls: false,
+            amclusterable: false,
+            amcanexclude: false,
+            amcaninclude: false,
+            amindexscan: false,
+            ambitmapscan: true,
+            returnability: IndexReturnability::Never,
+        }),
+        BRIN_AM_OID => Some(IndexAmPropertyProfile {
+            amcanorder: false,
+            amcanorderbyop: false,
+            amcanbackward: false,
+            amcanunique: false,
+            amcanmulticol: true,
+            amsearcharray: false,
+            amsearchnulls: true,
+            amclusterable: false,
+            amcanexclude: false,
+            amcaninclude: false,
+            amindexscan: false,
+            ambitmapscan: true,
+            returnability: IndexReturnability::Never,
+        }),
+        SPGIST_AM_OID => Some(IndexAmPropertyProfile {
+            amcanorder: false,
+            amcanorderbyop: true,
+            amcanbackward: false,
+            amcanunique: false,
+            amcanmulticol: false,
+            amsearcharray: false,
+            amsearchnulls: true,
+            amclusterable: false,
+            amcanexclude: true,
+            amcaninclude: true,
+            amindexscan: true,
+            ambitmapscan: true,
+            returnability: IndexReturnability::SpgistBox,
+        }),
+        _ => crate::backend::access::index::amapi::index_am_handler(am_oid).map(|routine| {
+            IndexAmPropertyProfile {
+                amcanorder: routine.amcanorder,
+                amcanorderbyop: routine.amcanorderbyop,
+                amcanbackward: routine.amcanbackward,
+                amcanunique: routine.amcanunique,
+                amcanmulticol: routine.amcanmulticol,
+                amsearcharray: routine.amsearcharray,
+                amsearchnulls: routine.amsearchnulls,
+                amclusterable: routine.amclusterable,
+                amcanexclude: routine.amgettuple.is_some(),
+                amcaninclude: false,
+                amindexscan: routine.amgettuple.is_some(),
+                ambitmapscan: false,
+                returnability: IndexReturnability::Never,
+            }
+        }),
+    }
+}
+
+fn index_column_has_ordering_operator(
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    column_index: usize,
+) -> bool {
+    index_meta
+        .amop_entries
+        .get(column_index)
+        .is_some_and(|entries| entries.iter().any(|entry| entry.purpose == 'o'))
+}
+
+fn eval_pg_indexam_has_property(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [am_oid, property] => {
+            let am_oid = oid_arg_to_u32(am_oid, "pg_indexam_has_property")?;
+            let Some(property) = property.as_text() else {
+                return Err(ExecError::TypeMismatch {
+                    op: "pg_indexam_has_property",
+                    left: property.clone(),
+                    right: Value::Text("".into()),
+                });
+            };
+            let Some(profile) = index_am_profile(am_oid) else {
+                return Ok(Value::Null);
+            };
+            Ok(match parse_index_property(property) {
+                Some(IndexPropertyKind::CanOrder) => Value::Bool(profile.amcanorder),
+                Some(IndexPropertyKind::CanUnique) => Value::Bool(profile.amcanunique),
+                Some(IndexPropertyKind::CanMultiCol) => Value::Bool(profile.amcanmulticol),
+                Some(IndexPropertyKind::CanExclude) => Value::Bool(profile.amcanexclude),
+                Some(IndexPropertyKind::CanInclude) => Value::Bool(profile.amcaninclude),
+                _ => Value::Null,
+            })
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_indexam_has_property(oid, text)",
+            actual: format!("PgIndexAmHasProperty({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_pg_index_has_property(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [relation_oid, property] => {
+            let relation_oid = oid_arg_to_u32(relation_oid, "pg_index_has_property")?;
+            let Some(property) = property.as_text() else {
+                return Err(ExecError::TypeMismatch {
+                    op: "pg_index_has_property",
+                    left: property.clone(),
+                    right: Value::Text("".into()),
+                });
+            };
+            let catalog = executor_catalog(ctx)?;
+            let Some(entry) = catalog.relcache().get_by_oid(relation_oid) else {
+                return Ok(Value::Null);
+            };
+            let Some(index_meta) = entry.index.as_ref() else {
+                return Ok(Value::Null);
+            };
+            let Some(profile) = index_am_profile(index_meta.am_oid) else {
+                return Ok(Value::Null);
+            };
+            Ok(match parse_index_property(property) {
+                Some(IndexPropertyKind::Clusterable) => Value::Bool(profile.amclusterable),
+                Some(IndexPropertyKind::IndexScan) => Value::Bool(profile.amindexscan),
+                Some(IndexPropertyKind::BitmapScan) => Value::Bool(profile.ambitmapscan),
+                Some(IndexPropertyKind::BackwardScan) => Value::Bool(profile.amcanbackward),
+                _ => Value::Null,
+            })
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_index_has_property(regclass, text)",
+            actual: format!("PgIndexHasProperty({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_pg_index_column_has_property(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _, _] | [_, Value::Null, _] | [_, _, Value::Null] => Ok(Value::Null),
+        [relation_oid, attno, property] => {
+            let relation_oid = oid_arg_to_u32(relation_oid, "pg_index_column_has_property")?;
+            let attno = int32_arg(attno, "pg_index_column_has_property")?;
+            if attno <= 0 {
+                return Ok(Value::Null);
+            }
+            let Some(property) = property.as_text() else {
+                return Err(ExecError::TypeMismatch {
+                    op: "pg_index_column_has_property",
+                    left: property.clone(),
+                    right: Value::Text("".into()),
+                });
+            };
+            let catalog = executor_catalog(ctx)?;
+            let Some(entry) = catalog.relcache().get_by_oid(relation_oid) else {
+                return Ok(Value::Null);
+            };
+            let Some(index_meta) = entry.index.as_ref() else {
+                return Ok(Value::Null);
+            };
+            let Some(profile) = index_am_profile(index_meta.am_oid) else {
+                return Ok(Value::Null);
+            };
+            let column_index = (attno - 1) as usize;
+            if column_index >= usize::try_from(index_meta.indnatts).unwrap_or_default() {
+                return Ok(Value::Null);
+            }
+            let is_key = column_index < usize::try_from(index_meta.indnkeyatts).unwrap_or_default();
+            let indoption = index_meta
+                .indoption
+                .get(column_index)
+                .copied()
+                .unwrap_or_default();
+            Ok(match parse_index_property(property) {
+                Some(IndexPropertyKind::Asc) => {
+                    if !is_key {
+                        Value::Null
+                    } else {
+                        Value::Bool(profile.amcanorder && (indoption & INDOPTION_DESC) == 0)
+                    }
+                }
+                Some(IndexPropertyKind::Desc) => {
+                    if !is_key {
+                        Value::Null
+                    } else {
+                        Value::Bool(profile.amcanorder && (indoption & INDOPTION_DESC) != 0)
+                    }
+                }
+                Some(IndexPropertyKind::NullsFirst) => {
+                    if !is_key {
+                        Value::Null
+                    } else {
+                        Value::Bool(profile.amcanorder && (indoption & INDOPTION_NULLS_FIRST) != 0)
+                    }
+                }
+                Some(IndexPropertyKind::NullsLast) => {
+                    if !is_key {
+                        Value::Null
+                    } else {
+                        Value::Bool(profile.amcanorder && (indoption & INDOPTION_NULLS_FIRST) == 0)
+                    }
+                }
+                Some(IndexPropertyKind::Orderable) => Value::Bool(is_key && profile.amcanorder),
+                Some(IndexPropertyKind::DistanceOrderable) => Value::Bool(
+                    is_key
+                        && profile.amcanorderbyop
+                        && index_column_has_ordering_operator(index_meta, column_index),
+                ),
+                Some(IndexPropertyKind::Returnable) => Value::Bool(match profile.returnability {
+                    IndexReturnability::Never => false,
+                    IndexReturnability::Always => true,
+                    IndexReturnability::SpgistBox => {
+                        index_meta.indclass.get(column_index).copied()
+                            == Some(BOX_SPGIST_OPCLASS_OID)
+                    }
+                }),
+                Some(IndexPropertyKind::SearchArray) => {
+                    if is_key {
+                        Value::Bool(profile.amsearcharray)
+                    } else {
+                        Value::Null
+                    }
+                }
+                Some(IndexPropertyKind::SearchNulls) => {
+                    if is_key {
+                        Value::Bool(profile.amsearchnulls)
+                    } else {
+                        Value::Null
+                    }
+                }
+                _ => Value::Null,
+            })
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_index_column_has_property(regclass, int4, text)",
+            actual: format!("PgIndexColumnHasProperty({} args)", values.len()),
+        })),
     }
 }
 
@@ -1026,13 +1413,11 @@ fn eval_op_expr(
             eval_expr(right, slot, ctx)?,
             op.collation_oid,
         ),
-        (OpExprKind::NotEq, [left, right]) => {
-            not_equal_values(
-                eval_expr(left, slot, ctx)?,
-                eval_expr(right, slot, ctx)?,
-                op.collation_oid,
-            )
-        }
+        (OpExprKind::NotEq, [left, right]) => not_equal_values(
+            eval_expr(left, slot, ctx)?,
+            eval_expr(right, slot, ctx)?,
+            op.collation_oid,
+        ),
         (OpExprKind::Lt, [left, right]) => order_values(
             "<",
             eval_expr(left, slot, ctx)?,
@@ -2188,6 +2573,9 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::ObjDescription
         | BuiltinScalarFunction::PgGetExpr
         | BuiltinScalarFunction::PgRelationIsPublishable
+        | BuiltinScalarFunction::PgIndexAmHasProperty
+        | BuiltinScalarFunction::PgIndexHasProperty
+        | BuiltinScalarFunction::PgIndexColumnHasProperty
         | BuiltinScalarFunction::ToJson
         | BuiltinScalarFunction::ToJsonb
         | BuiltinScalarFunction::ArrayToJson
@@ -3039,6 +3427,11 @@ fn eval_builtin_function(
         BuiltinScalarFunction::PgGetExpr => eval_pg_get_expr(&values),
         BuiltinScalarFunction::PgRelationIsPublishable => {
             eval_pg_relation_is_publishable(&values, ctx)
+        }
+        BuiltinScalarFunction::PgIndexAmHasProperty => eval_pg_indexam_has_property(&values),
+        BuiltinScalarFunction::PgIndexHasProperty => eval_pg_index_has_property(&values, ctx),
+        BuiltinScalarFunction::PgIndexColumnHasProperty => {
+            eval_pg_index_column_has_property(&values, ctx)
         }
         BuiltinScalarFunction::PgSizePretty => eval_pg_size_pretty_function(&values),
         BuiltinScalarFunction::PgSizeBytes => eval_pg_size_bytes_function(&values),
