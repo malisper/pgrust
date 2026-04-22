@@ -12,6 +12,7 @@ mod expr_datetime;
 mod expr_format;
 pub(crate) mod expr_geometry;
 mod expr_json;
+mod expr_locks;
 mod expr_math;
 mod expr_money;
 mod expr_multirange;
@@ -101,6 +102,7 @@ use crate::backend::parser::{
     ParseError, Statement, bind_delete, bind_insert, bind_update, parse_statement, pg_plan_query,
     pg_plan_values_query,
 };
+use crate::backend::storage::lmgr::AdvisoryLockManager;
 use crate::backend::storage::lmgr::TableLockError;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot;
@@ -170,6 +172,7 @@ pub struct ExecutorContext {
     pub txn_waiter: Option<std::sync::Arc<TransactionWaiter>>,
     pub sequences: Option<std::sync::Arc<SequenceRuntime>>,
     pub large_objects: Option<std::sync::Arc<LargeObjectRuntime>>,
+    pub advisory_locks: std::sync::Arc<AdvisoryLockManager>,
     pub checkpoint_stats: CheckpointStatsSnapshot,
     pub datetime_config: DateTimeConfig,
     pub interrupts: std::sync::Arc<InterruptState>,
@@ -177,9 +180,11 @@ pub struct ExecutorContext {
     pub session_stats: std::sync::Arc<parking_lot::RwLock<SessionStatsState>>,
     pub snapshot: Snapshot,
     pub client_id: ClientId,
+    pub current_database_name: String,
     pub session_user_oid: u32,
     pub current_user_oid: u32,
     pub active_role_oid: Option<u32>,
+    pub statement_lock_scope_id: Option<u64>,
     pub next_command_id: CommandId,
     pub default_toast_compression: crate::include::access::htup::AttributeCompression,
     pub expr_bindings: ExprEvalBindings,
