@@ -306,6 +306,7 @@ pub enum BuiltinScalarFunction {
     PgNotify,
     PgNotificationQueueUsage,
     PgTypeof,
+    PgColumnCompression,
     PgStatGetCheckpointerNumTimed,
     PgStatGetCheckpointerNumRequested,
     PgStatGetCheckpointerNumPerformed,

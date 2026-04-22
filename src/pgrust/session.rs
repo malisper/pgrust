@@ -142,10 +142,45 @@ pub enum ByteaOutputFormat {
 
 fn default_stats_guc_value(name: &str) -> Option<&'static str> {
     match name {
+        "default_toast_compression" => Some("pglz"),
         "track_counts" => Some("on"),
         "track_functions" => Some("none"),
         "stats_fetch_consistency" => Some("cache"),
         _ => None,
+    }
+}
+
+fn available_default_toast_compression_values() -> &'static str {
+    #[cfg(feature = "lz4")]
+    {
+        "pglz, lz4"
+    }
+    #[cfg(not(feature = "lz4"))]
+    {
+        "pglz"
+    }
+}
+
+fn invalid_default_toast_compression_value(value: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "invalid value for parameter \"default_toast_compression\": \"{value}\""
+        ),
+        detail: None,
+        hint: Some(format!(
+            "Available values: {}.",
+            available_default_toast_compression_values()
+        )),
+        sqlstate: "22023",
+    }
+}
+
+fn parse_default_toast_compression_guc_value(value: &str) -> Result<&'static str, ExecError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "pglz" => Ok("pglz"),
+        #[cfg(feature = "lz4")]
+        "lz4" => Ok("lz4"),
+        _ => Err(invalid_default_toast_compression_value(value)),
     }
 }
 
@@ -3704,6 +3739,7 @@ impl Session {
                 normalized,
             )));
         }
+        let mut stored_value = value.to_string();
         match normalized.as_str() {
             "datestyle" => {
                 let Some((date_style_format, date_order)) = parse_datestyle(value) else {
@@ -3769,9 +3805,12 @@ impl Session {
                     ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
                 })?;
             }
+            "default_toast_compression" => {
+                stored_value = parse_default_toast_compression_guc_value(value)?.to_string();
+            }
             _ => {}
         }
-        self.gucs.insert(normalized, value.to_string());
+        self.gucs.insert(normalized, stored_value);
         Ok(())
     }
 
@@ -4333,7 +4372,10 @@ fn parse_copy_from_file(sql: &str) -> Option<(String, Option<Vec<String>>, Strin
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_max_stack_depth, parse_startup_options, parse_statement_timeout};
+    use super::{
+        parse_default_toast_compression_guc_value, parse_max_stack_depth, parse_startup_options,
+        parse_statement_timeout,
+    };
     use crate::backend::executor::ExecError;
     use crate::backend::parser::ParseError;
     use std::time::Duration;
@@ -4398,6 +4440,49 @@ mod tests {
                 ("statement_timeout".to_string(), "5s".to_string()),
                 ("DateStyle".to_string(), "SQL, DMY".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn default_toast_compression_guc_accepts_pglz() {
+        assert_eq!(
+            parse_default_toast_compression_guc_value("pglz").unwrap(),
+            "pglz"
+        );
+    }
+
+    #[cfg(not(feature = "lz4"))]
+    #[test]
+    fn default_toast_compression_guc_rejects_invalid_values() {
+        for value in ["", "I do not exist compression", "lz4"] {
+            let err = parse_default_toast_compression_guc_value(value).unwrap_err();
+            match err {
+                ExecError::DetailedError {
+                    message,
+                    hint,
+                    sqlstate,
+                    ..
+                } => {
+                    assert_eq!(
+                        message,
+                        format!(
+                            "invalid value for parameter \"default_toast_compression\": \"{value}\""
+                        )
+                    );
+                    assert_eq!(hint.as_deref(), Some("Available values: pglz."));
+                    assert_eq!(sqlstate, "22023");
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+        }
+    }
+
+    #[cfg(feature = "lz4")]
+    #[test]
+    fn default_toast_compression_guc_accepts_lz4() {
+        assert_eq!(
+            parse_default_toast_compression_guc_value("lz4").unwrap(),
+            "lz4"
         );
     }
 }
