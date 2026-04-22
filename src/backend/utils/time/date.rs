@@ -472,6 +472,17 @@ fn parse_compact_time_components_rounded(text: &str) -> Option<(u32, u32, u32, i
     Some((hour, minute, second + u32::from(carry_second), micros))
 }
 
+fn parse_time_fields_raw(text: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = text.split(':');
+    let hour = parts.next()?.parse::<u32>().ok()?;
+    let minute = parts.next()?.parse::<u32>().ok()?;
+    let second = parts.next()?.parse::<u32>().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((hour, minute, second))
+}
+
 fn standalone_meridiem(token: &str) -> bool {
     token.eq_ignore_ascii_case("am") || token.eq_ignore_ascii_case("pm")
 }
@@ -492,27 +503,13 @@ fn parse_time_token(text: &str) -> Result<Option<(i64, Option<TimeZoneSpec>)>, D
         let (hour, minute, second) = match parse_time_components(main_time) {
             Some((hour, minute, second, _)) => (hour, minute, second),
             None => {
-                if main_time
-                    .split(':')
-                    .collect::<Vec<_>>()
-                    .get(2)
-                    .is_some_and(|value| {
-                        value.parse::<u32>().ok().is_some_and(|second| second == 60)
-                    })
-                {
-                    let parts = main_time.split(':').collect::<Vec<_>>();
-                    let hour = parts[0].parse::<u32>().map_err(|_| DateTimeParseError::Invalid)?;
-                    let minute =
-                        parts[1].parse::<u32>().map_err(|_| DateTimeParseError::Invalid)?;
-                    let second =
-                        parts[2].parse::<u32>().map_err(|_| DateTimeParseError::Invalid)?;
-                    if hour > 24 || minute > 59 || second > 60 {
-                        return Err(DateTimeParseError::FieldOutOfRange);
-                    }
-                    (hour, minute, second)
-                } else {
+                let Some((hour, minute, second)) = parse_time_fields_raw(main_time) else {
                     return Ok(None);
+                };
+                if hour > 24 || minute > 59 || second > 60 {
+                    return Err(DateTimeParseError::FieldOutOfRange);
                 }
+                (hour, minute, second)
             }
         };
         let (micros, carry_second) = match fraction {

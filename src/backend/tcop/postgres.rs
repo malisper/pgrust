@@ -207,6 +207,16 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::Parse(crate::backend::parser::ParseError::UndefinedOperator { op, .. }) => {
             return sql.find(op).map(|index| index + 1);
         }
+        ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. }) => {
+            if let Some(position) = find_detailed_operator_position(sql, message) {
+                return Some(position);
+            }
+            if let Some(value) = extract_quoted_error_value(message) {
+                value
+            } else {
+                return None;
+            }
+        }
         ExecError::Parse(crate::backend::parser::ParseError::InvalidPublicationTableName(name))
         | ExecError::Parse(crate::backend::parser::ParseError::InvalidPublicationSchemaName(
             name,
@@ -229,6 +239,13 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::InvalidBooleanInput { value } => value.as_str(),
         ExecError::InvalidFloatInput { value, .. } => value.as_str(),
         ExecError::FloatOutOfRange { value, .. } => value.as_str(),
+        ExecError::InvalidStorageValue { details, .. } => {
+            if let Some(value) = extract_quoted_error_value(details) {
+                value
+            } else {
+                return None;
+            }
+        }
         ExecError::DetailedError { message, .. } => {
             if let Some(target) = extract_subscripted_assignment_target(message) {
                 return find_subscripted_assignment_position(sql, target);
@@ -246,10 +263,7 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::XmlInput { raw_input, .. } => raw_input.as_str(),
         _ => return None,
     };
-    sql.find(value).map(|index| index + 1).or_else(|| {
-        let needle = format!("'{}'", value.replace('\'', "''"));
-        sql.rfind(&needle).map(|index| index + 1)
-    })
+    find_error_value_position(sql, value)
 }
 
 fn find_json_literal_position(sql: &str, raw_input: &str) -> Option<usize> {
@@ -313,6 +327,36 @@ fn extract_subscripted_assignment_target(message: &str) -> Option<&str> {
     let rest = message.strip_prefix(prefix)?;
     let end = rest.find('"')?;
     Some(&rest[..end])
+}
+
+fn find_error_value_position(sql: &str, value: &str) -> Option<usize> {
+    let needle = format!("'{}'", value.replace('\'', "''"));
+    if let Some(index) = sql.rfind(&needle) {
+        let prefix = sql[..index].trim_end();
+        let last_word = prefix
+            .rsplit(|ch: char| !ch.is_ascii_alphabetic())
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if matches!(
+            last_word.as_str(),
+            "date" | "time" | "timetz" | "timestamp" | "timestamptz" | "interval"
+        ) {
+            return Some(index + 2);
+        }
+        return Some(index + 1);
+    }
+    sql.find(value).map(|index| index + 1)
+}
+
+fn find_detailed_operator_position(sql: &str, message: &str) -> Option<usize> {
+    let (_, detail) = message.rsplit_once(": ")?;
+    for op in ["<>", "<=", ">=", "+", "-", "*", "/", "%", "<", ">", "="] {
+        if detail.contains(&format!(" {op} ")) {
+            return sql.find(op).map(|index| index + 1);
+        }
+    }
+    None
 }
 
 fn find_subscripted_assignment_position(sql: &str, target: &str) -> Option<usize> {
@@ -5495,6 +5539,36 @@ mod tests {
         };
 
         assert_eq!(exec_error_position(sql, &err), Some(14));
+    }
+
+    #[test]
+    fn exec_error_position_points_at_string_literal_quote_for_cast_errors() {
+        let sql = "select '25:00:00'::time;";
+        let err = ExecError::DetailedError {
+            message: "date/time field value out of range: \"25:00:00\"".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22008",
+        };
+
+        assert_eq!(exec_error_position(sql, &err), Some(8));
+    }
+
+    #[test]
+    fn exec_error_position_points_at_operator_for_ambiguous_operator_errors() {
+        let sql = "select f1 + time '00:01' from time_tbl";
+        let err = ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
+            message: "operator is not unique: time without time zone + time without time zone"
+                .into(),
+            detail: None,
+            hint: Some(
+                "Could not choose a best candidate operator. You might need to add explicit type casts."
+                    .into(),
+            ),
+            sqlstate: "42725",
+        });
+
+        assert_eq!(exec_error_position(sql, &err), sql.find('+').map(|index| index + 1));
     }
 
     #[test]
