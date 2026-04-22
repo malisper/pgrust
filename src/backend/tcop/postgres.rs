@@ -239,6 +239,16 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return None;
             }
         }
+        ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. }) => {
+            if message.starts_with("cannot subscript type ") {
+                return find_subscript_expression_position(sql);
+            }
+            if let Some(value) = extract_quoted_error_value(message) {
+                value
+            } else {
+                return None;
+            }
+        }
         ExecError::JsonInput { raw_input, .. } => {
             return find_json_literal_position(sql, raw_input)
                 .or_else(|| sql.find(raw_input).map(|index| index + 1));
@@ -323,6 +333,54 @@ fn find_subscripted_assignment_position(sql: &str, target: &str) -> Option<usize
         }
     }
     None
+}
+
+fn find_subscript_expression_position(sql: &str) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let bracket = bytes.iter().position(|byte| *byte == b'[')?;
+    let start = find_subscript_base_start(bytes, bracket)?;
+    Some(start + 1)
+}
+
+fn find_subscript_base_start(bytes: &[u8], bracket: usize) -> Option<usize> {
+    let mut pos = bracket.checked_sub(1)?;
+    while bytes.get(pos).is_some_and(|byte| byte.is_ascii_whitespace()) {
+        pos = pos.checked_sub(1)?;
+    }
+    match *bytes.get(pos)? {
+        b')' => {
+            let mut depth = 1usize;
+            let mut idx = pos;
+            while idx > 0 {
+                idx -= 1;
+                match bytes[idx] {
+                    b')' => depth += 1,
+                    b'(' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(extend_identifier_chain_left(bytes, idx));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Some(extend_identifier_chain_left(bytes, pos))
+        }
+        _ => Some(extend_identifier_chain_left(bytes, pos)),
+    }
+}
+
+fn extend_identifier_chain_left(bytes: &[u8], pos: usize) -> usize {
+    let mut start = pos;
+    while start > 0 {
+        let prev = bytes[start - 1];
+        if prev.is_ascii_alphanumeric() || matches!(prev, b'_' | b'.' | b'"') {
+            start -= 1;
+            continue;
+        }
+        break;
+    }
+    start
 }
 
 fn extract_syntax_error_token(message: &str) -> Option<&str> {
@@ -5591,6 +5649,26 @@ mod tests {
         .unwrap();
 
         assert_eq!(first_error_response_position(&output), Some(22));
+    }
+
+    #[test]
+    fn simple_query_reports_position_for_unsupported_subscript_error() {
+        let db = Database::open(temp_dir("unsupported_subscript_error_position"), 16).unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+
+        handle_query(&mut output, &db, &mut state, "select (now())[1]").unwrap();
+
+        assert!(output_contains_message(
+            &output,
+            "cannot subscript type timestamp with time zone because it does not support subscripting"
+        ));
+        assert_eq!(first_error_response_position(&output), Some(8));
     }
 
     #[test]
