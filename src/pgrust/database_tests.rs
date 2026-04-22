@@ -4395,13 +4395,12 @@ fn gist_leaf_tuple_count(db: &Database, client_id: u32, rel: crate::RelFileLocat
 }
 
 fn assert_explain_uses_index(db: &Database, client_id: u32, sql: &str, index_name: &str) {
-    let relfilenode = relfilenode_for(db, client_id, index_name);
     let lines = explain_lines(db, client_id, sql);
     assert!(
         lines
             .iter()
-            .any(|line| line.contains(&format!("Index Scan using rel {relfilenode} "))),
-        "expected EXPLAIN to use index {index_name} (relfilenode {relfilenode}), got {lines:?}"
+            .any(|line| line.contains(&format!("Index Scan using {index_name} "))),
+        "expected EXPLAIN to use index {index_name}, got {lines:?}"
     );
 }
 
@@ -8538,6 +8537,21 @@ fn create_spgist_box_index_supports_overlap_and_knn_order_by() {
     assert_eq!(
         query_rows(&db, 1, overlap_sql),
         vec![vec![Value::Int32(2)], vec![Value::Int32(4)]]
+    );
+
+    let left_of_sql = "select * from boxes where b << '(10,20),(30,40)'::box";
+    let left_of_lines = explain_lines(&db, 1, left_of_sql);
+    assert!(
+        left_of_lines
+            .iter()
+            .any(|line| line.contains("Index Scan using boxes_b_spgist on boxes")),
+        "expected named index scan in EXPLAIN, got {left_of_lines:?}"
+    );
+    assert!(
+        left_of_lines
+            .iter()
+            .any(|line| line.contains("Index Cond: (b << '(30,40),(10,20)'::box)")),
+        "expected box index condition in EXPLAIN, got {left_of_lines:?}"
     );
 
     let knn_sql = "select id from boxes \
@@ -14149,11 +14163,10 @@ fn index_matrix_order_only_uses_forward_index_scan() {
 fn index_matrix_projection_over_ordered_index_keeps_order_without_sort() {
     let db = setup_index_matrix_db("index_matrix_order_projection");
     let lines = explain_lines(&db, 1, "select a + 1 from items order by a");
-    let relfilenode = relfilenode_for(&db, 1, "items_a_idx");
     assert!(
         lines
             .iter()
-            .any(|line| line.contains(&format!("Index Scan using rel {relfilenode} "))),
+            .any(|line| line.contains("Index Scan using items_a_idx ")),
         "expected ordered index scan, got {lines:?}"
     );
     assert!(
