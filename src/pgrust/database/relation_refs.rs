@@ -90,9 +90,7 @@ pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLoc
         Expr::Cast(inner, _)
         | Expr::Collate { expr: inner, .. }
         | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => {
-            collect_rels_from_expr(inner, rels)
-        }
+        | Expr::IsNotNull(inner) => collect_rels_from_expr(inner, rels),
         Expr::Coalesce(left, right)
         | Expr::IsDistinctFrom(left, right)
         | Expr::IsNotDistinctFrom(left, right) => {

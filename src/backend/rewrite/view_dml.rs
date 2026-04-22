@@ -6,7 +6,7 @@ use crate::backend::parser::{
 use crate::include::nodes::parsenodes::{
     JoinTreeNode, Query, RangeTblEntryKind, SelectStatement, ViewCheckOption,
 };
-use crate::include::nodes::primnodes::{attrno_index, is_system_attr, Expr, RelationDesc};
+use crate::include::nodes::primnodes::{Expr, RelationDesc, attrno_index, is_system_attr};
 
 use super::views::{load_view_return_query, load_view_return_select};
 
@@ -132,8 +132,7 @@ pub(crate) fn resolve_auto_updatable_view_target(
         if matches!(
             view_check_option(catalog, relation_oid),
             ViewCheckOption::Local | ViewCheckOption::Cascaded
-        )
-            && let Some(predicate) = query.where_qual.clone()
+        ) && let Some(predicate) = query.where_qual.clone()
         {
             view_check_options.push(ViewCheck {
                 view_name: display_name.clone(),
@@ -243,12 +242,18 @@ fn combine_view_checks(
     let mut checks = nested_checks;
     if matches!(check_option, ViewCheckOption::Cascaded) {
         for predicate in all_view_predicates {
-            if !checks.iter().any(|check| check.view_name == predicate.view_name) {
+            if !checks
+                .iter()
+                .any(|check| check.view_name == predicate.view_name)
+            {
                 checks.push(predicate.clone());
             }
         }
     } else if let Some(local_check) = local_check {
-        if !checks.iter().any(|check| check.view_name == local_check.view_name) {
+        if !checks
+            .iter()
+            .any(|check| check.view_name == local_check.view_name)
+        {
             checks.push(local_check);
         }
     }

@@ -5,8 +5,8 @@ use crate::backend::parser::{
 };
 use crate::backend::utils::cache::syscache::backend_catcache;
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, INT2_TYPE_OID, INT4_TYPE_OID, OID_TYPE_OID,
-    PG_CATALOG_NAMESPACE_OID, PUBLIC_NAMESPACE_OID, PgOperatorRow,
+    BOOTSTRAP_SUPERUSER_OID, INT2_TYPE_OID, INT4_TYPE_OID, OID_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
+    PUBLIC_NAMESPACE_OID, PgOperatorRow,
 };
 use crate::include::nodes::parsenodes::RawTypeName;
 
