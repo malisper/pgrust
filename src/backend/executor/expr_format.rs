@@ -912,11 +912,7 @@ fn apply_implicit_sign(spec: &FormatSpec, rendered: &mut [String], negative: boo
         return;
     };
     let sign = if negative { "-" } else { " " };
-    if let Some(target_idx) = (0..anchor_idx).rev().find(|idx| rendered[*idx] == " ") {
-        rendered[target_idx] = format!("{sign}{}", rendered[target_idx]);
-    } else {
-        rendered[anchor_idx] = format!("{sign}{}", rendered[anchor_idx]);
-    }
+    rendered[anchor_idx] = format!("{sign}{}", rendered[anchor_idx]);
 }
 
 fn trim_fill_mode_fraction(spec: &FormatSpec, rendered: &mut [String], decimal_idx: usize) {

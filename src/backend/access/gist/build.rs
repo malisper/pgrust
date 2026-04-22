@@ -582,7 +582,8 @@ fn write_sorted_build_plan(
         0,
         &root_image,
         XLOG_GIST_PAGE_UPDATE,
-    )
+    )?;
+    Ok(())
 }
 
 fn page_fillfactor_reserve(fillfactor: usize) -> usize {
