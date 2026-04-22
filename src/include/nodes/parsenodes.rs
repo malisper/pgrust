@@ -266,6 +266,9 @@ pub enum Statement {
     Do(DoStatement),
     Explain(ExplainStatement),
     Show(ShowStatement),
+    Notify(NotifyStatement),
+    Listen(ListenStatement),
+    Unlisten(UnlistenStatement),
     Select(SelectStatement),
     Values(ValuesStatement),
     CopyFrom(CopyFromStatement),
@@ -710,6 +713,22 @@ pub struct ShowStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckpointStatement;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotifyStatement {
+    pub channel: String,
+    pub payload: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListenStatement {
+    pub channel: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnlistenStatement {
+    pub channel: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExplainStatement {

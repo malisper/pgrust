@@ -306,9 +306,7 @@ fn expr_contains_sublink_for_minmax_rewrite(expr: &Expr) -> bool {
         Expr::Cast(inner, _)
         | Expr::Collate { expr: inner, .. }
         | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => {
-            expr_contains_sublink_for_minmax_rewrite(inner)
-        }
+        | Expr::IsNotNull(inner) => expr_contains_sublink_for_minmax_rewrite(inner),
         Expr::Like {
             expr,
             pattern,
@@ -499,7 +497,10 @@ fn rewrite_minmax_aggrefs(expr: Expr, rewritten_aggs: &[Expr]) -> Expr {
         Expr::Cast(inner, ty) => {
             Expr::Cast(Box::new(rewrite_minmax_aggrefs(*inner, rewritten_aggs)), ty)
         }
-        Expr::Collate { expr, collation_oid } => Expr::Collate {
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => Expr::Collate {
             expr: Box::new(rewrite_minmax_aggrefs(*expr, rewritten_aggs)),
             collation_oid,
         },
@@ -666,9 +667,7 @@ fn expr_contains_local_var_outside_subquery(expr: &Expr) -> bool {
         Expr::Cast(inner, _)
         | Expr::Collate { expr: inner, .. }
         | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => {
-            expr_contains_local_var_outside_subquery(inner)
-        }
+        | Expr::IsNotNull(inner) => expr_contains_local_var_outside_subquery(inner),
         Expr::Like {
             expr,
             pattern,
@@ -1067,9 +1066,7 @@ fn expr_contains_window_func(expr: &Expr) -> bool {
         Expr::Cast(inner, _)
         | Expr::Collate { expr: inner, .. }
         | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => {
-            expr_contains_window_func(inner)
-        }
+        | Expr::IsNotNull(inner) => expr_contains_window_func(inner),
         Expr::Param(_)
         | Expr::Var(_)
         | Expr::CaseTest(_)

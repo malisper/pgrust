@@ -1133,8 +1133,14 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             coerce_bound_expr(bound_inner, source_type, target_type)
         }
         SqlExpr::Collate { expr, collation } => {
-            let inner_type =
-                infer_sql_expr_type_with_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes);
+            let inner_type = infer_sql_expr_type_with_ctes(
+                expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             let bound_inner = bind_expr_with_outer_and_ctes(
                 expr,
                 scope,

@@ -39,13 +39,14 @@ use crate::include::catalog::PG_CHECKPOINT_OID;
 use crate::include::nodes::execnodes::ScalarType;
 use crate::pgrust::auth::AuthState;
 use crate::pgrust::database::{
-    Database, SequenceMutationEffect, SessionStatsState, StatsFetchConsistency, TempMutationEffect,
-    TrackFunctionsSetting, alter_table_add_constraint_lock_requests,
-    alter_table_validate_constraint_lock_requests, delete_foreign_key_lock_requests,
-    insert_foreign_key_lock_requests, merge_table_lock_requests,
-    prepared_insert_foreign_key_lock_requests, reject_relation_with_referencing_foreign_keys,
-    relation_foreign_key_lock_requests, update_foreign_key_lock_requests,
-    validate_deferred_foreign_key_constraints,
+    AsyncListenAction, AsyncListenOp, Database, PendingNotification, SequenceMutationEffect,
+    SessionStatsState, StatsFetchConsistency, TempMutationEffect, TrackFunctionsSetting,
+    alter_table_add_constraint_lock_requests, alter_table_validate_constraint_lock_requests,
+    delete_foreign_key_lock_requests, insert_foreign_key_lock_requests,
+    merge_pending_notifications, merge_table_lock_requests,
+    prepared_insert_foreign_key_lock_requests, queue_pending_notification,
+    reject_relation_with_referencing_foreign_keys, relation_foreign_key_lock_requests,
+    update_foreign_key_lock_requests, validate_deferred_foreign_key_constraints,
 };
 use crate::pl::plpgsql::execute_do;
 use crate::{ClientId, RelFileLocator};
@@ -119,6 +120,8 @@ struct ActiveTransaction {
     temp_effects: Vec<TempMutationEffect>,
     sequence_effects: Vec<SequenceMutationEffect>,
     deferred_foreign_keys: DeferredForeignKeyTracker,
+    async_listen_ops: Vec<AsyncListenOp>,
+    pending_async_notifications: Vec<PendingNotification>,
 }
 
 pub struct Session {
@@ -360,6 +363,7 @@ impl Session {
             txn_waiter: Some(db.txn_waiter.clone()),
             sequences: Some(db.sequences.clone()),
             large_objects: Some(db.large_objects.clone()),
+            async_notify_runtime: Some(db.async_notify_runtime.clone()),
             advisory_locks: Arc::clone(&db.advisory_locks),
             checkpoint_stats: db.checkpoint_stats_snapshot(),
             datetime_config: self.datetime_config.clone(),
@@ -377,6 +381,7 @@ impl Session {
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             timed: false,
             allow_side_effects: true,
+            pending_async_notifications: Vec::new(),
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),
@@ -388,6 +393,57 @@ impl Session {
             recursive_worktables: std::collections::HashMap::new(),
             deferred_foreign_keys,
         }
+    }
+
+    fn active_transaction_for_xid(&self, xid: TransactionId) -> ActiveTransaction {
+        ActiveTransaction {
+            xid,
+            failed: false,
+            auth_at_start: self.auth.clone(),
+            held_table_locks: BTreeMap::new(),
+            next_command_id: 0,
+            catalog_effects: Vec::new(),
+            current_cmd_catalog_invalidations: Vec::new(),
+            prior_cmd_catalog_invalidations: Vec::new(),
+            temp_effects: Vec::new(),
+            sequence_effects: Vec::new(),
+            deferred_foreign_keys: DeferredForeignKeyTracker::default(),
+            async_listen_ops: Vec::new(),
+            pending_async_notifications: Vec::new(),
+        }
+    }
+
+    fn queue_txn_listener_op(&mut self, action: AsyncListenAction, channel: Option<String>) {
+        if let Some(txn) = self.active_txn.as_mut() {
+            txn.async_listen_ops.push(AsyncListenOp { action, channel });
+        }
+    }
+
+    fn queue_txn_notification(&mut self, channel: &str, payload: &str) -> Result<(), ExecError> {
+        let txn = self.active_txn.as_mut().ok_or_else(|| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "active transaction",
+                actual: "no active transaction for NOTIFY".into(),
+            })
+        })?;
+        queue_pending_notification(&mut txn.pending_async_notifications, channel, payload)
+    }
+
+    fn merge_ctx_pending_async_notifications(
+        &mut self,
+        ctx: &mut ExecutorContext,
+        succeeded: bool,
+    ) {
+        if !succeeded {
+            ctx.pending_async_notifications.clear();
+            return;
+        }
+        let Some(txn) = self.active_txn.as_mut() else {
+            ctx.pending_async_notifications.clear();
+            return;
+        };
+        let pending = mem::take(&mut ctx.pending_async_notifications);
+        merge_pending_notifications(&mut txn.pending_async_notifications, pending);
     }
 
     fn validate_deferred_foreign_keys_for_active_txn(
@@ -457,6 +513,10 @@ impl Session {
                     db.finalize_committed_temp_effects(self.client_id, &txn.temp_effects);
                     db.finalize_committed_sequence_effects(&txn.sequence_effects)?;
                     db.apply_temp_on_commit(self.client_id)?;
+                    db.async_notify_runtime
+                        .apply_listener_ops(self.client_id, &txn.async_listen_ops);
+                    db.async_notify_runtime
+                        .publish(self.client_id, &txn.pending_async_notifications);
                     db.advisory_locks
                         .unlock_all_transaction(self.client_id, txn.xid);
                     self.stats_state.write().commit_top_level_xact(&db.stats);
@@ -1543,19 +1603,7 @@ impl Session {
                     }));
                 }
                 let xid = db.txns.write().begin();
-                self.active_txn = Some(ActiveTransaction {
-                    xid,
-                    failed: false,
-                    auth_at_start: self.auth.clone(),
-                    held_table_locks: BTreeMap::new(),
-                    next_command_id: 0,
-                    catalog_effects: Vec::new(),
-                    current_cmd_catalog_invalidations: Vec::new(),
-                    prior_cmd_catalog_invalidations: Vec::new(),
-                    temp_effects: Vec::new(),
-                    sequence_effects: Vec::new(),
-                    deferred_foreign_keys: DeferredForeignKeyTracker::default(),
-                });
+                self.active_txn = Some(self.active_transaction_for_xid(xid));
                 self.stats_state.write().begin_top_level_xact();
                 Ok(StatementResult::AffectedRows(0))
             }
@@ -1672,6 +1720,7 @@ impl Session {
                 db.table_locks.unlock_table(rel, self.client_id);
             }
         }
+        db.async_notify_runtime.disconnect(self.client_id);
 
         // :HACK: Session-scoped table locks are currently tracked partly on the
         // session and partly in the global table lock manager. Release anything
@@ -2848,34 +2897,46 @@ impl Session {
             Statement::Vacuum(_) => {
                 Err(ExecError::Parse(ParseError::ActiveSqlTransaction("VACUUM")))
             }
+            Statement::Notify(ref notify_stmt) => self
+                .queue_txn_notification(
+                    &notify_stmt.channel,
+                    notify_stmt.payload.as_deref().unwrap_or(""),
+                )
+                .map(|_| StatementResult::AffectedRows(0)),
+            Statement::Listen(ref listen_stmt) => {
+                self.queue_txn_listener_op(
+                    AsyncListenAction::Listen,
+                    Some(listen_stmt.channel.clone()),
+                );
+                Ok(StatementResult::AffectedRows(0))
+            }
+            Statement::Unlisten(ref unlisten_stmt) => {
+                self.queue_txn_listener_op(
+                    AsyncListenAction::Unlisten,
+                    unlisten_stmt.channel.clone(),
+                );
+                Ok(StatementResult::AffectedRows(0))
+            }
             Statement::Merge(ref merge_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let bound = plan_merge(merge_stmt, &catalog)?;
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
-                let mut ctx = self.executor_context_for_catalog(
-                    db,
-                    snapshot,
-                    cid,
-                    &catalog,
-                    None,
-                    None,
-                );
-                execute_merge(bound, &catalog, &mut ctx, xid, cid)
+                let mut ctx =
+                    self.executor_context_for_catalog(db, snapshot, cid, &catalog, None, None);
+                let result = execute_merge(bound, &catalog, &mut ctx, xid, cid);
+                self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
+                result
             }
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) => {
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let search_path = self.configured_search_path();
                 let catalog =
                     db.lazy_catalog_lookup(client_id, Some((xid, cid)), search_path.as_deref());
-                let mut ctx = self.executor_context_for_catalog(
-                    db,
-                    snapshot,
-                    cid,
-                    &catalog,
-                    None,
-                    None,
-                );
-                execute_readonly_statement(stmt, &catalog, &mut ctx)
+                let mut ctx =
+                    self.executor_context_for_catalog(db, snapshot, cid, &catalog, None, None);
+                let result = execute_readonly_statement(stmt, &catalog, &mut ctx);
+                self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
+                result
             }
             Statement::Insert(ref insert_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
@@ -2904,13 +2965,16 @@ impl Session {
                     Some(deferred_foreign_keys),
                     None,
                 );
-                crate::pgrust::database::commands::rules::execute_bound_insert_with_rules(
-                    prepared.stmt,
-                    &catalog,
-                    &mut ctx,
-                    xid,
-                    cid,
-                )
+                let result =
+                    crate::pgrust::database::commands::rules::execute_bound_insert_with_rules(
+                        prepared.stmt,
+                        &catalog,
+                        &mut ctx,
+                        xid,
+                        cid,
+                    );
+                self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
+                result
             }
             Statement::Update(ref update_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
@@ -2941,14 +3005,17 @@ impl Session {
                     None,
                 );
                 ctx.interrupts = Arc::clone(&interrupts);
-                crate::pgrust::database::commands::rules::execute_bound_update_with_rules(
-                    prepared.stmt,
-                    &catalog,
-                    &mut ctx,
-                    xid,
-                    cid,
-                    Some((&db.txns, &db.txn_waiter, interrupts.as_ref())),
-                )
+                let result =
+                    crate::pgrust::database::commands::rules::execute_bound_update_with_rules(
+                        prepared.stmt,
+                        &catalog,
+                        &mut ctx,
+                        xid,
+                        cid,
+                        Some((&db.txns, &db.txn_waiter, interrupts.as_ref())),
+                    );
+                self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
+                result
             }
             Statement::Delete(ref delete_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
@@ -2979,13 +3046,16 @@ impl Session {
                     None,
                 );
                 ctx.interrupts = Arc::clone(&interrupts);
-                crate::pgrust::database::commands::rules::execute_bound_delete_with_rules(
-                    prepared.stmt,
-                    &catalog,
-                    &mut ctx,
-                    xid,
-                    Some((&db.txns, &db.txn_waiter, interrupts.as_ref())),
-                )
+                let result =
+                    crate::pgrust::database::commands::rules::execute_bound_delete_with_rules(
+                        prepared.stmt,
+                        &catalog,
+                        &mut ctx,
+                        xid,
+                        Some((&db.txns, &db.txn_waiter, interrupts.as_ref())),
+                    );
+                self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
+                result
             }
             Statement::CreateFunction(ref create_stmt) => {
                 let search_path = self.configured_search_path();
@@ -3621,7 +3691,9 @@ impl Session {
             None,
         );
         ctx.interrupts = interrupts;
-        execute_prepared_insert_row(prepared, params, &mut ctx, xid, cid)
+        let result = execute_prepared_insert_row(prepared, params, &mut ctx, xid, cid);
+        self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
+        result
     }
 
     pub fn copy_from_rows(
@@ -3655,19 +3727,7 @@ impl Session {
         db.install_interrupt_state(self.client_id, self.interrupts());
         let started_txn = if self.active_txn.is_none() {
             let xid = db.txns.write().begin();
-            self.active_txn = Some(ActiveTransaction {
-                xid,
-                failed: false,
-                auth_at_start: self.auth.clone(),
-                held_table_locks: BTreeMap::new(),
-                next_command_id: 0,
-                catalog_effects: Vec::new(),
-                current_cmd_catalog_invalidations: Vec::new(),
-                prior_cmd_catalog_invalidations: Vec::new(),
-                temp_effects: Vec::new(),
-                sequence_effects: Vec::new(),
-                deferred_foreign_keys: DeferredForeignKeyTracker::default(),
-            });
+            self.active_txn = Some(self.active_transaction_for_xid(xid));
             self.stats_state.write().begin_top_level_xact();
             true
         } else {
@@ -3864,7 +3924,7 @@ impl Session {
                 None,
             );
             ctx.interrupts = interrupts;
-            crate::backend::commands::tablecmds::execute_insert_values(
+            let result = crate::backend::commands::tablecmds::execute_insert_values(
                 table_name,
                 relation_oid,
                 rel,
@@ -3878,7 +3938,9 @@ impl Session {
                 &mut ctx,
                 xid,
                 cid,
-            )
+            );
+            self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
+            result
         })();
 
         let final_result = if started_txn {

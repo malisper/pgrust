@@ -4,12 +4,12 @@ use std::str::FromStr;
 
 use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::executor::exec_expr::format_array_text;
+use crate::backend::executor::value_io::builtin_type_oid_for_sql_type;
 use crate::backend::executor::{
     ArrayValue, ExecError, QueryColumn, Value, geometry_input_error_message,
     render_datetime_value_text_with_config, render_geometry_text, render_internal_char_text,
     render_range_text,
 };
-use crate::backend::executor::value_io::builtin_type_oid_for_sql_type;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::access::htup::TupleError;
@@ -185,6 +185,9 @@ pub(crate) fn infer_command_tag(sql: &str, affected: usize) -> String {
         ("COMMENT", _) => "COMMENT".to_string(),
         ("CHECKPOINT", _) => "CHECKPOINT".to_string(),
         ("DO", _) => "DO".to_string(),
+        ("LISTEN", _) => "LISTEN".to_string(),
+        ("NOTIFY", _) => "NOTIFY".to_string(),
+        ("UNLISTEN", _) => "UNLISTEN".to_string(),
         ("VACUUM", _) => "VACUUM".to_string(),
         ("SET", _) => "SET".to_string(),
         ("RESET", _) => "RESET".to_string(),
@@ -796,7 +799,8 @@ pub(crate) fn send_typed_data_row(
                 let rendered = if let Some(sql_type) = sql_type.filter(|ty| ty.is_array) {
                     let array = builtin_type_oid_for_sql_type(sql_type.element_type()).map(
                         |element_type_oid| {
-                            ArrayValue::from_1d(items.clone()).with_element_type_oid(element_type_oid)
+                            ArrayValue::from_1d(items.clone())
+                                .with_element_type_oid(element_type_oid)
                         },
                     );
                     array
@@ -1090,6 +1094,23 @@ pub(crate) fn send_copy_in_response(w: &mut impl Write) -> io::Result<()> {
     w.write_all(&7_i32.to_be_bytes())?;
     w.write_all(&[0])?;
     w.write_all(&0_i16.to_be_bytes())?;
+    Ok(())
+}
+
+pub(crate) fn send_notification_response(
+    w: &mut impl Write,
+    sender_pid: i32,
+    channel: &str,
+    payload: &str,
+) -> io::Result<()> {
+    let len = 4 + 4 + channel.len() + 1 + payload.len() + 1;
+    w.write_all(&[b'A'])?;
+    w.write_all(&(len as i32).to_be_bytes())?;
+    w.write_all(&sender_pid.to_be_bytes())?;
+    w.write_all(channel.as_bytes())?;
+    w.write_all(&[0])?;
+    w.write_all(payload.as_bytes())?;
+    w.write_all(&[0])?;
     Ok(())
 }
 

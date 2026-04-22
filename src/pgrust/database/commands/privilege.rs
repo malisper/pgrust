@@ -746,13 +746,7 @@ fn resolve_role_grantor(
     legacy_group_syntax: bool,
 ) -> Result<u32, ExecError> {
     let Some(grantor) = grantor else {
-        return select_best_role_grantor(
-            auth,
-            catalog,
-            role.oid,
-            is_grant,
-            legacy_group_syntax,
-        );
+        return select_best_role_grantor(auth, catalog, role.oid, is_grant, legacy_group_syntax);
     };
     let grantor = resolve_role_grantor_spec(auth, catalog, grantor)?;
 
@@ -1293,10 +1287,18 @@ mod tests {
         let base = temp_dir("alter_group_permission_denied");
         let db = Database::open(&base, 16).unwrap();
         let mut session = Session::new(1);
-        session.execute(&db, "create role regress_priv_group2").unwrap();
-        session.execute(&db, "create role regress_priv_user1 login").unwrap();
-        session.execute(&db, "create role regress_priv_user2 login").unwrap();
-        session.execute(&db, "create role regress_priv_user3 login").unwrap();
+        session
+            .execute(&db, "create role regress_priv_group2")
+            .unwrap();
+        session
+            .execute(&db, "create role regress_priv_user1 login")
+            .unwrap();
+        session
+            .execute(&db, "create role regress_priv_user2 login")
+            .unwrap();
+        session
+            .execute(&db, "create role regress_priv_user3 login")
+            .unwrap();
         session
             .execute(
                 &db,
@@ -1319,7 +1321,9 @@ mod tests {
         ] {
             let err = session.execute(&db, sql).unwrap_err();
             match err {
-                ExecError::DetailedError { message, detail, .. } => {
+                ExecError::DetailedError {
+                    message, detail, ..
+                } => {
                     assert_eq!(message, "permission denied to alter role");
                     assert_eq!(
                         detail.as_deref(),

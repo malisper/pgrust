@@ -41,11 +41,10 @@ use crate::include::catalog::{
     PG_OPFAMILY_RELATION_OID, PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID,
     PG_PUBLICATION_REL_RELATION_OID, PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID,
     PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PUBLISH_GENCOLS_NONE, PgAmopRow, PgAmprocRow,
-    PgAttrdefRow,
-    PgAttributeRow, PgClassRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow,
-    PgForeignDataWrapperRow, PgInheritsRow, PgNamespaceRow, PgOpclassRow, PgOpfamilyRow,
-    PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow,
-    PgRewriteRow, PgStatisticRow, PgTablespaceRow, relkind_has_storage,
+    PgAttrdefRow, PgAttributeRow, PgClassRow, PgConstraintRow, PgDatabaseRow, PgDependRow,
+    PgDescriptionRow, PgForeignDataWrapperRow, PgInheritsRow, PgNamespaceRow, PgOpclassRow,
+    PgOpfamilyRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
+    PgPublicationRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow, relkind_has_storage,
 };
 use crate::include::nodes::datum::Value;
 

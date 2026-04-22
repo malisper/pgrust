@@ -604,6 +604,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         large_objects: Some(std::sync::Arc::new(
             crate::pgrust::database::LargeObjectRuntime::new_ephemeral(),
         )),
+        async_notify_runtime: None,
         advisory_locks: std::sync::Arc::new(
             crate::backend::storage::lmgr::AdvisoryLockManager::new(),
         ),
@@ -634,6 +635,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         subplans: Vec::new(),
         timed: false,
         allow_side_effects: true,
+        pending_async_notifications: Vec::new(),
         catalog: None,
         compiled_functions: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),
@@ -661,6 +663,7 @@ fn run_plan(
         large_objects: Some(std::sync::Arc::new(
             crate::pgrust::database::LargeObjectRuntime::new_ephemeral(),
         )),
+        async_notify_runtime: None,
         advisory_locks: std::sync::Arc::new(
             crate::backend::storage::lmgr::AdvisoryLockManager::new(),
         ),
@@ -691,6 +694,7 @@ fn run_plan(
         subplans: Vec::new(),
         timed: false,
         allow_side_effects: true,
+        pending_async_notifications: Vec::new(),
         catalog: None,
         compiled_functions: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),
@@ -756,6 +760,7 @@ fn run_sql_with_catalog(
             large_objects: Some(std::sync::Arc::new(
                 crate::pgrust::database::LargeObjectRuntime::new_ephemeral(),
             )),
+            async_notify_runtime: None,
             advisory_locks: std::sync::Arc::new(
                 crate::backend::storage::lmgr::AdvisoryLockManager::new(),
             ),
@@ -786,6 +791,7 @@ fn run_sql_with_catalog(
             subplans: Vec::new(),
             timed: false,
             allow_side_effects: true,
+            pending_async_notifications: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
@@ -928,6 +934,65 @@ fn advisory_lock_builtins_are_rejected_in_read_only_executor_context() {
             ..
         }
     ));
+}
+
+#[test]
+fn pg_notify_is_rejected_in_read_only_executor_context() {
+    let base = temp_dir("pg_notify_is_rejected_in_read_only_executor_context");
+    let mut ctx = empty_executor_context(&base);
+    ctx.allow_side_effects = false;
+    let mut slot = TupleSlot::virtual_row(vec![]);
+
+    let err = eval_expr(
+        &Expr::builtin_func(
+            crate::include::nodes::primnodes::BuiltinScalarFunction::PgNotify,
+            Some(crate::backend::parser::SqlType::new(
+                crate::backend::parser::SqlTypeKind::Void,
+            )),
+            false,
+            vec![
+                Expr::Const(Value::Text("alerts".into())),
+                Expr::Const(Value::Text("payload".into())),
+            ],
+        ),
+        &mut slot,
+        &mut ctx,
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            sqlstate: "25006",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn pg_notification_queue_usage_returns_zero_with_empty_runtime() {
+    let base = temp_dir("pg_notification_queue_usage_returns_zero_with_empty_runtime");
+    let mut ctx = empty_executor_context(&base);
+    ctx.async_notify_runtime = Some(std::sync::Arc::new(
+        crate::pgrust::database::AsyncNotifyRuntime::new(),
+    ));
+    let mut slot = TupleSlot::virtual_row(vec![]);
+
+    let value = eval_expr(
+        &Expr::builtin_func(
+            crate::include::nodes::primnodes::BuiltinScalarFunction::PgNotificationQueueUsage,
+            Some(crate::backend::parser::SqlType::new(
+                crate::backend::parser::SqlTypeKind::Float8,
+            )),
+            false,
+            vec![],
+        ),
+        &mut slot,
+        &mut ctx,
+    )
+    .unwrap();
+
+    assert_eq!(value, Value::Float64(0.0));
 }
 
 #[test]
@@ -3618,11 +3683,7 @@ fn oid_text_input_wraps_negative_values_and_orders_unsigned() {
     assert_eq!(small, Value::Int64(1234));
     assert_eq!(
         crate::backend::executor::expr_ops::compare_order_values(
-            &small,
-            &wrapped,
-            None,
-            None,
-            false,
+            &small, &wrapped, None, None, false,
         )
         .unwrap(),
         std::cmp::Ordering::Less
@@ -7021,6 +7082,7 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         large_objects: Some(std::sync::Arc::new(
             crate::pgrust::database::LargeObjectRuntime::new_ephemeral(),
         )),
+        async_notify_runtime: None,
         advisory_locks: std::sync::Arc::new(
             crate::backend::storage::lmgr::AdvisoryLockManager::new(),
         ),
@@ -7051,6 +7113,7 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         subplans: Vec::new(),
         timed: false,
         allow_side_effects: true,
+        pending_async_notifications: Vec::new(),
         catalog: catalog.materialize_visible_catalog(),
         compiled_functions: std::collections::HashMap::new(),
         cte_tables: std::collections::HashMap::new(),
@@ -16311,7 +16374,10 @@ fn large_object_metadata_tracks_create_and_unlink() {
                 crate::pgrust::database::SequenceRuntime::new_ephemeral(),
             )),
             large_objects: Some(large_objects.clone()),
-            advisory_locks: std::sync::Arc::new(crate::backend::storage::lmgr::AdvisoryLockManager::new()),
+            async_notify_runtime: None,
+            advisory_locks: std::sync::Arc::new(
+                crate::backend::storage::lmgr::AdvisoryLockManager::new(),
+            ),
             checkpoint_stats:
                 crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -16339,6 +16405,7 @@ fn large_object_metadata_tracks_create_and_unlink() {
             subplans: Vec::new(),
             timed: false,
             allow_side_effects: true,
+            pending_async_notifications: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),

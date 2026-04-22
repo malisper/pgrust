@@ -1,7 +1,7 @@
 use super::render_bit_text;
 use super::{compare_order_values, parse_numeric_text, render_datetime_value_text};
-use crate::backend::executor::exec_expr::{expect_float8_arg, float8_regr_accum_state};
 use crate::backend::executor::ExecError;
+use crate::backend::executor::exec_expr::{expect_float8_arg, float8_regr_accum_state};
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue, Value};
@@ -372,7 +372,9 @@ impl AccumState {
             ) => |state, values| {
                 let value = values.first().unwrap_or(&Value::Null);
                 match state {
-                    AccumState::FloatStats { count, sum, sum_sq, .. } => {
+                    AccumState::FloatStats {
+                        count, sum, sum_sq, ..
+                    } => {
                         if let Some(value) = aggregate_float_value(value) {
                             let next_count = *count + 1.0;
                             let next_sum = *sum + value;
@@ -438,16 +440,10 @@ impl AccumState {
                     }
                     let y = expect_float8_arg("regr aggregate", y)?;
                     let x = expect_float8_arg("regr aggregate", x)?;
-                    [
-                        *count,
-                        *sum_x,
-                        *sum_sq_x,
-                        *sum_y,
-                        *sum_sq_y,
-                        *sum_xy,
-                    ] = float8_regr_accum_state(
-                        *count, *sum_x, *sum_sq_x, *sum_y, *sum_sq_y, *sum_xy, y, x,
-                    )?;
+                    [*count, *sum_x, *sum_sq_x, *sum_y, *sum_sq_y, *sum_xy] =
+                        float8_regr_accum_state(
+                            *count, *sum_x, *sum_sq_x, *sum_y, *sum_sq_y, *sum_xy, y, x,
+                        )?;
                 }
                 Ok(())
             },

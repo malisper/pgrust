@@ -90,9 +90,7 @@ fn same_peer(
         .iter()
         .zip(left.order_keys.iter().zip(right.order_keys.iter()))
     {
-        if compare_order_values(left, right, item.collation_oid, None, false)?
-            != Ordering::Equal
-        {
+        if compare_order_values(left, right, item.collation_oid, None, false)? != Ordering::Equal {
             return Ok(false);
         }
     }
@@ -418,7 +416,13 @@ fn evaluate_window_frame(
                 "starting",
             )?
             .expect("offset");
-            move_group_start(partition_rows, &clause.spec.order_by, row_index, offset, false)?
+            move_group_start(
+                partition_rows,
+                &clause.spec.order_by,
+                row_index,
+                offset,
+                false,
+            )?
         }
         (WindowFrameMode::Groups, WindowFrameBound::OffsetFollowing(_)) => {
             let offset = evaluate_frame_bound_i64(
@@ -428,7 +432,13 @@ fn evaluate_window_frame(
                 "starting",
             )?
             .expect("offset");
-            move_group_start(partition_rows, &clause.spec.order_by, row_index, offset, true)?
+            move_group_start(
+                partition_rows,
+                &clause.spec.order_by,
+                row_index,
+                offset,
+                true,
+            )?
         }
         (WindowFrameMode::Range, WindowFrameBound::OffsetPreceding(expr))
         | (WindowFrameMode::Range, WindowFrameBound::OffsetFollowing(expr)) => {
@@ -492,7 +502,13 @@ fn evaluate_window_frame(
                 "ending",
             )?
             .expect("offset");
-            move_group_end(partition_rows, &clause.spec.order_by, row_index, offset, false)?
+            move_group_end(
+                partition_rows,
+                &clause.spec.order_by,
+                row_index,
+                offset,
+                false,
+            )?
         }
         (WindowFrameMode::Groups, WindowFrameBound::OffsetFollowing(_)) => {
             let offset = evaluate_frame_bound_i64(
@@ -502,7 +518,13 @@ fn evaluate_window_frame(
                 "ending",
             )?
             .expect("offset");
-            move_group_end(partition_rows, &clause.spec.order_by, row_index, offset, true)?
+            move_group_end(
+                partition_rows,
+                &clause.spec.order_by,
+                row_index,
+                offset,
+                true,
+            )?
         }
         (WindowFrameMode::Range, WindowFrameBound::OffsetPreceding(expr))
         | (WindowFrameMode::Range, WindowFrameBound::OffsetFollowing(expr)) => {

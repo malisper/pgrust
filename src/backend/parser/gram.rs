@@ -2450,10 +2450,7 @@ fn build_alter_index_alter_column_statistics_statement(
         .map_err(|_| ParseError::InvalidInteger(column_number_sql.to_string()))?;
     if column_number_i32 <= 0 || column_number_i32 > i32::from(i16::MAX) {
         return Err(ParseError::DetailedError {
-            message: format!(
-                "column number must be in range from 1 to {}",
-                i16::MAX
-            ),
+            message: format!("column number must be in range from 1 to {}", i16::MAX),
             detail: None,
             hint: None,
             sqlstate: "22023",
@@ -4718,6 +4715,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::copy_stmt => Ok(Statement::CopyFrom(build_copy_from(inner)?)),
         Rule::analyze_stmt => Ok(Statement::Analyze(build_analyze(inner)?)),
         Rule::checkpoint_stmt => Ok(Statement::Checkpoint(CheckpointStatement)),
+        Rule::notify_stmt => Ok(Statement::Notify(build_notify(inner)?)),
+        Rule::listen_stmt => Ok(Statement::Listen(build_listen(inner)?)),
+        Rule::unlisten_stmt => Ok(Statement::Unlisten(build_unlisten(inner)?)),
         Rule::show_stmt => Ok(Statement::Show(build_show(inner)?)),
         Rule::set_session_authorization_stmt => Ok(Statement::SetSessionAuthorization(
             build_set_session_authorization(inner)?,
@@ -4816,9 +4816,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             Ok(Statement::CommentOnTable(build_comment_on_table(inner)?))
         }
         Rule::comment_on_rule_stmt => Ok(Statement::CommentOnRule(build_comment_on_rule(inner)?)),
-        Rule::comment_on_trigger_stmt => {
-            Ok(Statement::CommentOnTrigger(build_comment_on_trigger(inner)?))
-        }
+        Rule::comment_on_trigger_stmt => Ok(Statement::CommentOnTrigger(build_comment_on_trigger(
+            inner,
+        )?)),
         Rule::create_schema_stmt => Ok(Statement::CreateSchema(build_create_schema(inner)?)),
         Rule::create_policy_stmt => Ok(Statement::CreatePolicy(build_create_policy_statement(
             inner.as_str(),
@@ -5054,6 +5054,43 @@ fn build_show(pair: Pair<'_, Rule>) -> Result<ShowStatement, ParseError> {
         });
     }
     Ok(ShowStatement { name })
+}
+
+fn build_notify(pair: Pair<'_, Rule>) -> Result<NotifyStatement, ParseError> {
+    let mut channel = None;
+    let mut payload = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => channel = Some(build_identifier(part)),
+            Rule::notify_payload => {
+                let literal = part.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+                payload = Some(decode_string_literal_pair(literal)?);
+            }
+            _ => {}
+        }
+    }
+    Ok(NotifyStatement {
+        channel: channel.ok_or(ParseError::UnexpectedEof)?,
+        payload,
+    })
+}
+
+fn build_listen(pair: Pair<'_, Rule>) -> Result<ListenStatement, ParseError> {
+    let channel = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::identifier)
+        .map(build_identifier)
+        .ok_or(ParseError::UnexpectedEof)?;
+    Ok(ListenStatement { channel })
+}
+
+fn build_unlisten(pair: Pair<'_, Rule>) -> Result<UnlistenStatement, ParseError> {
+    Ok(UnlistenStatement {
+        channel: pair
+            .into_inner()
+            .find(|part| part.as_rule() == Rule::identifier)
+            .map(build_identifier),
+    })
 }
 
 fn build_set_session_authorization(
@@ -7675,7 +7712,9 @@ fn build_comment_on_trigger(pair: Pair<'_, Rule>) -> Result<CommentOnTriggerStat
     let mut comment = None;
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::identifier if trigger_name.is_none() => trigger_name = Some(build_identifier(part)),
+            Rule::identifier if trigger_name.is_none() => {
+                trigger_name = Some(build_identifier(part))
+            }
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::quoted_string_literal
             | Rule::string_literal

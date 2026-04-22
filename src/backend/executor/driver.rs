@@ -7,6 +7,7 @@ use super::{
     pg_plan_query, pg_plan_values_query,
 };
 use crate::backend::parser::{CatalogLookup, UnsupportedStatement, plan_merge};
+use crate::pgrust::database::queue_pending_notification;
 use crate::pl::plpgsql::execute_do;
 
 fn unsupported_statement_error(stmt: &UnsupportedStatement) -> ExecError {
@@ -138,6 +139,26 @@ fn execute_statement_with_source(
             ctx,
         ),
         Statement::Analyze(stmt) => execute_analyze(stmt, catalog),
+        Statement::Notify(stmt) => {
+            queue_pending_notification(
+                &mut ctx.pending_async_notifications,
+                &stmt.channel,
+                stmt.payload.as_deref().unwrap_or(""),
+            )?;
+            Ok(StatementResult::AffectedRows(0))
+        }
+        Statement::Listen(stmt) => {
+            if let Some(runtime) = ctx.async_notify_runtime.as_ref() {
+                runtime.listen(ctx.client_id, &stmt.channel);
+            }
+            Ok(StatementResult::AffectedRows(0))
+        }
+        Statement::Unlisten(stmt) => {
+            if let Some(runtime) = ctx.async_notify_runtime.as_ref() {
+                runtime.unlisten(ctx.client_id, stmt.channel.as_deref());
+            }
+            Ok(StatementResult::AffectedRows(0))
+        }
         Statement::Show(_)
         | Statement::Checkpoint(_)
         | Statement::Set(_)

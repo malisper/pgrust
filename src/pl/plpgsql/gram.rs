@@ -129,14 +129,15 @@ fn build_alias_decl(pair: Pair<'_, Rule>) -> Result<AliasDecl, ParseError> {
             Rule::ident => name = Some(build_ident(part)),
             Rule::positional_param => {
                 let raw = part.as_str();
-                param_index = Some(
-                    raw[1..]
-                        .parse::<usize>()
-                        .map_err(|_| ParseError::UnexpectedToken {
-                            expected: "valid positional parameter reference",
-                            actual: raw.into(),
-                        })?,
-                );
+                param_index =
+                    Some(
+                        raw[1..]
+                            .parse::<usize>()
+                            .map_err(|_| ParseError::UnexpectedToken {
+                                expected: "valid positional parameter reference",
+                                actual: raw.into(),
+                            })?,
+                    );
             }
             _ => {}
         }
