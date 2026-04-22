@@ -6,8 +6,9 @@ use crate::backend::utils::time::datetime::{
     unix_days_from_postgres_date, ymd_from_days,
 };
 use crate::include::nodes::datetime::{
-    DATEVAL_NOBEGIN, DATEVAL_NOEND, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimestampADT,
-    TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC,
+    DATEVAL_NOBEGIN, DATEVAL_NOEND, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeADT, TimeTzADT,
+    TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_HOUR, USECS_PER_MINUTE,
+    USECS_PER_SEC,
 };
 
 fn extract_year_number(astronomical_year: i32) -> i32 {
@@ -49,6 +50,59 @@ fn unrecognized_date_part(field: &str) -> ExecError {
         detail: None,
         hint: None,
         sqlstate: "22023",
+    }
+}
+
+fn unsupported_time_part(field: &str, with_timezone: bool) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "unit \"{field}\" not supported for type time {} time zone",
+            if with_timezone { "with" } else { "without" }
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
+fn unrecognized_time_part(field: &str, with_timezone: bool) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "unit \"{field}\" not recognized for type time {} time zone",
+            if with_timezone { "with" } else { "without" }
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "22023",
+    }
+}
+
+fn eval_time_part(field: &str, time: TimeADT, with_timezone: bool) -> Result<Value, ExecError> {
+    let second = time.0.rem_euclid(USECS_PER_MINUTE) as f64 / USECS_PER_SEC as f64;
+    let result = match field {
+        "microsecond" | "microseconds" => time.0.rem_euclid(USECS_PER_MINUTE) as f64,
+        "millisecond" | "milliseconds" => {
+            time.0.rem_euclid(USECS_PER_MINUTE) as f64 / 1_000.0
+        }
+        "second" => second,
+        "minute" => time.0.div_euclid(USECS_PER_MINUTE).rem_euclid(60) as f64,
+        "hour" => time.0.div_euclid(USECS_PER_HOUR) as f64,
+        "epoch" => time.0 as f64 / USECS_PER_SEC as f64,
+        "timezone" | "timezone_h" | "timezone_m" | "day" | "month" | "year" | "quarter"
+        | "decade" | "century" | "millennium" | "isoyear" | "week" | "dow" | "isodow"
+        | "doy" | "julian" => return Err(unsupported_time_part(field, with_timezone)),
+        _ => return Err(unrecognized_time_part(field, with_timezone)),
+    };
+    Ok(Value::Float64(result))
+}
+
+fn eval_timetz_part(field: &str, timetz: TimeTzADT) -> Result<Value, ExecError> {
+    let time_result = eval_time_part(field, timetz.time, true);
+    match field {
+        "timezone" => Ok(Value::Float64((-timetz.offset_seconds) as f64)),
+        "timezone_h" => Ok(Value::Float64(((-timetz.offset_seconds) / 3_600) as f64)),
+        "timezone_m" => Ok(Value::Float64(((-timetz.offset_seconds) / 60 % 60) as f64)),
+        _ => time_result,
     }
 }
 
@@ -96,8 +150,12 @@ pub(crate) fn eval_date_part_function(values: &[Value]) -> Result<Value, ExecErr
             left: field_value.clone(),
             right: Value::Text("".into()),
         })?;
-    let date = match date_value {
-        Value::Date(date) => *date,
+    let field = field.trim().to_ascii_lowercase();
+
+    match date_value {
+        Value::Time(time) => return eval_time_part(&field, *time, false),
+        Value::TimeTz(timetz) => return eval_timetz_part(&field, *timetz),
+        Value::Date(_) => {}
         other => {
             return Err(ExecError::TypeMismatch {
                 op: "date_part",
@@ -105,8 +163,11 @@ pub(crate) fn eval_date_part_function(values: &[Value]) -> Result<Value, ExecErr
                 right: other.clone(),
             });
         }
+    }
+    let Value::Date(date) = date_value else {
+        unreachable!("checked above")
     };
-    let field = field.trim().to_ascii_lowercase();
+    let date = *date;
 
     if matches!(
         field.as_str(),
@@ -341,7 +402,7 @@ pub(crate) fn eval_make_date_function(values: &[Value]) -> Result<Value, ExecErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::include::nodes::datetime::DateADT;
+    use crate::include::nodes::datetime::{DateADT, TimeADT, TimeTzADT};
 
     #[test]
     fn date_part_handles_bc_and_iso_fields() {
@@ -454,6 +515,89 @@ mod tests {
             eval_make_date_function(&[Value::Int32(-44), Value::Int32(3), Value::Int32(15)])
                 .unwrap(),
             Value::Date(DateADT(days_from_ymd(-43, 3, 15).unwrap()))
+        );
+    }
+
+    #[test]
+    fn date_part_supports_time_fields() {
+        let time = TimeADT(((13 * 60 * 60 + 30 * 60 + 25) as i64 * USECS_PER_SEC) + 575_401);
+        assert_eq!(
+            eval_date_part_function(&[Value::Text("microseconds".into()), Value::Time(time)])
+                .unwrap(),
+            Value::Float64(25_575_401.0)
+        );
+        assert_eq!(
+            eval_date_part_function(&[Value::Text("milliseconds".into()), Value::Time(time)])
+                .unwrap(),
+            Value::Float64(25_575.401)
+        );
+        assert_eq!(
+            eval_date_part_function(&[Value::Text("second".into()), Value::Time(time)]).unwrap(),
+            Value::Float64(25.575401)
+        );
+        assert_eq!(
+            eval_date_part_function(&[Value::Text("minute".into()), Value::Time(time)]).unwrap(),
+            Value::Float64(30.0)
+        );
+        assert_eq!(
+            eval_date_part_function(&[Value::Text("hour".into()), Value::Time(time)]).unwrap(),
+            Value::Float64(13.0)
+        );
+        assert_eq!(
+            eval_date_part_function(&[Value::Text("epoch".into()), Value::Time(time)]).unwrap(),
+            Value::Float64(48_625.575401)
+        );
+    }
+
+    #[test]
+    fn date_part_rejects_invalid_time_fields_with_postgres_errors() {
+        let time = TimeADT((13 * 60 * 60) as i64 * USECS_PER_SEC);
+        match eval_date_part_function(&[Value::Text("day".into()), Value::Time(time)]).unwrap_err()
+        {
+            ExecError::DetailedError {
+                message, sqlstate, ..
+            } => {
+                assert_eq!(message, "unit \"day\" not supported for type time without time zone");
+                assert_eq!(sqlstate, "0A000");
+            }
+            other => panic!("expected detailed error, got {other:?}"),
+        }
+        match eval_date_part_function(&[Value::Text("fortnight".into()), Value::Time(time)])
+            .unwrap_err()
+        {
+            ExecError::DetailedError {
+                message, sqlstate, ..
+            } => {
+                assert_eq!(
+                    message,
+                    "unit \"fortnight\" not recognized for type time without time zone"
+                );
+                assert_eq!(sqlstate, "22023");
+            }
+            other => panic!("expected detailed error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn date_part_supports_timetz_timezone_fields() {
+        let timetz = TimeTzADT {
+            time: TimeADT((13 * 60 * 60 + 30 * 60) as i64 * USECS_PER_SEC),
+            offset_seconds: -7 * 60 * 60,
+        };
+        assert_eq!(
+            eval_date_part_function(&[Value::Text("timezone".into()), Value::TimeTz(timetz)])
+                .unwrap(),
+            Value::Float64(25_200.0)
+        );
+        assert_eq!(
+            eval_date_part_function(&[Value::Text("timezone_h".into()), Value::TimeTz(timetz)])
+                .unwrap(),
+            Value::Float64(7.0)
+        );
+        assert_eq!(
+            eval_date_part_function(&[Value::Text("timezone_m".into()), Value::TimeTz(timetz)])
+                .unwrap(),
+            Value::Float64(0.0)
         );
     }
 }

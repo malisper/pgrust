@@ -4735,6 +4735,33 @@ fn build_plan_coerces_time_comparison_string_literals() {
 }
 
 #[test]
+fn build_plan_rejects_ambiguous_time_addition() {
+    match build_plan(&parse_select("select time '01:02' + time '03:04'").unwrap(), &catalog())
+        .unwrap_err()
+    {
+        ParseError::DetailedError {
+            message,
+            hint,
+            sqlstate,
+            ..
+        } => {
+            assert_eq!(
+                message,
+                "operator is not unique: time without time zone + time without time zone"
+            );
+            assert_eq!(
+                hint.as_deref(),
+                Some(
+                    "Could not choose a best candidate operator. You might need to add explicit type casts."
+                )
+            );
+            assert_eq!(sqlstate, "42725");
+        }
+        other => panic!("expected detailed error, got {other:?}"),
+    }
+}
+
+#[test]
 fn build_plan_accepts_catalog_backed_bit_comparisons() {
     assert!(build_plan(
         &parse_select(

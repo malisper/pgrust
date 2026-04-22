@@ -1176,6 +1176,10 @@ fn input_error_sqlstate(err: &ExecError) -> &'static str {
         {
             if details.starts_with("time zone \"") {
                 "22023"
+            } else if details.starts_with("date/time field value out of range:")
+                || details.starts_with("date out of range:")
+            {
+                "22008"
             } else {
                 "22007"
             }
