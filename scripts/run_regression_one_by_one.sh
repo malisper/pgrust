@@ -41,6 +41,9 @@ fi
 SQL_DIR="$PG_REGRESS/sql"
 EXPECTED_DIR="$PG_REGRESS/expected"
 PG_REGRESS_ABS="$(cd "$PG_REGRESS" && pwd)"
+TABLESPACE_VERSION_DIRECTORY="PG_18_202406281"
+REGRESS_TABLESPACE_DIR=""
+PREPARED_SETUP_SQL=""
 
 setup_pg_regress_env() {
     if command -v pg_config >/dev/null 2>&1; then
@@ -64,6 +67,25 @@ transform_triggers_fixture() {
     perl -0pe "
         s/CREATE FUNCTION trigger_return_old \\(\\)\\n\\s+RETURNS trigger\\n\\s+AS :'regresslib'\\n\\s+LANGUAGE C;/CREATE FUNCTION trigger_return_old ()\\n        RETURNS trigger\\n        AS \\\$\\\$\\nBEGIN\\n    IF TG_OP = 'INSERT' THEN\\n        RETURN NEW;\\n    END IF;\\n    RETURN OLD;\\nEND\\n\\\$\\\$\\n        LANGUAGE plpgsql;/s;
     " "$input_path" > "$output_path"
+}
+
+prepare_setup_fixture() {
+    local input_path="$1"
+    local output_path="$2"
+
+    perl -0pe '
+        my $tablespace_dir = $ENV{"PGRUST_REGRESS_TABLESPACE_DIR"};
+        s{CREATE TABLESPACE regress_tblspace LOCATION '\''/tmp/pgrust_regress_tblspace'\'';}
+         {"CREATE TABLESPACE regress_tblspace LOCATION '\''$tablespace_dir'\'';"}ge;
+        END {
+            if ($tablespace_dir eq q{}) {
+                die "PGRUST_REGRESS_TABLESPACE_DIR must be set\n";
+            }
+        }
+    ' "$input_path" > "$output_path"
+
+    rm -rf "$REGRESS_TABLESPACE_DIR/$TABLESPACE_VERSION_DIRECTORY"
+    mkdir -p "$REGRESS_TABLESPACE_DIR"
 }
 
 prepare_test_fixture() {
@@ -131,6 +153,10 @@ if [[ -z "$DATA_DIR" ]]; then
     DATA_DIR="$(make_temp_dir pgrust_regress_one_by_one_data)"
 fi
 
+REGRESS_TABLESPACE_DIR="$RESULTS_DIR/regress_tblspace"
+export PGRUST_REGRESS_TABLESPACE_DIR="$REGRESS_TABLESPACE_DIR"
+PREPARED_SETUP_SQL="$RESULTS_DIR/fixtures/test_setup_pgrust.sql"
+
 cleanup() {
     if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
         echo "Stopping pgrust server (PID $SERVER_PID)..."
@@ -155,6 +181,9 @@ run_bootstrap_setup_one_by_one() {
         setup_timings="$RESULTS_DIR/timings/test_setup_pgrust.tsv"
         setup_tmp="$RESULTS_DIR/tmp/test_setup_pgrust"
         setup_label="pgrust setup bootstrap"
+        mkdir -p "$RESULTS_DIR/fixtures"
+        prepare_setup_fixture "$setup_sql" "$PREPARED_SETUP_SQL"
+        setup_sql="$PREPARED_SETUP_SQL"
     else
         setup_sql="$SQL_DIR/test_setup.sql"
         setup_out="$RESULTS_DIR/output/test_setup.out"
@@ -180,7 +209,7 @@ run_bootstrap_setup_one_by_one() {
         :
     fi
 
-    if grep -qi "statement timeout\|could not connect\|server closed the connection unexpectedly" "$setup_raw"; then
+    if grep -qi "statement timeout\|could not connect\|server closed the connection unexpectedly\|ERROR:" "$setup_raw"; then
         echo "ERROR: $setup_label failed"
         echo "See:"
         echo "  output:  $setup_out"
@@ -457,7 +486,7 @@ extract_clean_output_and_timings() {
 
             if (defined $current && $line =~ /statement timeout/i) {
                 $timing{status} = "timeout";
-            } elsif (defined $current && $line =~ /^ERROR:/) {
+            } elsif (defined $current && $line =~ /(?:^ERROR:|:\s+ERROR:)/) {
                 $timing{status} = "error" if !defined $timing{status};
             }
 
@@ -562,6 +591,12 @@ run_sql_one_by_one() {
         cat "$chunk_raw" >> "$raw_output"
         cat "$chunk_clean" >> "$clean_output"
         tail -n +2 "$chunk_timings" >> "$timings_output"
+
+        local error_id=""
+        error_id="$(awk -F'\t' 'NR > 1 && $2 == "error" { print $1; exit }' "$chunk_timings")"
+        if [[ "$on_error_stop" == true && -n "$error_id" ]]; then
+            break
+        fi
 
         local crash_id=""
         crash_id="$(awk -F'\t' 'NR > 1 && $2 == "crash" { print $1; exit }' "$chunk_timings")"
