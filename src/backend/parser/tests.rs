@@ -709,6 +709,7 @@ fn catalog_with_people_id_index() -> Catalog {
             index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
                 indrelid: 65000,
                 indisunique: false,
+                indnullsnotdistinct: false,
                 indisprimary: false,
                 indisvalid: true,
                 indisready: true,
@@ -761,6 +762,7 @@ fn catalog_with_people_primary_key_opclass(opclass_oid: u32) -> Catalog {
             index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
                 indrelid: 65000,
                 indisunique: true,
+                indnullsnotdistinct: false,
                 indisprimary: true,
                 indisvalid: true,
                 indisready: true,
@@ -842,6 +844,7 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
             index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
                 indrelid: people.relation_oid,
                 indisunique: true,
+                indnullsnotdistinct: false,
                 indisprimary: false,
                 indisvalid: true,
                 indisready: true,
@@ -891,6 +894,7 @@ fn catalog_with_people_expression_unique_index() -> Catalog {
             index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
                 indrelid: people.relation_oid,
                 indisunique: true,
+                indnullsnotdistinct: false,
                 indisprimary: false,
                 indisvalid: true,
                 indisready: true,
@@ -940,6 +944,7 @@ fn catalog_with_people_name_c_collation_index() -> Catalog {
             index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
                 indrelid: people.relation_oid,
                 indisunique: true,
+                indnullsnotdistinct: false,
                 indisprimary: false,
                 indisvalid: true,
                 indisready: true,
@@ -997,6 +1002,7 @@ fn catalog_with_text_parent_primary_key() -> Catalog {
             index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
                 indrelid: 65030,
                 indisunique: true,
+                indnullsnotdistinct: false,
                 indisprimary: true,
                 indisvalid: true,
                 indisready: true,
@@ -1902,6 +1908,7 @@ fn parse_alter_table_constraint_statements() {
                     deferrable: None,
                     initially_deferred: None,
                     enforced: None,
+                    nulls_not_distinct: false,
                 },
                 expr_sql: "id > 0".into(),
             },
@@ -1926,6 +1933,7 @@ fn parse_alter_table_constraint_statements() {
                     deferrable: None,
                     initially_deferred: None,
                     enforced: None,
+                    nulls_not_distinct: false,
                 },
                 column: "note".into(),
             },
@@ -7110,6 +7118,23 @@ fn parse_create_table_primary_key_and_unique_constraints() {
             columns: vec!["id".into()],
         }]
     );
+
+    let stmt =
+        parse_statement("create table items (id int4 unique nulls not distinct, note text)")
+            .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let columns = ct.columns().collect::<Vec<_>>();
+    assert_eq!(
+        columns[0].constraints,
+        vec![ColumnConstraint::Unique {
+            attributes: ConstraintAttributes {
+                nulls_not_distinct: true,
+                ..attrs()
+            }
+        }]
+    );
 }
 
 #[test]
@@ -7133,6 +7158,7 @@ fn parse_create_table_named_check_and_not_null_constraints() {
                 deferrable: Some(true),
                 initially_deferred: Some(true),
                 enforced: Some(false),
+                nulls_not_distinct: false,
             },
             expr_sql: "id > 0".into(),
         }]
@@ -7148,6 +7174,7 @@ fn parse_create_table_named_check_and_not_null_constraints() {
                     deferrable: None,
                     initially_deferred: None,
                     enforced: None,
+                    nulls_not_distinct: false,
                 },
                 column: "note".into(),
             },
@@ -7159,6 +7186,7 @@ fn parse_create_table_named_check_and_not_null_constraints() {
                     deferrable: Some(false),
                     initially_deferred: Some(false),
                     enforced: Some(true),
+                    nulls_not_distinct: false,
                 },
                 expr_sql: "note <> ''".into(),
             },

@@ -544,7 +544,12 @@ fn base_dir_has_cluster_contents(base_dir: &Path) -> Result<bool, DatabaseError>
         if matches!(name, "postgresql.conf" | "postgresql.auto.conf") {
             continue;
         }
-        return Ok(true);
+        if matches!(
+            name,
+            "global" | "base" | "pg_wal" | "pg_tblspc" | "pg_xact" | "pg_multixact"
+        ) {
+            return Ok(true);
+        }
     }
     Ok(false)
 }

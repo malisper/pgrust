@@ -11241,6 +11241,33 @@ fn alter_table_add_foreign_key_without_constraint_name_accepts_no_space_before_c
 }
 
 #[test]
+fn create_table_unique_nulls_not_distinct_treats_nulls_as_conflicting() {
+    let base = temp_dir("unique_nulls_not_distinct");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+
+    db.execute(
+        1,
+        "create table items (id int4 unique nulls not distinct, note text)",
+    )
+    .unwrap();
+    db.execute(1, "insert into items (note) values ('first')").unwrap();
+
+    match db.execute(1, "insert into items (note) values ('second')") {
+        Err(ExecError::UniqueViolation { constraint }) if constraint == "items_id_key" => {}
+        other => panic!("expected null unique violation, got {other:?}"),
+    }
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indnullsnotdistinct from pg_index i join pg_class c on c.oid = i.indexrelid where c.relname = 'items_id_key'"
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
 fn foreign_keys_support_enforced_not_valid_on_create_and_alter_table_add() {
     let base = temp_dir("foreign_keys_enforced_not_valid");
     let db = Database::open(&base, 16).unwrap();
@@ -13054,6 +13081,18 @@ fn durable_open_bootstraps_control_file_and_clean_shutdown_marks_shutdown() {
 
     let control = ControlFileStore::load(&base).unwrap().snapshot();
     assert_eq!(control.state, ControlFileState::ShutDown);
+}
+
+#[test]
+fn durable_open_ignores_non_cluster_files_in_empty_data_dir() {
+    use crate::backend::access::transam::ControlFileStore;
+
+    let base = scratch_temp_dir("control_file_ignores_junk");
+    std::fs::write(base.join("server.log"), b"bootstrap probe").unwrap();
+
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(32)).unwrap();
+    assert!(ControlFileStore::path(&base).exists());
+    assert_eq!(query_rows(&db, 1, "select 1"), vec![vec![Value::Int32(1)]]);
 }
 
 #[test]
