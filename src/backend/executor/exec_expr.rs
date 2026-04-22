@@ -95,6 +95,7 @@ use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp,
 };
 use crate::backend::utils::misc::checkpoint::checkpoint_stats_value;
+use crate::include::access::toast_compression::ToastCompressionId;
 use crate::include::catalog::{
     CURRENT_DATABASE_OID, FLOAT8_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID,
     builtin_scalar_function_for_proc_oid,
@@ -103,7 +104,7 @@ use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
 use crate::include::nodes::primnodes::{
     BoolExpr, BoolExprType, FuncExpr, INDEX_VAR, INNER_VAR, OUTER_VAR, OpExpr, OpExprKind,
     SELF_ITEM_POINTER_ATTR_NO, ScalarArrayOpExpr, ScalarFunctionImpl, SubLinkType,
-    TABLE_OID_ATTR_NO, attrno_index,
+    TABLE_OID_ATTR_NO, attrno_index, is_executor_special_varno,
 };
 use crate::pgrust::compact_string::CompactString;
 use crate::pl::plpgsql::execute_user_defined_scalar_function;
@@ -726,6 +727,87 @@ fn eval_pg_get_expr(values: &[Value]) -> Result<Value, ExecError> {
         _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "pg_get_expr(pg_node_tree, oid [, pretty])",
             actual: format!("PgGetExpr({} args)", values.len()),
+        })),
+    }
+}
+
+fn current_slot_raw_attr_bytes<'a>(
+    slot: &'a TupleSlot,
+    index: usize,
+) -> Result<Option<&'a [u8]>, ExecError> {
+    match &slot.kind {
+        SlotKind::BufferHeapTuple {
+            attr_descs,
+            tuple_ptr,
+            tuple_len,
+            ..
+        } => {
+            let bytes: &'a [u8] = unsafe { std::slice::from_raw_parts(*tuple_ptr, *tuple_len) };
+            let raw = crate::include::access::htup::deform_raw(bytes, attr_descs)?;
+            Ok(raw.get(index).copied().flatten())
+        }
+        SlotKind::HeapTuple {
+            attr_descs, tuple, ..
+        } => {
+            let raw = tuple.deform(attr_descs)?;
+            Ok(raw.get(index).copied().flatten())
+        }
+        SlotKind::Virtual | SlotKind::Empty => Ok(None),
+    }
+}
+
+fn compression_method_name_value(method: u32) -> Result<Value, ExecError> {
+    match ToastCompressionId::from_u32(method) {
+        Some(ToastCompressionId::Pglz) => Ok(Value::Text("pglz".into())),
+        Some(ToastCompressionId::Lz4) => Ok(Value::Text("lz4".into())),
+        Some(ToastCompressionId::Invalid) | None => Err(ExecError::DetailedError {
+            message: format!("invalid compression method id {method}"),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        }),
+    }
+}
+
+fn eval_pg_column_compression_raw(raw: &[u8]) -> Result<Value, ExecError> {
+    if crate::include::varatt::is_ondisk_toast_pointer(raw) {
+        let pointer = crate::include::varatt::decode_ondisk_toast_pointer(raw).ok_or_else(|| {
+            ExecError::DetailedError {
+                message: "invalid on-disk toast pointer".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            }
+        })?;
+        if !crate::include::varatt::varatt_external_is_compressed(pointer) {
+            return Ok(Value::Null);
+        }
+        return compression_method_name_value(
+            crate::include::varatt::varatt_external_get_compression_method(pointer),
+        );
+    }
+    if crate::include::varatt::is_compressed_inline_datum(raw) {
+        let method =
+            crate::include::varatt::compressed_inline_compression_method(raw).ok_or_else(|| {
+                ExecError::DetailedError {
+                    message: "invalid compressed inline datum".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "XX000",
+                }
+            })?;
+        return compression_method_name_value(method);
+    }
+    Ok(Value::Null)
+}
+
+fn eval_pg_column_compression_values(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null] => Ok(Value::Null),
+        [_] => Ok(Value::Null),
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_column_compression(any)",
+            actual: format!("PgColumnCompression({} args)", values.len()),
         })),
     }
 }
@@ -1973,6 +2055,7 @@ fn eval_plpgsql_builtin_function(
             hint: None,
             sqlstate: "0A000",
         }),
+        BuiltinScalarFunction::PgColumnCompression => eval_pg_column_compression_values(&values),
         BuiltinScalarFunction::PgSizePretty => eval_pg_size_pretty_function(&values),
         BuiltinScalarFunction::PgSizeBytes => eval_pg_size_bytes_function(&values),
         BuiltinScalarFunction::Lower => eval_lower_function(&values),
@@ -2724,6 +2807,16 @@ fn eval_builtin_function(
     if let Some(result) = eval_json_record_builtin_function(func, result_type, args, slot, ctx) {
         return result;
     }
+    if matches!(func, BuiltinScalarFunction::PgColumnCompression)
+        && let [Expr::Var(var)] = args
+        && var.varlevelsup == 0
+        && (var.varno == OUTER_VAR || !is_executor_special_varno(var.varno))
+        && var.varattno > 0
+        && let Some(index) = attrno_index(var.varattno)
+        && let Some(raw) = current_slot_raw_attr_bytes(slot, index)?
+    {
+        return eval_pg_column_compression_raw(raw);
+    }
     let values = args
         .iter()
         .map(|arg| eval_expr(arg, slot, ctx))
@@ -3033,6 +3126,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::CurrentDatabase => {
             Ok(Value::Text(ctx.current_database_name.clone().into()))
         }
+        BuiltinScalarFunction::PgColumnCompression => eval_pg_column_compression_values(&values),
         BuiltinScalarFunction::ObjDescription => eval_obj_description(&values, ctx),
         BuiltinScalarFunction::PgGetExpr => eval_pg_get_expr(&values),
         BuiltinScalarFunction::PgRelationIsPublishable => {
