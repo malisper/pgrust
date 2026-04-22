@@ -1,4 +1,7 @@
 use super::*;
+use crate::backend::catalog::loader::load_physical_catalog_rows_visible_scoped;
+use crate::backend::catalog::persistence::sync_catalog_rows_subset;
+use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::commands::analyze::collect_analyze_stats;
 use crate::backend::executor::{ExecError, Value};
 use crate::backend::parser::{BoundRelation, CatalogLookup, ParseError, SqlType, SqlTypeKind};
@@ -7,8 +10,8 @@ use crate::backend::utils::misc::notices::{
     clear_notices as clear_backend_notices, take_notices as take_backend_notices,
 };
 use crate::include::catalog::{
-    FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, PG_CLASS_RELATION_OID,
-    PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID,
+    BootstrapCatalogKind, FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID,
+    PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
 };
 use crate::include::nodes::parsenodes::MaintenanceTarget;
 use crate::include::nodes::primnodes::QueryColumn;
@@ -1062,6 +1065,82 @@ fn session_query_rows(session: &mut Session, db: &Database, sql: &str) -> Vec<Ve
     }
 }
 
+fn create_plain_test_aggregates(db: &Database) {
+    db.execute(
+        1,
+        "create aggregate newavg ( \
+         sfunc = int4_avg_accum, basetype = int4, stype = _int8, \
+         finalfunc = int8_avg, initcond1 = '{0,0}')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create aggregate newsum ( \
+         sfunc1 = int4pl, basetype = int4, stype1 = int4, \
+         initcond1 = '0')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create aggregate newcnt (*) ( \
+         sfunc = int8inc, stype = int8, \
+         initcond = '0', parallel = safe)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create aggregate oldcnt ( \
+         sfunc = int8inc, basetype = 'ANY', stype = int8, \
+         initcond = '0')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create aggregate newcnt (\"any\") ( \
+         sfunc = int8inc_any, stype = int8, \
+         initcond = '0')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function sum3(int8, int8, int8) returns int8 as \
+         'select $1 + $2 + $3' language sql strict immutable",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create aggregate sum2(int8, int8) ( \
+         sfunc = sum3, stype = int8, \
+         initcond = '0')",
+    )
+    .unwrap();
+}
+
+fn create_plain_test_aggregate_inputs(db: &Database) {
+    db.execute(1, "create table agg_input (four int4, q1 int8, q2 int8)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into agg_input values \
+         (1, 10, 100), \
+         (2, 1, 2), \
+         (null, null, null), \
+         (3, 5, 6)",
+    )
+    .unwrap();
+}
+
+fn visible_aggregate_row(
+    db: &Database,
+    client_id: ClientId,
+    aggfnoid: u32,
+) -> Option<PgAggregateRow> {
+    db.backend_catcache(client_id, None)
+        .unwrap()
+        .aggregate_by_fnoid(aggfnoid)
+        .cloned()
+}
+
 fn take_notice_messages() -> Vec<String> {
     take_notices()
         .into_iter()
@@ -1961,7 +2040,9 @@ fn advisory_session_and_xact_locks_on_same_key_do_not_block_same_backend() {
         ]
     );
 
-    session.execute(&db, "select pg_advisory_unlock_all()").unwrap();
+    session
+        .execute(&db, "select pg_advisory_unlock_all()")
+        .unwrap();
     session.execute(&db, "begin").unwrap();
     session
         .execute(
@@ -1996,7 +2077,10 @@ fn advisory_unlock_false_queues_warning() {
 
     session.execute(&db, "begin").unwrap();
     session
-        .execute(&db, "select pg_advisory_xact_lock(1), pg_advisory_xact_lock_shared(2)")
+        .execute(
+            &db,
+            "select pg_advisory_xact_lock(1), pg_advisory_xact_lock_shared(2)",
+        )
         .unwrap();
 
     clear_backend_notices();
@@ -4109,9 +4193,14 @@ fn create_view_supports_check_option_and_or_replace() {
     let db = Database::open(&dir, 128).unwrap();
     let mut session = Session::new(1);
 
-    session.execute(&db, "create table base_tbl(a int)").unwrap();
     session
-        .execute(&db, "create view rw_view1 as select * from base_tbl where a > 0")
+        .execute(&db, "create table base_tbl(a int)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view rw_view1 as select * from base_tbl where a > 0",
+        )
         .unwrap();
     session
         .execute(
@@ -4135,12 +4224,20 @@ fn create_view_supports_check_option_and_or_replace() {
         ]
     );
 
-    session.execute(&db, "insert into rw_view2 values (5)").unwrap();
+    session
+        .execute(&db, "insert into rw_view2 values (5)")
+        .unwrap();
     match session.execute(&db, "insert into rw_view2 values (-5)") {
         Err(ExecError::DetailedError {
-            message, detail, sqlstate, ..
+            message,
+            detail,
+            sqlstate,
+            ..
         }) => {
-            assert_eq!(message, "new row violates check option for view \"rw_view1\"");
+            assert_eq!(
+                message,
+                "new row violates check option for view \"rw_view1\""
+            );
             assert_eq!(detail.as_deref(), Some("Failing row contains (-5)."));
             assert_eq!(sqlstate, "44000");
         }
@@ -4148,9 +4245,15 @@ fn create_view_supports_check_option_and_or_replace() {
     }
     match session.execute(&db, "insert into rw_view2 values (15)") {
         Err(ExecError::DetailedError {
-            message, detail, sqlstate, ..
+            message,
+            detail,
+            sqlstate,
+            ..
         }) => {
-            assert_eq!(message, "new row violates check option for view \"rw_view2\"");
+            assert_eq!(
+                message,
+                "new row violates check option for view \"rw_view2\""
+            );
             assert_eq!(detail.as_deref(), Some("Failing row contains (15)."));
             assert_eq!(sqlstate, "44000");
         }
@@ -4168,16 +4271,24 @@ fn create_view_supports_check_option_and_or_replace() {
         .unwrap();
     match session.execute(&db, "insert into rw_view2 values (20)") {
         Err(ExecError::DetailedError {
-            message, detail, sqlstate, ..
+            message,
+            detail,
+            sqlstate,
+            ..
         }) => {
-            assert_eq!(message, "new row violates check option for view \"rw_view2\"");
+            assert_eq!(
+                message,
+                "new row violates check option for view \"rw_view2\""
+            );
             assert_eq!(detail.as_deref(), Some("Failing row contains (20)."));
             assert_eq!(sqlstate, "44000");
         }
         other => panic!("expected local check-option violation, got {other:?}"),
     }
 
-    session.execute(&db, "create table t1(a int, b text)").unwrap();
+    session
+        .execute(&db, "create table t1(a int, b text)")
+        .unwrap();
     session
         .execute(&db, "create view v1 as select null::int as a")
         .unwrap();
@@ -4192,7 +4303,10 @@ fn create_view_supports_check_option_and_or_replace() {
         .unwrap();
     match session.execute(&db, "insert into v1 values (-1, 'bad')") {
         Err(ExecError::DetailedError {
-            message, detail, sqlstate, ..
+            message,
+            detail,
+            sqlstate,
+            ..
         }) => {
             assert_eq!(message, "new row violates check option for view \"v1\"");
             assert_eq!(detail.as_deref(), Some("Failing row contains (-1, bad)."));
@@ -5522,6 +5636,331 @@ fn comment_on_table_upserts_and_clears_pg_description() {
 }
 
 #[test]
+fn create_aggregate_supports_plain_custom_aggregate_execution() {
+    let base = temp_dir("create_aggregate_execution");
+    let db = Database::open(&base, 16).unwrap();
+
+    create_plain_test_aggregates(&db);
+    create_plain_test_aggregate_inputs(&db);
+    let newavg_oid = int_value(
+        &query_rows(
+            &db,
+            1,
+            "select oid from pg_proc where proname = 'newavg' and prokind = 'a'",
+        )[0][0],
+    ) as u32;
+    let snapshot = db
+        .txns
+        .read()
+        .snapshot(crate::backend::access::transam::xact::INVALID_TRANSACTION_ID)
+        .unwrap();
+    let txns = db.txns.read();
+    let visible_rows = load_physical_catalog_rows_visible_scoped(
+        &db.cluster.base_dir,
+        &db.pool,
+        &txns,
+        &snapshot,
+        1,
+        db.database_oid,
+        &crate::include::catalog::bootstrap_catalog_kinds(),
+    )
+    .unwrap();
+    let local_catcache = db
+        .catalog
+        .read()
+        .catcache_with_snapshot(&db.pool, &txns, &snapshot, 1)
+        .unwrap();
+    let backend_catcache = db.backend_catcache(1, None).unwrap();
+    assert!(
+        visible_rows
+            .aggregates
+            .iter()
+            .any(|row| row.aggfnoid == newavg_oid),
+        "visible aggregate rows should include newavg; got {:?}",
+        visible_rows
+            .aggregates
+            .iter()
+            .map(|row| row.aggfnoid)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        local_catcache.aggregate_by_fnoid(newavg_oid).is_some(),
+        "local catcache aggregate rows: {:?}",
+        local_catcache
+            .aggregate_rows()
+            .into_iter()
+            .map(|row| row.aggfnoid)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        backend_catcache.aggregate_by_fnoid(newavg_oid).is_some(),
+        "backend catcache aggregate rows: {:?}",
+        backend_catcache
+            .aggregate_rows()
+            .into_iter()
+            .map(|row| row.aggfnoid)
+            .collect::<Vec<_>>()
+    );
+    drop(txns);
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select \
+             newavg(four), \
+             newsum(four), \
+             newcnt(four), \
+             newcnt(*), \
+             oldcnt(*), \
+             sum2(q1, q2) \
+             from agg_input"
+        ),
+        vec![vec![
+            Value::Numeric("2".into()),
+            Value::Int32(6),
+            Value::Int64(3),
+            Value::Int64(4),
+            Value::Int64(4),
+            Value::Int64(124),
+        ]]
+    );
+}
+
+#[test]
+fn reopen_backfills_missing_pg_aggregate_bootstrap_rows() {
+    let base = temp_dir("aggregate_backfill_reopen");
+    let db = Database::open(&base, 16).unwrap();
+    let db_oid = db.database_oid;
+    drop(db);
+
+    sync_catalog_rows_subset(
+        &base,
+        &PhysicalCatalogRows::default(),
+        db_oid,
+        &[BootstrapCatalogKind::PgAggregate],
+    )
+    .unwrap();
+
+    let reopened = Database::open(&base, 16).unwrap();
+    assert!(
+        reopened
+            .backend_catcache(1, None)
+            .unwrap()
+            .aggregate_by_fnoid(6219)
+            .is_some()
+    );
+    assert_eq!(
+        query_rows(
+            &reopened,
+            1,
+            "select count(*) from pg_aggregate where aggfnoid = 6219"
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+}
+
+#[test]
+fn reopen_missing_pg_aggregate_custom_rows_is_corrupt() {
+    let base = temp_dir("aggregate_backfill_custom_corrupt");
+    let db = Database::open(&base, 16).unwrap();
+    let db_oid = db.database_oid;
+
+    create_plain_test_aggregates(&db);
+    drop(db);
+
+    sync_catalog_rows_subset(
+        &base,
+        &PhysicalCatalogRows::default(),
+        db_oid,
+        &[BootstrapCatalogKind::PgAggregate],
+    )
+    .unwrap();
+
+    match Database::open(&base, 16) {
+        Err(DatabaseError::Catalog(crate::backend::catalog::CatalogError::Corrupt(
+            "missing pg_aggregate row for custom aggregate",
+        ))) => {}
+        Err(err) => panic!("unexpected reopen error: {err:?}"),
+        Ok(_) => panic!("expected reopen to fail"),
+    }
+}
+
+#[test]
+fn comment_on_aggregate_uses_pg_proc_description_rows() {
+    let base = temp_dir("comment_on_aggregate");
+    let db = Database::open(&base, 16).unwrap();
+
+    create_plain_test_aggregates(&db);
+
+    db.execute(1, "comment on aggregate newcnt(*) is 'an agg(*) comment'")
+        .unwrap();
+    db.execute(
+        1,
+        "comment on aggregate newcnt(\"any\") is 'an agg(any) comment'",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            &format!(
+                "select p.pronargs, d.description \
+                 from pg_description d \
+                 join pg_proc p on p.oid = d.objoid \
+                 where p.proname = 'newcnt' \
+                   and p.prokind = 'a' \
+                   and d.classoid = {} \
+                   and d.objsubid = 0 \
+                 order by p.pronargs",
+                PG_PROC_RELATION_OID
+            )
+        ),
+        vec![
+            vec![Value::Int16(0), Value::Text("an agg(*) comment".into())],
+            vec![Value::Int16(1), Value::Text("an agg(any) comment".into())],
+        ]
+    );
+
+    db.execute(1, "comment on aggregate newcnt(*) is null")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            &format!(
+                "select p.pronargs, d.description \
+                 from pg_description d \
+                 join pg_proc p on p.oid = d.objoid \
+                 where p.proname = 'newcnt' \
+                   and p.prokind = 'a' \
+                   and d.classoid = {} \
+                   and d.objsubid = 0 \
+                 order by p.pronargs",
+                PG_PROC_RELATION_OID
+            )
+        ),
+        vec![vec![
+            Value::Int16(1),
+            Value::Text("an agg(any) comment".into()),
+        ]]
+    );
+}
+
+#[test]
+fn drop_aggregate_removes_proc_and_aggregate_rows() {
+    let base = temp_dir("drop_aggregate_rows");
+    let db = Database::open(&base, 16).unwrap();
+
+    create_plain_test_aggregates(&db);
+    create_plain_test_aggregate_inputs(&db);
+
+    let proc_oid = int_value(
+        &query_rows(
+            &db,
+            1,
+            "select oid \
+             from pg_proc \
+             where proname = 'newcnt' and prokind = 'a' and pronargs = 0",
+        )[0][0],
+    );
+    assert!(visible_aggregate_row(&db, 1, proc_oid as u32).is_some());
+
+    db.execute(1, "drop aggregate newcnt(*)").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            &format!("select count(*) from pg_proc where oid = {proc_oid}"),
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+    assert_eq!(visible_aggregate_row(&db, 1, proc_oid as u32), None);
+
+    match db.execute(1, "select newcnt(*) from agg_input") {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual }))
+            if expected.contains("supported") && actual == "newcnt" => {}
+        other => panic!("expected dropped aggregate call failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_or_replace_aggregate_preserves_proc_oid() {
+    let base = temp_dir("replace_aggregate_oid");
+    let db = Database::open(&base, 16).unwrap();
+
+    create_plain_test_aggregates(&db);
+    create_plain_test_aggregate_inputs(&db);
+
+    let before_rows = query_rows(
+        &db,
+        1,
+        "select oid, proparallel \
+         from pg_proc \
+         where proname = 'sum2'",
+    );
+    assert_eq!(before_rows.len(), 1);
+    let before_oid = int_value(&before_rows[0][0]);
+    assert_eq!(before_rows[0][1], Value::Text("u".into()));
+    assert_eq!(
+        visible_aggregate_row(&db, 1, before_oid as u32)
+            .expect("sum2 aggregate metadata should exist")
+            .agginitval,
+        Some("0".into())
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select sum2(q1, q2) from agg_input"),
+        vec![vec![Value::Int64(124)]]
+    );
+
+    db.execute(
+        1,
+        "create or replace aggregate sum2(int8, int8) ( \
+         sfunc = sum3, stype = int8, \
+         initcond = '10', parallel = safe)",
+    )
+    .unwrap();
+
+    let after_rows = query_rows(
+        &db,
+        1,
+        "select oid, proparallel \
+         from pg_proc \
+         where proname = 'sum2'",
+    );
+    assert_eq!(after_rows.len(), 1);
+    assert_eq!(int_value(&after_rows[0][0]), before_oid);
+    assert_eq!(after_rows[0][1], Value::Text("s".into()));
+    assert_eq!(
+        visible_aggregate_row(&db, 1, before_oid as u32)
+            .expect("sum2 aggregate metadata should still exist")
+            .agginitval,
+        Some("10".into())
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select sum2(q1, q2) from agg_input"),
+        vec![vec![Value::Int64(134)]]
+    );
+}
+
+#[test]
+fn custom_aggregate_window_execution_is_rejected() {
+    let base = temp_dir("aggregate_window_rejected");
+    let db = Database::open(&base, 16).unwrap();
+
+    create_plain_test_aggregates(&db);
+    create_plain_test_aggregate_inputs(&db);
+
+    match db.execute(1, "select newcnt(four) over () from agg_input") {
+        Err(ExecError::Parse(ParseError::FeatureNotSupported(feature)))
+            if feature == "window execution for custom aggregate newcnt" => {}
+        other => panic!("expected custom aggregate window rejection, got {other:?}"),
+    }
+}
+
+#[test]
 fn comment_on_constraint_upserts_and_clears_pg_description() {
     let base = temp_dir("comment_on_constraint");
     let db = Database::open(&base, 16).unwrap();
@@ -5616,8 +6055,11 @@ fn comment_on_trigger_upserts_and_clears_pg_description() {
     )
     .unwrap();
 
-    db.execute(1, "comment on trigger item_trigger on items is 'hello world'")
-        .unwrap();
+    db.execute(
+        1,
+        "comment on trigger item_trigger on items is 'hello world'",
+    )
+    .unwrap();
     assert_eq!(
         query_rows(
             &db,
@@ -5630,8 +6072,11 @@ fn comment_on_trigger_upserts_and_clears_pg_description() {
         vec![vec![Value::Text("hello world".into())]]
     );
 
-    db.execute(1, "comment on trigger item_trigger on items is 'second comment'")
-        .unwrap();
+    db.execute(
+        1,
+        "comment on trigger item_trigger on items is 'second comment'",
+    )
+    .unwrap();
     assert_eq!(
         query_rows(
             &db,
@@ -7066,8 +7511,11 @@ fn alter_index_alter_column_set_statistics_updates_expression_column_and_resets(
     db.execute(1, "create index attmp_idx on attmp (a, (d + e), b)")
         .unwrap();
 
-    db.execute(1, "alter index attmp_idx alter column 2 set statistics 1000")
-        .unwrap();
+    db.execute(
+        1,
+        "alter index attmp_idx alter column 2 set statistics 1000",
+    )
+    .unwrap();
     assert_eq!(
         query_rows(
             &db,
@@ -7103,7 +7551,10 @@ fn alter_index_alter_column_set_statistics_rejects_non_expression_and_missing_co
     db.execute(1, "create index attmp_idx on attmp (a, (d + e), b)")
         .unwrap();
 
-    match db.execute(1, "alter index attmp_idx alter column 1 set statistics 1000") {
+    match db.execute(
+        1,
+        "alter index attmp_idx alter column 1 set statistics 1000",
+    ) {
         Err(ExecError::DetailedError {
             message,
             hint: Some(hint),
@@ -7116,7 +7567,10 @@ fn alter_index_alter_column_set_statistics_rejects_non_expression_and_missing_co
         other => panic!("expected non-expression index-column error, got {other:?}"),
     }
 
-    match db.execute(1, "alter index attmp_idx alter column 3 set statistics 1000") {
+    match db.execute(
+        1,
+        "alter index attmp_idx alter column 3 set statistics 1000",
+    ) {
         Err(ExecError::DetailedError {
             message,
             hint: Some(hint),
@@ -7129,7 +7583,10 @@ fn alter_index_alter_column_set_statistics_rejects_non_expression_and_missing_co
         other => panic!("expected non-expression index-column error, got {other:?}"),
     }
 
-    match db.execute(1, "alter index attmp_idx alter column 4 set statistics 1000") {
+    match db.execute(
+        1,
+        "alter index attmp_idx alter column 4 set statistics 1000",
+    ) {
         Err(ExecError::DetailedError {
             message, sqlstate, ..
         }) if message == "column number 4 of relation \"attmp_idx\" does not exist"
@@ -7182,8 +7639,11 @@ fn alter_index_and_table_set_statistics_clamp_and_emit_warning() {
     db.execute(1, "create table items (i int4)").unwrap();
 
     clear_backend_notices();
-    db.execute(1, "alter index attmp_idx alter column 2 set statistics 50000")
-        .unwrap();
+    db.execute(
+        1,
+        "alter index attmp_idx alter column 2 set statistics 50000",
+    )
+    .unwrap();
     assert_eq!(
         query_rows(
             &db,
@@ -15169,9 +15629,7 @@ fn drop_function_uses_search_path_and_signature() {
             "create function add_one(x int4) returns int4 language sql as $$ select x + 1 $$",
         )
         .unwrap();
-    session
-        .execute(&db, "drop function add_one(int4)")
-        .unwrap();
+    session.execute(&db, "drop function add_one(int4)").unwrap();
 
     let visible = db.backend_catcache(1, None).unwrap();
     assert!(
@@ -15186,9 +15644,14 @@ fn drop_table_cascade_notice_omits_temp_schema_name() {
     let db = Database::open(&base, 16).unwrap();
     let mut session = Session::new(1);
 
-    session.execute(&db, "create temp table some_tab (id int4)").unwrap();
     session
-        .execute(&db, "create temp table some_tab_child () inherits (some_tab)")
+        .execute(&db, "create temp table some_tab (id int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create temp table some_tab_child () inherits (some_tab)",
+        )
         .unwrap();
     take_backend_notice_messages();
 
@@ -18396,7 +18859,11 @@ fn plpgsql_alias_record_select_into_and_update_work() {
         vec![vec![Value::Int32(0)]]
     );
     assert_eq!(
-        query_rows(&db, 1, "select backlink from slots where slotname = 'PS.base.a1'"),
+        query_rows(
+            &db,
+            1,
+            "select backlink from slots where slotname = 'PS.base.a1'"
+        ),
         vec![vec![Value::Text("WS.001.1a".into())]]
     );
 }

@@ -283,6 +283,41 @@ pub fn proc_depend_rows(
     rows
 }
 
+pub fn aggregate_depend_rows(
+    proc_oid: u32,
+    namespace_oid: u32,
+    result_type_oid: u32,
+    arg_type_oids: &[u32],
+    transfn_oid: u32,
+    finalfn_oid: u32,
+) -> Vec<PgDependRow> {
+    let mut rows = proc_depend_rows(proc_oid, namespace_oid, result_type_oid, arg_type_oids);
+    if transfn_oid != 0 {
+        rows.push(PgDependRow {
+            classid: PG_PROC_RELATION_OID,
+            objid: proc_oid,
+            objsubid: 0,
+            refclassid: PG_PROC_RELATION_OID,
+            refobjid: transfn_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        });
+    }
+    if finalfn_oid != 0 {
+        rows.push(PgDependRow {
+            classid: PG_PROC_RELATION_OID,
+            objid: proc_oid,
+            objsubid: 0,
+            refclassid: PG_PROC_RELATION_OID,
+            refobjid: finalfn_oid,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        });
+    }
+    sort_pg_depend_rows(&mut rows);
+    rows
+}
+
 pub fn publication_rel_depend_rows(
     publication_rel_oid: u32,
     publication_oid: u32,

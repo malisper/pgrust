@@ -14,10 +14,10 @@ use super::expr_money::{
 use super::expr_multirange::{multirange_from_range, parse_multirange_text};
 use super::expr_range::{parse_range_text, render_range_text};
 use super::node_types::*;
-use crate::backend::libpq::pqformat::{FloatFormatOptions, format_float4_text, format_float8_text};
 use crate::backend::executor::jsonb::{
     parse_json_text_input, parse_jsonb_text, parse_jsonb_text_with_limit, render_jsonb_bytes,
 };
+use crate::backend::libpq::pqformat::{FloatFormatOptions, format_float4_text, format_float8_text};
 use crate::backend::parser::{RawTypeName, SqlType, SqlTypeKind, parse_type_name};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::time::date::{
@@ -2477,21 +2477,19 @@ pub(crate) fn cast_value_with_source_type_and_config(
         | Value::Polygon(_)
         | Value::Circle(_) => unreachable!("geometry casts handled before scalar match"),
         Value::Array(items) => match ty.kind {
-            SqlTypeKind::Text
-            | SqlTypeKind::Name
-            | SqlTypeKind::Char
-            | SqlTypeKind::Varchar => Ok(Value::Text(CompactString::from_owned(
-                crate::backend::executor::value_io::format_array_text(&items),
-            ))),
+            SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar => {
+                Ok(Value::Text(CompactString::from_owned(
+                    crate::backend::executor::value_io::format_array_text(&items),
+                )))
+            }
             _ => Ok(Value::Array(items)),
         },
         Value::PgArray(array) => match ty.kind {
-            SqlTypeKind::Text
-            | SqlTypeKind::Name
-            | SqlTypeKind::Char
-            | SqlTypeKind::Varchar => Ok(Value::Text(CompactString::from_owned(
-                crate::backend::executor::value_io::format_array_value_text(&array),
-            ))),
+            SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar => {
+                Ok(Value::Text(CompactString::from_owned(
+                    crate::backend::executor::value_io::format_array_value_text(&array),
+                )))
+            }
             _ => Ok(Value::PgArray(array)),
         },
         Value::Record(record) => Ok(Value::Record(record)),
@@ -3153,9 +3151,9 @@ mod tests {
     };
     use crate::backend::executor::exec_expr::parse_numeric_text;
     use crate::backend::executor::{ExecError, Value};
-    use crate::include::nodes::datum::ArrayValue;
     use crate::backend::parser::{SqlType, SqlTypeKind};
     use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+    use crate::include::nodes::datum::ArrayValue;
 
     #[test]
     fn float4_text_input_rounds_at_float4_width() {

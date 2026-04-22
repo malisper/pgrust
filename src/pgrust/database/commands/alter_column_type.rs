@@ -4,8 +4,8 @@ use crate::backend::commands::tablecmds::{
     collect_matching_rows_heap, insert_index_entry_for_row, reinitialize_index_relation,
 };
 use crate::backend::executor::value_io::tuple_from_values;
-use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::backend::executor::{ExecutorContext, RelationDesc, TupleSlot, eval_expr};
+use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::{BTREE_AM_OID, PG_CATALOG_NAMESPACE_OID, default_btree_opclass_oid};
 use crate::pgrust::database::ddl::{

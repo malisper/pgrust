@@ -1,13 +1,14 @@
 use super::super::*;
+use super::create::{aggregate_signature_arg_oids, resolve_aggregate_proc_rows};
+use crate::backend::parser::{parse_type_name, resolve_raw_type_name};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail};
-use crate::backend::parser::{parse_type_name, resolve_raw_type_name};
 use crate::include::catalog::{
     CONSTRAINT_FOREIGN, DEPENDENCY_NORMAL, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
     PG_REWRITE_RELATION_OID, PgConstraintRow, PgRewriteRow,
 };
 use crate::include::nodes::parsenodes::{
-    DropFunctionStatement, DropIndexStatement, DropSchemaStatement,
+    DropAggregateStatement, DropFunctionStatement, DropIndexStatement, DropSchemaStatement,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -421,6 +422,100 @@ fn plan_drop_table_relation(
 }
 
 impl Database {
+    pub(crate) fn execute_drop_aggregate_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        drop_stmt: &DropAggregateStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_drop_aggregate_stmt_in_transaction_with_search_path(
+            client_id,
+            drop_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_drop_aggregate_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        drop_stmt: &DropAggregateStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let txn_ctx = Some((xid, cid));
+        let catalog = self.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
+        let arg_oids = aggregate_signature_arg_oids(&catalog, &drop_stmt.signature)
+            .map_err(ExecError::Parse)?;
+        let schema_oid = match &drop_stmt.schema_name {
+            Some(schema_name) => Some(
+                self.visible_namespace_oid_by_name(client_id, txn_ctx, schema_name)
+                    .ok_or_else(|| ExecError::DetailedError {
+                        message: format!("schema \"{schema_name}\" does not exist"),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "3F000",
+                    })?,
+            ),
+            None => None,
+        };
+        let matches =
+            resolve_aggregate_proc_rows(&catalog, &drop_stmt.aggregate_name, schema_oid, &arg_oids);
+        let proc_row = match matches.as_slice() {
+            [(row, _agg)] => row.clone(),
+            [] if drop_stmt.if_exists => {
+                push_notice(format!(
+                    "aggregate {} does not exist, skipping",
+                    drop_stmt.aggregate_name
+                ));
+                return Ok(StatementResult::AffectedRows(0));
+            }
+            [] => {
+                return Err(ExecError::DetailedError {
+                    message: format!("aggregate {} does not exist", drop_stmt.aggregate_name),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42883",
+                });
+            }
+            _ => {
+                return Err(ExecError::DetailedError {
+                    message: format!("aggregate name {} is ambiguous", drop_stmt.aggregate_name),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42725",
+                });
+            }
+        };
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let (_dropped_row, effect) = self
+            .catalog
+            .write()
+            .drop_proc_by_oid_mvcc(proc_row.oid, &ctx)
+            .map_err(map_catalog_error)?;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
     pub(crate) fn execute_drop_function_stmt_with_search_path(
         &self,
         client_id: ClientId,

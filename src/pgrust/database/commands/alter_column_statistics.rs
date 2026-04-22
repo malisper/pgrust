@@ -170,7 +170,9 @@ impl Database {
         ensure_relation_owner(self, client_id, &relation, &alter_stmt.index_name)?;
         let described = self
             .describe_relation_by_oid(client_id, Some((xid, cid)), relation.relation_oid)
-            .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(alter_stmt.index_name.clone())))?;
+            .ok_or_else(|| {
+                ExecError::Parse(ParseError::TableDoesNotExist(alter_stmt.index_name.clone()))
+            })?;
         let display_name = self
             .relation_display_name(
                 client_id,

@@ -1,7 +1,100 @@
 use super::*;
 use crate::include::catalog::multirange_type_ref_for_sql_type;
 
-pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CollectedAggregate {
+    pub name: String,
+    pub args: SqlCallArgs,
+    pub order_by: Vec<OrderByItem>,
+    pub distinct: bool,
+    pub func_variadic: bool,
+    pub filter: Option<SqlExpr>,
+}
+
+impl CollectedAggregate {
+    pub(super) fn matches_call(
+        &self,
+        name: &str,
+        args: &SqlCallArgs,
+        order_by: &[OrderByItem],
+        distinct: bool,
+        func_variadic: bool,
+        filter: Option<&SqlExpr>,
+    ) -> bool {
+        self.name.eq_ignore_ascii_case(name)
+            && self.args == *args
+            && self.order_by == order_by
+            && self.distinct == distinct
+            && self.func_variadic == func_variadic
+            && self.filter.as_ref() == filter
+    }
+}
+
+fn aggregate_call_matches_catalog(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+    args: &SqlCallArgs,
+) -> bool {
+    if let Some(func) = resolve_builtin_aggregate(name) {
+        return builtin_aggregate_accepts_call(func, args);
+    }
+
+    catalog.proc_rows_by_name(name).into_iter().any(|row| {
+        row.prokind == 'a'
+            && if args.is_star() {
+                row.pronargs == 0
+            } else if row.provariadic == 0 {
+                row.pronargs as usize == args.args().len()
+            } else {
+                let fixed = row.pronargs.saturating_sub(1) as usize;
+                args.args().len() >= fixed
+            }
+    })
+}
+
+fn builtin_aggregate_accepts_call(func: AggFunc, args: &SqlCallArgs) -> bool {
+    let arg_count = args.args().len();
+    if args.is_star() {
+        return matches!(func, AggFunc::Count);
+    }
+    match func {
+        AggFunc::Count => arg_count <= 1,
+        AggFunc::AnyValue
+        | AggFunc::Sum
+        | AggFunc::Avg
+        | AggFunc::VarPop
+        | AggFunc::VarSamp
+        | AggFunc::StddevPop
+        | AggFunc::StddevSamp
+        | AggFunc::BoolAnd
+        | AggFunc::BoolOr
+        | AggFunc::Min
+        | AggFunc::Max
+        | AggFunc::ArrayAgg
+        | AggFunc::JsonAgg
+        | AggFunc::JsonbAgg
+        | AggFunc::RangeAgg
+        | AggFunc::XmlAgg
+        | AggFunc::RangeIntersectAgg => arg_count == 1,
+        AggFunc::RegrCount
+        | AggFunc::RegrSxx
+        | AggFunc::RegrSyy
+        | AggFunc::RegrSxy
+        | AggFunc::RegrAvgX
+        | AggFunc::RegrAvgY
+        | AggFunc::RegrR2
+        | AggFunc::RegrSlope
+        | AggFunc::RegrIntercept
+        | AggFunc::CovarPop
+        | AggFunc::CovarSamp
+        | AggFunc::Corr
+        | AggFunc::StringAgg
+        | AggFunc::JsonObjectAgg
+        | AggFunc::JsonbObjectAgg => arg_count == 2,
+    }
+}
+
+pub(super) fn expr_contains_agg(catalog: &dyn CatalogLookup, expr: &SqlExpr) -> bool {
     match expr {
         SqlExpr::Column(_)
         | SqlExpr::Default
@@ -30,25 +123,38 @@ pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
             over,
             ..
         } => {
-            resolve_builtin_aggregate(name).is_some() && over.is_none()
-                || args.args().iter().any(|arg| expr_contains_agg(&arg.value))
-                || order_by.iter().any(|item| expr_contains_agg(&item.expr))
-                || filter.as_deref().is_some_and(expr_contains_agg)
+            over.is_none() && aggregate_call_matches_catalog(catalog, name, args)
+                || args
+                    .args()
+                    .iter()
+                    .any(|arg| expr_contains_agg(catalog, &arg.value))
+                || order_by
+                    .iter()
+                    .any(|item| expr_contains_agg(catalog, &item.expr))
+                || filter
+                    .as_deref()
+                    .is_some_and(|expr| expr_contains_agg(catalog, expr))
         }
         SqlExpr::ArrayLiteral(elements) | SqlExpr::Row(elements) => {
-            elements.iter().any(expr_contains_agg)
+            elements.iter().any(|expr| expr_contains_agg(catalog, expr))
         }
         SqlExpr::BinaryOperator { left, right, .. } => {
-            expr_contains_agg(left) || expr_contains_agg(right)
+            expr_contains_agg(catalog, left) || expr_contains_agg(catalog, right)
         }
         SqlExpr::PrefixOperator { expr, .. } | SqlExpr::FieldSelect { expr, .. } => {
-            expr_contains_agg(expr)
+            expr_contains_agg(catalog, expr)
         }
         SqlExpr::ArraySubscript { array, subscripts } => {
-            expr_contains_agg(array)
+            expr_contains_agg(catalog, array)
                 || subscripts.iter().any(|subscript| {
-                    subscript.lower.as_deref().is_some_and(expr_contains_agg)
-                        || subscript.upper.as_deref().is_some_and(expr_contains_agg)
+                    subscript
+                        .lower
+                        .as_deref()
+                        .is_some_and(|expr| expr_contains_agg(catalog, expr))
+                        || subscript
+                            .upper
+                            .as_deref()
+                            .is_some_and(|expr| expr_contains_agg(catalog, expr))
                 })
         }
         SqlExpr::ArrayOverlap(l, r)
@@ -67,8 +173,12 @@ pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
         | SqlExpr::JsonbExistsAny(l, r)
         | SqlExpr::JsonbExistsAll(l, r)
         | SqlExpr::JsonbPathExists(l, r)
-        | SqlExpr::JsonbPathMatch(l, r) => expr_contains_agg(l) || expr_contains_agg(r),
-        SqlExpr::Cast(inner, _) | SqlExpr::Collate { expr: inner, .. } => expr_contains_agg(inner),
+        | SqlExpr::JsonbPathMatch(l, r) => {
+            expr_contains_agg(catalog, l) || expr_contains_agg(catalog, r)
+        }
+        SqlExpr::Cast(inner, _) | SqlExpr::Collate { expr: inner, .. } => {
+            expr_contains_agg(catalog, inner)
+        }
         SqlExpr::Add(l, r)
         | SqlExpr::Sub(l, r)
         | SqlExpr::BitAnd(l, r)
@@ -90,27 +200,34 @@ pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
         | SqlExpr::And(l, r)
         | SqlExpr::Or(l, r)
         | SqlExpr::IsDistinctFrom(l, r)
-        | SqlExpr::IsNotDistinctFrom(l, r) => expr_contains_agg(l) || expr_contains_agg(r),
+        | SqlExpr::IsNotDistinctFrom(l, r) => {
+            expr_contains_agg(catalog, l) || expr_contains_agg(catalog, r)
+        }
         SqlExpr::Like {
             expr,
             pattern,
             escape,
             ..
         } => {
-            expr_contains_agg(expr)
-                || expr_contains_agg(pattern)
-                || escape.as_ref().is_some_and(|e| expr_contains_agg(e))
+            expr_contains_agg(catalog, expr)
+                || expr_contains_agg(catalog, pattern)
+                || escape
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_agg(catalog, expr))
         }
         SqlExpr::Case {
             arg,
             args,
             defresult,
         } => {
-            arg.as_deref().is_some_and(expr_contains_agg)
-                || args
-                    .iter()
-                    .any(|arm| expr_contains_agg(&arm.expr) || expr_contains_agg(&arm.result))
-                || defresult.as_deref().is_some_and(expr_contains_agg)
+            arg.as_deref()
+                .is_some_and(|expr| expr_contains_agg(catalog, expr))
+                || args.iter().any(|arm| {
+                    expr_contains_agg(catalog, &arm.expr) || expr_contains_agg(catalog, &arm.result)
+                })
+                || defresult
+                    .as_deref()
+                    .is_some_and(|expr| expr_contains_agg(catalog, expr))
         }
         SqlExpr::Similar {
             expr,
@@ -118,9 +235,11 @@ pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
             escape,
             ..
         } => {
-            expr_contains_agg(expr)
-                || expr_contains_agg(pattern)
-                || escape.as_ref().is_some_and(|e| expr_contains_agg(e))
+            expr_contains_agg(catalog, expr)
+                || expr_contains_agg(catalog, pattern)
+                || escape
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_agg(catalog, expr))
         }
         SqlExpr::UnaryPlus(inner)
         | SqlExpr::Negate(inner)
@@ -129,16 +248,20 @@ pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
         | SqlExpr::IsNull(inner)
         | SqlExpr::IsNotNull(inner)
         | SqlExpr::GeometryUnaryOp { expr: inner, .. }
-        | SqlExpr::Subscript { expr: inner, .. } => expr_contains_agg(inner),
+        | SqlExpr::Subscript { expr: inner, .. } => expr_contains_agg(catalog, inner),
         SqlExpr::GeometryBinaryOp { left, right, .. } => {
-            expr_contains_agg(left) || expr_contains_agg(right)
+            expr_contains_agg(catalog, left) || expr_contains_agg(catalog, right)
         }
-        SqlExpr::Xml(xml) => xml.child_exprs().any(expr_contains_agg),
+        SqlExpr::Xml(xml) => xml
+            .child_exprs()
+            .any(|expr| expr_contains_agg(catalog, expr)),
     }
 }
 
-pub(super) fn targets_contain_agg(targets: &[SelectItem]) -> bool {
-    targets.iter().any(|t| expr_contains_agg(&t.expr))
+pub(super) fn targets_contain_agg(catalog: &dyn CatalogLookup, targets: &[SelectItem]) -> bool {
+    targets
+        .iter()
+        .any(|target| expr_contains_agg(catalog, &target.expr))
 }
 
 pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
@@ -295,15 +418,9 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
 }
 
 pub(super) fn collect_aggs(
+    catalog: &dyn CatalogLookup,
     expr: &SqlExpr,
-    aggs: &mut Vec<(
-        AggFunc,
-        Vec<SqlFunctionArg>,
-        Vec<OrderByItem>,
-        bool,
-        bool,
-        Option<SqlExpr>,
-    )>,
+    aggs: &mut Vec<CollectedAggregate>,
 ) {
     match expr {
         SqlExpr::Column(_)
@@ -326,11 +443,11 @@ pub(super) fn collect_aggs(
         | SqlExpr::LocalTime { .. }
         | SqlExpr::LocalTimestamp { .. } => {}
         SqlExpr::BinaryOperator { left, right, .. } => {
-            collect_aggs(left, aggs);
-            collect_aggs(right, aggs);
+            collect_aggs(catalog, left, aggs);
+            collect_aggs(catalog, right, aggs);
         }
         SqlExpr::PrefixOperator { expr, .. } | SqlExpr::FieldSelect { expr, .. } => {
-            collect_aggs(expr, aggs);
+            collect_aggs(catalog, expr, aggs);
         }
         SqlExpr::FuncCall {
             name,
@@ -341,44 +458,44 @@ pub(super) fn collect_aggs(
             filter,
             over,
         } => {
-            if let Some(func) = resolve_builtin_aggregate(name) {
+            if aggregate_call_matches_catalog(catalog, name, args) {
                 if over.is_none() {
-                    let entry = (
-                        func,
-                        args.args().to_vec(),
-                        order_by.clone(),
-                        *distinct,
-                        *func_variadic,
-                        filter.as_deref().cloned(),
-                    );
+                    let entry = CollectedAggregate {
+                        name: name.clone(),
+                        args: args.clone(),
+                        order_by: order_by.clone(),
+                        distinct: *distinct,
+                        func_variadic: *func_variadic,
+                        filter: filter.as_deref().cloned(),
+                    };
                     if !aggs.contains(&entry) {
                         aggs.push(entry);
                     }
                 }
             }
             for arg in args.args() {
-                collect_aggs(&arg.value, aggs);
+                collect_aggs(catalog, &arg.value, aggs);
             }
             for item in order_by {
-                collect_aggs(&item.expr, aggs);
+                collect_aggs(catalog, &item.expr, aggs);
             }
             if let Some(filter) = filter.as_deref() {
-                collect_aggs(filter, aggs);
+                collect_aggs(catalog, filter, aggs);
             }
         }
         SqlExpr::ArrayLiteral(elements) | SqlExpr::Row(elements) => {
             for element in elements {
-                collect_aggs(element, aggs);
+                collect_aggs(catalog, element, aggs);
             }
         }
         SqlExpr::ArraySubscript { array, subscripts } => {
-            collect_aggs(array, aggs);
+            collect_aggs(catalog, array, aggs);
             for subscript in subscripts {
                 if let Some(lower) = &subscript.lower {
-                    collect_aggs(lower, aggs);
+                    collect_aggs(catalog, lower, aggs);
                 }
                 if let Some(upper) = &subscript.upper {
-                    collect_aggs(upper, aggs);
+                    collect_aggs(catalog, upper, aggs);
                 }
             }
         }
@@ -399,11 +516,11 @@ pub(super) fn collect_aggs(
         | SqlExpr::JsonbExistsAll(l, r)
         | SqlExpr::JsonbPathExists(l, r)
         | SqlExpr::JsonbPathMatch(l, r) => {
-            collect_aggs(l, aggs);
-            collect_aggs(r, aggs);
+            collect_aggs(catalog, l, aggs);
+            collect_aggs(catalog, r, aggs);
         }
         SqlExpr::Cast(inner, _) | SqlExpr::Collate { expr: inner, .. } => {
-            collect_aggs(inner, aggs)
+            collect_aggs(catalog, inner, aggs)
         }
         SqlExpr::Add(l, r)
         | SqlExpr::Sub(l, r)
@@ -427,8 +544,8 @@ pub(super) fn collect_aggs(
         | SqlExpr::Or(l, r)
         | SqlExpr::IsDistinctFrom(l, r)
         | SqlExpr::IsNotDistinctFrom(l, r) => {
-            collect_aggs(l, aggs);
-            collect_aggs(r, aggs);
+            collect_aggs(catalog, l, aggs);
+            collect_aggs(catalog, r, aggs);
         }
         SqlExpr::Like {
             expr,
@@ -436,10 +553,10 @@ pub(super) fn collect_aggs(
             escape,
             ..
         } => {
-            collect_aggs(expr, aggs);
-            collect_aggs(pattern, aggs);
+            collect_aggs(catalog, expr, aggs);
+            collect_aggs(catalog, pattern, aggs);
             if let Some(escape) = escape {
-                collect_aggs(escape, aggs);
+                collect_aggs(catalog, escape, aggs);
             }
         }
         SqlExpr::Case {
@@ -448,14 +565,14 @@ pub(super) fn collect_aggs(
             defresult,
         } => {
             if let Some(arg) = arg {
-                collect_aggs(arg, aggs);
+                collect_aggs(catalog, arg, aggs);
             }
             for arm in args {
-                collect_aggs(&arm.expr, aggs);
-                collect_aggs(&arm.result, aggs);
+                collect_aggs(catalog, &arm.expr, aggs);
+                collect_aggs(catalog, &arm.result, aggs);
             }
             if let Some(defresult) = defresult {
-                collect_aggs(defresult, aggs);
+                collect_aggs(catalog, defresult, aggs);
             }
         }
         SqlExpr::Similar {
@@ -464,10 +581,10 @@ pub(super) fn collect_aggs(
             escape,
             ..
         } => {
-            collect_aggs(expr, aggs);
-            collect_aggs(pattern, aggs);
+            collect_aggs(catalog, expr, aggs);
+            collect_aggs(catalog, pattern, aggs);
             if let Some(escape) = escape {
-                collect_aggs(escape, aggs);
+                collect_aggs(catalog, escape, aggs);
             }
         }
         SqlExpr::UnaryPlus(inner)
@@ -477,14 +594,14 @@ pub(super) fn collect_aggs(
         | SqlExpr::IsNull(inner)
         | SqlExpr::IsNotNull(inner)
         | SqlExpr::GeometryUnaryOp { expr: inner, .. }
-        | SqlExpr::Subscript { expr: inner, .. } => collect_aggs(inner, aggs),
+        | SqlExpr::Subscript { expr: inner, .. } => collect_aggs(catalog, inner, aggs),
         SqlExpr::GeometryBinaryOp { left, right, .. } => {
-            collect_aggs(left, aggs);
-            collect_aggs(right, aggs);
+            collect_aggs(catalog, left, aggs);
+            collect_aggs(catalog, right, aggs);
         }
         SqlExpr::Xml(xml) => {
             for child in xml.child_exprs() {
-                collect_aggs(child, aggs);
+                collect_aggs(catalog, child, aggs);
             }
         }
     }

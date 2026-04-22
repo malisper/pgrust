@@ -1786,9 +1786,7 @@ fn reject_unsupported_check_expr(expr: &Expr) -> Result<(), ParseError> {
         Expr::Cast(inner, _)
         | Expr::Collate { expr: inner, .. }
         | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => {
-            reject_unsupported_check_expr(inner)
-        }
+        | Expr::IsNotNull(inner) => reject_unsupported_check_expr(inner),
         Expr::Like {
             expr,
             pattern,

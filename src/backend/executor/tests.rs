@@ -3618,11 +3618,7 @@ fn oid_text_input_wraps_negative_values_and_orders_unsigned() {
     assert_eq!(small, Value::Int64(1234));
     assert_eq!(
         crate::backend::executor::expr_ops::compare_order_values(
-            &small,
-            &wrapped,
-            None,
-            None,
-            false,
+            &small, &wrapped, None, None, false,
         )
         .unwrap(),
         std::cmp::Ordering::Less
@@ -16311,7 +16307,9 @@ fn large_object_metadata_tracks_create_and_unlink() {
                 crate::pgrust::database::SequenceRuntime::new_ephemeral(),
             )),
             large_objects: Some(large_objects.clone()),
-            advisory_locks: std::sync::Arc::new(crate::backend::storage::lmgr::AdvisoryLockManager::new()),
+            advisory_locks: std::sync::Arc::new(
+                crate::backend::storage::lmgr::AdvisoryLockManager::new(),
+            ),
             checkpoint_stats:
                 crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),

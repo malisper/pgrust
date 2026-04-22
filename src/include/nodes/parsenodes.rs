@@ -274,6 +274,7 @@ pub enum Statement {
     Set(SetStatement),
     Reset(ResetStatement),
     CreateFunction(CreateFunctionStatement),
+    CreateAggregate(CreateAggregateStatement),
     CreateTrigger(CreateTriggerStatement),
     CreateType(CreateTypeStatement),
     CreateDatabase(CreateDatabaseStatement),
@@ -328,6 +329,7 @@ pub enum Statement {
     CommentOnConversion(CommentOnConversionStatement),
     CommentOnForeignDataWrapper(CommentOnForeignDataWrapperStatement),
     CommentOnPublication(CommentOnPublicationStatement),
+    CommentOnAggregate(CommentOnAggregateStatement),
     CreateDomain(CreateDomainStatement),
     CreateConversion(CreateConversionStatement),
     CreatePublication(CreatePublicationStatement),
@@ -342,6 +344,7 @@ pub enum Statement {
     DropDatabase(DropDatabaseStatement),
     DropPublication(DropPublicationStatement),
     DropFunction(DropFunctionStatement),
+    DropAggregate(DropAggregateStatement),
     DropTable(DropTableStatement),
     DropTrigger(DropTriggerStatement),
     DropIndex(DropIndexStatement),
@@ -522,6 +525,18 @@ pub enum FunctionParallel {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AggregateArgType {
+    Type(RawTypeName),
+    AnyPseudo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AggregateSignatureKind {
+    Star,
+    Args(Vec<AggregateArgType>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateFunctionArg {
     pub mode: FunctionArgMode,
     pub name: Option<String>,
@@ -555,6 +570,19 @@ pub struct CreateFunctionStatement {
     pub language: String,
     pub body: String,
     pub link_symbol: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateAggregateStatement {
+    pub schema_name: Option<String>,
+    pub aggregate_name: String,
+    pub replace_existing: bool,
+    pub signature: AggregateSignatureKind,
+    pub sfunc_name: String,
+    pub stype: RawTypeName,
+    pub finalfunc_name: Option<String>,
+    pub initcond: Option<String>,
+    pub parallel: Option<FunctionParallel>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1745,6 +1773,15 @@ pub struct DropFunctionStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropAggregateStatement {
+    pub if_exists: bool,
+    pub schema_name: Option<String>,
+    pub aggregate_name: String,
+    pub signature: AggregateSignatureKind,
+    pub cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetSessionAuthorizationStatement {
     pub role_name: String,
 }
@@ -1763,6 +1800,14 @@ pub struct ResetRoleStatement;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommentOnRoleStatement {
     pub role_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnAggregateStatement {
+    pub schema_name: Option<String>,
+    pub aggregate_name: String,
+    pub signature: AggregateSignatureKind,
     pub comment: Option<String>,
 }
 

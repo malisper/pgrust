@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
+use crate::backend::commands::tablecmds::{execute_delete, execute_insert, execute_update};
 use crate::backend::executor::{
     ArrayDimension, ArrayValue, ExecError, ExecutorContext, Expr, RelationDesc, StatementResult,
     TupleSlot, Value, cast_value, eval_expr, eval_plpgsql_expr, execute_planned_stmt,
 };
-use crate::backend::commands::tablecmds::{execute_delete, execute_insert, execute_update};
 use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, TriggerLevel, TriggerTiming,
 };
@@ -92,11 +92,19 @@ pub fn execute_user_defined_scalar_function(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let compiled = compiled_function_for_proc(proc_oid, ctx)?;
     let arg_values = args
         .iter()
         .map(|arg| eval_expr(arg, slot, ctx))
         .collect::<Result<Vec<_>, _>>()?;
+    execute_user_defined_scalar_function_values(proc_oid, &arg_values, ctx)
+}
+
+pub fn execute_user_defined_scalar_function_values(
+    proc_oid: u32,
+    arg_values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let compiled = compiled_function_for_proc(proc_oid, ctx)?;
 
     let FunctionReturnContract::Scalar { setof, ty, .. } = &compiled.return_contract else {
         return Err(function_runtime_error(
@@ -798,22 +806,22 @@ fn exec_function_select_into(
         return Ok(());
     };
 
-    state.values[target_slot] = if matches!(target_ty.kind, SqlTypeKind::Record | SqlTypeKind::Composite)
-    {
-        Value::Record(RecordValue::from_descriptor(
-            RecordDescriptor::anonymous(
-                plan.columns()
-                    .into_iter()
-                    .map(|column| (column.name, column.sql_type))
-                    .collect(),
-                -1,
-            ),
-            row.clone(),
-        ))
-    } else {
-        let value = row.first().cloned().unwrap_or(Value::Null);
-        cast_value(value, target_ty)?
-    };
+    state.values[target_slot] =
+        if matches!(target_ty.kind, SqlTypeKind::Record | SqlTypeKind::Composite) {
+            Value::Record(RecordValue::from_descriptor(
+                RecordDescriptor::anonymous(
+                    plan.columns()
+                        .into_iter()
+                        .map(|column| (column.name, column.sql_type))
+                        .collect(),
+                    -1,
+                ),
+                row.clone(),
+            ))
+        } else {
+            let value = row.first().cloned().unwrap_or(Value::Null);
+            cast_value(value, target_ty)?
+        };
     state.values[compiled.found_slot] = Value::Bool(true);
     Ok(())
 }
@@ -941,7 +949,6 @@ fn statement_result_changed_rows(result: &StatementResult) -> bool {
         StatementResult::Query { rows, .. } => !rows.is_empty(),
     }
 }
-
 
 fn current_output_row(
     compiled: &CompiledFunction,

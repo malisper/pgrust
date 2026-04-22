@@ -10,11 +10,12 @@ use crate::backend::catalog::persistence::{
 };
 use crate::backend::catalog::pg_constraint::{derived_pg_constraint_rows, sort_pg_constraint_rows};
 use crate::backend::catalog::pg_depend::{
-    derived_pg_depend_rows, foreign_data_wrapper_depend_rows, foreign_key_constraint_depend_rows,
-    index_backed_constraint_depend_rows, inheritance_depend_rows,
-    primary_key_owned_not_null_depend_rows, proc_depend_rows, publication_namespace_depend_rows,
-    publication_rel_depend_rows, relation_constraint_depend_rows, relation_rule_depend_rows,
-    sort_pg_depend_rows, trigger_depend_rows, view_rewrite_depend_rows,
+    aggregate_depend_rows, derived_pg_depend_rows, foreign_data_wrapper_depend_rows,
+    foreign_key_constraint_depend_rows, index_backed_constraint_depend_rows,
+    inheritance_depend_rows, primary_key_owned_not_null_depend_rows, proc_depend_rows,
+    publication_namespace_depend_rows, publication_rel_depend_rows,
+    relation_constraint_depend_rows, relation_rule_depend_rows, sort_pg_depend_rows,
+    trigger_depend_rows, view_rewrite_depend_rows,
 };
 use crate::backend::catalog::rowcodec::{
     pg_description_row_from_values, pg_statistic_row_from_values,
@@ -40,12 +41,12 @@ use crate::include::catalog::{
     PG_NAMESPACE_RELATION_OID, PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID,
     PG_OPFAMILY_RELATION_OID, PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID,
     PG_PUBLICATION_REL_RELATION_OID, PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID,
-    PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PUBLISH_GENCOLS_NONE, PgAmopRow, PgAmprocRow,
-    PgAttrdefRow,
-    PgAttributeRow, PgClassRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow,
-    PgForeignDataWrapperRow, PgInheritsRow, PgNamespaceRow, PgOpclassRow, PgOpfamilyRow,
-    PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow,
-    PgRewriteRow, PgStatisticRow, PgTablespaceRow, relkind_has_storage,
+    PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PUBLISH_GENCOLS_NONE, PgAggregateRow, PgAmopRow,
+    PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgClassRow, PgConstraintRow, PgDatabaseRow,
+    PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow, PgInheritsRow, PgNamespaceRow,
+    PgOpclassRow, PgOpfamilyRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow,
+    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow,
+    relkind_has_storage,
 };
 use crate::include::nodes::datum::Value;
 
@@ -1025,6 +1026,15 @@ impl CatalogStore {
         self.comment_shared_object_mvcc(fdw_oid, PG_FOREIGN_DATA_WRAPPER_RELATION_OID, comment, ctx)
     }
 
+    pub fn comment_proc_mvcc(
+        &mut self,
+        proc_oid: u32,
+        comment: Option<&str>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        self.comment_shared_object_mvcc(proc_oid, PG_PROC_RELATION_OID, comment, ctx)
+    }
+
     pub fn replace_proc_mvcc(
         &mut self,
         old_row: &PgProcRow,
@@ -1070,6 +1080,96 @@ impl CatalogStore {
         Ok((row.oid, effect))
     }
 
+    pub fn create_aggregate_mvcc(
+        &mut self,
+        mut proc_row: PgProcRow,
+        aggregate_row: PgAggregateRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
+        proc_row.oid = self.allocate_next_oid(proc_row.oid)?;
+        let arg_type_oids = parse_proc_argtype_oids(&proc_row.proargtypes);
+        let kinds = [
+            BootstrapCatalogKind::PgProc,
+            BootstrapCatalogKind::PgAggregate,
+            BootstrapCatalogKind::PgDepend,
+        ];
+        let rows = PhysicalCatalogRows {
+            procs: vec![proc_row.clone()],
+            aggregates: vec![PgAggregateRow {
+                aggfnoid: proc_row.oid,
+                ..aggregate_row
+            }],
+            depends: aggregate_depend_rows(
+                proc_row.oid,
+                proc_row.pronamespace,
+                proc_row.prorettype,
+                &arg_type_oids,
+                aggregate_row.aggtransfn,
+                aggregate_row.aggfinalfn,
+            ),
+            ..PhysicalCatalogRows::default()
+        };
+        insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        Ok((proc_row.oid, effect))
+    }
+
+    pub fn replace_aggregate_mvcc(
+        &mut self,
+        old_proc_row: &PgProcRow,
+        old_aggregate_row: &PgAggregateRow,
+        mut proc_row: PgProcRow,
+        aggregate_row: PgAggregateRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
+        let old_arg_type_oids = parse_proc_argtype_oids(&old_proc_row.proargtypes);
+        let old_rows = PhysicalCatalogRows {
+            procs: vec![old_proc_row.clone()],
+            aggregates: vec![old_aggregate_row.clone()],
+            depends: aggregate_depend_rows(
+                old_proc_row.oid,
+                old_proc_row.pronamespace,
+                old_proc_row.prorettype,
+                &old_arg_type_oids,
+                old_aggregate_row.aggtransfn,
+                old_aggregate_row.aggfinalfn,
+            ),
+            ..PhysicalCatalogRows::default()
+        };
+        let kinds = [
+            BootstrapCatalogKind::PgProc,
+            BootstrapCatalogKind::PgAggregate,
+            BootstrapCatalogKind::PgDepend,
+        ];
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
+
+        proc_row.oid = old_proc_row.oid;
+        let arg_type_oids = parse_proc_argtype_oids(&proc_row.proargtypes);
+        let new_rows = PhysicalCatalogRows {
+            procs: vec![proc_row.clone()],
+            aggregates: vec![PgAggregateRow {
+                aggfnoid: proc_row.oid,
+                ..aggregate_row
+            }],
+            depends: aggregate_depend_rows(
+                proc_row.oid,
+                proc_row.pronamespace,
+                proc_row.prorettype,
+                &arg_type_oids,
+                aggregate_row.aggtransfn,
+                aggregate_row.aggfinalfn,
+            ),
+            ..PhysicalCatalogRows::default()
+        };
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        Ok((proc_row.oid, effect))
+    }
+
     pub fn drop_proc_by_oid_mvcc(
         &mut self,
         proc_oid: u32,
@@ -1084,17 +1184,73 @@ impl CatalogStore {
         if let Some(all_arg_types) = &proc_row.proallargtypes {
             referenced_type_oids.extend(all_arg_types.iter().copied());
         }
-        let kinds = [BootstrapCatalogKind::PgProc, BootstrapCatalogKind::PgDepend];
+        let snapshot = ctx
+            .txns
+            .read()
+            .snapshot_for_command(ctx.xid, ctx.cid)
+            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+        let aggregate_row = catcache.aggregate_by_fnoid(proc_oid).cloned();
+        let mut kinds = vec![BootstrapCatalogKind::PgProc, BootstrapCatalogKind::PgDepend];
+        if aggregate_row.is_some() {
+            kinds.push(BootstrapCatalogKind::PgAggregate);
+        }
+        let description_rows = probe_system_catalog_rows_visible_in_db(
+            &ctx.pool,
+            &ctx.txns,
+            &snapshot,
+            ctx.client_id,
+            self.scope_db_oid(),
+            PG_DESCRIPTION_O_C_O_INDEX_OID,
+            vec![
+                crate::include::access::scankey::ScanKeyData {
+                    attribute_number: 1,
+                    strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                    argument: Value::Int64(i64::from(proc_row.oid)),
+                },
+                crate::include::access::scankey::ScanKeyData {
+                    attribute_number: 2,
+                    strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                    argument: Value::Int64(i64::from(PG_PROC_RELATION_OID)),
+                },
+                crate::include::access::scankey::ScanKeyData {
+                    attribute_number: 3,
+                    strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                    argument: Value::Int32(0),
+                },
+            ],
+        )?
+        .into_iter()
+        .map(pg_description_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?;
+        if !description_rows.is_empty() {
+            kinds.push(BootstrapCatalogKind::PgDescription);
+        }
         delete_catalog_rows_subset_mvcc(
             ctx,
             &PhysicalCatalogRows {
                 procs: vec![proc_row.clone()],
-                depends: proc_depend_rows(
-                    proc_row.oid,
-                    proc_row.pronamespace,
-                    proc_row.prorettype,
-                    &referenced_type_oids,
-                ),
+                aggregates: aggregate_row.clone().into_iter().collect(),
+                depends: aggregate_row
+                    .as_ref()
+                    .map(|agg| {
+                        aggregate_depend_rows(
+                            proc_row.oid,
+                            proc_row.pronamespace,
+                            proc_row.prorettype,
+                            &referenced_type_oids,
+                            agg.aggtransfn,
+                            agg.aggfinalfn,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        proc_depend_rows(
+                            proc_row.oid,
+                            proc_row.pronamespace,
+                            proc_row.prorettype,
+                            &referenced_type_oids,
+                        )
+                    }),
+                descriptions: description_rows,
                 ..PhysicalCatalogRows::default()
             },
             self.scope_db_oid(),

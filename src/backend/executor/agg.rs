@@ -1,11 +1,12 @@
 use super::render_bit_text;
 use super::{compare_order_values, parse_numeric_text, render_datetime_value_text};
-use crate::backend::executor::exec_expr::{expect_float8_arg, float8_regr_accum_state};
 use crate::backend::executor::ExecError;
+use crate::backend::executor::exec_expr::{expect_float8_arg, float8_regr_accum_state};
+use crate::backend::executor::expr_agg_support::execute_scalar_function_value_call;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue, Value};
-use crate::include::nodes::primnodes::AggFunc;
+use crate::include::nodes::primnodes::{AggAccum, AggFunc};
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::session::ByteaOutputFormat;
 
@@ -19,6 +20,25 @@ use super::expr_xml::concat_xml_texts;
 use super::jsonb::{JsonbValue, encode_jsonb, jsonb_from_value, render_jsonb_bytes};
 
 pub(crate) type AggTransitionFn = fn(&mut AccumState, &[Value]) -> Result<(), ExecError>;
+
+#[derive(Debug, Clone)]
+pub(crate) struct CustomAggregateRuntime {
+    pub(crate) transfn_oid: u32,
+    pub(crate) transfn_strict: bool,
+    pub(crate) finalfn_oid: Option<u32>,
+    pub(crate) finalfn_strict: bool,
+    pub(crate) transtype: SqlType,
+    pub(crate) init_value: Option<Value>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum AggregateRuntime {
+    Builtin {
+        func: AggFunc,
+        transition: AggTransitionFn,
+    },
+    Custom(CustomAggregateRuntime),
+}
 
 #[derive(Debug, Clone)]
 pub(crate) enum NumericAccum {
@@ -109,6 +129,9 @@ pub(crate) enum AccumState {
     },
     RangeIntersect {
         current: Option<Value>,
+    },
+    Custom {
+        value: Value,
     },
 }
 
@@ -372,7 +395,9 @@ impl AccumState {
             ) => |state, values| {
                 let value = values.first().unwrap_or(&Value::Null);
                 match state {
-                    AccumState::FloatStats { count, sum, sum_sq, .. } => {
+                    AccumState::FloatStats {
+                        count, sum, sum_sq, ..
+                    } => {
                         if let Some(value) = aggregate_float_value(value) {
                             let next_count = *count + 1.0;
                             let next_sum = *sum + value;
@@ -438,16 +463,10 @@ impl AccumState {
                     }
                     let y = expect_float8_arg("regr aggregate", y)?;
                     let x = expect_float8_arg("regr aggregate", x)?;
-                    [
-                        *count,
-                        *sum_x,
-                        *sum_sq_x,
-                        *sum_y,
-                        *sum_sq_y,
-                        *sum_xy,
-                    ] = float8_regr_accum_state(
-                        *count, *sum_x, *sum_sq_x, *sum_y, *sum_sq_y, *sum_xy, y, x,
-                    )?;
+                    [*count, *sum_x, *sum_sq_x, *sum_y, *sum_sq_y, *sum_xy] =
+                        float8_regr_accum_state(
+                            *count, *sum_x, *sum_sq_x, *sum_y, *sum_sq_y, *sum_xy, y, x,
+                        )?;
                 }
                 Ok(())
             },
@@ -576,6 +595,10 @@ impl AccumState {
                 Ok(())
             },
         }
+    }
+
+    pub(crate) fn custom(value: Value) -> Self {
+        Self::Custom { value }
     }
 
     pub(crate) fn finalize(&self) -> Value {
@@ -799,6 +822,87 @@ impl AccumState {
                 .map(Value::Multirange)
                 .unwrap_or(Value::Null),
             AccumState::RangeIntersect { current } => current.clone().unwrap_or(Value::Null),
+            AccumState::Custom { value } => value.clone(),
+        }
+    }
+}
+
+impl AggregateRuntime {
+    pub(crate) fn initialize_state(&self, accum: &AggAccum) -> AccumState {
+        match self {
+            AggregateRuntime::Builtin { func, .. } => {
+                AccumState::new(*func, accum.distinct, accum.sql_type)
+            }
+            AggregateRuntime::Custom(custom) => {
+                AccumState::custom(custom.init_value.clone().unwrap_or(Value::Null))
+            }
+        }
+    }
+
+    pub(crate) fn transition(
+        &self,
+        state: &mut AccumState,
+        arg_values: &[Value],
+        ctx: &mut crate::backend::executor::ExecutorContext,
+    ) -> Result<(), ExecError> {
+        match self {
+            AggregateRuntime::Builtin { transition, .. } => transition(state, arg_values),
+            AggregateRuntime::Custom(custom) => {
+                let mut call_args = Vec::with_capacity(arg_values.len() + 1);
+                let current_state = match state {
+                    AccumState::Custom { value } => value.clone(),
+                    other => {
+                        return Err(ExecError::DetailedError {
+                            message: "custom aggregate state shape mismatch".into(),
+                            detail: Some(format!("{other:?}")),
+                            hint: None,
+                            sqlstate: "XX000",
+                        });
+                    }
+                };
+                call_args.push(current_state);
+                call_args.extend(arg_values.iter().cloned());
+                if custom.transfn_strict
+                    && call_args.iter().any(|value| matches!(value, Value::Null))
+                {
+                    return Ok(());
+                }
+                let value =
+                    execute_scalar_function_value_call(custom.transfn_oid, &call_args, ctx)?;
+                *state = AccumState::custom(super::cast_value(value, custom.transtype)?);
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) fn finalize(
+        &self,
+        state: &AccumState,
+        ctx: &mut crate::backend::executor::ExecutorContext,
+    ) -> Result<Value, ExecError> {
+        match self {
+            AggregateRuntime::Builtin { .. } => Ok(state.finalize()),
+            AggregateRuntime::Custom(custom) => {
+                let state_value = match state {
+                    AccumState::Custom { value } => value.clone(),
+                    other => {
+                        return Err(ExecError::DetailedError {
+                            message: "custom aggregate state shape mismatch".into(),
+                            detail: Some(format!("{other:?}")),
+                            hint: None,
+                            sqlstate: "XX000",
+                        });
+                    }
+                };
+                if let Some(finalfn_oid) = custom.finalfn_oid {
+                    if custom.finalfn_strict && matches!(state_value, Value::Null) {
+                        return Ok(Value::Null);
+                    }
+                    execute_scalar_function_value_call(finalfn_oid, &[state_value], ctx)
+                } else {
+                    Ok(state_value)
+                }
+            }
         }
     }
 }

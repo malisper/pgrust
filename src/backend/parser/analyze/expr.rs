@@ -322,7 +322,7 @@ fn bind_window_agg_call(
             infer_sql_expr_type_with_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)
         })
         .collect::<Vec<_>>();
-    let resolved = resolve_aggregate_call(catalog, func, &arg_types, func_variadic);
+    let resolved = resolve_builtin_aggregate_call(catalog, func, &arg_types, func_variadic);
     let bound_args = arg_values
         .iter()
         .map(|expr| {
@@ -507,21 +507,26 @@ fn bind_window_func_call(
             resolved.result_type,
         ));
     }
-    if let Some(agg_impl) = resolved.agg_impl {
-        return bind_window_agg_call(
-            agg_impl,
-            args,
-            &[],
-            false,
-            resolved.func_variadic,
-            None,
-            over,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        );
+    if resolved.prokind == 'a' {
+        if let Some(agg_impl) = resolved.agg_impl {
+            return bind_window_agg_call(
+                agg_impl,
+                args,
+                &[],
+                false,
+                resolved.func_variadic,
+                None,
+                over,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+        }
+        return Err(ParseError::FeatureNotSupported(format!(
+            "window execution for custom aggregate {name}"
+        )));
     }
     Err(ParseError::FeatureNotSupported(format!(
         "window function {name}"
@@ -1133,8 +1138,14 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             coerce_bound_expr(bound_inner, source_type, target_type)
         }
         SqlExpr::Collate { expr, collation } => {
-            let inner_type =
-                infer_sql_expr_type_with_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes);
+            let inner_type = infer_sql_expr_type_with_ctes(
+                expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
             let bound_inner = bind_expr_with_outer_and_ctes(
                 expr,
                 scope,

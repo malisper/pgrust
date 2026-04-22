@@ -1,8 +1,6 @@
-use super::agg::AccumState;
 use super::{Plan, PlanState, TupleSlot, expr, tuple_decoder};
 use crate::backend::executor::hashjoin::HashJoinPhase;
 use crate::backend::parser::SqlType;
-use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, CteScanState, FilterState, FunctionScanState, HashJoinState,
     HashState, IndexScanState, LimitState, NestedLoopJoinState, NodeExecStats, OrderByState,
@@ -63,9 +61,7 @@ fn expr_uses_outer_columns(expr: &Expr) -> bool {
         Expr::Cast(inner, _)
         | Expr::Collate { expr: inner, .. }
         | Expr::IsNull(inner)
-        | Expr::IsNotNull(inner) => {
-            expr_uses_outer_columns(inner)
-        }
+        | Expr::IsNotNull(inner) => expr_uses_outer_columns(inner),
         Expr::Like {
             expr,
             pattern,
@@ -622,19 +618,6 @@ pub fn executor_start(plan: Plan) -> PlanState {
         } => {
             let output_column_names = output_columns.iter().map(|c| c.name.clone()).collect();
             let key_buffer = Vec::with_capacity(group_by.len());
-            let trans_fns: Vec<super::AggTransitionFn> = accumulators
-                .iter()
-                .map(|a| {
-                    let func =
-                        builtin_aggregate_function_for_proc_oid(a.aggfnoid).unwrap_or_else(|| {
-                            panic!(
-                                "aggregate {:?} lacks builtin implementation mapping",
-                                a.aggfnoid
-                            )
-                        });
-                    AccumState::transition_fn(func, a.args.len(), a.distinct)
-                })
-                .collect();
             Box::new(AggregateState {
                 input: executor_start(*input),
                 group_by,
@@ -644,7 +627,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 result_rows: None,
                 next_index: 0,
                 key_buffer,
-                trans_fns,
+                runtimes: None,
                 current_bindings: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),
