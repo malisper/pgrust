@@ -770,6 +770,18 @@ fn rewrite_semantic_expr(
             )?),
             ty,
         ),
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => Expr::Collate {
+            expr: Box::new(rewrite_semantic_expr(
+                *expr,
+                catalog,
+                expanded_views,
+                active_policy_relations,
+            )?),
+            collation_oid,
+        },
         Expr::IsNull(inner) => Expr::IsNull(Box::new(rewrite_semantic_expr(
             *inner,
             catalog,
@@ -816,6 +828,7 @@ fn rewrite_semantic_expr(
             escape,
             case_insensitive,
             negated,
+            collation_oid,
         } => Expr::Like {
             expr: Box::new(rewrite_semantic_expr(
                 *expr,
@@ -837,12 +850,14 @@ fn rewrite_semantic_expr(
                 .map(Box::new),
             case_insensitive,
             negated,
+            collation_oid,
         },
         Expr::Similar {
             expr,
             pattern,
             escape,
             negated,
+            collation_oid,
         } => Expr::Similar {
             expr: Box::new(rewrite_semantic_expr(
                 *expr,
@@ -859,10 +874,11 @@ fn rewrite_semantic_expr(
             escape: escape
                 .map(|expr| {
                     rewrite_semantic_expr(*expr, catalog, expanded_views, active_policy_relations)
-                })
+            })
                 .transpose()?
                 .map(Box::new),
             negated,
+            collation_oid,
         },
         Expr::ArrayLiteral {
             elements,

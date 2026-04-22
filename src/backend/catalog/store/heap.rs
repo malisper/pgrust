@@ -40,7 +40,8 @@ use crate::include::catalog::{
     PG_NAMESPACE_RELATION_OID, PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID,
     PG_OPFAMILY_RELATION_OID, PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID,
     PG_PUBLICATION_REL_RELATION_OID, PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID,
-    PG_TYPE_RELATION_OID, PUBLISH_GENCOLS_NONE, PgAmopRow, PgAmprocRow, PgAttrdefRow,
+    PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PUBLISH_GENCOLS_NONE, PgAmopRow, PgAmprocRow,
+    PgAttrdefRow,
     PgAttributeRow, PgClassRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow,
     PgForeignDataWrapperRow, PgInheritsRow, PgNamespaceRow, PgOpclassRow, PgOpfamilyRow,
     PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow,
@@ -3826,6 +3827,15 @@ impl CatalogStore {
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         self.comment_shared_object_mvcc(rewrite_oid, PG_REWRITE_RELATION_OID, comment, ctx)
+    }
+
+    pub fn comment_trigger_mvcc(
+        &mut self,
+        trigger_oid: u32,
+        comment: Option<&str>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        self.comment_shared_object_mvcc(trigger_oid, PG_TRIGGER_RELATION_OID, comment, ctx)
     }
 
     pub fn comment_constraint_mvcc(

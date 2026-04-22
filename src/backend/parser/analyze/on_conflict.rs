@@ -254,19 +254,6 @@ fn resolve_opclass_spec(
         })
 }
 
-fn resolve_collation_oid(name: &str, catalog: &dyn CatalogLookup) -> Result<u32, ParseError> {
-    let normalized = normalize_lookup_name(name);
-    catalog
-        .collation_rows()
-        .into_iter()
-        .find(|row| row.collname.eq_ignore_ascii_case(normalized))
-        .map(|row| row.oid)
-        .ok_or_else(|| ParseError::UnexpectedToken {
-            expected: "known collation",
-            actual: name.to_string(),
-        })
-}
-
 fn index_matches_inference(
     index: &BoundIndexRelation,
     requested: &[BoundInferenceElement],

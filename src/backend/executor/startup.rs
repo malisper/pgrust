@@ -60,7 +60,10 @@ fn expr_uses_outer_columns(expr: &Expr) -> bool {
         Expr::ScalarArrayOp(saop) => {
             expr_uses_outer_columns(&saop.left) || expr_uses_outer_columns(&saop.right)
         }
-        Expr::Cast(inner, _) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => {
             expr_uses_outer_columns(inner)
         }
         Expr::Like {

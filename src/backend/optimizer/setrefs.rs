@@ -800,6 +800,7 @@ fn lower_projection_expr_by_input_target(
             escape,
             case_insensitive,
             negated,
+            collation_oid,
         } => Expr::Like {
             expr: Box::new(lower_projection_expr_by_input_target(
                 root,
@@ -823,12 +824,14 @@ fn lower_projection_expr_by_input_target(
             }),
             case_insensitive,
             negated,
+            collation_oid,
         },
         Expr::Similar {
             expr,
             pattern,
             escape,
             negated,
+            collation_oid,
         } => Expr::Similar {
             expr: Box::new(lower_projection_expr_by_input_target(
                 root,
@@ -851,6 +854,7 @@ fn lower_projection_expr_by_input_target(
                 ))
             }),
             negated,
+            collation_oid,
         },
         Expr::IsNull(inner) => Expr::IsNull(Box::new(lower_projection_expr_by_input_target(
             root,
@@ -1219,23 +1223,27 @@ fn rewrite_expr_for_append_rel(
             escape,
             case_insensitive,
             negated,
+            collation_oid,
         } => Expr::Like {
             expr: Box::new(rewrite_expr_for_append_rel(*expr, info)),
             pattern: Box::new(rewrite_expr_for_append_rel(*pattern, info)),
             escape: escape.map(|expr| Box::new(rewrite_expr_for_append_rel(*expr, info))),
             case_insensitive,
             negated,
+            collation_oid,
         },
         Expr::Similar {
             expr,
             pattern,
             escape,
             negated,
+            collation_oid,
         } => Expr::Similar {
             expr: Box::new(rewrite_expr_for_append_rel(*expr, info)),
             pattern: Box::new(rewrite_expr_for_append_rel(*pattern, info)),
             escape: escape.map(|expr| Box::new(rewrite_expr_for_append_rel(*expr, info))),
             negated,
+            collation_oid,
         },
         Expr::IsNull(inner) => Expr::IsNull(Box::new(rewrite_expr_for_append_rel(*inner, info))),
         Expr::IsNotNull(inner) => {
@@ -2006,23 +2014,27 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
             escape,
             case_insensitive,
             negated,
+            collation_oid,
         } => Expr::Like {
             expr: Box::new(lower_expr(ctx, *expr, mode)),
             pattern: Box::new(lower_expr(ctx, *pattern, mode)),
             escape: escape.map(|expr| Box::new(lower_expr(ctx, *expr, mode))),
             case_insensitive,
             negated,
+            collation_oid,
         },
         Expr::Similar {
             expr,
             pattern,
             escape,
             negated,
+            collation_oid,
         } => Expr::Similar {
             expr: Box::new(lower_expr(ctx, *expr, mode)),
             pattern: Box::new(lower_expr(ctx, *pattern, mode)),
             escape: escape.map(|expr| Box::new(lower_expr(ctx, *expr, mode))),
             negated,
+            collation_oid,
         },
         Expr::IsNull(inner) => Expr::IsNull(Box::new(lower_expr(ctx, *inner, mode))),
         Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(lower_expr(ctx, *inner, mode))),
@@ -2128,7 +2140,9 @@ fn validate_executable_expr(expr: &Expr, plan_node: &str, field: &str) {
             validate_executable_expr(&saop.left, plan_node, field);
             validate_executable_expr(&saop.right, plan_node, field);
         }
-        Expr::Cast(inner, _) => validate_executable_expr(inner, plan_node, field),
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            validate_executable_expr(inner, plan_node, field)
+        }
         Expr::Like {
             expr,
             pattern,
@@ -2450,7 +2464,9 @@ fn validate_planner_expr(expr: &Expr, path_node: &str, field: &str) {
             validate_planner_expr(&saop.left, path_node, field);
             validate_planner_expr(&saop.right, path_node, field);
         }
-        Expr::Cast(inner, _) => validate_planner_expr(inner, path_node, field),
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            validate_planner_expr(inner, path_node, field)
+        }
         Expr::Like {
             expr,
             pattern,
@@ -3868,23 +3884,27 @@ fn rebuild_setrefs_expr(
             escape,
             case_insensitive,
             negated,
+            collation_oid,
         } => Expr::Like {
             expr: Box::new(recurse(*expr)),
             pattern: Box::new(recurse(*pattern)),
             escape: escape.map(|expr| Box::new(recurse(*expr))),
             case_insensitive,
             negated,
+            collation_oid,
         },
         Expr::Similar {
             expr,
             pattern,
             escape,
             negated,
+            collation_oid,
         } => Expr::Similar {
             expr: Box::new(recurse(*expr)),
             pattern: Box::new(recurse(*pattern)),
             escape: escape.map(|expr| Box::new(recurse(*expr))),
             negated,
+            collation_oid,
         },
         Expr::IsNull(inner) => Expr::IsNull(Box::new(recurse(*inner))),
         Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(recurse(*inner))),
@@ -4037,23 +4057,27 @@ fn fully_expand_output_expr(expr: Expr, path: &Path) -> Expr {
             escape,
             case_insensitive,
             negated,
+            collation_oid,
         } => Expr::Like {
             expr: Box::new(fully_expand_output_expr(*expr, path)),
             pattern: Box::new(fully_expand_output_expr(*pattern, path)),
             escape: escape.map(|expr| Box::new(fully_expand_output_expr(*expr, path))),
             case_insensitive,
             negated,
+            collation_oid,
         },
         Expr::Similar {
             expr,
             pattern,
             escape,
             negated,
+            collation_oid,
         } => Expr::Similar {
             expr: Box::new(fully_expand_output_expr(*expr, path)),
             pattern: Box::new(fully_expand_output_expr(*pattern, path)),
             escape: escape.map(|expr| Box::new(fully_expand_output_expr(*expr, path))),
             negated,
+            collation_oid,
         },
         Expr::ArrayLiteral {
             elements,

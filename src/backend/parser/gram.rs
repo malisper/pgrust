@@ -4541,6 +4541,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             Ok(Statement::CommentOnTable(build_comment_on_table(inner)?))
         }
         Rule::comment_on_rule_stmt => Ok(Statement::CommentOnRule(build_comment_on_rule(inner)?)),
+        Rule::comment_on_trigger_stmt => {
+            Ok(Statement::CommentOnTrigger(build_comment_on_trigger(inner)?))
+        }
         Rule::create_schema_stmt => Ok(Statement::CreateSchema(build_create_schema(inner)?)),
         Rule::create_policy_stmt => Ok(Statement::CreatePolicy(build_create_policy_statement(
             inner.as_str(),
@@ -6288,8 +6291,9 @@ fn build_on_conflict_target(pair: Pair<'_, Rule>) -> Result<OnConflictTarget, Pa
                                 Rule::on_conflict_inference_collation => {
                                     collation = child
                                         .into_inner()
-                                        .find(|part| part.as_rule() == Rule::identifier)
-                                        .map(build_identifier);
+                                        .find(|part| part.as_rule() == Rule::collation_name)
+                                        .map(build_collation_name)
+                                        .transpose()?;
                                 }
                                 Rule::on_conflict_inference_opclass => {
                                     opclass = child.into_inner().next().map(build_identifier);
@@ -6297,8 +6301,19 @@ fn build_on_conflict_target(pair: Pair<'_, Rule>) -> Result<OnConflictTarget, Pa
                                 _ => {}
                             }
                         }
+                        let mut expr = expr.ok_or(ParseError::UnexpectedEof)?;
+                        if collation.is_none() {
+                            if let SqlExpr::Collate {
+                                expr: inner_expr,
+                                collation: explicit_collation,
+                            } = expr
+                            {
+                                expr = *inner_expr;
+                                collation = Some(explicit_collation);
+                            }
+                        }
                         elements.push(OnConflictInferenceElem {
-                            expr: expr.ok_or(ParseError::UnexpectedEof)?,
+                            expr,
                             collation,
                             opclass,
                         });
@@ -7344,6 +7359,32 @@ fn build_comment_on_rule(pair: Pair<'_, Rule>) -> Result<CommentOnRuleStatement,
     Ok(CommentOnRuleStatement {
         rule_name: rule_name.ok_or(ParseError::UnexpectedEof)?,
         relation_name: relation_name.ok_or(ParseError::UnexpectedEof)?,
+        comment: comment.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_comment_on_trigger(pair: Pair<'_, Rule>) -> Result<CommentOnTriggerStatement, ParseError> {
+    let mut trigger_name = None;
+    let mut table_name = None;
+    let mut comment = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier if trigger_name.is_none() => trigger_name = Some(build_identifier(part)),
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::quoted_string_literal
+            | Rule::string_literal
+            | Rule::unicode_string_literal
+            | Rule::escape_string_literal
+            | Rule::dollar_string_literal => {
+                comment = Some(Some(decode_string_literal_pair(part)?))
+            }
+            Rule::kw_null => comment = Some(None),
+            _ => {}
+        }
+    }
+    Ok(CommentOnTriggerStatement {
+        trigger_name: trigger_name.ok_or(ParseError::UnexpectedEof)?,
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         comment: comment.ok_or(ParseError::UnexpectedEof)?,
     })
 }
@@ -9120,6 +9161,18 @@ fn parse_i32(pair: Pair<'_, Rule>) -> Result<i32, ParseError> {
         .map_err(|_| ParseError::InvalidInteger(pair.as_str().to_string()))
 }
 
+fn build_collation_name(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
+    let parts = pair
+        .into_inner()
+        .filter(|part| part.as_rule() == Rule::identifier)
+        .map(build_identifier)
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    Ok(parts.join("."))
+}
+
 fn build_identifier(pair: Pair<'_, Rule>) -> String {
     if pair.as_rule() == Rule::identifier {
         if let Some(inner) = pair.clone().into_inner().next() {
@@ -9197,6 +9250,18 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                         expr = SqlExpr::FieldSelect {
                             expr: Box::new(expr),
                             field,
+                        };
+                    }
+                    Rule::collate_suffix => {
+                        let collation = build_collation_name(
+                            suffix
+                                .into_inner()
+                                .find(|part| part.as_rule() == Rule::collation_name)
+                                .ok_or(ParseError::UnexpectedEof)?,
+                        )?;
+                        expr = SqlExpr::Collate {
+                            expr: Box::new(expr),
+                            collation,
                         };
                     }
                     _ => {}
@@ -10925,9 +10990,9 @@ fn decode_unicode_quoted_identifier(raw: &str) -> Result<String, ParseError> {
 }
 
 // :HACK: psql describe queries still rely on explicit OPERATOR(pg_catalog....)
-// and COLLATE pg_catalog.default syntax that the grammar does not parse
-// natively yet. Keep the shim narrow, but make it lexical-state-aware so it
-// never rewrites inside strings, identifiers, or comments.
+// syntax that the grammar does not parse natively yet. Keep the shim narrow,
+// but make it lexical-state-aware so it never rewrites inside strings,
+// identifiers, or comments.
 fn normalize_psql_describe_syntax_preserving_layout(sql: &str) -> String {
     let bytes = sql.as_bytes();
     let mut out = bytes.to_vec();
@@ -10971,10 +11036,6 @@ fn normalize_psql_describe_syntax_preserving_layout(sql: &str) -> String {
                     state = State::DollarString;
                 } else if let Some(end) =
                     rewrite_pg_operator_invocation_preserving_layout(bytes, &mut out, i)
-                {
-                    i = end;
-                } else if let Some(end) =
-                    strip_default_collation_clause_preserving_layout(bytes, &mut out, i)
                 {
                     i = end;
                 } else {
@@ -11048,23 +11109,6 @@ fn rewrite_pg_operator_invocation_preserving_layout(
     out[start..=close].fill(b' ');
     out[start..start + operator.len()].copy_from_slice(operator.as_bytes());
     Some(close + 1)
-}
-
-fn strip_default_collation_clause_preserving_layout(
-    bytes: &[u8],
-    out: &mut [u8],
-    start: usize,
-) -> Option<usize> {
-    let pattern = b"collate pg_catalog.default";
-    let end = start + pattern.len();
-    if !matches_ascii_insensitive(bytes, start, pattern)
-        || !has_identifier_boundary_before(bytes, start)
-        || !has_identifier_boundary_after(bytes, end)
-    {
-        return None;
-    }
-    out[start..end].fill(b' ');
-    Some(end)
 }
 
 fn matches_ascii_insensitive(bytes: &[u8], start: usize, pattern: &[u8]) -> bool {
@@ -11158,7 +11202,7 @@ mod sql_normalization_tests {
     use super::normalize_psql_describe_syntax_preserving_layout;
 
     #[test]
-    fn psql_describe_normalization_rewrites_exact_operator_and_collation_clause() {
+    fn psql_describe_normalization_rewrites_exact_operator_without_touching_collation_clause() {
         let sql = "SELECT oid \
              FROM pg_catalog.pg_publication \
              WHERE pubname OPERATOR(pg_catalog.~) '^(pub)$' COLLATE pg_catalog.default \
@@ -11170,11 +11214,7 @@ mod sql_normalization_tests {
                 .to_ascii_lowercase()
                 .contains("operator(pg_catalog.~)")
         );
-        assert!(
-            !normalized
-                .to_ascii_lowercase()
-                .contains("collate pg_catalog.default")
-        );
+        assert!(normalized.contains("COLLATE pg_catalog.default"));
         assert!(normalized.contains("pubname ~"));
     }
 

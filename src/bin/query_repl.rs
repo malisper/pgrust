@@ -807,6 +807,7 @@ fn run_statement(
         }
         Statement::CommentOnConstraint(_)
         | Statement::CommentOnDomain(_)
+        | Statement::CommentOnTrigger(_)
         | Statement::CreateConversion(_)
         | Statement::CommentOnRule(_)
         | Statement::CreateFunction(_)

@@ -253,21 +253,19 @@ pub(super) fn bind_grouped_quantified_array(
     } else {
         SqlType::array_of(left_type.element_type())
     };
-    let left = coerce_bound_expr(
-        bind_agg_output_expr(
-            left,
-            group_by_exprs,
-            group_key_exprs,
-            input_scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            agg_list,
-            n_keys,
-        )?,
-        raw_left_type,
-        left_type,
-    );
+    let bound_left = bind_agg_output_expr(
+        left,
+        group_by_exprs,
+        group_key_exprs,
+        input_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        agg_list,
+        n_keys,
+    )?;
+    let (bound_left, left_explicit_collation) = strip_explicit_collation(bound_left);
+    let left = coerce_bound_expr(bound_left, raw_left_type, left_type);
     let right = coerce_bound_expr(
         bind_agg_output_expr(
             array,
@@ -283,7 +281,26 @@ pub(super) fn bind_grouped_quantified_array(
         raw_array_type,
         array_type,
     );
-    Ok(Expr::scalar_array_op(op, !is_all, left, right))
+    let collation_oid = consumer_for_subquery_comparison_op(op)
+        .map(|consumer| {
+            derive_consumer_collation(
+                catalog,
+                consumer,
+                &[
+                    (left_type, left_explicit_collation),
+                    (array_type.element_type(), None),
+                ],
+            )
+        })
+        .transpose()?
+        .flatten();
+    Ok(Expr::scalar_array_op_with_collation(
+        op,
+        !is_all,
+        left,
+        right,
+        collation_oid,
+    ))
 }
 
 pub(super) fn bind_grouped_func_call(

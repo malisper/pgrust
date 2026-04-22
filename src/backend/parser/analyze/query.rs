@@ -512,29 +512,40 @@ pub(crate) fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
         }
         expr @ (Expr::Param(_) | Expr::Const(_) | Expr::Random) => expr,
         Expr::Cast(inner, ty) => Expr::Cast(Box::new(shift_expr_rtindexes(*inner, offset)), ty),
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => Expr::Collate {
+            expr: Box::new(shift_expr_rtindexes(*expr, offset)),
+            collation_oid,
+        },
         Expr::Like {
             expr,
             pattern,
             escape,
             case_insensitive,
             negated,
+            collation_oid,
         } => Expr::Like {
             expr: Box::new(shift_expr_rtindexes(*expr, offset)),
             pattern: Box::new(shift_expr_rtindexes(*pattern, offset)),
             escape: escape.map(|expr| Box::new(shift_expr_rtindexes(*expr, offset))),
             case_insensitive,
             negated,
+            collation_oid,
         },
         Expr::Similar {
             expr,
             pattern,
             escape,
             negated,
+            collation_oid,
         } => Expr::Similar {
             expr: Box::new(shift_expr_rtindexes(*expr, offset)),
             pattern: Box::new(shift_expr_rtindexes(*pattern, offset)),
             escape: escape.map(|expr| Box::new(shift_expr_rtindexes(*expr, offset))),
             negated,
+            collation_oid,
         },
         Expr::IsNull(inner) => Expr::IsNull(Box::new(shift_expr_rtindexes(*inner, offset))),
         Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(shift_expr_rtindexes(*inner, offset))),
@@ -802,29 +813,44 @@ pub(crate) fn rewrite_local_vars_for_output_exprs(
                 ty,
             )
         }
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => Expr::Collate {
+            expr: Box::new(rewrite_local_vars_for_output_exprs(
+                *expr,
+                source_varno,
+                output_exprs,
+            )),
+            collation_oid,
+        },
         Expr::Like {
             expr,
             pattern,
             escape,
             case_insensitive,
             negated,
+            collation_oid,
         } => Expr::Like {
             expr: Box::new(rewrite_local_vars_for_output_exprs(*expr, source_varno, output_exprs)),
             pattern: Box::new(rewrite_local_vars_for_output_exprs(*pattern, source_varno, output_exprs)),
             escape: escape.map(|expr| Box::new(rewrite_local_vars_for_output_exprs(*expr, source_varno, output_exprs))),
             case_insensitive,
             negated,
+            collation_oid,
         },
         Expr::Similar {
             expr,
             pattern,
             escape,
             negated,
+            collation_oid,
         } => Expr::Similar {
             expr: Box::new(rewrite_local_vars_for_output_exprs(*expr, source_varno, output_exprs)),
             pattern: Box::new(rewrite_local_vars_for_output_exprs(*pattern, source_varno, output_exprs)),
             escape: escape.map(|expr| Box::new(rewrite_local_vars_for_output_exprs(*expr, source_varno, output_exprs))),
             negated,
+            collation_oid,
         },
         Expr::IsNull(inner) => Expr::IsNull(Box::new(rewrite_local_vars_for_output_exprs(
             *inner,
