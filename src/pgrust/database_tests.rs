@@ -16213,6 +16213,35 @@ fn temp_create_table_as_select_works() {
 }
 
 #[test]
+fn select_into_creates_table_from_query() {
+    let base = temp_dir("select_into_ctas");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create table cmdata (f1 text)").unwrap();
+    session
+        .execute(
+            &db,
+            "insert into cmdata values (repeat('1234567890', 1000))",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session
+            .execute(&db, "select * into cmmove1 from cmdata")
+            .unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+
+    match session.execute(&db, "select length(f1) from cmmove1").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(10_000)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn create_table_as_autocommit_publishes_permanent_catalog_rows() {
     let base = temp_dir("autocommit_ctas_permanent");
     let db = Database::open(&base, 16).unwrap();
