@@ -359,6 +359,53 @@ fn jsonb_populate_record_named_composite_works() {
 }
 
 #[test]
+fn named_composite_row_cast_coerces_fields() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create type jbpop as (a text, b int4, c timestamp)")
+        .expect("create composite type");
+
+    let timestamp_row = session
+        .execute(&db, "select timestamp '2012-12-31 15:30:56'")
+        .expect("select timestamp literal");
+    let StatementResult::Query {
+        rows: expected_rows, ..
+    } = timestamp_row
+    else {
+        panic!("expected query result");
+    };
+    let expected_timestamp = expected_rows[0][0].clone();
+
+    let field_result = session
+        .execute(&db, "select (row('x',3,'2012-12-31 15:30:56')::jbpop).c")
+        .expect("select named composite field");
+    let StatementResult::Query { rows, .. } = field_result else {
+        panic!("expected query result");
+    };
+    assert_eq!(rows, vec![vec![expected_timestamp.clone()]]);
+
+    let populate_result = session
+        .execute(
+            &db,
+            "select * from jsonb_populate_record(row('x',3,'2012-12-31 15:30:56')::jbpop, '{\"a\":\"blurfl\",\"x\":43.2}') q",
+        )
+        .expect("run jsonb_populate_record");
+    let StatementResult::Query { rows, .. } = populate_result else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        rows,
+        vec![vec![
+            Value::Text("blurfl".into()),
+            Value::Int32(3),
+            expected_timestamp,
+        ]]
+    );
+}
+
+#[test]
 fn create_type_skips_temp_schema_in_search_path() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
