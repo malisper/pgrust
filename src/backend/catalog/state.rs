@@ -19,6 +19,7 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::backend::utils::misc::interrupts::InterruptReason;
+use crate::include::access::brin::BrinOptions;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_NOTNULL, PUBLIC_NAMESPACE_OID, PgAuthIdRow,
     PgAuthMembersRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgInheritsRow, PgPolicyRow,
@@ -49,6 +50,7 @@ pub struct CatalogIndexMeta {
     pub indoption: Vec<i16>,
     pub indexprs: Option<String>,
     pub indpred: Option<String>,
+    pub brin_options: Option<BrinOptions>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +59,7 @@ pub struct CatalogIndexBuildOptions {
     pub indclass: Vec<u32>,
     pub indcollation: Vec<u32>,
     pub indoption: Vec<i16>,
+    pub brin_options: Option<BrinOptions>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -612,6 +615,7 @@ impl Catalog {
                     .transpose()
                     .map_err(|_| CatalogError::Corrupt("invalid index expression metadata"))?,
                 indpred: None,
+                brin_options: options.brin_options.clone(),
             }),
         };
         self.next_rel_number = self.next_rel_number.saturating_add(1);
@@ -1230,6 +1234,7 @@ impl Catalog {
             indclass,
             indcollation,
             indoption,
+            brin_options: None,
         })
     }
 

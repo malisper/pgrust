@@ -131,6 +131,7 @@ pub fn system_catalog_index_meta(
         indoption: vec![0; descriptor.key_attnums.len()],
         indexprs: None,
         indpred: None,
+        brin_options: None,
     }
 }
 
@@ -167,6 +168,7 @@ pub fn system_catalog_index_relcache(
         amproc_entries: Vec::new(),
         indexprs: None,
         indpred: None,
+        brin_options: None,
     }
 }
 
