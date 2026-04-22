@@ -141,12 +141,15 @@ fn base_filter_expr(rel: &RelOptInfo) -> Option<Expr> {
     )
 }
 
-fn query_order_items_for_base_rel(root: &PlannerInfo, rtindex: usize) -> Option<Vec<OrderByEntry>> {
-    if root.query_pathkeys.is_empty() {
+fn order_items_for_base_rel_pathkeys(
+    root: &PlannerInfo,
+    rtindex: usize,
+    pathkeys: &[PathKey],
+) -> Option<Vec<OrderByEntry>> {
+    if pathkeys.is_empty() {
         return None;
     }
-    let expanded_pathkeys = root
-        .query_pathkeys
+    let expanded_pathkeys = pathkeys
         .iter()
         .cloned()
         .map(|key| PathKey {
@@ -165,6 +168,10 @@ fn query_order_items_for_base_rel(root: &PlannerInfo, rtindex: usize) -> Option<
     } else {
         None
     }
+}
+
+fn query_order_items_for_base_rel(root: &PlannerInfo, rtindex: usize) -> Option<Vec<OrderByEntry>> {
+    order_items_for_base_rel_pathkeys(root, rtindex, &root.query_pathkeys)
 }
 
 fn collect_relation_access_paths(
@@ -262,6 +269,94 @@ fn collect_relation_access_paths(
         }
     }
     paths
+}
+
+fn collect_relation_ordered_index_paths(
+    rtindex: usize,
+    heap_rel: RelFileLocator,
+    relation_name: String,
+    relation_oid: u32,
+    toast: Option<ToastRelationRef>,
+    desc: RelationDesc,
+    filter: Option<Expr>,
+    order_items: &[OrderByEntry],
+    catalog: &dyn CatalogLookup,
+) -> Vec<Path> {
+    let stats = relation_stats(catalog, relation_oid, &desc);
+    let mut paths = Vec::new();
+    for index in catalog
+        .index_relations_for_heap(relation_oid)
+        .iter()
+        .filter(|index| {
+            index.index_meta.indisvalid
+                && index.index_meta.indisready
+                && !index.index_meta.indkey.is_empty()
+        })
+    {
+        if let Some(spec) = build_index_path_spec(filter.as_ref(), Some(order_items), index) {
+            if !spec.removes_order {
+                continue;
+            }
+            paths.push(
+                estimate_index_candidate(
+                    rtindex,
+                    heap_rel,
+                    relation_name.clone(),
+                    relation_oid,
+                    toast,
+                    desc.clone(),
+                    &stats,
+                    spec,
+                    Some(order_items.to_vec()),
+                    catalog,
+                )
+                .plan,
+            );
+        }
+    }
+    paths
+}
+
+pub(super) fn relation_ordered_index_paths(
+    root: &PlannerInfo,
+    rtindex: usize,
+    pathkeys: &[PathKey],
+    catalog: &dyn CatalogLookup,
+) -> Vec<Path> {
+    let Some(order_items) = order_items_for_base_rel_pathkeys(root, rtindex, pathkeys) else {
+        return Vec::new();
+    };
+    let Some(rel) = root
+        .simple_rel_array
+        .get(rtindex)
+        .and_then(Option::as_ref)
+    else {
+        return Vec::new();
+    };
+    let Some(rte) = root.parse.rtable.get(rtindex - 1) else {
+        return Vec::new();
+    };
+    match &rte.kind {
+        RangeTblEntryKind::Relation {
+            rel: heap_rel,
+            relation_oid,
+            relkind,
+            toast,
+        } if *relkind == 'r' => collect_relation_ordered_index_paths(
+            rtindex,
+            *heap_rel,
+            rte.alias
+                .clone()
+                .unwrap_or_else(|| format!("rel {}", heap_rel.rel_number)),
+            *relation_oid,
+            *toast,
+            rte.desc.clone(),
+            base_filter_expr(rel),
+            &order_items,
+            catalog,
+        ),
+        _ => Vec::new(),
+    }
 }
 
 fn cheapest_relation_access_path(

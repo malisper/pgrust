@@ -823,6 +823,24 @@ impl Database {
                 &entry,
                 &index_columns,
             )?;
+        if access_method_oid == SPGIST_AM_OID && index_columns.len() != 1 {
+            return Err(ExecError::DetailedError {
+                message: "access method \"spgist\" does not support multicolumn indexes".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
+        if access_method_oid == SPGIST_AM_OID
+            && index_columns.iter().any(|column| column.expr_sql.is_some())
+        {
+            return Err(ExecError::DetailedError {
+                message: "access method \"spgist\" does not support expression indexes".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
         let am_routine = crate::backend::access::index::amapi::index_am_handler(access_method_oid)
             .ok_or_else(|| {
                 ExecError::Parse(ParseError::UnexpectedToken {

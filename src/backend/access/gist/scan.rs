@@ -5,7 +5,7 @@ use crate::include::access::gist::{
     GIST_INVALID_BLOCKNO, gist_downlink_block, gist_page_get_opaque, gist_page_items_with_offsets,
 };
 use crate::include::access::relscan::{
-    GistIndexScanOpaque, GistOrderByDistance, GistSearchItem, GistSearchItemKind, IndexScanDesc,
+    GistIndexScanOpaque, GistSearchItem, GistSearchItemKind, IndexOrderByDistance, IndexScanDesc,
     IndexScanOpaque, ScanDirection,
 };
 use crate::include::access::scankey::ScanKeyData;
@@ -113,12 +113,12 @@ fn tuple_order_distances(
     tuple_values: &[crate::include::nodes::datum::Value],
     keys: &[ScanKeyData],
     is_leaf: bool,
-) -> Result<(Vec<GistOrderByDistance>, bool), CatalogError> {
+) -> Result<(Vec<IndexOrderByDistance>, bool), CatalogError> {
     let mut distances = Vec::with_capacity(keys.len());
     let mut recheck = false;
     for key in keys {
         let result = state.distance(tuple_values, key, is_leaf)?;
-        distances.push(GistOrderByDistance {
+        distances.push(IndexOrderByDistance {
             value: result.value.unwrap_or(f64::INFINITY),
             is_null: result.value.is_none(),
         });

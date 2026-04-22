@@ -2392,7 +2392,7 @@ fn qual_strategy(
                 value_type_oid(&qual.argument),
             )
             .or_else(|| {
-                is_gist_like_am(index.index_meta.am_oid)
+                (index.index_meta.am_oid == GIST_AM_OID)
                     .then(|| gist_builtin_strategy(proc_oid, &qual.argument))
                     .flatten()
             }),

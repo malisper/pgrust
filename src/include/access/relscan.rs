@@ -20,12 +20,12 @@ pub enum ScanDirection {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct GistOrderByDistance {
+pub struct IndexOrderByDistance {
     pub value: f64,
     pub is_null: bool,
 }
 
-impl Eq for GistOrderByDistance {}
+impl Eq for IndexOrderByDistance {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GistSearchItemKind {
@@ -44,7 +44,7 @@ pub enum GistSearchItemKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GistSearchItem {
     pub kind: GistSearchItemKind,
-    pub distances: Vec<GistOrderByDistance>,
+    pub distances: Vec<IndexOrderByDistance>,
     pub ordinal: u64,
 }
 
@@ -81,6 +81,15 @@ impl PartialOrd for GistSearchItem {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpgistSearchItem {
+    pub tid: ItemPointerData,
+    pub tuple: IndexTuple,
+    pub recheck: bool,
+    pub recheck_order_by: bool,
+    pub distances: Vec<IndexOrderByDistance>,
+}
+
 #[derive(Debug, Clone)]
 pub struct BtIndexScanOpaque {
     pub current_block: Option<u32>,
@@ -97,11 +106,18 @@ pub struct GistIndexScanOpaque {
     pub next_ordinal: u64,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct SpgistIndexScanOpaque {
+    pub items: Vec<SpgistSearchItem>,
+    pub next_item: usize,
+}
+
 #[derive(Debug, Clone)]
 pub enum IndexScanOpaque {
     None,
     Btree(BtIndexScanOpaque),
     Gist(GistIndexScanOpaque),
+    Spgist(SpgistIndexScanOpaque),
 }
 
 #[derive(Clone)]

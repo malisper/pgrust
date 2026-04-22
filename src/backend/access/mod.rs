@@ -3,5 +3,6 @@ pub mod gist;
 pub mod heap;
 pub mod index;
 pub mod nbtree;
+pub mod spgist;
 pub mod table;
 pub mod transam;

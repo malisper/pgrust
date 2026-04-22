@@ -11,7 +11,7 @@ use crate::include::nodes::primnodes::{Expr, ProjectSetTarget, TargetEntry, Wind
 use super::super::bestpath;
 use super::super::create_plan_with_param_base;
 use super::super::has_grouping;
-use super::super::path::{query_planner, residual_where_qual};
+use super::super::path::{query_planner, relation_ordered_index_paths, residual_where_qual};
 use super::super::pathnodes::{next_synthetic_slot_id, window_output_columns};
 use super::super::root;
 use super::super::upperrels;
@@ -297,7 +297,51 @@ fn make_window_rel(
     let slot_id = next_synthetic_slot_id();
     let required_pathkeys = window_pathkeys(&clause);
     let mut rel = RelOptInfo::new(input_rel.relids.clone(), RelOptKind::UpperRel, reltarget);
-    for path in input_rel.pathlist {
+    let mut ordered_input_paths = Vec::new();
+    if !has_grouping(root)
+        && root.parse.project_set.is_none()
+        && input_rel.reltarget == root.window_input_target
+        && !input_rel
+            .pathlist
+            .iter()
+            .any(|path| bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys))
+        && let [rtindex] = input_rel.relids.as_slice()
+    {
+        let ordered_paths = relation_ordered_index_paths(root, *rtindex, &required_pathkeys, catalog);
+        if !ordered_paths.is_empty() {
+            let base_target = root
+                .simple_rel_array
+                .get(*rtindex)
+                .and_then(Option::as_ref)
+                .map(|base_rel| base_rel.reltarget.clone())
+                .unwrap_or_else(|| input_rel.reltarget.clone());
+            let mut ordered_rel = RelOptInfo::new(vec![*rtindex], RelOptKind::BaseRel, base_target);
+            ordered_rel.pathlist = ordered_paths;
+            bestpath::set_cheapest(&mut ordered_rel);
+            let ordered_rel = if ordered_rel.reltarget != input_rel.reltarget {
+                make_pathtarget_projection_rel(
+                    root,
+                    ordered_rel,
+                    &input_rel.reltarget,
+                    catalog,
+                    false,
+                )
+            } else {
+                ordered_rel
+            };
+            ordered_input_paths.extend(
+                ordered_rel
+                    .pathlist
+                    .into_iter()
+                    .filter(|path| bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys)),
+            );
+        }
+    }
+    for path in input_rel
+        .pathlist
+        .into_iter()
+        .chain(ordered_input_paths.into_iter())
+    {
         let path = if !bestpath::pathkeys_satisfy(&path.pathkeys(), &required_pathkeys) {
             optimize_path(
                 Path::OrderBy {
