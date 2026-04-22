@@ -83,6 +83,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_create_operator_class_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_operator_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_trigger_statement(&sql)? {
         return Ok(stmt);
     }
@@ -1326,6 +1329,11 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
                 SqlTypeKind::RegProcedure,
             )));
         }
+        "regoperator" => {
+            return Ok(RawTypeName::Builtin(SqlType::new(
+                SqlTypeKind::RegOperator,
+            )));
+        }
         _ => {}
     }
     SqlParser::parse(Rule::type_name, &sql)
@@ -1900,6 +1908,30 @@ fn try_parse_create_operator_class_statement(sql: &str) -> Result<Option<Stateme
     Ok(Some(Statement::CreateOperatorClass(
         build_create_operator_class_statement(trimmed)?,
     )))
+}
+
+fn try_parse_operator_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("create operator ")
+        && !lowered.starts_with("create operator class ")
+        && !lowered.starts_with("create operator family ")
+    {
+        return build_create_operator_statement(trimmed).map(|stmt| Some(Statement::CreateOperator(stmt)));
+    }
+    if lowered.starts_with("alter operator ")
+        && !lowered.starts_with("alter operator class ")
+        && !lowered.starts_with("alter operator family ")
+    {
+        return build_alter_operator_statement(trimmed).map(|stmt| Some(Statement::AlterOperator(stmt)));
+    }
+    if lowered.starts_with("drop operator ")
+        && !lowered.starts_with("drop operator class ")
+        && !lowered.starts_with("drop operator family ")
+    {
+        return build_drop_operator_statement(trimmed).map(|stmt| Some(Statement::DropOperator(stmt)));
+    }
+    Ok(None)
 }
 
 fn try_parse_create_type_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
@@ -4084,6 +4116,313 @@ fn build_create_operator_class_statement(
     })
 }
 
+fn build_create_operator_statement(sql: &str) -> Result<CreateOperatorStatement, ParseError> {
+    let prefix = "create operator";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let ((schema_name, operator_name), rest) = parse_operator_name(rest)?;
+    let (definition_sql, rest) = take_parenthesized_segment(rest.trim_start())?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of CREATE OPERATOR",
+            actual: rest.trim().into(),
+        });
+    }
+
+    let mut left_arg = None;
+    let mut right_arg = None;
+    let mut procedure = None;
+    let mut commutator = None;
+    let mut negator = None;
+    let mut restrict = None;
+    let mut join = None;
+    let mut hashes = false;
+    let mut merges = false;
+
+    for item in split_top_level_items(&definition_sql, ',')? {
+        let trimmed = item.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some(eq_idx) = trimmed.find('=') else {
+            let (option_name, tail) = parse_sql_identifier(trimmed)?;
+            if !tail.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "operator definition option",
+                    actual: trimmed.into(),
+                });
+            }
+            match option_name.to_ascii_lowercase().as_str() {
+                "hashes" => hashes = true,
+                "merges" => merges = true,
+                other => {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "recognized CREATE OPERATOR option",
+                        actual: other.into(),
+                    });
+                }
+            }
+            continue;
+        };
+
+        let (option_name, tail) = parse_sql_identifier(trimmed[..eq_idx].trim())?;
+        if !tail.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "operator option name",
+                actual: trimmed[..eq_idx].trim().into(),
+            });
+        }
+        let value = trimmed[eq_idx + 1..].trim();
+        match option_name.to_ascii_lowercase().as_str() {
+            "procedure" | "function" => {
+                let (target, rest) = parse_qualified_name_ref(value, "procedure name")?;
+                if !rest.trim().is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "procedure name",
+                        actual: value.into(),
+                    });
+                }
+                procedure = Some(target);
+            }
+            "leftarg" => left_arg = Some(parse_type_name(value)?),
+            "rightarg" => right_arg = Some(parse_type_name(value)?),
+            "commutator" => commutator = Some(parse_operator_name_value(value)?),
+            "negator" => negator = Some(parse_operator_name_value(value)?),
+            "restrict" => {
+                if keyword_at_start(value, "none")
+                    && consume_keyword(value.trim_start(), "none").trim().is_empty()
+                {
+                    restrict = None;
+                } else {
+                    let (target, rest) = parse_qualified_name_ref(value, "restriction estimator")?;
+                    if !rest.trim().is_empty() {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "restriction estimator",
+                            actual: value.into(),
+                        });
+                    }
+                    restrict = Some(target);
+                }
+            }
+            "join" => {
+                if keyword_at_start(value, "none")
+                    && consume_keyword(value.trim_start(), "none").trim().is_empty()
+                {
+                    join = None;
+                } else {
+                    let (target, rest) = parse_qualified_name_ref(value, "join estimator")?;
+                    if !rest.trim().is_empty() {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "join estimator",
+                            actual: value.into(),
+                        });
+                    }
+                    join = Some(target);
+                }
+            }
+            "hashes" => hashes = parse_operator_bool_value(value)?,
+            "merges" => merges = parse_operator_bool_value(value)?,
+            other => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "recognized CREATE OPERATOR option",
+                    actual: other.into(),
+                });
+            }
+        }
+    }
+
+    Ok(CreateOperatorStatement {
+        schema_name,
+        operator_name,
+        left_arg,
+        right_arg,
+        procedure: procedure.ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "PROCEDURE option",
+            actual: sql.into(),
+        })?,
+        commutator,
+        negator,
+        restrict,
+        join,
+        hashes,
+        merges,
+    })
+}
+
+fn build_alter_operator_statement(sql: &str) -> Result<AlterOperatorStatement, ParseError> {
+    let prefix = "alter operator";
+    let rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let ((schema_name, operator_name), rest) = parse_operator_name(rest)?;
+    let ((left_arg, right_arg), rest) = parse_operator_argtypes(rest.trim_start())?;
+    let rest = rest.trim_start();
+    if !keyword_at_start(rest, "set") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "SET",
+            actual: rest.into(),
+        });
+    }
+    let (options_sql, rest) = take_parenthesized_segment(consume_keyword(rest, "set").trim_start())?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER OPERATOR",
+            actual: rest.trim().into(),
+        });
+    }
+
+    let mut options = Vec::new();
+    for item in split_top_level_items(&options_sql, ',')? {
+        let trimmed = item.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let (option_name_raw, value) = if let Some(eq_idx) = trimmed.find('=') {
+            (trimmed[..eq_idx].trim(), Some(trimmed[eq_idx + 1..].trim()))
+        } else {
+            (trimmed, None)
+        };
+        let (option_name, tail) = parse_sql_identifier(option_name_raw)?;
+        if !tail.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "operator option name",
+                actual: option_name_raw.into(),
+            });
+        }
+        let option_name = option_name.to_ascii_lowercase();
+        let option = match option_name.as_str() {
+            "restrict" => {
+                let function = match value {
+                    None => None,
+                    Some(value)
+                        if keyword_at_start(value, "none")
+                            && consume_keyword(value.trim_start(), "none").trim().is_empty() =>
+                    {
+                        None
+                    }
+                    Some(value) => {
+                        let (target, rest) =
+                            parse_qualified_name_ref(value, "restriction estimator")?;
+                        if !rest.trim().is_empty() {
+                            return Err(ParseError::UnexpectedToken {
+                                expected: "restriction estimator",
+                                actual: value.into(),
+                            });
+                        }
+                        Some(target)
+                    }
+                };
+                AlterOperatorOption::Restrict {
+                    option_name,
+                    function,
+                }
+            }
+            "join" => {
+                let function = match value {
+                    None => None,
+                    Some(value)
+                        if keyword_at_start(value, "none")
+                            && consume_keyword(value.trim_start(), "none").trim().is_empty() =>
+                    {
+                        None
+                    }
+                    Some(value) => {
+                        let (target, rest) = parse_qualified_name_ref(value, "join estimator")?;
+                        if !rest.trim().is_empty() {
+                            return Err(ParseError::UnexpectedToken {
+                                expected: "join estimator",
+                                actual: value.into(),
+                            });
+                        }
+                        Some(target)
+                    }
+                };
+                AlterOperatorOption::Join {
+                    option_name,
+                    function,
+                }
+            }
+            "commutator" => match value {
+                Some(value) => AlterOperatorOption::Commutator {
+                    option_name,
+                    operator_name: parse_operator_name_value(value)?,
+                },
+                None => AlterOperatorOption::Unrecognized {
+                    option_name,
+                    raw_tokens: Vec::new(),
+                },
+            },
+            "negator" => match value {
+                Some(value) => AlterOperatorOption::Negator {
+                    option_name,
+                    operator_name: parse_operator_name_value(value)?,
+                },
+                None => AlterOperatorOption::Unrecognized {
+                    option_name,
+                    raw_tokens: Vec::new(),
+                },
+            },
+            "merges" => AlterOperatorOption::Merges {
+                option_name,
+                enabled: value.map(parse_operator_bool_value).transpose()?.unwrap_or(true),
+            },
+            "hashes" => AlterOperatorOption::Hashes {
+                option_name,
+                enabled: value.map(parse_operator_bool_value).transpose()?.unwrap_or(true),
+            },
+            _ => AlterOperatorOption::Unrecognized {
+                option_name,
+                raw_tokens: value.into_iter().map(str::to_string).collect(),
+            },
+        };
+        options.push(option);
+    }
+
+    Ok(AlterOperatorStatement {
+        schema_name,
+        operator_name,
+        left_arg,
+        right_arg,
+        options,
+    })
+}
+
+fn build_drop_operator_statement(sql: &str) -> Result<DropOperatorStatement, ParseError> {
+    let prefix = "drop operator";
+    let mut rest = sql
+        .get(prefix.len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let mut if_exists = false;
+    if let Some(next) = consume_keywords(rest, &["if", "exists"]) {
+        if_exists = true;
+        rest = next.trim_start();
+    }
+    let ((schema_name, operator_name), rest_after_name) = parse_operator_name(rest)?;
+    let ((left_arg, right_arg), suffix) = parse_operator_argtypes(rest_after_name.trim_start())?;
+    let suffix = suffix.trim();
+    if !(suffix.is_empty()
+        || keyword_at_start(suffix, "restrict")
+        || keyword_at_start(suffix, "cascade"))
+    {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CASCADE, RESTRICT, or end of statement",
+            actual: suffix.into(),
+        });
+    }
+
+    Ok(DropOperatorStatement {
+        if_exists,
+        schema_name,
+        operator_name,
+        left_arg,
+        right_arg,
+    })
+}
+
 fn parse_create_operator_class_items(
     input: &str,
 ) -> Result<Vec<CreateOperatorClassItem>, ParseError> {
@@ -4142,6 +4481,120 @@ fn parse_create_operator_class_item(input: &str) -> Result<CreateOperatorClassIt
         "unsupported CREATE OPERATOR CLASS item: {}",
         trimmed.split_whitespace().next().unwrap_or(trimmed)
     )))
+}
+
+fn parse_operator_name(input: &str) -> Result<((Option<String>, String), &str), ParseError> {
+    let input = input.trim_start();
+    if let Ok((schema_name, rest)) = parse_sql_identifier(input) {
+        let rest = rest.trim_start();
+        if let Some(after_dot) = rest.strip_prefix('.') {
+            let (operator_name, remaining) = parse_operator_token(after_dot)?;
+            return Ok(((Some(schema_name), operator_name), remaining));
+        }
+    }
+    let (operator_name, rest) = parse_operator_token(input)?;
+    Ok(((None, operator_name), rest))
+}
+
+fn parse_operator_token(input: &str) -> Result<(String, &str), ParseError> {
+    let input = input.trim_start();
+    let token_len = input
+        .char_indices()
+        .take_while(|(_, ch)| {
+            matches!(
+                ch,
+                '!' | '#'
+                    | '%'
+                    | '&'
+                    | '*'
+                    | '+'
+                    | '-'
+                    | '/'
+                    | '<'
+                    | '='
+                    | '>'
+                    | '?'
+                    | '@'
+                    | '^'
+                    | '|'
+                    | '~'
+            )
+        })
+        .map(|(idx, ch)| idx + ch.len_utf8())
+        .last()
+        .unwrap_or(0);
+    if token_len == 0 || !is_simple_operator_token(&input[..token_len]) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "operator name",
+            actual: input.into(),
+        });
+    }
+    Ok((input[..token_len].to_string(), &input[token_len..]))
+}
+
+fn parse_operator_argtypes(
+    input: &str,
+) -> Result<((Option<RawTypeName>, Option<RawTypeName>), &str), ParseError> {
+    let (args_sql, rest) = take_parenthesized_segment(input)?;
+    let args = split_top_level_items(&args_sql, ',')?;
+    if args.len() != 2 {
+        return Err(ParseError::UnexpectedToken {
+            expected: "(leftarg, rightarg)",
+            actual: args_sql,
+        });
+    }
+    let left_arg = parse_optional_operator_argtype(&args[0])?;
+    let right_arg = parse_optional_operator_argtype(&args[1])?;
+    Ok(((left_arg, right_arg), rest))
+}
+
+fn parse_optional_operator_argtype(input: &str) -> Result<Option<RawTypeName>, ParseError> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    if keyword_at_start(input, "none") && consume_keyword(input, "none").trim().is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(parse_type_name(input)?))
+}
+
+fn parse_qualified_name_ref<'a>(
+    input: &'a str,
+    expected: &'static str,
+) -> Result<(QualifiedNameRef, &'a str), ParseError> {
+    let ((schema_name, name), rest) = parse_schema_qualified_name(input)?;
+    if name.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected,
+            actual: input.into(),
+        });
+    }
+    Ok((QualifiedNameRef { schema_name, name }, rest))
+}
+
+fn parse_operator_name_value(input: &str) -> Result<String, ParseError> {
+    let ((schema_name, operator_name), rest) = parse_operator_name(input)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "operator name",
+            actual: input.into(),
+        });
+    }
+    Ok(schema_name
+        .map(|schema| format!("{schema}.{operator_name}"))
+        .unwrap_or(operator_name))
+}
+
+fn parse_operator_bool_value(input: &str) -> Result<bool, ParseError> {
+    let (value, rest) = parse_publication_bool_value(input)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "boolean option value",
+            actual: input.into(),
+        });
+    }
+    Ok(value)
 }
 
 fn parse_create_type_attributes(input: &str) -> Result<Vec<CompositeTypeAttributeDef>, ParseError> {
@@ -5389,6 +5842,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::copy_stmt => Ok(Statement::CopyFrom(build_copy_from(inner)?)),
         Rule::analyze_stmt => Ok(Statement::Analyze(build_analyze(inner)?)),
         Rule::checkpoint_stmt => Ok(Statement::Checkpoint(CheckpointStatement)),
+        Rule::notify_stmt => Ok(Statement::Notify(build_notify(inner)?)),
+        Rule::listen_stmt => Ok(Statement::Listen(build_listen(inner)?)),
+        Rule::unlisten_stmt => Ok(Statement::Unlisten(build_unlisten(inner)?)),
         Rule::show_stmt => Ok(Statement::Show(build_show(inner)?)),
         Rule::set_session_authorization_stmt => Ok(Statement::SetSessionAuthorization(
             build_set_session_authorization(inner)?,
@@ -5728,6 +6184,61 @@ fn build_show(pair: Pair<'_, Rule>) -> Result<ShowStatement, ParseError> {
         });
     }
     Ok(ShowStatement { name })
+}
+
+fn build_notify(pair: Pair<'_, Rule>) -> Result<NotifyStatement, ParseError> {
+    let mut channel = None;
+    let mut payload = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => channel = Some(build_identifier(part)),
+            Rule::notify_payload => {
+                let payload_value = part
+                    .into_inner()
+                    .find(|inner| {
+                        matches!(
+                            inner.as_rule(),
+                            Rule::quoted_string_literal
+                                | Rule::string_literal
+                                | Rule::escape_string_literal
+                                | Rule::unicode_string_literal
+                                | Rule::dollar_string_literal
+                        )
+                    })
+                    .ok_or(ParseError::UnexpectedEof)?;
+                payload = Some(decode_string_literal_pair(payload_value)?);
+            }
+            _ => {}
+        }
+    }
+    Ok(NotifyStatement {
+        channel: channel.ok_or(ParseError::UnexpectedEof)?,
+        payload,
+    })
+}
+
+fn build_listen(pair: Pair<'_, Rule>) -> Result<ListenStatement, ParseError> {
+    let channel = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::identifier)
+        .map(build_identifier)
+        .ok_or(ParseError::UnexpectedEof)?;
+    Ok(ListenStatement { channel })
+}
+
+fn build_unlisten(pair: Pair<'_, Rule>) -> Result<UnlistenStatement, ParseError> {
+    let text = pair.as_str().trim();
+    let mut channel = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => channel = Some(build_identifier(part)),
+            _ => {}
+        }
+    }
+    if channel.is_none() && !text.ends_with('*') {
+        return Err(ParseError::UnexpectedEof);
+    }
+    Ok(UnlistenStatement { channel })
 }
 
 fn build_set_session_authorization(
@@ -6841,12 +7352,14 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
         Rule::srf_from_item => {
             let mut name = None;
             let mut parsed_args = ParsedFunctionArgs::default();
+            let mut with_ordinality = false;
             for part in pair.into_inner() {
                 match part.as_rule() {
                     Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
                     Rule::function_arg_list => {
                         parsed_args = build_function_arg_list(part)?;
                     }
+                    Rule::srf_with_ordinality => with_ordinality = true,
                     _ => {}
                 }
             }
@@ -6854,7 +7367,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                 name: name.ok_or(ParseError::UnexpectedEof)?,
                 args: parsed_args.args,
                 func_variadic: parsed_args.func_variadic,
-                with_ordinality: false,
+                with_ordinality,
             })
         }
         Rule::derived_from_item => {
@@ -9082,6 +9595,7 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
             }
             _ => raw_type_output_name(ty).to_string(),
         },
+        SqlExpr::Case { .. } => "case".to_string(),
         SqlExpr::Row(_) => "row".to_string(),
         SqlExpr::Random => "random".to_string(),
         SqlExpr::CurrentUser => "current_user".to_string(),
@@ -10252,6 +10766,8 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
         Rule::kw_regclass => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegClass)),
         Rule::kw_regconfig => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegConfig)),
         Rule::kw_regdictionary => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegDictionary)),
+        Rule::kw_regoperator => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegOperator)),
+        Rule::kw_regprocedure => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegProcedure)),
         Rule::kw_bool | Rule::kw_boolean => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool)),
         Rule::date_type | Rule::kw_date => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Date)),
         Rule::time_type
@@ -12826,5 +13342,113 @@ mod tests {
             "select sum(id) over (w rows between 1 preceding and current row) from people window w as (partition by name order by id)",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn parse_notify_listen_and_unlisten_statements() {
+        assert_eq!(
+            parse_statement("notify alerts, 'hello'").unwrap(),
+            Statement::Notify(NotifyStatement {
+                channel: "alerts".to_string(),
+                payload: Some("hello".to_string()),
+            })
+        );
+        assert_eq!(
+            parse_statement("listen alerts").unwrap(),
+            Statement::Listen(ListenStatement {
+                channel: "alerts".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_statement("unlisten *").unwrap(),
+            Statement::Unlisten(UnlistenStatement { channel: None })
+        );
+    }
+
+    #[test]
+    fn parse_create_operator_statement() {
+        assert_eq!(
+            parse_statement(
+                "create operator === (procedure = regoperator_test_fn, leftarg = boolean, rightarg = boolean, restrict = customcontsel, join = contjoinsel, hashes, merges)"
+            )
+            .unwrap(),
+            Statement::CreateOperator(CreateOperatorStatement {
+                schema_name: None,
+                operator_name: "===".to_string(),
+                left_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool))),
+                right_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool))),
+                procedure: QualifiedNameRef {
+                    schema_name: None,
+                    name: "regoperator_test_fn".to_string(),
+                },
+                commutator: None,
+                negator: None,
+                restrict: Some(QualifiedNameRef {
+                    schema_name: None,
+                    name: "customcontsel".to_string(),
+                }),
+                join: Some(QualifiedNameRef {
+                    schema_name: None,
+                    name: "contjoinsel".to_string(),
+                }),
+                hashes: true,
+                merges: true,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_alter_and_drop_operator_statements() {
+        assert_eq!(
+            parse_statement(
+                "alter operator === (boolean, boolean) set (restrict = none, join = contjoinsel, hashes, merges = false)"
+            )
+            .unwrap(),
+            Statement::AlterOperator(AlterOperatorStatement {
+                schema_name: None,
+                operator_name: "===".to_string(),
+                left_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool))),
+                right_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool))),
+                options: vec![
+                    AlterOperatorOption::Restrict {
+                        option_name: "restrict".to_string(),
+                        function: None,
+                    },
+                    AlterOperatorOption::Join {
+                        option_name: "join".to_string(),
+                        function: Some(QualifiedNameRef {
+                            schema_name: None,
+                            name: "contjoinsel".to_string(),
+                        }),
+                    },
+                    AlterOperatorOption::Hashes {
+                        option_name: "hashes".to_string(),
+                        enabled: true,
+                    },
+                    AlterOperatorOption::Merges {
+                        option_name: "merges".to_string(),
+                        enabled: false,
+                    },
+                ],
+            })
+        );
+        assert_eq!(
+            parse_statement("drop operator if exists public.===(boolean, boolean) cascade").unwrap(),
+            Statement::DropOperator(DropOperatorStatement {
+                if_exists: true,
+                schema_name: Some("public".to_string()),
+                operator_name: "===".to_string(),
+                left_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool))),
+                right_arg: Some(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool))),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_regoperator_type_name() {
+        assert_eq!(
+            parse_type_name("regoperator").unwrap(),
+            RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegOperator))
+        );
     }
 }

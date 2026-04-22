@@ -721,7 +721,7 @@ mod tests {
             CORE_BOOTSTRAP_RELATIONS[38].oid,
             PG_PUBLICATION_NAMESPACE_RELATION_OID
         );
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[38].oid, PG_AGGREGATE_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[39].oid, PG_AGGREGATE_RELATION_OID);
     }
 
     #[test]
@@ -764,6 +764,7 @@ mod tests {
                 "pg_foreign_data_wrapper",
                 "pg_index",
                 "pg_inherits",
+                "pg_partitioned_table",
                 "pg_rewrite",
                 "pg_statistic",
                 "pg_trigger",
