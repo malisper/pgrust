@@ -5045,10 +5045,14 @@ fn build_plan_coerces_time_comparison_string_literals() {
         predicate,
         Expr::Op(op)
             if op.op == crate::include::nodes::primnodes::OpExprKind::Lt
-                && matches!(op.args.as_slice(), [Expr::Var(var), Expr::Cast(inner, ty)]
+                && matches!(op.args.as_slice(), [Expr::Var(var), right]
                     if var.vartype == SqlType::new(SqlTypeKind::Time)
-                        && *ty == SqlType::new(SqlTypeKind::Time)
-                        && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _))))
+                        && (matches!(
+                            right,
+                            Expr::Cast(inner, ty)
+                                if *ty == SqlType::new(SqlTypeKind::Time)
+                                    && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _)))
+                        ) || matches!(right, Expr::Const(Value::Time(_)))))
     ));
 }
 
@@ -5138,9 +5142,12 @@ fn build_plan_coerces_unknown_string_literals_for_array_ops() {
                 && matches!(op.args.as_slice(), [left, right]
                     if matches!(left, Expr::ArrayLiteral { array_type, .. }
                 if *array_type == SqlType::array_of(SqlType::new(SqlTypeKind::Int4)))
-                && matches!(right, Expr::Cast(inner, ty)
-                    if *ty == SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
-                        && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _)))))
+                && (matches!(
+                    right,
+                    Expr::Cast(inner, ty)
+                        if *ty == SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+                            && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _)))
+                ) || matches!(right, Expr::Const(Value::PgArray(_)))))
     ));
     assert!(matches!(
         &targets[1].expr,
@@ -5149,9 +5156,12 @@ fn build_plan_coerces_unknown_string_literals_for_array_ops() {
                 && matches!(op.args.as_slice(), [left, right]
                     if matches!(left, Expr::ArrayLiteral { array_type, .. }
                 if *array_type == SqlType::array_of(SqlType::new(SqlTypeKind::Int4)))
-                && matches!(right, Expr::Cast(inner, ty)
-                    if *ty == SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
-                        && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _)))))
+                && (matches!(
+                    right,
+                    Expr::Cast(inner, ty)
+                        if *ty == SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+                            && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _)))
+                ) || matches!(right, Expr::Const(Value::PgArray(_)))))
     ));
     assert!(matches!(
         &targets[2].expr,
@@ -5160,17 +5170,23 @@ fn build_plan_coerces_unknown_string_literals_for_array_ops() {
                 && matches!(op.args.as_slice(), [left, right]
                     if matches!(left, Expr::ArrayLiteral { array_type, .. }
                 if *array_type == SqlType::array_of(SqlType::new(SqlTypeKind::Int4)))
-                && matches!(right, Expr::Cast(inner, ty)
-                    if *ty == SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
-                        && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _)))))
+                && (matches!(
+                    right,
+                    Expr::Cast(inner, ty)
+                        if *ty == SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+                            && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _)))
+                ) || matches!(right, Expr::Const(Value::PgArray(_)))))
     ));
     assert!(matches!(
         &targets[3].expr,
         Expr::ScalarArrayOp(saop)
             if saop.use_or
-                && matches!(saop.right.as_ref(), Expr::Cast(inner, ty)
-                if *ty == SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
-                    && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _))))
+                && (matches!(
+                    saop.right.as_ref(),
+                    Expr::Cast(inner, ty)
+                        if *ty == SqlType::array_of(SqlType::new(SqlTypeKind::Int4))
+                            && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _)))
+                ) || matches!(saop.right.as_ref(), Expr::Const(Value::PgArray(_))))
     ));
 }
 
