@@ -10336,9 +10336,14 @@ fn array_subscript_on_unsubscriptable_type_uses_postgres_error() {
     let txns = TransactionManager::new_durable(&base).unwrap();
 
     match run_sql(&base, &txns, INVALID_TRANSACTION_ID, "select (now())[1]") {
-        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual })) => {
-            assert_eq!(expected, "array expression");
-            assert_eq!(actual, "timestamp with time zone");
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) => {
+            assert_eq!(
+                message,
+                "cannot subscript type timestamp with time zone because it does not support subscripting"
+            );
+            assert_eq!(sqlstate, "42804");
         }
         other => panic!("expected unsubscriptable-type error, got {other:?}"),
     }
@@ -10355,9 +10360,11 @@ fn point_slice_subscript_uses_fixed_length_array_error() {
         INVALID_TRANSACTION_ID,
         "select ('(1,2)'::point)[0:1]",
     ) {
-        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual })) => {
-            assert_eq!(expected, "array expression");
-            assert_eq!(actual, "point");
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) => {
+            assert_eq!(message, "slices of fixed-length arrays not implemented");
+            assert_eq!(sqlstate, "0A000");
         }
         other => panic!("expected fixed-length array slice error, got {other:?}"),
     }

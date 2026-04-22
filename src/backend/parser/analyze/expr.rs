@@ -59,6 +59,27 @@ fn supports_array_subscripts(array_type: SqlType) -> bool {
         )
 }
 
+fn unsupported_subscript_type_error(sql_type: SqlType) -> ParseError {
+    ParseError::DetailedError {
+        message: format!(
+            "cannot subscript type {} because it does not support subscripting",
+            sql_type_name(sql_type)
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "42804",
+    }
+}
+
+fn fixed_length_array_slice_error() -> ParseError {
+    ParseError::DetailedError {
+        message: "slices of fixed-length arrays not implemented".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
 #[allow(dead_code)]
 pub(crate) fn bind_expr(expr: &SqlExpr, scope: &BoundScope) -> Result<Expr, ParseError> {
     bind_expr_with_outer(expr, scope, &Catalog::default(), &[], None)
@@ -1782,16 +1803,10 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             if array_type.kind == SqlTypeKind::Point
                 && subscripts.iter().any(|subscript| subscript.is_slice)
             {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "array expression",
-                    actual: "point".into(),
-                });
+                return Err(fixed_length_array_slice_error());
             }
             if !supports_array_subscripts(array_type) {
-                return Err(ParseError::UnexpectedToken {
-                    expected: "array expression",
-                    actual: sql_type_name(array_type).into(),
-                });
+                return Err(unsupported_subscript_type_error(array_type));
             }
             Expr::ArraySubscript {
                 array: Box::new(bind_expr_with_outer_and_ctes(
