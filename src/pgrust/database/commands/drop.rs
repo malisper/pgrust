@@ -1044,6 +1044,9 @@ mod tests {
 
     fn take_backend_notice_messages() -> Vec<String> {
         take_backend_notices()
+            .into_iter()
+            .map(|notice| notice.message)
+            .collect()
     }
 
     #[test]

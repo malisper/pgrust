@@ -6,7 +6,7 @@ use crate::backend::executor::nodes::render_explain_join_expr;
 use crate::backend::executor::{ExecError, ExecutorContext};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
-    HashJoinState, MaterializedRow, PlanNode, SlotKind, SystemVarBinding, TupleSlot,
+    HashJoinState, MaterializedRow, PlanNode, SystemVarBinding, TupleSlot,
 };
 use crate::include::nodes::primnodes::{Expr, JoinType};
 
@@ -65,11 +65,7 @@ fn merge_system_bindings(
 }
 
 fn store_virtual_row(slot: &mut TupleSlot, values: Vec<Value>) {
-    let nvalid = values.len();
-    slot.tts_values = values;
-    slot.tts_nvalid = nvalid;
-    slot.kind = SlotKind::Virtual;
-    slot.decode_offset = 0;
+    slot.store_virtual_row(values, None, None);
 }
 
 fn combine_slots(left: &MaterializedRow, right: &[Value]) -> Vec<Value> {
@@ -94,7 +90,7 @@ impl PlanNode for HashJoinState {
                         let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
                         Value::materialize_all(&mut values);
                         self.current_outer = Some(MaterializedRow::new(
-                            TupleSlot::virtual_row(values),
+                            TupleSlot::virtual_row_with_metadata(values, slot.tid(), slot.table_oid),
                             self.left.current_system_bindings().to_vec(),
                         ));
                         self.current_bucket_entries.clear();
