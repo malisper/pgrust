@@ -30,7 +30,7 @@
 - **B-tree indexes**
 - **Wire protocol compatibility (psql connects)**
 - **Basic SQL: SELECT / INSERT / UPDATE / DELETE / CREATE TABLE / CREATE INDEX / transactions / JSON and JSONB / basic aggregates / joins**
-- **~34% of PostgreSQL regression tests passi**
+- **~45% of PostgreSQL regression queries match expected output**
 
 ## **Quick start**
 
