@@ -48,10 +48,8 @@ use crate::backend::executor::{
     ExecError, ExecutorContext, Expr, StatementResult, ToastRelationRef, compare_order_values,
     create_query_desc, executor_start,
 };
-use crate::backend::storage::page::bufpage::MAX_HEAP_TUPLE_SIZE;
 use crate::include::access::amapi::IndexUniqueCheck;
-use crate::include::access::detoast::is_ondisk_toast_pointer;
-use crate::include::access::htup::{HeapTuple, TupleValue};
+use crate::include::access::htup::HeapTuple;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::builtin_range_name_for_sql_type;
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, Value, array_value_from_value};

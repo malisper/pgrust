@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use super::ExecError;
 use super::exec_expr::parse_numeric_text;
 use super::expr_bit::{coerce_bit_string, render_bit_text};
@@ -58,7 +60,7 @@ const INTERNAL_VALUE_TAG_NUMERIC: u8 = 21;
 const INTERNAL_VALUE_TAG_JSON: u8 = 22;
 const INTERNAL_VALUE_TAG_JSONB: u8 = 23;
 const INTERNAL_VALUE_TAG_JSONPATH: u8 = 24;
-const INTERNAL_VALUE_TAG_XML: u8 = 32;
+const INTERNAL_VALUE_TAG_XML: u8 = 33;
 const INTERNAL_VALUE_TAG_TSVECTOR: u8 = 25;
 const INTERNAL_VALUE_TAG_TSQUERY: u8 = 26;
 const INTERNAL_VALUE_TAG_TEXT: u8 = 27;
@@ -350,7 +352,7 @@ fn sql_type_kind_from_tag(tag: u8) -> Result<SqlTypeKind, ExecError> {
         2 => SqlTypeKind::Composite,
         54 => SqlTypeKind::Trigger,
         51 => SqlTypeKind::Void,
-        55 => SqlTypeKind::FdwHandler,
+        64 => SqlTypeKind::FdwHandler,
         3 => SqlTypeKind::Int2,
         4 => SqlTypeKind::Int2Vector,
         5 => SqlTypeKind::Int4,
@@ -380,7 +382,7 @@ fn sql_type_kind_from_tag(tag: u8) -> Result<SqlTypeKind, ExecError> {
         25 => SqlTypeKind::Json,
         26 => SqlTypeKind::Jsonb,
         27 => SqlTypeKind::JsonPath,
-        56 => SqlTypeKind::Xml,
+        65 => SqlTypeKind::Xml,
         28 => SqlTypeKind::Date,
         29 => SqlTypeKind::Time,
         30 => SqlTypeKind::TimeTz,

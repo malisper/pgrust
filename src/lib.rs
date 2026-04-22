@@ -1,3 +1,5 @@
+#![allow(dead_code, private_interfaces)]
+
 pub mod backend;
 pub mod include;
 pub mod pgrust;

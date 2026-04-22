@@ -456,7 +456,7 @@ fn insert_into_block(
     let outcome = write_or_split_page(
         pool, client_id, xid, rel, desc, state, block, opaque, items, is_root,
     )?;
-    if let Some(split) = child_outcome.split {
+    if let Some(_split) = child_outcome.split {
         clear_follow_right(pool, client_id, xid, rel, child_block, outcome.write_lsn)?;
     }
     Ok(outcome)

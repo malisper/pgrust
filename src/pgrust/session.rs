@@ -8,8 +8,7 @@ use crate::backend::access::transam::xact::TransactionId;
 use crate::backend::catalog::store::CatalogMutationEffect;
 use crate::backend::commands::copyfrom::parse_text_array_literal;
 use crate::backend::commands::tablecmds::{
-    execute_delete_with_waiter, execute_insert, execute_merge, execute_prepared_insert_row,
-    execute_update_with_waiter,
+    execute_merge, execute_prepared_insert_row,
 };
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
@@ -1763,7 +1762,7 @@ impl Session {
         &mut self,
         db: &Database,
         stmt: Statement,
-        statement_lock_scope_id: Option<u64>,
+        _statement_lock_scope_id: Option<u64>,
     ) -> Result<StatementResult, ExecError> {
         let effect_start = self
             .active_txn
@@ -3598,7 +3597,7 @@ impl Session {
         let xid = txn.xid;
         let cid = txn.next_command_id;
         txn.next_command_id = txn.next_command_id.saturating_add(1);
-        let client_id = self.client_id;
+        let _client_id = self.client_id;
 
         let lock_requests = prepared_insert_foreign_key_lock_requests(prepared);
         self.lock_table_requests_if_needed(db, &lock_requests)?;
