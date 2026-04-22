@@ -4060,6 +4060,56 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn set_relation_vacuum_stats_mvcc(
+        &mut self,
+        relation_oid: u32,
+        relpages: i32,
+        relallvisible: i32,
+        relallfrozen: i32,
+        relfrozenxid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, _new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
+                entry.relpages = relpages;
+                entry.relallvisible = relallvisible;
+                entry.relallfrozen = relallfrozen;
+                entry.relfrozenxid = relfrozenxid;
+                Ok(((), vec![BootstrapCatalogKind::PgClass]))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok(effect)
+    }
+
+    pub fn set_relation_maintenance_stats_mvcc(
+        &mut self,
+        relation_oid: u32,
+        relpages: i32,
+        reltuples: f64,
+        relallvisible: i32,
+        relallfrozen: i32,
+        relfrozenxid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, _new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
+                entry.relpages = relpages;
+                entry.reltuples = reltuples;
+                entry.relallvisible = relallvisible;
+                entry.relallfrozen = relallfrozen;
+                entry.relfrozenxid = relfrozenxid;
+                Ok(((), vec![BootstrapCatalogKind::PgClass]))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok(effect)
+    }
+
     pub fn replace_relation_statistics_mvcc(
         &mut self,
         relation_oid: u32,
@@ -4464,6 +4514,9 @@ fn build_relation_entry(
         relforcerowsecurity: false,
         relpages,
         reltuples,
+        relallvisible: 0,
+        relallfrozen: 0,
+        relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
         desc,
         index_meta: None,
     };
@@ -4562,6 +4615,9 @@ fn build_index_entry(
         relforcerowsecurity: false,
         relpages: 0,
         reltuples: -1.0,
+        relallvisible: 0,
+        relallfrozen: 0,
+        relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
         desc: RelationDesc {
             columns: index_columns,
         },
@@ -5026,19 +5082,22 @@ fn class_row_for_relation_name(relation_name: &str, entry: &CatalogEntry) -> PgC
         reltype: entry.row_type_oid,
         relowner: entry.owner_oid,
         relam: entry.am_oid,
-        reltablespace: 0,
         relfilenode: entry.rel.rel_number,
+        reltablespace: 0,
+        relpages: entry.relpages,
+        reltuples: entry.reltuples,
+        relallvisible: entry.relallvisible,
+        relallfrozen: entry.relallfrozen,
         reltoastrelid: entry.reltoastrelid,
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
+        relnatts: entry.desc.columns.len() as i16,
         relhassubclass: entry.relhassubclass,
         relhastriggers: entry.relhastriggers,
-        relispartition: entry.relispartition,
         relrowsecurity: entry.relrowsecurity,
         relforcerowsecurity: entry.relforcerowsecurity,
-        relnatts: entry.desc.columns.len() as i16,
-        relpages: entry.relpages,
-        reltuples: entry.reltuples,
+        relispartition: entry.relispartition,
+        relfrozenxid: entry.relfrozenxid,
     }
 }
 
@@ -5221,6 +5280,9 @@ fn catalog_entry_from_visible_relation(
         relforcerowsecurity: class_row.relforcerowsecurity,
         relpages: class_row.relpages,
         reltuples: class_row.reltuples,
+        relallvisible: class_row.relallvisible,
+        relallfrozen: class_row.relallfrozen,
+        relfrozenxid: class_row.relfrozenxid,
         desc: relation.desc.clone(),
         index_meta: relation.index.as_ref().map(|index| CatalogIndexMeta {
             indrelid: index.indrelid,

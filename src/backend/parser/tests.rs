@@ -466,6 +466,9 @@ fn test_catalog_entry(rel_number: u32, desc: RelationDesc) -> CatalogEntry {
         relforcerowsecurity: false,
         relpages: 0,
         reltuples: 0.0,
+        relallvisible: 0,
+        relallfrozen: 0,
+        relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
         desc,
         index_meta: None,
     }
@@ -519,6 +522,9 @@ fn people_view_entry() -> CatalogEntry {
         relforcerowsecurity: false,
         relpages: 0,
         reltuples: 0.0,
+        relallvisible: 0,
+        relallfrozen: 0,
+        relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
         desc: RelationDesc {
             columns: vec![
                 column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
@@ -704,6 +710,9 @@ fn catalog_with_people_id_index() -> Catalog {
             relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
+            relallvisible: 0,
+            relallfrozen: 0,
+            relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
             desc: RelationDesc {
                 columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
             },
@@ -757,6 +766,9 @@ fn catalog_with_people_primary_key_opclass(opclass_oid: u32) -> Catalog {
             relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
+            relallvisible: 0,
+            relallfrozen: 0,
+            relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
             desc: RelationDesc {
                 columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
             },
@@ -839,6 +851,9 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
             relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
+            relallvisible: 0,
+            relallfrozen: 0,
+            relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
             desc: RelationDesc {
                 columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
             },
@@ -889,6 +904,9 @@ fn catalog_with_people_expression_unique_index() -> Catalog {
             relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
+            relallvisible: 0,
+            relallfrozen: 0,
+            relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
             desc: RelationDesc {
                 columns: vec![column_desc("lower", SqlType::new(SqlTypeKind::Text), false)],
             },
@@ -939,6 +957,9 @@ fn catalog_with_people_name_c_collation_index() -> Catalog {
             relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
+            relallvisible: 0,
+            relallfrozen: 0,
+            relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
             desc: RelationDesc {
                 columns: vec![column_desc("name", SqlType::new(SqlTypeKind::Text), false)],
             },
@@ -997,6 +1018,9 @@ fn catalog_with_text_parent_primary_key() -> Catalog {
             relforcerowsecurity: false,
             relpages: 0,
             reltuples: 0.0,
+            relallvisible: 0,
+            relallfrozen: 0,
+            relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
             desc: RelationDesc {
                 columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Text), false)],
             },

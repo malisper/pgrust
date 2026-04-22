@@ -149,6 +149,9 @@ fn test_catalog_entry(rel: RelFileLocator, desc: RelationDesc) -> CatalogEntry {
         relforcerowsecurity: false,
         relpages: 0,
         reltuples: 0.0,
+        relallvisible: 0,
+        relallfrozen: 0,
+        relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
         desc,
         index_meta: None,
     }

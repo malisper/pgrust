@@ -1801,12 +1801,30 @@ pub fn execute_vacuum(
     ctx: &mut ExecutorContext,
 ) -> Result<StatementResult, ExecError> {
     validate_maintenance_targets(&stmt.targets, catalog)?;
+    let _ = collect_vacuum_stats(&stmt.targets, catalog, ctx)?;
+    Ok(StatementResult::AffectedRows(0))
+}
+
+pub fn collect_vacuum_stats(
+    targets: &[MaintenanceTarget],
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<crate::backend::access::heap::vacuumlazy::VacuumRelationStats>, ExecError> {
     let mut processed = 0u64;
-    for target in stmt.targets {
+    let mut stats = Vec::with_capacity(targets.len());
+    for target in targets {
         let Some(entry) = catalog.lookup_relation(&target.table_name) else {
             continue;
         };
+        let scan = crate::backend::access::heap::vacuumlazy::vacuum_relation_scan(
+            &ctx.pool,
+            ctx.client_id,
+            entry.rel,
+            &ctx.txns,
+        )
+        .map_err(ExecError::Heap)?;
         let indexes = catalog.index_relations_for_heap(entry.relation_oid);
+        let dead_items = &scan.dead_tids;
         for index in indexes {
             let vacuum_ctx = crate::include::access::amapi::IndexVacuumContext {
                 pool: ctx.pool.clone(),
@@ -1820,13 +1838,19 @@ pub fn execute_vacuum(
                 index_desc: index.desc.clone(),
                 index_meta: index.index_meta.clone(),
             };
-            let stats = indexam::index_bulk_delete(&vacuum_ctx, index.index_meta.am_oid, None)
-                .map_err(|err| {
-                    ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "VACUUM bulk delete",
-                        actual: format!("{err:?}"),
-                    })
-                })?;
+            let dead_item_callback = |tid| dead_items.contains(&tid);
+            let stats = indexam::index_bulk_delete(
+                &vacuum_ctx,
+                index.index_meta.am_oid,
+                &dead_item_callback,
+                None,
+            )
+            .map_err(|err| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "VACUUM bulk delete",
+                    actual: format!("{err:?}"),
+                })
+            })?;
             let _ =
                 indexam::index_vacuum_cleanup(&vacuum_ctx, index.index_meta.am_oid, Some(stats))
                     .map_err(|err| {
@@ -1836,10 +1860,24 @@ pub fn execute_vacuum(
                         })
                     })?;
         }
+        let previous_relfrozenxid = catalog
+            .class_row_by_oid(entry.relation_oid)
+            .map(|row| row.relfrozenxid);
+        let relation_stats = crate::backend::access::heap::vacuumlazy::vacuum_relation_pages(
+            &ctx.pool,
+            ctx.client_id,
+            entry.rel,
+            entry.relation_oid,
+            &ctx.txns,
+            &scan,
+            previous_relfrozenxid,
+        )
+        .map_err(ExecError::Heap)?;
+        stats.push(relation_stats);
         processed += 1;
     }
     let _ = processed;
-    Ok(StatementResult::AffectedRows(0))
+    Ok(stats)
 }
 
 pub fn execute_create_table(
@@ -1970,7 +2008,13 @@ pub fn execute_truncate_table(
         let indexes = catalog.index_relations_for_heap(entry.relation_oid);
         let _ = ctx.pool.invalidate_relation(entry.rel);
         ctx.pool
-            .with_storage_mut(|s| s.smgr.truncate(entry.rel, ForkNumber::Main, 0))
+            .with_storage_mut(|s| {
+                s.smgr.truncate(entry.rel, ForkNumber::Main, 0)?;
+                if s.smgr.exists(entry.rel, ForkNumber::VisibilityMap) {
+                    s.smgr.truncate(entry.rel, ForkNumber::VisibilityMap, 0)?;
+                }
+                Ok(())
+            })
             .map_err(HeapError::Storage)?;
         for index in indexes
             .iter()

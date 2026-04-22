@@ -51,7 +51,7 @@ pub(crate) fn sync_catalog_rows_subset(
         let rel = bootstrap_catalog_rel(kind, db_oid);
         smgr.open(rel)
             .map_err(|e| CatalogError::Io(e.to_string()))?;
-        smgr.unlink(rel, Some(ForkNumber::Main), false);
+        smgr.unlink(rel, None, false);
         smgr.create(rel, ForkNumber::Main, false)
             .map_err(|e| CatalogError::Io(e.to_string()))?;
     }
