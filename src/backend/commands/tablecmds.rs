@@ -2500,6 +2500,8 @@ pub(crate) fn materialize_insert_rows(
                 .map_err(ExecError::Parse)?
                 .try_into()
                 .expect("insert-select rewrite should return a single query");
+            let query =
+                crate::backend::optimizer::fold_query_constants(query).map_err(ExecError::Parse)?;
             let planned = planner(query, catalog);
             let result: Result<Vec<Vec<Value>>, ExecError> = (|| {
                 let saved_subplans = std::mem::replace(&mut ctx.subplans, planned.subplans.clone());

@@ -5377,6 +5377,33 @@ fn build_plan_resolves_aliased_columns() {
 }
 
 #[test]
+fn build_plan_constant_folds_nullif_filter_to_false() {
+    let stmt = parse_select("select * from people where nullif(1, 2) = 2").unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+
+    match plan {
+        Plan::Filter {
+            predicate, input, ..
+        } => {
+            assert_eq!(predicate, Expr::Const(Value::Bool(false)));
+            assert!(matches!(*input, Plan::SeqScan { .. }));
+        }
+        other => panic!("expected filter, got {:?}", other),
+    }
+}
+
+#[test]
+fn build_plan_case_raises_reachable_division_by_zero() {
+    let stmt = parse_select("select case when id > 0 then id else 1/0 end from people").unwrap();
+
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::DetailedError { message, sqlstate, .. })
+            if message == "division by zero" && sqlstate == "22012"
+    ));
+}
+
+#[test]
 fn build_join_plan_resolves_qualified_columns() {
     let mut catalog = catalog();
     catalog.insert("pets", pets_entry());
@@ -10452,6 +10479,7 @@ fn parse_case_expressions() {
             defresult: Some(_),
         } if matches!(arg.as_ref(), SqlExpr::Column(name) if name == "id") && args.len() == 1
     ));
+    assert_eq!(stmt.targets[0].output_name, "case");
     assert!(matches!(
         &stmt.targets[1].expr,
         SqlExpr::Case {
@@ -10460,6 +10488,7 @@ fn parse_case_expressions() {
             defresult: Some(_),
         } if args.len() == 1
     ));
+    assert_eq!(stmt.targets[1].output_name, "case");
 }
 
 #[test]

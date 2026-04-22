@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 mod bestpath;
+mod constfold;
 mod inherit;
 mod joininfo;
 mod path;
@@ -324,6 +325,10 @@ fn extract_hash_join_clauses(
 
 pub(crate) fn planner(query: Query, catalog: &dyn CatalogLookup) -> PlannedStmt {
     plan::planner(query, catalog)
+}
+
+pub(crate) fn fold_query_constants(query: Query) -> Result<Query, crate::backend::parser::ParseError> {
+    constfold::fold_query_constants(query)
 }
 
 pub(crate) fn planner_with_param_base(
