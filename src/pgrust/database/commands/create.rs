@@ -1084,6 +1084,7 @@ impl Database {
             waiter: None,
             interrupts,
         };
+        let is_new_relation = existing_relation.is_none();
         let relation_oid = if let Some(existing_relation) = existing_relation {
             if !create_stmt.or_replace {
                 return Err(ExecError::Parse(ParseError::TableAlreadyExists(view_name)));
@@ -1166,6 +1167,13 @@ impl Database {
             )
             .map_err(map_catalog_error)?;
         catalog_effects.push(rule_effect);
+        if is_new_relation {
+            // :HACK: CREATE VIEW reserves an intermediate command id between creating
+            // the relation row and publishing the _RETURN rule. Session command-end
+            // bookkeeping advances by catalog effect count, so pad the effect list to
+            // keep the next statement's cid beyond the reserved internal cids.
+            catalog_effects.push(CatalogMutationEffect::default());
+        }
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -1199,6 +1207,7 @@ impl Database {
             txn_waiter: Some(self.txn_waiter.clone()),
             sequences: Some(self.sequences.clone()),
             large_objects: Some(self.large_objects.clone()),
+            advisory_locks: Arc::clone(&self.advisory_locks),
             checkpoint_stats: self.checkpoint_stats_snapshot(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
             interrupts: Arc::clone(&interrupts),
@@ -1206,9 +1215,11 @@ impl Database {
             session_stats: self.session_stats_state(client_id),
             snapshot,
             client_id,
+            current_database_name: self.current_database_name(),
             session_user_oid: self.auth_state(client_id).session_user_oid(),
             current_user_oid: self.auth_state(client_id).current_user_oid(),
             active_role_oid: self.auth_state(client_id).active_role_oid(),
+            statement_lock_scope_id: None,
             next_command_id: cid,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -1344,6 +1355,7 @@ impl Database {
             txn_waiter: Some(self.txn_waiter.clone()),
             sequences: Some(self.sequences.clone()),
             large_objects: Some(self.large_objects.clone()),
+            advisory_locks: Arc::clone(&self.advisory_locks),
             checkpoint_stats: self.checkpoint_stats_snapshot(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
             interrupts,
@@ -1351,9 +1363,11 @@ impl Database {
             session_stats: self.session_stats_state(client_id),
             snapshot,
             client_id,
+            current_database_name: self.current_database_name(),
             session_user_oid: self.auth_state(client_id).session_user_oid(),
             current_user_oid: self.auth_state(client_id).current_user_oid(),
             active_role_oid: self.auth_state(client_id).active_role_oid(),
+            statement_lock_scope_id: None,
             next_command_id: cid,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),

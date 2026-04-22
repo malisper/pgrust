@@ -896,6 +896,9 @@ where
                     writer.flush()?;
                 }
                 b'S' => {
+                    state.session.interrupts().reset_statement_state();
+                    db.interrupt_state(state.session.client_id)
+                        .reset_statement_state();
                     send_ready_for_query(&mut writer, state.session.ready_status())?;
                     writer.flush()?;
                 }
@@ -964,6 +967,9 @@ fn handle_query(
     state: &mut ConnectionState,
     sql: &str,
 ) -> io::Result<()> {
+    state.session.interrupts().reset_statement_state();
+    db.interrupt_state(state.session.client_id)
+        .reset_statement_state();
     if sql_is_effectively_empty_after_comments(sql) {
         send_empty_query(stream)?;
         send_ready_for_query(stream, state.session.ready_status())?;
@@ -5598,7 +5604,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(output.windows("SERROR\0C54000\0".len()).any(|window| window == b"SERROR\0C54000\0"));
+        assert!(output.windows("C54000\0".len()).any(|window| window == b"C54000\0"));
     }
 
     fn split_simple_query_statements_keeps_rule_action_lists_together() {

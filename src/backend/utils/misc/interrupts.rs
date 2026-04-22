@@ -55,6 +55,11 @@ impl InterruptState {
         self.pending.store(0, Ordering::SeqCst);
     }
 
+    pub fn reset_statement_state(&self) {
+        self.clear_pending();
+        *self.deadline.lock() = None;
+    }
+
     pub fn pending_reason(&self) -> Option<InterruptReason> {
         InterruptReason::from_code(self.pending.load(Ordering::SeqCst))
     }

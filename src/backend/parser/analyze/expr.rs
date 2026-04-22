@@ -3,7 +3,9 @@ use super::infer::*;
 use super::*;
 use crate::backend::catalog::roles::find_role_by_name;
 use crate::backend::parser::parse_type_name;
-use crate::backend::utils::record::assign_anonymous_record_descriptor;
+use crate::backend::utils::record::{
+    assign_anonymous_record_descriptor, lookup_anonymous_record_descriptor,
+};
 use crate::include::catalog::range_type_ref_for_sql_type;
 use crate::include::nodes::primnodes::{
     BoolExprType, CaseExpr as BoundCaseExpr, CaseTestExpr as BoundCaseTestExpr,
@@ -2631,6 +2633,17 @@ fn resolve_bound_field_select_type(
         {
             return Ok(found.sql_type);
         }
+    }
+
+    if matches!(row_type.kind, SqlTypeKind::Record)
+        && row_type.typmod > 0
+        && let Some(descriptor) = lookup_anonymous_record_descriptor(row_type.typmod)
+        && let Some(found) = descriptor
+            .fields
+            .iter()
+            .find(|candidate| candidate.name.eq_ignore_ascii_case(field))
+    {
+        return Ok(found.sql_type);
     }
 
     Err(ParseError::UnexpectedToken {

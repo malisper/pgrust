@@ -5425,6 +5425,7 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
     let mut buffers = false;
     let mut costs = true;
     let mut timing = true;
+    let mut verbose = false;
     let mut statement = None;
     for part in pair.into_inner() {
         match part.as_rule() {
@@ -5454,12 +5455,15 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
                     Some(Rule::kw_buffers) => buffers = bool_val,
                     Some(Rule::kw_costs) => costs = bool_val,
                     Some(Rule::kw_timing) => timing = bool_val,
-                    _ => {} // VERBOSE, SUMMARY, FORMAT: parsed but ignored
+                    Some(Rule::kw_verbose) => verbose = bool_val,
+                    _ => {} // SUMMARY, FORMAT: parsed but ignored
                 }
             }
             Rule::select_stmt => statement = Some(Statement::Select(build_select(part)?)),
             Rule::insert_stmt => statement = Some(Statement::Insert(build_insert(part)?)),
             Rule::merge_stmt => statement = Some(Statement::Merge(build_merge(part)?)),
+            Rule::update_stmt => statement = Some(Statement::Update(build_update(part)?)),
+            Rule::delete_stmt => statement = Some(Statement::Delete(build_delete(part)?)),
             _ => {}
         }
     }
@@ -5468,7 +5472,7 @@ fn build_explain(pair: Pair<'_, Rule>) -> Result<ExplainStatement, ParseError> {
         buffers,
         costs,
         timing,
-        verbose: false,
+        verbose,
         statement: Box::new(statement.ok_or(ParseError::UnexpectedEof)?),
     })
 }
@@ -7367,6 +7371,11 @@ fn build_reference_action_clause(
                         expected: "ON UPDATE action",
                         actual: text.to_string(),
                     })?;
+            if action.contains('(') {
+                return Err(ParseError::FeatureNotSupportedMessage(
+                    "a column list with SET NULL is only supported for ON DELETE actions".into(),
+                ));
+            }
             Ok((false, build_reference_action_text(action.trim())?, None))
         }
         _ => Err(ParseError::UnexpectedToken {
@@ -8245,6 +8254,7 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
     let _ = index;
     match expr {
         SqlExpr::Column(name) => name.rsplit('.').next().unwrap_or(name).to_string(),
+        SqlExpr::ArrayLiteral(_) | SqlExpr::ArraySubquery(_) => "array".to_string(),
         SqlExpr::ArraySubscript { array, .. } => select_item_name(array, index),
         SqlExpr::FieldSelect { field, .. } => field.clone(),
         SqlExpr::Cast(inner, ty) => match inner.as_ref() {

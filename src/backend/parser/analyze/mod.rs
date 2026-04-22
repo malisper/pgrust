@@ -21,6 +21,8 @@ mod scope;
 mod system_views;
 mod window;
 
+pub(crate) use self::scope::ScopeColumn;
+
 use crate::RelFileLocator;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{Value, cast_value};
@@ -1178,54 +1180,35 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
     columns: &[SlotScopeColumn],
     catalog: &dyn CatalogLookup,
 ) -> Result<(Expr, SqlType), ParseError> {
-    let max_slot = columns
-        .iter()
-        .map(|column| column.slot)
-        .chain(
-            relation_scopes
-                .iter()
-                .flat_map(|(_, columns)| columns.iter().map(|column| column.slot)),
-        )
-        .max();
-    let Some(max_slot) = max_slot else {
+    if columns.is_empty() && relation_scopes.is_empty() {
         let empty_scope = scope::empty_scope();
         let empty_outer = Vec::new();
         let bound = bind_expr_with_outer(expr, &empty_scope, catalog, &empty_outer, None)?;
         let sql_type = infer_sql_expr_type(expr, &empty_scope, catalog, &empty_outer, None);
         return Ok((bound, sql_type));
-    };
+    }
 
-    let mut desc_columns = (0..=max_slot)
-        .map(|index| {
-            column_desc(
-                format!("__slot{index}"),
-                SqlType::new(SqlTypeKind::Text),
-                true,
-            )
-        })
-        .collect::<Vec<_>>();
-    let mut scope_columns = (0..=max_slot)
-        .map(|index| scope::ScopeColumn {
-            output_name: format!("__slot{index}"),
-            hidden: true,
-            qualified_only: false,
-            relation_names: Vec::new(),
-            hidden_invalid_relation_names: Vec::new(),
-            hidden_missing_relation_names: Vec::new(),
-        })
-        .collect::<Vec<_>>();
+    let mut desc_columns = Vec::new();
+    let mut scope_columns = Vec::new();
+    let mut output_exprs = Vec::new();
     let mut relations = Vec::new();
 
     for column in columns {
-        desc_columns[column.slot] = column_desc(column.name.clone(), column.sql_type, true);
-        scope_columns[column.slot] = scope::ScopeColumn {
+        desc_columns.push(column_desc(column.name.clone(), column.sql_type, true));
+        scope_columns.push(scope::ScopeColumn {
             output_name: column.name.clone(),
             hidden: column.hidden,
             qualified_only: false,
             relation_names: Vec::new(),
             hidden_invalid_relation_names: Vec::new(),
             hidden_missing_relation_names: Vec::new(),
-        };
+        });
+        output_exprs.push(Expr::Var(Var {
+            varno: 1,
+            varattno: user_attrno(column.slot),
+            varlevelsup: 0,
+            vartype: column.sql_type,
+        }));
     }
 
     for (relation_name, relation_columns) in relation_scopes {
@@ -1236,15 +1219,21 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
             system_varno: None,
         });
         for column in relation_columns {
-            desc_columns[column.slot] = column_desc(column.name.clone(), column.sql_type, true);
-            scope_columns[column.slot] = scope::ScopeColumn {
+            desc_columns.push(column_desc(column.name.clone(), column.sql_type, true));
+            scope_columns.push(scope::ScopeColumn {
                 output_name: column.name.clone(),
                 hidden: column.hidden,
                 qualified_only: false,
                 relation_names: vec![relation_name.clone()],
                 hidden_invalid_relation_names: Vec::new(),
                 hidden_missing_relation_names: Vec::new(),
-            };
+            });
+            output_exprs.push(Expr::Var(Var {
+                varno: 1,
+                varattno: user_attrno(column.slot),
+                varlevelsup: 0,
+                vartype: column.sql_type,
+            }));
         }
     }
 
@@ -1252,19 +1241,7 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
         columns: desc_columns,
     };
     let scope = scope::BoundScope {
-        output_exprs: desc
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(index, column)| {
-                Expr::Var(Var {
-                    varno: 1,
-                    varattno: user_attrno(index),
-                    varlevelsup: 0,
-                    vartype: column.sql_type,
-                })
-            })
-            .collect(),
+        output_exprs,
         desc,
         columns: scope_columns,
         relations,
@@ -2389,6 +2366,14 @@ pub fn pg_plan_query_with_outer(
     build_plan_with_outer(stmt, catalog, &[outer_scope], None, &[], &[])
 }
 
+pub(crate) fn pg_plan_query_with_outer_scopes(
+    stmt: &SelectStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+) -> Result<PlannedStmt, ParseError> {
+    build_plan_with_outer(stmt, catalog, outer_scopes, None, &[], &[])
+}
+
 pub fn build_plan(stmt: &SelectStatement, catalog: &dyn CatalogLookup) -> Result<Plan, ParseError> {
     Ok(pg_plan_query(stmt, catalog)?.plan_tree)
 }
@@ -2413,6 +2398,14 @@ pub fn pg_plan_values_query_with_outer(
     };
     let outer_scope = scope_for_relation(None, &desc);
     build_values_plan_with_outer(stmt, catalog, &[outer_scope], None, &[], &[])
+}
+
+pub(crate) fn pg_plan_values_query_with_outer_scopes(
+    stmt: &ValuesStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+) -> Result<PlannedStmt, ParseError> {
+    build_values_plan_with_outer(stmt, catalog, outer_scopes, None, &[], &[])
 }
 
 pub fn build_values_plan(

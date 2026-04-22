@@ -1012,8 +1012,14 @@ impl Value {
 
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
-        if let (Some(left), Some(right)) = (self.as_array_value(), other.as_array_value()) {
-            return left == right;
+        match (self, other) {
+            (Value::Array(left), Value::Array(right)) => return left == right,
+            (Value::Array(left), Value::PgArray(right))
+            | (Value::PgArray(right), Value::Array(left)) => {
+                return right.to_nested_values() == *left;
+            }
+            (Value::PgArray(left), Value::PgArray(right)) => return left == right,
+            _ => {}
         }
         match (self, other) {
             (Value::Int16(a), Value::Int16(b)) => a == b,

@@ -147,14 +147,20 @@ impl Database {
         configured_search_path: Option<&[String]>,
         datetime_config: &DateTimeConfig,
     ) -> Result<StatementResult, ExecError> {
+        let statement_lock_scope_id = Some(self.allocate_statement_lock_scope_id());
         let stats_state = self.session_stats_state(client_id);
         stats_state.write().begin_top_level_xact();
+        let advisory_locks = std::sync::Arc::clone(&self.advisory_locks);
         let result = self.execute_statement_with_search_path_inner(
             client_id,
             stmt,
+            statement_lock_scope_id,
             configured_search_path,
             datetime_config,
         );
+        if let Some(scope_id) = statement_lock_scope_id {
+            advisory_locks.unlock_all_statement(client_id, scope_id);
+        }
         match &result {
             Ok(_) => stats_state.write().commit_top_level_xact(&self.stats),
             Err(_) => stats_state.write().rollback_top_level_xact(),
@@ -166,6 +172,7 @@ impl Database {
         &self,
         client_id: ClientId,
         stmt: Statement,
+        statement_lock_scope_id: Option<u64>,
         configured_search_path: Option<&[String]>,
         datetime_config: &DateTimeConfig,
     ) -> Result<StatementResult, ExecError> {
@@ -494,6 +501,7 @@ impl Database {
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
@@ -501,9 +509,11 @@ impl Database {
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
                     client_id,
+                    current_database_name: self.current_database_name(),
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
+                    statement_lock_scope_id, 
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -629,13 +639,16 @@ impl Database {
                     interrupts.as_ref(),
                 )?;
 
-                let snapshot = self.txns.read().snapshot(INVALID_TRANSACTION_ID)?;
+                let xid = self.txns.write().begin();
+                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
@@ -643,9 +656,11 @@ impl Database {
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
                     client_id,
+                    current_database_name: self.current_database_name(),
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
+                    statement_lock_scope_id, 
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -667,6 +682,8 @@ impl Database {
                     None => execute_readonly_statement(stmt, &visible_catalog, &mut ctx),
                 };
                 drop(ctx);
+                let result = self.finish_txn(client_id, xid, result, &[], &[], &[]);
+                guard.disarm();
 
                 unlock_relations(&self.table_locks, client_id, &rels);
                 result
@@ -698,6 +715,7 @@ impl Database {
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
@@ -705,9 +723,11 @@ impl Database {
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
                     client_id,
+                    current_database_name: self.current_database_name(),
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
+                    statement_lock_scope_id, 
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -779,6 +799,7 @@ impl Database {
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
@@ -786,9 +807,11 @@ impl Database {
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
                     client_id,
+                    current_database_name: self.current_database_name(),
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
+                    statement_lock_scope_id, 
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -861,6 +884,7 @@ impl Database {
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
@@ -868,9 +892,11 @@ impl Database {
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
                     client_id,
+                    current_database_name: self.current_database_name(),
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
+                    statement_lock_scope_id, 
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -1164,6 +1190,7 @@ impl Database {
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
@@ -1171,9 +1198,11 @@ impl Database {
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
                     client_id,
+                    current_database_name: self.current_database_name(),
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
+                    statement_lock_scope_id, 
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -1228,15 +1257,18 @@ impl Database {
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     interrupts: Arc::clone(&interrupts),
                     stats: std::sync::Arc::clone(&self.stats),
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
                     client_id,
+                    current_database_name: self.current_database_name(),
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
+                    statement_lock_scope_id, 
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -1276,6 +1308,7 @@ impl Database {
             select_stmt,
             txn_ctx,
             None,
+            None,
             &DateTimeConfig::default(),
         )
     }
@@ -1291,6 +1324,7 @@ impl Database {
             client_id,
             select_stmt,
             txn_ctx,
+            None,
             configured_search_path,
             &DateTimeConfig::default(),
         )
@@ -1301,6 +1335,7 @@ impl Database {
         client_id: ClientId,
         select_stmt: &crate::backend::parser::SelectStatement,
         txn_ctx: Option<(TransactionId, CommandId)>,
+        statement_lock_scope_id: Option<u64>,
         configured_search_path: Option<&[String]>,
         datetime_config: &DateTimeConfig,
     ) -> Result<SelectGuard<'_>, ExecError> {
@@ -1335,6 +1370,7 @@ impl Database {
             txn_waiter: Some(self.txn_waiter.clone()),
             sequences: Some(self.sequences.clone()),
             large_objects: Some(self.large_objects.clone()),
+            advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
             checkpoint_stats: self.checkpoint_stats_snapshot(),
             datetime_config: datetime_config.clone(),
             interrupts,
@@ -1342,9 +1378,11 @@ impl Database {
             session_stats: self.session_stats_state(client_id),
             snapshot,
             client_id,
+            current_database_name: self.current_database_name(),
             session_user_oid: self.auth_state(client_id).session_user_oid(),
             current_user_oid: self.auth_state(client_id).current_user_oid(),
             active_role_oid: self.auth_state(client_id).active_role_oid(),
+            statement_lock_scope_id,
             next_command_id: command_id,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -1369,6 +1407,8 @@ impl Database {
             rels,
             table_locks: &self.table_locks,
             client_id,
+            advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
+            statement_lock_scope_id,
             interrupt_guard: None,
         })
     }

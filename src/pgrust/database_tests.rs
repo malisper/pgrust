@@ -180,6 +180,7 @@ fn analyze_executor_context(
         txn_waiter: Some(db.txn_waiter.clone()),
         sequences: Some(db.sequences.clone()),
         large_objects: Some(db.large_objects.clone()),
+        advisory_locks: Arc::clone(&db.advisory_locks),
         checkpoint_stats: db.checkpoint_stats_snapshot(),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         interrupts: db.interrupt_state(client_id),
@@ -187,9 +188,11 @@ fn analyze_executor_context(
         session_stats: db.session_stats_state(client_id),
         snapshot: db.txns.read().snapshot_for_command(xid, cid).unwrap(),
         client_id,
+        current_database_name: db.current_database_name(),
         session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         active_role_oid: None,
+        statement_lock_scope_id: None,
         next_command_id: cid,
         default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
         timed: false,
@@ -15187,12 +15190,12 @@ fn drop_table_cascade_notice_omits_temp_schema_name() {
     session
         .execute(&db, "create temp table some_tab_child () inherits (some_tab)")
         .unwrap();
-    take_notice_messages();
+    take_backend_notice_messages();
 
     session.execute(&db, "drop table some_tab cascade").unwrap();
 
     assert_eq!(
-        take_notice_messages(),
+        take_backend_notice_messages(),
         vec![String::from("drop cascades to table some_tab_child")]
     );
 }
@@ -16215,7 +16218,7 @@ fn concurrent_reads_same_page_no_io_error() {
         })
         .collect();
 
-    join_all_with_timeout(handles, CONTENTION_TEST_TIMEOUT);
+    join_all_with_timeout(handles, HEAVY_CONTENTION_TEST_TIMEOUT);
 }
 
 /// Regression: without the content lock on heap_scan_next, a reader could
@@ -17323,7 +17326,7 @@ fn lock_ordering_deadlock_repro() {
         }));
     }
 
-    join_all_with_timeout(handles, CONTENTION_TEST_TIMEOUT);
+    join_all_with_timeout(handles, HEAVY_CONTENTION_TEST_TIMEOUT);
 }
 
 #[test]
