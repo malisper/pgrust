@@ -8580,6 +8580,7 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
         SqlExpr::Column(name) => name.rsplit('.').next().unwrap_or(name).to_string(),
         SqlExpr::ArrayLiteral(_) | SqlExpr::ArraySubquery(_) => "array".to_string(),
         SqlExpr::ArraySubscript { array, .. } => select_item_name(array, index),
+        SqlExpr::Case { .. } => "case".to_string(),
         SqlExpr::FieldSelect { field, .. } => field.clone(),
         SqlExpr::Cast(inner, ty) => match inner.as_ref() {
             SqlExpr::Column(_) => select_item_name(inner, index),
