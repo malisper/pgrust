@@ -40,9 +40,9 @@ use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator
 use crate::include::catalog::{
     BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
     PgClassRow, PgCollationRow, PgConstraintRow, PgIndexRow, PgNamespaceRow, PgOpclassRow,
-    PgOpfamilyRow, PgTypeRow, bootstrap_catalog_kinds, bootstrap_pg_aggregate_rows,
-    bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows, bootstrap_pg_database_rows,
-    bootstrap_pg_tablespace_rows, bootstrap_relation_desc, system_catalog_index_by_oid,
+    PgOpfamilyRow, PgTypeRow, bootstrap_catalog_kinds, bootstrap_pg_auth_members_rows,
+    bootstrap_pg_authid_rows, bootstrap_pg_database_rows, bootstrap_pg_tablespace_rows,
+    bootstrap_relation_desc, system_catalog_index_by_oid,
 };
 use crate::include::nodes::datum::Value;
 
@@ -326,7 +326,6 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                 desc.storage.attalign = attr.attalign;
                 desc.storage.attstorage = attr.attstorage;
                 desc.storage.attcompression = attr.attcompression;
-                desc.collation_oid = (attr.attcollation != 0).then_some(attr.attcollation);
                 desc.attstattarget = attr.attstattarget;
                 desc.attinhcount = attr.attinhcount;
                 desc.attislocal = attr.attislocal;
@@ -862,10 +861,6 @@ fn restore_missing_first_class_catalog_rows_scoped(
     missing_constraint: bool,
     missing_depend: bool,
 ) -> Result<(), CatalogError> {
-    if rows.aggregates.is_empty() {
-        rows.aggregates = bootstrap_pg_aggregate_rows();
-    }
-
     if missing_constraint {
         let catalog = catalog_from_physical_rows_scoped(base_dir, rows.clone(), db_oid)?;
         rows.constraints = catalog
@@ -2515,7 +2510,7 @@ fn load_visible_catalog_kind_in_pool(
     load_visible_catalog_kind_in_pool_scoped(pool, txns, snapshot, client_id, kind, 1)
 }
 
-fn load_visible_catalog_kind_in_pool_scoped(
+pub(crate) fn load_visible_catalog_kind_in_pool_scoped(
     pool: &BufferPool<SmgrStorageBackend>,
     txns: &TransactionManager,
     snapshot: &Snapshot,

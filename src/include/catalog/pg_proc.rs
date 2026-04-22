@@ -5,13 +5,13 @@ use crate::include::catalog::{
     ANYARRAYOID, ANYOID, BIT_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID, BOX_TYPE_OID,
     BPCHAR_TYPE_OID, BYTEA_TYPE_OID, CIRCLE_TYPE_OID, DATE_TYPE_OID, DATERANGE_TYPE_OID,
     FDW_HANDLER_TYPE_OID, FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INT2_TYPE_OID, INT4_TYPE_OID,
-    INT4RANGE_TYPE_OID, INT8_TYPE_OID, INT8RANGE_TYPE_OID, JSON_TYPE_OID, JSONB_TYPE_OID,
-    JSONPATH_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID, MONEY_TYPE_OID, NAME_TYPE_OID,
-    NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID, OID_TYPE_OID, PATH_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
-    PG_LANGUAGE_INTERNAL_OID, PG_NODE_TREE_TYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID,
-    RECORD_TYPE_OID, REGCLASS_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_TYPE_OID,
-    TIMESTAMPTZ_TYPE_OID, TSQUERY_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID,
-    aggregate_func_for_dynamic_range_proc_oid,
+    INT4MULTIRANGE_TYPE_OID, INT4RANGE_TYPE_OID, INT8_ARRAY_TYPE_OID, INT8_TYPE_OID,
+    INT8RANGE_TYPE_OID, JSON_TYPE_OID, JSONB_TYPE_OID, JSONPATH_TYPE_OID, LINE_TYPE_OID,
+    LSEG_TYPE_OID, MONEY_TYPE_OID, NAME_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID,
+    OID_TYPE_OID, PATH_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID,
+    PG_NODE_TREE_TYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, RECORD_TYPE_OID, TEXT_ARRAY_TYPE_OID,
+    TEXT_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TSQUERY_TYPE_OID, TSRANGE_TYPE_OID,
+    TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID, aggregate_func_for_dynamic_range_proc_oid,
 };
 use crate::include::nodes::primnodes::{AggFunc, BuiltinScalarFunction, BuiltinWindowFunction};
 use std::sync::OnceLock;
@@ -90,8 +90,6 @@ pub const RANGE_GIST_SAME_PROC_OID: u32 = 3881;
 pub const GIST_BOX_DISTANCE_PROC_OID: u32 = 3998;
 pub const GIST_TRANSLATE_CMPTYPE_COMMON_PROC_OID: u32 = 6347;
 pub const RANGE_SORTSUPPORT_PROC_OID: u32 = 6391;
-pub const CONTSEL_PROC_OID: u32 = 6412;
-pub const CONTJOINSEL_PROC_OID: u32 = 6413;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PgProcRow {
@@ -217,18 +215,6 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
-            6405,
-            "pg_rust_test_opclass_options_func",
-            VOID_TYPE_OID,
-            &oid_argtypes(&[INTERNAL_TYPE_OID]),
-            "pg_rust_test_opclass_options_func",
-            1,
-            false,
-            true,
-            'f',
-            'i',
-        ),
-        proc_row(
             6404,
             "pg_my_temp_schema",
             TEXT_TYPE_OID,
@@ -283,41 +269,6 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "pg_rust_test_enc_conversion",
             4,
             &[("validlen", INT4_TYPE_OID), ("result", BYTEA_TYPE_OID)],
-        ),
-        proc_row(
-            CONTSEL_PROC_OID,
-            "contsel",
-            FLOAT8_TYPE_OID,
-            &oid_argtypes(&[
-                INTERNAL_TYPE_OID,
-                OID_TYPE_OID,
-                INTERNAL_TYPE_OID,
-                INT4_TYPE_OID,
-            ]),
-            "contsel",
-            4,
-            false,
-            true,
-            'f',
-            's',
-        ),
-        proc_row(
-            CONTJOINSEL_PROC_OID,
-            "contjoinsel",
-            FLOAT8_TYPE_OID,
-            &oid_argtypes(&[
-                INTERNAL_TYPE_OID,
-                OID_TYPE_OID,
-                INTERNAL_TYPE_OID,
-                INT2_TYPE_OID,
-                INTERNAL_TYPE_OID,
-            ]),
-            "contjoinsel",
-            5,
-            false,
-            true,
-            'f',
-            's',
         ),
         proc_row(
             3100,
@@ -584,32 +535,6 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'f',
             's',
         ),
-        proc_row_with_parallel(
-            3036,
-            "pg_notify",
-            VOID_TYPE_OID,
-            &oid_argtypes(&[TEXT_TYPE_OID, TEXT_TYPE_OID]),
-            "pg_notify",
-            2,
-            false,
-            false,
-            'f',
-            'v',
-            'r',
-        ),
-        proc_row_with_parallel(
-            3296,
-            "pg_notification_queue_usage",
-            FLOAT8_TYPE_OID,
-            "",
-            "pg_notification_queue_usage",
-            0,
-            false,
-            false,
-            'f',
-            'v',
-            'r',
-        ),
         proc_row(
             6301,
             "nextval",
@@ -719,42 +644,6 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             's',
         ),
         proc_row(
-            2288,
-            "pg_size_pretty",
-            TEXT_TYPE_OID,
-            &oid_argtypes(&[INT8_TYPE_OID]),
-            "pg_size_pretty",
-            1,
-            false,
-            true,
-            'f',
-            'i',
-        ),
-        proc_row(
-            3166,
-            "pg_size_pretty",
-            TEXT_TYPE_OID,
-            &oid_argtypes(&[NUMERIC_TYPE_OID]),
-            "pg_size_pretty_numeric",
-            1,
-            false,
-            true,
-            'f',
-            'i',
-        ),
-        proc_row(
-            3334,
-            "pg_size_bytes",
-            INT8_TYPE_OID,
-            &oid_argtypes(&[TEXT_TYPE_OID]),
-            "pg_size_bytes",
-            1,
-            false,
-            true,
-            'f',
-            'i',
-        ),
-        proc_row(
             1642,
             "pg_get_userbyid",
             NAME_TYPE_OID,
@@ -779,18 +668,6 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             's',
         ),
         proc_row(
-            3537,
-            "pg_describe_object",
-            TEXT_TYPE_OID,
-            &oid_argtypes(&[OID_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID]),
-            "pg_describe_object",
-            3,
-            false,
-            true,
-            'f',
-            's',
-        ),
-        proc_row(
             1716,
             "pg_get_expr",
             TEXT_TYPE_OID,
@@ -808,42 +685,6 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             TEXT_TYPE_OID,
             &oid_argtypes(&[PG_NODE_TREE_TYPE_OID, OID_TYPE_OID, BOOL_TYPE_OID]),
             "pg_get_expr_ext",
-            3,
-            false,
-            true,
-            'f',
-            's',
-        ),
-        proc_row(
-            636,
-            "pg_indexam_has_property",
-            BOOL_TYPE_OID,
-            &oid_argtypes(&[OID_TYPE_OID, TEXT_TYPE_OID]),
-            "pg_indexam_has_property",
-            2,
-            false,
-            true,
-            'f',
-            's',
-        ),
-        proc_row(
-            637,
-            "pg_index_has_property",
-            BOOL_TYPE_OID,
-            &oid_argtypes(&[REGCLASS_TYPE_OID, TEXT_TYPE_OID]),
-            "pg_index_has_property",
-            2,
-            false,
-            true,
-            'f',
-            's',
-        ),
-        proc_row(
-            638,
-            "pg_index_column_has_property",
-            BOOL_TYPE_OID,
-            &oid_argtypes(&[REGCLASS_TYPE_OID, INT4_TYPE_OID, TEXT_TYPE_OID]),
-            "pg_index_column_has_property",
             3,
             false,
             true,
@@ -1204,18 +1045,6 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             1,
             false,
             false,
-            'f',
-            's',
-        ),
-        proc_row(
-            6604,
-            "pg_column_compression",
-            TEXT_TYPE_OID,
-            &oid_argtypes(&[ANYOID]),
-            "pg_column_compression",
-            1,
-            false,
-            true,
             'f',
             's',
         ),
@@ -2543,6 +2372,66 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             "unnest",
             1,
         ),
+        proc_row(
+            7004,
+            "int4pl",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[INT4_TYPE_OID, INT4_TYPE_OID]),
+            "int4pl",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            7005,
+            "int8inc",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[INT8_TYPE_OID]),
+            "int8inc",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            7006,
+            "int8inc_any",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[INT8_TYPE_OID, ANYOID]),
+            "int8inc_any",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            7007,
+            "int4_avg_accum",
+            INT8_ARRAY_TYPE_OID,
+            &oid_argtypes(&[INT8_ARRAY_TYPE_OID, INT4_TYPE_OID]),
+            "int4_avg_accum",
+            2,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
+            7008,
+            "int8_avg",
+            NUMERIC_TYPE_OID,
+            &oid_argtypes(&[INT8_ARRAY_TYPE_OID]),
+            "int8_avg",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
         aggregate_row(6219, "count", INT8_TYPE_OID, &oid_argtypes(&[ANYOID]), 1),
         aggregate_row(6293, "any_value", ANYOID, &oid_argtypes(&[ANYOID]), 1),
         aggregate_row(
@@ -3430,19 +3319,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "getdatabaseencoding",
             BuiltinScalarFunction::GetDatabaseEncoding,
         ),
-        ("pg_notify", BuiltinScalarFunction::PgNotify),
-        (
-            "pg_notification_queue_usage",
-            BuiltinScalarFunction::PgNotificationQueueUsage,
-        ),
         ("pg_my_temp_schema", BuiltinScalarFunction::PgMyTempSchema),
         (
             "pg_rust_internal_binary_coercible",
             BuiltinScalarFunction::PgRustInternalBinaryCoercible,
-        ),
-        (
-            "pg_rust_test_opclass_options_func",
-            BuiltinScalarFunction::PgRustTestOpclassOptionsFunc,
         ),
         (
             "pg_rust_test_fdw_handler",
@@ -3457,10 +3337,6 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgRustTestEncConversion,
         ),
         ("current_setting", BuiltinScalarFunction::CurrentSetting),
-        (
-            "pg_column_compression",
-            BuiltinScalarFunction::PgColumnCompression,
-        ),
         ("nextval", BuiltinScalarFunction::NextVal),
         ("currval", BuiltinScalarFunction::CurrVal),
         ("setval", BuiltinScalarFunction::SetVal),
@@ -3468,12 +3344,6 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_get_serial_sequence",
             BuiltinScalarFunction::PgGetSerialSequence,
         ),
-        ("pg_size_pretty", BuiltinScalarFunction::PgSizePretty),
-        (
-            "pg_size_pretty_numeric",
-            BuiltinScalarFunction::PgSizePretty,
-        ),
-        ("pg_size_bytes", BuiltinScalarFunction::PgSizeBytes),
         ("pg_advisory_lock", BuiltinScalarFunction::PgAdvisoryLock),
         (
             "pg_advisory_xact_lock",
@@ -3809,6 +3679,11 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("scale", BuiltinScalarFunction::Scale),
         ("min_scale", BuiltinScalarFunction::MinScale),
         ("numeric_inc", BuiltinScalarFunction::NumericInc),
+        ("int4pl", BuiltinScalarFunction::Int4Pl),
+        ("int8inc", BuiltinScalarFunction::Int8Inc),
+        ("int8inc_any", BuiltinScalarFunction::Int8IncAny),
+        ("int4_avg_accum", BuiltinScalarFunction::Int4AvgAccum),
+        ("int8_avg", BuiltinScalarFunction::Int8Avg),
         ("factorial", BuiltinScalarFunction::Factorial),
         ("pg_lsn", BuiltinScalarFunction::PgLsn),
         ("div", BuiltinScalarFunction::Div),
@@ -4009,24 +3884,11 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ),
         ("pg_get_userbyid", BuiltinScalarFunction::PgGetUserById),
         ("obj_description", BuiltinScalarFunction::ObjDescription),
-        ("pg_describe_object", BuiltinScalarFunction::PgDescribeObject),
         ("pg_get_expr", BuiltinScalarFunction::PgGetExpr),
         ("pg_get_expr_ext", BuiltinScalarFunction::PgGetExpr),
         (
             "pg_relation_is_publishable",
             BuiltinScalarFunction::PgRelationIsPublishable,
-        ),
-        (
-            "pg_indexam_has_property",
-            BuiltinScalarFunction::PgIndexAmHasProperty,
-        ),
-        (
-            "pg_index_has_property",
-            BuiltinScalarFunction::PgIndexHasProperty,
-        ),
-        (
-            "pg_index_column_has_property",
-            BuiltinScalarFunction::PgIndexColumnHasProperty,
         ),
     ]
 }
@@ -7115,38 +6977,6 @@ mod tests {
     }
 
     #[test]
-    fn async_notification_rows_have_expected_oids() {
-        let rows = bootstrap_pg_proc_rows();
-        let pg_notify = rows.iter().find(|row| row.oid == 3036).expect("pg_notify");
-        assert_eq!(pg_notify.proname, "pg_notify");
-        assert_eq!(
-            pg_notify.proargtypes,
-            oid_argtypes(&[TEXT_TYPE_OID, TEXT_TYPE_OID])
-        );
-        assert_eq!(pg_notify.prorettype, VOID_TYPE_OID);
-        assert_eq!(pg_notify.provolatile, 'v');
-        assert_eq!(pg_notify.proparallel, 'r');
-        assert_eq!(
-            builtin_scalar_function_for_proc_oid(pg_notify.oid),
-            Some(BuiltinScalarFunction::PgNotify)
-        );
-
-        let queue_usage = rows
-            .iter()
-            .find(|row| row.oid == 3296)
-            .expect("pg_notification_queue_usage");
-        assert_eq!(queue_usage.proname, "pg_notification_queue_usage");
-        assert_eq!(queue_usage.proargtypes, "");
-        assert_eq!(queue_usage.prorettype, FLOAT8_TYPE_OID);
-        assert_eq!(queue_usage.provolatile, 'v');
-        assert_eq!(queue_usage.proparallel, 'r');
-        assert_eq!(
-            builtin_scalar_function_for_proc_oid(queue_usage.oid),
-            Some(BuiltinScalarFunction::PgNotificationQueueUsage)
-        );
-    }
-
-    #[test]
     fn bootstrap_rows_have_unique_oids() {
         use std::collections::HashSet;
 
@@ -7166,15 +6996,9 @@ mod tests {
         for func in [
             BuiltinScalarFunction::CurrentDatabase,
             BuiltinScalarFunction::CurrentSetting,
-            BuiltinScalarFunction::PgNotify,
-            BuiltinScalarFunction::PgNotificationQueueUsage,
             BuiltinScalarFunction::RegProcedureToText,
             BuiltinScalarFunction::RegRoleToText,
             BuiltinScalarFunction::PgGetUserById,
-            BuiltinScalarFunction::PgIndexAmHasProperty,
-            BuiltinScalarFunction::PgIndexHasProperty,
-            BuiltinScalarFunction::PgIndexColumnHasProperty,
-            BuiltinScalarFunction::PgDescribeObject,
             BuiltinScalarFunction::Float8Accum,
             BuiltinScalarFunction::Float8Combine,
             BuiltinScalarFunction::Float8RegrAccum,

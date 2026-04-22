@@ -7,7 +7,8 @@ use crate::backend::utils::time::datetime::{
 };
 use crate::include::nodes::datetime::{
     DATEVAL_NOBEGIN, DATEVAL_NOEND, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeADT, TimeTzADT,
-    TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_HOUR, USECS_PER_MINUTE, USECS_PER_SEC,
+    TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_HOUR, USECS_PER_MINUTE,
+    USECS_PER_SEC,
 };
 
 fn extract_year_number(astronomical_year: i32) -> i32 {
@@ -80,14 +81,16 @@ fn eval_time_part(field: &str, time: TimeADT, with_timezone: bool) -> Result<Val
     let second = time.0.rem_euclid(USECS_PER_MINUTE) as f64 / USECS_PER_SEC as f64;
     let result = match field {
         "microsecond" | "microseconds" => time.0.rem_euclid(USECS_PER_MINUTE) as f64,
-        "millisecond" | "milliseconds" => time.0.rem_euclid(USECS_PER_MINUTE) as f64 / 1_000.0,
+        "millisecond" | "milliseconds" => {
+            time.0.rem_euclid(USECS_PER_MINUTE) as f64 / 1_000.0
+        }
         "second" => second,
         "minute" => time.0.div_euclid(USECS_PER_MINUTE).rem_euclid(60) as f64,
         "hour" => time.0.div_euclid(USECS_PER_HOUR) as f64,
         "epoch" => time.0 as f64 / USECS_PER_SEC as f64,
         "timezone" | "timezone_h" | "timezone_m" | "day" | "month" | "year" | "quarter"
-        | "decade" | "century" | "millennium" | "isoyear" | "week" | "dow" | "isodow" | "doy"
-        | "julian" => return Err(unsupported_time_part(field, with_timezone)),
+        | "decade" | "century" | "millennium" | "isoyear" | "week" | "dow" | "isodow"
+        | "doy" | "julian" => return Err(unsupported_time_part(field, with_timezone)),
         _ => return Err(unrecognized_time_part(field, with_timezone)),
     };
     Ok(Value::Float64(result))
@@ -554,10 +557,7 @@ mod tests {
             ExecError::DetailedError {
                 message, sqlstate, ..
             } => {
-                assert_eq!(
-                    message,
-                    "unit \"day\" not supported for type time without time zone"
-                );
+                assert_eq!(message, "unit \"day\" not supported for type time without time zone");
                 assert_eq!(sqlstate, "0A000");
             }
             other => panic!("expected detailed error, got {other:?}"),

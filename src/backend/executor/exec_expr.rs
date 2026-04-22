@@ -5,6 +5,9 @@ use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
 use crate::include::nodes::primnodes::expr_sql_type_hint;
 use rand::{Rng, RngCore};
 
+use super::expr_agg_support::{
+    execute_builtin_scalar_function_value_call, execute_scalar_function_value_call,
+};
 use super::expr_async::{eval_pg_notification_queue_usage_function, eval_pg_notify_function};
 use super::expr_bit::{
     bit_count as eval_bit_count, bit_length as eval_bit_length, get_bit as eval_get_bit,
@@ -2509,6 +2512,13 @@ fn eval_plpgsql_builtin_function(
                 right: Value::Null,
             }),
         },
+        BuiltinScalarFunction::Int4Pl
+        | BuiltinScalarFunction::Int8Inc
+        | BuiltinScalarFunction::Int8IncAny
+        | BuiltinScalarFunction::Int4AvgAccum
+        | BuiltinScalarFunction::Int8Avg => {
+            execute_builtin_scalar_function_value_call(func, &values)
+        }
         BuiltinScalarFunction::CurrentSetting => Err(ExecError::DetailedError {
             message: "current_setting is not supported in PL/pgSQL expression evaluation".into(),
             detail: None,
@@ -3369,6 +3379,13 @@ fn eval_builtin_function(
                 right: Value::Null,
             }),
         },
+        BuiltinScalarFunction::Int4Pl
+        | BuiltinScalarFunction::Int8Inc
+        | BuiltinScalarFunction::Int8IncAny
+        | BuiltinScalarFunction::Int4AvgAccum
+        | BuiltinScalarFunction::Int8Avg => {
+            execute_builtin_scalar_function_value_call(func, &values)
+        }
         BuiltinScalarFunction::RegProcedureToText => match values.as_slice() {
             [value] => eval_regprocedure_to_text(value, ctx),
             _ => Err(malformed_expr_error("regprocedure_to_text")),

@@ -237,7 +237,9 @@ impl Database {
         datetime_config: &DateTimeConfig,
     ) -> Result<StatementResult, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
-        use crate::backend::commands::tablecmds::{execute_truncate_table, execute_vacuum};
+        use crate::backend::commands::tablecmds::{
+            execute_truncate_table, execute_vacuum,
+        };
         let interrupts = self.interrupt_state(client_id);
 
         match stmt {
@@ -520,6 +522,12 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
+            Statement::CreateAggregate(ref create_stmt) => self
+                .execute_create_aggregate_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
             Statement::CreateOperator(ref create_stmt) => self
                 .execute_create_operator_stmt_with_search_path(
                     client_id,
@@ -634,6 +642,12 @@ impl Database {
                 ),
             Statement::CommentOnIndex(ref comment_stmt) => self
                 .execute_comment_on_index_stmt_with_search_path(
+                    client_id,
+                    comment_stmt,
+                    configured_search_path,
+                ),
+            Statement::CommentOnAggregate(ref comment_stmt) => self
+                .execute_comment_on_aggregate_stmt_with_search_path(
                     client_id,
                     comment_stmt,
                     configured_search_path,
@@ -1187,6 +1201,12 @@ impl Database {
             ),
             Statement::DropFunction(ref drop_stmt) => self
                 .execute_drop_function_stmt_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    configured_search_path,
+                ),
+            Statement::DropAggregate(ref drop_stmt) => self
+                .execute_drop_aggregate_stmt_with_search_path(
                     client_id,
                     drop_stmt,
                     configured_search_path,

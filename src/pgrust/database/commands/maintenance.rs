@@ -1,5 +1,6 @@
 use super::super::*;
 use super::constraint::{find_constraint_row, validate_check_rows, validate_not_null_rows};
+use super::create::{aggregate_signature_arg_oids, resolve_aggregate_proc_rows};
 use crate::backend::access::heap::heapam::heap_update_with_waiter;
 use crate::backend::commands::tablecmds::{collect_matching_rows_heap, maintain_indexes_for_row};
 use crate::backend::executor::value_io::{coerce_assignment_value, tuple_from_values};
@@ -7,7 +8,9 @@ use crate::backend::executor::{ExecutorContext, RelationDesc};
 use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::{PG_CATALOG_NAMESPACE_OID, relkind_is_analyzable};
 use crate::include::nodes::datum::Value;
-use crate::include::nodes::parsenodes::{CommentOnIndexStatement, MaintenanceTarget};
+use crate::include::nodes::parsenodes::{
+    CommentOnAggregateStatement, CommentOnIndexStatement, MaintenanceTarget,
+};
 use crate::pgrust::database::ddl::{
     lookup_analyzable_relation_for_ddl, lookup_heap_relation_for_alter_table,
     lookup_heap_relation_for_ddl, lookup_index_relation_for_alter_index,
@@ -248,6 +251,168 @@ impl Database {
         Ok(StatementResult::AffectedRows(0))
     }
 
+    pub(crate) fn execute_comment_on_aggregate_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        comment_stmt: &CommentOnAggregateStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_comment_on_aggregate_stmt_in_transaction_with_search_path(
+            client_id,
+            comment_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_comment_on_index_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        comment_stmt: &CommentOnIndexStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let relation =
+            lookup_index_relation_for_alter_index(&catalog, &comment_stmt.index_name, false)?
+                .expect("index lookup without if_exists should return relation or error");
+        self.table_locks.lock_table_interruptible(
+            relation.rel,
+            TableLockMode::AccessExclusive,
+            client_id,
+            interrupts.as_ref(),
+        )?;
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_comment_on_index_stmt_in_transaction_with_search_path(
+            client_id,
+            comment_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        self.table_locks.unlock_table(relation.rel, client_id);
+        result
+    }
+
+    pub(crate) fn execute_comment_on_aggregate_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        comment_stmt: &CommentOnAggregateStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let txn_ctx = Some((xid, cid));
+        let catalog = self.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
+        let arg_oids = aggregate_signature_arg_oids(&catalog, &comment_stmt.signature)
+            .map_err(ExecError::Parse)?;
+        let schema_oid = match &comment_stmt.schema_name {
+            Some(schema_name) => Some(
+                self.visible_namespace_oid_by_name(client_id, txn_ctx, schema_name)
+                    .ok_or_else(|| ExecError::DetailedError {
+                        message: format!("schema \"{schema_name}\" does not exist"),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "3F000",
+                    })?,
+            ),
+            None => None,
+        };
+        let matches = resolve_aggregate_proc_rows(
+            &catalog,
+            &comment_stmt.aggregate_name,
+            schema_oid,
+            &arg_oids,
+        );
+        let proc_row = match matches.as_slice() {
+            [(row, _agg)] => row.clone(),
+            [] => {
+                return Err(ExecError::DetailedError {
+                    message: format!("aggregate {} does not exist", comment_stmt.aggregate_name),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42883",
+                });
+            }
+            _ => {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "aggregate name {} is ambiguous",
+                        comment_stmt.aggregate_name
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42725",
+                });
+            }
+        };
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .comment_proc_mvcc(proc_row.oid, comment_stmt.comment.as_deref(), &ctx)
+            .map_err(map_catalog_error)?;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    pub(crate) fn execute_comment_on_index_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        comment_stmt: &CommentOnIndexStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let relation =
+            lookup_index_relation_for_alter_index(&catalog, &comment_stmt.index_name, false)?
+                .expect("index lookup without if_exists should return relation or error");
+        ensure_relation_owner(self, client_id, &relation, &comment_stmt.index_name)?;
+
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: Arc::clone(&interrupts),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .comment_relation_mvcc(relation.relation_oid, comment_stmt.comment.as_deref(), &ctx)
+            .map_err(map_catalog_error)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
     pub(crate) fn execute_comment_on_table_stmt_with_search_path(
         &self,
         client_id: ClientId,
@@ -315,40 +480,6 @@ impl Database {
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
         let result = self.execute_comment_on_constraint_stmt_in_transaction_with_search_path(
-            client_id,
-            comment_stmt,
-            xid,
-            0,
-            configured_search_path,
-            &mut catalog_effects,
-        );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
-        guard.disarm();
-        self.table_locks.unlock_table(relation.rel, client_id);
-        result
-    }
-
-    pub(crate) fn execute_comment_on_index_stmt_with_search_path(
-        &self,
-        client_id: ClientId,
-        comment_stmt: &CommentOnIndexStatement,
-        configured_search_path: Option<&[String]>,
-    ) -> Result<StatementResult, ExecError> {
-        let interrupts = self.interrupt_state(client_id);
-        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let relation =
-            lookup_index_relation_for_alter_index(&catalog, &comment_stmt.index_name, false)?
-                .expect("index lookup without if_exists should return relation or error");
-        self.table_locks.lock_table_interruptible(
-            relation.rel,
-            TableLockMode::AccessExclusive,
-            client_id,
-            interrupts.as_ref(),
-        )?;
-        let xid = self.txns.write().begin();
-        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
-        let mut catalog_effects = Vec::new();
-        let result = self.execute_comment_on_index_stmt_in_transaction_with_search_path(
             client_id,
             comment_stmt,
             xid,
@@ -498,11 +629,11 @@ impl Database {
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             timed: false,
             allow_side_effects: false,
-            pending_async_notifications: Vec::new(),
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
             case_test_values: Vec::new(),
             system_bindings: Vec::new(),
             subplans: Vec::new(),
+            pending_async_notifications: Vec::new(),
             catalog: catalog.materialize_visible_catalog(),
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),
@@ -638,40 +769,6 @@ impl Database {
         Ok(StatementResult::AffectedRows(0))
     }
 
-    pub(crate) fn execute_comment_on_index_stmt_in_transaction_with_search_path(
-        &self,
-        client_id: ClientId,
-        comment_stmt: &CommentOnIndexStatement,
-        xid: TransactionId,
-        cid: CommandId,
-        configured_search_path: Option<&[String]>,
-        catalog_effects: &mut Vec<CatalogMutationEffect>,
-    ) -> Result<StatementResult, ExecError> {
-        let interrupts = self.interrupt_state(client_id);
-        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation =
-            lookup_index_relation_for_alter_index(&catalog, &comment_stmt.index_name, false)?
-                .expect("index lookup without if_exists should return relation or error");
-        ensure_relation_owner(self, client_id, &relation, &comment_stmt.index_name)?;
-
-        let ctx = CatalogWriteContext {
-            pool: self.pool.clone(),
-            txns: self.txns.clone(),
-            xid,
-            cid,
-            client_id,
-            waiter: None,
-            interrupts: Arc::clone(&interrupts),
-        };
-        let effect = self
-            .catalog
-            .write()
-            .comment_relation_mvcc(relation.relation_oid, comment_stmt.comment.as_deref(), &ctx)
-            .map_err(map_catalog_error)?;
-        catalog_effects.push(effect);
-        Ok(StatementResult::AffectedRows(0))
-    }
-
     pub(crate) fn execute_alter_table_add_column_stmt_in_transaction_with_search_path(
         &self,
         client_id: ClientId,
@@ -785,11 +882,11 @@ impl Database {
                 default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
                 timed: false,
                 allow_side_effects: false,
-                pending_async_notifications: Vec::new(),
                 expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
                 system_bindings: Vec::new(),
                 subplans: Vec::new(),
+                pending_async_notifications: Vec::new(),
                 catalog: catalog.materialize_visible_catalog(),
                 compiled_functions: std::collections::HashMap::new(),
                 cte_tables: std::collections::HashMap::new(),

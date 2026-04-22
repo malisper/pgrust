@@ -364,7 +364,7 @@ fn bind_window_agg_call(
             infer_sql_expr_type_with_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)
         })
         .collect::<Vec<_>>();
-    let resolved = resolve_aggregate_call(catalog, func, &arg_types, func_variadic);
+    let resolved = resolve_builtin_aggregate_call(catalog, func, &arg_types, func_variadic);
     let bound_args = arg_values
         .iter()
         .map(|expr| {
@@ -549,21 +549,26 @@ fn bind_window_func_call(
             resolved.result_type,
         ));
     }
-    if let Some(agg_impl) = resolved.agg_impl {
-        return bind_window_agg_call(
-            agg_impl,
-            args,
-            &[],
-            false,
-            resolved.func_variadic,
-            None,
-            over,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        );
+    if resolved.prokind == 'a' {
+        if let Some(agg_impl) = resolved.agg_impl {
+            return bind_window_agg_call(
+                agg_impl,
+                args,
+                &[],
+                false,
+                resolved.func_variadic,
+                None,
+                over,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            );
+        }
+        return Err(ParseError::FeatureNotSupported(format!(
+            "window execution for custom aggregate {name}"
+        )));
     }
     Err(ParseError::FeatureNotSupported(format!(
         "window function {name}"
@@ -3035,11 +3040,7 @@ fn bind_regclass_literal_cast(
     let relation_oid = relation_name
         .parse::<u32>()
         .ok()
-        .or_else(|| {
-            catalog
-                .lookup_any_relation(relation_name)
-                .map(|entry| entry.relation_oid)
-        })
+        .or_else(|| catalog.lookup_any_relation(relation_name).map(|entry| entry.relation_oid))
         .ok_or_else(|| ParseError::UnknownTable(relation_name.to_string()))?;
     Ok(Some(Expr::Cast(
         Box::new(Expr::Const(Value::Int64(relation_oid as i64))),

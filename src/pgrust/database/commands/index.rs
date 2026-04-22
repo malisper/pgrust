@@ -363,10 +363,7 @@ impl Database {
             .as_ref()
             .and_then(|meta| meta.indexprs.as_ref())
             .is_some();
-        if has_expression_keys
-            && access_method_oid != GIST_AM_OID
-            && access_method_oid != SPGIST_AM_OID
-        {
+        if has_expression_keys && access_method_oid != GIST_AM_OID && access_method_oid != SPGIST_AM_OID {
             self.build_expression_index_rows_in_transaction(
                 client_id,
                 relation,

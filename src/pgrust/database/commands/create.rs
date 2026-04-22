@@ -1,11 +1,12 @@
 use super::super::*;
 use crate::backend::parser::{
-    CreateFunctionReturnSpec, CreateFunctionStatement, FunctionArgMode, FunctionParallel,
-    FunctionVolatility, OwnedSequenceSpec, SequenceOptionsSpec, SqlTypeKind, resolve_raw_type_name,
+    AggregateArgType, AggregateSignatureKind, CreateAggregateStatement, CreateFunctionReturnSpec,
+    CreateFunctionStatement, FunctionArgMode, FunctionParallel, FunctionVolatility,
+    OwnedSequenceSpec, SequenceOptionsSpec, SqlTypeKind, resolve_raw_type_name,
 };
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID,
-    PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID, PgProcRow, RECORD_TYPE_OID,
+    ANYOID, BOOTSTRAP_SUPERUSER_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID,
+    PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID, PgAggregateRow, PgProcRow, RECORD_TYPE_OID,
 };
 use crate::include::nodes::parsenodes::{ForeignKeyAction, ForeignKeyMatchType};
 use crate::include::nodes::primnodes::{QueryColumn, ToastRelationRef};
@@ -45,19 +46,21 @@ fn existing_view_prefix_matches(
             })
 }
 
-fn normalize_create_function_name_for_search_path(
+pub(super) fn normalize_create_proc_name_for_search_path(
     db: &Database,
     client_id: ClientId,
     txn_ctx: CatalogTxnContext,
-    stmt: &CreateFunctionStatement,
+    schema_name: Option<&str>,
+    proc_name: &str,
+    object_kind: &'static str,
     configured_search_path: Option<&[String]>,
 ) -> Result<(String, u32), ParseError> {
-    let normalized = stmt.function_name.to_ascii_lowercase();
-    match stmt.schema_name.as_deref().map(str::to_ascii_lowercase) {
+    let normalized = proc_name.to_ascii_lowercase();
+    match schema_name.map(str::to_ascii_lowercase) {
         Some(schema) if schema == "pg_catalog" => Ok((normalized, PG_CATALOG_NAMESPACE_OID)),
         Some(schema) if schema == "pg_temp" => Err(ParseError::UnexpectedToken {
-            expected: "permanent function",
-            actual: "temporary function".into(),
+            expected: "permanent database object",
+            actual: format!("temporary {object_kind}"),
         }),
         Some(schema) => db
             .visible_namespace_oid_by_name(client_id, txn_ctx, &schema)
@@ -84,6 +87,127 @@ fn normalize_create_function_name_for_search_path(
             Err(ParseError::NoSchemaSelectedForCreate)
         }
     }
+}
+
+fn proc_parallel_code(parallel: FunctionParallel) -> char {
+    match parallel {
+        FunctionParallel::Unsafe => 'u',
+        FunctionParallel::Restricted => 'r',
+        FunctionParallel::Safe => 's',
+    }
+}
+
+pub(super) fn aggregate_signature_arg_oids(
+    catalog: &dyn CatalogLookup,
+    signature: &AggregateSignatureKind,
+) -> Result<Vec<u32>, ParseError> {
+    match signature {
+        AggregateSignatureKind::Star => Ok(Vec::new()),
+        AggregateSignatureKind::Args(args) => args
+            .iter()
+            .map(|arg| match arg {
+                AggregateArgType::AnyPseudo => Ok(ANYOID),
+                AggregateArgType::Type(raw_type) => {
+                    let sql_type = resolve_raw_type_name(raw_type, catalog)?;
+                    catalog
+                        .type_oid_for_sql_type(sql_type)
+                        .ok_or_else(|| ParseError::UnsupportedType(format!("{sql_type:?}")))
+                }
+            })
+            .collect(),
+    }
+}
+
+fn split_proc_name(name: &str) -> (Option<&str>, &str) {
+    name.rsplit_once('.')
+        .map(|(schema, proc_name)| (Some(schema), proc_name))
+        .unwrap_or((None, name))
+}
+
+fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {
+    if argtypes.trim().is_empty() {
+        return Some(Vec::new());
+    }
+    argtypes
+        .split_whitespace()
+        .map(|part| part.parse::<u32>().ok())
+        .collect()
+}
+
+fn resolve_exact_proc_row(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    catalog: &dyn CatalogLookup,
+    proc_name: &str,
+    arg_oids: &[u32],
+    expected_kind: char,
+) -> Result<PgProcRow, ExecError> {
+    let (schema_name, base_name) = split_proc_name(proc_name);
+    let namespace_oid = match schema_name {
+        Some(schema_name) => Some(
+            db.visible_namespace_oid_by_name(client_id, txn_ctx, schema_name)
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!("schema \"{schema_name}\" does not exist"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "3F000",
+                })?,
+        ),
+        None => None,
+    };
+    let matches = catalog
+        .proc_rows_by_name(base_name)
+        .into_iter()
+        .filter(|row| {
+            row.prokind == expected_kind
+                && parse_proc_argtype_oids(&row.proargtypes)
+                    .is_some_and(|row_arg_oids| row_arg_oids == arg_oids)
+                && namespace_oid
+                    .map(|namespace_oid| row.pronamespace == namespace_oid)
+                    .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [row] => Ok(row.clone()),
+        [] => Err(ExecError::DetailedError {
+            message: format!("function {proc_name} does not exist"),
+            detail: Some(format!("expected argument OIDs {arg_oids:?}")),
+            hint: None,
+            sqlstate: "42883",
+        }),
+        _ => Err(ExecError::DetailedError {
+            message: format!("function name {proc_name} is ambiguous"),
+            detail: Some(format!("expected argument OIDs {arg_oids:?}")),
+            hint: None,
+            sqlstate: "42725",
+        }),
+    }
+}
+
+pub(super) fn resolve_aggregate_proc_rows(
+    catalog: &dyn CatalogLookup,
+    aggregate_name: &str,
+    namespace_oid: Option<u32>,
+    arg_oids: &[u32],
+) -> Vec<(PgProcRow, PgAggregateRow)> {
+    catalog
+        .proc_rows_by_name(aggregate_name)
+        .into_iter()
+        .filter(|row| {
+            row.prokind == 'a'
+                && namespace_oid
+                    .map(|namespace_oid| row.pronamespace == namespace_oid)
+                    .unwrap_or(true)
+                && parse_proc_argtype_oids(&row.proargtypes)
+                    .is_some_and(|row_arg_oids| row_arg_oids == arg_oids)
+        })
+        .filter_map(|row| {
+            catalog
+                .aggregate_by_fnoid(row.oid)
+                .map(|aggregate_row| (row, aggregate_row))
+        })
+        .collect()
 }
 
 fn proc_arg_mode(mode: FunctionArgMode) -> u8 {
@@ -528,11 +652,13 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let (function_name, namespace_oid) = normalize_create_function_name_for_search_path(
+        let (function_name, namespace_oid) = normalize_create_proc_name_for_search_path(
             self,
             client_id,
             Some((xid, cid)),
-            create_stmt,
+            create_stmt.schema_name.as_deref(),
+            &create_stmt.function_name,
+            "function",
             configured_search_path,
         )?;
 
@@ -540,16 +666,16 @@ impl Database {
             .language_row_by_name(&create_stmt.language)
             .ok_or_else(|| {
                 ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "LANGUAGE plpgsql, sql, or internal",
+                    expected: "LANGUAGE plpgsql or sql",
                     actual: format!("LANGUAGE {}", create_stmt.language),
                 })
             })?;
         if !matches!(
             language_row.oid,
-            PG_LANGUAGE_PLPGSQL_OID | PG_LANGUAGE_SQL_OID | PG_LANGUAGE_INTERNAL_OID
+            PG_LANGUAGE_PLPGSQL_OID | PG_LANGUAGE_SQL_OID
         ) {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "LANGUAGE plpgsql, sql, or internal",
+                expected: "LANGUAGE plpgsql or sql",
                 actual: format!("LANGUAGE {}", create_stmt.language),
             }));
         }
@@ -592,7 +718,7 @@ impl Database {
         }
 
         let mut proretset = false;
-        let prorettype: u32;
+        let mut prorettype = 0u32;
         let mut proallargtypes = None;
         let mut proargmodes = None;
         let mut proargnames = all_arg_names
@@ -696,7 +822,9 @@ impl Database {
                             ))
                         })?;
                 } else {
-                    prorettype = RECORD_TYPE_OID;
+                    return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                        "multi-OUT non-set functions are not supported yet".into(),
+                    )));
                 }
             }
         }
@@ -737,11 +865,7 @@ impl Database {
                 FunctionVolatility::Stable => 's',
                 FunctionVolatility::Immutable => 'i',
             },
-            proparallel: match create_stmt.parallel {
-                FunctionParallel::Unsafe => 'u',
-                FunctionParallel::Restricted => 'r',
-                FunctionParallel::Safe => 's',
-            },
+            proparallel: proc_parallel_code(create_stmt.parallel),
             pronargs: callable_arg_oids.len() as i16,
             pronargdefaults: 0,
             prorettype,
@@ -770,6 +894,190 @@ impl Database {
             } else {
                 catalog_store
                     .create_proc_mvcc(proc_row, &ctx)
+                    .map_err(map_catalog_error)?
+            };
+            effect
+        };
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    pub(crate) fn execute_create_aggregate_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateAggregateStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_create_aggregate_stmt_in_transaction_with_search_path(
+            client_id,
+            create_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_create_aggregate_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateAggregateStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let txn_ctx = Some((xid, cid));
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
+        let (aggregate_name, namespace_oid) = normalize_create_proc_name_for_search_path(
+            self,
+            client_id,
+            txn_ctx,
+            create_stmt.schema_name.as_deref(),
+            &create_stmt.aggregate_name,
+            "aggregate",
+            configured_search_path,
+        )?;
+        let arg_oids = aggregate_signature_arg_oids(&catalog, &create_stmt.signature)?;
+        let stype =
+            resolve_raw_type_name(&create_stmt.stype, &catalog).map_err(ExecError::Parse)?;
+        let stype_oid = catalog
+            .type_oid_for_sql_type(stype)
+            .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(format!("{stype:?}"))))?;
+        let mut trans_arg_oids = Vec::with_capacity(arg_oids.len() + 1);
+        trans_arg_oids.push(stype_oid);
+        trans_arg_oids.extend(arg_oids.iter().copied());
+        let transfn_row = resolve_exact_proc_row(
+            self,
+            client_id,
+            txn_ctx,
+            &catalog,
+            &create_stmt.sfunc_name,
+            &trans_arg_oids,
+            'f',
+        )?;
+        let finalfn_row = create_stmt
+            .finalfunc_name
+            .as_deref()
+            .map(|name| {
+                resolve_exact_proc_row(self, client_id, txn_ctx, &catalog, name, &[stype_oid], 'f')
+            })
+            .transpose()?;
+        let result_type_oid = finalfn_row
+            .as_ref()
+            .map(|row| row.prorettype)
+            .unwrap_or(stype_oid);
+        let proargtypes = arg_oids
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let conflicting_non_aggregate = catalog
+            .proc_rows_by_name(&aggregate_name)
+            .into_iter()
+            .find(|row| {
+                row.pronamespace == namespace_oid
+                    && parse_proc_argtype_oids(&row.proargtypes)
+                        .is_some_and(|row_arg_oids| row_arg_oids == arg_oids)
+                    && row.prokind != 'a'
+            });
+        if conflicting_non_aggregate.is_some() {
+            return Err(ExecError::Parse(ParseError::WrongObjectType {
+                name: aggregate_name.clone(),
+                expected: "aggregate",
+            }));
+        }
+        let existing =
+            resolve_aggregate_proc_rows(&catalog, &aggregate_name, Some(namespace_oid), &arg_oids);
+        if !existing.is_empty() && !create_stmt.replace_existing {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "unique aggregate signature",
+                actual: format!("aggregate {aggregate_name}({proargtypes}) already exists"),
+            }));
+        }
+
+        let proc_row = PgProcRow {
+            oid: 0,
+            proname: aggregate_name.clone(),
+            pronamespace: namespace_oid,
+            proowner: BOOTSTRAP_SUPERUSER_OID,
+            prolang: PG_LANGUAGE_INTERNAL_OID,
+            procost: 1.0,
+            prorows: 0.0,
+            provariadic: 0,
+            prosupport: 0,
+            prokind: 'a',
+            prosecdef: false,
+            proleakproof: false,
+            proisstrict: false,
+            proretset: false,
+            provolatile: 'i',
+            proparallel: create_stmt.parallel.map(proc_parallel_code).unwrap_or('u'),
+            pronargs: arg_oids.len() as i16,
+            pronargdefaults: 0,
+            prorettype: result_type_oid,
+            proargtypes,
+            proallargtypes: None,
+            proargmodes: None,
+            proargnames: None,
+            prosrc: aggregate_name.clone(),
+        };
+        let aggregate_row = PgAggregateRow {
+            aggfnoid: 0,
+            aggkind: 'n',
+            aggnumdirectargs: 0,
+            aggtransfn: transfn_row.oid,
+            aggfinalfn: finalfn_row.as_ref().map(|row| row.oid).unwrap_or(0),
+            aggcombinefn: 0,
+            aggserialfn: 0,
+            aggdeserialfn: 0,
+            aggmtransfn: 0,
+            aggminvtransfn: 0,
+            aggmfinalfn: 0,
+            aggfinalextra: false,
+            aggmfinalextra: false,
+            aggfinalmodify: 'r',
+            aggmfinalmodify: 'r',
+            aggsortop: 0,
+            aggtranstype: stype_oid,
+            aggtransspace: 0,
+            aggmtranstype: 0,
+            aggmtransspace: 0,
+            agginitval: create_stmt.initcond.clone(),
+            aggminitval: None,
+        };
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts,
+        };
+        let effect = {
+            let mut catalog_store = self.catalog.write();
+            let (_oid, effect) = if let Some((old_proc_row, old_aggregate_row)) = existing.first() {
+                catalog_store
+                    .replace_aggregate_mvcc(
+                        old_proc_row,
+                        old_aggregate_row,
+                        proc_row,
+                        aggregate_row,
+                        &ctx,
+                    )
+                    .map_err(map_catalog_error)?
+            } else {
+                catalog_store
+                    .create_aggregate_mvcc(proc_row, aggregate_row, &ctx)
                     .map_err(map_catalog_error)?
             };
             effect
@@ -1283,8 +1591,6 @@ impl Database {
                                         column.sql_type,
                                     ),
                                     default_expr: None,
-                                    collation: None,
-                                    storage: None,
                                     compression: None,
                                     constraints: vec![],
                                 },

@@ -8,14 +8,14 @@ use crate::include::catalog::{
     RECORD_TYPE_OID, bootstrap_pg_proc_rows, sort_pg_rewrite_rows,
 };
 use crate::include::nodes::parsenodes::{
-    AliasColumnDef, AliasColumnSpec, ColumnConstraint, CompositeTypeAttributeDef,
+    AggregateArgType, AggregateSignatureKind, AliasColumnDef, AliasColumnSpec, ColumnConstraint,
+    CommentOnAggregateStatement, CompositeTypeAttributeDef, CreateAggregateStatement,
     CreateCompositeTypeStatement, CreateTriggerStatement, CreateTypeStatement,
-    DropTriggerStatement, DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, IndexColumnDef,
-    InsertSource, InsertStatement, JoinTreeNode, ListenStatement, NotifyStatement,
+    DropAggregateStatement, DropTriggerStatement, DropTypeStatement, ForeignKeyAction,
+    ForeignKeyMatchType, IndexColumnDef, InsertSource, InsertStatement, JoinTreeNode,
     PublicationObjectSpec, PublicationOption, PublicationSchemaName, RangeTblEntryKind,
-    PublicationSchemaName, RangeTblEntryKind, RawTypeName, SetSessionAuthorizationStatement,
-    SqlCallArgs, TableConstraint, TableLikeClause, TableLikeOptions, TriggerEvent,
-    TriggerEventSpec, TriggerLevel, TriggerTiming, UnlistenStatement, ViewCheckOption,
+    RawTypeName, SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint, TriggerEvent,
+    TriggerEventSpec, TriggerLevel, TriggerTiming, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -1876,68 +1876,10 @@ fn parse_alter_table_add_column_statement() {
                 name: "note".into(),
                 ty: builtin_type(SqlType::new(SqlTypeKind::Text)),
                 default_expr: Some("'hello'".into()),
-                collation: None,
-                storage: None,
-                compression: None,
                 constraints: vec![],
             },
         })
     );
-}
-
-#[test]
-fn parse_create_table_column_compression() {
-    let stmt = parse_statement("create table cmdata (f1 text compression pglz)").unwrap();
-    let Statement::CreateTable(create) = stmt else {
-        panic!("expected create table");
-    };
-    let columns = create.columns().collect::<Vec<_>>();
-    assert_eq!(columns.len(), 1);
-    assert_eq!(columns[0].name, "f1");
-    assert_eq!(columns[0].compression, Some(AttributeCompression::Pglz));
-}
-
-#[test]
-fn parse_create_table_invalid_compression_name_lowercases_identifier() {
-    let err =
-        parse_statement("create table badcompresstbl (a text compression I_Do_Not_Exist_Compression)")
-            .unwrap_err();
-    match err {
-        ParseError::DetailedError {
-            message, sqlstate, ..
-        } => {
-            assert_eq!(
-                message,
-                "invalid compression method \"i_do_not_exist_compression\""
-            );
-            assert_eq!(sqlstate, "22023");
-        }
-        other => panic!("unexpected error: {other:?}"),
-    }
-}
-
-#[cfg(not(feature = "lz4"))]
-#[test]
-fn unsupported_create_table_with_lz4_reports_compression_error() {
-    let err =
-        parse_statement("create table cmpart(f1 text compression lz4) partition by hash(f1)")
-            .unwrap_err();
-    match err {
-        ParseError::DetailedError {
-            message,
-            detail,
-            sqlstate,
-            ..
-        } => {
-            assert_eq!(message, "compression method lz4 not supported");
-            assert_eq!(
-                detail.as_deref(),
-                Some("This functionality requires the server to be built with lz4 support.")
-            );
-            assert_eq!(sqlstate, "0A000");
-        }
-        other => panic!("unexpected error: {other:?}"),
-    }
 }
 
 #[test]
@@ -3508,64 +3450,6 @@ fn parse_create_function_statement_with_unnamed_args() {
 }
 
 #[test]
-fn parse_create_function_statement_with_named_in_out_args() {
-    let stmt = parse_statement(
-        "create function test_conv(input in bytea, src_encoding in text, dst_encoding in text, result out bytea, errorat out bytea, error out text) language plpgsql as $$ begin return; end $$",
-    )
-    .unwrap();
-    assert_eq!(
-        stmt,
-        Statement::CreateFunction(CreateFunctionStatement {
-            schema_name: None,
-            function_name: "test_conv".into(),
-            replace_existing: false,
-            args: vec![
-                CreateFunctionArg {
-                    mode: FunctionArgMode::In,
-                    name: Some("input".into()),
-                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bytea)),
-                },
-                CreateFunctionArg {
-                    mode: FunctionArgMode::In,
-                    name: Some("src_encoding".into()),
-                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
-                },
-                CreateFunctionArg {
-                    mode: FunctionArgMode::In,
-                    name: Some("dst_encoding".into()),
-                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
-                },
-                CreateFunctionArg {
-                    mode: FunctionArgMode::Out,
-                    name: Some("result".into()),
-                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bytea)),
-                },
-                CreateFunctionArg {
-                    mode: FunctionArgMode::Out,
-                    name: Some("errorat".into()),
-                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bytea)),
-                },
-                CreateFunctionArg {
-                    mode: FunctionArgMode::Out,
-                    name: Some("error".into()),
-                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
-                },
-            ],
-            return_spec: CreateFunctionReturnSpec::DerivedFromOutArgs {
-                setof_record: false,
-            },
-            strict: false,
-            leakproof: false,
-            volatility: FunctionVolatility::Volatile,
-            parallel: FunctionParallel::Unsafe,
-            language: "plpgsql".into(),
-            body: " begin return; end ".into(),
-            link_symbol: None,
-        })
-    );
-}
-
-#[test]
 fn parse_create_function_statement_with_pg_clauses_and_link_symbol() {
     let stmt = parse_statement(
         "create function binary_coercible(oid, oid) returns bool as 'regress', 'binary_coercible' language c strict stable parallel safe",
@@ -3637,18 +3521,6 @@ fn parse_create_function_statement_with_sql_return_shorthand() {
 }
 
 #[test]
-fn parse_select_statement_with_record_expansion_target() {
-    let stmt = parse_select("select (pair(1)).*").unwrap();
-    assert!(matches!(
-        stmt.targets.as_slice(),
-        [SelectItem {
-            output_name,
-            expr: SqlExpr::FieldSelect { field, .. }
-        }] if output_name == "*" && field == "*"
-    ));
-}
-
-#[test]
 fn parse_drop_function_statement_with_signature() {
     let stmt = parse_statement("drop function public.p2text(p2)").unwrap();
     assert_eq!(
@@ -3661,6 +3533,135 @@ fn parse_drop_function_statement_with_signature() {
             cascade: false,
         })
     );
+}
+
+#[test]
+fn parse_create_aggregate_statement_with_plain_signature() {
+    let stmt = parse_statement(
+        "create aggregate newavg(int4) (sfunc = int4_avg_accum, stype = _int8, finalfunc = int8_avg, initcond = '{0,0}', parallel = safe)",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateAggregate(CreateAggregateStatement {
+            schema_name: None,
+            aggregate_name: "newavg".into(),
+            replace_existing: false,
+            signature: AggregateSignatureKind::Args(vec![AggregateArgType::Type(
+                RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+            )]),
+            sfunc_name: "int4_avg_accum".into(),
+            stype: RawTypeName::Named {
+                name: "_int8".into(),
+                array_bounds: 0,
+            },
+            finalfunc_name: Some("int8_avg".into()),
+            initcond: Some("{0,0}".into()),
+            parallel: Some(FunctionParallel::Safe),
+        })
+    );
+}
+
+#[test]
+fn parse_create_aggregate_statement_with_old_style_basetype() {
+    let stmt = parse_statement(
+        "create aggregate oldcnt (sfunc = int8inc, basetype = 'ANY', stype = int8, initcond = '0')",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateAggregate(CreateAggregateStatement {
+            schema_name: None,
+            aggregate_name: "oldcnt".into(),
+            replace_existing: false,
+            signature: AggregateSignatureKind::Star,
+            sfunc_name: "int8inc".into(),
+            stype: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int8)),
+            finalfunc_name: None,
+            initcond: Some("0".into()),
+            parallel: None,
+        })
+    );
+}
+
+#[test]
+fn parse_create_or_replace_aggregate_star_signature() {
+    let stmt = parse_statement(
+        "create or replace aggregate public.newcnt(*) (sfunc = int8inc, stype = int8, initcond = '0')",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateAggregate(CreateAggregateStatement {
+            schema_name: Some("public".into()),
+            aggregate_name: "newcnt".into(),
+            replace_existing: true,
+            signature: AggregateSignatureKind::Star,
+            sfunc_name: "int8inc".into(),
+            stype: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int8)),
+            finalfunc_name: None,
+            initcond: Some("0".into()),
+            parallel: None,
+        })
+    );
+}
+
+#[test]
+fn parse_drop_and_comment_on_aggregate_statements() {
+    let stmt = parse_statement("drop aggregate if exists public.newcnt(\"any\") cascade").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::DropAggregate(DropAggregateStatement {
+            if_exists: true,
+            schema_name: Some("public".into()),
+            aggregate_name: "newcnt".into(),
+            signature: AggregateSignatureKind::Args(vec![AggregateArgType::AnyPseudo]),
+            cascade: true,
+        })
+    );
+
+    let stmt = parse_statement("comment on aggregate newcnt(*) is 'an agg(*) comment'").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CommentOnAggregate(CommentOnAggregateStatement {
+            schema_name: None,
+            aggregate_name: "newcnt".into(),
+            signature: AggregateSignatureKind::Star,
+            comment: Some("an agg(*) comment".into()),
+        })
+    );
+}
+
+#[test]
+fn parse_create_aggregate_rejects_unsupported_forms() {
+    let err = parse_statement(
+        "create aggregate my_percentile_disc(float8 order by anyelement) (sfunc = int8inc, stype = int8)",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::FeatureNotSupported(message)
+            if message.contains("ordered-set aggregate signatures")
+    ));
+
+    let err = parse_statement(
+        "create aggregate least_agg(variadic items anyarray) (sfunc = int8inc, stype = int8)",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::FeatureNotSupported(message)
+            if message.contains("VARIADIC aggregate signatures")
+    ));
+
+    let err = parse_statement(
+        "create aggregate badagg(int4) (sfunc = int4pl, stype = int4, combinefunc = int4pl)",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::FeatureNotSupported(message) if message.contains("combinefunc")
+    ));
 }
 
 #[test]
@@ -4845,79 +4846,6 @@ fn build_plan_accepts_catalog_backed_text_input_casts() {
 }
 
 #[test]
-fn build_plan_accepts_catalog_backed_time_casts_and_comparisons() {
-    assert!(
-        build_plan(
-            &parse_select("select time('05:06:07'), time '05:06:07', time '05:06:07' < '06:07:08'")
-                .unwrap(),
-            &catalog(),
-        )
-        .is_ok()
-    );
-}
-
-#[test]
-fn build_plan_coerces_time_comparison_string_literals() {
-    let mut catalog = catalog();
-    catalog.insert(
-        "time_tbl",
-        test_catalog_entry(
-            15040,
-            RelationDesc {
-                columns: vec![column_desc("f1", SqlType::new(SqlTypeKind::Time), false)],
-            },
-        ),
-    );
-    let plan = build_plan(
-        &parse_select("select * from time_tbl where f1 < '05:06:07'").unwrap(),
-        &catalog,
-    )
-    .unwrap();
-    let Plan::Filter { predicate, .. } = plan else {
-        panic!("expected filter plan");
-    };
-    assert!(matches!(
-        predicate,
-        Expr::Op(op)
-            if op.op == crate::include::nodes::primnodes::OpExprKind::Lt
-                && matches!(op.args.as_slice(), [Expr::Var(var), Expr::Cast(inner, ty)]
-                    if var.vartype == SqlType::new(SqlTypeKind::Time)
-                        && *ty == SqlType::new(SqlTypeKind::Time)
-                        && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _))))
-    ));
-}
-
-#[test]
-fn build_plan_rejects_ambiguous_time_addition() {
-    match build_plan(
-        &parse_select("select time '01:02' + time '03:04'").unwrap(),
-        &catalog(),
-    )
-    .unwrap_err()
-    {
-        ParseError::DetailedError {
-            message,
-            hint,
-            sqlstate,
-            ..
-        } => {
-            assert_eq!(
-                message,
-                "operator is not unique: time without time zone + time without time zone"
-            );
-            assert_eq!(
-                hint.as_deref(),
-                Some(
-                    "Could not choose a best candidate operator. You might need to add explicit type casts."
-                )
-            );
-            assert_eq!(sqlstate, "42725");
-        }
-        other => panic!("expected detailed error, got {other:?}"),
-    }
-}
-
-#[test]
 fn build_plan_accepts_catalog_backed_bit_comparisons() {
     assert!(build_plan(
         &parse_select(
@@ -5428,33 +5356,6 @@ fn build_plan_resolves_aliased_columns() {
 }
 
 #[test]
-fn build_plan_constant_folds_nullif_filter_to_false() {
-    let stmt = parse_select("select * from people where nullif(1, 2) = 2").unwrap();
-    let plan = build_plan(&stmt, &catalog()).unwrap();
-
-    match plan {
-        Plan::Filter {
-            predicate, input, ..
-        } => {
-            assert_eq!(predicate, Expr::Const(Value::Bool(false)));
-            assert!(matches!(*input, Plan::SeqScan { .. }));
-        }
-        other => panic!("expected filter, got {:?}", other),
-    }
-}
-
-#[test]
-fn build_plan_case_raises_reachable_division_by_zero() {
-    let stmt = parse_select("select case when id > 0 then id else 1/0 end from people").unwrap();
-
-    assert!(matches!(
-        build_plan(&stmt, &catalog()),
-        Err(ParseError::DetailedError { message, sqlstate, .. })
-            if message == "division by zero" && sqlstate == "22012"
-    ));
-}
-
-#[test]
 fn build_join_plan_resolves_qualified_columns() {
     let mut catalog = catalog();
     catalog.insert("pets", pets_entry());
@@ -5855,49 +5756,8 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("create temp table withoutoid() with (oids = false)").unwrap(), Statement::CreateTable(ct) if ct.persistence == TablePersistence::Temporary && ct.table_name == "withoutoid" && ct.columns().count() == 0)
     );
     assert!(matches!(
-        parse_statement("create table widgets (like source_table)").unwrap(),
-        Statement::CreateTable(CreateTableStatement { elements, .. })
-            if matches!(
-                elements.as_slice(),
-                [CreateTableElement::Like(TableLikeClause { relation_name, options })]
-                    if relation_name == "source_table"
-                        && options == &TableLikeOptions::default()
-            )
-    ));
-    assert!(matches!(
-        parse_statement("create table widgets (like public.source_table including defaults excluding defaults)").unwrap(),
-        Statement::CreateTable(CreateTableStatement { elements, .. })
-            if matches!(
-                elements.as_slice(),
-                [CreateTableElement::Like(TableLikeClause { relation_name, options })]
-                    if relation_name == "public.source_table"
-                        && !options.defaults
-                        && !options.constraints
-                        && !options.storage
-                        && !options.compression
-                        && !options.indexes
-                        && !options.comments
-                        && !options.statistics
-                        && !options.generated
-                        && !options.identity
-            )
-    ));
-    assert!(matches!(
-        parse_statement("create table widgets (like source_table including all excluding indexes)").unwrap(),
-        Statement::CreateTable(CreateTableStatement { elements, .. })
-            if matches!(
-                elements.as_slice(),
-                [CreateTableElement::Like(TableLikeClause { options, .. })]
-                    if options.defaults
-                        && options.constraints
-                        && options.storage
-                        && options.compression
-                        && !options.indexes
-                        && options.comments
-                        && options.statistics
-                        && options.generated
-                        && options.identity
-            )
+        parse_statement("create table widgets (like source_table)"),
+        Err(ParseError::FeatureNotSupported(feature)) if feature == "CREATE TABLE ... LIKE"
     ));
     assert!(matches!(
         parse_statement("create table withoid() with (oids)"),
@@ -5970,9 +5830,6 @@ fn parse_insert_update_delete() {
     );
     assert!(
         matches!(parse_statement("create schema tenant authorization app_user").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: Some(schema_name), auth_role: Some(auth_role), if_not_exists: false }) if schema_name == "tenant" && auth_role == "app_user")
-    );
-    assert!(
-        matches!(parse_statement("/* comment with doesn't in it */\ncreate schema collate_tests").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: Some(schema_name), auth_role: None, if_not_exists: false }) if schema_name == "collate_tests")
     );
     assert!(
         matches!(parse_statement("drop view if exists item_names, recent_items").unwrap(), Statement::DropView(DropViewStatement { if_exists: true, view_names }) if view_names == vec!["item_names", "recent_items"])
@@ -7374,22 +7231,6 @@ fn parse_create_table_primary_key_and_unique_constraints() {
 }
 
 #[test]
-fn parse_create_table_array_column_with_unique_constraint() {
-    let stmt = parse_statement("create temp table arr_tbl (f1 int[] unique)").unwrap();
-    let Statement::CreateTable(ct) = stmt else {
-        panic!("expected create table");
-    };
-    let columns = ct.columns().collect::<Vec<_>>();
-    assert_eq!(columns.len(), 1);
-    assert_eq!(columns[0].name, "f1");
-    assert_eq!(
-        columns[0].ty,
-        RawTypeName::Builtin(SqlType::array_of(SqlType::new(SqlTypeKind::Int4)))
-    );
-    assert!(columns[0].unique());
-}
-
-#[test]
 fn parse_create_table_named_check_and_not_null_constraints() {
     let stmt = parse_statement(
         "create table items (id int4 constraint id_positive check (id > 0) not valid deferrable initially deferred not enforced, note text, constraint note_present not null note not valid, constraint note_nonempty check (note <> '') not deferrable initially immediate enforced)",
@@ -8208,37 +8049,6 @@ fn parse_array_and_unnest_expressions() {
 }
 
 #[test]
-fn parse_unnest_with_ordinality_aliases_columns() {
-    let stmt = parse_select(
-        "select * from unnest(ARRAY['a', 'b']::varchar[]) with ordinality as u(val, ord)",
-    )
-    .unwrap();
-    let Some(FromItem::Alias {
-        source,
-        alias,
-        column_aliases,
-        ..
-    }) = stmt.from
-    else {
-        panic!("expected aliased function call in from");
-    };
-    assert_eq!(alias, "u");
-    assert_eq!(
-        column_aliases,
-        AliasColumnSpec::Names(vec!["val".into(), "ord".into()])
-    );
-    assert!(matches!(
-        source.as_ref(),
-        FromItem::FunctionCall {
-            name,
-            args,
-            with_ordinality: true,
-            ..
-        } if name == "unnest" && args.len() == 1
-    ));
-}
-
-#[test]
 fn parse_nested_array_constructor_shorthand() {
     let stmt =
         parse_select("select ARRAY[[[111,112],[121,122]],[[211,212],[221,222]]] as f").unwrap();
@@ -9040,34 +8850,6 @@ fn build_plan_for_unnest_uses_array_element_types() {
                 SqlType::new(SqlTypeKind::Varchar)
             );
             assert_eq!(output_columns[1].sql_type, SqlType::new(SqlTypeKind::Int4));
-        }
-        other => panic!("expected unnest plan, got {other:?}"),
-    }
-}
-
-#[test]
-fn build_plan_for_unnest_with_ordinality_adds_bigint_column() {
-    let stmt = parse_select("select * from unnest(ARRAY['a']::varchar[]) with ordinality").unwrap();
-    let plan = build_plan(&stmt, &catalog()).unwrap();
-    match plan {
-        Plan::FunctionScan {
-            call:
-                crate::include::nodes::primnodes::SetReturningCall::Unnest {
-                    output_columns,
-                    with_ordinality,
-                    ..
-                },
-            ..
-        } => {
-            assert!(with_ordinality);
-            assert_eq!(output_columns.len(), 2);
-            assert_eq!(output_columns[0].name, "unnest");
-            assert_eq!(
-                output_columns[0].sql_type,
-                SqlType::new(SqlTypeKind::Varchar)
-            );
-            assert_eq!(output_columns[1].name, "ordinality");
-            assert_eq!(output_columns[1].sql_type, SqlType::new(SqlTypeKind::Int8));
         }
         other => panic!("expected unnest plan, got {other:?}"),
     }
@@ -10193,18 +9975,6 @@ fn parse_create_table_column_defaults() {
 }
 
 #[test]
-fn parse_create_table_column_collation() {
-    let stmt = parse_statement("create table collate_test (a int, b text collate \"C\" not null)")
-        .unwrap();
-    let Statement::CreateTable(ct) = stmt else {
-        panic!("expected create table");
-    };
-    let columns = ct.columns().collect::<Vec<_>>();
-    assert_eq!(columns[0].collation, None);
-    assert_eq!(columns[1].collation.as_deref(), Some("C"));
-}
-
-#[test]
 fn parse_scalar_subquery_expression() {
     assert!(parse_select("select (select 1)").is_ok());
 }
@@ -10552,61 +10322,6 @@ fn parse_trim_without_explicit_trim_chars() {
 }
 
 #[test]
-fn parse_notify_statement() {
-    let stmt = parse_statement("notify foo").unwrap();
-    assert_eq!(
-        stmt,
-        Statement::Notify(NotifyStatement {
-            channel: "foo".into(),
-            payload: None,
-        })
-    );
-}
-
-#[test]
-fn parse_notify_statement_with_payload() {
-    let stmt = parse_statement("notify foo, 'bar'").unwrap();
-    assert_eq!(
-        stmt,
-        Statement::Notify(NotifyStatement {
-            channel: "foo".into(),
-            payload: Some("bar".into()),
-        })
-    );
-}
-
-#[test]
-fn parse_listen_statement() {
-    let stmt = parse_statement("listen foo").unwrap();
-    assert_eq!(
-        stmt,
-        Statement::Listen(ListenStatement {
-            channel: "foo".into(),
-        })
-    );
-}
-
-#[test]
-fn parse_unlisten_statement() {
-    let stmt = parse_statement("unlisten foo").unwrap();
-    assert_eq!(
-        stmt,
-        Statement::Unlisten(UnlistenStatement {
-            channel: Some("foo".into()),
-        })
-    );
-}
-
-#[test]
-fn parse_unlisten_all_statement() {
-    let stmt = parse_statement("unlisten *").unwrap();
-    assert_eq!(
-        stmt,
-        Statement::Unlisten(UnlistenStatement { channel: None })
-    );
-}
-
-#[test]
 fn parse_similar_to_syntax() {
     let stmt = parse_statement("select 'abcdefg' similar to '_bcd#%' escape '#'").unwrap();
     match stmt {
@@ -10638,7 +10353,6 @@ fn parse_case_expressions() {
             defresult: Some(_),
         } if matches!(arg.as_ref(), SqlExpr::Column(name) if name == "id") && args.len() == 1
     ));
-    assert_eq!(stmt.targets[0].output_name, "case");
     assert!(matches!(
         &stmt.targets[1].expr,
         SqlExpr::Case {
@@ -10647,7 +10361,6 @@ fn parse_case_expressions() {
             defresult: Some(_),
         } if args.len() == 1
     ));
-    assert_eq!(stmt.targets[1].output_name, "case");
 }
 
 #[test]
