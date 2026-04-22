@@ -584,6 +584,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
             BuiltinScalarFunction::PgMyTempSchema => args.is_empty(),
             BuiltinScalarFunction::PgRustInternalBinaryCoercible => args.len() == 2,
+            BuiltinScalarFunction::PgRustTestOpclassOptionsFunc => args.len() == 1,
             BuiltinScalarFunction::PgRustTestFdwHandler => args.is_empty(),
             BuiltinScalarFunction::PgRustTestEncSetup => args.is_empty(),
             BuiltinScalarFunction::PgRustTestEncConversion => args.len() == 4,
@@ -1303,6 +1304,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_rust_internal_binary_coercible",
             BuiltinScalarFunction::PgRustInternalBinaryCoercible,
+        ),
+        (
+            "pg_rust_test_opclass_options_func",
+            BuiltinScalarFunction::PgRustTestOpclassOptionsFunc,
         ),
         (
             "pg_rust_test_fdw_handler",

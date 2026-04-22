@@ -57,6 +57,16 @@ setup_pg_regress_env() {
     fi
 }
 
+transform_alter_generic_fixture() {
+    local input_path="$1"
+    local output_path="$2"
+
+    perl -0pe "
+        s/CREATE FUNCTION test_opclass_options_func\\(internal\\)\\n\\s+RETURNS void\\n\\s+AS :'regresslib', 'test_opclass_options_func'\\n\\s+LANGUAGE C;\\n//s;
+        s/\\btest_opclass_options_func\\b/pg_rust_test_opclass_options_func/g;
+    " "$input_path" > "$output_path"
+}
+
 transform_triggers_fixture() {
     local input_path="$1"
     local output_path="$2"
@@ -76,6 +86,13 @@ prepare_test_fixture() {
 
     local fixture_dir="$RESULTS_DIR/fixtures"
     case "$test_name" in
+        alter_generic)
+            mkdir -p "$fixture_dir"
+            PREPARED_SQL_FILE="$fixture_dir/${test_name}.sql"
+            PREPARED_EXPECTED_FILE="$fixture_dir/${test_name}.out"
+            transform_alter_generic_fixture "$sql_file" "$PREPARED_SQL_FILE"
+            transform_alter_generic_fixture "$expected_file" "$PREPARED_EXPECTED_FILE"
+            ;;
         triggers)
             mkdir -p "$fixture_dir"
             PREPARED_SQL_FILE="$fixture_dir/${test_name}.sql"
@@ -97,6 +114,7 @@ DATA_DIR=""
 SERVER_PID=""
 USE_PGRUST_SETUP=true
 REGRESS_USER="${PGRUST_REGRESS_USER:-${PGUSER:-$(id -un)}}"
+REGRESS_TABLESPACE_DIR=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -130,6 +148,9 @@ fi
 if [[ -z "$DATA_DIR" ]]; then
     DATA_DIR="$(make_temp_dir pgrust_regress_one_by_one_data)"
 fi
+
+REGRESS_TABLESPACE_DIR="$RESULTS_DIR/tablespaces/regress_tblspace"
+mkdir -p "$REGRESS_TABLESPACE_DIR"
 
 cleanup() {
     if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
@@ -208,7 +229,19 @@ wait_for_server_ready() {
     psql -X -h 127.0.0.1 -p "$PORT" -U "$REGRESS_USER" postgres -c "SELECT 1" >/dev/null 2>&1
 }
 
+ensure_port_available() {
+    if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+        echo "ERROR: port $PORT is already in use by another listener"
+        lsof -nP -iTCP:"$PORT" -sTCP:LISTEN || true
+        return 1
+    fi
+    return 0
+}
+
 start_server() {
+    if ! ensure_port_available; then
+        return 1
+    fi
     echo "Starting pgrust server on port $PORT (data: $DATA_DIR)..."
     "$SERVER_BIN" "$DATA_DIR" "$PORT" &
     SERVER_PID=$!
@@ -274,6 +307,7 @@ fi
 
 export PGPASSWORD="x"
 export PG_ABS_SRCDIR="$PG_REGRESS_ABS"
+export PGRUST_REGRESS_TABLESPACE_DIR="$REGRESS_TABLESPACE_DIR"
 export PGTZ="America/Los_Angeles"
 export PGDATESTYLE="Postgres, MDY"
 setup_pg_regress_env
