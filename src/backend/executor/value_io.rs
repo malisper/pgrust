@@ -1310,12 +1310,10 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
         (ScalarType::TsQuery, Value::TsQuery(query)) => Ok(TupleValue::Bytes(
             crate::backend::executor::encode_tsquery_bytes(&query),
         )),
-        (ScalarType::Text, Value::InternalChar(v)) => {
-            Ok(TupleValue::Bytes(render_internal_char_text(v).into_bytes()))
+        (ScalarType::Text, value) => {
+            let text = text_value_for_storage(&value)?;
+            Ok(TupleValue::Bytes(text.into_bytes()))
         }
-        (ScalarType::Text, value) => Ok(TupleValue::Bytes(
-            value.as_text().unwrap().as_bytes().to_vec(),
-        )),
         (ScalarType::Record, Value::Record(record)) => {
             Ok(TupleValue::Bytes(encode_composite_datum(&record)?))
         }
@@ -1344,6 +1342,27 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
             op: "assignment",
             left: Value::Null,
             right: other,
+        }),
+    }
+}
+
+fn text_value_for_storage(value: &Value) -> Result<String, ExecError> {
+    if let Some(text) = value.as_text() {
+        return Ok(text.to_string());
+    }
+    if let Value::InternalChar(v) = value {
+        return Ok(render_internal_char_text(*v));
+    }
+    match cast_value(value.clone(), SqlType::new(SqlTypeKind::Text))? {
+        Value::Text(text) => Ok(text.to_string()),
+        Value::TextRef(ptr, len) => Ok(unsafe {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len as usize)).to_owned()
+        }),
+        Value::InternalChar(v) => Ok(render_internal_char_text(v)),
+        other => Err(ExecError::TypeMismatch {
+            op: "text storage coercion",
+            left: other,
+            right: Value::Text("".into()),
         }),
     }
 }
@@ -2052,6 +2071,15 @@ mod tests {
         let decoded = decode_anyarray_bytes(&bytes).unwrap();
 
         assert_eq!(decoded, Value::PgArray(array));
+    }
+
+    #[test]
+    fn encode_text_column_coerces_non_text_values() {
+        let column = column_desc("v", SqlType::new(SqlTypeKind::Text), true);
+
+        let encoded = encode_value(&column, &Value::Int32(42)).unwrap();
+
+        assert_eq!(encoded, TupleValue::Bytes(b"42".to_vec()));
     }
 
     #[test]

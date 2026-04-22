@@ -434,6 +434,7 @@ impl Database {
             index_name: index_name.to_string(),
             index_desc: index_entry.desc.clone(),
             index_meta: relcache_index_meta,
+            default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             maintenance_work_mem_kb,
             expr_eval: has_expression_keys.then_some(IndexBuildExprContext {
                 txn_waiter: Some(self.txn_waiter.clone()),
@@ -641,6 +642,7 @@ impl Database {
                         index_name: index_name.to_string(),
                         index_desc: index_entry.desc.clone(),
                         index_meta: index_meta.clone(),
+                        default_toast_compression: ctx.default_toast_compression,
                         heap_tid,
                         values: key_values,
                         unique_check: if index_meta.indisunique {

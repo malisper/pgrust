@@ -232,6 +232,7 @@ fn gistinsert_build_tuple(
         index_name: ctx.index_name.clone(),
         index_desc: ctx.index_desc.clone(),
         index_meta: ctx.index_meta.clone(),
+        default_toast_compression: ctx.default_toast_compression,
         heap_tid,
         values,
         unique_check: IndexUniqueCheck::No,
