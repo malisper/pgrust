@@ -282,8 +282,8 @@ pub(crate) fn namespace_row_from_values(
 }
 
 pub(crate) fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow, CatalogError> {
-    let relpersistence = expect_char(&values[9], "relpersistence")?;
-    let relkind = expect_char(&values[10], "relkind")?;
+    let relpersistence = expect_char(&values[13], "relpersistence")?;
+    let relkind = expect_char(&values[14], "relkind")?;
     Ok(PgClassRow {
         oid: expect_oid(&values[0])?,
         relname: expect_text(&values[1])?,
@@ -291,19 +291,22 @@ pub(crate) fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow,
         reltype: expect_oid(&values[3])?,
         relowner: expect_oid(&values[4])?,
         relam: expect_oid(&values[5])?,
-        reltablespace: expect_oid(&values[6])?,
-        relfilenode: expect_oid(&values[7])?,
-        reltoastrelid: expect_oid(&values[8])?,
+        relfilenode: expect_oid(&values[6])?,
+        reltablespace: expect_oid(&values[7])?,
+        relpages: expect_int32(&values[8])?,
+        reltuples: expect_float64(&values[9])?,
+        relallvisible: expect_int32(&values[10])?,
+        relallfrozen: expect_int32(&values[11])?,
+        reltoastrelid: expect_oid(&values[12])?,
         relpersistence,
         relkind,
-        relhassubclass: expect_bool(&values[11])?,
-        relhastriggers: expect_bool(&values[12])?,
-        relispartition: expect_bool(&values[13])?,
-        relrowsecurity: expect_bool(&values[14])?,
-        relforcerowsecurity: expect_bool(&values[15])?,
-        relnatts: expect_int16(&values[16])?,
-        relpages: expect_int32(&values[17])?,
-        reltuples: expect_float64(&values[18])?,
+        relnatts: expect_int16(&values[15])?,
+        relhassubclass: expect_bool(&values[16])?,
+        relhastriggers: expect_bool(&values[17])?,
+        relrowsecurity: expect_bool(&values[18])?,
+        relforcerowsecurity: expect_bool(&values[19])?,
+        relispartition: expect_bool(&values[20])?,
+        relfrozenxid: expect_oid(&values[21])?,
     })
 }
 
@@ -947,19 +950,22 @@ fn pg_class_row_values(row: PgClassRow) -> Vec<Value> {
         Value::Int32(row.reltype as i32),
         Value::Int32(row.relowner as i32),
         Value::Int32(row.relam as i32),
-        Value::Int32(row.reltablespace as i32),
         Value::Int32(row.relfilenode as i32),
+        Value::Int32(row.reltablespace as i32),
+        Value::Int32(row.relpages),
+        Value::Float64(row.reltuples),
+        Value::Int32(row.relallvisible),
+        Value::Int32(row.relallfrozen),
         Value::Int32(row.reltoastrelid as i32),
         Value::Text(row.relpersistence.to_string().into()),
         Value::Text(row.relkind.to_string().into()),
+        Value::Int16(row.relnatts),
         Value::Bool(row.relhassubclass),
         Value::Bool(row.relhastriggers),
-        Value::Bool(row.relispartition),
         Value::Bool(row.relrowsecurity),
         Value::Bool(row.relforcerowsecurity),
-        Value::Int16(row.relnatts),
-        Value::Int32(row.relpages),
-        Value::Float64(row.reltuples),
+        Value::Bool(row.relispartition),
+        Value::Int32(row.relfrozenxid as i32),
     ]
 }
 

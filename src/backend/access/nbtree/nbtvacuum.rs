@@ -1,6 +1,5 @@
-use crate::backend::access::heap::heapam::heap_fetch;
 use crate::backend::access::nbtree::nbtxlog::{LoggedBtreeBlock, log_btree_record};
-use crate::backend::access::transam::xact::{INVALID_TRANSACTION_ID, TransactionStatus};
+use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
 use crate::backend::access::transam::xlog::{
     INVALID_LSN, XLOG_BTREE_DELETE, XLOG_BTREE_MARK_PAGE_HALFDEAD, XLOG_BTREE_UNLINK_PAGE,
     XLOG_BTREE_VACUUM,
@@ -8,7 +7,9 @@ use crate::backend::access::transam::xlog::{
 use crate::backend::catalog::CatalogError;
 use crate::backend::storage::fsm::{finalize_pending_index_pages, record_free_index_page};
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
-use crate::include::access::amapi::{IndexBulkDeleteResult, IndexVacuumContext};
+use crate::include::access::amapi::{
+    IndexBulkDeleteCallback, IndexBulkDeleteResult, IndexVacuumContext,
+};
 use crate::include::access::nbtree::{
     BTP_DELETED, BTP_HALF_DEAD, BTREE_METAPAGE, P_NONE, bt_page_data_items, bt_page_get_meta,
     bt_page_get_opaque, bt_page_high_key, bt_page_init, bt_page_is_recyclable, bt_page_items,
@@ -73,23 +74,6 @@ fn write_cleanup_info(ctx: &IndexVacuumContext, deleted_pages: u32) -> Result<()
     ctx.pool
         .install_page_image_locked(pin.buffer_id(), &page, lsn, &mut guard)
         .map_err(|err| CatalogError::Io(format!("btree metapage write failed: {err:?}")))
-}
-
-fn index_tuple_dead(
-    ctx: &IndexVacuumContext,
-    tid: crate::include::access::itemptr::ItemPointerData,
-    oldest_active_xid: u32,
-) -> Result<bool, CatalogError> {
-    let tuple = heap_fetch(&ctx.pool, ctx.client_id, ctx.heap_relation, tid)
-        .map_err(|err| CatalogError::Io(format!("heap vacuum probe failed: {err:?}")))?;
-    if tuple.header.xmax == INVALID_TRANSACTION_ID {
-        return Ok(false);
-    }
-    let txns = ctx.txns.read();
-    Ok(matches!(
-        txns.status(tuple.header.xmax),
-        Some(TransactionStatus::Committed)
-    ) && tuple.header.xmax < oldest_active_xid)
 }
 
 fn find_parent_block(
@@ -346,10 +330,10 @@ fn delete_empty_leaf(
 
 pub fn btbulkdelete(
     ctx: &IndexVacuumContext,
+    callback: &IndexBulkDeleteCallback<'_>,
     stats: Option<IndexBulkDeleteResult>,
 ) -> Result<IndexBulkDeleteResult, CatalogError> {
     let mut stats = stats.unwrap_or_default();
-    let oldest_active_xid = ctx.txns.read().oldest_active_xid();
     let nblocks = relation_nblocks(&ctx.pool, ctx.index_relation)?;
     for block in 1..nblocks {
         let pin = pin_btree_block(&ctx.pool, ctx.client_id, ctx.index_relation, block)?;
@@ -373,7 +357,7 @@ pub fn btbulkdelete(
         let mut live = Vec::with_capacity(items.len());
         let mut removed = 0u64;
         for item in items {
-            if index_tuple_dead(ctx, item.t_tid, oldest_active_xid)? {
+            if callback(item.t_tid) {
                 removed += 1;
             } else {
                 live.push(item);
@@ -388,7 +372,7 @@ pub fn btbulkdelete(
         if live.is_empty() {
             drop(guard);
             drop(pin);
-            if delete_empty_leaf(ctx, block, oldest_active_xid)? {
+            if delete_empty_leaf(ctx, block, ctx.txns.read().oldest_active_xid())? {
                 stats.num_deleted_pages += 1;
             }
             continue;

@@ -13,10 +13,11 @@ use crate::backend::storage::smgr::md::MdStorageManager;
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
 
 use super::{
-    INVALID_LSN, Lsn, RM_BTREE_ID, RM_GIST_ID, RM_HEAP_ID, RM_XACT_ID, RM_XLOG_ID, WalError,
-    WalReader, XLOG_CHECKPOINT_ONLINE, XLOG_CHECKPOINT_SHUTDOWN, XLOG_FPI, XLOG_HEAP_INSERT,
-    XLOG_XACT_COMMIT,
+    INVALID_LSN, Lsn, RM_BTREE_ID, RM_GIST_ID, RM_HEAP_ID, RM_HEAP2_ID, RM_XACT_ID, RM_XLOG_ID,
+    WalError, WalReader, XLOG_CHECKPOINT_ONLINE, XLOG_CHECKPOINT_SHUTDOWN, XLOG_FPI,
+    XLOG_HEAP_INSERT, XLOG_XACT_COMMIT,
 };
+use crate::include::access::heapam_xlog::XLOG_HEAP2_VISIBLE;
 
 /// Statistics from WAL recovery, printed at startup.
 pub struct RecoveryStats {
@@ -68,7 +69,7 @@ pub fn perform_wal_recovery_from(
         }
 
         match (record.rmid, record.info) {
-            (RM_HEAP_ID, XLOG_FPI) => {
+            (RM_HEAP_ID, XLOG_FPI) | (RM_HEAP2_ID, XLOG_FPI) => {
                 stats.fpis += record.blocks.len() as u64;
                 let block = record
                     .blocks
@@ -145,6 +146,23 @@ pub fn perform_wal_recovery_from(
                 smgr.write_block(tag.rel, tag.fork, tag.block, &page, true)
                     .map_err(smgr_to_wal)?;
             }
+            (RM_HEAP2_ID, XLOG_HEAP2_VISIBLE) => {
+                for block in &record.blocks {
+                    let mut page = block
+                        .image
+                        .as_ref()
+                        .ok_or_else(|| {
+                            WalError::Corrupt(
+                                "heap visible record missing block image during recovery".into(),
+                            )
+                        })?
+                        .clone();
+                    ensure_block_exists(smgr, block.tag.rel, block.tag.fork, block.tag.block)?;
+                    page[0..8].copy_from_slice(&record_lsn.to_le_bytes());
+                    smgr.write_block(block.tag.rel, block.tag.fork, block.tag.block, &page[..], true)
+                        .map_err(smgr_to_wal)?;
+                }
+            }
             (RM_XACT_ID, XLOG_XACT_COMMIT) => {
                 stats.commits += 1;
                 committed_xids.insert(record.xid);
@@ -208,7 +226,9 @@ fn smgr_to_wal(e: crate::backend::storage::smgr::SmgrError) -> WalError {
 mod tests {
     use super::*;
     use crate::backend::access::transam::CheckpointRecord;
-    use crate::backend::access::transam::xact::{TransactionManager, TransactionStatus};
+    use crate::backend::access::transam::xact::{
+        FIRST_NORMAL_TRANSACTION_ID, TransactionManager, TransactionStatus,
+    };
     use crate::backend::access::transam::xlog::{
         WalReader, WalRecord, WalWriter, wal_segment_path_for_lsn,
     };
@@ -679,11 +699,15 @@ mod tests {
         let (dir, wal_dir) = setup_recovery("recovery_mixed");
         let wal = WalWriter::new(&wal_dir).unwrap();
         let page = [0u8; PAGE_SIZE];
+        let committed_xid = FIRST_NORMAL_TRANSACTION_ID;
+        let aborted_xid = committed_xid + 1;
 
-        wal.write_record(1, test_tag(400, 0), &page).unwrap();
-        wal.write_commit(1).unwrap(); // committed
-        wal.write_record(2, test_tag(400, 1), &page).unwrap();
-        // xid 2 has no commit → should be aborted
+        wal.write_record(committed_xid, test_tag(400, 0), &page)
+            .unwrap();
+        wal.write_commit(committed_xid).unwrap();
+        wal.write_record(aborted_xid, test_tag(400, 1), &page)
+            .unwrap();
+        // xid `aborted_xid` has no commit and should replay as aborted.
         wal.flush().unwrap();
         drop(wal);
 
@@ -694,8 +718,8 @@ mod tests {
 
         assert_eq!(stats.commits, 1);
         assert_eq!(stats.aborted, 1);
-        assert_eq!(txns.status(1), Some(TransactionStatus::Committed));
-        assert_eq!(txns.status(2), Some(TransactionStatus::Aborted));
+        assert_eq!(txns.status(committed_xid), Some(TransactionStatus::Committed));
+        assert_eq!(txns.status(aborted_xid), Some(TransactionStatus::Aborted));
     }
 
     #[test]
@@ -960,12 +984,14 @@ mod tests {
         let wal = WalWriter::new(&wal_dir).unwrap();
         let page_a = make_page_with_tuples(&[&[0xAA; 20]]);
         let page_b = make_page_with_tuples(&[&[0xBB; 20]]);
+        let xid1 = FIRST_NORMAL_TRANSACTION_ID;
+        let xid2 = xid1 + 1;
 
         // Interleave two transactions.
-        wal.write_record(1, test_tag(1200, 0), &page_a).unwrap();
-        wal.write_record(2, test_tag(1200, 1), &page_b).unwrap();
-        wal.write_commit(2).unwrap();
-        wal.write_commit(1).unwrap();
+        wal.write_record(xid1, test_tag(1200, 0), &page_a).unwrap();
+        wal.write_record(xid2, test_tag(1200, 1), &page_b).unwrap();
+        wal.write_commit(xid2).unwrap();
+        wal.write_commit(xid1).unwrap();
         wal.flush().unwrap();
         drop(wal);
 
@@ -974,8 +1000,8 @@ mod tests {
         let mut txns = TransactionManager::default();
         perform_wal_recovery(&wal_dir, &mut smgr, &mut txns).unwrap();
 
-        assert_eq!(txns.status(1), Some(TransactionStatus::Committed));
-        assert_eq!(txns.status(2), Some(TransactionStatus::Committed));
+        assert_eq!(txns.status(xid1), Some(TransactionStatus::Committed));
+        assert_eq!(txns.status(xid2), Some(TransactionStatus::Committed));
     }
 
     #[test]
@@ -1065,16 +1091,18 @@ mod tests {
         let mut page2 = page1;
         let second_offset = page_add_item(&mut page2, &tuple2).unwrap();
         assert_eq!(second_offset, 2);
+        let xid1 = FIRST_NORMAL_TRANSACTION_ID;
+        let xid2 = xid1 + 1;
 
         let wal = WalWriter::new(&wal_dir).unwrap();
-        wal.write_record(1, tag, &page1).unwrap();
-        wal.write_commit(1).unwrap();
+        wal.write_record(xid1, tag, &page1).unwrap();
+        wal.write_commit(xid1).unwrap();
         let redo_lsn = wal.insert_lsn();
         wal.write_checkpoint_record(CheckpointRecord { redo_lsn }, false)
             .unwrap();
-        wal.write_insert(2, tag, &page2, second_offset, &tuple2)
+        wal.write_insert(xid2, tag, &page2, second_offset, &tuple2)
             .unwrap();
-        wal.write_commit(2).unwrap();
+        wal.write_commit(xid2).unwrap();
         wal.flush().unwrap();
         drop(wal);
 
@@ -1083,7 +1111,7 @@ mod tests {
         smgr.extend(rel, ForkNumber::Main, 0, &page1, true).unwrap();
 
         let mut txns = TransactionManager::default();
-        txns.replay_commit(1);
+        txns.replay_commit(xid1);
         let stats = perform_wal_recovery_from(&wal_dir, &mut smgr, &mut txns, redo_lsn).unwrap();
 
         let mut recovered = [0u8; BLCKSZ];
@@ -1092,7 +1120,7 @@ mod tests {
         assert_eq!(stats.records_replayed, 3);
         assert_eq!(page_get_item(&recovered, 1).unwrap(), tuple1);
         assert_eq!(page_get_item(&recovered, 2).unwrap(), tuple2);
-        assert_eq!(txns.status(1), Some(TransactionStatus::Committed));
-        assert_eq!(txns.status(2), Some(TransactionStatus::Committed));
+        assert_eq!(txns.status(xid1), Some(TransactionStatus::Committed));
+        assert_eq!(txns.status(xid2), Some(TransactionStatus::Committed));
     }
 }

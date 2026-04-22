@@ -80,6 +80,9 @@ pub struct CatalogEntry {
     pub relforcerowsecurity: bool,
     pub relpages: i32,
     pub reltuples: f64,
+    pub relallvisible: i32,
+    pub relallfrozen: i32,
+    pub relfrozenxid: u32,
     pub desc: RelationDesc,
     pub index_meta: Option<CatalogIndexMeta>,
 }
@@ -437,6 +440,9 @@ impl Catalog {
             relforcerowsecurity: false,
             relpages,
             reltuples,
+            relallvisible: 0,
+            relallfrozen: 0,
+            relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
             desc,
             index_meta: None,
         };
@@ -595,6 +601,9 @@ impl Catalog {
             relforcerowsecurity: false,
             relpages: 0,
             reltuples: -1.0,
+            relallvisible: 0,
+            relallfrozen: 0,
+            relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
             desc: RelationDesc {
                 columns: index_columns,
             },

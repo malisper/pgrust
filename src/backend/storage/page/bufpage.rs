@@ -4,6 +4,7 @@ pub const PG_PAGE_LAYOUT_VERSION: u8 = 4;
 pub const ITEM_ID_SIZE: usize = 4;
 pub const SIZE_OF_PAGE_HEADER_DATA: usize = 24;
 pub const MAXALIGN: usize = 8;
+pub const PD_ALL_VISIBLE: u16 = 0x0004;
 pub const MAX_HEAP_TUPLE_SIZE: usize =
     BLCKSZ - ((SIZE_OF_PAGE_HEADER_DATA + ITEM_ID_SIZE + (MAXALIGN - 1)) & !(MAXALIGN - 1));
 
@@ -175,6 +176,24 @@ pub fn page_header(page: &[u8; BLCKSZ]) -> Result<PageHeaderData, PageError> {
         return Err(PageError::CorruptHeader);
     }
     Ok(header)
+}
+
+pub fn page_is_all_visible(page: &[u8; BLCKSZ]) -> Result<bool, PageError> {
+    Ok(page_header(page)?.pd_flags & PD_ALL_VISIBLE != 0)
+}
+
+pub fn page_set_all_visible(page: &mut [u8; BLCKSZ]) -> Result<(), PageError> {
+    let mut header = page_header(page)?;
+    header.pd_flags |= PD_ALL_VISIBLE;
+    write_page_header(page, header);
+    Ok(())
+}
+
+pub fn page_clear_all_visible(page: &mut [u8; BLCKSZ]) -> Result<(), PageError> {
+    let mut header = page_header(page)?;
+    header.pd_flags &= !PD_ALL_VISIBLE;
+    write_page_header(page, header);
+    Ok(())
 }
 
 pub fn page_init(page: &mut [u8; BLCKSZ], special_size: usize) {
