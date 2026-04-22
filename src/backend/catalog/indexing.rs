@@ -69,6 +69,9 @@ pub fn system_catalog_index_entry_for_db(
         relforcerowsecurity: false,
         relpages: 0,
         reltuples: 0.0,
+        relallvisible: 0,
+        relallfrozen: 0,
+        relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
         desc: system_catalog_index_desc(descriptor),
         index_meta: Some(system_catalog_index_meta(descriptor)),
     }
@@ -186,7 +189,7 @@ pub fn rebuild_system_catalog_indexes_for_db(
         let rel = system_catalog_index_rel(*descriptor, db_oid);
         smgr.open(rel)
             .map_err(|e| CatalogError::Io(format!("open system index relfile failed: {e}")))?;
-        smgr.unlink(rel, Some(ForkNumber::Main), false);
+        smgr.unlink(rel, None, false);
         smgr.create(rel, ForkNumber::Main, false)
             .map_err(|e| CatalogError::Io(format!("create system index relfile failed: {e}")))?;
     }

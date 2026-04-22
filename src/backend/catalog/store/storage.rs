@@ -641,7 +641,7 @@ fn migrate_legacy_attrdef_defaults_if_needed(
         let entry = system_catalog_index_entry_for_db(*descriptor, db_oid);
         smgr.open(entry.rel)
             .map_err(|e| CatalogError::Io(e.to_string()))?;
-        smgr.unlink(entry.rel, Some(ForkNumber::Main), false);
+        smgr.unlink(entry.rel, None, false);
         smgr.create(entry.rel, ForkNumber::Main, false)
             .map_err(|e| CatalogError::Io(e.to_string()))?;
     }

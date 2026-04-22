@@ -2406,6 +2406,91 @@ fn analyze_populates_pg_statistic_and_pg_class_stats() {
 }
 
 #[test]
+fn vacuum_populates_pg_class_visibility_stats() {
+    let dir = temp_dir("vacuum_populates_visibility_stats");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create table vac_t(a int4)").unwrap();
+    session
+        .execute(
+            &db,
+            "insert into vac_t values (1), (2), (3), (4), (5), (6)",
+        )
+        .unwrap();
+
+    match session.execute(&db, "vacuum vac_t").unwrap() {
+        StatementResult::AffectedRows(count) => assert_eq!(count, 0),
+        other => panic!("expected affected rows, got {other:?}"),
+    }
+
+    let rows = query_rows(
+        &db,
+        1,
+        "select relpages, relallvisible, relallfrozen, relfrozenxid
+         from pg_class
+         where relname = 'vac_t'",
+    );
+    assert_eq!(rows.len(), 1);
+    assert!(int_value(&rows[0][0]) >= 1);
+    assert!(int_value(&rows[0][1]) >= 1);
+    assert!(int_value(&rows[0][2]) >= 1);
+    assert_eq!(
+        int_value(&rows[0][3]),
+        crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID as i64
+    );
+}
+
+#[test]
+fn vacuum_analyze_updates_visibility_and_analyze_stats() {
+    let dir = temp_dir("vacuum_analyze_updates_stats");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table vac_analyze_t(a int4, b text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into vac_analyze_t values
+               (1, 'one'),
+               (1, 'one'),
+               (2, 'two'),
+               (null, null),
+               (3, 'three')",
+        )
+        .unwrap();
+
+    match session.execute(&db, "vacuum analyze vac_analyze_t").unwrap() {
+        StatementResult::AffectedRows(count) => assert_eq!(count, 0),
+        other => panic!("expected affected rows, got {other:?}"),
+    }
+
+    let rel_stats = query_rows(
+        &db,
+        1,
+        "select relpages, reltuples, relallvisible, relallfrozen
+         from pg_class
+         where relname = 'vac_analyze_t'",
+    );
+    assert_eq!(rel_stats.len(), 1);
+    assert!(int_value(&rel_stats[0][0]) >= 1);
+    assert!(float_value(&rel_stats[0][1]) >= 4.0);
+    assert!(int_value(&rel_stats[0][2]) >= 1);
+    assert!(int_value(&rel_stats[0][3]) >= 1);
+
+    let statistic_count = query_rows(
+        &db,
+        1,
+        "select count(*)
+         from pg_statistic
+         where starelid = (select oid from pg_class where relname = 'vac_analyze_t')",
+    );
+    assert_eq!(statistic_count, vec![vec![Value::Int64(2)]]);
+}
+
+#[test]
 fn analyze_without_targets_scans_permitted_heap_relations() {
     let dir = temp_dir("analyze_permitted_relations");
     let db = Database::open(&dir, 128).unwrap();

@@ -596,7 +596,16 @@ impl Database {
             self.pool
                 .with_storage_mut(|s| {
                     s.smgr
-                        .truncate(rel, crate::backend::storage::smgr::ForkNumber::Main, 0)
+                        .truncate(rel, crate::backend::storage::smgr::ForkNumber::Main, 0)?;
+                    if s.smgr.exists(rel, crate::backend::storage::smgr::ForkNumber::VisibilityMap)
+                    {
+                        s.smgr.truncate(
+                            rel,
+                            crate::backend::storage::smgr::ForkNumber::VisibilityMap,
+                            0,
+                        )?;
+                    }
+                    Ok(())
                 })
                 .map_err(crate::backend::access::heap::heapam::HeapError::Storage)?;
         }

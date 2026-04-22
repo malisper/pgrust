@@ -178,7 +178,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         use crate::backend::commands::tablecmds::{
-            execute_truncate_table, execute_vacuum,
+            execute_truncate_table,
         };
         let interrupts = self.interrupt_state(client_id);
 
@@ -1250,64 +1250,14 @@ impl Database {
                 result
             }
             Statement::Vacuum(ref vacuum_stmt) => {
-                let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-                let rels = vacuum_stmt
-                    .targets
-                    .iter()
-                    .filter_map(|target| {
-                        catalog
-                            .lookup_relation(&target.table_name)
-                            .map(|entry| entry.rel)
-                    })
-                    .collect::<Vec<_>>();
-                lock_tables_interruptible(
-                    &self.table_locks,
+                let _ = interrupts;
+                let _ = statement_lock_scope_id;
+                let _ = datetime_config;
+                self.execute_vacuum_stmt_with_search_path(
                     client_id,
-                    &rels,
-                    TableLockMode::ShareUpdateExclusive,
-                    interrupts.as_ref(),
-                )?;
-
-                let snapshot = self.txns.read().snapshot(INVALID_TRANSACTION_ID)?;
-                let mut ctx = ExecutorContext {
-                    pool: std::sync::Arc::clone(&self.pool),
-                    txns: self.txns.clone(),
-                    txn_waiter: Some(self.txn_waiter.clone()),
-                    sequences: Some(self.sequences.clone()),
-                    large_objects: Some(self.large_objects.clone()),
-                    advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
-                    checkpoint_stats: self.checkpoint_stats_snapshot(),
-                    interrupts: Arc::clone(&interrupts),
-                    stats: std::sync::Arc::clone(&self.stats),
-                    session_stats: self.session_stats_state(client_id),
-                    snapshot,
-                    client_id,
-                    current_database_name: self.current_database_name(),
-                    session_user_oid: self.auth_state(client_id).session_user_oid(),
-                    current_user_oid: self.auth_state(client_id).current_user_oid(),
-                    active_role_oid: self.auth_state(client_id).active_role_oid(),
-                    statement_lock_scope_id,
-                    next_command_id: 0,
-                    default_toast_compression:
-                        crate::include::access::htup::AttributeCompression::Pglz,
-                    datetime_config: datetime_config.clone(),
-                    expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
-                    case_test_values: Vec::new(),
-                    system_bindings: Vec::new(),
-                    subplans: Vec::new(),
-                    timed: false,
-                    allow_side_effects: false,
-                    catalog: catalog.materialize_visible_catalog(),
-                    compiled_functions: std::collections::HashMap::new(),
-                    cte_tables: std::collections::HashMap::new(),
-                    cte_producers: std::collections::HashMap::new(),
-                    recursive_worktables: std::collections::HashMap::new(),
-                    deferred_foreign_keys: None,
-                };
-                let result = execute_vacuum(vacuum_stmt.clone(), &catalog, &mut ctx);
-                drop(ctx);
-                unlock_relations(&self.table_locks, client_id, &rels);
-                result
+                    vacuum_stmt,
+                    configured_search_path,
+                )
             }
             Statement::Begin | Statement::Commit | Statement::Rollback => {
                 Ok(StatementResult::AffectedRows(0))
