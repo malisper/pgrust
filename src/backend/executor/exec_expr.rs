@@ -93,8 +93,8 @@ use crate::backend::parser::analyze::is_binary_coercible_type;
 use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp,
 };
-use crate::backend::utils::misc::guc::normalize_guc_name;
 use crate::backend::utils::misc::checkpoint::checkpoint_stats_value;
+use crate::backend::utils::misc::guc::normalize_guc_name;
 use crate::include::catalog::{
     CURRENT_DATABASE_OID, FLOAT8_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID,
     builtin_scalar_function_for_proc_oid,
@@ -1026,13 +1026,11 @@ fn eval_op_expr(
             eval_expr(right, slot, ctx)?,
             op.collation_oid,
         ),
-        (OpExprKind::NotEq, [left, right]) => {
-            not_equal_values(
-                eval_expr(left, slot, ctx)?,
-                eval_expr(right, slot, ctx)?,
-                op.collation_oid,
-            )
-        }
+        (OpExprKind::NotEq, [left, right]) => not_equal_values(
+            eval_expr(left, slot, ctx)?,
+            eval_expr(right, slot, ctx)?,
+            op.collation_oid,
+        ),
         (OpExprKind::Lt, [left, right]) => order_values(
             "<",
             eval_expr(left, slot, ctx)?,

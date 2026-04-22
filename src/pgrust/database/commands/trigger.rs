@@ -4,8 +4,8 @@ use std::sync::Arc;
 use super::super::*;
 use crate::backend::parser::{
     CatalogLookup, CommentOnTriggerStatement, CreateTriggerStatement, DropTriggerStatement,
-    ParseError, SqlTypeKind, TriggerEvent, TriggerTiming,
-    bind_scalar_expr_in_named_relation_scope, parse_expr,
+    ParseError, SqlTypeKind, TriggerEvent, TriggerTiming, bind_scalar_expr_in_named_relation_scope,
+    parse_expr,
 };
 use crate::include::catalog::{PG_LANGUAGE_PLPGSQL_OID, PgTriggerRow};
 use crate::pgrust::database::ddl::{ensure_relation_owner, lookup_heap_relation_for_ddl};
@@ -253,10 +253,8 @@ impl Database {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let relation = lookup_heap_relation_for_ddl(&catalog, &stmt.table_name)?;
         ensure_relation_owner(self, client_id, &relation, &stmt.table_name)?;
-        let trigger =
-            lookup_trigger_row(&catalog, relation.relation_oid, &stmt.trigger_name).ok_or_else(
-                || missing_trigger_error(&stmt.trigger_name, &stmt.table_name),
-            )?;
+        let trigger = lookup_trigger_row(&catalog, relation.relation_oid, &stmt.trigger_name)
+            .ok_or_else(|| missing_trigger_error(&stmt.trigger_name, &stmt.table_name))?;
 
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),

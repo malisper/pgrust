@@ -1333,7 +1333,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgGetSerialSequence,
         ),
         ("pg_size_pretty", BuiltinScalarFunction::PgSizePretty),
-        ("pg_size_pretty_numeric", BuiltinScalarFunction::PgSizePretty),
+        (
+            "pg_size_pretty_numeric",
+            BuiltinScalarFunction::PgSizePretty,
+        ),
         ("pg_size_bytes", BuiltinScalarFunction::PgSizeBytes),
         ("pg_get_userbyid", BuiltinScalarFunction::PgGetUserById),
         ("obj_description", BuiltinScalarFunction::ObjDescription),

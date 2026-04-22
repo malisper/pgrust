@@ -838,6 +838,7 @@ fn run_statement(
         | Statement::CommentOnDomain(_)
         | Statement::CommentOnTrigger(_)
         | Statement::CreateConversion(_)
+        | Statement::CommentOnIndex(_)
         | Statement::CommentOnRule(_)
         | Statement::CreateFunction(_)
         | Statement::CreateOperator(_)

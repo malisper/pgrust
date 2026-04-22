@@ -1480,6 +1480,24 @@ impl Session {
                     )
                 }
             }
+            Statement::CommentOnIndex(ref comment_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_comment_on_index_stmt_with_search_path(
+                        self.client_id,
+                        comment_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::CommentOnConstraint(ref comment_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -2814,6 +2832,34 @@ impl Session {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_comment_on_table_stmt_in_transaction_with_search_path(
+                    client_id,
+                    comment_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::CommentOnIndex(ref comment_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let relation = match catalog.lookup_any_relation(&comment_stmt.index_name) {
+                    Some(relation) if relation.relkind == 'i' => relation,
+                    Some(_) => {
+                        return Err(ExecError::Parse(ParseError::WrongObjectType {
+                            name: comment_stmt.index_name.clone(),
+                            expected: "index",
+                        }));
+                    }
+                    None => {
+                        return Err(ExecError::Parse(ParseError::TableDoesNotExist(
+                            comment_stmt.index_name.clone(),
+                        )));
+                    }
+                };
+                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_comment_on_index_stmt_in_transaction_with_search_path(
                     client_id,
                     comment_stmt,
                     xid,
