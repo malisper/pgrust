@@ -1,11 +1,11 @@
 use super::*;
 use crate::backend::catalog::catalog::column_desc;
-use crate::backend::executor::{AggFunc, Expr, Plan, RelationDesc, Value};
+use crate::backend::executor::{Expr, Plan, RelationDesc, Value};
 use crate::include::access::htup::{AttributeAlign, AttributeCompression, AttributeStorage};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, JSON_TYPE_OID, PUBLIC_NAMESPACE_OID, PgAuthIdRow,
-    PgAuthMembersRow, PgClassRow, PgPolicyRow, PgProcRow, PgRewriteRow, PgTypeRow, PolicyCommand,
-    RECORD_TYPE_OID, bootstrap_pg_proc_rows, sort_pg_rewrite_rows,
+    bootstrap_pg_proc_rows, sort_pg_rewrite_rows, PgAuthIdRow, PgAuthMembersRow, PgClassRow,
+    PgPolicyRow, PgProcRow, PgRewriteRow, PgTypeRow, PolicyCommand, BOOTSTRAP_SUPERUSER_OID,
+    CONSTRAINT_PRIMARY, JSON_TYPE_OID, PUBLIC_NAMESPACE_OID, RECORD_TYPE_OID,
 };
 use crate::include::nodes::parsenodes::{
     AggregateArgType, AggregateSignatureKind, AliasColumnDef, AliasColumnSpec, ColumnConstraint,
@@ -17,7 +17,7 @@ use crate::include::nodes::parsenodes::{
     RawTypeName, SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint, TriggerEvent,
     TriggerEventSpec, TriggerLevel, TriggerTiming, ViewCheckOption,
 };
-use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
+use crate::include::nodes::primnodes::{is_system_attr, AttrNumber, JoinType, Var};
 
 fn desc() -> RelationDesc {
     RelationDesc {
@@ -63,12 +63,11 @@ fn parse_create_publication_mixed_targets_and_options() {
                 PublicationOption::Publish(actions)
                     if actions.insert && actions.update && !actions.delete && !actions.truncate
             )));
-            assert!(
-                stmt.options.options.iter().any(|option| matches!(
-                    option,
-                    PublicationOption::PublishViaPartitionRoot(true)
-                ))
-            );
+            assert!(stmt
+                .options
+                .options
+                .iter()
+                .any(|option| matches!(option, PublicationOption::PublishViaPartitionRoot(true))));
         }
         other => panic!("expected create publication, got {other:?}"),
     }
@@ -877,6 +876,55 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
     catalog
 }
 
+fn catalog_with_people_ctid_partial_unique_index() -> Catalog {
+    let mut catalog = catalog();
+    let people = catalog.lookup_any_relation("people").unwrap();
+    catalog.insert(
+        "people_ctid_partial_key",
+        CatalogEntry {
+            rel: crate::RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: 15015,
+            },
+            relation_oid: 50015,
+            namespace_oid: 11,
+            owner_oid: BOOTSTRAP_SUPERUSER_OID,
+            row_type_oid: 60015,
+            array_type_oid: 0,
+            reltoastrelid: 0,
+            relpersistence: 'p',
+            relkind: 'i',
+            am_oid: crate::include::catalog::BTREE_AM_OID,
+            relhastriggers: false,
+            relhassubclass: false,
+            relispartition: false,
+            relrowsecurity: false,
+            relforcerowsecurity: false,
+            relpages: 0,
+            reltuples: 0.0,
+            desc: RelationDesc {
+                columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
+            },
+            index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
+                indrelid: people.relation_oid,
+                indisunique: true,
+                indisprimary: false,
+                indisvalid: true,
+                indisready: true,
+                indislive: true,
+                indkey: vec![1],
+                indclass: vec![crate::include::catalog::INT4_BTREE_OPCLASS_OID],
+                indcollation: vec![0],
+                indoption: vec![0],
+                indexprs: None,
+                indpred: Some("ctid >= '(1000,0)'".into()),
+            }),
+        },
+    );
+    catalog
+}
+
 fn catalog_with_people_expression_unique_index() -> Catalog {
     let mut catalog = catalog();
     let people = catalog.lookup_any_relation("people").unwrap();
@@ -1587,6 +1635,7 @@ fn parse_create_unique_index_statement() {
             ],
             include_columns: Vec::new(),
             predicate: None,
+            predicate_sql: None,
             options: Vec::new(),
         })
     );
@@ -1734,6 +1783,7 @@ fn parse_create_index_with_method_and_ordering() {
             ],
             include_columns: Vec::new(),
             predicate: None,
+            predicate_sql: None,
             options: Vec::new(),
         })
     );
@@ -1764,6 +1814,7 @@ fn parse_create_index_with_if_not_exists_and_opclass() {
             }],
             include_columns: Vec::new(),
             predicate: None,
+            predicate_sql: None,
             options: Vec::new(),
         })
     );
@@ -1802,6 +1853,7 @@ fn parse_create_index_without_name() {
             ],
             include_columns: Vec::new(),
             predicate: None,
+            predicate_sql: None,
             options: Vec::new(),
         })
     );
@@ -1821,8 +1873,7 @@ fn parse_create_table_rejects_malformed_tuple_default_expression() {
 
 #[test]
 fn parse_create_table_rejects_unparenthesized_in_default_expression() {
-    let err =
-        parse_statement("CREATE TABLE error_tbl (b1 bool DEFAULT 1 IN (1, 2))").unwrap_err();
+    let err = parse_statement("CREATE TABLE error_tbl (b1 bool DEFAULT 1 IN (1, 2))").unwrap_err();
     assert_eq!(err.to_string(), "syntax error at or near \"IN\"");
 }
 
@@ -1901,6 +1952,38 @@ fn parse_create_index_with_expression_item() {
             ],
             include_columns: Vec::new(),
             predicate: None,
+            predicate_sql: None,
+            options: Vec::new(),
+        })
+    );
+}
+
+#[test]
+fn parse_create_partial_index_statement_captures_predicate_sql() {
+    let stmt = parse_statement(
+        "create index onek2_u1_prtl on onek2 using btree(unique1 int4_ops) where unique1 < 20 or unique1 > 980",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateIndex(CreateIndexStatement {
+            unique: false,
+            if_not_exists: false,
+            index_name: "onek2_u1_prtl".into(),
+            table_name: "onek2".into(),
+            using_method: Some("btree".into()),
+            columns: vec![IndexColumnDef {
+                name: "unique1".into(),
+                expr_sql: None,
+                expr_type: None,
+                collation: None,
+                opclass: Some("int4_ops".into()),
+                descending: false,
+                nulls_first: None,
+            }],
+            include_columns: Vec::new(),
+            predicate: Some(parse_expr("unique1 < 20 or unique1 > 980").unwrap()),
+            predicate_sql: Some("unique1 < 20 or unique1 > 980".into()),
             options: Vec::new(),
         })
     );
@@ -4930,14 +5013,12 @@ fn build_plan_accepts_catalog_backed_text_input_casts() {
 
 #[test]
 fn build_plan_accepts_catalog_backed_time_casts_and_comparisons() {
-    assert!(
-        build_plan(
-            &parse_select("select time('05:06:07'), time '05:06:07', time '05:06:07' < '06:07:08'")
-                .unwrap(),
-            &catalog(),
-        )
-        .is_ok()
-    );
+    assert!(build_plan(
+        &parse_select("select time('05:06:07'), time '05:06:07', time '05:06:07' < '06:07:08'")
+            .unwrap(),
+        &catalog(),
+    )
+    .is_ok());
 }
 
 #[test]
@@ -5015,16 +5096,14 @@ fn build_plan_accepts_catalog_backed_bit_comparisons() {
 
 #[test]
 fn build_plan_accepts_catalog_backed_bytea_comparisons() {
-    assert!(
-        build_plan(
-            &parse_select(
-                r"select E'\\x01'::bytea = E'\\x01'::bytea, E'\\x01'::bytea < E'\\x02'::bytea"
-            )
-            .unwrap(),
-            &catalog(),
+    assert!(build_plan(
+        &parse_select(
+            r"select E'\\x01'::bytea = E'\\x01'::bytea, E'\\x01'::bytea < E'\\x02'::bytea"
         )
-        .is_ok()
-    );
+        .unwrap(),
+        &catalog(),
+    )
+    .is_ok());
 }
 
 #[test]
@@ -5110,14 +5189,12 @@ fn analyze_timestamptz_typed_string_literal_keeps_timestamp_tz_type() {
 
 #[test]
 fn build_plan_accepts_catalog_backed_text_array_casts() {
-    assert!(
-        build_plan(
-            &parse_select("select cast('{1,2}' as int4[]), cast('{\"a\",\"b\"}' as varchar[])")
-                .unwrap(),
-            &catalog(),
-        )
-        .is_ok()
-    );
+    assert!(build_plan(
+        &parse_select("select cast('{1,2}' as int4[]), cast('{\"a\",\"b\"}' as varchar[])")
+            .unwrap(),
+        &catalog(),
+    )
+    .is_ok());
 }
 
 #[test]
@@ -5540,8 +5617,8 @@ fn build_plan_case_raises_reachable_division_by_zero() {
 
 #[test]
 fn build_plan_case_skips_unreachable_else_division_by_zero() {
-    let stmt = parse_select("select case when 1 = 0 then 1/0 when 1 = 1 then 1 else 2/0 end")
-        .unwrap();
+    let stmt =
+        parse_select("select case when 1 = 0 then 1/0 when 1 = 1 then 1 else 2/0 end").unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
 
     match plan {
@@ -6113,10 +6190,9 @@ fn parse_update_statement_with_from_and_aliases() {
 
 #[test]
 fn parse_update_statement_with_as_target_alias() {
-    let stmt = parse_statement(
-        "update case_tbl as c set i = b.i from case2_tbl as b where b.j = -c.i",
-    )
-    .unwrap();
+    let stmt =
+        parse_statement("update case_tbl as c set i = b.i from case2_tbl as b where b.j = -c.i")
+            .unwrap();
     let stmt = match stmt {
         Statement::Update(stmt) => stmt,
         other => panic!("expected update statement, got {other:?}"),
@@ -6437,13 +6513,12 @@ fn bind_update_alias_hides_base_table_name() {
 fn bind_update_from_rejects_duplicate_target_alias_name() {
     let mut catalog = catalog();
     catalog.insert("pets", pets_entry());
-    let stmt =
-        match parse_statement("update people p set id = 1 from pets p where p.owner_id = 1")
-            .unwrap()
-        {
-            Statement::Update(stmt) => stmt,
-            other => panic!("expected update statement, got {other:?}"),
-        };
+    let stmt = match parse_statement("update people p set id = 1 from pets p where p.owner_id = 1")
+        .unwrap()
+    {
+        Statement::Update(stmt) => stmt,
+        other => panic!("expected update statement, got {other:?}"),
+    };
     assert!(matches!(
         bind_update(&stmt, &catalog),
         Err(ParseError::DuplicateTableName(name)) if name == "p"
@@ -6462,6 +6537,56 @@ fn bind_update_from_subquery_cannot_see_target_relation() {
         bind_update(&stmt, &catalog()),
         Err(ParseError::UnknownColumn(name)) if name == "p.id"
     ));
+}
+
+#[test]
+fn bind_update_uses_partial_index_row_source_when_filter_implies_predicate() {
+    std::thread::Builder::new()
+        .name("bind_update_uses_partial_index_row_source_when_filter_implies_predicate".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let catalog = catalog_with_people_partial_unique_index();
+            let stmt = match parse_statement("update people set name = 'x' where id = 1 and id > 0")
+                .unwrap()
+            {
+                Statement::Update(stmt) => stmt,
+                other => panic!("expected update statement, got {other:?}"),
+            };
+            let bound = bind_update(&stmt, &catalog).unwrap();
+            assert_eq!(bound.targets.len(), 1);
+            match &bound.targets[0].row_source {
+                BoundModifyRowSource::Index { index, .. } => {
+                    assert_eq!(index.name, "people_partial_key");
+                }
+                other => panic!("expected partial index row source, got {other:?}"),
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn bind_delete_ignores_partial_index_when_filter_does_not_imply_predicate() {
+    std::thread::Builder::new()
+        .name("bind_delete_ignores_partial_index_when_filter_does_not_imply_predicate".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let catalog = catalog_with_people_partial_unique_index();
+            let stmt = match parse_statement("delete from people where id = 1").unwrap() {
+                Statement::Delete(stmt) => stmt,
+                other => panic!("expected delete statement, got {other:?}"),
+            };
+            let bound = bind_delete(&stmt, &catalog).unwrap();
+            assert_eq!(bound.targets.len(), 1);
+            assert!(matches!(
+                bound.targets[0].row_source,
+                BoundModifyRowSource::Heap
+            ));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]
@@ -6648,6 +6773,32 @@ fn bind_insert_rejects_partial_index_when_inference_predicate_is_missing_or_weak
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+fn bind_insert_rejects_on_conflict_partial_index_with_ctid_predicate() {
+    let catalog = catalog_with_people_ctid_partial_unique_index();
+    let people = catalog.lookup_any_relation("people").unwrap();
+    crate::backend::parser::bind_index_predicate_sql_expr(
+        "ctid >= '(1000,0)'",
+        Some("people"),
+        &people.desc,
+        &catalog,
+    )
+    .expect("bind ctid partial index predicate");
+    let stmt = people_insert_with_on_conflict(
+        None,
+        crate::include::nodes::parsenodes::OnConflictAction::Nothing,
+        vec![],
+        None,
+    );
+    let err = stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || bind_insert(&stmt, &catalog))
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::FeatureNotSupported(message)
+            if message == "ON CONFLICT with partial indexes whose predicate uses ctid"
+    ));
 }
 
 #[test]
@@ -7574,9 +7725,8 @@ fn parse_create_table_primary_key_and_unique_constraints() {
         }]
     );
 
-    let stmt =
-        parse_statement("create table items (id int4 unique nulls not distinct, note text)")
-            .unwrap();
+    let stmt = parse_statement("create table items (id int4 unique nulls not distinct, note text)")
+        .unwrap();
     let Statement::CreateTable(ct) = stmt else {
         panic!("expected create table");
     };
@@ -7763,8 +7913,7 @@ fn lower_create_table_rejects_invalid_key_constraints() {
 
 #[test]
 fn lower_create_table_accepts_check_not_enforced() {
-    let stmt =
-        parse_statement("create table items (id int4 check (id > 0) not enforced)").unwrap();
+    let stmt = parse_statement("create table items (id int4 check (id > 0) not enforced)").unwrap();
     let Statement::CreateTable(ct) = stmt else {
         panic!("expected create table");
     };

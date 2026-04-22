@@ -809,6 +809,25 @@ pub(crate) fn insert_index_key_values(
     Ok(())
 }
 
+pub(crate) fn row_matches_index_predicate(
+    index: &BoundIndexRelation,
+    values: &[Value],
+    heap_tid: Option<ItemPointerData>,
+    relation_oid: u32,
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    let Some(predicate) = index.index_predicate.as_ref() else {
+        return Ok(true);
+    };
+    let mut slot =
+        TupleSlot::virtual_row_with_metadata(values.to_vec(), heap_tid, Some(relation_oid));
+    match eval_expr(predicate, &mut slot, ctx)? {
+        Value::Bool(value) => Ok(value),
+        Value::Null => Ok(false),
+        other => Err(ExecError::NonBoolQual(other)),
+    }
+}
+
 pub(crate) fn insert_index_entry_for_row(
     heap_rel: crate::backend::storage::smgr::RelFileLocator,
     heap_desc: &RelationDesc,
@@ -817,6 +836,15 @@ pub(crate) fn insert_index_entry_for_row(
     heap_tid: ItemPointerData,
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
+    if !row_matches_index_predicate(
+        index,
+        values,
+        Some(heap_tid),
+        index.index_meta.indrelid,
+        ctx,
+    )? {
+        return Ok(());
+    }
     let key_values = index_key_values_for_row(index, heap_desc, values, ctx)?;
     insert_index_key_values(heap_rel, heap_desc, index, key_values, heap_tid, ctx)
 }

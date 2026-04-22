@@ -1,31 +1,15 @@
-use crate::backend::access::heap::heapam::heap_fetch;
-use crate::backend::access::transam::xact::{INVALID_TRANSACTION_ID, TransactionStatus};
+use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
 use crate::backend::access::transam::xlog::XLOG_GIST_VACUUM;
 use crate::backend::catalog::CatalogError;
-use crate::include::access::amapi::{IndexBulkDeleteResult, IndexVacuumContext};
+use crate::include::access::amapi::{
+    IndexBulkDeleteCallback, IndexBulkDeleteResult, IndexVacuumContext,
+};
 use crate::include::access::spgist::{
-    F_HAS_GARBAGE, F_TUPLES_DELETED, spgist_page_items, spgist_page_items_with_offsets,
-    spgist_page_replace_items,
+    spgist_page_items, spgist_page_items_with_offsets, spgist_page_replace_items, F_HAS_GARBAGE,
+    F_TUPLES_DELETED,
 };
 
 use super::page::{page_opaque, read_buffered_page, relation_nblocks, write_buffered_page};
-
-fn index_tuple_dead(
-    ctx: &IndexVacuumContext,
-    tid: crate::include::access::itemptr::ItemPointerData,
-    oldest_active_xid: u32,
-) -> Result<bool, CatalogError> {
-    let tuple = heap_fetch(&ctx.pool, ctx.client_id, ctx.heap_relation, tid)
-        .map_err(|err| CatalogError::Io(format!("heap vacuum probe failed: {err:?}")))?;
-    if tuple.header.xmax == INVALID_TRANSACTION_ID {
-        return Ok(false);
-    }
-    let txns = ctx.txns.read();
-    Ok(matches!(
-        txns.status(tuple.header.xmax),
-        Some(TransactionStatus::Committed)
-    ) && tuple.header.xmax < oldest_active_xid)
-}
 
 fn spgist_tuple_count(
     pool: &crate::BufferPool<crate::SmgrStorageBackend>,
@@ -50,7 +34,7 @@ fn spgist_tuple_count(
 fn vacuum_leaf_page(
     ctx: &IndexVacuumContext,
     block: u32,
-    oldest_active_xid: u32,
+    callback: &IndexBulkDeleteCallback<'_>,
 ) -> Result<(u64, u64), CatalogError> {
     let page = read_buffered_page(&ctx.pool, ctx.client_id, ctx.index_relation, block)?;
     let mut opaque = page_opaque(&page)?;
@@ -62,7 +46,7 @@ fn vacuum_leaf_page(
     let mut survivors = Vec::with_capacity(items.len());
     let mut removed = 0u64;
     for (_, tuple) in items {
-        if index_tuple_dead(ctx, tuple.t_tid, oldest_active_xid)? {
+        if callback(tuple.t_tid) {
             removed += 1;
         } else {
             survivors.push(tuple);
@@ -90,18 +74,18 @@ fn vacuum_leaf_page(
 
 pub(crate) fn spgbulkdelete(
     ctx: &IndexVacuumContext,
+    callback: &IndexBulkDeleteCallback<'_>,
     stats: Option<IndexBulkDeleteResult>,
 ) -> Result<IndexBulkDeleteResult, CatalogError> {
     let mut stats = stats.unwrap_or_default();
     let nblocks = relation_nblocks(&ctx.pool, ctx.index_relation)?;
-    let oldest_active_xid = ctx.txns.read().oldest_active_xid();
     stats.num_pages = nblocks as u64;
     // :HACK: VACUUM prunes dead leaf tuples in place, but page reclamation can
     // stay deferred until the SP-GiST runtime grows a real split/delete story.
     stats.num_deleted_pages = 0;
     stats.num_index_tuples = 0;
     for block in 0..nblocks {
-        let (remaining, removed) = vacuum_leaf_page(ctx, block, oldest_active_xid)?;
+        let (remaining, removed) = vacuum_leaf_page(ctx, block, callback)?;
         stats.num_index_tuples += remaining;
         stats.num_removed_tuples += removed;
     }

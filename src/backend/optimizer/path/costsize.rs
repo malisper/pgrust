@@ -3,6 +3,7 @@ use std::collections::HashMap;
 
 use crate::RelFileLocator;
 use crate::backend::executor::{Value, cast_value, compare_order_values};
+use crate::backend::parser::analyze::predicate_implies_index_predicate;
 use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType, SqlTypeKind};
 use crate::backend::storage::page::bufpage::{ITEM_ID_SIZE, MAXALIGN, SIZE_OF_PAGE_HEADER_DATA};
 use crate::backend::storage::smgr::BLCKSZ;
@@ -1799,6 +1800,9 @@ pub(super) fn build_index_path_spec(
     order_items: Option<&[OrderByEntry]>,
     index: &BoundIndexRelation,
 ) -> Option<IndexPathSpec> {
+    if !predicate_implies_index_predicate(filter, index.index_predicate.as_ref()) {
+        return None;
+    }
     let conjuncts = filter.map(flatten_and_conjuncts).unwrap_or_default();
     let parsed_quals = conjuncts
         .iter()

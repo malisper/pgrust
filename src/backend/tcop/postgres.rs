@@ -2615,7 +2615,7 @@ fn psql_relation_obj_description_query(
     ))
 }
 
-fn format_psql_indexdef(
+pub(crate) fn format_psql_indexdef(
     db: &Database,
     session: &Session,
     index: &crate::backend::parser::BoundIndexRelation,

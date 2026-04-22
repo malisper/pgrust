@@ -1302,6 +1302,7 @@ pub struct CreateIndexStatement {
     pub columns: Vec<IndexColumnDef>,
     pub include_columns: Vec<String>,
     pub predicate: Option<SqlExpr>,
+    pub predicate_sql: Option<String>,
     pub options: Vec<RelOption>,
 }
 

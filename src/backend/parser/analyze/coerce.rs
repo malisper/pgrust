@@ -323,6 +323,7 @@ pub(super) fn coerce_unknown_string_literal_type(
             SqlTypeKind::InternalChar => return SqlType::new(SqlTypeKind::Text),
             SqlTypeKind::TsQuery => return SqlType::new(SqlTypeKind::TsQuery),
             SqlTypeKind::TsVector => return SqlType::new(SqlTypeKind::TsVector),
+            SqlTypeKind::Tid => return SqlType::new(SqlTypeKind::Tid),
             SqlTypeKind::Void => return SqlType::new(SqlTypeKind::Void),
             SqlTypeKind::FdwHandler => return SqlType::new(SqlTypeKind::FdwHandler),
             SqlTypeKind::RegClass => return SqlType::new(SqlTypeKind::RegClass),
