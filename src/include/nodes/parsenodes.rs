@@ -133,9 +133,13 @@ impl fmt::Display for ParseError {
                 f,
                 "INSERT has {actual} values but target list requires {expected}"
             ),
-            ParseError::TableAlreadyExists(name) => write!(f, "table already exists: {name}"),
-            ParseError::TableDoesNotExist(name) => write!(f, "table does not exist: {name}"),
-            ParseError::UnsupportedType(name) => write!(f, "unsupported type: {name}"),
+            ParseError::TableAlreadyExists(name) => {
+                write!(f, "relation \"{name}\" already exists")
+            }
+            ParseError::TableDoesNotExist(name) => {
+                write!(f, "relation \"{name}\" does not exist")
+            }
+            ParseError::UnsupportedType(name) => write!(f, "type \"{name}\" does not exist"),
             ParseError::WindowingError(message) => write!(f, "{message}"),
             ParseError::UndefinedOperator {
                 op,
@@ -257,6 +261,22 @@ mod tests {
         assert_eq!(
             ParseError::UnknownTable("attmp".into()).to_string(),
             "relation \"attmp\" does not exist"
+        );
+    }
+
+    #[test]
+    fn relation_and_type_lookup_displays_match_postgres_shape() {
+        assert_eq!(
+            ParseError::TableAlreadyExists("items".into()).to_string(),
+            "relation \"items\" already exists"
+        );
+        assert_eq!(
+            ParseError::TableDoesNotExist("items".into()).to_string(),
+            "relation \"items\" does not exist"
+        );
+        assert_eq!(
+            ParseError::UnsupportedType("widget".into()).to_string(),
+            "type \"widget\" does not exist"
         );
     }
 }
