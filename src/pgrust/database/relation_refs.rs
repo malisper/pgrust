@@ -87,7 +87,10 @@ pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLoc
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. } => {}
-        Expr::Cast(inner, _) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => {
             collect_rels_from_expr(inner, rels)
         }
         Expr::Coalesce(left, right)
@@ -658,6 +661,7 @@ fn collect_direct_relation_oids_from_sql_expr(
         | SqlExpr::BitNot(inner)
         | SqlExpr::Subscript { expr: inner, .. }
         | SqlExpr::PrefixOperator { expr: inner, .. }
+        | SqlExpr::Collate { expr: inner, .. }
         | SqlExpr::Cast(inner, _)
         | SqlExpr::Not(inner)
         | SqlExpr::IsNull(inner)

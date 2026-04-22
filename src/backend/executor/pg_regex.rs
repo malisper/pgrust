@@ -1,5 +1,6 @@
 use super::ExecError;
 use super::RegexError;
+use super::expr_ops::ensure_builtin_collation_supported;
 use super::node_types::Value;
 use crate::pgrust::compact_string::CompactString;
 use regex::{Regex, RegexBuilder};
@@ -261,11 +262,13 @@ pub(super) fn eval_similar(
     left: &Value,
     pattern: &Value,
     escape: Option<&Value>,
+    collation_oid: Option<u32>,
     negated: bool,
 ) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(pattern, Value::Null) {
         return Ok(Value::Null);
     }
+    ensure_builtin_collation_supported(collation_oid)?;
     let text = expect_text_arg("similar to", left, pattern)?;
     let pattern_text = expect_text_arg("similar to", pattern, left)?;
     let escape = parse_similar_escape_arg("similar to", left, escape)?;
@@ -2414,5 +2417,40 @@ mod tests {
 
         let compiled = compile_spans(r"()*\1");
         assert!(compiled.is_match("a").unwrap());
+    }
+
+    #[test]
+    fn eval_similar_accepts_builtin_collations() {
+        for oid in [
+            crate::include::catalog::DEFAULT_COLLATION_OID,
+            crate::include::catalog::C_COLLATION_OID,
+            crate::include::catalog::POSIX_COLLATION_OID,
+        ] {
+            assert_eq!(
+                eval_similar(
+                    &Value::Text("alpha".into()),
+                    &Value::Text("a%".into()),
+                    None,
+                    Some(oid),
+                    false,
+                )
+                .unwrap(),
+                Value::Bool(true)
+            );
+        }
+    }
+
+    #[test]
+    fn eval_similar_rejects_unsupported_collation_oid() {
+        assert!(matches!(
+            eval_similar(
+                &Value::Text("alpha".into()),
+                &Value::Text("a%".into()),
+                None,
+                Some(123_456),
+                false,
+            ),
+            Err(ExecError::DetailedError { sqlstate, .. }) if sqlstate == "0A000"
+        ));
     }
 }

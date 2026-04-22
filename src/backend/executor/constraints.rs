@@ -1,4 +1,5 @@
 use crate::backend::executor::eval_expr;
+use crate::backend::executor::value_io::format_failing_row_detail;
 use crate::backend::parser::BoundRelationConstraints;
 use crate::backend::rewrite::RlsWriteCheck;
 use crate::include::nodes::datum::Value;

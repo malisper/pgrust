@@ -833,7 +833,8 @@ fn bounds_adjacent(upper: Option<&RangeBound>, lower: Option<&RangeBound>) -> bo
 }
 
 pub(crate) fn compare_scalar_values(left: &Value, right: &Value) -> Ordering {
-    compare_order_values(left, right, Some(false), false)
+    compare_order_values(left, right, None, Some(false), false)
+        .expect("range scalar comparisons use implicit default collation")
 }
 
 fn ensure_same_range_kind(

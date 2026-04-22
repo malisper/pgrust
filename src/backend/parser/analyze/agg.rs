@@ -68,7 +68,7 @@ pub(super) fn expr_contains_agg(expr: &SqlExpr) -> bool {
         | SqlExpr::JsonbExistsAll(l, r)
         | SqlExpr::JsonbPathExists(l, r)
         | SqlExpr::JsonbPathMatch(l, r) => expr_contains_agg(l) || expr_contains_agg(r),
-        SqlExpr::Cast(inner, _) => expr_contains_agg(inner),
+        SqlExpr::Cast(inner, _) | SqlExpr::Collate { expr: inner, .. } => expr_contains_agg(inner),
         SqlExpr::Add(l, r)
         | SqlExpr::Sub(l, r)
         | SqlExpr::BitAnd(l, r)
@@ -278,6 +278,7 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
                     .is_some_and(|e| expr_references_input_scope(e))
         }
         SqlExpr::Cast(inner, _)
+        | SqlExpr::Collate { expr: inner, .. }
         | SqlExpr::UnaryPlus(inner)
         | SqlExpr::Negate(inner)
         | SqlExpr::BitNot(inner)
@@ -401,7 +402,9 @@ pub(super) fn collect_aggs(
             collect_aggs(l, aggs);
             collect_aggs(r, aggs);
         }
-        SqlExpr::Cast(inner, _) => collect_aggs(inner, aggs),
+        SqlExpr::Cast(inner, _) | SqlExpr::Collate { expr: inner, .. } => {
+            collect_aggs(inner, aggs)
+        }
         SqlExpr::Add(l, r)
         | SqlExpr::Sub(l, r)
         | SqlExpr::BitAnd(l, r)

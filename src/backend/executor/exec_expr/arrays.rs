@@ -4,6 +4,7 @@ use super::*;
 pub(super) fn eval_quantified_array(
     left_value: &Value,
     op: SubqueryComparisonOp,
+    collation_oid: Option<u32>,
     is_all: bool,
     array_value: &Value,
 ) -> Result<Value, ExecError> {
@@ -20,7 +21,7 @@ pub(super) fn eval_quantified_array(
                 saw_null = true;
                 continue;
             }
-            match compare_subquery_values(left_value, item, op)? {
+            match compare_subquery_values(left_value, item, op, collation_oid)? {
                 Value::Bool(result) => {
                     if !is_all && result {
                         return Ok(Value::Bool(true));
@@ -673,7 +674,7 @@ fn array_position_value(
             false
         } else {
             matches!(
-                compare_values("=", item.clone(), needle.clone())?,
+                compare_values("=", item.clone(), needle.clone(), None)?,
                 Value::Bool(true)
             )
         };
@@ -846,7 +847,7 @@ fn array_replace_like(
             false
         } else {
             matches!(
-                compare_values("=", item.clone(), search.clone())?,
+                compare_values("=", item.clone(), search.clone(), None)?,
                 Value::Bool(true)
             )
         };
@@ -896,9 +897,21 @@ fn array_sort_value(
     }
     if array.ndim() == 1 {
         let mut items = array.elements.clone();
+        let mut sort_error = None;
         items.sort_by(|left, right| {
-            compare_order_values(left, right, Some(nulls_first), descending)
+            match compare_order_values(left, right, None, Some(nulls_first), descending) {
+                Ok(ordering) => ordering,
+                Err(err) => {
+                    if sort_error.is_none() {
+                        sort_error = Some(err);
+                    }
+                    std::cmp::Ordering::Equal
+                }
+            }
         });
+        if let Some(err) = sort_error {
+            return Err(err);
+        }
         return Ok(Value::PgArray(ArrayValue::from_dimensions(
             array.dimensions,
             items,
@@ -918,7 +931,21 @@ fn array_sort_value(
             ))
         })
         .collect::<Vec<_>>();
-    slices.sort_by(|left, right| compare_order_values(left, right, Some(nulls_first), descending));
+    let mut sort_error = None;
+    slices.sort_by(|left, right| {
+        match compare_order_values(left, right, None, Some(nulls_first), descending) {
+            Ok(ordering) => ordering,
+            Err(err) => {
+                if sort_error.is_none() {
+                    sort_error = Some(err);
+                }
+                std::cmp::Ordering::Equal
+            }
+        }
+    });
+    if let Some(err) = sort_error {
+        return Err(err);
+    }
     let mut elements = Vec::with_capacity(array.elements.len());
     for slice in slices {
         if let Value::PgArray(slice_array) = slice {
@@ -1007,7 +1034,7 @@ pub(super) fn eval_width_bucket_thresholds(values: &[Value]) -> Result<Value, Ex
             let mut bucket = 0i32;
             for threshold in &thresholds.elements {
                 if matches!(
-                    order_values("<", operand.clone(), threshold.clone())?,
+                    order_values("<", operand.clone(), threshold.clone(), None)?,
                     Value::Bool(true)
                 ) {
                     break;
@@ -1120,7 +1147,7 @@ pub(super) fn eval_array_overlap(left: Value, right: Value) -> Result<Value, Exe
                 continue;
             }
             if matches!(
-                compare_values("=", left_item.clone(), right_item.clone())?,
+                compare_values("=", left_item.clone(), right_item.clone(), None)?,
                 Value::Bool(true)
             ) {
                 return Ok(Value::Bool(true));
@@ -1162,7 +1189,7 @@ fn eval_array_contains_internal(op: &'static str, left: Value, right: Value) -> 
                 continue;
             }
             if matches!(
-                compare_values("=", left_item.clone(), right_item.clone())?,
+                compare_values("=", left_item.clone(), right_item.clone(), None)?,
                 Value::Bool(true)
             ) {
                 matched = true;
@@ -1174,4 +1201,47 @@ fn eval_array_contains_internal(op: &'static str, left: Value, right: Value) -> 
         }
     }
     Ok(Value::Bool(true))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::eval_quantified_array;
+    use crate::backend::executor::ExecError;
+    use crate::backend::parser::SubqueryComparisonOp;
+    use crate::include::catalog::C_COLLATION_OID;
+    use crate::include::nodes::datum::{ArrayValue, Value};
+
+    #[test]
+    fn eval_quantified_array_accepts_builtin_collation() {
+        let array = Value::PgArray(ArrayValue::from_1d(vec![
+            Value::Text("alpha".into()),
+            Value::Text("beta".into()),
+        ]));
+        assert_eq!(
+            eval_quantified_array(
+                &Value::Text("alpha".into()),
+                SubqueryComparisonOp::Eq,
+                Some(C_COLLATION_OID),
+                false,
+                &array,
+            )
+            .unwrap(),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn eval_quantified_array_rejects_unsupported_collation_oid() {
+        let array = Value::PgArray(ArrayValue::from_1d(vec![Value::Text("alpha".into())]));
+        assert!(matches!(
+            eval_quantified_array(
+                &Value::Text("alpha".into()),
+                SubqueryComparisonOp::Eq,
+                Some(123_456),
+                false,
+                &array,
+            ),
+            Err(ExecError::DetailedError { sqlstate, .. }) if sqlstate == "0A000"
+        ));
+    }
 }

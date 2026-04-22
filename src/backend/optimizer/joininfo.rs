@@ -422,23 +422,27 @@ pub(super) fn flatten_join_alias_vars_query(query: &Query, expr: Expr) -> Expr {
             escape,
             case_insensitive,
             negated,
+            collation_oid,
         } => Expr::Like {
             expr: Box::new(flatten_join_alias_vars_query(query, *expr)),
             pattern: Box::new(flatten_join_alias_vars_query(query, *pattern)),
             escape: escape.map(|expr| Box::new(flatten_join_alias_vars_query(query, *expr))),
             case_insensitive,
             negated,
+            collation_oid,
         },
         Expr::Similar {
             expr,
             pattern,
             escape,
             negated,
+            collation_oid,
         } => Expr::Similar {
             expr: Box::new(flatten_join_alias_vars_query(query, *expr)),
             pattern: Box::new(flatten_join_alias_vars_query(query, *pattern)),
             escape: escape.map(|expr| Box::new(flatten_join_alias_vars_query(query, *expr))),
             negated,
+            collation_oid,
         },
         Expr::IsNull(inner) => Expr::IsNull(Box::new(flatten_join_alias_vars_query(query, *inner))),
         Expr::IsNotNull(inner) => {
@@ -642,7 +646,10 @@ fn collect_expr_relids(expr: &Expr, relids: &mut Vec<usize>) {
             collect_expr_relids(&saop.left, relids);
             collect_expr_relids(&saop.right, relids);
         }
-        Expr::Cast(inner, _) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => {
             collect_expr_relids(inner, relids)
         }
         Expr::Like {
@@ -783,6 +790,7 @@ mod tests {
             op: OpExprKind::Eq,
             opresulttype: SqlType::new(SqlTypeKind::Bool),
             args: vec![int4_var(left_varno), int4_var(right_varno)],
+            collation_oid: None,
         }))
     }
 

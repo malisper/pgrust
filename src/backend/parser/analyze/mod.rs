@@ -1,6 +1,7 @@
 mod agg;
 mod agg_output;
 mod agg_output_special;
+mod collation;
 mod coerce;
 mod constraints;
 mod create_table;
@@ -57,6 +58,7 @@ use crate::backend::utils::cache::system_views::{
 };
 use agg::*;
 use agg_output::*;
+use collation::*;
 pub use coerce::is_binary_coercible_type;
 use coerce::*;
 pub(crate) use constraints::*;
@@ -168,6 +170,7 @@ fn build_sort_clause(
                 tle_sort_group_ref,
                 descending: item.descending,
                 nulls_first: item.nulls_first,
+                collation_oid: item.collation_oid,
             }
         })
         .collect()
@@ -1897,6 +1900,7 @@ impl<'a> RecursiveReferenceChecker<'a> {
             | SqlExpr::CurrentTimestamp { .. }
             | SqlExpr::LocalTime { .. }
             | SqlExpr::LocalTimestamp { .. } => Ok(()),
+            SqlExpr::Collate { expr, .. } => self.visit_expr(expr, context),
             SqlExpr::UnaryPlus(expr)
             | SqlExpr::Negate(expr)
             | SqlExpr::BitNot(expr)
@@ -2186,6 +2190,7 @@ fn sql_expr_references_table(expr: &SqlExpr, table_name: &str) -> bool {
         | SqlExpr::CurrentTimestamp { .. }
         | SqlExpr::LocalTime { .. }
         | SqlExpr::LocalTimestamp { .. } => false,
+        SqlExpr::Collate { expr: inner, .. } => sql_expr_references_table(inner, table_name),
         SqlExpr::UnaryPlus(inner)
         | SqlExpr::Negate(inner)
         | SqlExpr::BitNot(inner)
@@ -2451,7 +2456,7 @@ fn bind_values_query_with_outer(
     let sort_inputs = if stmt.order_by.is_empty() {
         Vec::new()
     } else {
-        bind_order_by_items(&stmt.order_by, &target_list, |expr| {
+        bind_order_by_items(&stmt.order_by, &target_list, catalog, |expr| {
             bind_expr_with_outer_and_ctes(
                 expr,
                 &scope,
@@ -2743,18 +2748,22 @@ fn bind_select_query_with_outer(
                     let bound_order_by = order_by
                         .iter()
                         .map(|item| {
+                            let bound_expr = bind_expr_with_outer_and_ctes(
+                                &item.expr,
+                                &scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer.as_ref(),
+                                &visible_ctes,
+                            )?;
+                            let (expr, collation_oid) =
+                                finalize_order_by_expr(bound_expr, catalog)?;
                             Ok(OrderByEntry {
-                                expr: bind_expr_with_outer_and_ctes(
-                                    &item.expr,
-                                    &scope,
-                                    catalog,
-                                    outer_scopes,
-                                    grouped_outer.as_ref(),
-                                    &visible_ctes,
-                                )?,
+                                expr,
                                 ressortgroupref: 0,
                                 descending: item.descending,
                                 nulls_first: item.nulls_first,
+                                collation_oid,
                             })
                         })
                         .collect::<Result<Vec<_>, ParseError>>()?;
@@ -2932,7 +2941,7 @@ fn bind_select_query_with_outer(
                 if stmt.order_by.is_empty() {
                     Ok(Vec::new())
                 } else {
-                    bind_order_by_items(&stmt.order_by, &targets, |expr| {
+                    bind_order_by_items(&stmt.order_by, &targets, catalog, |expr| {
                         bind_agg_output_expr_in_clause(
                             expr,
                             UngroupedColumnClause::SelectTarget,
@@ -2993,7 +3002,7 @@ fn bind_select_query_with_outer(
                     if stmt.order_by.is_empty() {
                         Ok(Vec::new())
                     } else {
-                        bind_order_by_items(&stmt.order_by, &targets, |expr| {
+                        bind_order_by_items(&stmt.order_by, &targets, catalog, |expr| {
                             bind_expr_with_outer_and_ctes(
                                 expr,
                                 &scope,
@@ -3050,7 +3059,7 @@ fn bind_select_query_with_outer(
                     if stmt.order_by.is_empty() {
                         Ok(Vec::new())
                     } else {
-                        bind_order_by_items(&stmt.order_by, &final_targets, |expr| {
+                        bind_order_by_items(&stmt.order_by, &final_targets, catalog, |expr| {
                             bind_expr_with_outer_and_ctes(
                                 expr,
                                 &scope,
@@ -3261,7 +3270,7 @@ fn bind_set_operation_query_with_outer(
     let sort_inputs = if stmt.order_by.is_empty() {
         Vec::new()
     } else {
-        bind_order_by_items(&stmt.order_by, &target_list, |expr| {
+        bind_order_by_items(&stmt.order_by, &target_list, catalog, |expr| {
             bind_expr_with_outer_and_ctes(
                 expr,
                 &scope,

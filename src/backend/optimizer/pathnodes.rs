@@ -322,6 +322,7 @@ impl Path {
                     ressortgroupref: item.ressortgroupref,
                     descending: item.descending,
                     nulls_first: item.nulls_first,
+                    collation_oid: item.collation_oid,
                 })
                 .collect(),
             Self::NestedLoopJoin { left, kind, .. }
@@ -571,6 +572,7 @@ fn project_pathkeys(
                 ressortgroupref: key.ressortgroupref,
                 descending: key.descending,
                 nulls_first: key.nulls_first,
+                collation_oid: key.collation_oid,
             }
         })
         .collect()
@@ -720,6 +722,7 @@ pub(super) fn lower_agg_output_expr(
             escape,
             case_insensitive,
             negated,
+            collation_oid,
         } => Expr::Like {
             expr: Box::new(lower_agg_output_expr(*expr, group_by, agg_output_layout)),
             pattern: Box::new(lower_agg_output_expr(*pattern, group_by, agg_output_layout)),
@@ -727,18 +730,21 @@ pub(super) fn lower_agg_output_expr(
                 .map(|expr| Box::new(lower_agg_output_expr(*expr, group_by, agg_output_layout))),
             case_insensitive,
             negated,
+            collation_oid,
         },
         Expr::Similar {
             expr,
             pattern,
             escape,
             negated,
+            collation_oid,
         } => Expr::Similar {
             expr: Box::new(lower_agg_output_expr(*expr, group_by, agg_output_layout)),
             pattern: Box::new(lower_agg_output_expr(*pattern, group_by, agg_output_layout)),
             escape: escape
                 .map(|expr| Box::new(lower_agg_output_expr(*expr, group_by, agg_output_layout))),
             negated,
+            collation_oid,
         },
         Expr::IsNull(inner) => Expr::IsNull(Box::new(lower_agg_output_expr(
             *inner,
@@ -826,6 +832,7 @@ pub(super) fn expr_sql_type(expr: &Expr) -> SqlType {
         | Expr::Similar { .. }
         | Expr::ScalarArrayOp(_) => SqlType::new(SqlTypeKind::Bool),
         Expr::Cast(_, ty) => *ty,
+        Expr::Collate { expr, .. } => expr_sql_type(expr),
         Expr::ArrayLiteral { array_type, .. } => *array_type,
         Expr::Row { descriptor, .. } => descriptor.sql_type(),
         Expr::FieldSelect { field_type, .. } => *field_type,

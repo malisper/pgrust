@@ -254,6 +254,9 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 _ => SqlType::new(SqlTypeKind::Text),
             }
         }
+        SqlExpr::Collate { expr: inner, .. } => {
+            infer_sql_expr_type_with_ctes(inner, scope, catalog, outer_scopes, grouped_outer, ctes)
+        }
         SqlExpr::UnaryPlus(inner) => {
             infer_sql_expr_type_with_ctes(inner, scope, catalog, outer_scopes, grouped_outer, ctes)
         }

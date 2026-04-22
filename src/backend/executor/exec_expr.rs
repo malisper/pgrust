@@ -138,6 +138,13 @@ fn malformed_expr_error(kind: &str) -> ExecError {
     }
 }
 
+fn top_level_explicit_collation(expr: &Expr) -> Option<u32> {
+    match expr {
+        Expr::Collate { collation_oid, .. } => Some(*collation_oid),
+        _ => None,
+    }
+}
+
 fn sql_type_from_builtin_oid(oid: u32) -> Option<SqlType> {
     crate::include::catalog::builtin_type_rows()
         .iter()
@@ -984,29 +991,38 @@ fn eval_op_expr(
             "=",
             eval_expr(left, slot, ctx)?,
             eval_expr(right, slot, ctx)?,
+            op.collation_oid,
         ),
         (OpExprKind::NotEq, [left, right]) => {
-            not_equal_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
+            not_equal_values(
+                eval_expr(left, slot, ctx)?,
+                eval_expr(right, slot, ctx)?,
+                op.collation_oid,
+            )
         }
         (OpExprKind::Lt, [left, right]) => order_values(
             "<",
             eval_expr(left, slot, ctx)?,
             eval_expr(right, slot, ctx)?,
+            op.collation_oid,
         ),
         (OpExprKind::LtEq, [left, right]) => order_values(
             "<=",
             eval_expr(left, slot, ctx)?,
             eval_expr(right, slot, ctx)?,
+            op.collation_oid,
         ),
         (OpExprKind::Gt, [left, right]) => order_values(
             ">",
             eval_expr(left, slot, ctx)?,
             eval_expr(right, slot, ctx)?,
+            op.collation_oid,
         ),
         (OpExprKind::GtEq, [left, right]) => order_values(
             ">=",
             eval_expr(left, slot, ctx)?,
             eval_expr(right, slot, ctx)?,
+            op.collation_oid,
         ),
         (OpExprKind::RegexMatch, [left, right]) => {
             let text = eval_expr(left, slot, ctx)?;
@@ -1180,7 +1196,13 @@ fn eval_scalar_array_op_expr(
 ) -> Result<Value, ExecError> {
     let left_value = eval_expr(&saop.left, slot, ctx)?;
     let right_value = eval_expr(&saop.right, slot, ctx)?;
-    eval_quantified_array(&left_value, saop.op, !saop.use_or, &right_value)
+    eval_quantified_array(
+        &left_value,
+        saop.op,
+        saop.collation_oid,
+        !saop.use_or,
+        &right_value,
+    )
 }
 
 fn eval_bound_tuple_var(
@@ -1319,6 +1341,7 @@ pub fn eval_expr(
             *ty,
             &ctx.datetime_config,
         ),
+        Expr::Collate { expr, .. } => eval_expr(expr, slot, ctx),
         Expr::Coalesce(left, right) => {
             let left = eval_expr(left, slot, ctx)?;
             if !matches!(left, Value::Null) {
@@ -1331,8 +1354,10 @@ pub fn eval_expr(
             expr,
             pattern,
             escape,
+            collation_oid,
             case_insensitive,
             negated,
+            ..
         } => {
             let left = eval_expr(expr, slot, ctx)?;
             let pattern = eval_expr(pattern, slot, ctx)?;
@@ -1344,6 +1369,7 @@ pub fn eval_expr(
                 &left,
                 &pattern,
                 escape.as_ref(),
+                *collation_oid,
                 *case_insensitive,
                 *negated,
             )
@@ -1352,7 +1378,9 @@ pub fn eval_expr(
             expr,
             pattern,
             escape,
+            collation_oid,
             negated,
+            ..
         } => {
             let left = eval_expr(expr, slot, ctx)?;
             let pattern = eval_expr(pattern, slot, ctx)?;
@@ -1360,7 +1388,7 @@ pub fn eval_expr(
                 Some(value) => Some(eval_expr(value, slot, ctx)?),
                 None => None,
             };
-            eval_similar(&left, &pattern, escape.as_ref(), *negated)
+            eval_similar(&left, &pattern, escape.as_ref(), *collation_oid, *negated)
         }
         Expr::IsNull(inner) => Ok(Value::Bool(matches!(
             eval_expr(inner, slot, ctx)?,
@@ -1427,8 +1455,17 @@ pub fn eval_expr(
                     hint: None,
                     sqlstate: "XX000",
                 })?;
+                let collation_oid = top_level_explicit_collation(left);
                 let left_value = eval_expr(left, slot, ctx)?;
-                eval_quantified_subquery(&left_value, op, false, subplan, slot, ctx)
+                eval_quantified_subquery(
+                    &left_value,
+                    op,
+                    collation_oid,
+                    false,
+                    subplan,
+                    slot,
+                    ctx,
+                )
             }
             SubLinkType::AllSubLink(op) => {
                 let left = subplan.testexpr.as_ref().ok_or(ExecError::DetailedError {
@@ -1437,8 +1474,17 @@ pub fn eval_expr(
                     hint: None,
                     sqlstate: "XX000",
                 })?;
+                let collation_oid = top_level_explicit_collation(left);
                 let left_value = eval_expr(left, slot, ctx)?;
-                eval_quantified_subquery(&left_value, op, true, subplan, slot, ctx)
+                eval_quantified_subquery(
+                    &left_value,
+                    op,
+                    collation_oid,
+                    true,
+                    subplan,
+                    slot,
+                    ctx,
+                )
             }
         },
         Expr::ArraySubscript { array, subscripts } => {
@@ -1526,30 +1572,36 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
                 "=",
                 eval_plpgsql_expr(left, slot)?,
                 eval_plpgsql_expr(right, slot)?,
+                op.collation_oid,
             ),
             (OpExprKind::NotEq, [left, right]) => not_equal_values(
                 eval_plpgsql_expr(left, slot)?,
                 eval_plpgsql_expr(right, slot)?,
+                op.collation_oid,
             ),
             (OpExprKind::Lt, [left, right]) => order_values(
                 "<",
                 eval_plpgsql_expr(left, slot)?,
                 eval_plpgsql_expr(right, slot)?,
+                op.collation_oid,
             ),
             (OpExprKind::LtEq, [left, right]) => order_values(
                 "<=",
                 eval_plpgsql_expr(left, slot)?,
                 eval_plpgsql_expr(right, slot)?,
+                op.collation_oid,
             ),
             (OpExprKind::Gt, [left, right]) => order_values(
                 ">",
                 eval_plpgsql_expr(left, slot)?,
                 eval_plpgsql_expr(right, slot)?,
+                op.collation_oid,
             ),
             (OpExprKind::GtEq, [left, right]) => order_values(
                 ">=",
                 eval_plpgsql_expr(left, slot)?,
                 eval_plpgsql_expr(right, slot)?,
+                op.collation_oid,
             ),
             (OpExprKind::RegexMatch, [left, right]) => {
                 let text = eval_plpgsql_expr(left, slot)?;
@@ -1598,7 +1650,13 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
         Expr::ScalarArrayOp(saop) => {
             let left_value = eval_plpgsql_expr(&saop.left, slot)?;
             let right_value = eval_plpgsql_expr(&saop.right, slot)?;
-            eval_quantified_array(&left_value, saop.op, !saop.use_or, &right_value)
+            eval_quantified_array(
+                &left_value,
+                saop.op,
+                saop.collation_oid,
+                !saop.use_or,
+                &right_value,
+            )
         }
         Expr::SubLink(_) | Expr::SubPlan(_) => Err(ExecError::DetailedError {
             message: "subqueries are not supported in PL/pgSQL expression evaluation".into(),
@@ -1643,6 +1701,7 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
             let value = eval_plpgsql_expr(expr, slot)?;
             eval_record_field(value, field)
         }
+        Expr::Collate { expr, .. } => eval_plpgsql_expr(expr, slot),
         Expr::Case(case_expr) => {
             if case_expr.arg.is_some() {
                 return Err(malformed_expr_error("CASE in PL/pgSQL"));
@@ -1675,8 +1734,10 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
             expr,
             pattern,
             escape,
+            collation_oid,
             case_insensitive,
             negated,
+            ..
         } => {
             let left = eval_plpgsql_expr(expr, slot)?;
             let pattern = eval_plpgsql_expr(pattern, slot)?;
@@ -1688,6 +1749,7 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
                 &left,
                 &pattern,
                 escape.as_ref(),
+                *collation_oid,
                 *case_insensitive,
                 *negated,
             )
@@ -1696,7 +1758,9 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
             expr,
             pattern,
             escape,
+            collation_oid,
             negated,
+            ..
         } => {
             let left = eval_plpgsql_expr(expr, slot)?;
             let pattern = eval_plpgsql_expr(pattern, slot)?;
@@ -1704,7 +1768,7 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
                 Some(value) => Some(eval_plpgsql_expr(value, slot)?),
                 None => None,
             };
-            eval_similar(&left, &pattern, escape.as_ref(), *negated)
+            eval_similar(&left, &pattern, escape.as_ref(), *collation_oid, *negated)
         }
         Expr::IsNull(inner) => Ok(Value::Bool(matches!(
             eval_plpgsql_expr(inner, slot)?,

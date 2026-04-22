@@ -21,20 +21,26 @@ use crate::backend::executor::jsonb::{
     JsonbValue, compare_jsonb, decode_jsonb, encode_jsonb, jsonb_concat,
 };
 use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::include::catalog::{C_COLLATION_OID, DEFAULT_COLLATION_OID, POSIX_COLLATION_OID};
 use crate::pgrust::compact_string::CompactString;
 
 pub(crate) fn compare_order_by_keys(
     items: &[OrderByEntry],
     left_keys: &[Value],
     right_keys: &[Value],
-) -> Ordering {
+) -> Result<Ordering, ExecError> {
     for (item, (left_value, right_value)) in
         items.iter().zip(left_keys.iter().zip(right_keys.iter()))
     {
-        let ordering =
-            compare_order_values(left_value, right_value, item.nulls_first, item.descending);
+        let ordering = compare_order_values(
+            left_value,
+            right_value,
+            item.collation_oid,
+            item.nulls_first,
+            item.descending,
+        )?;
         if ordering != Ordering::Equal {
-            return if item.descending
+            return Ok(if item.descending
                 && !matches!(
                     (left_value, right_value),
                     (Value::Null, _) | (_, Value::Null)
@@ -42,76 +48,77 @@ pub(crate) fn compare_order_by_keys(
                 ordering.reverse()
             } else {
                 ordering
-            };
+            });
         }
     }
-    Ordering::Equal
+    Ok(Ordering::Equal)
 }
 
 pub(crate) fn compare_order_values(
     left: &Value,
     right: &Value,
+    collation_oid: Option<u32>,
     nulls_first: Option<bool>,
     descending: bool,
-) -> Ordering {
+) -> Result<Ordering, ExecError> {
     let nulls_first = nulls_first.unwrap_or(descending);
     match (left, right) {
-        (Value::Null, Value::Null) => Ordering::Equal,
+        (Value::Null, Value::Null) => Ok(Ordering::Equal),
         (Value::Null, _) => {
             if nulls_first {
-                Ordering::Less
+                Ok(Ordering::Less)
             } else {
-                Ordering::Greater
+                Ok(Ordering::Greater)
             }
         }
         (_, Value::Null) => {
             if nulls_first {
-                Ordering::Greater
+                Ok(Ordering::Greater)
             } else {
-                Ordering::Less
+                Ok(Ordering::Less)
             }
         }
-        (Value::Int32(a), Value::Int32(b)) => a.cmp(b),
-        (Value::Int64(a), Value::Int64(b)) => a.cmp(b),
-        (Value::Date(a), Value::Date(b)) => a.cmp(b),
-        (Value::Time(a), Value::Time(b)) => a.cmp(b),
-        (Value::TimeTz(a), Value::TimeTz(b)) => a
+        (Value::Int32(a), Value::Int32(b)) => Ok(a.cmp(b)),
+        (Value::Int64(a), Value::Int64(b)) => Ok(a.cmp(b)),
+        (Value::Date(a), Value::Date(b)) => Ok(a.cmp(b)),
+        (Value::Time(a), Value::Time(b)) => Ok(a.cmp(b)),
+        (Value::TimeTz(a), Value::TimeTz(b)) => Ok(a
             .time
             .cmp(&b.time)
-            .then_with(|| a.offset_seconds.cmp(&b.offset_seconds)),
-        (Value::Timestamp(a), Value::Timestamp(b)) => a.cmp(b),
-        (Value::TimestampTz(a), Value::TimestampTz(b)) => a.cmp(b),
-        (Value::Bit(a), Value::Bit(b)) => compare_bit_strings(a, b),
-        (Value::Bytea(a), Value::Bytea(b)) => a.cmp(b),
-        (Value::Float64(a), Value::Float64(b)) => pg_float_cmp(*a, *b),
-        (Value::Money(a), Value::Money(b)) => money_cmp(*a, *b),
+            .then_with(|| a.offset_seconds.cmp(&b.offset_seconds))),
+        (Value::Timestamp(a), Value::Timestamp(b)) => Ok(a.cmp(b)),
+        (Value::TimestampTz(a), Value::TimestampTz(b)) => Ok(a.cmp(b)),
+        (Value::Bit(a), Value::Bit(b)) => Ok(compare_bit_strings(a, b)),
+        (Value::Bytea(a), Value::Bytea(b)) => Ok(a.cmp(b)),
+        (Value::Float64(a), Value::Float64(b)) => Ok(pg_float_cmp(*a, *b)),
+        (Value::Money(a), Value::Money(b)) => Ok(money_cmp(*a, *b)),
         (a, b) if parsed_numeric_value(a).is_some() && parsed_numeric_value(b).is_some() => {
-            parsed_numeric_value(a)
+            Ok(parsed_numeric_value(a)
                 .and_then(|left| parsed_numeric_value(b).map(|right| left.cmp(&right)))
-                .unwrap_or(Ordering::Equal)
+                .unwrap_or(Ordering::Equal))
         }
-        (Value::Jsonb(a), Value::Jsonb(b)) => compare_jsonb(
+        (Value::Jsonb(a), Value::Jsonb(b)) => Ok(compare_jsonb(
             &decode_jsonb(a).unwrap_or(JsonbValue::Null),
             &decode_jsonb(b).unwrap_or(JsonbValue::Null),
+        )),
+        (Value::Range(a), Value::Range(b)) => Ok(compare_range_values(a, b)),
+        (Value::Multirange(a), Value::Multirange(b)) => Ok(compare_multirange_values(a, b)),
+        (Value::TsVector(a), Value::TsVector(b)) => Ok(crate::backend::executor::compare_tsvector(a, b)),
+        (Value::TsQuery(a), Value::TsQuery(b)) => Ok(crate::backend::executor::compare_tsquery(a, b)),
+        (Value::Record(a), Value::Record(b)) => Ok(compare_record_values(a, b)),
+        (a, b) if a.as_text().is_some() && b.as_text().is_some() => compare_text_values(
+            a.as_text().unwrap(),
+            b.as_text().unwrap(),
+            collation_oid,
         ),
-        (Value::Range(a), Value::Range(b)) => compare_range_values(a, b),
-        (Value::Multirange(a), Value::Multirange(b)) => compare_multirange_values(a, b),
-        (Value::TsVector(a), Value::TsVector(b)) => {
-            crate::backend::executor::compare_tsvector(a, b)
-        }
-        (Value::TsQuery(a), Value::TsQuery(b)) => crate::backend::executor::compare_tsquery(a, b),
-        (Value::Record(a), Value::Record(b)) => compare_record_values(a, b),
-        (a, b) if a.as_text().is_some() && b.as_text().is_some() => {
-            a.as_text().unwrap().cmp(b.as_text().unwrap())
-        }
-        (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
+        (Value::Bool(a), Value::Bool(b)) => Ok(a.cmp(b)),
         (a, b) if normalize_array_value(a).is_some() && normalize_array_value(b).is_some() => {
-            compare_array_values(
+            Ok(compare_array_values(
                 &normalize_array_value(a).unwrap(),
                 &normalize_array_value(b).unwrap(),
-            )
+            ))
         }
-        _ => Ordering::Equal,
+        _ => Ok(Ordering::Equal),
     }
 }
 
@@ -149,6 +156,7 @@ pub(crate) fn compare_values(
     op: &'static str,
     left: Value,
     right: Value,
+    collation_oid: Option<u32>,
 ) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
@@ -195,6 +203,7 @@ pub(crate) fn compare_values(
             Ok(Value::Bool(compare_record_values(l, r) == Ordering::Equal))
         }
         (l, r) if l.as_text().is_some() && r.as_text().is_some() => {
+            ensure_builtin_collation_supported(collation_oid)?;
             Ok(Value::Bool(l.as_text() == r.as_text()))
         }
         (Value::Bool(l), Value::Bool(r)) => Ok(Value::Bool(l == r)),
@@ -210,11 +219,15 @@ pub(crate) fn compare_values(
     }
 }
 
-pub(crate) fn not_equal_values(left: Value, right: Value) -> Result<Value, ExecError> {
+pub(crate) fn not_equal_values(
+    left: Value,
+    right: Value,
+    collation_oid: Option<u32>,
+) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
     }
-    match compare_values("=", left.clone(), right.clone())? {
+    match compare_values("=", left.clone(), right.clone(), collation_oid)? {
         Value::Bool(value) => Ok(Value::Bool(!value)),
         other => Err(ExecError::NonBoolQual(other)),
     }
@@ -667,6 +680,7 @@ pub(crate) fn order_values(
     op: &'static str,
     left: Value,
     right: Value,
+    collation_oid: Option<u32>,
 ) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
@@ -749,13 +763,17 @@ pub(crate) fn order_values(
                 _ => unreachable!(),
             }))
         }
-        (l, r) if l.as_text().is_some() && r.as_text().is_some() => Ok(Value::Bool(match op {
-            "<" => l.as_text().unwrap() < r.as_text().unwrap(),
-            "<=" => l.as_text().unwrap() <= r.as_text().unwrap(),
-            ">" => l.as_text().unwrap() > r.as_text().unwrap(),
-            ">=" => l.as_text().unwrap() >= r.as_text().unwrap(),
-            _ => unreachable!(),
-        })),
+        (l, r) if l.as_text().is_some() && r.as_text().is_some() => {
+            let ordering =
+                compare_text_values(l.as_text().unwrap(), r.as_text().unwrap(), collation_oid)?;
+            Ok(Value::Bool(match op {
+                "<" => ordering == Ordering::Less,
+                "<=" => ordering != Ordering::Greater,
+                ">" => ordering == Ordering::Greater,
+                ">=" => ordering != Ordering::Less,
+                _ => unreachable!(),
+            }))
+        }
         (l, r) if normalize_array_value(l).is_some() && normalize_array_value(r).is_some() => {
             Ok(Value::Bool(compare_ord(
                 compare_array_values(
@@ -768,6 +786,33 @@ pub(crate) fn order_values(
         }
         _ => Err(ExecError::TypeMismatch { op, left, right }),
     }
+}
+
+pub(crate) fn ensure_builtin_collation_supported(
+    collation_oid: Option<u32>,
+) -> Result<(), ExecError> {
+    match collation_oid {
+        None
+        | Some(DEFAULT_COLLATION_OID | C_COLLATION_OID | POSIX_COLLATION_OID) => Ok(()),
+        Some(oid) => Err(ExecError::DetailedError {
+            message: format!("collation with OID {oid} is not supported"),
+            detail: Some(
+                "Only the built-in collations \"default\", \"C\", and \"POSIX\" are supported"
+                    .into(),
+            ),
+            hint: None,
+            sqlstate: "0A000",
+        }),
+    }
+}
+
+fn compare_text_values(
+    left: &str,
+    right: &str,
+    collation_oid: Option<u32>,
+) -> Result<Ordering, ExecError> {
+    ensure_builtin_collation_supported(collation_oid)?;
+    Ok(left.cmp(right))
 }
 
 fn compare_ord<T: Ord>(left: T, right: T, op: &'static str) -> bool {
@@ -785,7 +830,8 @@ fn compare_record_values(
     right: &crate::include::nodes::datum::RecordValue,
 ) -> Ordering {
     for (left_value, right_value) in left.fields.iter().zip(&right.fields) {
-        let value_ordering = compare_order_values(left_value, right_value, None, false);
+        let value_ordering = compare_order_values(left_value, right_value, None, None, false)
+            .expect("record field comparisons use implicit default collation");
         if value_ordering != Ordering::Equal {
             return value_ordering;
         }
@@ -809,13 +855,13 @@ fn compare_array_values(left: &ArrayValue, right: &ArrayValue) -> Ordering {
             (_, Value::Null) => return Ordering::Less,
             _ => {
                 if matches!(
-                    compare_values("=", left_item.clone(), right_item.clone()),
+                    compare_values("=", left_item.clone(), right_item.clone(), None),
                     Ok(Value::Bool(true))
                 ) {
                     continue;
                 }
                 if matches!(
-                    order_values("<", left_item.clone(), right_item.clone()),
+                    order_values("<", left_item.clone(), right_item.clone(), None),
                     Ok(Value::Bool(true))
                 ) {
                     return Ordering::Less;
@@ -1374,6 +1420,7 @@ fn exact_numeric_binary(
 mod tests {
     use std::cmp::Ordering;
 
+    use crate::include::catalog::{C_COLLATION_OID, DEFAULT_COLLATION_OID, POSIX_COLLATION_OID};
     use crate::include::nodes::datum::Value;
 
     #[test]
@@ -1383,9 +1430,42 @@ mod tests {
                 &Value::Int64(1234),
                 &Value::Int64(4_294_966_256),
                 None,
+                None,
                 false
-            ),
+            )
+            .unwrap(),
             Ordering::Less
         );
+    }
+
+    #[test]
+    fn compare_order_values_accepts_builtin_text_collations() {
+        for oid in [DEFAULT_COLLATION_OID, C_COLLATION_OID, POSIX_COLLATION_OID] {
+            assert_eq!(
+                super::compare_order_values(
+                    &Value::Text("alpha".into()),
+                    &Value::Text("beta".into()),
+                    Some(oid),
+                    None,
+                    false,
+                )
+                .unwrap(),
+                Ordering::Less
+            );
+        }
+    }
+
+    #[test]
+    fn compare_values_rejects_unsupported_collation_oid() {
+        assert!(matches!(
+            super::compare_values(
+                "=",
+                Value::Text("alpha".into()),
+                Value::Text("alpha".into()),
+                Some(123_456),
+            ),
+            Err(crate::backend::executor::ExecError::DetailedError { sqlstate, .. })
+                if sqlstate == "0A000"
+        ));
     }
 }

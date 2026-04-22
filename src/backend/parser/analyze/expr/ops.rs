@@ -126,6 +126,8 @@ pub(super) fn bind_comparison_expr(
             grouped_outer,
             ctes,
         )?;
+        let (left_bound, left_explicit_collation) = strip_explicit_collation(left_bound);
+        let (right_bound, right_explicit_collation) = strip_explicit_collation(right_bound);
         let money = SqlType::new(SqlTypeKind::Money);
         return bind_lowered_comparison_expr(
             op,
@@ -136,6 +138,8 @@ pub(super) fn bind_comparison_expr(
             right_bound,
             raw_right_type,
             right_type,
+            left_explicit_collation,
+            right_explicit_collation,
             catalog,
         );
     }
@@ -143,6 +147,8 @@ pub(super) fn bind_comparison_expr(
         bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?;
     let right_bound =
         bind_expr_with_outer_and_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+    let (left_bound, left_explicit_collation) = strip_explicit_collation(left_bound);
+    let (right_bound, right_explicit_collation) = strip_explicit_collation(right_bound);
     bind_lowered_comparison_expr(
         op,
         make,
@@ -152,6 +158,8 @@ pub(super) fn bind_comparison_expr(
         right_bound,
         raw_right_type,
         right_type,
+        left_explicit_collation,
+        right_explicit_collation,
         catalog,
     )
 }
@@ -185,6 +193,8 @@ pub(super) fn bind_bound_comparison_expr(
             grouped_outer,
             ctes,
         )?;
+        let (left_bound, left_explicit_collation) = strip_explicit_collation(left_bound);
+        let (right_bound, right_explicit_collation) = strip_explicit_collation(right_bound);
         return bind_lowered_comparison_expr(
             op,
             make,
@@ -194,11 +204,15 @@ pub(super) fn bind_bound_comparison_expr(
             right_bound,
             raw_right_type,
             right_type,
+            left_explicit_collation,
+            right_explicit_collation,
             catalog,
         );
     }
     let right_bound =
         bind_expr_with_outer_and_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+    let (left_bound, left_explicit_collation) = strip_explicit_collation(left_bound);
+    let (right_bound, right_explicit_collation) = strip_explicit_collation(right_bound);
     bind_lowered_comparison_expr(
         op,
         make,
@@ -208,6 +222,8 @@ pub(super) fn bind_bound_comparison_expr(
         right_bound,
         raw_right_type,
         right_type,
+        left_explicit_collation,
+        right_explicit_collation,
         catalog,
     )
 }
@@ -221,6 +237,8 @@ pub(crate) fn bind_lowered_comparison_expr(
     right_bound: Expr,
     raw_right_type: SqlType,
     right_type: SqlType,
+    left_explicit_collation: Option<u32>,
+    right_explicit_collation: Option<u32>,
     catalog: &dyn CatalogLookup,
 ) -> Result<Expr, ParseError> {
     let (left, right) = if is_numeric_family(left_type) && is_numeric_family(right_type) {
@@ -272,7 +290,23 @@ pub(crate) fn bind_lowered_comparison_expr(
         }
         (left, right)
     };
-    Ok(Expr::op_auto(make, vec![left, right]))
+    let collation_oid = derive_consumer_collation(
+        catalog,
+        CollationConsumer::StringComparison,
+        &[
+            (expr_sql_type_hint(&left).unwrap_or(left_type), left_explicit_collation),
+            (
+                expr_sql_type_hint(&right).unwrap_or(right_type),
+                right_explicit_collation,
+            ),
+        ],
+    )?;
+    Ok(Expr::op_with_collation(
+        make,
+        SqlType::new(SqlTypeKind::Bool),
+        vec![left, right],
+        collation_oid,
+    ))
 }
 
 fn bind_money_arithmetic_expr(

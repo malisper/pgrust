@@ -59,6 +59,7 @@ fn pathkey(expr: crate::include::nodes::primnodes::Expr) -> PathKey {
         ressortgroupref: 0,
         descending: false,
         nulls_first: None,
+        collation_oid: None,
     }
 }
 
@@ -71,6 +72,7 @@ fn pathkey_with_ref(
         ressortgroupref,
         descending: false,
         nulls_first: None,
+        collation_oid: None,
     }
 }
 
@@ -237,6 +239,7 @@ fn ordered_path(slot_id: usize, startup_cost: f64, total_cost: f64, key_attno: u
             ressortgroupref: 0,
             descending: false,
             nulls_first: None,
+            collation_oid: None,
         }],
     )
 }
@@ -326,6 +329,7 @@ fn projection_keeps_hidden_order_pathkeys() {
                     order_expr.clone(),
                     crate::include::nodes::primnodes::Expr::Const(Value::Int32(1)),
                 ],
+                collation_oid: None,
             })),
             int4(),
             1,
@@ -372,6 +376,7 @@ fn normalize_rte_path_preserves_projection_sortgrouprefs() {
             ressortgroupref: 17,
             descending: false,
             nulls_first: None,
+            collation_oid: None,
         }],
     );
     let desc = RelationDesc {
@@ -870,6 +875,7 @@ fn projection_pathkeys_prefer_sortgroupref_identity() {
             ressortgroupref: 17,
             descending: false,
             nulls_first: None,
+            collation_oid: None,
         }],
     );
     let projection = projection_path(
@@ -995,6 +1001,7 @@ fn into_plan_order_by_lowers_via_child_sortgroupref() {
             ressortgroupref: 17,
             descending: false,
             nulls_first: None,
+            collation_oid: None,
         }],
     )
     .into_plan();
@@ -1526,6 +1533,7 @@ fn lower_pathkeys_for_path_strips_binary_coercible_casts() {
         ressortgroupref: 0,
         descending: false,
         nulls_first: None,
+        collation_oid: None,
     };
 
     let lowered = util::lower_pathkeys_for_path(&root, &path, &[cast_key]);

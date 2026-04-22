@@ -7,7 +7,8 @@ use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{MaterializedRow, SystemVarBinding, TupleSlot};
 use crate::include::nodes::parsenodes::WindowFrameMode;
 use crate::include::nodes::primnodes::{
-    BuiltinWindowFunction, WindowClause, WindowFrameBound, WindowFuncExpr, WindowFuncKind,
+    BuiltinWindowFunction, OrderByEntry, WindowClause, WindowFrameBound, WindowFuncExpr,
+    WindowFuncKind,
 };
 use std::cmp::Ordering;
 
@@ -77,13 +78,25 @@ fn same_partition(left: &PreparedWindowRow, right: &PreparedWindowRow) -> bool {
             .all(|(left, right)| !values_are_distinct(left, right))
 }
 
-fn same_peer(left: &PreparedWindowRow, right: &PreparedWindowRow) -> bool {
-    left.order_keys.len() == right.order_keys.len()
-        && left
-            .order_keys
-            .iter()
-            .zip(right.order_keys.iter())
-            .all(|(left, right)| compare_order_values(left, right, None, false) == Ordering::Equal)
+fn same_peer(
+    order_by: &[OrderByEntry],
+    left: &PreparedWindowRow,
+    right: &PreparedWindowRow,
+) -> Result<bool, ExecError> {
+    if left.order_keys.len() != right.order_keys.len() || left.order_keys.len() != order_by.len() {
+        return Ok(false);
+    }
+    for (item, (left, right)) in order_by
+        .iter()
+        .zip(left.order_keys.iter().zip(right.order_keys.iter()))
+    {
+        if compare_order_values(left, right, item.collation_oid, None, false)?
+            != Ordering::Equal
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn evaluate_window_expr_on_row(
@@ -100,23 +113,40 @@ fn evaluate_window_expr_on_row(
     eval_expr(expr, &mut row.row.slot, ctx).map(|value| value.to_owned_value())
 }
 
-fn peer_group_end_for_index(partition_rows: &[PreparedWindowRow], index: usize) -> usize {
+fn peer_group_end_for_index(
+    partition_rows: &[PreparedWindowRow],
+    order_by: &[OrderByEntry],
+    index: usize,
+) -> Result<usize, ExecError> {
     let mut peer_end = index + 1;
     while peer_end < partition_rows.len()
-        && same_peer(&partition_rows[peer_end - 1], &partition_rows[peer_end])
+        && same_peer(
+            order_by,
+            &partition_rows[peer_end - 1],
+            &partition_rows[peer_end],
+        )?
     {
         peer_end += 1;
     }
-    peer_end
+    Ok(peer_end)
 }
 
-fn peer_group_start_for_index(partition_rows: &[PreparedWindowRow], index: usize) -> usize {
+fn peer_group_start_for_index(
+    partition_rows: &[PreparedWindowRow],
+    order_by: &[OrderByEntry],
+    index: usize,
+) -> Result<usize, ExecError> {
     let mut peer_start = index;
-    while peer_start > 0 && same_peer(&partition_rows[peer_start - 1], &partition_rows[peer_start])
+    while peer_start > 0
+        && same_peer(
+            order_by,
+            &partition_rows[peer_start - 1],
+            &partition_rows[peer_start],
+        )?
     {
         peer_start -= 1;
     }
-    peer_start
+    Ok(peer_start)
 }
 
 fn current_row_frame_error(which: &'static str) -> ExecError {
@@ -220,40 +250,42 @@ fn offset_is_negative(value: &Value) -> Result<bool, ExecError> {
 
 fn move_group_start(
     partition_rows: &[PreparedWindowRow],
+    order_by: &[OrderByEntry],
     row_index: usize,
     offset: i64,
     following: bool,
-) -> usize {
-    let mut start = peer_group_start_for_index(partition_rows, row_index);
+) -> Result<usize, ExecError> {
+    let mut start = peer_group_start_for_index(partition_rows, order_by, row_index)?;
     let mut remaining = offset;
     while remaining > 0 {
         if following {
-            let end = peer_group_end_for_index(partition_rows, start);
+            let end = peer_group_end_for_index(partition_rows, order_by, start)?;
             if end >= partition_rows.len() {
-                return partition_rows.len();
+                return Ok(partition_rows.len());
             }
             start = end;
         } else if start == 0 {
-            return 0;
+            return Ok(0);
         } else {
-            start = peer_group_start_for_index(partition_rows, start - 1);
+            start = peer_group_start_for_index(partition_rows, order_by, start - 1)?;
         }
         remaining -= 1;
     }
-    start
+    Ok(start)
 }
 
 fn move_group_end(
     partition_rows: &[PreparedWindowRow],
+    order_by: &[OrderByEntry],
     row_index: usize,
     offset: i64,
     following: bool,
-) -> usize {
-    let start = move_group_start(partition_rows, row_index, offset, following);
+) -> Result<usize, ExecError> {
+    let start = move_group_start(partition_rows, order_by, row_index, offset, following)?;
     if start >= partition_rows.len() {
-        partition_rows.len()
+        Ok(partition_rows.len())
     } else {
-        peer_group_end_for_index(partition_rows, start)
+        peer_group_end_for_index(partition_rows, order_by, start)
     }
 }
 
@@ -295,43 +327,48 @@ fn compute_range_boundary_key(
 
 fn range_frame_start_from_boundary(
     partition_rows: &[PreparedWindowRow],
+    order_by: &[OrderByEntry],
     boundary_key: &Value,
     current_order: usize,
     nulls_first: Option<bool>,
     descending: bool,
-) -> usize {
-    partition_rows
-        .iter()
-        .position(|row| {
-            compare_order_values(
-                &row.order_keys[current_order],
-                boundary_key,
-                nulls_first,
-                descending,
-            ) != Ordering::Less
-        })
-        .unwrap_or(partition_rows.len())
+) -> Result<usize, ExecError> {
+    for (index, row) in partition_rows.iter().enumerate() {
+        if compare_order_values(
+            &row.order_keys[current_order],
+            boundary_key,
+            order_by[current_order].collation_oid,
+            nulls_first,
+            descending,
+        )? != Ordering::Less
+        {
+            return Ok(index);
+        }
+    }
+    Ok(partition_rows.len())
 }
 
 fn range_frame_end_from_boundary(
     partition_rows: &[PreparedWindowRow],
+    order_by: &[OrderByEntry],
     boundary_key: &Value,
     current_order: usize,
     nulls_first: Option<bool>,
     descending: bool,
-) -> usize {
-    partition_rows
-        .iter()
-        .rposition(|row| {
-            compare_order_values(
-                &row.order_keys[current_order],
-                boundary_key,
-                nulls_first,
-                descending,
-            ) != Ordering::Greater
-        })
-        .map(|index| index + 1)
-        .unwrap_or(0)
+) -> Result<usize, ExecError> {
+    for (index, row) in partition_rows.iter().enumerate().rev() {
+        if compare_order_values(
+            &row.order_keys[current_order],
+            boundary_key,
+            order_by[current_order].collation_oid,
+            nulls_first,
+            descending,
+        )? != Ordering::Greater
+        {
+            return Ok(index + 1);
+        }
+    }
+    Ok(0)
 }
 
 fn evaluate_window_frame(
@@ -342,8 +379,8 @@ fn evaluate_window_frame(
 ) -> Result<(usize, usize), ExecError> {
     let frame = &clause.spec.frame;
     let len = partition_rows.len();
-    let peer_start = peer_group_start_for_index(partition_rows, row_index);
-    let peer_end = peer_group_end_for_index(partition_rows, row_index);
+    let peer_start = peer_group_start_for_index(partition_rows, &clause.spec.order_by, row_index)?;
+    let peer_end = peer_group_end_for_index(partition_rows, &clause.spec.order_by, row_index)?;
     let current_key = partition_rows[row_index].order_keys.first().cloned();
 
     let start = match (&frame.mode, &frame.start_bound) {
@@ -381,7 +418,7 @@ fn evaluate_window_frame(
                 "starting",
             )?
             .expect("offset");
-            move_group_start(partition_rows, row_index, offset, false)
+            move_group_start(partition_rows, &clause.spec.order_by, row_index, offset, false)?
         }
         (WindowFrameMode::Groups, WindowFrameBound::OffsetFollowing(_)) => {
             let offset = evaluate_frame_bound_i64(
@@ -391,7 +428,7 @@ fn evaluate_window_frame(
                 "starting",
             )?
             .expect("offset");
-            move_group_start(partition_rows, row_index, offset, true)
+            move_group_start(partition_rows, &clause.spec.order_by, row_index, offset, true)?
         }
         (WindowFrameMode::Range, WindowFrameBound::OffsetPreceding(expr))
         | (WindowFrameMode::Range, WindowFrameBound::OffsetFollowing(expr)) => {
@@ -410,11 +447,12 @@ fn evaluate_window_frame(
                 )?;
                 range_frame_start_from_boundary(
                     partition_rows,
+                    &clause.spec.order_by,
                     &boundary,
                     0,
                     item.nulls_first,
                     item.descending,
-                )
+                )?
             }
         }
     };
@@ -454,7 +492,7 @@ fn evaluate_window_frame(
                 "ending",
             )?
             .expect("offset");
-            move_group_end(partition_rows, row_index, offset, false)
+            move_group_end(partition_rows, &clause.spec.order_by, row_index, offset, false)?
         }
         (WindowFrameMode::Groups, WindowFrameBound::OffsetFollowing(_)) => {
             let offset = evaluate_frame_bound_i64(
@@ -464,7 +502,7 @@ fn evaluate_window_frame(
                 "ending",
             )?
             .expect("offset");
-            move_group_end(partition_rows, row_index, offset, true)
+            move_group_end(partition_rows, &clause.spec.order_by, row_index, offset, true)?
         }
         (WindowFrameMode::Range, WindowFrameBound::OffsetPreceding(expr))
         | (WindowFrameMode::Range, WindowFrameBound::OffsetFollowing(expr)) => {
@@ -483,11 +521,12 @@ fn evaluate_window_frame(
                 )?;
                 range_frame_end_from_boundary(
                     partition_rows,
+                    &clause.spec.order_by,
                     &boundary,
                     0,
                     item.nulls_first,
                     item.descending,
-                )
+                )?
             }
         }
     };
@@ -533,7 +572,8 @@ fn advance_window_aggregate(
 fn evaluate_rank_like_window(
     func: BuiltinWindowFunction,
     partition_rows: &[PreparedWindowRow],
-) -> Vec<Value> {
+    order_by: &[OrderByEntry],
+) -> Result<Vec<Value>, ExecError> {
     let mut values = Vec::with_capacity(partition_rows.len());
     let mut dense_rank = 1i64;
     let total_rows = partition_rows.len();
@@ -541,7 +581,11 @@ fn evaluate_rank_like_window(
     while peer_start < total_rows {
         let mut peer_end = peer_start + 1;
         while peer_end < total_rows
-            && same_peer(&partition_rows[peer_end - 1], &partition_rows[peer_end])
+            && same_peer(
+                order_by,
+                &partition_rows[peer_end - 1],
+                &partition_rows[peer_end],
+            )?
         {
             peer_end += 1;
         }
@@ -598,7 +642,7 @@ fn evaluate_rank_like_window(
         peer_start = peer_end;
         dense_rank += 1;
     }
-    values
+    Ok(values)
 }
 
 fn invalid_ntile_bucket_error() -> ExecError {
@@ -849,7 +893,7 @@ fn evaluate_builtin_window(
         | BuiltinWindowFunction::NthValue => {
             evaluate_value_window(ctx, clause, func, partition_rows)
         }
-        _ => Ok(evaluate_rank_like_window(builtin, partition_rows)),
+        _ => evaluate_rank_like_window(builtin, partition_rows, &clause.spec.order_by),
     }
 }
 

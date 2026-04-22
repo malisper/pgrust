@@ -990,6 +990,7 @@ fn render_explain_expr_inner_with_qualifier(
             pattern,
             escape,
             negated,
+            ..
         } => render_similar_explain_expr(expr, pattern, escape.as_deref(), *negated, |expr| {
             render_explain_expr_inner_with_qualifier(expr, qualifier, column_names)
         }),
@@ -1111,6 +1112,7 @@ fn render_explain_join_expr_inner(
             pattern,
             escape,
             negated,
+            ..
         } => render_similar_explain_expr(expr, pattern, escape.as_deref(), *negated, |expr| {
             render_explain_join_expr_inner(expr, outer_names, inner_names)
         }),
@@ -1753,9 +1755,25 @@ impl PlanNode for OrderByState {
                 keyed_rows.push((keys, row));
             }
 
-            keyed_rows.sort_by(|(left_keys, _), (right_keys, _)| {
-                compare_order_by_keys(&self.items, left_keys, right_keys)
-            });
+            let mut sort_error = None;
+            keyed_rows.sort_by(
+                |(left_keys, _), (right_keys, _)| match compare_order_by_keys(
+                    &self.items,
+                    left_keys,
+                    right_keys,
+                ) {
+                    Ok(ordering) => ordering,
+                    Err(err) => {
+                        if sort_error.is_none() {
+                            sort_error = Some(err);
+                        }
+                        std::cmp::Ordering::Equal
+                    }
+                },
+            );
+            if let Some(err) = sort_error {
+                return Err(err);
+            }
             self.rows = Some(keyed_rows.into_iter().map(|(_, row)| row).collect());
         }
 
@@ -2097,9 +2115,25 @@ impl PlanNode for AggregateState {
                         continue;
                     }
                     let inputs = &mut group.ordered_inputs[i];
+                    let mut sort_error = None;
                     inputs.sort_by(|left, right| {
-                        compare_order_by_keys(&accum.order_by, &left.sort_keys, &right.sort_keys)
+                        match compare_order_by_keys(
+                            &accum.order_by,
+                            &left.sort_keys,
+                            &right.sort_keys,
+                        ) {
+                            Ok(ordering) => ordering,
+                            Err(err) => {
+                                if sort_error.is_none() {
+                                    sort_error = Some(err);
+                                }
+                                std::cmp::Ordering::Equal
+                            }
+                        }
                     });
+                    if let Some(err) = sort_error {
+                        return Err(err);
+                    }
                     for input in inputs.iter() {
                         (self.trans_fns[i])(&mut group.accum_states[i], &input.arg_values)?;
                     }

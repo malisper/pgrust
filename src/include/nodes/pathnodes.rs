@@ -83,6 +83,7 @@ impl PathTarget {
                     ressortgroupref: clause.tle_sort_group_ref,
                     descending: clause.descending,
                     nulls_first: clause.nulls_first,
+                    collation_oid: clause.collation_oid,
                 }
             })
             .collect()
@@ -148,6 +149,7 @@ pub struct PathKey {
     pub ressortgroupref: usize,
     pub descending: bool,
     pub nulls_first: Option<bool>,
+    pub collation_oid: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

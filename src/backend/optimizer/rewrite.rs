@@ -159,23 +159,27 @@ pub(super) fn rewrite_expr_for_append_rel(expr: Expr, info: &AppendRelInfo) -> E
             escape,
             case_insensitive,
             negated,
+            collation_oid,
         } => Expr::Like {
             expr: Box::new(rewrite_expr_for_append_rel(*expr, info)),
             pattern: Box::new(rewrite_expr_for_append_rel(*pattern, info)),
             escape: escape.map(|expr| Box::new(rewrite_expr_for_append_rel(*expr, info))),
             case_insensitive,
             negated,
+            collation_oid,
         },
         Expr::Similar {
             expr,
             pattern,
             escape,
             negated,
+            collation_oid,
         } => Expr::Similar {
             expr: Box::new(rewrite_expr_for_append_rel(*expr, info)),
             pattern: Box::new(rewrite_expr_for_append_rel(*pattern, info)),
             escape: escape.map(|expr| Box::new(rewrite_expr_for_append_rel(*expr, info))),
             negated,
+            collation_oid,
         },
         Expr::IsNull(inner) => Expr::IsNull(Box::new(rewrite_expr_for_append_rel(*inner, info))),
         Expr::IsNotNull(inner) => {
@@ -409,6 +413,7 @@ pub(super) fn rewrite_semantic_expr_for_path(expr: Expr, path: &Path, layout: &[
             escape,
             case_insensitive,
             negated,
+            collation_oid,
         } => Expr::Like {
             expr: Box::new(rewrite_semantic_expr_for_path(*expr, path, layout)),
             pattern: Box::new(rewrite_semantic_expr_for_path(*pattern, path, layout)),
@@ -416,18 +421,21 @@ pub(super) fn rewrite_semantic_expr_for_path(expr: Expr, path: &Path, layout: &[
                 .map(|expr| Box::new(rewrite_semantic_expr_for_path(*expr, path, layout))),
             case_insensitive,
             negated,
+            collation_oid,
         },
         Expr::Similar {
             expr,
             pattern,
             escape,
             negated,
+            collation_oid,
         } => Expr::Similar {
             expr: Box::new(rewrite_semantic_expr_for_path(*expr, path, layout)),
             pattern: Box::new(rewrite_semantic_expr_for_path(*pattern, path, layout)),
             escape: escape
                 .map(|expr| Box::new(rewrite_semantic_expr_for_path(*expr, path, layout))),
             negated,
+            collation_oid,
         },
         Expr::IsNull(inner) => Expr::IsNull(Box::new(rewrite_semantic_expr_for_path(
             *inner, path, layout,

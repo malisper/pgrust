@@ -5,7 +5,7 @@ use crate::include::catalog::{
     BTREE_AM_OID, GIST_AM_OID, bootstrap_pg_operator_rows, builtin_scalar_function_for_proc_oid,
     proc_oid_for_builtin_scalar_function,
 };
-use crate::include::nodes::primnodes::{BuiltinScalarFunction, OpExprKind};
+use crate::include::nodes::primnodes::{BuiltinScalarFunction, OpExprKind, expr_sql_type_hint};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoundModifyRowSource {
@@ -480,12 +480,17 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
 pub(super) fn bind_order_by_items(
     items: &[OrderByItem],
     targets: &[TargetEntry],
+    catalog: &dyn CatalogLookup,
     bind_expr: impl Fn(&SqlExpr) -> Result<Expr, ParseError>,
 ) -> Result<Vec<crate::backend::executor::OrderByEntry>, ParseError> {
     items
         .iter()
         .map(|item| {
-            let (expr, ressortgroupref) = match &item.expr {
+            let (raw_expr, explicit_collation) = match &item.expr {
+                SqlExpr::Collate { expr, collation } => (expr.as_ref(), Some(collation.as_str())),
+                other => (other, None),
+            };
+            let (expr, ressortgroupref) = match raw_expr {
                 SqlExpr::IntegerLiteral(value) => {
                     if let Ok(ordinal) = value.parse::<usize>() {
                         if ordinal > 0 && ordinal <= targets.len() {
@@ -505,7 +510,7 @@ pub(super) fn bind_order_by_items(
                             });
                         }
                     } else {
-                        (bind_expr(&item.expr)?, 0)
+                        (bind_expr(raw_expr)?, 0)
                     }
                 }
                 SqlExpr::Column(name) => {
@@ -522,16 +527,23 @@ pub(super) fn bind_order_by_items(
                             },
                         )
                     } else {
-                        (bind_expr(&item.expr)?, 0)
+                        (bind_expr(raw_expr)?, 0)
                     }
                 }
-                _ => (bind_expr(&item.expr)?, 0),
+                _ => (bind_expr(raw_expr)?, 0),
             };
+            let expr_type = expr_sql_type_hint(&expr).unwrap_or(SqlType::new(SqlTypeKind::Text));
+            let expr = match explicit_collation {
+                Some(collation) => bind_explicit_collation(expr, expr_type, collation, catalog)?,
+                None => expr,
+            };
+            let (expr, collation_oid) = finalize_order_by_expr(expr, catalog)?;
             Ok(crate::backend::executor::OrderByEntry {
                 expr,
                 ressortgroupref,
                 descending: item.descending,
                 nulls_first: item.nulls_first,
+                collation_oid,
             })
         })
         .collect()

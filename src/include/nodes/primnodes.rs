@@ -162,6 +162,7 @@ pub struct OrderByEntry {
     pub ressortgroupref: usize,
     pub descending: bool,
     pub nulls_first: Option<bool>,
+    pub collation_oid: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,6 +171,7 @@ pub struct SortGroupClause {
     pub tle_sort_group_ref: usize,
     pub descending: bool,
     pub nulls_first: Option<bool>,
+    pub collation_oid: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -994,6 +996,7 @@ pub struct OpExpr {
     pub op: OpExprKind,
     pub opresulttype: SqlType,
     pub args: Vec<Expr>,
+    pub collation_oid: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1043,6 +1046,7 @@ pub struct ScalarArrayOpExpr {
     pub use_or: bool,
     pub left: Box<Expr>,
     pub right: Box<Expr>,
+    pub collation_oid: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1093,18 +1097,24 @@ pub enum Expr {
     ScalarArrayOp(Box<ScalarArrayOpExpr>),
     Xml(Box<XmlExpr>),
     Cast(Box<Expr>, SqlType),
+    Collate {
+        expr: Box<Expr>,
+        collation_oid: u32,
+    },
     Like {
         expr: Box<Expr>,
         pattern: Box<Expr>,
         escape: Option<Box<Expr>>,
         case_insensitive: bool,
         negated: bool,
+        collation_oid: Option<u32>,
     },
     Similar {
         expr: Box<Expr>,
         pattern: Box<Expr>,
         escape: Option<Box<Expr>>,
         negated: bool,
+        collation_oid: Option<u32>,
     },
     IsNull(Box<Expr>),
     IsNotNull(Box<Expr>),
@@ -1149,12 +1159,22 @@ pub enum Expr {
 
 impl Expr {
     pub fn op(op: OpExprKind, opresulttype: SqlType, args: Vec<Expr>) -> Self {
+        Self::op_with_collation(op, opresulttype, args, None)
+    }
+
+    pub fn op_with_collation(
+        op: OpExprKind,
+        opresulttype: SqlType,
+        args: Vec<Expr>,
+        collation_oid: Option<u32>,
+    ) -> Self {
         Expr::Op(Box::new(OpExpr {
             opno: 0,
             opfuncid: 0,
             op,
             opresulttype,
             args,
+            collation_oid,
         }))
     }
 
@@ -1370,11 +1390,22 @@ impl Expr {
         left: Expr,
         right: Expr,
     ) -> Self {
+        Self::scalar_array_op_with_collation(op, use_or, left, right, None)
+    }
+
+    pub fn scalar_array_op_with_collation(
+        op: SubqueryComparisonOp,
+        use_or: bool,
+        left: Expr,
+        right: Expr,
+        collation_oid: Option<u32>,
+    ) -> Self {
         Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
             op,
             use_or,
             left: Box::new(left),
             right: Box::new(right),
+            collation_oid,
         }))
     }
 }
@@ -1464,6 +1495,7 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
             ))
         }
         Expr::SubPlan(subplan) => subplan.first_col_type,
+        Expr::Collate { expr, .. } => expr_sql_type_hint(expr),
         Expr::CurrentUser | Expr::SessionUser | Expr::CurrentRole => {
             Some(SqlType::new(SqlTypeKind::Name))
         }
