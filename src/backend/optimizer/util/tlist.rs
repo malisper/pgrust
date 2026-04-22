@@ -20,6 +20,7 @@ pub(super) fn pathkeys_to_order_items(pathkeys: &[PathKey]) -> Vec<OrderByEntry>
             ressortgroupref: key.ressortgroupref,
             descending: key.descending,
             nulls_first: key.nulls_first,
+            collation_oid: key.collation_oid,
         })
         .collect()
 }
@@ -208,6 +209,7 @@ pub(super) fn lower_pathkeys_for_path(
                 ressortgroupref: key.ressortgroupref,
                 descending: key.descending,
                 nulls_first: key.nulls_first,
+                collation_oid: key.collation_oid,
             })
             .collect(),
         None => pathkeys
@@ -231,6 +233,7 @@ pub(super) fn lower_pathkeys_for_path(
                     ressortgroupref: key.ressortgroupref,
                     descending: key.descending,
                     nulls_first: key.nulls_first,
+                    collation_oid: key.collation_oid,
                 }
             })
             .collect(),

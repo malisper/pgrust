@@ -320,7 +320,7 @@ impl AccumState {
                         *min = Some(match min.take() {
                             None => value.clone(),
                             Some(current) => {
-                                if compare_order_values(value, &current, None, false)
+                                if compare_order_values(value, &current, None, None, false)?
                                     == Ordering::Less
                                 {
                                     value.clone()
@@ -340,7 +340,7 @@ impl AccumState {
                         *max = Some(match max.take() {
                             None => value.clone(),
                             Some(current) => {
-                                if compare_order_values(value, &current, None, false)
+                                if compare_order_values(value, &current, None, None, false)?
                                     == Ordering::Greater
                                 {
                                     value.clone()

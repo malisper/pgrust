@@ -179,6 +179,13 @@ pub(super) fn finalize_expr_subqueries(
             Box::new(finalize_expr_subqueries(*inner, catalog, subplans)),
             ty,
         ),
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => Expr::Collate {
+            expr: Box::new(finalize_expr_subqueries(*expr, catalog, subplans)),
+            collation_oid,
+        },
         Expr::IsNull(inner) => Expr::IsNull(Box::new(finalize_expr_subqueries(
             *inner, catalog, subplans,
         ))),
@@ -199,23 +206,27 @@ pub(super) fn finalize_expr_subqueries(
             escape,
             case_insensitive,
             negated,
+            collation_oid,
         } => Expr::Like {
             expr: Box::new(finalize_expr_subqueries(*expr, catalog, subplans)),
             pattern: Box::new(finalize_expr_subqueries(*pattern, catalog, subplans)),
             escape: escape.map(|expr| Box::new(finalize_expr_subqueries(*expr, catalog, subplans))),
             case_insensitive,
             negated,
+            collation_oid,
         },
         Expr::Similar {
             expr,
             pattern,
             escape,
             negated,
+            collation_oid,
         } => Expr::Similar {
             expr: Box::new(finalize_expr_subqueries(*expr, catalog, subplans)),
             pattern: Box::new(finalize_expr_subqueries(*pattern, catalog, subplans)),
             escape: escape.map(|expr| Box::new(finalize_expr_subqueries(*expr, catalog, subplans))),
             negated,
+            collation_oid,
         },
         Expr::ArrayLiteral {
             elements,
@@ -552,6 +563,13 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
             },
         )),
         Expr::Cast(inner, ty) => Expr::Cast(Box::new(rebase_expr_subplan_ids(*inner, base)), ty),
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => Expr::Collate {
+            expr: Box::new(rebase_expr_subplan_ids(*expr, base)),
+            collation_oid,
+        },
         Expr::IsNull(inner) => Expr::IsNull(Box::new(rebase_expr_subplan_ids(*inner, base))),
         Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(rebase_expr_subplan_ids(*inner, base))),
         Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
@@ -568,23 +586,27 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
             escape,
             case_insensitive,
             negated,
+            collation_oid,
         } => Expr::Like {
             expr: Box::new(rebase_expr_subplan_ids(*expr, base)),
             pattern: Box::new(rebase_expr_subplan_ids(*pattern, base)),
             escape: escape.map(|expr| Box::new(rebase_expr_subplan_ids(*expr, base))),
             case_insensitive,
             negated,
+            collation_oid,
         },
         Expr::Similar {
             expr,
             pattern,
             escape,
             negated,
+            collation_oid,
         } => Expr::Similar {
             expr: Box::new(rebase_expr_subplan_ids(*expr, base)),
             pattern: Box::new(rebase_expr_subplan_ids(*pattern, base)),
             escape: escape.map(|expr| Box::new(rebase_expr_subplan_ids(*expr, base))),
             negated,
+            collation_oid,
         },
         Expr::ArrayLiteral {
             elements,
@@ -982,6 +1004,7 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                     ressortgroupref: item.ressortgroupref,
                     descending: item.descending,
                     nulls_first: item.nulls_first,
+                    collation_oid: item.collation_oid,
                 })
                 .collect(),
         },
@@ -1275,6 +1298,7 @@ pub(super) fn finalize_plan_subqueries(
                     ressortgroupref: item.ressortgroupref,
                     descending: item.descending,
                     nulls_first: item.nulls_first,
+                    collation_oid: item.collation_oid,
                 })
                 .collect(),
         },

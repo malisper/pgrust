@@ -154,6 +154,7 @@ fn query_order_items_for_base_rel(root: &PlannerInfo, rtindex: usize) -> Option<
             ressortgroupref: key.ressortgroupref,
             descending: key.descending,
             nulls_first: key.nulls_first,
+            collation_oid: key.collation_oid,
         })
         .collect::<Vec<_>>();
     if expanded_pathkeys
@@ -483,6 +484,7 @@ fn build_subquery_scan_path(
                     ressortgroupref: key.ressortgroupref,
                     descending: key.descending,
                     nulls_first: key.nulls_first,
+                    collation_oid: key.collation_oid,
                 })
         })
         .collect();

@@ -3,8 +3,9 @@ use std::sync::Arc;
 
 use super::super::*;
 use crate::backend::parser::{
-    CatalogLookup, CreateTriggerStatement, DropTriggerStatement, ParseError, SqlTypeKind,
-    TriggerEvent, TriggerTiming, bind_scalar_expr_in_named_relation_scope, parse_expr,
+    CatalogLookup, CommentOnTriggerStatement, CreateTriggerStatement, DropTriggerStatement,
+    ParseError, SqlTypeKind, TriggerEvent, TriggerTiming,
+    bind_scalar_expr_in_named_relation_scope, parse_expr,
 };
 use crate::include::catalog::{PG_LANGUAGE_PLPGSQL_OID, PgTriggerRow};
 use crate::pgrust::database::ddl::{ensure_relation_owner, lookup_heap_relation_for_ddl};
@@ -200,6 +201,75 @@ impl Database {
         catalog_effects.push(effect);
         Ok(StatementResult::AffectedRows(0))
     }
+
+    pub(crate) fn execute_comment_on_trigger_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &CommentOnTriggerStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
+        let relation = lookup_heap_relation_for_ddl(&catalog, &stmt.table_name)?;
+        self.table_locks.lock_table_interruptible(
+            relation.rel,
+            TableLockMode::AccessExclusive,
+            client_id,
+            interrupts.as_ref(),
+        )?;
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_comment_on_trigger_stmt_in_transaction_with_search_path(
+            client_id,
+            stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        self.table_locks.unlock_table(relation.rel, client_id);
+        result
+    }
+
+    pub(crate) fn execute_comment_on_trigger_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &CommentOnTriggerStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let relation = lookup_heap_relation_for_ddl(&catalog, &stmt.table_name)?;
+        ensure_relation_owner(self, client_id, &relation, &stmt.table_name)?;
+        let trigger =
+            lookup_trigger_row(&catalog, relation.relation_oid, &stmt.trigger_name).ok_or_else(
+                || missing_trigger_error(&stmt.trigger_name, &stmt.table_name),
+            )?;
+
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .comment_trigger_mvcc(trigger.oid, stmt.comment.as_deref(), &ctx)
+            .map_err(map_catalog_error)?;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        self.plan_cache.invalidate_all();
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
 }
 
 fn format_trigger_relation_name(stmt: &CreateTriggerStatement) -> String {
@@ -214,6 +284,29 @@ fn format_trigger_drop_relation_name(stmt: &DropTriggerStatement) -> String {
         .as_deref()
         .map(|schema| format!("{schema}.{}", stmt.table_name))
         .unwrap_or_else(|| stmt.table_name.clone())
+}
+
+fn lookup_trigger_row(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    trigger_name: &str,
+) -> Option<PgTriggerRow> {
+    catalog
+        .trigger_rows_for_relation(relation_oid)
+        .into_iter()
+        .find(|row| row.tgname.eq_ignore_ascii_case(trigger_name))
+}
+
+fn missing_trigger_error(trigger_name: &str, table_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "trigger \"{}\" for table \"{}\" does not exist",
+            trigger_name, table_name
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "42704",
+    }
 }
 
 fn resolve_trigger_function(

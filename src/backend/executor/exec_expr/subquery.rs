@@ -145,6 +145,7 @@ pub(super) fn eval_exists_subquery(
 pub(super) fn eval_quantified_subquery(
     left_value: &Value,
     op: SubqueryComparisonOp,
+    collation_oid: Option<u32>,
     is_all: bool,
     subplan: &crate::include::nodes::primnodes::SubPlan,
     slot: &mut TupleSlot,
@@ -185,7 +186,7 @@ pub(super) fn eval_quantified_subquery(
                     hint: None,
                 });
             }
-            match compare_subquery_values(left_value, &values[0], op)? {
+            match compare_subquery_values(left_value, &values[0], op, collation_oid)? {
                 Value::Bool(result) => {
                     if !is_all && result {
                         return Ok(Value::Bool(true));
@@ -330,15 +331,16 @@ pub(super) fn compare_subquery_values(
     left: &Value,
     right: &Value,
     op: SubqueryComparisonOp,
+    collation_oid: Option<u32>,
 ) -> Result<Value, ExecError> {
     let (left, right) = coerce_quantified_compare_values(left, right)?;
     match op {
-        SubqueryComparisonOp::Eq => compare_values("=", left, right),
-        SubqueryComparisonOp::NotEq => not_equal_values(left, right),
-        SubqueryComparisonOp::Lt => order_values("<", left, right),
-        SubqueryComparisonOp::LtEq => order_values("<=", left, right),
-        SubqueryComparisonOp::Gt => order_values(">", left, right),
-        SubqueryComparisonOp::GtEq => order_values(">=", left, right),
+        SubqueryComparisonOp::Eq => compare_values("=", left, right, collation_oid),
+        SubqueryComparisonOp::NotEq => not_equal_values(left, right, collation_oid),
+        SubqueryComparisonOp::Lt => order_values("<", left, right, collation_oid),
+        SubqueryComparisonOp::LtEq => order_values("<=", left, right, collation_oid),
+        SubqueryComparisonOp::Gt => order_values(">", left, right, collation_oid),
+        SubqueryComparisonOp::GtEq => order_values(">=", left, right, collation_oid),
         SubqueryComparisonOp::Match => match (&left, &right) {
             (Value::TsVector(vector), Value::TsQuery(query)) => Ok(Value::Bool(
                 crate::backend::executor::eval_tsvector_matches_tsquery(vector, query),
@@ -352,12 +354,18 @@ pub(super) fn compare_subquery_values(
                 right,
             }),
         },
-        SubqueryComparisonOp::Like => eval_like(&left, &right, None, false, false),
-        SubqueryComparisonOp::NotLike => eval_like(&left, &right, None, false, true),
-        SubqueryComparisonOp::ILike => eval_like(&left, &right, None, true, false),
-        SubqueryComparisonOp::NotILike => eval_like(&left, &right, None, true, true),
-        SubqueryComparisonOp::Similar => eval_similar(&left, &right, None, false),
-        SubqueryComparisonOp::NotSimilar => eval_similar(&left, &right, None, true),
+        SubqueryComparisonOp::Like => eval_like(&left, &right, None, collation_oid, false, false),
+        SubqueryComparisonOp::NotLike => {
+            eval_like(&left, &right, None, collation_oid, false, true)
+        }
+        SubqueryComparisonOp::ILike => eval_like(&left, &right, None, collation_oid, true, false),
+        SubqueryComparisonOp::NotILike => {
+            eval_like(&left, &right, None, collation_oid, true, true)
+        }
+        SubqueryComparisonOp::Similar => eval_similar(&left, &right, None, collation_oid, false),
+        SubqueryComparisonOp::NotSimilar => {
+            eval_similar(&left, &right, None, collation_oid, true)
+        }
     }
 }
 

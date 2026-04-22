@@ -183,7 +183,10 @@ fn expr_references_local_cte(expr: &Expr, local_ctes: &HashMap<usize, String>) -
             }),
         Expr::ScalarArrayOp(saop) => expr_references_local_cte(&saop.left, local_ctes)
             .or_else(|| expr_references_local_cte(&saop.right, local_ctes)),
-        Expr::Cast(inner, _) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => {
             expr_references_local_cte(inner, local_ctes)
         }
         Expr::Like {
@@ -514,28 +517,31 @@ fn bind_grouped_window_agg_call(
     let bound_order_by = order_by
         .iter()
         .map(|item| {
+            let bound_expr = bind_agg_output_expr(
+                &item.expr,
+                group_by_exprs,
+                group_key_exprs,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                agg_list,
+                n_keys,
+            )?;
+            let (expr, collation_oid) = finalize_order_by_expr(bound_expr, catalog)?;
             Ok(OrderByEntry {
-                expr: bind_agg_output_expr(
-                    &item.expr,
-                    group_by_exprs,
-                    group_key_exprs,
-                    input_scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    agg_list,
-                    n_keys,
-                )?,
+                expr,
                 ressortgroupref: 0,
                 descending: item.descending,
                 nulls_first: item.nulls_first,
+                collation_oid,
             })
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
     for item in &bound_order_by {
         reject_nested_local_ctes_in_agg_expr(&item.expr)?;
     }
-    let spec = bind_window_spec(over, |expr| {
+    let spec = bind_window_spec(over, catalog, |expr| {
         bind_agg_output_expr(
             expr,
             group_by_exprs,
@@ -633,7 +639,7 @@ fn bind_grouped_window_func_call(
             actual: name.to_string(),
         });
     }
-    let spec = bind_window_spec(over, |expr| {
+    let spec = bind_window_spec(over, catalog, |expr| {
         bind_agg_output_expr(
             expr,
             group_by_exprs,
@@ -778,6 +784,28 @@ pub(super) fn bind_agg_output_expr_in_clause(
     }
 
     match expr {
+        SqlExpr::Collate { expr, collation } => {
+            let inner_type = grouped_infer_sql_expr_type(
+                expr,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+            );
+            let bound = bind_agg_output_expr_in_clause(
+                expr,
+                clause,
+                group_by_exprs,
+                group_key_exprs,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                agg_list,
+                n_keys,
+            )?;
+            bind_explicit_collation(bound, inner_type, collation, catalog)
+        }
         SqlExpr::Xml(_) => Err(ParseError::FeatureNotSupported(
             "xml expressions in grouped aggregate output are not implemented".into(),
         )),
@@ -898,17 +926,21 @@ pub(super) fn bind_agg_output_expr_in_clause(
                         let bound_order_by = order_by
                             .iter()
                             .map(|item| {
+                                let bound_expr = bind_grouped_plain_expr(
+                                    &item.expr,
+                                    input_scope,
+                                    catalog,
+                                    outer_scopes,
+                                    grouped_outer,
+                                )?;
+                                let (expr, collation_oid) =
+                                    finalize_order_by_expr(bound_expr, catalog)?;
                                 Ok(OrderByEntry {
-                                    expr: bind_grouped_plain_expr(
-                                        &item.expr,
-                                        input_scope,
-                                        catalog,
-                                        outer_scopes,
-                                        grouped_outer,
-                                    )?,
+                                    expr,
                                     ressortgroupref: 0,
                                     descending: item.descending,
                                     nulls_first: item.nulls_first,
+                                    collation_oid,
                                 })
                             })
                             .collect::<Result<Vec<_>, ParseError>>()?;
@@ -1598,6 +1630,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             },
             case_insensitive: *case_insensitive,
             negated: *negated,
+            collation_oid: None,
         }),
         SqlExpr::Similar {
             expr,
@@ -1642,6 +1675,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 None => None,
             },
             negated: *negated,
+            collation_oid: None,
         }),
         SqlExpr::Case {
             arg,
@@ -1717,6 +1751,8 @@ pub(super) fn bind_agg_output_expr_in_clause(
                         right_bound,
                         raw_right_type,
                         raw_right_type,
+                        None,
+                        None,
                         catalog,
                     )?
                 } else {

@@ -149,23 +149,27 @@ pub(super) fn translate_append_rel_expr(expr: Expr, info: &AppendRelInfo) -> Exp
             escape,
             case_insensitive,
             negated,
+            collation_oid,
         } => Expr::Like {
             expr: Box::new(translate_append_rel_expr(*expr, info)),
             pattern: Box::new(translate_append_rel_expr(*pattern, info)),
             escape: escape.map(|expr| Box::new(translate_append_rel_expr(*expr, info))),
             case_insensitive,
             negated,
+            collation_oid,
         },
         Expr::Similar {
             expr,
             pattern,
             escape,
             negated,
+            collation_oid,
         } => Expr::Similar {
             expr: Box::new(translate_append_rel_expr(*expr, info)),
             pattern: Box::new(translate_append_rel_expr(*pattern, info)),
             escape: escape.map(|expr| Box::new(translate_append_rel_expr(*expr, info))),
             negated,
+            collation_oid,
         },
         Expr::IsNull(inner) => Expr::IsNull(Box::new(translate_append_rel_expr(*inner, info))),
         Expr::IsNotNull(inner) => {

@@ -189,11 +189,29 @@ pub(super) fn bind_quantified_array_expr(
     };
     let bound_array =
         bind_expr_with_outer_and_ctes(array, scope, catalog, outer_scopes, grouped_outer, ctes)?;
-    let left = coerce_bound_expr(
-        bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?,
-        raw_left_type,
-        left_type,
-    );
+    let bound_left =
+        bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+    let (bound_left, left_explicit_collation) = strip_explicit_collation(bound_left);
+    let left = coerce_bound_expr(bound_left, raw_left_type, left_type);
     let right = coerce_bound_expr(bound_array, raw_array_type, target_array_type);
-    Ok(Expr::scalar_array_op(op, !is_all, left, right))
+    let collation_oid = consumer_for_subquery_comparison_op(op)
+        .map(|consumer| {
+            derive_consumer_collation(
+                catalog,
+                consumer,
+                &[
+                    (left_type, left_explicit_collation),
+                    (target_array_type.element_type(), None),
+                ],
+            )
+        })
+        .transpose()?
+        .flatten();
+    Ok(Expr::scalar_array_op_with_collation(
+        op,
+        !is_all,
+        left,
+        right,
+        collation_oid,
+    ))
 }

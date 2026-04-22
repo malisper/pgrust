@@ -1752,7 +1752,10 @@ fn reject_unsupported_check_expr(expr: &Expr) -> Result<(), ParseError> {
             reject_unsupported_check_expr(&expr.left)?;
             reject_unsupported_check_expr(&expr.right)
         }
-        Expr::Cast(inner, _) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => {
             reject_unsupported_check_expr(inner)
         }
         Expr::Like {
