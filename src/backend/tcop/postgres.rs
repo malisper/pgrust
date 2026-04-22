@@ -35,8 +35,8 @@ use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value,
 };
 use crate::include::nodes::primnodes::RelationDesc;
-use crate::pgrust::database::ddl::format_sql_type_name;
 use crate::pgrust::compact_string::CompactString;
+use crate::pgrust::database::ddl::format_sql_type_name;
 use crate::pl::plpgsql::{PlpgsqlNotice, RaiseLevel, clear_notices, take_notices};
 
 fn exec_error_sqlstate(e: &ExecError) -> &'static str {
@@ -171,8 +171,7 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         e,
         ExecError::DetailedError { message, .. }
             if message == "invalid input syntax for type numeric: \" \""
-    )
-        && sql.to_ascii_lowercase().contains("to_number(")
+    ) && sql.to_ascii_lowercase().contains("to_number(")
     {
         return None;
     }
@@ -347,7 +346,10 @@ fn find_subscript_expression_position(sql: &str) -> Option<usize> {
 
 fn find_subscript_base_start(bytes: &[u8], bracket: usize) -> Option<usize> {
     let mut pos = bracket.checked_sub(1)?;
-    while bytes.get(pos).is_some_and(|byte| byte.is_ascii_whitespace()) {
+    while bytes
+        .get(pos)
+        .is_some_and(|byte| byte.is_ascii_whitespace())
+    {
         pos = pos.checked_sub(1)?;
     }
     match *bytes.get(pos)? {
@@ -1912,7 +1914,12 @@ fn psql_index_display_columns(
                             .get((*attnum as usize).saturating_sub(1))
                             .map(|column| column.name.clone())
                     })
-                    .or_else(|| index_desc.columns.get(index).map(|column| column.name.clone()))
+                    .or_else(|| {
+                        index_desc
+                            .columns
+                            .get(index)
+                            .map(|column| column.name.clone())
+                    })
                     .unwrap_or_else(|| format!("column{}", index + 1));
                 return PsqlIndexDisplayColumn {
                     display_name: name.clone(),
@@ -1922,7 +1929,12 @@ fn psql_index_display_columns(
             let expression_sql = expression_sqls
                 .get(expression_index)
                 .cloned()
-                .or_else(|| index_desc.columns.get(index).map(|column| column.name.clone()))
+                .or_else(|| {
+                    index_desc
+                        .columns
+                        .get(index)
+                        .map(|column| column.name.clone())
+                })
                 .unwrap_or_else(|| format!("expr{}", index + 1));
             expression_index += 1;
             PsqlIndexDisplayColumn {
@@ -4153,9 +4165,9 @@ mod tests {
     #[test]
     fn parse_errors_use_postgres_sqlstates() {
         assert_eq!(
-            exec_error_sqlstate(&ExecError::Parse(crate::backend::parser::ParseError::UnknownTable(
-                "items".into(),
-            ))),
+            exec_error_sqlstate(&ExecError::Parse(
+                crate::backend::parser::ParseError::UnknownTable("items".into(),)
+            )),
             "42P01"
         );
         assert_eq!(
@@ -5055,8 +5067,11 @@ mod tests {
             .unwrap();
         db.execute(1, "create index attmp_idx on attmp (a, (d + e), b)")
             .unwrap();
-        db.execute(1, "alter index attmp_idx alter column 2 set statistics 1000")
-            .unwrap();
+        db.execute(
+            1,
+            "alter index attmp_idx alter column 2 set statistics 1000",
+        )
+        .unwrap();
         let entry = session
             .catalog_lookup(&db)
             .lookup_any_relation("attmp_idx")
@@ -5758,7 +5773,11 @@ mod tests {
         )
         .unwrap();
 
-        assert!(output.windows("C54000\0".len()).any(|window| window == b"C54000\0"));
+        assert!(
+            output
+                .windows("C54000\0".len())
+                .any(|window| window == b"C54000\0")
+        );
     }
 
     fn split_simple_query_statements_keeps_rule_action_lists_together() {

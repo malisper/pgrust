@@ -90,7 +90,11 @@ impl PlanNode for HashJoinState {
                         let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
                         Value::materialize_all(&mut values);
                         self.current_outer = Some(MaterializedRow::new(
-                            TupleSlot::virtual_row_with_metadata(values, slot.tid(), slot.table_oid),
+                            TupleSlot::virtual_row_with_metadata(
+                                values,
+                                slot.tid(),
+                                slot.table_oid,
+                            ),
                             self.left.current_system_bindings().to_vec(),
                         ));
                         self.current_bucket_entries.clear();

@@ -149,11 +149,9 @@ impl AdvisoryLockManager {
     ) -> bool {
         let mut state = self.state.lock();
         let key_state = state.keys.entry(key).or_default();
-        if key_state
-            .granted
-            .iter()
-            .any(|entry| conflicts_between_owners(entry.owner, owner) && entry.mode.conflicts_with(mode))
-        {
+        if key_state.granted.iter().any(|entry| {
+            conflicts_between_owners(entry.owner, owner) && entry.mode.conflicts_with(mode)
+        }) {
             return false;
         }
         grant_lock(key_state, owner, mode);
@@ -172,10 +170,9 @@ impl AdvisoryLockManager {
         let mut waiting = false;
         loop {
             let key_state = state.keys.entry(key).or_default();
-            let has_conflict = key_state
-                .granted
-                .iter()
-                .any(|entry| conflicts_between_owners(entry.owner, owner) && entry.mode.conflicts_with(mode));
+            let has_conflict = key_state.granted.iter().any(|entry| {
+                conflicts_between_owners(entry.owner, owner) && entry.mode.conflicts_with(mode)
+            });
             if !has_conflict {
                 if waiting {
                     remove_waiter(key_state, waiter_id);

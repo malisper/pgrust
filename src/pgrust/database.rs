@@ -50,9 +50,9 @@ use crate::backend::parser::{
     normalize_create_table_as_name, normalize_create_table_name, normalize_create_view_name,
 };
 use crate::backend::storage::lmgr::{
-    AdvisoryLockKey, AdvisoryLockManager, AdvisoryLockSnapshotRow, TableLockManager,
-    TableLockMode, TableLockSnapshotRow, lock_relations_interruptible,
-    lock_tables_interruptible, unlock_relations,
+    AdvisoryLockKey, AdvisoryLockManager, AdvisoryLockSnapshotRow, TableLockManager, TableLockMode,
+    TableLockSnapshotRow, lock_relations_interruptible, lock_tables_interruptible,
+    unlock_relations,
 };
 use crate::backend::storage::smgr::{RelFileLocator, StorageManager};
 pub use crate::backend::utils::activity::{DatabaseStatsStore, SessionStatsState};
@@ -100,9 +100,8 @@ pub(crate) use large_objects::LargeObjectRuntime;
 use relation_refs::{collect_direct_relation_oids_from_select, collect_rels_from_planned_stmt};
 pub(crate) use sequences::{
     SequenceData, SequenceMutationEffect, SequenceOwnedByRef, SequenceRuntime,
-    default_sequence_name_base, default_sequence_oid_from_default_expr,
-    format_nextval_default_oid, initial_sequence_state, resolve_sequence_options_spec,
-    sequence_type_oid_for_serial_kind,
+    default_sequence_name_base, default_sequence_oid_from_default_expr, format_nextval_default_oid,
+    initial_sequence_state, resolve_sequence_options_spec, sequence_type_oid_for_serial_kind,
 };
 use toast::{toast_bindings_from_create_result, toast_bindings_from_temp_relation};
 use txn::AutoCommitGuard;

@@ -5,8 +5,8 @@ mod views;
 
 use row_security::apply_query_row_security_with_active_relations;
 pub(crate) use row_security::{
-    build_target_relation_row_security, relation_has_row_security, RlsWriteCheck,
-    RlsWriteCheckSource,
+    RlsWriteCheck, RlsWriteCheckSource, build_target_relation_row_security,
+    relation_has_row_security,
 };
 pub(crate) use rules::{format_stored_rule_definition, split_stored_rule_action_sql};
 pub(crate) use view_dml::{
@@ -878,7 +878,7 @@ fn rewrite_semantic_expr(
             escape: escape
                 .map(|expr| {
                     rewrite_semantic_expr(*expr, catalog, expanded_views, active_policy_relations)
-            })
+                })
                 .transpose()?
                 .map(Box::new),
             negated,

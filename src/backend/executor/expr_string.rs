@@ -173,8 +173,7 @@ fn format_size_pretty_int64(mut size: i64) -> String {
             return format!("{size} {}", unit.name);
         }
         let next = next.expect("checked above");
-        let shift_by =
-            next.unitbits - unit.unitbits - u8::from(next.round) + u8::from(unit.round);
+        let shift_by = next.unitbits - unit.unitbits - u8::from(next.round) + u8::from(unit.round);
         size /= 1_i64 << shift_by;
     }
     unreachable!("size units are non-empty")
@@ -357,8 +356,7 @@ fn invalid_size_unit_error(input: &str, unit: &str) -> ExecError {
         message: format!("invalid size: \"{input}\""),
         detail: Some(format!("Invalid size unit: \"{unit}\".")),
         hint: Some(
-            "Valid units are \"bytes\", \"B\", \"kB\", \"MB\", \"GB\", \"TB\", and \"PB\"."
-                .into(),
+            "Valid units are \"bytes\", \"B\", \"kB\", \"MB\", \"GB\", \"TB\", and \"PB\".".into(),
         ),
         sqlstate: "22023",
     }

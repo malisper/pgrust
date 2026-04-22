@@ -402,9 +402,7 @@ pub(super) fn collect_aggs(
             collect_aggs(l, aggs);
             collect_aggs(r, aggs);
         }
-        SqlExpr::Cast(inner, _) | SqlExpr::Collate { expr: inner, .. } => {
-            collect_aggs(inner, aggs)
-        }
+        SqlExpr::Cast(inner, _) | SqlExpr::Collate { expr: inner, .. } => collect_aggs(inner, aggs),
         SqlExpr::Add(l, r)
         | SqlExpr::Sub(l, r)
         | SqlExpr::BitAnd(l, r)

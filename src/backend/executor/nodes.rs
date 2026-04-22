@@ -407,8 +407,7 @@ impl PlanNode for AppendState {
                     .current_bindings
                     .first()
                     .map(|binding| binding.table_oid);
-                self.slot
-                    .store_virtual_row(values, slot.tid(), table_oid);
+                self.slot.store_virtual_row(values, slot.tid(), table_oid);
                 set_active_system_bindings(ctx, &self.current_bindings);
                 finish_row(&mut self.stats, start);
                 return Ok(Some(&mut self.slot));
@@ -959,7 +958,9 @@ fn render_explain_expr_inner_with_qualifier(
                 let rendered = bool_expr
                     .args
                     .iter()
-                    .map(|arg| render_explain_expr_inner_with_qualifier(arg, qualifier, column_names))
+                    .map(|arg| {
+                        render_explain_expr_inner_with_qualifier(arg, qualifier, column_names)
+                    })
                     .collect::<Vec<_>>();
                 format!("({})", rendered.join(" AND "))
             }
@@ -967,7 +968,9 @@ fn render_explain_expr_inner_with_qualifier(
                 let rendered = bool_expr
                     .args
                     .iter()
-                    .map(|arg| render_explain_expr_inner_with_qualifier(arg, qualifier, column_names))
+                    .map(|arg| {
+                        render_explain_expr_inner_with_qualifier(arg, qualifier, column_names)
+                    })
                     .collect::<Vec<_>>();
                 format!("({})", rendered.join(" OR "))
             }
@@ -1846,12 +1849,8 @@ impl PlanNode for OrderByState {
             }
 
             let mut sort_error = None;
-            keyed_rows.sort_by(
-                |(left_keys, _), (right_keys, _)| match compare_order_by_keys(
-                    &self.items,
-                    left_keys,
-                    right_keys,
-                ) {
+            keyed_rows.sort_by(|(left_keys, _), (right_keys, _)| {
+                match compare_order_by_keys(&self.items, left_keys, right_keys) {
                     Ok(ordering) => ordering,
                     Err(err) => {
                         if sort_error.is_none() {
@@ -1859,8 +1858,8 @@ impl PlanNode for OrderByState {
                         }
                         std::cmp::Ordering::Equal
                     }
-                },
-            );
+                }
+            });
             if let Some(err) = sort_error {
                 return Err(err);
             }
@@ -3075,11 +3074,8 @@ impl PlanNode for ProjectSetState {
                 }
             }
 
-            self.slot.store_virtual_row(
-                values,
-                input_slot.slot.tid(),
-                input_slot.slot.table_oid,
-            );
+            self.slot
+                .store_virtual_row(values, input_slot.slot.tid(), input_slot.slot.table_oid);
             self.current_bindings = input_slot.system_bindings.clone();
             set_active_system_bindings(ctx, &self.current_bindings);
 

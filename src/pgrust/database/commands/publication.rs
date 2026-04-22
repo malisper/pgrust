@@ -1345,8 +1345,9 @@ mod tests {
             },
         };
 
-        let unlogged_err = validate_publishable_relation(&db, 1, &unlogged_relation, "unlogged_items")
-            .unwrap_err();
+        let unlogged_err =
+            validate_publishable_relation(&db, 1, &unlogged_relation, "unlogged_items")
+                .unwrap_err();
         match unlogged_err {
             ExecError::DetailedError {
                 message,
@@ -1354,7 +1355,10 @@ mod tests {
                 sqlstate,
                 ..
             } => {
-                assert_eq!(message, "cannot add relation \"unlogged_items\" to publication");
+                assert_eq!(
+                    message,
+                    "cannot add relation \"unlogged_items\" to publication"
+                );
                 assert_eq!(
                     detail.as_deref(),
                     Some("This operation is not supported for unlogged tables.")
