@@ -4,6 +4,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use crate::BufferPool;
+use crate::backend::access::heap::vacuumlazy::vacuum_relation_scan;
 use crate::backend::access::index::indexam::{
     index_beginscan, index_build_stub, index_bulk_delete, index_endscan, index_getnext,
     index_vacuum_cleanup,
@@ -395,7 +396,10 @@ pub fn vacuum_system_catalog_indexes_for_kinds_in_db(
                 index_desc: system_catalog_index_desc(*descriptor),
                 index_meta: system_catalog_index_relcache(*descriptor),
             };
-            let stats = index_bulk_delete(&ctx, BTREE_AM_OID, None)?;
+            let scan = vacuum_relation_scan(pool, 0, ctx.heap_relation, txns)
+                .map_err(|err| CatalogError::Io(format!("catalog heap vacuum scan failed: {err:?}")))?;
+            let dead_item_callback = |tid| scan.dead_tids.contains(&tid);
+            let stats = index_bulk_delete(&ctx, BTREE_AM_OID, &dead_item_callback, None)?;
             let _ = index_vacuum_cleanup(&ctx, BTREE_AM_OID, Some(stats))?;
         }
     }

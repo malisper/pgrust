@@ -12,6 +12,13 @@ pub use crate::backend::utils::time::snapmgr::Snapshot;
 pub type TransactionId = u32;
 pub type CommandId = u32;
 pub const INVALID_TRANSACTION_ID: TransactionId = 0;
+pub const BOOTSTRAP_TRANSACTION_ID: TransactionId = 1;
+pub const FROZEN_TRANSACTION_ID: TransactionId = 2;
+pub const FIRST_NORMAL_TRANSACTION_ID: TransactionId = 3;
+
+pub const fn transaction_id_is_normal(xid: TransactionId) -> bool {
+    xid >= FIRST_NORMAL_TRANSACTION_ID
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransactionStatus {
@@ -59,9 +66,10 @@ impl Clone for TransactionManager {
 
 impl TransactionManager {
     pub fn new_ephemeral() -> Self {
-        let clog_buf = INVALID_TRANSACTION_ID.to_le_bytes().to_vec();
+        let initial_next_xid = FIRST_NORMAL_TRANSACTION_ID - 1;
+        let clog_buf = initial_next_xid.to_le_bytes().to_vec();
         Self {
-            next_xid: INVALID_TRANSACTION_ID,
+            next_xid: initial_next_xid,
             statuses: BTreeMap::new(),
             in_progress: Vec::new(),
             status_path: None,
@@ -90,7 +98,7 @@ impl TransactionManager {
                 .open(&path)
                 .map_err(|e| MvccError::Io(e.to_string()))?;
             Ok(Self {
-                next_xid,
+                next_xid: next_xid.max(FIRST_NORMAL_TRANSACTION_ID - 1),
                 statuses,
                 in_progress,
                 status_path: Some(path),
@@ -105,10 +113,11 @@ impl TransactionManager {
                 .truncate(true)
                 .open(&path)
                 .map_err(|e| MvccError::Io(e.to_string()))?;
-            let clog_buf = INVALID_TRANSACTION_ID.to_le_bytes().to_vec();
+            let initial_next_xid = FIRST_NORMAL_TRANSACTION_ID - 1;
+            let clog_buf = initial_next_xid.to_le_bytes().to_vec();
             Self::write_initial_status_file(&mut file, &clog_buf)?;
             Ok(Self {
-                next_xid: INVALID_TRANSACTION_ID,
+                next_xid: initial_next_xid,
                 statuses: BTreeMap::new(),
                 in_progress: Vec::new(),
                 status_path: Some(path),
@@ -191,6 +200,9 @@ impl TransactionManager {
     }
 
     pub fn status(&self, xid: TransactionId) -> Option<TransactionStatus> {
+        if matches!(xid, BOOTSTRAP_TRANSACTION_ID | FROZEN_TRANSACTION_ID) {
+            return Some(TransactionStatus::Committed);
+        }
         self.statuses.get(&xid).copied()
     }
 
@@ -214,7 +226,10 @@ impl TransactionManager {
             }
         }
 
-        let xmax = self.next_xid.saturating_add(1).max(1);
+        let xmax = self
+            .next_xid
+            .saturating_add(1)
+            .max(FIRST_NORMAL_TRANSACTION_ID);
         let xmin = in_progress
             .iter()
             .copied()
@@ -236,7 +251,11 @@ impl TransactionManager {
             .iter()
             .copied()
             .min()
-            .unwrap_or_else(|| self.next_xid.saturating_add(1).max(1))
+            .unwrap_or_else(|| {
+                self.next_xid
+                    .saturating_add(1)
+                    .max(FIRST_NORMAL_TRANSACTION_ID)
+            })
     }
 
     pub fn next_xid(&self) -> TransactionId {
@@ -490,7 +509,7 @@ mod tests {
         let _txns = TransactionManager::new_durable(&base).unwrap();
         let raw = std::fs::read(base.join("pg_xact").join("status")).unwrap();
         assert_eq!(raw.len(), STATUS_FILE_HEADER_SIZE);
-        assert_eq!(raw, INVALID_TRANSACTION_ID.to_le_bytes());
+        assert_eq!(raw, (FIRST_NORMAL_TRANSACTION_ID - 1).to_le_bytes());
     }
 
     /// Build raw tuple bytes for hint bit testing.
@@ -986,14 +1005,14 @@ mod tests {
         // incorrectly returns visible when XMAX_INVALID is also set.
         use crate::include::access::htup::{HEAP_XMAX_INVALID, HEAP_XMIN_COMMITTED};
         let mut txns = TransactionManager::default();
-        let inserter = txns.begin(); // xid=1
+        let inserter = txns.begin(); // xid=FIRST_NORMAL_TRANSACTION_ID
         txns.commit(inserter).unwrap();
 
-        // Take snapshot while xid=1 is committed (next_xid=1, xmax=2).
+        // Take a snapshot after the first normal transaction commits.
         let snapshot = txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
 
         // A new transaction inserts AFTER the snapshot.
-        let new_inserter = txns.begin(); // xid=2, >= snapshot.xmax
+        let new_inserter = txns.begin(); // xid=FIRST_NORMAL_TRANSACTION_ID + 1
         txns.commit(new_inserter).unwrap();
 
         // Another reader sets XMIN_COMMITTED on the new tuple.

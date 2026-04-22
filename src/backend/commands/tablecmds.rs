@@ -1781,7 +1781,15 @@ pub fn execute_vacuum(
         let Some(entry) = catalog.lookup_relation(&target.table_name) else {
             continue;
         };
+        let scan = crate::backend::access::heap::vacuumlazy::vacuum_relation_scan(
+            &ctx.pool,
+            ctx.client_id,
+            entry.rel,
+            &ctx.txns,
+        )
+        .map_err(ExecError::Heap)?;
         let indexes = catalog.index_relations_for_heap(entry.relation_oid);
+        let dead_items = &scan.dead_tids;
         for index in indexes {
             let vacuum_ctx = crate::include::access::amapi::IndexVacuumContext {
                 pool: ctx.pool.clone(),
@@ -1795,13 +1803,19 @@ pub fn execute_vacuum(
                 index_desc: index.desc.clone(),
                 index_meta: index.index_meta.clone(),
             };
-            let stats = indexam::index_bulk_delete(&vacuum_ctx, index.index_meta.am_oid, None)
-                .map_err(|err| {
-                    ExecError::Parse(ParseError::UnexpectedToken {
-                        expected: "VACUUM bulk delete",
-                        actual: format!("{err:?}"),
-                    })
-                })?;
+            let dead_item_callback = |tid| dead_items.contains(&tid);
+            let stats = indexam::index_bulk_delete(
+                &vacuum_ctx,
+                index.index_meta.am_oid,
+                &dead_item_callback,
+                None,
+            )
+            .map_err(|err| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "VACUUM bulk delete",
+                    actual: format!("{err:?}"),
+                })
+            })?;
             let _ =
                 indexam::index_vacuum_cleanup(&vacuum_ctx, index.index_meta.am_oid, Some(stats))
                     .map_err(|err| {
@@ -1811,6 +1825,16 @@ pub fn execute_vacuum(
                         })
                     })?;
         }
+        let _stats = crate::backend::access::heap::vacuumlazy::vacuum_relation_pages(
+            &ctx.pool,
+            ctx.client_id,
+            entry.rel,
+            entry.relation_oid,
+            &ctx.txns,
+            &scan,
+            Some(crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID),
+        )
+        .map_err(ExecError::Heap)?;
         processed += 1;
     }
     let _ = processed;

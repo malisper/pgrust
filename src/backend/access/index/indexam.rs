@@ -1,7 +1,7 @@
 use crate::backend::catalog::CatalogError;
 use crate::include::access::amapi::{
     IndexBeginScanContext, IndexBuildContext, IndexBuildEmptyContext, IndexBuildResult,
-    IndexBulkDeleteResult, IndexInsertContext, IndexVacuumContext,
+    IndexBulkDeleteCallback, IndexBulkDeleteResult, IndexInsertContext, IndexVacuumContext,
 };
 use crate::include::access::relscan::{IndexScanDesc, ScanDirection};
 
@@ -86,6 +86,7 @@ pub fn index_endscan(scan: IndexScanDesc, am_oid: u32) -> Result<(), CatalogErro
 pub fn index_bulk_delete(
     ctx: &IndexVacuumContext,
     am_oid: u32,
+    callback: &IndexBulkDeleteCallback<'_>,
     stats: Option<IndexBulkDeleteResult>,
 ) -> Result<IndexBulkDeleteResult, CatalogError> {
     let routine = crate::backend::access::index::amapi::index_am_handler(am_oid)
@@ -93,7 +94,7 @@ pub fn index_bulk_delete(
     let ambulkdelete = routine
         .ambulkdelete
         .ok_or(CatalogError::Corrupt("missing index bulkdelete callback"))?;
-    ambulkdelete(ctx, stats)
+    ambulkdelete(ctx, callback, stats)
 }
 
 pub fn index_vacuum_cleanup(

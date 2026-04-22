@@ -1,5 +1,6 @@
 use crate::backend::access::transam::xact::{
-    CommandId, INVALID_TRANSACTION_ID, TransactionId, TransactionManager, TransactionStatus,
+    CommandId, FROZEN_TRANSACTION_ID, INVALID_TRANSACTION_ID, TransactionId, TransactionManager,
+    TransactionStatus,
 };
 use crate::backend::utils::time::snapmgr::Snapshot;
 use crate::include::access::htup::{
@@ -169,6 +170,24 @@ fn check_visibility(
 ) -> bool {
     if xmin == INVALID_TRANSACTION_ID {
         return true;
+    }
+    if xmin == FROZEN_TRANSACTION_ID {
+        if xmax == INVALID_TRANSACTION_ID {
+            return true;
+        }
+        if xmax == snapshot.current_xid {
+            return false;
+        }
+        if xmax >= snapshot.xmax {
+            return true;
+        }
+        if snapshot.transaction_active_in_snapshot(xmax) {
+            return true;
+        }
+        return match txns.status(xmax) {
+            Some(TransactionStatus::Committed) => false,
+            Some(TransactionStatus::Aborted) | Some(TransactionStatus::InProgress) | None => true,
+        };
     }
     if xmin == snapshot.current_xid {
         if cid >= snapshot.current_cid {

@@ -136,8 +136,10 @@ pub type AmRescanFn =
     fn(&mut IndexScanDesc, &[ScanKeyData], ScanDirection) -> Result<(), CatalogError>;
 pub type AmGetTupleFn = fn(&mut IndexScanDesc) -> Result<bool, CatalogError>;
 pub type AmEndScanFn = fn(IndexScanDesc) -> Result<(), CatalogError>;
-pub type AmBulkDeleteFn = fn(
+pub type IndexBulkDeleteCallback<'a> = dyn Fn(ItemPointerData) -> bool + 'a;
+pub type AmBulkDeleteFn = for<'a> fn(
     &IndexVacuumContext,
+    &'a IndexBulkDeleteCallback<'a>,
     Option<IndexBulkDeleteResult>,
 ) -> Result<IndexBulkDeleteResult, CatalogError>;
 pub type AmVacuumCleanupFn = fn(

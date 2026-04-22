@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use crate::backend::access::transam::CheckpointRecord;
 use crate::backend::access::transam::xloginsert::RegisteredXLogRecord;
+use crate::include::access::heapam_xlog::{XLOG_HEAP2_VISIBLE, XlHeapVisible};
 use crate::backend::access::transam::xlogreader::{
     BKPBLOCK_FORK_MASK, BKPBLOCK_HAS_DATA, BKPBLOCK_HAS_IMAGE, BKPBLOCK_SAME_REL,
     BKPBLOCK_WILL_INIT, BKPIMAGE_APPLY, BKPIMAGE_HAS_HOLE, CRC_OFFSET, DecodedBkpBlock,
@@ -56,10 +57,11 @@ pub const XLOG_CHECKPOINT_ONLINE: u8 = 0x10;
 pub const XLOG_CHECKPOINT_SHUTDOWN: u8 = 0x11;
 
 pub const RM_HEAP_ID: u8 = 0;
-pub const RM_XACT_ID: u8 = 1;
-pub const RM_BTREE_ID: u8 = 2;
-pub const RM_XLOG_ID: u8 = 3;
-pub const RM_GIST_ID: u8 = 4;
+pub const RM_HEAP2_ID: u8 = 1;
+pub const RM_XACT_ID: u8 = 2;
+pub const RM_BTREE_ID: u8 = 3;
+pub const RM_XLOG_ID: u8 = 4;
+pub const RM_GIST_ID: u8 = 5;
 
 pub const REGBUF_STANDARD: u8 = 1 << 0;
 pub const REGBUF_WILL_INIT: u8 = 1 << 1;
@@ -274,6 +276,14 @@ pub enum WalRecord {
         tag: BufferTag,
         offset_number: u16,
         tuple_data: Vec<u8>,
+    },
+    HeapVisible {
+        xid: u32,
+        heap_tag: BufferTag,
+        heap_page: Box<[u8; PAGE_SIZE]>,
+        vm_tag: BufferTag,
+        vm_page: Box<[u8; PAGE_SIZE]>,
+        record: XlHeapVisible,
     },
     XactCommit {
         xid: u32,
@@ -759,7 +769,7 @@ impl WalReader {
         };
         let end_lsn = decoded.end_lsn;
         let record = match (decoded.rmid, decoded.info) {
-            (RM_HEAP_ID, XLOG_FPI) => {
+            (RM_HEAP_ID, XLOG_FPI) | (RM_HEAP2_ID, XLOG_FPI) => {
                 let block = decoded
                     .blocks
                     .first()
@@ -844,6 +854,46 @@ impl WalReader {
                     tag: block.tag,
                     offset_number,
                     tuple_data: block.data[4..4 + tuple_len].to_vec(),
+                }
+            }
+            (RM_HEAP2_ID, XLOG_HEAP2_VISIBLE) => {
+                if decoded.blocks.len() < 2 {
+                    return Err(WalError::Corrupt(
+                        "heap visible record missing block images".into(),
+                    ));
+                }
+                if decoded.main_data.len() < 5 {
+                    return Err(WalError::Corrupt(
+                        "heap visible record missing main data".into(),
+                    ));
+                }
+                let record = XlHeapVisible {
+                    snapshot_conflict_horizon: u32::from_le_bytes(
+                        decoded.main_data[0..4].try_into().unwrap(),
+                    ),
+                    flags: decoded.main_data[4],
+                };
+                let vm_block = &decoded.blocks[0];
+                let heap_block = &decoded.blocks[1];
+                WalRecord::HeapVisible {
+                    xid: decoded.xid,
+                    heap_tag: heap_block.tag,
+                    heap_page: heap_block
+                        .image
+                        .as_ref()
+                        .ok_or_else(|| {
+                            WalError::Corrupt("heap visible record missing heap image".into())
+                        })?
+                        .clone(),
+                    vm_tag: vm_block.tag,
+                    vm_page: vm_block
+                        .image
+                        .as_ref()
+                        .ok_or_else(|| {
+                            WalError::Corrupt("heap visible record missing vm image".into())
+                        })?
+                        .clone(),
+                    record,
                 }
             }
             (RM_XACT_ID, XLOG_XACT_COMMIT) => WalRecord::XactCommit { xid: decoded.xid },
@@ -1058,6 +1108,40 @@ impl WalWriter {
             xid,
             RM_HEAP_ID,
             XLOG_HEAP_INSERT,
+        )
+    }
+
+    pub fn write_heap_visible(
+        &self,
+        xid: u32,
+        vm_tag: BufferTag,
+        vm_page: &[u8; PAGE_SIZE],
+        heap_tag: BufferTag,
+        heap_page: &[u8; PAGE_SIZE],
+        record: XlHeapVisible,
+    ) -> Result<Lsn, WalError> {
+        crate::backend::access::transam::xloginsert::xlog_begin_insert();
+        crate::backend::access::transam::xloginsert::xlog_register_data(
+            &record.snapshot_conflict_horizon.to_le_bytes(),
+        );
+        crate::backend::access::transam::xloginsert::xlog_register_data(&[record.flags]);
+        crate::backend::access::transam::xloginsert::xlog_register_buffer(
+            0,
+            vm_tag,
+            REGBUF_FORCE_IMAGE | REGBUF_STANDARD,
+        );
+        crate::backend::access::transam::xloginsert::xlog_register_buffer_image(0, vm_page);
+        crate::backend::access::transam::xloginsert::xlog_register_buffer(
+            1,
+            heap_tag,
+            REGBUF_FORCE_IMAGE | REGBUF_STANDARD,
+        );
+        crate::backend::access::transam::xloginsert::xlog_register_buffer_image(1, heap_page);
+        crate::backend::access::transam::xloginsert::xlog_insert(
+            self,
+            xid,
+            RM_HEAP2_ID,
+            XLOG_HEAP2_VISIBLE,
         )
     }
 
