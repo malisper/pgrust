@@ -30,7 +30,8 @@ use crate::include::nodes::execnodes::{
     ValuesState, WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::primnodes::{
-    Expr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR, RelationDesc, Var, attrno_index,
+    BuiltinScalarFunction, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR,
+    RelationDesc, ScalarFunctionImpl, Var, attrno_index,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -1084,6 +1085,7 @@ fn render_explain_expr_inner_with_qualifier(
                 render_explain_expr_inner_with_qualifier(inner, qualifier, column_names)
             )
         }
+        Expr::Func(func) => render_explain_func_expr(func, qualifier, column_names),
         Expr::Similar {
             expr,
             pattern,
@@ -1094,6 +1096,45 @@ fn render_explain_expr_inner_with_qualifier(
             render_explain_expr_inner_with_qualifier(expr, qualifier, column_names)
         }),
         other => format!("{other:?}"),
+    }
+}
+
+fn render_explain_func_expr(
+    func: &FuncExpr,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> String {
+    if let Some(operator) = builtin_scalar_function_infix_operator(func.implementation) {
+        if let [left, right] = func.args.as_slice() {
+            return format!(
+                "{} {} {}",
+                render_explain_infix_operand(left, qualifier, column_names),
+                operator,
+                render_explain_infix_operand(right, qualifier, column_names)
+            );
+        }
+    }
+    format!("{func:?}")
+}
+
+fn builtin_scalar_function_infix_operator(
+    implementation: ScalarFunctionImpl,
+) -> Option<&'static str> {
+    match implementation {
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoSame) => Some("~="),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoDistance) => Some("<->"),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoContains) => Some("@>"),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoContainedBy) => Some("<@"),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoOverlap) => Some("&&"),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoLeft) => Some("<<"),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoOverLeft) => Some("&<"),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoRight) => Some(">>"),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoOverRight) => Some("&>"),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoBelow) => Some("<<|"),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoOverBelow) => Some("&<|"),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoAbove) => Some("|>>"),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoOverAbove) => Some("|&>"),
+        _ => None,
     }
 }
 
@@ -2184,12 +2225,25 @@ impl PlanNode for ProjectionState {
 
 fn projection_is_explain_passthrough(state: &ProjectionState) -> bool {
     let input_names = state.input.column_names();
-    state.targets.len() == input_names.len()
+    let identity_projection = state.targets.len() == input_names.len()
         && state.targets.iter().enumerate().all(|(index, target)| {
             !target.resjunk
                 && target.input_resno == Some(index + 1)
                 && target.name == input_names[index]
-        })
+        });
+    if identity_projection {
+        return true;
+    }
+    let full_width_projection =
+        state.targets.len() == input_names.len() && state.targets.iter().all(|target| !target.resjunk);
+    if state.input.node_label() == "WindowAgg" && full_width_projection {
+        return true;
+    }
+    full_width_projection
+        && state
+            .targets
+            .iter()
+            .all(|target| matches!(target.expr, Expr::Var(_)))
 }
 
 impl PlanNode for AggregateState {

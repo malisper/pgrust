@@ -88,6 +88,11 @@ pub const RANGE_GIST_PENALTY_PROC_OID: u32 = 3879;
 pub const RANGE_GIST_PICKSPLIT_PROC_OID: u32 = 3880;
 pub const RANGE_GIST_SAME_PROC_OID: u32 = 3881;
 pub const GIST_BOX_DISTANCE_PROC_OID: u32 = 3998;
+pub const SPG_BOX_QUAD_CONFIG_PROC_OID: u32 = 5012;
+pub const SPG_BOX_QUAD_CHOOSE_PROC_OID: u32 = 5013;
+pub const SPG_BOX_QUAD_PICKSPLIT_PROC_OID: u32 = 5014;
+pub const SPG_BOX_QUAD_INNER_CONSISTENT_PROC_OID: u32 = 5015;
+pub const SPG_BOX_QUAD_LEAF_CONSISTENT_PROC_OID: u32 = 5016;
 pub const GIST_TRANSLATE_CMPTYPE_COMMON_PROC_OID: u32 = 6347;
 pub const RANGE_SORTSUPPORT_PROC_OID: u32 = 6391;
 
@@ -3067,6 +3072,7 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
     rows.extend(geometry_proc_rows());
     rows.extend(range_proc_rows());
     rows.extend(gist_support_proc_rows());
+    rows.extend(spgist_support_proc_rows());
     rows
 }
 
@@ -3829,23 +3835,37 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("geole", BuiltinScalarFunction::GeoLe),
         ("geogt", BuiltinScalarFunction::GeoGt),
         ("geoge", BuiltinScalarFunction::GeoGe),
+        ("box_same", BuiltinScalarFunction::GeoSame),
         ("same", BuiltinScalarFunction::GeoSame),
+        ("dist_pb", BuiltinScalarFunction::GeoDistance),
+        ("box_distance", BuiltinScalarFunction::GeoDistance),
         ("distance", BuiltinScalarFunction::GeoDistance),
         ("close_pt", BuiltinScalarFunction::GeoClosestPoint),
         ("interpt", BuiltinScalarFunction::GeoIntersection),
         ("intersects", BuiltinScalarFunction::GeoIntersects),
         ("parallel", BuiltinScalarFunction::GeoParallel),
         ("perpendicular", BuiltinScalarFunction::GeoPerpendicular),
+        ("box_contain", BuiltinScalarFunction::GeoContains),
         ("contains", BuiltinScalarFunction::GeoContains),
+        ("box_contained", BuiltinScalarFunction::GeoContainedBy),
         ("contained", BuiltinScalarFunction::GeoContainedBy),
+        ("box_overlap", BuiltinScalarFunction::GeoOverlap),
         ("overlap", BuiltinScalarFunction::GeoOverlap),
+        ("box_left", BuiltinScalarFunction::GeoLeft),
         ("left", BuiltinScalarFunction::GeoLeft),
+        ("box_overleft", BuiltinScalarFunction::GeoOverLeft),
         ("overleft", BuiltinScalarFunction::GeoOverLeft),
+        ("box_right", BuiltinScalarFunction::GeoRight),
         ("right", BuiltinScalarFunction::GeoRight),
+        ("box_overright", BuiltinScalarFunction::GeoOverRight),
         ("overright", BuiltinScalarFunction::GeoOverRight),
+        ("box_below", BuiltinScalarFunction::GeoBelow),
         ("below", BuiltinScalarFunction::GeoBelow),
+        ("box_overbelow", BuiltinScalarFunction::GeoOverBelow),
         ("overbelow", BuiltinScalarFunction::GeoOverBelow),
+        ("box_above", BuiltinScalarFunction::GeoAbove),
         ("above", BuiltinScalarFunction::GeoAbove),
+        ("box_overabove", BuiltinScalarFunction::GeoOverAbove),
         ("overabove", BuiltinScalarFunction::GeoOverAbove),
         ("geo_add", BuiltinScalarFunction::GeoAdd),
         ("geo_sub", BuiltinScalarFunction::GeoSub),
@@ -4786,6 +4806,71 @@ fn gist_support_proc_rows() -> Vec<PgProcRow> {
             &oid_argtypes(&[INT4_TYPE_OID]),
             "gist_translate_cmptype_common",
             1,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+    ]
+}
+
+fn spgist_support_proc_rows() -> Vec<PgProcRow> {
+    vec![
+        proc_row(
+            SPG_BOX_QUAD_CONFIG_PROC_OID,
+            "spg_box_quad_config",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_box_quad_config",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_BOX_QUAD_CHOOSE_PROC_OID,
+            "spg_box_quad_choose",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_box_quad_choose",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_BOX_QUAD_PICKSPLIT_PROC_OID,
+            "spg_box_quad_picksplit",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_box_quad_picksplit",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_BOX_QUAD_INNER_CONSISTENT_PROC_OID,
+            "spg_box_quad_inner_consistent",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_box_quad_inner_consistent",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            SPG_BOX_QUAD_LEAF_CONSISTENT_PROC_OID,
+            "spg_box_quad_leaf_consistent",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "spg_box_quad_leaf_consistent",
+            2,
             false,
             false,
             'f',

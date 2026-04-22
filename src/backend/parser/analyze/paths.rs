@@ -196,8 +196,7 @@ fn qual_strategy(
                 value_type_oid(&qual.argument),
             )
             .or_else(|| {
-                ((index.index_meta.am_oid == GIST_AM_OID)
-                    || (index.index_meta.am_oid == SPGIST_AM_OID))
+                (index.index_meta.am_oid == GIST_AM_OID)
                     .then(|| gist_builtin_strategy(proc_oid, &qual.argument))
                     .flatten()
             }),

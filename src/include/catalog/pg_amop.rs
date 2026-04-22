@@ -3,11 +3,12 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
     BIT_TYPE_OID, BOOL_TYPE_OID, BOX_TYPE_OID, BTREE_AM_OID, BTREE_BIT_FAMILY_OID,
-    BTREE_BOOL_FAMILY_OID, BTREE_BYTEA_FAMILY_OID, BTREE_INTEGER_FAMILY_OID, BTREE_TEXT_FAMILY_OID,
-    BTREE_VARBIT_FAMILY_OID, BYTEA_TYPE_OID, DATERANGE_TYPE_OID, GIST_AM_OID, GIST_BOX_FAMILY_OID,
-    GIST_RANGE_FAMILY_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, INT8RANGE_TYPE_OID,
-    NUMRANGE_TYPE_OID, SPGIST_AM_OID, SPGIST_BOX_FAMILY_OID, TEXT_TYPE_OID, TSRANGE_TYPE_OID,
-    TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID, bootstrap_pg_operator_rows,
+    BTREE_BOOL_FAMILY_OID, BTREE_BYTEA_FAMILY_OID, BTREE_FLOAT_FAMILY_OID,
+    BTREE_INTEGER_FAMILY_OID, BTREE_TEXT_FAMILY_OID, BTREE_VARBIT_FAMILY_OID, BYTEA_TYPE_OID,
+    DATERANGE_TYPE_OID, GIST_AM_OID, GIST_BOX_FAMILY_OID, GIST_RANGE_FAMILY_OID, INT4_TYPE_OID,
+    INT4RANGE_TYPE_OID, INT8RANGE_TYPE_OID, NUMRANGE_TYPE_OID, POINT_TYPE_OID, SPGIST_AM_OID,
+    SPGIST_BOX_FAMILY_OID, TEXT_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID,
+    bootstrap_pg_operator_rows,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,12 +165,12 @@ pub fn bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
         oid,
         amopfamily: SPGIST_BOX_FAMILY_OID,
         amoplefttype: BOX_TYPE_OID,
-        amoprighttype: BOX_TYPE_OID,
-        amopstrategy: 1,
+        amoprighttype: POINT_TYPE_OID,
+        amopstrategy: 15,
         amoppurpose: 'o',
-        amopopr: operator_oid(&operators, "<->", BOX_TYPE_OID, BOX_TYPE_OID),
+        amopopr: operator_oid(&operators, "<->", BOX_TYPE_OID, POINT_TYPE_OID),
         amopmethod: SPGIST_AM_OID,
-        amopsortfamily: 0,
+        amopsortfamily: BTREE_FLOAT_FAMILY_OID,
     });
     oid = oid.saturating_add(1);
     for (range_type_oid, subtype_oid) in [
@@ -225,4 +226,27 @@ fn operator_oid(
         .find(|row| row.oprname == name && row.oprleft == left && row.oprright == right)
         .map(|row| row.oid)
         .unwrap_or_else(|| panic!("missing bootstrap operator {name}({left},{right})"))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::include::catalog::{
+        BOX_TYPE_OID, BTREE_FLOAT_FAMILY_OID, POINT_TYPE_OID, SPGIST_AM_OID, SPGIST_BOX_FAMILY_OID,
+    };
+
+    use super::bootstrap_pg_amop_rows;
+
+    #[test]
+    fn spgist_box_ordering_row_matches_postgres_shape() {
+        let row = bootstrap_pg_amop_rows()
+            .into_iter()
+            .find(|row| row.amopfamily == SPGIST_BOX_FAMILY_OID && row.amoppurpose == 'o')
+            .expect("spgist box ordering row");
+
+        assert_eq!(row.amopmethod, SPGIST_AM_OID);
+        assert_eq!(row.amopstrategy, 15);
+        assert_eq!(row.amoplefttype, BOX_TYPE_OID);
+        assert_eq!(row.amoprighttype, POINT_TYPE_OID);
+        assert_eq!(row.amopsortfamily, BTREE_FLOAT_FAMILY_OID);
+    }
 }

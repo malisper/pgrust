@@ -8,7 +8,7 @@ use crate::RelFileLocator;
 use crate::backend::optimizer::{AccessCandidate, IndexPathSpec, RelationStats};
 use crate::backend::parser::BoundIndexRelation;
 use crate::backend::parser::CatalogLookup;
-use crate::include::nodes::pathnodes::{Path, PlannerInfo, RelOptInfo, RestrictInfo};
+use crate::include::nodes::pathnodes::{Path, PathKey, PlannerInfo, RelOptInfo, RestrictInfo};
 use crate::include::nodes::primnodes::ToastRelationRef;
 use crate::include::nodes::primnodes::{Expr, JoinType, OrderByEntry, QueryColumn, RelationDesc};
 
@@ -168,4 +168,13 @@ pub(super) fn build_index_path_spec(
     index: &BoundIndexRelation,
 ) -> Option<IndexPathSpec> {
     costsize::build_index_path_spec(filter, order_items, index)
+}
+
+pub(super) fn relation_ordered_index_paths(
+    root: &PlannerInfo,
+    rtindex: usize,
+    pathkeys: &[PathKey],
+    catalog: &dyn CatalogLookup,
+) -> Vec<Path> {
+    allpaths::relation_ordered_index_paths(root, rtindex, pathkeys, catalog)
 }
