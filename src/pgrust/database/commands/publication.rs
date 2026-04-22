@@ -254,7 +254,7 @@ impl Database {
                 )?;
                 if !resolved.namespace_rows.is_empty() && !current_role.rolsuper {
                     return Err(must_be_superuser_error(
-                        "must be superuser to add TABLES IN SCHEMA to publication",
+                        "must be superuser to add or set schemas",
                     ));
                 }
                 let existing_rel_rows =
@@ -700,43 +700,39 @@ fn validate_publishable_relation(
     relation_name: &str,
 ) -> Result<(), ExecError> {
     if !matches!(relation.relkind, 'r' | 'p') {
-        return Err(ExecError::Parse(ParseError::WrongObjectType {
-            name: relation_name.to_string(),
-            expected: "table",
-        }));
+        return Err(ExecError::DetailedError {
+            message: format!("cannot add relation \"{relation_name}\" to publication"),
+            detail: Some("This operation is not supported for relation type.".into()),
+            hint: None,
+            sqlstate: "22023",
+        });
     }
     if relation.relpersistence == 't'
         || db.other_session_temp_namespace_oid(client_id, relation.namespace_oid)
     {
         return Err(ExecError::DetailedError {
-            message: format!(
-                "temporary relation \"{relation_name}\" cannot be added to a publication"
-            ),
-            detail: None,
+            message: format!("cannot add relation \"{relation_name}\" to publication"),
+            detail: Some("This operation is not supported for temporary tables.".into()),
             hint: None,
-            sqlstate: "55000",
+            sqlstate: "22023",
         });
     }
     if relation.relpersistence == 'u' {
         return Err(ExecError::DetailedError {
-            message: format!(
-                "unlogged relation \"{relation_name}\" cannot be added to a publication"
-            ),
-            detail: None,
+            message: format!("cannot add relation \"{relation_name}\" to publication"),
+            detail: Some("This operation is not supported for unlogged tables.".into()),
             hint: None,
-            sqlstate: "55000",
+            sqlstate: "22023",
         });
     }
     if relation.namespace_oid == PG_CATALOG_NAMESPACE_OID
         || relation.namespace_oid == PG_TOAST_NAMESPACE_OID
     {
         return Err(ExecError::DetailedError {
-            message: format!(
-                "system relation \"{relation_name}\" cannot be added to a publication"
-            ),
-            detail: None,
+            message: format!("cannot add relation \"{relation_name}\" to publication"),
+            detail: Some("This operation is not supported for system tables.".into()),
             hint: None,
-            sqlstate: "55000",
+            sqlstate: "22023",
         });
     }
     Ok(())
@@ -750,10 +746,10 @@ fn validate_publishable_schema(
 ) -> Result<(), ExecError> {
     if namespace_oid == PG_CATALOG_NAMESPACE_OID || namespace_oid == PG_TOAST_NAMESPACE_OID {
         return Err(ExecError::DetailedError {
-            message: format!("system schema \"{schema_name}\" cannot be added to a publication"),
-            detail: None,
+            message: format!("cannot add schema \"{schema_name}\" to publication"),
+            detail: Some("This operation is not supported for system schemas.".into()),
             hint: None,
-            sqlstate: "55000",
+            sqlstate: "22023",
         });
     }
     if db.other_session_temp_namespace_oid(client_id, namespace_oid)
@@ -761,10 +757,10 @@ fn validate_publishable_schema(
         || schema_name.starts_with("pg_toast_temp_")
     {
         return Err(ExecError::DetailedError {
-            message: format!("temporary schema \"{schema_name}\" cannot be added to a publication"),
-            detail: None,
+            message: format!("cannot add schema \"{schema_name}\" to publication"),
+            detail: Some("Temporary schemas cannot be replicated.".into()),
             hint: None,
-            sqlstate: "55000",
+            sqlstate: "22023",
         });
     }
     Ok(())
@@ -1290,6 +1286,109 @@ mod tests {
         let missing_text = format!("{missing:?}");
         assert!(missing_text.contains("gadgets"));
         assert!(missing_text.contains("is not member of publication"));
+    }
+
+    #[test]
+    fn publication_add_relation_errors_match_postgres_text() {
+        let base = temp_dir("add_relation_errors");
+        let db = Database::open(&base, 16).unwrap();
+        let temp_relation = BoundRelation {
+            rel: crate::backend::storage::smgr::RelFileLocator {
+                spc_oid: 0,
+                db_oid: 0,
+                rel_number: 1,
+            },
+            relation_oid: 1,
+            toast: None,
+            namespace_oid: crate::include::catalog::PUBLIC_NAMESPACE_OID,
+            owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+            relpersistence: 't',
+            relkind: 'r',
+            desc: crate::include::nodes::primnodes::RelationDesc {
+                columns: Vec::new(),
+            },
+        };
+
+        let temp_err =
+            validate_publishable_relation(&db, 1, &temp_relation, "temp_items").unwrap_err();
+        match temp_err {
+            ExecError::DetailedError {
+                message,
+                detail,
+                sqlstate,
+                ..
+            } => {
+                assert_eq!(message, "cannot add relation \"temp_items\" to publication");
+                assert_eq!(
+                    detail.as_deref(),
+                    Some("This operation is not supported for temporary tables.")
+                );
+                assert_eq!(sqlstate, "22023");
+            }
+            other => panic!("expected detailed error, got {other:?}"),
+        }
+
+        let unlogged_relation = BoundRelation {
+            rel: crate::backend::storage::smgr::RelFileLocator {
+                spc_oid: 0,
+                db_oid: 0,
+                rel_number: 2,
+            },
+            relation_oid: 2,
+            toast: None,
+            namespace_oid: crate::include::catalog::PUBLIC_NAMESPACE_OID,
+            owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+            relpersistence: 'u',
+            relkind: 'r',
+            desc: crate::include::nodes::primnodes::RelationDesc {
+                columns: Vec::new(),
+            },
+        };
+
+        let unlogged_err = validate_publishable_relation(&db, 1, &unlogged_relation, "unlogged_items")
+            .unwrap_err();
+        match unlogged_err {
+            ExecError::DetailedError {
+                message,
+                detail,
+                sqlstate,
+                ..
+            } => {
+                assert_eq!(message, "cannot add relation \"unlogged_items\" to publication");
+                assert_eq!(
+                    detail.as_deref(),
+                    Some("This operation is not supported for unlogged tables.")
+                );
+                assert_eq!(sqlstate, "22023");
+            }
+            other => panic!("expected detailed error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn publication_add_schema_errors_match_postgres_text() {
+        let base = temp_dir("add_schema_errors");
+        let db = Database::open(&base, 16).unwrap();
+
+        let system_err =
+            validate_publishable_schema(&db, 1, "pg_catalog", PG_CATALOG_NAMESPACE_OID)
+                .unwrap_err();
+        match system_err {
+            ExecError::DetailedError {
+                message,
+                detail,
+                sqlstate,
+                ..
+            } => {
+                assert_eq!(message, "cannot add schema \"pg_catalog\" to publication");
+                assert_eq!(
+                    detail.as_deref(),
+                    Some("This operation is not supported for system schemas.")
+                );
+                assert_eq!(sqlstate, "22023");
+            }
+            other => panic!("expected detailed error, got {other:?}"),
+        }
     }
 
     #[test]
