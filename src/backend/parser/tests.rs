@@ -4704,6 +4704,37 @@ fn build_plan_accepts_catalog_backed_time_casts_and_comparisons() {
 }
 
 #[test]
+fn build_plan_coerces_time_comparison_string_literals() {
+    let mut catalog = catalog();
+    catalog.insert(
+        "time_tbl",
+        test_catalog_entry(
+            15040,
+            RelationDesc {
+                columns: vec![column_desc("f1", SqlType::new(SqlTypeKind::Time), false)],
+            },
+        ),
+    );
+    let plan = build_plan(
+        &parse_select("select * from time_tbl where f1 < '05:06:07'").unwrap(),
+        &catalog,
+    )
+    .unwrap();
+    let Plan::Filter { predicate, .. } = plan else {
+        panic!("expected filter plan");
+    };
+    assert!(matches!(
+        predicate,
+        Expr::Op(op)
+            if op.op == crate::include::nodes::primnodes::OpExprKind::Lt
+                && matches!(op.args.as_slice(), [Expr::Var(var), Expr::Cast(inner, ty)]
+                    if var.vartype == SqlType::new(SqlTypeKind::Time)
+                        && *ty == SqlType::new(SqlTypeKind::Time)
+                        && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _))))
+    ));
+}
+
+#[test]
 fn build_plan_accepts_catalog_backed_bit_comparisons() {
     assert!(build_plan(
         &parse_select(

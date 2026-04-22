@@ -483,7 +483,7 @@ pub(crate) fn canonicalize_interval_text(text: &str) -> Result<String, ExecError
     }
 
     if rest.contains(':') {
-        let parsed = parse_time_text(rest).ok_or_else(|| invalid(text))?;
+        let parsed = parse_time_text(rest, &DateTimeConfig::default()).map_err(|_| invalid(text))?;
         return Ok(render_interval(0, 0, parsed.0, negative));
     }
 
@@ -2570,12 +2570,12 @@ pub(super) fn cast_text_value_with_config(
         SqlTypeKind::Date => parse_date_text(text, config)
             .map(Value::Date)
             .map_err(|err| date_parse_error(text, err)),
-        SqlTypeKind::Time => parse_time_text(text)
+        SqlTypeKind::Time => parse_time_text(text, config)
             .map(Value::Time)
             .map(|value| apply_time_precision(value, ty.time_precision()))
-            .ok_or_else(|| ExecError::InvalidStorageValue {
+            .map_err(|err| ExecError::InvalidStorageValue {
                 column: "time".into(),
-                details: format!("invalid input syntax for type time: \"{text}\""),
+                details: datetime_parse_error_details("time", text, err),
             }),
         SqlTypeKind::TimeTz => parse_timetz_text(text, config)
             .map(Value::TimeTz)
