@@ -588,7 +588,9 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgRustTestEncSetup => args.is_empty(),
             BuiltinScalarFunction::PgRustTestEncConversion => args.len() == 4,
             BuiltinScalarFunction::CurrentSetting => matches!(args.len(), 1 | 2),
-            BuiltinScalarFunction::PgTypeof => args.len() == 1,
+            BuiltinScalarFunction::PgTypeof | BuiltinScalarFunction::PgColumnCompression => {
+                args.len() == 1
+            }
             BuiltinScalarFunction::NextVal | BuiltinScalarFunction::CurrVal => args.len() == 1,
             BuiltinScalarFunction::SetVal => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::PgGetSerialSequence => args.len() == 2,
@@ -1320,6 +1322,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgRustTestEncConversion,
         ),
         ("current_setting", BuiltinScalarFunction::CurrentSetting),
+        (
+            "pg_column_compression",
+            BuiltinScalarFunction::PgColumnCompression,
+        ),
         ("nextval", BuiltinScalarFunction::NextVal),
         ("currval", BuiltinScalarFunction::CurrVal),
         ("setval", BuiltinScalarFunction::SetVal),
