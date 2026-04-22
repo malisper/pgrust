@@ -35,12 +35,14 @@ fn existing_view_prefix_matches(
     new_desc: &crate::backend::executor::RelationDesc,
 ) -> bool {
     old_desc.columns.len() <= new_desc.columns.len()
-        && old_desc.columns.iter().zip(new_desc.columns.iter()).all(
-            |(old_column, new_column)| {
+        && old_desc
+            .columns
+            .iter()
+            .zip(new_desc.columns.iter())
+            .all(|(old_column, new_column)| {
                 old_column.name.eq_ignore_ascii_case(&new_column.name)
                     && old_column.sql_type == new_column.sql_type
-            },
-        )
+            })
 }
 
 fn normalize_create_function_name_for_search_path(
@@ -1097,8 +1099,7 @@ impl Database {
             }
             if !existing_view_prefix_matches(&existing_relation.desc, &desc) {
                 return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
-                    "CREATE OR REPLACE VIEW can only add new columns at the end of the view"
-                        .into(),
+                    "CREATE OR REPLACE VIEW can only add new columns at the end of the view".into(),
                 )));
             }
             let replace_effect = self
@@ -1282,6 +1283,7 @@ impl Database {
                                         column.sql_type,
                                     ),
                                     default_expr: None,
+                                    compression: None,
                                     constraints: vec![],
                                 },
                             )

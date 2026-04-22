@@ -1,8 +1,11 @@
 use std::collections::BTreeSet;
 
+use crate::backend::access::common::toast_compression::ensure_attribute_compression_supported;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SerialKind, SqlType, SqlTypeKind};
+use crate::include::access::htup::{AttributeCompression, AttributeStorage};
+use crate::pgrust::database::ddl::format_sql_type_name;
 
 use super::{
     CatalogLookup, CheckConstraintAction, CreateTableStatement, ForeignKeyConstraintAction,
@@ -120,6 +123,10 @@ pub fn lower_create_table(
                         sql_type,
                     });
                 }
+                if let Some(compression) = column.compression {
+                    validate_create_column_compression(sql_type, compression)?;
+                    desc.storage.attcompression = compression;
+                }
                 Ok(desc)
             })
             .collect::<Result<Vec<_>, _>>()?,
@@ -134,6 +141,42 @@ pub fn lower_create_table(
         owned_sequences,
         parent_oids: Vec::new(),
     })
+}
+
+fn validate_create_column_compression(
+    sql_type: SqlType,
+    compression: AttributeCompression,
+) -> Result<(), ParseError> {
+    ensure_attribute_compression_supported(compression).map_err(|err| match err {
+        crate::backend::executor::ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        } => ParseError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        },
+        other => ParseError::FeatureNotSupportedMessage(format!("{other:?}")),
+    })?;
+
+    let type_default = column_desc("attcompression_check", sql_type, true)
+        .storage
+        .attstorage;
+    if compression != AttributeCompression::Default && type_default == AttributeStorage::Plain {
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "column data type {} does not support compression",
+                format_sql_type_name(sql_type)
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -155,6 +198,7 @@ mod tests {
                 name: "a".into(),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::AnyArray)),
                 default_expr: None,
+                compression: None,
                 constraints: vec![],
             })],
             inherits: Vec::new(),
@@ -182,6 +226,7 @@ mod tests {
                     name: "id".into(),
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
                     default_expr: None,
+                    compression: None,
                     constraints: vec![crate::backend::parser::ColumnConstraint::PrimaryKey {
                         attributes: ConstraintAttributes::default(),
                     }],
@@ -190,6 +235,7 @@ mod tests {
                     name: "note".into(),
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
                     default_expr: None,
+                    compression: None,
                     constraints: vec![crate::backend::parser::ColumnConstraint::NotNull {
                         attributes: ConstraintAttributes {
                             name: Some("items_note_nn".into()),
@@ -240,6 +286,7 @@ mod tests {
                     name: "id".into(),
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
                     default_expr: None,
+                    compression: None,
                     constraints: vec![crate::backend::parser::ColumnConstraint::PrimaryKey {
                         attributes: ConstraintAttributes::default(),
                     }],
@@ -279,6 +326,7 @@ mod tests {
                 name: "id".into(),
                 ty: RawTypeName::Serial(SerialKind::Regular),
                 default_expr: None,
+                compression: None,
                 constraints: vec![],
             })],
             inherits: Vec::new(),
@@ -312,6 +360,7 @@ mod tests {
                 name: "id".into(),
                 ty: RawTypeName::Serial(SerialKind::Regular),
                 default_expr: Some("7".into()),
+                compression: None,
                 constraints: vec![],
             })],
             inherits: Vec::new(),
@@ -328,5 +377,63 @@ mod tests {
                 actual: "multiple default values specified for column \"id\"".into(),
             })
         );
+    }
+
+    #[test]
+    fn lower_create_table_applies_column_compression() {
+        let stmt = CreateTableStatement {
+            schema_name: None,
+            table_name: "cmdata".into(),
+            persistence: TablePersistence::Permanent,
+            on_commit: OnCommitAction::PreserveRows,
+            elements: vec![CreateTableElement::Column(ColumnDef {
+                name: "f1".into(),
+                ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+                default_expr: None,
+                compression: Some(AttributeCompression::Pglz),
+                constraints: vec![],
+            })],
+            inherits: Vec::new(),
+            if_not_exists: false,
+        };
+
+        let lowered = lower_create_table(
+            &stmt,
+            &crate::backend::parser::analyze::LiteralDefaultCatalog,
+        )
+        .unwrap();
+        assert_eq!(
+            lowered.relation_desc.columns[0].storage.attcompression,
+            AttributeCompression::Pglz
+        );
+    }
+
+    #[test]
+    fn lower_create_table_rejects_compression_for_plain_types() {
+        let stmt = CreateTableStatement {
+            schema_name: None,
+            table_name: "cmdata".into(),
+            persistence: TablePersistence::Permanent,
+            on_commit: OnCommitAction::PreserveRows,
+            elements: vec![CreateTableElement::Column(ColumnDef {
+                name: "f1".into(),
+                ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                default_expr: None,
+                compression: Some(AttributeCompression::Pglz),
+                constraints: vec![],
+            })],
+            inherits: Vec::new(),
+            if_not_exists: false,
+        };
+
+        assert!(matches!(
+            lower_create_table(
+                &stmt,
+                &crate::backend::parser::analyze::LiteralDefaultCatalog
+            ),
+            Err(ParseError::DetailedError { message, sqlstate, .. })
+                if message == "column data type integer does not support compression"
+                    && sqlstate == "0A000"
+        ));
     }
 }
