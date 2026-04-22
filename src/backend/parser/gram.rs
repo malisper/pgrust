@@ -110,6 +110,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_alter_table_add_unnamed_foreign_key_statement(&sql, options)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_index_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_unsupported_statement(&sql) {
         if matches!(
             stmt,
@@ -1113,6 +1116,22 @@ fn try_parse_unsupported_statement(sql: &str) -> Option<Statement> {
     }))
 }
 
+fn try_parse_index_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("alter index ") {
+        return Ok(None);
+    }
+    if lowered.contains(" rename to ") {
+        return build_alter_index_rename_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterIndexRename(stmt)));
+    }
+    if lowered.contains(" set statistics ") {
+        return build_alter_index_alter_column_statistics_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterIndexAlterColumnStatistics(stmt)));
+    }
+    Ok(None)
+}
 fn try_parse_domain_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
@@ -2396,6 +2415,68 @@ fn build_alter_index_rename_statement(sql: &str) -> Result<AlterTableRenameState
         only: false,
         table_name,
         new_table_name,
+    })
+}
+
+fn build_alter_index_alter_column_statistics_statement(
+    sql: &str,
+) -> Result<AlterIndexAlterColumnStatisticsStatement, ParseError> {
+    let mut rest = consume_keyword(sql.trim_start(), "alter").trim_start();
+    rest = consume_keyword(rest, "index").trim_start();
+    let mut if_exists = false;
+    if keyword_at_start(rest, "if") {
+        let after_if = consume_keyword(rest, "if").trim_start();
+        if !keyword_at_start(after_if, "exists") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "IF EXISTS",
+                actual: sql.into(),
+            });
+        }
+        if_exists = true;
+        rest = consume_keyword(after_if, "exists").trim_start();
+    }
+    let (parts, rest_after_name) = parse_qualified_identifier_parts(rest)?;
+    let index_name = parts.join(".");
+    let mut rest = rest_after_name.trim_start();
+    rest = consume_keyword(rest, "alter").trim_start();
+    if keyword_at_start(rest, "column") {
+        rest = consume_keyword(rest, "column").trim_start();
+    }
+    let (column_number_sql, rest_after_column_number) = split_sql_identifier_token(rest)?;
+    let column_number_i32 = column_number_sql
+        .parse::<i32>()
+        .map_err(|_| ParseError::InvalidInteger(column_number_sql.to_string()))?;
+    if column_number_i32 <= 0 || column_number_i32 > i32::from(i16::MAX) {
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "column number must be in range from 1 to {}",
+                i16::MAX
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        });
+    }
+    let column_number = i16::try_from(column_number_i32)
+        .map_err(|_| ParseError::InvalidInteger(column_number_i32.to_string()))?;
+    let mut rest = rest_after_column_number.trim_start();
+    rest = consume_keyword(rest, "set").trim_start();
+    rest = consume_keyword(rest, "statistics").trim_start();
+    let (statistics_target_sql, rest) = split_sql_identifier_token(rest)?;
+    let statistics_target = statistics_target_sql
+        .parse::<i32>()
+        .map_err(|_| ParseError::InvalidInteger(statistics_target_sql.to_string()))?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER INDEX ALTER COLUMN SET STATISTICS statement",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(AlterIndexAlterColumnStatisticsStatement {
+        if_exists,
+        index_name,
+        column_number,
+        statistics_target,
     })
 }
 fn build_drop_sequence_statement(sql: &str) -> Result<DropSequenceStatement, ParseError> {
@@ -3913,6 +3994,18 @@ fn parse_sql_identifier(input: &str) -> Result<(String, &str), ParseError> {
         }
     }
     Ok((input[..end].to_ascii_lowercase(), &input[end..]))
+}
+
+fn split_sql_identifier_token(input: &str) -> Result<(&str, &str), ParseError> {
+    let input = input.trim_start();
+    if input.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    let end = input
+        .char_indices()
+        .find_map(|(index, ch)| (index > 0 && ch.is_ascii_whitespace()).then_some(index))
+        .unwrap_or(input.len());
+    Ok((&input[..end], &input[end..]))
 }
 
 fn take_parenthesized_segment(input: &str) -> Result<(String, &str), ParseError> {
@@ -8808,10 +8901,7 @@ fn build_alter_table_alter_column_statistics(
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::identifier if column_name.is_none() => column_name = Some(build_identifier(part)),
             Rule::signed_integer => {
-                let value = parse_i32(part)?;
-                let value = i16::try_from(value)
-                    .map_err(|_| ParseError::InvalidInteger(value.to_string()))?;
-                statistics_target = Some(value);
+                statistics_target = Some(parse_i32(part)?);
             }
             _ => {}
         }

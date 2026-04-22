@@ -73,7 +73,6 @@ pub(crate) use expr_multirange::{
     eval_multirange_function, multirange_intersection_agg_transition, parse_multirange_text,
     range_agg_transition,
 };
-pub(crate) use nodes::render_explain_expr;
 pub use expr_range::render_range_text;
 pub(crate) use expr_range::{
     compare_range_values, decode_range_bytes, encode_range_bytes, eval_range_function,
