@@ -1283,6 +1283,8 @@ impl Database {
                                         column.sql_type,
                                     ),
                                     default_expr: None,
+                                    collation: None,
+                                    storage: None,
                                     compression: None,
                                     constraints: vec![],
                                 },

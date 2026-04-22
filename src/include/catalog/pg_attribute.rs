@@ -51,6 +51,7 @@ pub struct PgAttributeRow {
     pub attnotnull: bool,
     pub attisdropped: bool,
     pub atttypmod: i32,
+    pub attcollation: u32,
     pub attalign: AttributeAlign,
     pub attstorage: AttributeStorage,
     pub attcompression: AttributeCompression,
@@ -71,6 +72,7 @@ pub fn pg_attribute_desc() -> RelationDesc {
             column_desc("attnotnull", SqlType::new(SqlTypeKind::Bool), false),
             column_desc("attisdropped", SqlType::new(SqlTypeKind::Bool), false),
             column_desc("atttypmod", SqlType::new(SqlTypeKind::Int4), false),
+            column_desc("attcollation", SqlType::new(SqlTypeKind::Oid), false),
             column_desc("attalign", SqlType::new(SqlTypeKind::InternalChar), false),
             column_desc("attstorage", SqlType::new(SqlTypeKind::InternalChar), false),
             column_desc(
@@ -212,6 +214,7 @@ fn attribute_rows_for_desc(relid: u32, desc: &RelationDesc) -> Vec<PgAttributeRo
             attnotnull: !column.storage.nullable,
             attisdropped: column.dropped,
             atttypmod: column.sql_type.typmod,
+            attcollation: column.collation_oid.unwrap_or(0),
             attalign: column.storage.attalign,
             attstorage: column.storage.attstorage,
             attcompression: column.storage.attcompression,

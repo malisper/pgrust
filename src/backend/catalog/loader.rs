@@ -326,6 +326,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                 desc.storage.attalign = attr.attalign;
                 desc.storage.attstorage = attr.attstorage;
                 desc.storage.attcompression = attr.attcompression;
+                desc.collation_oid = (attr.attcollation != 0).then_some(attr.attcollation);
                 desc.attstattarget = attr.attstattarget;
                 desc.attinhcount = attr.attinhcount;
                 desc.attislocal = attr.attislocal;

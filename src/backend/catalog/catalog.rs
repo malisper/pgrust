@@ -4,7 +4,9 @@ pub use crate::backend::catalog::state::{
 use crate::backend::executor::{ColumnDesc, RelationDesc, ScalarType};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::access::htup::{AttributeAlign, AttributeCompression, AttributeStorage};
-use crate::include::catalog::{multirange_type_ref_for_sql_type, range_type_ref_for_sql_type};
+use crate::include::catalog::{
+    DEFAULT_COLLATION_OID, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+};
 
 pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -> ColumnDesc {
     let name = name.into();
@@ -54,6 +56,7 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         },
         ty,
         sql_type,
+        collation_oid: default_collation_oid(sql_type),
         dropped: false,
         attstattarget: -1,
         attinhcount: 0,
@@ -70,6 +73,15 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         default_sequence_oid: None,
         missing_default_value: None,
     }
+}
+
+fn default_collation_oid(sql_type: SqlType) -> Option<u32> {
+    (!sql_type.is_array
+        && matches!(
+            sql_type.kind,
+            SqlTypeKind::Text | SqlTypeKind::Varchar | SqlTypeKind::Char | SqlTypeKind::Name
+        ))
+    .then_some(DEFAULT_COLLATION_OID)
 }
 
 fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage {

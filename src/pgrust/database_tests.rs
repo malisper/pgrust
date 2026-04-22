@@ -11220,20 +11220,211 @@ fn drop_sequence_restrict_and_cascade_respect_row_type_dependencies() {
 }
 
 #[test]
-fn unsupported_create_table_like_does_not_poison_catalog_after_sequence_drop() {
-    let base = temp_dir("unsupported_create_table_like_sequence");
+fn create_table_like_plain_copies_columns_not_null_and_collation_without_defaults_or_checks() {
+    let base = temp_dir("create_table_like_plain");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(
+        1,
+        "create table src_like_plain (
+            id int4 default 7 constraint src_like_plain_id_positive check (id > 0),
+            note text collate \"C\" not null
+        )",
+    )
+    .unwrap();
+    db.execute(1, "create table dst_like_plain (like src_like_plain)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select attname, attnotnull, attcollation \
+             from pg_attribute \
+             where attrelid = (select oid from pg_class where relname = 'dst_like_plain') \
+               and attnum > 0 \
+             order by attnum",
+        ),
+        vec![
+            vec![
+                Value::Text("id".into()),
+                Value::Bool(false),
+                Value::Int64(0),
+            ],
+            vec![
+                Value::Text("note".into()),
+                Value::Bool(true),
+                Value::Int64(crate::include::catalog::C_COLLATION_OID as i64),
+            ],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_attrdef where adrelid = (select oid from pg_class where relname = 'dst_like_plain')",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_constraint where conrelid = (select oid from pg_class where relname = 'dst_like_plain') and contype = 'c'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+
+    match db.execute(1, "insert into dst_like_plain values (1, null)") {
+        Err(ExecError::NotNullViolation {
+            relation, column, ..
+        }) if relation == "dst_like_plain" && column == "note" => {}
+        other => panic!("expected copied NOT NULL rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_table_like_with_defaults_and_constraints_copies_only_supported_constraint_types() {
+    let base = temp_dir("create_table_like_defaults_constraints");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table like_parent (id int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table src_like_opts (
+            id int4 primary key,
+            code text unique,
+            parent_id int4 references like_parent(id),
+            payload int4 default 7,
+            constraint src_like_payload_positive check (payload > 0)
+        )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table dst_like_opts (
+            like src_like_opts including defaults including constraints
+        )",
+    )
+    .unwrap();
+
+    db.execute(
+        1,
+        "insert into dst_like_opts (id, code, parent_id) values (1, 'a', 999)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into dst_like_opts (id, code, parent_id) values (1, 'a', 999)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id, code, parent_id, payload from dst_like_opts order by payload, id",
+        ),
+        vec![
+            vec![
+                Value::Int32(1),
+                Value::Text("a".into()),
+                Value::Int32(999),
+                Value::Int32(7),
+            ],
+            vec![
+                Value::Int32(1),
+                Value::Text("a".into()),
+                Value::Int32(999),
+                Value::Int32(7),
+            ],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_constraint \
+             where conrelid = (select oid from pg_class where relname = 'dst_like_opts') \
+               and contype in ('p', 'u', 'f')",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_constraint \
+             where conrelid = (select oid from pg_class where relname = 'dst_like_opts') \
+               and contype = 'c'",
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    match db.execute(
+        1,
+        "insert into dst_like_opts (id, code, parent_id, payload) values (2, 'b', 999, 0)",
+    ) {
+        Err(ExecError::CheckViolation {
+            relation,
+            constraint,
+        }) if relation == "dst_like_opts" && constraint == "src_like_payload_positive" => {}
+        other => panic!("expected copied CHECK rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_table_like_with_storage_and_compression_copies_pg_attribute_settings() {
+    let base = temp_dir("create_table_like_storage_compression");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table src_like_storage (payload text)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table src_like_storage alter column payload set storage external",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table src_like_storage alter column payload set compression pglz",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table dst_like_storage (
+            like src_like_storage including storage including compression
+        )",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select attstorage, attcompression \
+             from pg_attribute \
+             where attrelid = (select oid from pg_class where relname = 'dst_like_storage') \
+               and attname = 'payload'",
+        ),
+        vec![vec![Value::Text("e".into()), Value::Text("p".into())]]
+    );
+}
+
+#[test]
+fn create_table_like_sequence_reports_wrong_object_type_and_keeps_catalog_usable() {
+    let base = temp_dir("create_table_like_sequence");
     let db = Database::open(&base, 64).unwrap();
 
     db.execute(1, "create table items (id int4)").unwrap();
     db.execute(1, "create sequence ctlseq1").unwrap();
     match db.execute(1, "create table ctlt10 (like ctlseq1)") {
-        Err(ExecError::Parse(ParseError::FeatureNotSupported(feature))) => {
-            assert_eq!(feature, "CREATE TABLE ... LIKE")
+        Err(ExecError::Parse(ParseError::WrongObjectType { name, expected })) => {
+            assert_eq!(name, "ctlseq1");
+            assert_eq!(expected, "table");
         }
-        other => panic!(
-            "expected unsupported CREATE TABLE LIKE error, got {:?}",
-            other
-        ),
+        other => panic!("expected wrong-object-type error, got {other:?}"),
     }
     db.execute(1, "drop sequence ctlseq1").unwrap();
 
@@ -15165,7 +15356,8 @@ fn create_operator_bool_bool_regression_debug() {
         .write()
         .create_operator_mvcc(row.clone(), &ctx)
         .unwrap();
-    db.apply_catalog_mutation_effect_immediate(&create_effect).unwrap();
+    db.apply_catalog_mutation_effect_immediate(&create_effect)
+        .unwrap();
 
     let mut current = row;
     current.oid = operator_oid;
