@@ -2291,6 +2291,7 @@ pub enum SqlTypeKind {
     RegClass,
     RegType,
     RegRole,
+    RegOperator,
     RegProcedure,
     Tid,
     Xid,

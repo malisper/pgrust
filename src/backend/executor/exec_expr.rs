@@ -304,6 +304,7 @@ fn regproc_type_name(sql_type: SqlType) -> &'static str {
         SqlTypeKind::RegClass => "regclass",
         SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::RegRole => "regrole",
+        SqlTypeKind::RegOperator => "regoperator",
         SqlTypeKind::Text => "text",
         SqlTypeKind::FdwHandler => "fdw_handler",
         _ => "text",
