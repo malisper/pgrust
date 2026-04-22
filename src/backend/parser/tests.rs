@@ -327,7 +327,8 @@ fn parse_select_with_collate_expression() {
 
 #[test]
 fn parse_select_with_order_by_collate_and_ordinal() {
-    let stmt = parse_select("select name, note from people order by name collate \"C\", 2").unwrap();
+    let stmt =
+        parse_select("select name, note from people order by name collate \"C\", 2").unwrap();
     assert_eq!(stmt.order_by.len(), 2);
     assert_eq!(
         stmt.order_by[0].expr,
@@ -2484,8 +2485,7 @@ fn parse_alter_index_rename_statement() {
 
 #[test]
 fn parse_alter_index_set_statistics_statement() {
-    let stmt =
-        parse_statement("alter index attmp_idx alter column 2 set statistics 1000").unwrap();
+    let stmt = parse_statement("alter index attmp_idx alter column 2 set statistics 1000").unwrap();
     assert_eq!(
         stmt,
         Statement::AlterIndexAlterColumnStatistics(AlterIndexAlterColumnStatisticsStatement {
@@ -2496,10 +2496,8 @@ fn parse_alter_index_set_statistics_statement() {
         })
     );
 
-    let stmt = parse_statement(
-        "alter index if exists attmp_idx alter column 2 set statistics -1",
-    )
-    .unwrap();
+    let stmt = parse_statement("alter index if exists attmp_idx alter column 2 set statistics -1")
+        .unwrap();
     assert_eq!(
         stmt,
         Statement::AlterIndexAlterColumnStatistics(AlterIndexAlterColumnStatisticsStatement {
@@ -4815,8 +4813,7 @@ fn build_plan_accepts_catalog_backed_text_array_casts() {
 #[test]
 fn analyze_interval_array_text_cast_keeps_outer_text_cast() {
     let stmt =
-        parse_select("select '{0 second,1 hour 42 minutes 20 seconds}'::interval[]::text")
-            .unwrap();
+        parse_select("select '{0 second,1 hour 42 minutes 20 seconds}'::interval[]::text").unwrap();
     let (query, _) =
         analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[]).unwrap();
     assert!(matches!(
@@ -5074,9 +5071,7 @@ fn parse_select_with_explicit_nulls_ordering() {
 
 #[test]
 fn build_plan_tracks_order_by_collation_for_aliases_and_ordinals() {
-    fn order_by_items(
-        plan: &Plan,
-    ) -> &[crate::include::nodes::primnodes::OrderByEntry] {
+    fn order_by_items(plan: &Plan) -> &[crate::include::nodes::primnodes::OrderByEntry] {
         match plan {
             Plan::Projection { input, .. }
             | Plan::Filter { input, .. }
@@ -5149,7 +5144,8 @@ fn build_plan_rejects_invalid_collation_usage() {
                 && sqlstate == "42804"
     ));
 
-    let stmt = parse_select("select name collate \"C\" = note collate \"POSIX\" from people").unwrap();
+    let stmt =
+        parse_select("select name collate \"C\" = note collate \"POSIX\" from people").unwrap();
     assert!(matches!(
         build_plan(&stmt, &catalog()),
         Err(ParseError::DetailedError { message, sqlstate, .. })
@@ -7886,12 +7882,46 @@ fn parse_array_and_unnest_expressions() {
 
     let stmt = parse_select("select ARRAY['a'] @> ARRAY['b'], ARRAY['a'] <@ ARRAY['b']").unwrap();
     assert!(matches!(stmt.targets[0].expr, SqlExpr::ArrayContains(_, _)));
-    assert!(matches!(stmt.targets[1].expr, SqlExpr::ArrayContained(_, _)));
+    assert!(matches!(
+        stmt.targets[1].expr,
+        SqlExpr::ArrayContained(_, _)
+    ));
 
     let stmt = parse_select("select '(0,0),(1,1)'::box && '(2,2),(3,3)'::box").unwrap();
     assert!(matches!(
         stmt.targets[0].expr,
         SqlExpr::BinaryOperator { ref op, .. } if op == "&&"
+    ));
+}
+
+#[test]
+fn parse_unnest_with_ordinality_aliases_columns() {
+    let stmt = parse_select(
+        "select * from unnest(ARRAY['a', 'b']::varchar[]) with ordinality as u(val, ord)",
+    )
+    .unwrap();
+    let Some(FromItem::Alias {
+        source,
+        alias,
+        column_aliases,
+        ..
+    }) = stmt.from
+    else {
+        panic!("expected aliased function call in from");
+    };
+    assert_eq!(alias, "u");
+    assert_eq!(
+        column_aliases,
+        AliasColumnSpec::Names(vec!["val".into(), "ord".into()])
+    );
+    assert!(matches!(
+        source.as_ref(),
+        FromItem::FunctionCall {
+            name,
+            args,
+            with_ordinality: true,
+            ..
+        } if name == "unnest" && args.len() == 1
     ));
 }
 
@@ -8697,6 +8727,34 @@ fn build_plan_for_unnest_uses_array_element_types() {
                 SqlType::new(SqlTypeKind::Varchar)
             );
             assert_eq!(output_columns[1].sql_type, SqlType::new(SqlTypeKind::Int4));
+        }
+        other => panic!("expected unnest plan, got {other:?}"),
+    }
+}
+
+#[test]
+fn build_plan_for_unnest_with_ordinality_adds_bigint_column() {
+    let stmt = parse_select("select * from unnest(ARRAY['a']::varchar[]) with ordinality").unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+    match plan {
+        Plan::FunctionScan {
+            call:
+                crate::include::nodes::primnodes::SetReturningCall::Unnest {
+                    output_columns,
+                    with_ordinality,
+                    ..
+                },
+            ..
+        } => {
+            assert!(with_ordinality);
+            assert_eq!(output_columns.len(), 2);
+            assert_eq!(output_columns[0].name, "unnest");
+            assert_eq!(
+                output_columns[0].sql_type,
+                SqlType::new(SqlTypeKind::Varchar)
+            );
+            assert_eq!(output_columns[1].name, "ordinality");
+            assert_eq!(output_columns[1].sql_type, SqlType::new(SqlTypeKind::Int8));
         }
         other => panic!("expected unnest plan, got {other:?}"),
     }

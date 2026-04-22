@@ -2450,10 +2450,7 @@ fn build_alter_index_alter_column_statistics_statement(
         .map_err(|_| ParseError::InvalidInteger(column_number_sql.to_string()))?;
     if column_number_i32 <= 0 || column_number_i32 > i32::from(i16::MAX) {
         return Err(ParseError::DetailedError {
-            message: format!(
-                "column number must be in range from 1 to {}",
-                i16::MAX
-            ),
+            message: format!("column number must be in range from 1 to {}", i16::MAX),
             detail: None,
             hint: None,
             sqlstate: "22023",
@@ -4816,9 +4813,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             Ok(Statement::CommentOnTable(build_comment_on_table(inner)?))
         }
         Rule::comment_on_rule_stmt => Ok(Statement::CommentOnRule(build_comment_on_rule(inner)?)),
-        Rule::comment_on_trigger_stmt => {
-            Ok(Statement::CommentOnTrigger(build_comment_on_trigger(inner)?))
-        }
+        Rule::comment_on_trigger_stmt => Ok(Statement::CommentOnTrigger(build_comment_on_trigger(
+            inner,
+        )?)),
         Rule::create_schema_stmt => Ok(Statement::CreateSchema(build_create_schema(inner)?)),
         Rule::create_policy_stmt => Ok(Statement::CreatePolicy(build_create_policy_statement(
             inner.as_str(),
@@ -6105,12 +6102,14 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
         Rule::srf_from_item => {
             let mut name = None;
             let mut parsed_args = ParsedFunctionArgs::default();
+            let mut with_ordinality = false;
             for part in pair.into_inner() {
                 match part.as_rule() {
                     Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
                     Rule::function_arg_list => {
                         parsed_args = build_function_arg_list(part)?;
                     }
+                    Rule::srf_with_ordinality => with_ordinality = true,
                     _ => {}
                 }
             }
@@ -6118,6 +6117,7 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
                 name: name.ok_or(ParseError::UnexpectedEof)?,
                 args: parsed_args.args,
                 func_variadic: parsed_args.func_variadic,
+                with_ordinality,
             })
         }
         Rule::derived_from_item => {
@@ -7675,7 +7675,9 @@ fn build_comment_on_trigger(pair: Pair<'_, Rule>) -> Result<CommentOnTriggerStat
     let mut comment = None;
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::identifier if trigger_name.is_none() => trigger_name = Some(build_identifier(part)),
+            Rule::identifier if trigger_name.is_none() => {
+                trigger_name = Some(build_identifier(part))
+            }
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::quoted_string_literal
             | Rule::string_literal

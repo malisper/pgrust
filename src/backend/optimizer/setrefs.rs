@@ -1585,20 +1585,23 @@ fn lower_set_returning_call(
             start,
             stop,
             step,
-            output,
+            output_columns,
+            with_ordinality,
         } => SetReturningCall::GenerateSeries {
             func_oid,
             func_variadic,
             start: lower_expr(ctx, start, mode),
             stop: lower_expr(ctx, stop, mode),
             step: lower_expr(ctx, step, mode),
-            output,
+            output_columns,
+            with_ordinality,
         },
         SetReturningCall::Unnest {
             func_oid,
             func_variadic,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::Unnest {
             func_oid,
             func_variadic,
@@ -1607,6 +1610,7 @@ fn lower_set_returning_call(
                 .map(|arg| lower_expr(ctx, arg, mode))
                 .collect(),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::JsonTableFunction {
             func_oid,
@@ -1614,6 +1618,7 @@ fn lower_set_returning_call(
             kind,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::JsonTableFunction {
             func_oid,
             func_variadic,
@@ -1623,6 +1628,7 @@ fn lower_set_returning_call(
                 .map(|arg| lower_expr(ctx, arg, mode))
                 .collect(),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::JsonRecordFunction {
             func_oid,
@@ -1631,6 +1637,7 @@ fn lower_set_returning_call(
             args,
             output_columns,
             record_type,
+            with_ordinality,
         } => SetReturningCall::JsonRecordFunction {
             func_oid,
             func_variadic,
@@ -1641,6 +1648,7 @@ fn lower_set_returning_call(
                 .collect(),
             output_columns,
             record_type,
+            with_ordinality,
         },
         SetReturningCall::RegexTableFunction {
             func_oid,
@@ -1648,6 +1656,7 @@ fn lower_set_returning_call(
             kind,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::RegexTableFunction {
             func_oid,
             func_variadic,
@@ -1657,11 +1666,13 @@ fn lower_set_returning_call(
                 .map(|arg| lower_expr(ctx, arg, mode))
                 .collect(),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::TextSearchTableFunction {
             kind,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::TextSearchTableFunction {
             kind,
             args: args
@@ -1669,12 +1680,14 @@ fn lower_set_returning_call(
                 .map(|arg| lower_expr(ctx, arg, mode))
                 .collect(),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::UserDefined {
             proc_oid,
             func_variadic,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::UserDefined {
             proc_oid,
             func_variadic,
@@ -1683,6 +1696,7 @@ fn lower_set_returning_call(
                 .map(|arg| lower_expr(ctx, arg, mode))
                 .collect(),
             output_columns,
+            with_ordinality,
         },
     }
 }
@@ -1702,20 +1716,23 @@ fn fix_set_returning_call_upper_exprs(
             start,
             stop,
             step,
-            output,
+            output_columns,
+            with_ordinality,
         } => SetReturningCall::GenerateSeries {
             func_oid,
             func_variadic,
             start: fix_upper_expr_for_input(root, start, path, input_tlist),
             stop: fix_upper_expr_for_input(root, stop, path, input_tlist),
             step: fix_upper_expr_for_input(root, step, path, input_tlist),
-            output,
+            output_columns,
+            with_ordinality,
         },
         SetReturningCall::Unnest {
             func_oid,
             func_variadic,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::Unnest {
             func_oid,
             func_variadic,
@@ -1724,6 +1741,7 @@ fn fix_set_returning_call_upper_exprs(
                 .map(|arg| fix_upper_expr_for_input(root, arg, path, input_tlist))
                 .collect(),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::JsonTableFunction {
             func_oid,
@@ -1731,6 +1749,7 @@ fn fix_set_returning_call_upper_exprs(
             kind,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::JsonTableFunction {
             func_oid,
             func_variadic,
@@ -1740,6 +1759,7 @@ fn fix_set_returning_call_upper_exprs(
                 .map(|arg| fix_upper_expr_for_input(root, arg, path, input_tlist))
                 .collect(),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::JsonRecordFunction {
             func_oid,
@@ -1748,6 +1768,7 @@ fn fix_set_returning_call_upper_exprs(
             args,
             output_columns,
             record_type,
+            with_ordinality,
         } => SetReturningCall::JsonRecordFunction {
             func_oid,
             func_variadic,
@@ -1758,6 +1779,7 @@ fn fix_set_returning_call_upper_exprs(
                 .collect(),
             output_columns,
             record_type,
+            with_ordinality,
         },
         SetReturningCall::RegexTableFunction {
             func_oid,
@@ -1765,6 +1787,7 @@ fn fix_set_returning_call_upper_exprs(
             kind,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::RegexTableFunction {
             func_oid,
             func_variadic,
@@ -1774,11 +1797,13 @@ fn fix_set_returning_call_upper_exprs(
                 .map(|arg| fix_upper_expr_for_input(root, arg, path, input_tlist))
                 .collect(),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::TextSearchTableFunction {
             kind,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::TextSearchTableFunction {
             kind,
             args: args
@@ -1786,12 +1811,14 @@ fn fix_set_returning_call_upper_exprs(
                 .map(|arg| fix_upper_expr_for_input(root, arg, path, input_tlist))
                 .collect(),
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::UserDefined {
             proc_oid,
             func_variadic,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::UserDefined {
             proc_oid,
             func_variadic,
@@ -1800,6 +1827,7 @@ fn fix_set_returning_call_upper_exprs(
                 .map(|arg| fix_upper_expr_for_input(root, arg, path, input_tlist))
                 .collect(),
             output_columns,
+            with_ordinality,
         },
     }
 }
