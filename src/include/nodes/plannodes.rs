@@ -108,6 +108,30 @@ pub enum Plan {
         order_by_keys: Vec<ScanKeyData>,
         direction: ScanDirection,
     },
+    BitmapIndexScan {
+        plan_info: PlanEstimate,
+        source_id: usize,
+        rel: RelFileLocator,
+        relation_oid: u32,
+        index_rel: RelFileLocator,
+        am_oid: u32,
+        desc: RelationDesc,
+        index_desc: RelationDesc,
+        index_meta: IndexRelCacheEntry,
+        keys: Vec<ScanKeyData>,
+        index_quals: Vec<Expr>,
+    },
+    BitmapHeapScan {
+        plan_info: PlanEstimate,
+        source_id: usize,
+        rel: RelFileLocator,
+        relation_name: String,
+        relation_oid: u32,
+        toast: Option<ToastRelationRef>,
+        desc: RelationDesc,
+        bitmapqual: Box<Plan>,
+        recheck_qual: Vec<Expr>,
+    },
     Hash {
         plan_info: PlanEstimate,
         input: Box<Plan>,
@@ -221,6 +245,8 @@ impl Plan {
             | Plan::Append { plan_info, .. }
             | Plan::SeqScan { plan_info, .. }
             | Plan::IndexScan { plan_info, .. }
+            | Plan::BitmapIndexScan { plan_info, .. }
+            | Plan::BitmapHeapScan { plan_info, .. }
             | Plan::Hash { plan_info, .. }
             | Plan::NestedLoopJoin { plan_info, .. }
             | Plan::HashJoin { plan_info, .. }
@@ -247,6 +273,8 @@ impl Plan {
             | Plan::Append { plan_info, .. }
             | Plan::SeqScan { plan_info, .. }
             | Plan::IndexScan { plan_info, .. }
+            | Plan::BitmapIndexScan { plan_info, .. }
+            | Plan::BitmapHeapScan { plan_info, .. }
             | Plan::Hash { plan_info, .. }
             | Plan::NestedLoopJoin { plan_info, .. }
             | Plan::HashJoin { plan_info, .. }
@@ -289,6 +317,16 @@ impl Plan {
                 })
                 .collect(),
             Plan::IndexScan { desc, .. } => desc
+                .columns
+                .iter()
+                .map(|c| QueryColumn {
+                    name: c.name.clone(),
+                    sql_type: c.sql_type,
+                    wire_type_oid: None,
+                })
+                .collect(),
+            Plan::BitmapIndexScan { .. } => vec![],
+            Plan::BitmapHeapScan { desc, .. } => desc
                 .columns
                 .iter()
                 .map(|c| QueryColumn {

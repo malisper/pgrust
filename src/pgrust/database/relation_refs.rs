@@ -275,8 +275,16 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                 collect_rels_from_plan(child, rels);
             }
         }
-        Plan::SeqScan { rel, .. } | Plan::IndexScan { rel, .. } => {
+        Plan::SeqScan { rel, .. }
+        | Plan::IndexScan { rel, .. }
+        | Plan::BitmapIndexScan { rel, .. } => {
             rels.insert(*rel);
+        }
+        Plan::BitmapHeapScan {
+            rel, bitmapqual, ..
+        } => {
+            rels.insert(*rel);
+            collect_rels_from_plan(bitmapqual, rels);
         }
         Plan::Hash {
             input, hash_keys, ..

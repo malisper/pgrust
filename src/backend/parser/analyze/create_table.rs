@@ -416,6 +416,9 @@ mod tests {
                 constraints: vec![],
             })],
             inherits: Vec::new(),
+            partition_spec: None,
+            partition_of: None,
+            partition_bound: None,
             if_not_exists: false,
         };
 
@@ -445,6 +448,9 @@ mod tests {
                 constraints: vec![],
             })],
             inherits: Vec::new(),
+            partition_spec: None,
+            partition_of: None,
+            partition_bound: None,
             if_not_exists: false,
         };
 

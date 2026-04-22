@@ -347,6 +347,10 @@ pub trait CatalogLookup {
         None
     }
 
+    fn brin_pages_per_range(&self, _relation_oid: u32) -> Option<u32> {
+        None
+    }
+
     fn index_relations_for_heap(&self, _relation_oid: u32) -> Vec<BoundIndexRelation> {
         Vec::new()
     }

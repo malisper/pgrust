@@ -1501,6 +1501,7 @@ impl IndexScanOpaqueExt for IndexScanOpaque {
             IndexScanOpaque::Btree(state) => Some(state),
             IndexScanOpaque::Gist(_) => None,
             IndexScanOpaque::Spgist(_) => None,
+            IndexScanOpaque::Brin(_) => None,
             IndexScanOpaque::None => None,
         }
     }
@@ -1544,6 +1545,7 @@ fn btgettuple(scan: &mut IndexScanDesc) -> Result<bool, CatalogError> {
             IndexScanOpaque::Btree(state) => state.current_items.is_empty(),
             IndexScanOpaque::Gist(_) => true,
             IndexScanOpaque::Spgist(_) => true,
+            IndexScanOpaque::Brin(_) => true,
             IndexScanOpaque::None => true,
         };
         if needs_load {
@@ -2300,12 +2302,14 @@ pub fn btree_am_handler() -> IndexAmRoutine {
         amstorage: false,
         amclusterable: true,
         ampredlocks: true,
+        amsummarizing: false,
         ambuild: Some(btbuild),
         ambuildempty: Some(btbuildempty),
         aminsert: Some(btinsert),
         ambeginscan: Some(btbeginscan),
         amrescan: Some(btrescan),
         amgettuple: Some(btgettuple),
+        amgetbitmap: None,
         amendscan: Some(btendscan),
         ambulkdelete: Some(crate::backend::access::nbtree::nbtvacuum::btbulkdelete),
         amvacuumcleanup: Some(crate::backend::access::nbtree::nbtvacuum::btvacuumcleanup),

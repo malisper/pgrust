@@ -329,6 +329,7 @@ impl Database {
                 "btree",
                 relation,
                 &index_columns,
+                &[],
             )?;
             let index_entry = self.build_simple_index_in_transaction(
                 client_id,

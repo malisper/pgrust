@@ -10,15 +10,17 @@ use crate::include::catalog::{
     BYTEA_CMP_LT_PROC_OID, BYTEA_CMP_NE_PROC_OID, BYTEA_TYPE_OID, CIRCLE_TYPE_OID, DATE_TYPE_OID,
     DATERANGE_TYPE_OID, FLOAT8_TYPE_OID, INT4_CMP_EQ_PROC_OID, INT4_CMP_GE_PROC_OID,
     INT4_CMP_GT_PROC_OID, INT4_CMP_LE_PROC_OID, INT4_CMP_LT_PROC_OID, INT4_CMP_NE_PROC_OID,
-    INT4_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID, INT8RANGE_TYPE_OID, JSONB_CMP_EQ_PROC_OID,
-    JSONB_CMP_GE_PROC_OID, JSONB_CMP_GT_PROC_OID, JSONB_CMP_LE_PROC_OID, JSONB_CMP_LT_PROC_OID,
-    JSONB_CMP_NE_PROC_OID, JSONB_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID, NUMERIC_TYPE_OID,
-    NUMRANGE_TYPE_OID, PATH_TYPE_OID, PG_CATALOG_NAMESPACE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID,
-    TEXT_CMP_EQ_PROC_OID, TEXT_CMP_GE_PROC_OID, TEXT_CMP_GT_PROC_OID, TEXT_CMP_LE_PROC_OID,
-    TEXT_CMP_LT_PROC_OID, TEXT_CMP_NE_PROC_OID, TEXT_STARTS_WITH_PROC_OID, TEXT_TYPE_OID,
-    TID_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID,
-    VARBIT_CMP_EQ_PROC_OID, VARBIT_CMP_GE_PROC_OID, VARBIT_CMP_GT_PROC_OID, VARBIT_CMP_LE_PROC_OID,
-    VARBIT_CMP_LT_PROC_OID, VARBIT_CMP_NE_PROC_OID, VARBIT_TYPE_OID,
+    INT4_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID, INT8RANGE_TYPE_OID, INTERNAL_CHAR_TYPE_OID,
+    JSONB_CMP_EQ_PROC_OID, JSONB_CMP_GE_PROC_OID, JSONB_CMP_GT_PROC_OID, JSONB_CMP_LE_PROC_OID,
+    JSONB_CMP_LT_PROC_OID, JSONB_CMP_NE_PROC_OID, JSONB_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID,
+    NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID, OID_TYPE_OID, PATH_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
+    POINT_TYPE_OID, POLYGON_TYPE_OID, TEXT_CMP_EQ_PROC_OID, TEXT_CMP_GE_PROC_OID,
+    TEXT_CMP_GT_PROC_OID, TEXT_CMP_LE_PROC_OID, TEXT_CMP_LT_PROC_OID, TEXT_CMP_NE_PROC_OID,
+    TEXT_STARTS_WITH_PROC_OID, TEXT_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_TYPE_OID,
+    TIMESTAMPTZ_TYPE_OID, TIMETZ_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID,
+    VARBIT_CMP_EQ_PROC_OID, VARBIT_CMP_GE_PROC_OID, VARBIT_CMP_GT_PROC_OID,
+    VARBIT_CMP_LE_PROC_OID, VARBIT_CMP_LT_PROC_OID, VARBIT_CMP_NE_PROC_OID, VARBIT_TYPE_OID,
+    bootstrap_pg_proc_rows, BPCHAR_TYPE_OID, FLOAT4_TYPE_OID, INT2_TYPE_OID, TID_TYPE_OID,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -606,6 +608,9 @@ pub fn bootstrap_pg_operator_rows() -> Vec<PgOperatorRow> {
     ];
     rows.extend(geometry_operator_rows());
     rows.extend(range_operator_rows());
+    rows.extend(brin_scalar_comparison_operator_rows(
+        &bootstrap_pg_proc_rows(),
+    ));
     rows
 }
 
@@ -2934,6 +2939,197 @@ fn range_operator_rows() -> Vec<PgOperatorRow> {
         next_proc_oid += 32;
     }
     rows
+}
+
+fn brin_scalar_comparison_operator_rows(
+    proc_rows: &[crate::include::catalog::PgProcRow],
+) -> Vec<PgOperatorRow> {
+    const BASE: u32 = 76_400;
+
+    let specs = [
+        (
+            INTERNAL_CHAR_TYPE_OID,
+            ["chareq", "charne", "charlt", "charle", "chargt", "charge"],
+        ),
+        (
+            INT2_TYPE_OID,
+            ["int2eq", "int2ne", "int2lt", "int2le", "int2gt", "int2ge"],
+        ),
+        (
+            INT8_TYPE_OID,
+            ["int8eq", "int8ne", "int8lt", "int8le", "int8gt", "int8ge"],
+        ),
+        (
+            OID_TYPE_OID,
+            ["oideq", "oidne", "oidlt", "oidle", "oidgt", "oidge"],
+        ),
+        (
+            FLOAT4_TYPE_OID,
+            [
+                "float4eq",
+                "float4ne",
+                "float4lt",
+                "float4le",
+                "float4gt",
+                "float4ge",
+            ],
+        ),
+        (
+            FLOAT8_TYPE_OID,
+            [
+                "float8eq",
+                "float8ne",
+                "float8lt",
+                "float8le",
+                "float8gt",
+                "float8ge",
+            ],
+        ),
+        (
+            BPCHAR_TYPE_OID,
+            [
+                "bpchareq",
+                "bpcharne",
+                "bpcharlt",
+                "bpcharle",
+                "bpchargt",
+                "bpcharge",
+            ],
+        ),
+        (
+            DATE_TYPE_OID,
+            ["date_eq", "date_ne", "date_lt", "date_le", "date_gt", "date_ge"],
+        ),
+        (
+            TIME_TYPE_OID,
+            ["time_eq", "time_ne", "time_lt", "time_le", "time_gt", "time_ge"],
+        ),
+        (
+            TIMETZ_TYPE_OID,
+            [
+                "timetz_eq",
+                "timetz_ne",
+                "timetz_lt",
+                "timetz_le",
+                "timetz_gt",
+                "timetz_ge",
+            ],
+        ),
+        (
+            TIMESTAMP_TYPE_OID,
+            [
+                "timestamp_eq",
+                "timestamp_ne",
+                "timestamp_lt",
+                "timestamp_le",
+                "timestamp_gt",
+                "timestamp_ge",
+            ],
+        ),
+        (
+            TIMESTAMPTZ_TYPE_OID,
+            [
+                "timestamptz_eq",
+                "timestamptz_ne",
+                "timestamptz_lt",
+                "timestamptz_le",
+                "timestamptz_gt",
+                "timestamptz_ge",
+            ],
+        ),
+    ];
+
+    let mut oid = BASE;
+    let mut rows = Vec::new();
+    for (type_oid, proc_names) in specs {
+        let eq_oid = oid;
+        let ne_oid = oid + 1;
+        let lt_oid = oid + 2;
+        let le_oid = oid + 3;
+        let gt_oid = oid + 4;
+        let ge_oid = oid + 5;
+
+        rows.push(operator_row(
+            eq_oid,
+            "=",
+            type_oid,
+            type_oid,
+            eq_oid,
+            ne_oid,
+            comparison_proc_oid(proc_rows, proc_names[0], type_oid),
+            true,
+            true,
+        ));
+        rows.push(operator_row(
+            ne_oid,
+            "<>",
+            type_oid,
+            type_oid,
+            ne_oid,
+            eq_oid,
+            comparison_proc_oid(proc_rows, proc_names[1], type_oid),
+            false,
+            false,
+        ));
+        rows.push(operator_row(
+            lt_oid,
+            "<",
+            type_oid,
+            type_oid,
+            gt_oid,
+            ge_oid,
+            comparison_proc_oid(proc_rows, proc_names[2], type_oid),
+            false,
+            false,
+        ));
+        rows.push(operator_row(
+            le_oid,
+            "<=",
+            type_oid,
+            type_oid,
+            ge_oid,
+            gt_oid,
+            comparison_proc_oid(proc_rows, proc_names[3], type_oid),
+            false,
+            false,
+        ));
+        rows.push(operator_row(
+            gt_oid,
+            ">",
+            type_oid,
+            type_oid,
+            lt_oid,
+            le_oid,
+            comparison_proc_oid(proc_rows, proc_names[4], type_oid),
+            false,
+            false,
+        ));
+        rows.push(operator_row(
+            ge_oid,
+            ">=",
+            type_oid,
+            type_oid,
+            le_oid,
+            lt_oid,
+            comparison_proc_oid(proc_rows, proc_names[5], type_oid),
+            false,
+            false,
+        ));
+        oid = oid.saturating_add(6);
+    }
+    rows
+}
+
+fn comparison_proc_oid(
+    rows: &[crate::include::catalog::PgProcRow],
+    name: &str,
+    type_oid: u32,
+) -> u32 {
+    let proargtypes = format!("{type_oid} {type_oid}");
+    rows.iter()
+        .find(|row| row.proname == name && row.proargtypes == proargtypes)
+        .map(|row| row.oid)
+        .unwrap_or_else(|| panic!("missing bootstrap comparison proc {name}({type_oid})"))
 }
 
 fn operator_row_full(

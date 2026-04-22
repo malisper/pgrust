@@ -16,6 +16,7 @@ use crate::include::access::htup::AttributeCompression;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::relscan::{IndexScanDesc, ScanDirection};
 use crate::include::access::scankey::ScanKeyData;
+use crate::include::access::tidbitmap::TidBitmap;
 use crate::pgrust::database::{LargeObjectRuntime, SequenceRuntime, TransactionWaiter};
 use crate::{BufferPool, ClientId};
 
@@ -94,6 +95,8 @@ pub struct IndexBuildEmptyContext {
     pub client_id: ClientId,
     pub xid: u32,
     pub index_relation: RelFileLocator,
+    pub index_desc: RelationDesc,
+    pub index_meta: IndexRelCacheEntry,
 }
 
 #[derive(Clone)]
@@ -138,6 +141,7 @@ pub type AmBeginScanFn = fn(&IndexBeginScanContext) -> Result<IndexScanDesc, Cat
 pub type AmRescanFn =
     fn(&mut IndexScanDesc, &[ScanKeyData], ScanDirection) -> Result<(), CatalogError>;
 pub type AmGetTupleFn = fn(&mut IndexScanDesc) -> Result<bool, CatalogError>;
+pub type AmGetBitmapFn = fn(&mut IndexScanDesc, &mut TidBitmap) -> Result<i64, CatalogError>;
 pub type AmEndScanFn = fn(IndexScanDesc) -> Result<(), CatalogError>;
 pub type IndexBulkDeleteCallback<'a> = dyn Fn(ItemPointerData) -> bool + 'a;
 pub type AmBulkDeleteFn = for<'a> fn(
@@ -167,12 +171,14 @@ pub struct IndexAmRoutine {
     pub amstorage: bool,
     pub amclusterable: bool,
     pub ampredlocks: bool,
+    pub amsummarizing: bool,
     pub ambuild: Option<AmBuildFn>,
     pub ambuildempty: Option<AmBuildEmptyFn>,
     pub aminsert: Option<AmInsertFn>,
     pub ambeginscan: Option<AmBeginScanFn>,
     pub amrescan: Option<AmRescanFn>,
     pub amgettuple: Option<AmGetTupleFn>,
+    pub amgetbitmap: Option<AmGetBitmapFn>,
     pub amendscan: Option<AmEndScanFn>,
     pub ambulkdelete: Option<AmBulkDeleteFn>,
     pub amvacuumcleanup: Option<AmVacuumCleanupFn>,

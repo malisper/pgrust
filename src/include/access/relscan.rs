@@ -112,12 +112,22 @@ pub struct SpgistIndexScanOpaque {
     pub next_item: usize,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BrinIndexScanOpaque {
+    pub pages_per_range: u32,
+    pub current_range_start: Option<u32>,
+    pub next_revmap_page: u32,
+    pub next_revmap_index: usize,
+    pub scan_started: bool,
+}
+
 #[derive(Debug, Clone)]
 pub enum IndexScanOpaque {
     None,
     Btree(BtIndexScanOpaque),
     Gist(GistIndexScanOpaque),
     Spgist(SpgistIndexScanOpaque),
+    Brin(BrinIndexScanOpaque),
 }
 
 #[derive(Clone)]

@@ -5,12 +5,15 @@ use crate::RelFileLocator;
 use crate::backend::executor::{Value, cast_value, compare_order_values};
 use crate::backend::parser::analyze::predicate_implies_index_predicate;
 use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType, SqlTypeKind};
+use crate::include::access::brin::BRIN_DEFAULT_PAGES_PER_RANGE;
+use crate::include::access::brin_page::REVMAP_PAGE_MAXITEMS;
 use crate::backend::storage::page::bufpage::{ITEM_ID_SIZE, MAXALIGN, SIZE_OF_PAGE_HEADER_DATA};
 use crate::backend::storage::smgr::BLCKSZ;
 use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::access::htup::SIZEOF_HEAP_TUPLE_HEADER;
 use crate::include::catalog::{
-    BTREE_AM_OID, GIST_AM_OID, PgStatisticRow, SPGIST_AM_OID, bootstrap_pg_operator_rows,
+    BRIN_AM_OID, BTREE_AM_OID, GIST_AM_OID, PgStatisticRow, SPGIST_AM_OID,
+    bootstrap_pg_operator_rows,
     builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
     relkind_has_storage,
 };
@@ -28,7 +31,8 @@ use super::super::{
     AccessCandidate, CPU_INDEX_TUPLE_COST, CPU_OPERATOR_COST, CPU_TUPLE_COST, DEFAULT_BOOL_SEL,
     DEFAULT_EQ_SEL, DEFAULT_INEQ_SEL, DEFAULT_NUM_PAGES, DEFAULT_NUM_ROWS, HashJoinClauses,
     IndexPathSpec, IndexableQual, RANDOM_PAGE_COST, RelationStats, SEQ_PAGE_COST,
-    STATISTIC_KIND_HISTOGRAM, STATISTIC_KIND_MCV, path_relids, relids_subset,
+    STATISTIC_KIND_CORRELATION, STATISTIC_KIND_HISTOGRAM, STATISTIC_KIND_MCV, path_relids,
+    relids_subset,
 };
 use super::gistcost::estimate_gist_scan_cost;
 
@@ -200,6 +204,88 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     order_by_keys,
                     direction,
                     pathkeys,
+                }
+            }
+            Path::BitmapIndexScan {
+                pathtarget,
+                source_id,
+                rel,
+                relation_oid,
+                index_rel,
+                am_oid,
+                desc,
+                index_desc,
+                index_meta,
+                keys,
+                index_quals,
+                ..
+            } => {
+                let stats = relation_stats(catalog, index_meta.indrelid, &desc);
+                let rows = clamp_rows(stats.reltuples * DEFAULT_EQ_SEL);
+                Path::BitmapIndexScan {
+                    plan_info: PlanEstimate::new(
+                        CPU_OPERATOR_COST,
+                        RANDOM_PAGE_COST + rows * CPU_INDEX_TUPLE_COST,
+                        rows,
+                        0,
+                    ),
+                    pathtarget,
+                    source_id,
+                    rel,
+                    relation_oid,
+                    index_rel,
+                    am_oid,
+                    desc,
+                    index_desc,
+                    index_meta,
+                    keys,
+                    index_quals,
+                }
+            }
+            Path::BitmapHeapScan {
+                pathtarget,
+                source_id,
+                rel,
+                relation_name,
+                relation_oid,
+                toast,
+                desc,
+                bitmapqual,
+                recheck_qual,
+                ..
+            } => {
+                let bitmapqual = optimize_path(*bitmapqual, catalog);
+                let stats = relation_stats(catalog, relation_oid, &desc);
+                let recheck_expr = and_exprs(recheck_qual.clone());
+                let selectivity = recheck_expr
+                    .as_ref()
+                    .map(|expr| clause_selectivity(expr, Some(&stats), stats.reltuples))
+                    .unwrap_or(1.0);
+                let rows = clamp_rows(stats.reltuples * selectivity);
+                let recheck_cost = recheck_expr
+                    .as_ref()
+                    .map(|expr| predicate_cost(expr) * rows * CPU_OPERATOR_COST)
+                    .unwrap_or(0.0);
+                let total_cost = bitmapqual.plan_info().total_cost.as_f64()
+                    + rows * CPU_TUPLE_COST
+                    + stats.relpages.min(rows.max(1.0)) * RANDOM_PAGE_COST
+                    + recheck_cost;
+                Path::BitmapHeapScan {
+                    plan_info: PlanEstimate::new(
+                        bitmapqual.plan_info().startup_cost.as_f64(),
+                        total_cost,
+                        rows,
+                        stats.width,
+                    ),
+                    pathtarget,
+                    source_id,
+                    rel,
+                    relation_name,
+                    relation_oid,
+                    toast,
+                    desc,
+                    bitmapqual: Box::new(bitmapqual),
+                    recheck_qual,
                 }
             }
             Path::Filter {
@@ -963,6 +1049,157 @@ pub(super) fn estimate_seqscan_candidate(
     AccessCandidate { total_cost, plan }
 }
 
+fn brin_pages_per_range(index: &BoundIndexRelation, catalog: &dyn CatalogLookup) -> u32 {
+    catalog
+        .brin_pages_per_range(index.relation_oid)
+        .or_else(|| {
+            index
+                .index_meta
+                .brin_options
+                .as_ref()
+                .map(|options| options.pages_per_range)
+                .filter(|pages| *pages > 0)
+        })
+        .unwrap_or(BRIN_DEFAULT_PAGES_PER_RANGE)
+}
+
+fn brin_revmap_page_count(index_ranges: f64) -> f64 {
+    let ranges = index_ranges.max(1.0).ceil() as usize;
+    (((ranges - 1) / REVMAP_PAGE_MAXITEMS) + 1) as f64
+}
+
+fn brin_index_correlation(stats: &RelationStats, spec: &IndexPathSpec) -> f64 {
+    spec.keys
+        .iter()
+        .filter_map(|key| {
+            let index_pos = usize::try_from(key.attribute_number.saturating_sub(1)).ok()?;
+            let attnum = *spec.index.index_meta.indkey.get(index_pos)?;
+            (attnum > 0)
+                .then(|| stats.stats_by_attnum.get(&attnum))
+                .flatten()
+                .and_then(|row| slot_first_number(row, STATISTIC_KIND_CORRELATION))
+                .map(f64::abs)
+        })
+        .fold(0.0, f64::max)
+}
+
+fn estimate_brin_bitmap_candidate(
+    source_id: usize,
+    rel: RelFileLocator,
+    relation_name: String,
+    relation_oid: u32,
+    toast: Option<ToastRelationRef>,
+    desc: RelationDesc,
+    stats: &RelationStats,
+    spec: IndexPathSpec,
+    order_items: Option<Vec<OrderByEntry>>,
+    catalog: &dyn CatalogLookup,
+) -> AccessCandidate {
+    let index_pages = catalog
+        .current_relation_pages(spec.index.relation_oid)
+        .map(|pages| pages as f64)
+        .or_else(|| {
+            catalog
+                .class_row_by_oid(spec.index.relation_oid)
+                .map(|row| row.relpages.max(1) as f64)
+        })
+        .unwrap_or(DEFAULT_NUM_PAGES)
+        .max(1.0);
+    let pages_per_range = brin_pages_per_range(&spec.index, catalog) as f64;
+    let index_ranges = (stats.relpages / pages_per_range).ceil().max(1.0);
+    let revmap_pages = brin_revmap_page_count(index_ranges);
+    let qual_selectivity = spec
+        .used_quals
+        .iter()
+        .map(|expr| clause_selectivity(expr, Some(stats), stats.reltuples))
+        .product::<f64>()
+        .clamp(0.0, 1.0);
+    let minimal_ranges = (index_ranges * qual_selectivity).ceil();
+    let index_correlation = brin_index_correlation(stats, &spec);
+    let estimated_ranges = if index_correlation < 1.0e-10 {
+        index_ranges
+    } else {
+        (minimal_ranges / index_correlation).min(index_ranges)
+    };
+    let index_selectivity = (estimated_ranges / index_ranges).clamp(0.0, 1.0);
+    let qual_arg_cost = and_exprs(spec.used_quals.clone())
+        .as_ref()
+        .map(|expr| predicate_cost(expr) * CPU_OPERATOR_COST)
+        .unwrap_or(0.0);
+    let index_startup_cost = SEQ_PAGE_COST * revmap_pages + qual_arg_cost;
+    let index_total_cost = index_startup_cost
+        + RANDOM_PAGE_COST * (index_pages - revmap_pages).max(0.0)
+        + 0.1 * CPU_OPERATOR_COST * estimated_ranges * pages_per_range;
+    let bitmap_index = Path::BitmapIndexScan {
+        plan_info: PlanEstimate::new(
+            index_startup_cost,
+            index_total_cost,
+            clamp_rows(stats.reltuples * index_selectivity),
+            0,
+        ),
+        pathtarget: PathTarget::new(Vec::new()),
+        source_id,
+        rel,
+        relation_oid,
+        index_rel: spec.index.rel,
+        am_oid: spec.index.index_meta.am_oid,
+        desc: desc.clone(),
+        index_desc: spec.index.desc.clone(),
+        index_meta: spec.index.index_meta.clone(),
+        keys: spec.keys.clone(),
+        index_quals: spec.used_quals.clone(),
+    };
+
+    let mut recheck_qual = spec.used_quals.clone();
+    if let Some(residual) = spec.residual.clone() {
+        recheck_qual.extend(flatten_and_conjuncts(&residual));
+    }
+    let recheck_expr = and_exprs(recheck_qual.clone());
+    let rows = recheck_expr
+        .as_ref()
+        .map(|expr| clamp_rows(stats.reltuples * clause_selectivity(expr, Some(stats), stats.reltuples)))
+        .unwrap_or_else(|| clamp_rows(stats.reltuples * index_selectivity));
+    let heap_pages = (estimated_ranges * pages_per_range).min(stats.relpages.max(1.0));
+    let recheck_cost = recheck_expr
+        .as_ref()
+        .map(|expr| predicate_cost(expr) * rows * CPU_OPERATOR_COST)
+        .unwrap_or(0.0);
+    let mut total_cost = bitmap_index.plan_info().total_cost.as_f64()
+        + heap_pages * RANDOM_PAGE_COST
+        + rows * CPU_TUPLE_COST
+        + recheck_cost;
+    let mut plan = Path::BitmapHeapScan {
+        plan_info: PlanEstimate::new(
+            bitmap_index.plan_info().startup_cost.as_f64(),
+            total_cost,
+            rows,
+            stats.width,
+        ),
+        pathtarget: slot_output_target(source_id, &desc.columns, |column| column.sql_type),
+        source_id,
+        rel,
+        relation_name: relation_name.clone(),
+        relation_oid,
+        toast,
+        desc,
+        bitmapqual: Box::new(bitmap_index),
+        recheck_qual,
+    };
+
+    if let Some(items) = order_items {
+        let sort_cost = estimate_sort_cost(rows, items.len());
+        total_cost += sort_cost;
+        plan = Path::OrderBy {
+            plan_info: PlanEstimate::new(total_cost - sort_cost, total_cost, rows, stats.width),
+            pathtarget: plan.semantic_output_target(),
+            input: Box::new(plan),
+            items,
+        };
+    }
+
+    AccessCandidate { total_cost, plan }
+}
+
 pub(super) fn estimate_index_candidate(
     source_id: usize,
     rel: RelFileLocator,
@@ -975,6 +1212,21 @@ pub(super) fn estimate_index_candidate(
     order_items: Option<Vec<OrderByEntry>>,
     catalog: &dyn CatalogLookup,
 ) -> AccessCandidate {
+    if spec.index.index_meta.am_oid == BRIN_AM_OID {
+        return estimate_brin_bitmap_candidate(
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            toast,
+            desc,
+            stats,
+            spec,
+            order_items,
+            catalog,
+        );
+    }
+
     let index_class = catalog.class_row_by_oid(spec.index.relation_oid);
     let index_pages = index_class
         .as_ref()
@@ -1505,7 +1757,18 @@ fn path_uses_immediate_outer_columns(path: &Path) -> bool {
         Path::Result { .. }
         | Path::SeqScan { .. }
         | Path::IndexScan { .. }
+        | Path::BitmapIndexScan { .. }
         | Path::WorkTableScan { .. } => false,
+        Path::BitmapHeapScan {
+            bitmapqual,
+            recheck_qual,
+            ..
+        } => {
+            path_uses_immediate_outer_columns(bitmapqual)
+                || recheck_qual
+                    .iter()
+                    .any(expr_uses_immediate_outer_columns)
+        }
         Path::Append { children, .. } | Path::SetOp { children, .. } => {
             children.iter().any(path_uses_immediate_outer_columns)
         }
@@ -1814,6 +2077,10 @@ pub(super) fn build_index_path_spec(
         .collect::<Vec<_>>();
     let (keys, used_indexes, equality_prefix) = match index.index_meta.am_oid {
         BTREE_AM_OID => build_btree_index_keys(index, &parsed_quals),
+        BRIN_AM_OID => {
+            let (keys, used_indexes) = build_brin_index_keys(index, &parsed_quals);
+            (keys, used_indexes, 0)
+        }
         GIST_AM_OID | SPGIST_AM_OID => {
             let (keys, used_indexes) = build_gist_index_keys(index, &parsed_quals);
             (keys, used_indexes, 0)
@@ -2079,6 +2346,14 @@ fn slot_values(row: &PgStatisticRow, kind: i16) -> Option<ArrayValue> {
 fn slot_numbers(row: &PgStatisticRow, kind: i16) -> Option<ArrayValue> {
     let idx = row.stakind.iter().position(|entry| *entry == kind)?;
     row.stanumbers[idx].clone()
+}
+
+fn slot_first_number(row: &PgStatisticRow, kind: i16) -> Option<f64> {
+    let numbers = slot_numbers(row, kind)?;
+    match numbers.elements.first()? {
+        Value::Float64(value) => Some(*value),
+        _ => None,
+    }
 }
 
 fn values_equal(left: &Value, right: &Value) -> bool {
@@ -2387,7 +2662,8 @@ fn qual_strategy(
             .index_meta
             .amop_strategy_for_operator(&index.desc, index_pos, oid, value_type_oid(&qual.argument))
             .or_else(|| {
-                (index.index_meta.am_oid == BTREE_AM_OID)
+                (index.index_meta.am_oid == BTREE_AM_OID
+                    || index.index_meta.am_oid == BRIN_AM_OID)
                     .then(|| btree_builtin_strategy(kind))
                     .flatten()
             }),
@@ -2467,6 +2743,36 @@ fn build_btree_index_keys(
 }
 
 fn build_gist_index_keys(
+    index: &BoundIndexRelation,
+    parsed_quals: &[IndexableQual],
+) -> (
+    Vec<crate::include::access::scankey::ScanKeyData>,
+    Vec<usize>,
+) {
+    let mut used_qual_indexes = Vec::new();
+    let keys = parsed_quals
+        .iter()
+        .enumerate()
+        .filter_map(|(qual_idx, qual)| {
+            let (index_pos, strategy) =
+                (0..index.index_meta.indkey.len()).find_map(|index_pos| {
+                    (simple_index_column(index, index_pos) == Some(qual.column))
+                        .then(|| qual_strategy(index, index_pos, qual))
+                        .flatten()
+                        .map(|strategy| (index_pos, strategy))
+                })?;
+            used_qual_indexes.push(qual_idx);
+            Some(crate::include::access::scankey::ScanKeyData {
+                attribute_number: (index_pos + 1) as i16,
+                strategy,
+                argument: qual.argument.clone(),
+            })
+        })
+        .collect();
+    (keys, used_qual_indexes)
+}
+
+fn build_brin_index_keys(
     index: &BoundIndexRelation,
     parsed_quals: &[IndexableQual],
 ) -> (
