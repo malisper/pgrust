@@ -11,7 +11,7 @@ use super::joininfo::build_special_join_info;
 use super::pathnodes::expr_sql_type;
 
 pub(super) fn prepare_query_for_planning(query: Query) -> Query {
-    rewrite_minmax_aggregate_query(query)
+    super::constfold::fold_query_constants_best_effort(rewrite_minmax_aggregate_query(query))
 }
 
 impl PlannerInfo {
