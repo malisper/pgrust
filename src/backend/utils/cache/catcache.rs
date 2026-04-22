@@ -1029,6 +1029,8 @@ pub fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::Bytea, true) => BYTEA_ARRAY_TYPE_OID,
         (SqlTypeKind::InternalChar, false) => INTERNAL_CHAR_TYPE_OID,
         (SqlTypeKind::InternalChar, true) => INTERNAL_CHAR_ARRAY_TYPE_OID,
+        (SqlTypeKind::Internal, false) => crate::include::catalog::INTERNAL_TYPE_OID,
+        (SqlTypeKind::Internal, true) => unreachable!("internal arrays are unsupported"),
         (SqlTypeKind::Void, false) => crate::include::catalog::VOID_TYPE_OID,
         (SqlTypeKind::Void, true) => unreachable!("void arrays are unsupported"),
         (SqlTypeKind::Trigger, false) => crate::include::catalog::TRIGGER_TYPE_OID,

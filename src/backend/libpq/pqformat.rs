@@ -4,12 +4,12 @@ use std::str::FromStr;
 
 use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::executor::exec_expr::format_array_text;
+use crate::backend::executor::value_io::builtin_type_oid_for_sql_type;
 use crate::backend::executor::{
     ArrayValue, ExecError, QueryColumn, Value, geometry_input_error_message,
     render_datetime_value_text_with_config, render_geometry_text, render_internal_char_text,
     render_range_text,
 };
-use crate::backend::executor::value_io::builtin_type_oid_for_sql_type;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::access::htup::TupleError;
@@ -427,6 +427,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Int8 => 1016,
             SqlTypeKind::Range => col.sql_type.type_oid as i32,
             SqlTypeKind::Multirange => col.sql_type.type_oid as i32,
+            SqlTypeKind::Internal => unreachable!("internal arrays are unsupported"),
             SqlTypeKind::Void => unreachable!("void arrays are unsupported"),
             SqlTypeKind::FdwHandler => unreachable!("fdw_handler arrays are unsupported"),
             SqlTypeKind::Oid => 1028,
@@ -520,6 +521,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             -1,
         ),
         SqlTypeKind::Trigger => (TRIGGER_TYPE_OID as i32, -1, -1),
+        SqlTypeKind::Internal => (crate::include::catalog::INTERNAL_TYPE_OID as i32, -1, -1),
         SqlTypeKind::FdwHandler => (crate::include::catalog::FDW_HANDLER_TYPE_OID as i32, 4, -1),
         SqlTypeKind::Record | SqlTypeKind::Composite => {
             (col.sql_type.type_oid as i32, -1, col.sql_type.typmod)
@@ -796,7 +798,8 @@ pub(crate) fn send_typed_data_row(
                 let rendered = if let Some(sql_type) = sql_type.filter(|ty| ty.is_array) {
                     let array = builtin_type_oid_for_sql_type(sql_type.element_type()).map(
                         |element_type_oid| {
-                            ArrayValue::from_1d(items.clone()).with_element_type_oid(element_type_oid)
+                            ArrayValue::from_1d(items.clone())
+                                .with_element_type_oid(element_type_oid)
                         },
                     );
                     array

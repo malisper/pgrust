@@ -288,6 +288,7 @@ pub enum Statement {
     CreateStatistics(CreateStatisticsStatement),
     CreateForeignDataWrapper(CreateForeignDataWrapperStatement),
     CreateIndex(CreateIndexStatement),
+    CreateOperator(CreateOperatorStatement),
     CreateOperatorClass(CreateOperatorClassStatement),
     AlterSequence(AlterSequenceStatement),
     AlterSequenceOwner(AlterRelationOwnerStatement),
@@ -320,6 +321,7 @@ pub enum Statement {
     AlterTableInherit(AlterTableInheritStatement),
     AlterTableNoInherit(AlterTableNoInheritStatement),
     AlterPublication(AlterPublicationStatement),
+    AlterOperator(AlterOperatorStatement),
     CommentOnTable(CommentOnTableStatement),
     CommentOnConstraint(CommentOnConstraintStatement),
     CommentOnRule(CommentOnRuleStatement),
@@ -342,6 +344,7 @@ pub enum Statement {
     DropDatabase(DropDatabaseStatement),
     DropPublication(DropPublicationStatement),
     DropFunction(DropFunctionStatement),
+    DropOperator(DropOperatorStatement),
     DropTable(DropTableStatement),
     DropTrigger(DropTriggerStatement),
     DropIndex(DropIndexStatement),
@@ -1243,6 +1246,27 @@ pub struct CreateIndexStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QualifiedNameRef {
+    pub schema_name: Option<String>,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateOperatorStatement {
+    pub schema_name: Option<String>,
+    pub operator_name: String,
+    pub left_arg: Option<RawTypeName>,
+    pub right_arg: Option<RawTypeName>,
+    pub procedure: QualifiedNameRef,
+    pub commutator: Option<String>,
+    pub negator: Option<String>,
+    pub restrict: Option<QualifiedNameRef>,
+    pub join: Option<QualifiedNameRef>,
+    pub hashes: bool,
+    pub merges: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateOperatorClassStatement {
     pub schema_name: Option<String>,
     pub opclass_name: String,
@@ -1263,6 +1287,46 @@ pub enum CreateOperatorClassItem {
         schema_name: Option<String>,
         function_name: String,
         arg_types: Vec<RawTypeName>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterOperatorStatement {
+    pub schema_name: Option<String>,
+    pub operator_name: String,
+    pub left_arg: Option<RawTypeName>,
+    pub right_arg: Option<RawTypeName>,
+    pub options: Vec<AlterOperatorOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterOperatorOption {
+    Restrict {
+        option_name: String,
+        function: Option<QualifiedNameRef>,
+    },
+    Join {
+        option_name: String,
+        function: Option<QualifiedNameRef>,
+    },
+    Commutator {
+        option_name: String,
+        operator_name: String,
+    },
+    Negator {
+        option_name: String,
+        operator_name: String,
+    },
+    Merges {
+        option_name: String,
+        enabled: bool,
+    },
+    Hashes {
+        option_name: String,
+        enabled: bool,
+    },
+    Unrecognized {
+        option_name: String,
     },
 }
 
@@ -1745,6 +1809,15 @@ pub struct DropFunctionStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropOperatorStatement {
+    pub if_exists: bool,
+    pub schema_name: Option<String>,
+    pub operator_name: String,
+    pub left_arg: Option<RawTypeName>,
+    pub right_arg: Option<RawTypeName>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetSessionAuthorizationStatement {
     pub role_name: String,
 }
@@ -2213,6 +2286,7 @@ pub enum SqlTypeKind {
     Timestamp,
     TimestampTz,
     PgNodeTree,
+    Internal,
     InternalChar,
     Char,
     Varchar,
