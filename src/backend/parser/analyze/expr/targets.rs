@@ -212,6 +212,20 @@ fn bind_plain_select_targets(
                 continue;
             }
         }
+        if let SqlExpr::FieldSelect { expr, field } = &item.expr
+            && field == "*"
+        {
+            entries.extend(expand_record_expr_targets(
+                expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+                entries.len() + 1,
+            )?);
+            continue;
+        }
 
         let expr = bind_expr_with_outer_and_ctes(
             &item.expr,
@@ -240,6 +254,89 @@ fn bind_plain_select_targets(
         );
     }
     Ok(entries)
+}
+
+fn expand_record_expr_targets(
+    expr: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+    resno_start: usize,
+) -> Result<Vec<TargetEntry>, ParseError> {
+    let bound_expr =
+        bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+    let fields = record_expr_fields(&bound_expr, catalog)?;
+    Ok(fields
+        .into_iter()
+        .enumerate()
+        .map(|(index, (name, sql_type))| {
+            TargetEntry::new(
+                name.clone(),
+                Expr::FieldSelect {
+                    expr: Box::new(bound_expr.clone()),
+                    field: name,
+                    field_type: sql_type,
+                },
+                sql_type,
+                resno_start + index,
+            )
+        })
+        .collect())
+}
+
+fn record_expr_fields(
+    expr: &Expr,
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<(String, SqlType)>, ParseError> {
+    if let Expr::Row { descriptor, .. } = expr {
+        return Ok(descriptor
+            .fields
+            .iter()
+            .map(|field| (field.name.clone(), field.sql_type))
+            .collect());
+    }
+
+    let Some(sql_type) = expr_sql_type_hint(expr) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "record expression",
+            actual: "field expansion .*".into(),
+        });
+    };
+
+    if matches!(sql_type.kind, SqlTypeKind::Composite) && sql_type.typrelid != 0 {
+        let relation =
+            catalog
+                .lookup_relation_by_oid(sql_type.typrelid)
+                .ok_or_else(|| ParseError::UnexpectedToken {
+                    expected: "named composite type",
+                    actual: format!("type relation {} not found", sql_type.typrelid),
+                })?;
+        return Ok(relation
+            .desc
+            .columns
+            .into_iter()
+            .filter(|column| !column.dropped)
+            .map(|column| (column.name, column.sql_type))
+            .collect());
+    }
+
+    if matches!(sql_type.kind, SqlTypeKind::Record)
+        && sql_type.typmod > 0
+        && let Some(descriptor) = lookup_anonymous_record_descriptor(sql_type.typmod)
+    {
+        return Ok(descriptor
+            .fields
+            .into_iter()
+            .map(|field| (field.name, field.sql_type))
+            .collect());
+    }
+
+    Err(ParseError::UnexpectedToken {
+        expected: "record expression",
+        actual: "field expansion .*".into(),
+    })
 }
 
 #[derive(Default)]
