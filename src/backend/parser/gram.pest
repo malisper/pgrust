@@ -284,7 +284,7 @@ bare_relation_alias = { !kw_as ~ !kw_join ~ !kw_on ~ !kw_where ~ !kw_group ~ !kw
 
 column_def = { !kw_constraint ~ identifier ~ type_name ~ column_modifier* }
 column_modifier = { column_default | column_compression | nullable | named_column_constraint | not_null_column_constraint | check_column_constraint | primary_key_column_constraint | unique_column_constraint | references_column_constraint }
-column_default = { kw_default ~ expr }
+column_default = { kw_default ~ b_expr }
 column_compression = { kw_compression ~ (kw_default | identifier) }
 named_column_constraint = { kw_constraint ~ identifier ~ (not_null_column_constraint | check_column_constraint | primary_key_column_constraint | unique_column_constraint | references_column_constraint) }
 primary_key_column_constraint = { primary_key_column_constraint_body ~ constraint_attribute* }
@@ -346,6 +346,7 @@ or_expr = { and_expr ~ (kw_or ~ and_expr)* }
 and_expr = { not_expr ~ (kw_and ~ not_expr)* }
 not_expr = { kw_not ~ not_expr | cmp_expr }
 cmp_expr = { json_access_expr ~ (is_document_suffix | null_predicate_suffix | between_suffix | in_expr_list_suffix | in_subquery_suffix | quantified_suffix | quantified_like_suffix | quantified_similar_suffix | like_suffix | similar_suffix | comp_op ~ json_access_expr)? }
+b_expr = { json_access_expr ~ (is_document_suffix | is_not_distinct_suffix | is_distinct_suffix | comp_op ~ json_access_expr)? }
 json_access_expr = { concat_expr ~ (json_access_op ~ concat_expr)* }
 concat_expr = { add_expr ~ (concat_op ~ add_expr)* }
 add_expr = { bit_expr ~ (add_op ~ bit_expr)* }
