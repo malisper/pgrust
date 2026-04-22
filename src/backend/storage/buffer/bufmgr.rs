@@ -60,6 +60,7 @@ impl PartitionedLookup {
 pub struct BufferPool<S: StorageBackend + Send> {
     storage: Mutex<S>,
     wal: Option<Arc<WalWriter>>,
+    no_wal_skip_fsync: bool,
     frames: Vec<BufferFrame>,
     lookup: PartitionedLookup,
     strategy: Mutex<StrategyState>,
@@ -71,14 +72,23 @@ pub struct BufferPool<S: StorageBackend + Send> {
 
 impl<S: StorageBackend + Send> BufferPool<S> {
     pub fn new(storage: S, capacity: usize) -> Self {
-        Self::new_inner(storage, capacity, None)
+        Self::new_inner(storage, capacity, None, false)
     }
 
     pub fn new_with_wal(storage: S, capacity: usize, wal: Arc<WalWriter>) -> Self {
-        Self::new_inner(storage, capacity, Some(wal))
+        Self::new_inner(storage, capacity, Some(wal), false)
     }
 
-    fn new_inner(storage: S, capacity: usize, wal: Option<Arc<WalWriter>>) -> Self {
+    pub fn new_without_wal_skip_fsync(storage: S, capacity: usize) -> Self {
+        Self::new_inner(storage, capacity, None, true)
+    }
+
+    fn new_inner(
+        storage: S,
+        capacity: usize,
+        wal: Option<Arc<WalWriter>>,
+        no_wal_skip_fsync: bool,
+    ) -> Self {
         let mut free_list = VecDeque::with_capacity(capacity);
         for id in 0..capacity {
             free_list.push_back(id);
@@ -96,6 +106,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         Self {
             storage: Mutex::new(storage),
             wal,
+            no_wal_skip_fsync,
             frames,
             lookup: PartitionedLookup::new(),
             strategy: Mutex::new(StrategyState {
@@ -613,7 +624,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             {
                 let mut storage = self.storage.lock();
                 storage
-                    .write_page(tag, &page_to_store, false)
+                    .write_page(tag, &page_to_store, self.no_wal_skip_fsync)
                     .map_err(Error::Storage)?;
             }
             self.stats_written.fetch_add(1, Ordering::Relaxed);
@@ -651,7 +662,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             {
                 let mut storage = self.storage.lock();
                 storage
-                    .write_page(tag, &page_to_store, false)
+                    .write_page(tag, &page_to_store, self.no_wal_skip_fsync)
                     .map_err(Error::Storage)?;
             }
             self.stats_written.fetch_add(1, Ordering::Relaxed);
@@ -719,7 +730,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
             {
                 let mut storage = self.storage.lock();
                 storage
-                    .write_page(tag, &page_to_store, false)
+                    .write_page(tag, &page_to_store, self.no_wal_skip_fsync)
                     .map_err(Error::Storage)?;
             }
             self.stats_written.fetch_add(1, Ordering::Relaxed);
@@ -750,7 +761,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         if self.wal.is_none() {
             let mut storage = self.storage.lock();
             storage
-                .write_page(tag, &page_to_store, false)
+                .write_page(tag, &page_to_store, self.no_wal_skip_fsync)
                 .map_err(Error::Storage)?;
             self.stats_written.fetch_add(1, Ordering::Relaxed);
             frame.state.clear_dirty();
@@ -783,7 +794,7 @@ impl<S: StorageBackend + Send> BufferPool<S> {
         };
 
         {
-            let skip_fsync = self.wal.is_some();
+            let skip_fsync = self.wal.is_some() || self.no_wal_skip_fsync;
             let mut storage = self.storage.lock();
             // When WAL is present, skip_fsync is true: the page can be recovered
             // from WAL after a crash. WAL flush is enforced at commit time and

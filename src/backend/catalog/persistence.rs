@@ -56,7 +56,10 @@ pub(crate) fn sync_catalog_rows_subset(
             .map_err(|e| CatalogError::Io(e.to_string()))?;
     }
 
-    let pool = BufferPool::new(SmgrStorageBackend::new(smgr), 16);
+    // Bulk bootstrap rewrites can safely defer fsync until the relation is
+    // fully written because no concurrent readers exist yet and we force a
+    // final relation sync below.
+    let pool = BufferPool::new_without_wal_skip_fsync(SmgrStorageBackend::new(smgr), 16);
     sync_catalog_rows_subset_in_pool(&pool, rows, db_oid, kinds)?;
     rebuild_system_catalog_indexes_for_db(base_dir, db_oid)?;
     Ok(())
@@ -198,6 +201,8 @@ fn insert_catalog_rows(
         heap_flush(pool, 0, rel, block)
             .map_err(|e| CatalogError::Io(format!("catalog flush failed: {e:?}")))?;
     }
+    pool.with_storage_mut(|s| s.smgr.immedsync(rel, ForkNumber::Main))
+        .map_err(|e| CatalogError::Io(format!("catalog sync failed: {e}")))?;
     Ok(())
 }
 
