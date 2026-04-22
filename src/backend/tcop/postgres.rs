@@ -211,6 +211,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             return sql.find(op).map(|index| index + 1);
         }
         ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. }) => {
+            if message.starts_with("cannot subscript type ") {
+                return find_subscript_expression_position(sql);
+            }
             if let Some(position) = find_detailed_operator_position(sql, message) {
                 return Some(position);
             }
@@ -255,16 +258,6 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             }
             if let Some(target) = extract_subscripted_assignment_target(message) {
                 return find_subscripted_assignment_position(sql, target);
-            }
-            if let Some(value) = extract_quoted_error_value(message) {
-                value
-            } else {
-                return None;
-            }
-        }
-        ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. }) => {
-            if message.starts_with("cannot subscript type ") {
-                return find_subscript_expression_position(sql);
             }
             if let Some(value) = extract_quoted_error_value(message) {
                 value
