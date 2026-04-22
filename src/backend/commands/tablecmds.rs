@@ -583,7 +583,7 @@ fn render_update_projection_output(target_name: &str, target: &BoundUpdateTarget
         .assignments
         .iter()
         .map(|assignment| {
-            crate::backend::executor::render_explain_expr_with_qualifier(
+            crate::backend::executor::render_explain_projection_expr_with_qualifier(
                 &assignment.expr,
                 Some(target_name),
                 &column_names,
@@ -638,17 +638,7 @@ fn explain_update_index_cond(target: &BoundUpdateTarget) -> Option<String> {
 }
 
 fn render_explain_index_value(value: &Value) -> String {
-    match value {
-        Value::Null => "NULL".into(),
-        Value::Bool(value) => value.to_string(),
-        Value::Int16(value) => value.to_string(),
-        Value::Int32(value) => value.to_string(),
-        Value::Int64(value) => value.to_string(),
-        Value::Float64(value) => value.to_string(),
-        Value::Text(text) => format!("'{text}'"),
-        Value::TextRef(_, _) => format!("'{}'", value.as_text().unwrap_or_default()),
-        _ => crate::backend::executor::render_explain_expr(&Expr::Const(value.clone()), &[]),
-    }
+    crate::backend::executor::render_explain_expr(&Expr::Const(value.clone()), &[])
 }
 
 fn explain_strategy_operator(strategy: u16) -> &'static str {

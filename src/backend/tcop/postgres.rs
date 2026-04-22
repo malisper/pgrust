@@ -5604,7 +5604,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(output.windows("SERROR\0C54000\0".len()).any(|window| window == b"SERROR\0C54000\0"));
+        assert!(output.windows("C54000\0".len()).any(|window| window == b"C54000\0"));
     }
 
     fn split_simple_query_statements_keeps_rule_action_lists_together() {

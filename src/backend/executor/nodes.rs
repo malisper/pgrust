@@ -13,6 +13,8 @@ use crate::backend::executor::srf::{
 use crate::backend::executor::value_io::{decode_value_with_toast, missing_column_value};
 use crate::backend::executor::window::execute_window_clause;
 use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+use crate::backend::utils::time::date::format_date_text;
 use crate::backend::utils::time::instant::Instant;
 use crate::include::catalog::PG_LARGEOBJECT_METADATA_RELATION_OID;
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
@@ -843,6 +845,17 @@ pub(crate) fn render_explain_expr_with_qualifier(
     )
 }
 
+pub(crate) fn render_explain_projection_expr_with_qualifier(
+    expr: &Expr,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> String {
+    format!(
+        "({})",
+        render_explain_projection_expr_inner_with_qualifier(expr, qualifier, column_names)
+    )
+}
+
 pub(crate) fn render_explain_join_expr(
     expr: &Expr,
     outer_names: &[String],
@@ -998,17 +1011,78 @@ fn render_explain_expr_inner_with_qualifier(
     }
 }
 
+fn render_explain_projection_expr_inner_with_qualifier(
+    expr: &Expr,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> String {
+    match expr {
+        Expr::Var(var) => render_explain_var_name(var, column_names)
+            .map(|name| match qualifier {
+                Some(qualifier) => format!("{qualifier}.{name}"),
+                None => name,
+            })
+            .unwrap_or_else(|| format!("{expr:?}")),
+        Expr::Const(value) => render_explain_projection_const(value),
+        Expr::Op(op) => match op.op {
+            crate::include::nodes::primnodes::OpExprKind::Add
+            | crate::include::nodes::primnodes::OpExprKind::Sub
+            | crate::include::nodes::primnodes::OpExprKind::Mul
+            | crate::include::nodes::primnodes::OpExprKind::Div
+            | crate::include::nodes::primnodes::OpExprKind::Mod
+            | crate::include::nodes::primnodes::OpExprKind::BitAnd
+            | crate::include::nodes::primnodes::OpExprKind::BitOr
+            | crate::include::nodes::primnodes::OpExprKind::BitXor
+            | crate::include::nodes::primnodes::OpExprKind::Shl
+            | crate::include::nodes::primnodes::OpExprKind::Shr
+            | crate::include::nodes::primnodes::OpExprKind::Concat => {
+                let [left, right] = op.args.as_slice() else {
+                    return render_explain_expr_inner_with_qualifier(expr, qualifier, column_names);
+                };
+                let op_text = match op.op {
+                    crate::include::nodes::primnodes::OpExprKind::Add => "+",
+                    crate::include::nodes::primnodes::OpExprKind::Sub => "-",
+                    crate::include::nodes::primnodes::OpExprKind::Mul => "*",
+                    crate::include::nodes::primnodes::OpExprKind::Div => "/",
+                    crate::include::nodes::primnodes::OpExprKind::Mod => "%",
+                    crate::include::nodes::primnodes::OpExprKind::BitAnd => "&",
+                    crate::include::nodes::primnodes::OpExprKind::BitOr => "|",
+                    crate::include::nodes::primnodes::OpExprKind::BitXor => "#",
+                    crate::include::nodes::primnodes::OpExprKind::Shl => "<<",
+                    crate::include::nodes::primnodes::OpExprKind::Shr => ">>",
+                    crate::include::nodes::primnodes::OpExprKind::Concat => "||",
+                    _ => unreachable!(),
+                };
+                format!(
+                    "{} {} {}",
+                    render_explain_projection_expr_inner_with_qualifier(
+                        left,
+                        qualifier,
+                        column_names,
+                    ),
+                    op_text,
+                    render_explain_projection_expr_inner_with_qualifier(
+                        right,
+                        qualifier,
+                        column_names,
+                    )
+                )
+            }
+            _ => render_explain_expr_inner_with_qualifier(expr, qualifier, column_names),
+        },
+        _ => render_explain_expr_inner_with_qualifier(expr, qualifier, column_names),
+    }
+}
+
 fn render_explain_infix_operand(
     expr: &Expr,
     qualifier: Option<&str>,
     column_names: &[String],
 ) -> String {
     match expr {
-        Expr::Const(value) => render_explain_literal(value),
-        Expr::Cast(inner, _) => match inner.as_ref() {
-            Expr::Const(value) => render_explain_literal(value),
-            _ => render_explain_expr_inner_with_qualifier(expr, qualifier, column_names),
-        },
+        Expr::Const(_) | Expr::Cast(_, _) => {
+            render_explain_expr_inner_with_qualifier(expr, qualifier, column_names)
+        }
         _ => render_explain_expr_inner_with_qualifier(expr, qualifier, column_names),
     }
 }
@@ -1173,12 +1247,25 @@ fn render_explain_const(value: &Value) -> String {
         Value::Text(_) | Value::TextRef(_, _) => {
             format!("'{}'::text", value.as_text().unwrap().replace('\'', "''"))
         }
+        Value::Date(date) => format!(
+            "'{}'::date",
+            format_date_text(*date, &DateTimeConfig::default())
+        ),
         Value::Int16(v) => format!("{v}::smallint"),
         Value::Int32(v) => format!("{v}::integer"),
         Value::Int64(v) => format!("{v}::bigint"),
         Value::Bool(v) => format!("{}::boolean", if *v { "true" } else { "false" }),
         Value::Null => "NULL".to_string(),
         other => format!("{other:?}"),
+    }
+}
+
+fn render_explain_projection_const(value: &Value) -> String {
+    match value {
+        Value::Int16(v) => v.to_string(),
+        Value::Int32(v) => v.to_string(),
+        Value::Int64(v) => v.to_string(),
+        _ => render_explain_const(value),
     }
 }
 
@@ -1220,6 +1307,9 @@ fn render_explain_literal(value: &Value) -> String {
     match value {
         Value::Text(_) | Value::TextRef(_, _) => {
             format!("'{}'", value.as_text().unwrap().replace('\'', "''"))
+        }
+        Value::Date(date) => {
+            format!("'{}'", format_date_text(*date, &DateTimeConfig::default()))
         }
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),

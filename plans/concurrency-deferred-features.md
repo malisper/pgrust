@@ -69,9 +69,26 @@ blocks the reader, while the writer waits for another thread that holds the
 content lock). The workaround is a `try_read` loop with `yield_now` (10 attempts)
 that avoids the deadlock by failing gracefully instead of blocking.
 
+The same coupling also leaves the commit path heavier than PostgreSQL's model.
+`Database::finish_txn()` currently commits the xid and then forces
+`flush_clog()` while holding `txns.write()` because
+`CatalogStore::catalog_snapshot()` rebuilds durable visibility from the on-disk
+status file. Under the `lock_ordering_deadlock_repro` workload this shows up as
+writer-heavy contention in `finish_txn -> txns.write() -> flush_clog() ->
+File::sync_data()`, with heap scan readers queued behind the writer. In other
+words, the remaining problem is more "global txns lock + fsync starvation" than
+"hard parking_lot deadlock".
+
 **To improve:** Separate the transaction status store from the transaction
-lifecycle lock. Use a concurrent data structure (e.g., `DashMap`) or per-xid
-atomics for status lookups, eliminating the need for `try_read`.
+lifecycle lock, and stop requiring immediate on-disk status flushes for normal
+visibility:
+- keep snapshot construction tied to the active xid set, not the status lookup
+  path
+- make committed/aborted status lookup read-mostly, using a concurrent
+  structure or page-granular status store instead of a single global
+  `RwLock<TransactionManager>`
+- remove the catalog snapshot dependency on synchronous `flush_clog()` at every
+  commit, or move that persistence onto a narrower/background writeback path
 
 ### Transaction wait uses condvar + timeout instead of per-xid locks
 

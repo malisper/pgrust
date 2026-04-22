@@ -279,6 +279,23 @@ fn drop_table_direct_dependencies(
         }
     }
 
+    for inherit in ctx.catcache.inherit_rows() {
+        if inherit.inhparent != relation_oid || !relation_oids.insert(inherit.inhrelid) {
+            continue;
+        }
+        let Some(class) = ctx.catcache.class_by_oid(inherit.inhrelid) else {
+            continue;
+        };
+        if !matches!(class.relkind, 'r' | 'p') {
+            continue;
+        }
+        deps.push(DropTableDependency::Relation {
+            relation_oid: inherit.inhrelid,
+            relkind: class.relkind,
+            display_name: drop_table_display_relation_name(ctx.catcache, inherit.inhrelid),
+        });
+    }
+
     deps.sort_by_key(DropTableDependency::sort_key);
     deps
 }

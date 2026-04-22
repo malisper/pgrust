@@ -60,6 +60,11 @@ pub(crate) fn format_explain_plan_with_subplans(
     show_costs: bool,
     lines: &mut Vec<String>,
 ) {
+    if let Some(child) = explain_passthrough_plan_child(plan) {
+        format_explain_plan_with_subplans(child, subplans, indent, show_costs, lines);
+        return;
+    }
+
     let state = executor_start(plan.clone());
     push_explain_state_line(state.as_ref(), indent, false, show_costs, lines);
     state.explain_details(indent, false, show_costs, lines);
@@ -84,6 +89,22 @@ pub(crate) fn format_explain_plan_with_subplans(
     };
     for child in direct_plan_children(plan) {
         format_explain_plan_with_subplans(child, subplans, child_indent, show_costs, lines);
+    }
+}
+
+fn explain_passthrough_plan_child(plan: &Plan) -> Option<&Plan> {
+    match plan {
+        Plan::Projection { input, targets, .. } => {
+            let input_names = input.column_names();
+            (targets.len() == input_names.len()
+                && targets.iter().enumerate().all(|(index, target)| {
+                    !target.resjunk
+                        && target.input_resno == Some(index + 1)
+                        && target.name == input_names[index]
+                }))
+            .then_some(input.as_ref())
+        }
+        _ => None,
     }
 }
 
