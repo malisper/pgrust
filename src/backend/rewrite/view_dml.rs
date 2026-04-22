@@ -118,6 +118,16 @@ pub(crate) fn resolve_auto_updatable_view_target(
     };
 
     if analyzed.base_relkind == 'r' {
+        let all_view_predicates = query
+            .where_qual
+            .clone()
+            .map(|expr| {
+                vec![ViewCheck {
+                    view_name: display_name.clone(),
+                    expr,
+                }]
+            })
+            .unwrap_or_default();
         let mut view_check_options = Vec::new();
         if matches!(
             view_check_option(catalog, relation_oid),
@@ -136,7 +146,7 @@ pub(crate) fn resolve_auto_updatable_view_target(
             visible_output_exprs: analyzed.output_exprs,
             combined_predicate: query.where_qual.clone(),
             updatable_column_map: analyzed.updatable_column_map,
-            all_view_predicates: view_check_options.clone(),
+            all_view_predicates,
             view_check_options,
         });
     }

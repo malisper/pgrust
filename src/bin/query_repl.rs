@@ -699,6 +699,11 @@ fn run_statement(
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
                 deferred_foreign_keys: None,
+                advisory_locks: Arc::new(
+                    pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
+                ),
+                current_database_name: String::new(),
+                statement_lock_scope_id: None,
             };
             execute_readonly_statement(Statement::Explain(stmt), &relcache, &mut ctx)
         }
@@ -736,6 +741,11 @@ fn run_statement(
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
                 deferred_foreign_keys: None,
+                advisory_locks: Arc::new(
+                    pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
+                ),
+                current_database_name: String::new(),
+                statement_lock_scope_id: None,
             };
             execute_readonly_statement(Statement::Select(stmt), &relcache, &mut ctx)
         }
@@ -773,6 +783,11 @@ fn run_statement(
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
                 deferred_foreign_keys: None,
+                advisory_locks: Arc::new(
+                    pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
+                ),
+                current_database_name: String::new(),
+                statement_lock_scope_id: None,
             };
             execute_readonly_statement(Statement::Values(stmt), &relcache, &mut ctx)
         }
@@ -810,6 +825,11 @@ fn run_statement(
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
                 deferred_foreign_keys: None,
+                advisory_locks: Arc::new(
+                    pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
+                ),
+                current_database_name: String::new(),
+                statement_lock_scope_id: None,
             };
             execute_readonly_statement(Statement::Analyze(stmt), &relcache, &mut ctx)
         }
@@ -932,6 +952,11 @@ fn run_statement(
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
                 deferred_foreign_keys: None,
+                advisory_locks: Arc::new(
+                    pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
+                ),
+                current_database_name: String::new(),
+                statement_lock_scope_id: None,
             };
             execute_truncate_table(stmt, &relcache, &mut ctx, INVALID_TRANSACTION_ID)
         }
@@ -969,6 +994,11 @@ fn run_statement(
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
                 deferred_foreign_keys: None,
+                advisory_locks: Arc::new(
+                    pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
+                ),
+                current_database_name: String::new(),
+                statement_lock_scope_id: None,
             };
             execute_readonly_statement(Statement::Vacuum(stmt), &relcache, &mut ctx)
         }
@@ -1009,6 +1039,11 @@ fn run_statement(
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
                     deferred_foreign_keys: None,
+                    advisory_locks: Arc::new(
+                        pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
+                    ),
+                    current_database_name: String::new(),
+                    statement_lock_scope_id: None,
                 };
                 execute_insert(bound, &relcache, &mut ctx, xid, 0)
             };
@@ -1060,6 +1095,11 @@ fn run_statement(
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
                     deferred_foreign_keys: None,
+                    advisory_locks: Arc::new(
+                        pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
+                    ),
+                    current_database_name: String::new(),
+                    statement_lock_scope_id: None,
                 };
                 execute_update_with_waiter(bound, &relcache, &mut ctx, xid, 0, None)
             };
@@ -1111,6 +1151,11 @@ fn run_statement(
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
                     deferred_foreign_keys: None,
+                    advisory_locks: Arc::new(
+                        pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
+                    ),
+                    current_database_name: String::new(),
+                    statement_lock_scope_id: None,
                 };
                 execute_delete_with_waiter(bound, &relcache, &mut ctx, xid, None)
             };

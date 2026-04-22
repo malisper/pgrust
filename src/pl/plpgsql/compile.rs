@@ -7,13 +7,14 @@ use crate::backend::parser::{
     SlotScopeColumn, SqlType, SqlTypeKind, Statement, bind_delete_with_outer_scopes,
     bind_insert_with_outer_scopes, bind_update_with_outer_scopes,
     bind_scalar_expr_in_named_slot_scope, parse_expr, parse_statement, parse_type_name,
-    pg_plan_query_with_outer, pg_plan_values_query_with_outer,
+    pg_plan_query_with_outer_scopes, pg_plan_values_query_with_outer_scopes, SqlExpr,
 };
 use crate::backend::parser::analyze::scope_for_relation;
+use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::backend::catalog::catalog::column_desc;
 use crate::include::catalog::{PgProcRow, RECORD_TYPE_OID};
 use crate::include::nodes::plannodes::PlannedStmt;
-use crate::include::nodes::primnodes::QueryColumn;
+use crate::include::nodes::primnodes::{QueryColumn, Var, user_attrno};
 
 use super::ast::{AssignTarget, Block, Decl, RaiseLevel, ReturnQueryKind, Stmt, VarDecl};
 use super::gram::parse_block;
@@ -207,6 +208,19 @@ impl CompileEnv {
     fn define_alias(&mut self, name: &str, slot: usize, ty: SqlType) {
         self.vars
             .insert(name.to_ascii_lowercase(), ScopeVar { slot, ty });
+    }
+
+    fn update_slot_type(&mut self, slot: usize, ty: SqlType) {
+        for var in self.vars.values_mut() {
+            if var.slot == slot {
+                var.ty = ty;
+            }
+        }
+        for parameter in &mut self.parameter_slots {
+            if parameter.slot == slot {
+                parameter.ty = ty;
+            }
+        }
     }
 
     fn get_var(&self, name: &str) -> Option<&ScopeVar> {
@@ -776,10 +790,10 @@ fn compile_return_query_stmt(
 
     let planned = match parse_statement(sql)? {
         Statement::Select(stmt) => {
-            pg_plan_query_with_outer(&stmt, catalog, &env.visible_columns())?
+            pg_plan_query_with_outer_scopes(&stmt, catalog, &[outer_scope_for_sql(env)])?
         }
         Statement::Values(stmt) => {
-            pg_plan_values_query_with_outer(&stmt, catalog, &env.visible_columns())?
+            pg_plan_values_query_with_outer_scopes(&stmt, catalog, &[outer_scope_for_sql(env)])?
         }
         other => {
             return Err(ParseError::UnexpectedToken {
@@ -799,10 +813,10 @@ fn compile_perform_stmt(
     catalog: &dyn CatalogLookup,
     env: &CompileEnv,
 ) -> Result<CompiledStmt, ParseError> {
-    let planned = pg_plan_query_with_outer(
+    let planned = pg_plan_query_with_outer_scopes(
         &crate::backend::parser::parse_select(&format!("select {sql}"))?,
         catalog,
-        &env.visible_sql_columns(),
+        &[outer_scope_for_sql(env)],
     )?;
     Ok(CompiledStmt::Perform { plan: planned })
 }
@@ -810,24 +824,40 @@ fn compile_perform_stmt(
 fn compile_exec_sql_stmt(
     sql: &str,
     catalog: &dyn CatalogLookup,
-    env: &CompileEnv,
+    env: &mut CompileEnv,
 ) -> Result<CompiledStmt, ParseError> {
     if let Some((target_name, select_sql)) = split_select_into_target(sql) {
+        let outer_scope = outer_scope_for_sql(env);
         let target = env
             .get_var(&target_name)
             .ok_or_else(|| ParseError::UnexpectedToken {
                 expected: "declared SELECT INTO target",
                 actual: target_name.clone(),
-            })?;
-        let planned = pg_plan_query_with_outer(
+            })?
+            .clone();
+        let planned = pg_plan_query_with_outer_scopes(
             &crate::backend::parser::parse_select(&select_sql)?,
             catalog,
-            &env.visible_sql_columns(),
+            &[outer_scope],
         )?;
+        let target_ty = if target.ty.kind == SqlTypeKind::Record {
+            let descriptor = assign_anonymous_record_descriptor(
+                planned
+                    .columns()
+                    .into_iter()
+                    .map(|column| (column.name, column.sql_type))
+                    .collect(),
+            );
+            let ty = descriptor.sql_type();
+            env.update_slot_type(target.slot, ty);
+            ty
+        } else {
+            target.ty
+        };
         return Ok(CompiledStmt::SelectInto {
             plan: planned,
             target_slot: target.slot,
-            target_ty: target.ty,
+            target_ty,
         });
     }
 
@@ -835,10 +865,10 @@ fn compile_exec_sql_stmt(
     let outer_scope = outer_scope_for_sql(env);
     match stmt {
         Statement::Select(stmt) => Ok(CompiledStmt::Perform {
-            plan: pg_plan_query_with_outer(&stmt, catalog, &env.visible_sql_columns())?,
+            plan: pg_plan_query_with_outer_scopes(&stmt, catalog, &[outer_scope])?,
         }),
         Statement::Values(stmt) => Ok(CompiledStmt::Perform {
-            plan: pg_plan_values_query_with_outer(&stmt, catalog, &env.visible_sql_columns())?,
+            plan: pg_plan_values_query_with_outer_scopes(&stmt, catalog, &[outer_scope])?,
         }),
         Statement::Insert(stmt) => Ok(CompiledStmt::ExecInsert {
             stmt: bind_insert_with_outer_scopes(&stmt, catalog, &[outer_scope])?,
@@ -857,14 +887,39 @@ fn compile_exec_sql_stmt(
 }
 
 fn outer_scope_for_sql(env: &CompileEnv) -> crate::backend::parser::BoundScope {
+    let columns = env.slot_columns();
     let desc = RelationDesc {
-        columns: env
-            .visible_sql_columns()
-            .into_iter()
-            .map(|(name, sql_type)| column_desc(name, sql_type, true))
+        columns: columns
+            .iter()
+            .map(|column| column_desc(column.name.clone(), column.sql_type, true))
             .collect(),
     };
-    scope_for_relation(None, &desc)
+    crate::backend::parser::BoundScope {
+        output_exprs: columns
+            .iter()
+            .map(|column| {
+                Expr::Var(Var {
+                    varno: 1,
+                    varattno: user_attrno(column.slot),
+                    varlevelsup: 0,
+                    vartype: column.sql_type,
+                })
+            })
+            .collect(),
+        desc,
+        columns: columns
+            .into_iter()
+            .map(|column| crate::backend::parser::analyze::ScopeColumn {
+                output_name: column.name,
+                hidden: column.hidden,
+                qualified_only: false,
+                relation_names: Vec::new(),
+                hidden_invalid_relation_names: Vec::new(),
+                hidden_missing_relation_names: Vec::new(),
+            })
+            .collect(),
+        relations: Vec::new(),
+    }
 }
 
 fn split_select_into_target(sql: &str) -> Option<(String, String)> {
@@ -921,7 +976,7 @@ fn compile_expr_text(
     catalog: &dyn CatalogLookup,
     env: &CompileEnv,
 ) -> Result<CompiledExpr, ParseError> {
-    let parsed = parse_expr(sql)?;
+    let parsed = normalize_plpgsql_expr(parse_expr(sql)?, env);
     let (expr, sql_type) = bind_scalar_expr_in_named_slot_scope(
         &parsed,
         &env.relation_slot_scopes(),
@@ -930,6 +985,160 @@ fn compile_expr_text(
     )?;
     let _ = sql_type;
     Ok(CompiledExpr { expr })
+}
+
+fn normalize_plpgsql_expr(expr: SqlExpr, env: &CompileEnv) -> SqlExpr {
+    match expr {
+        SqlExpr::Column(name) => {
+            if let Some((base, field)) = name.rsplit_once('.')
+                && let Some(var) = env.get_var(base)
+                && matches!(var.ty.kind, SqlTypeKind::Record | SqlTypeKind::Composite)
+            {
+                return SqlExpr::FieldSelect {
+                    expr: Box::new(SqlExpr::Column(base.to_string())),
+                    field: field.to_string(),
+                };
+            }
+            SqlExpr::Column(name)
+        }
+        SqlExpr::Add(left, right) => SqlExpr::Add(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::Sub(left, right) => SqlExpr::Sub(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::BitAnd(left, right) => SqlExpr::BitAnd(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::BitOr(left, right) => SqlExpr::BitOr(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::BitXor(left, right) => SqlExpr::BitXor(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::Shl(left, right) => SqlExpr::Shl(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::Shr(left, right) => SqlExpr::Shr(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::Mul(left, right) => SqlExpr::Mul(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::Div(left, right) => SqlExpr::Div(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::Mod(left, right) => SqlExpr::Mod(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::Concat(left, right) => SqlExpr::Concat(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::BinaryOperator { op, left, right } => SqlExpr::BinaryOperator {
+            op,
+            left: Box::new(normalize_plpgsql_expr(*left, env)),
+            right: Box::new(normalize_plpgsql_expr(*right, env)),
+        },
+        SqlExpr::UnaryPlus(inner) => {
+            SqlExpr::UnaryPlus(Box::new(normalize_plpgsql_expr(*inner, env)))
+        }
+        SqlExpr::Negate(inner) => {
+            SqlExpr::Negate(Box::new(normalize_plpgsql_expr(*inner, env)))
+        }
+        SqlExpr::BitNot(inner) => {
+            SqlExpr::BitNot(Box::new(normalize_plpgsql_expr(*inner, env)))
+        }
+        SqlExpr::Subscript { expr, index } => SqlExpr::Subscript {
+            expr: Box::new(normalize_plpgsql_expr(*expr, env)),
+            index,
+        },
+        SqlExpr::PrefixOperator { op, expr } => SqlExpr::PrefixOperator {
+            op,
+            expr: Box::new(normalize_plpgsql_expr(*expr, env)),
+        },
+        SqlExpr::Cast(inner, ty) => {
+            SqlExpr::Cast(Box::new(normalize_plpgsql_expr(*inner, env)), ty)
+        }
+        SqlExpr::Collate { expr, collation } => SqlExpr::Collate {
+            expr: Box::new(normalize_plpgsql_expr(*expr, env)),
+            collation,
+        },
+        SqlExpr::Eq(left, right) => SqlExpr::Eq(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::NotEq(left, right) => SqlExpr::NotEq(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::Lt(left, right) => SqlExpr::Lt(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::LtEq(left, right) => SqlExpr::LtEq(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::Gt(left, right) => SqlExpr::Gt(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::GtEq(left, right) => SqlExpr::GtEq(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::And(left, right) => SqlExpr::And(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::Or(left, right) => SqlExpr::Or(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::Not(inner) => SqlExpr::Not(Box::new(normalize_plpgsql_expr(*inner, env))),
+        SqlExpr::IsNull(inner) => {
+            SqlExpr::IsNull(Box::new(normalize_plpgsql_expr(*inner, env)))
+        }
+        SqlExpr::IsNotNull(inner) => {
+            SqlExpr::IsNotNull(Box::new(normalize_plpgsql_expr(*inner, env)))
+        }
+        SqlExpr::IsDistinctFrom(left, right) => SqlExpr::IsDistinctFrom(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::IsNotDistinctFrom(left, right) => SqlExpr::IsNotDistinctFrom(
+            Box::new(normalize_plpgsql_expr(*left, env)),
+            Box::new(normalize_plpgsql_expr(*right, env)),
+        ),
+        SqlExpr::ArrayLiteral(items) => SqlExpr::ArrayLiteral(
+            items
+                .into_iter()
+                .map(|item| normalize_plpgsql_expr(item, env))
+                .collect(),
+        ),
+        SqlExpr::Row(items) => SqlExpr::Row(
+            items
+                .into_iter()
+                .map(|item| normalize_plpgsql_expr(item, env))
+                .collect(),
+        ),
+        SqlExpr::FieldSelect { expr, field } => SqlExpr::FieldSelect {
+            expr: Box::new(normalize_plpgsql_expr(*expr, env)),
+            field,
+        },
+        other => other,
+    }
 }
 
 fn seed_trigger_env(env: &mut CompileEnv, relation_desc: &RelationDesc) -> CompiledTriggerBindings {

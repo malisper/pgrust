@@ -26,12 +26,25 @@ return_stmt = { kw_return ~ expr_until_semi? ~ semi }
 return_next_stmt = { kw_return ~ kw_next ~ expr_until_semi? ~ semi }
 return_query_stmt = { kw_return ~ kw_query ~ return_query_sql ~ semi }
 perform_stmt = { kw_perform ~ exec_sql_text ~ semi }
-exec_sql_stmt = { exec_sql_text ~ semi }
+exec_sql_stmt = { !stmt_keyword_start ~ exec_sql_text ~ semi }
 return_query_sql = @{ expr_chunk+ }
 exec_sql_text = @{ expr_chunk+ }
 positional_param = @{ "$" ~ ASCII_DIGIT+ }
 raise_level = { kw_notice | kw_warning | kw_exception }
 for_query_source_start = _{ kw_values | kw_select | kw_with }
+stmt_keyword_start = _{
+    kw_begin
+    | kw_end
+    | kw_null
+    | kw_if
+    | kw_elsif
+    | kw_else
+    | kw_for
+    | kw_loop
+    | kw_perform
+    | kw_raise
+    | kw_return
+}
 
 ident = { quoted_ident | bare_ident }
 bare_ident = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }

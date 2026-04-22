@@ -59,12 +59,51 @@ pub struct SelectGuard<'a> {
     pub(crate) rels: Vec<RelFileLocator>,
     pub(crate) table_locks: &'a TableLockManager,
     pub(crate) client_id: ClientId,
+    pub(crate) advisory_locks: Arc<crate::backend::storage::lmgr::AdvisoryLockManager>,
+    pub(crate) statement_lock_scope_id: Option<u64>,
     pub(crate) interrupt_guard: Option<StatementInterruptGuard>,
 }
 
 impl Drop for SelectGuard<'_> {
     fn drop(&mut self) {
         unlock_relations(self.table_locks, self.client_id, &self.rels);
+        if let Some(scope_id) = self.statement_lock_scope_id {
+            self.advisory_locks
+                .unlock_all_statement(self.client_id, scope_id);
+        }
+    }
+}
+
+struct StatementLockScopeGuard {
+    advisory_locks: Arc<crate::backend::storage::lmgr::AdvisoryLockManager>,
+    client_id: ClientId,
+    scope_id: Option<u64>,
+}
+
+impl StatementLockScopeGuard {
+    fn new(
+        advisory_locks: Arc<crate::backend::storage::lmgr::AdvisoryLockManager>,
+        client_id: ClientId,
+        scope_id: Option<u64>,
+    ) -> Self {
+        Self {
+            advisory_locks,
+            client_id,
+            scope_id,
+        }
+    }
+
+    fn scope_id(&self) -> Option<u64> {
+        self.scope_id
+    }
+}
+
+impl Drop for StatementLockScopeGuard {
+    fn drop(&mut self) {
+        if let Some(scope_id) = self.scope_id {
+            self.advisory_locks
+                .unlock_all_statement(self.client_id, scope_id);
+        }
     }
 }
 
@@ -313,6 +352,7 @@ impl Session {
         cid: u32,
         catalog: &crate::backend::utils::cache::lsyscache::LazyCatalogLookup<'_>,
         deferred_foreign_keys: Option<DeferredForeignKeyTracker>,
+        statement_lock_scope_id: Option<u64>,
     ) -> ExecutorContext {
         ExecutorContext {
             pool: Arc::clone(&db.pool),
@@ -320,6 +360,7 @@ impl Session {
             txn_waiter: Some(db.txn_waiter.clone()),
             sequences: Some(db.sequences.clone()),
             large_objects: Some(db.large_objects.clone()),
+            advisory_locks: Arc::clone(&db.advisory_locks),
             checkpoint_stats: db.checkpoint_stats_snapshot(),
             datetime_config: self.datetime_config.clone(),
             interrupts: self.interrupts(),
@@ -327,9 +368,11 @@ impl Session {
             session_stats: Arc::clone(&self.stats_state),
             snapshot,
             client_id: self.client_id,
+            current_database_name: db.current_database_name(),
             session_user_oid: self.session_user_oid(),
             current_user_oid: self.current_user_oid(),
             active_role_oid: self.active_role_oid(),
+            statement_lock_scope_id,
             next_command_id: cid,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             timed: false,
@@ -414,6 +457,8 @@ impl Session {
                     db.finalize_committed_temp_effects(self.client_id, &txn.temp_effects);
                     db.finalize_committed_sequence_effects(&txn.sequence_effects)?;
                     db.apply_temp_on_commit(self.client_id)?;
+                    db.advisory_locks
+                        .unlock_all_transaction(self.client_id, txn.xid);
                     self.stats_state.write().commit_top_level_xact(&db.stats);
                     db.txn_waiter.notify();
                     Ok(r)
@@ -441,6 +486,8 @@ impl Session {
         db.finalize_aborted_catalog_effects(&txn.catalog_effects);
         db.finalize_aborted_temp_effects(self.client_id, &txn.temp_effects);
         db.finalize_aborted_sequence_effects(&txn.sequence_effects);
+        db.advisory_locks
+            .unlock_all_transaction(self.client_id, txn.xid);
         db.txn_waiter.notify();
         if self.auth != txn.auth_at_start {
             self.auth = txn.auth_at_start.clone();
@@ -486,14 +533,28 @@ impl Session {
 
     pub fn execute(&mut self, db: &Database, sql: &str) -> Result<StatementResult, ExecError> {
         let _interrupt_guard = self.statement_interrupt_guard()?;
+        let statement_lock_scope = StatementLockScopeGuard::new(
+            Arc::clone(&db.advisory_locks),
+            self.client_id,
+            self.active_txn
+                .is_none()
+                .then(|| db.allocate_statement_lock_scope_id()),
+        );
         db.install_auth_state(self.client_id, self.auth.clone());
         db.install_row_security_enabled(self.client_id, self.row_security_enabled());
         db.install_temp_backend_id(self.client_id, self.temp_backend_id);
         db.install_stats_state(self.client_id, Arc::clone(&self.stats_state));
-        stacker::grow(32 * 1024 * 1024, || self.execute_internal(db, sql))
+        stacker::grow(32 * 1024 * 1024, || {
+            self.execute_internal(db, sql, statement_lock_scope.scope_id())
+        })
     }
 
-    fn execute_internal(&mut self, db: &Database, sql: &str) -> Result<StatementResult, ExecError> {
+    fn execute_internal(
+        &mut self,
+        db: &Database,
+        sql: &str,
+        statement_lock_scope_id: Option<u64>,
+    ) -> Result<StatementResult, ExecError> {
         db.install_interrupt_state(self.client_id, self.interrupts());
         if self.active_txn.is_none() {
             db.accept_invalidation_messages(self.client_id);
@@ -526,7 +587,7 @@ impl Session {
             Statement::CopyFrom(ref copy_stmt) => self.execute_copy_from_file(db, copy_stmt),
             Statement::CreateFunction(ref create_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -544,7 +605,7 @@ impl Session {
             }
             Statement::DropFunction(ref drop_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -562,7 +623,7 @@ impl Session {
             }
             Statement::CreateDatabase(ref create_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -575,7 +636,7 @@ impl Session {
             }
             Statement::CreateSchema(ref create_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -593,7 +654,7 @@ impl Session {
             }
             Statement::CreateTablespace(ref create_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -683,7 +744,7 @@ impl Session {
             }
             Statement::AlterTableOwner(ref alter_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -701,7 +762,7 @@ impl Session {
             }
             Statement::AlterTableRename(ref rename_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -719,7 +780,7 @@ impl Session {
             }
             Statement::AlterIndexRename(ref rename_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -737,7 +798,7 @@ impl Session {
             }
             Statement::AlterIndexAlterColumnStatistics(ref alter_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -755,7 +816,7 @@ impl Session {
             }
             Statement::AlterViewOwner(ref alter_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -773,7 +834,7 @@ impl Session {
             }
             Statement::AlterSchemaOwner(ref alter_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -791,7 +852,7 @@ impl Session {
             }
             Statement::AlterPublication(ref alter_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -809,7 +870,7 @@ impl Session {
             }
             Statement::AlterTableRenameColumn(ref rename_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -827,7 +888,7 @@ impl Session {
             }
             Statement::AlterTableAddColumn(ref alter_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -845,7 +906,7 @@ impl Session {
             }
             Statement::AlterTableDropColumn(ref drop_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -863,7 +924,7 @@ impl Session {
             }
             Statement::AlterTableAlterColumnType(ref alter_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -881,7 +942,7 @@ impl Session {
             }
             Statement::AlterTableAlterColumnDefault(ref alter_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -899,7 +960,7 @@ impl Session {
             }
             Statement::AlterTableAlterColumnCompression(ref alter_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -917,7 +978,7 @@ impl Session {
             }
             Statement::AlterTableAlterColumnStorage(ref alter_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -935,7 +996,7 @@ impl Session {
             }
             Statement::AlterTableAlterColumnOptions(ref alter_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -953,7 +1014,7 @@ impl Session {
             }
             Statement::AlterTableAlterColumnStatistics(ref alter_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -971,7 +1032,7 @@ impl Session {
             }
             Statement::AlterTableAddConstraint(ref alter_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -989,7 +1050,7 @@ impl Session {
             }
             Statement::AlterTableDropConstraint(ref alter_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1007,7 +1068,7 @@ impl Session {
             }
             Statement::AlterTableAlterConstraint(ref alter_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1025,7 +1086,7 @@ impl Session {
             }
             Statement::AlterTableRenameConstraint(ref alter_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1043,7 +1104,7 @@ impl Session {
             }
             Statement::AlterTableSetNotNull(ref alter_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1061,7 +1122,7 @@ impl Session {
             }
             Statement::AlterTableDropNotNull(ref alter_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1079,7 +1140,7 @@ impl Session {
             }
             Statement::AlterTableValidateConstraint(ref alter_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1097,7 +1158,7 @@ impl Session {
             }
             Statement::AlterTableInherit(ref alter_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1115,7 +1176,7 @@ impl Session {
             }
             Statement::AlterTableNoInherit(ref alter_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1133,7 +1194,7 @@ impl Session {
             }
             Statement::AlterTableSetRowSecurity(ref alter_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1151,7 +1212,7 @@ impl Session {
             }
             Statement::AlterPolicy(ref alter_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1169,7 +1230,7 @@ impl Session {
             }
             Statement::CreateRole(ref create_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1186,7 +1247,7 @@ impl Session {
             }
             Statement::AlterRole(ref alter_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1199,7 +1260,7 @@ impl Session {
             }
             Statement::DropRole(ref drop_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1212,7 +1273,7 @@ impl Session {
             }
             Statement::DropDatabase(ref drop_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1225,7 +1286,7 @@ impl Session {
             }
             Statement::GrantObject(ref grant_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1243,7 +1304,7 @@ impl Session {
             }
             Statement::RevokeObject(ref revoke_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1261,7 +1322,7 @@ impl Session {
             }
             Statement::GrantRoleMembership(ref grant_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1274,7 +1335,7 @@ impl Session {
             }
             Statement::RevokeRoleMembership(ref revoke_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1287,7 +1348,7 @@ impl Session {
             }
             Statement::SetSessionAuthorization(ref set_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1302,7 +1363,7 @@ impl Session {
             }
             Statement::ResetSessionAuthorization(ref reset_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1317,7 +1378,7 @@ impl Session {
             }
             Statement::SetRole(ref set_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1331,7 +1392,7 @@ impl Session {
             }
             Statement::ResetRole(ref reset_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1346,7 +1407,7 @@ impl Session {
             Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::CommentOnTable(ref comment_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1364,7 +1425,7 @@ impl Session {
             }
             Statement::CommentOnConstraint(ref comment_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1382,7 +1443,7 @@ impl Session {
             }
             Statement::CommentOnRule(ref comment_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1400,7 +1461,7 @@ impl Session {
             }
             Statement::CommentOnTrigger(ref comment_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1418,7 +1479,7 @@ impl Session {
             }
             Statement::CommentOnRole(ref comment_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1431,7 +1492,7 @@ impl Session {
             }
             Statement::CommentOnConversion(ref comment_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1449,7 +1510,7 @@ impl Session {
             }
             Statement::CommentOnPublication(ref comment_stmt) => {
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1531,7 +1592,7 @@ impl Session {
                 }
 
                 if self.active_txn.is_some() {
-                    let result = self.execute_in_transaction(db, stmt);
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
                     if result.is_err() {
                         if let Some(ref mut txn) = self.active_txn {
                             txn.failed = true;
@@ -1600,6 +1661,8 @@ impl Session {
             db.finalize_aborted_catalog_effects(&txn.catalog_effects);
             db.finalize_aborted_temp_effects(self.client_id, &txn.temp_effects);
             db.finalize_aborted_sequence_effects(&txn.sequence_effects);
+            db.advisory_locks
+                .unlock_all_transaction(self.client_id, txn.xid);
             db.txn_waiter.notify();
             for rel in txn.held_table_locks.keys().copied() {
                 db.table_locks.unlock_table(rel, self.client_id);
@@ -1611,6 +1674,7 @@ impl Session {
         // still associated with this backend on disconnect, mirroring PostgreSQL
         // backend-exit lock cleanup even if the session missed normal unwind.
         db.table_locks.unlock_all_for_client(self.client_id);
+        db.advisory_locks.unlock_all_session(self.client_id);
     }
 
     fn lock_table_if_needed(
@@ -1676,11 +1740,15 @@ impl Session {
         } else {
             None
         };
+        let statement_lock_scope_id = txn_ctx
+            .is_none()
+            .then(|| db.allocate_statement_lock_scope_id());
         let search_path = self.configured_search_path();
         let mut guard = db.execute_streaming_with_search_path_and_datetime_config(
             self.client_id,
             select_stmt,
             txn_ctx,
+            statement_lock_scope_id,
             search_path.as_deref(),
             &self.datetime_config,
         )?;
@@ -1692,6 +1760,7 @@ impl Session {
         &mut self,
         db: &Database,
         stmt: Statement,
+        statement_lock_scope_id: Option<u64>,
     ) -> Result<StatementResult, ExecError> {
         let effect_start = self
             .active_txn
@@ -1904,15 +1973,6 @@ impl Session {
                 )
             }
             Statement::AlterIndexRename(ref rename_stmt) => {
-                let catalog = self.catalog_lookup_for_command(db, xid, cid);
-                let relation = catalog
-                    .lookup_any_relation(&rename_stmt.table_name)
-                    .ok_or_else(|| {
-                        ExecError::Parse(ParseError::TableDoesNotExist(
-                            rename_stmt.table_name.clone(),
-                        ))
-                    })?;
-                self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_alter_index_rename_stmt_in_transaction_with_search_path(
@@ -2789,7 +2849,14 @@ impl Session {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let bound = plan_merge(merge_stmt, &catalog)?;
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
-                let mut ctx = self.executor_context_for_catalog(db, snapshot, cid, &catalog, None);
+                let mut ctx = self.executor_context_for_catalog(
+                    db,
+                    snapshot,
+                    cid,
+                    &catalog,
+                    None,
+                    None,
+                );
                 execute_merge(bound, &catalog, &mut ctx, xid, cid)
             }
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) => {
@@ -2797,7 +2864,14 @@ impl Session {
                 let search_path = self.configured_search_path();
                 let catalog =
                     db.lazy_catalog_lookup(client_id, Some((xid, cid)), search_path.as_deref());
-                let mut ctx = self.executor_context_for_catalog(db, snapshot, cid, &catalog, None);
+                let mut ctx = self.executor_context_for_catalog(
+                    db,
+                    snapshot,
+                    cid,
+                    &catalog,
+                    None,
+                    None,
+                );
                 execute_readonly_statement(stmt, &catalog, &mut ctx)
             }
             Statement::Insert(ref insert_stmt) => {
@@ -2825,6 +2899,7 @@ impl Session {
                     cid,
                     &catalog,
                     Some(deferred_foreign_keys),
+                    None,
                 );
                 crate::pgrust::database::commands::rules::execute_bound_insert_with_rules(
                     prepared.stmt,
@@ -2860,6 +2935,7 @@ impl Session {
                     cid,
                     &catalog,
                     Some(deferred_foreign_keys),
+                    None,
                 );
                 ctx.interrupts = Arc::clone(&interrupts);
                 crate::pgrust::database::commands::rules::execute_bound_update_with_rules(
@@ -2897,6 +2973,7 @@ impl Session {
                     cid,
                     &catalog,
                     Some(deferred_foreign_keys),
+                    None,
                 );
                 ctx.interrupts = Arc::clone(&interrupts);
                 crate::pgrust::database::commands::rules::execute_bound_delete_with_rules(
@@ -3538,6 +3615,7 @@ impl Session {
             cid,
             &catalog,
             Some(deferred_foreign_keys),
+            None,
         );
         ctx.interrupts = interrupts;
         execute_prepared_insert_row(prepared, params, &mut ctx, xid, cid)
@@ -3780,6 +3858,7 @@ impl Session {
                 cid,
                 &catalog,
                 Some(deferred_foreign_keys),
+                None,
             );
             ctx.interrupts = interrupts;
             crate::backend::commands::tablecmds::execute_insert_values(
