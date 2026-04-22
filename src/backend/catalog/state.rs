@@ -487,6 +487,7 @@ impl Catalog {
             primary,
             columns,
             &options,
+            None,
         )
     }
 
@@ -505,6 +506,7 @@ impl Catalog {
             false,
             columns,
             options,
+            None,
         )
     }
 
@@ -516,6 +518,7 @@ impl Catalog {
         primary: bool,
         columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
         options: &CatalogIndexBuildOptions,
+        predicate_sql: Option<&str>,
     ) -> Result<CatalogEntry, CatalogError> {
         let index_name = index_name.into().to_ascii_lowercase();
         if self.tables.contains_key(&index_name) {
@@ -611,7 +614,10 @@ impl Catalog {
                     .then(|| serde_json::to_string(&expr_sqls))
                     .transpose()
                     .map_err(|_| CatalogError::Corrupt("invalid index expression metadata"))?,
-                indpred: None,
+                indpred: predicate_sql
+                    .map(str::trim)
+                    .filter(|pred| !pred.is_empty())
+                    .map(str::to_string),
             }),
         };
         self.next_rel_number = self.next_rel_number.saturating_add(1);

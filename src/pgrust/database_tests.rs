@@ -1780,7 +1780,9 @@ fn advisory_session_and_transaction_locks_cleanup_and_encode_keys() {
         vec![vec![Value::Bool(false)]]
     );
 
-    session.execute(&db, "select pg_advisory_unlock_all()").unwrap();
+    session
+        .execute(&db, "select pg_advisory_unlock_all()")
+        .unwrap();
     assert_eq!(
         session_query_rows(
             &mut session,
@@ -1996,7 +1998,10 @@ fn advisory_unlock_false_queues_warning() {
 
     session.execute(&db, "begin").unwrap();
     session
-        .execute(&db, "select pg_advisory_xact_lock(1), pg_advisory_xact_lock_shared(2)")
+        .execute(
+            &db,
+            "select pg_advisory_xact_lock(1), pg_advisory_xact_lock_shared(2)",
+        )
         .unwrap();
 
     clear_backend_notices();
@@ -4109,9 +4114,14 @@ fn create_view_supports_check_option_and_or_replace() {
     let db = Database::open(&dir, 128).unwrap();
     let mut session = Session::new(1);
 
-    session.execute(&db, "create table base_tbl(a int)").unwrap();
     session
-        .execute(&db, "create view rw_view1 as select * from base_tbl where a > 0")
+        .execute(&db, "create table base_tbl(a int)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view rw_view1 as select * from base_tbl where a > 0",
+        )
         .unwrap();
     session
         .execute(
@@ -4135,12 +4145,20 @@ fn create_view_supports_check_option_and_or_replace() {
         ]
     );
 
-    session.execute(&db, "insert into rw_view2 values (5)").unwrap();
+    session
+        .execute(&db, "insert into rw_view2 values (5)")
+        .unwrap();
     match session.execute(&db, "insert into rw_view2 values (-5)") {
         Err(ExecError::DetailedError {
-            message, detail, sqlstate, ..
+            message,
+            detail,
+            sqlstate,
+            ..
         }) => {
-            assert_eq!(message, "new row violates check option for view \"rw_view1\"");
+            assert_eq!(
+                message,
+                "new row violates check option for view \"rw_view1\""
+            );
             assert_eq!(detail.as_deref(), Some("Failing row contains (-5)."));
             assert_eq!(sqlstate, "44000");
         }
@@ -4148,9 +4166,15 @@ fn create_view_supports_check_option_and_or_replace() {
     }
     match session.execute(&db, "insert into rw_view2 values (15)") {
         Err(ExecError::DetailedError {
-            message, detail, sqlstate, ..
+            message,
+            detail,
+            sqlstate,
+            ..
         }) => {
-            assert_eq!(message, "new row violates check option for view \"rw_view2\"");
+            assert_eq!(
+                message,
+                "new row violates check option for view \"rw_view2\""
+            );
             assert_eq!(detail.as_deref(), Some("Failing row contains (15)."));
             assert_eq!(sqlstate, "44000");
         }
@@ -4168,16 +4192,24 @@ fn create_view_supports_check_option_and_or_replace() {
         .unwrap();
     match session.execute(&db, "insert into rw_view2 values (20)") {
         Err(ExecError::DetailedError {
-            message, detail, sqlstate, ..
+            message,
+            detail,
+            sqlstate,
+            ..
         }) => {
-            assert_eq!(message, "new row violates check option for view \"rw_view2\"");
+            assert_eq!(
+                message,
+                "new row violates check option for view \"rw_view2\""
+            );
             assert_eq!(detail.as_deref(), Some("Failing row contains (20)."));
             assert_eq!(sqlstate, "44000");
         }
         other => panic!("expected local check-option violation, got {other:?}"),
     }
 
-    session.execute(&db, "create table t1(a int, b text)").unwrap();
+    session
+        .execute(&db, "create table t1(a int, b text)")
+        .unwrap();
     session
         .execute(&db, "create view v1 as select null::int as a")
         .unwrap();
@@ -4192,7 +4224,10 @@ fn create_view_supports_check_option_and_or_replace() {
         .unwrap();
     match session.execute(&db, "insert into v1 values (-1, 'bad')") {
         Err(ExecError::DetailedError {
-            message, detail, sqlstate, ..
+            message,
+            detail,
+            sqlstate,
+            ..
         }) => {
             assert_eq!(message, "new row violates check option for view \"v1\"");
             assert_eq!(detail.as_deref(), Some("Failing row contains (-1, bad)."));
@@ -4418,6 +4453,24 @@ fn assert_explain_uses_seqscan(db: &Database, client_id: u32, sql: &str, heap_na
     );
 }
 
+fn psql_index_definition(
+    db: &Database,
+    client_id: u32,
+    table_name: &str,
+    index_name: &str,
+) -> String {
+    let lookup = db.lazy_catalog_lookup(client_id, None, None);
+    let relation = lookup
+        .lookup_any_relation(table_name)
+        .unwrap_or_else(|| panic!("expected relation {table_name}"));
+    let index = lookup
+        .index_relations_for_heap(relation.relation_oid)
+        .into_iter()
+        .find(|index| index.name == index_name)
+        .unwrap_or_else(|| panic!("expected index {index_name}"));
+    crate::backend::tcop::postgres::format_psql_indexdef(db, &Session::new(client_id), &index)
+}
+
 fn setup_index_matrix_db(label: &str) -> Database {
     let base = temp_dir(label);
     let db = Database::open(&base, 16).unwrap();
@@ -4445,6 +4498,32 @@ fn setup_index_matrix_db(label: &str) -> Database {
         .unwrap();
     db.execute(1, "create index items_ba_idx on items (b, a)")
         .unwrap();
+    db
+}
+
+fn setup_partial_index_matrix_db(label: &str) -> Database {
+    let base = temp_dir(label);
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(
+        1,
+        "create table items (id int4 not null, flag text not null, note text)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into items values \
+         (1, 'skip', 's1'), \
+         (1, 'keep', 'k1'), \
+         (2, 'keep', 'k2'), \
+         (2, 'skip', 's2'), \
+         (3, 'skip', 's3')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index items_keep_idx on items (id) where flag = 'keep'",
+    )
+    .unwrap();
     db
 }
 
@@ -5680,8 +5759,11 @@ fn comment_on_trigger_upserts_and_clears_pg_description() {
     )
     .unwrap();
 
-    db.execute(1, "comment on trigger item_trigger on items is 'hello world'")
-        .unwrap();
+    db.execute(
+        1,
+        "comment on trigger item_trigger on items is 'hello world'",
+    )
+    .unwrap();
     assert_eq!(
         query_rows(
             &db,
@@ -5694,8 +5776,11 @@ fn comment_on_trigger_upserts_and_clears_pg_description() {
         vec![vec![Value::Text("hello world".into())]]
     );
 
-    db.execute(1, "comment on trigger item_trigger on items is 'second comment'")
-        .unwrap();
+    db.execute(
+        1,
+        "comment on trigger item_trigger on items is 'second comment'",
+    )
+    .unwrap();
     assert_eq!(
         query_rows(
             &db,
@@ -7143,8 +7228,11 @@ fn alter_index_alter_column_set_statistics_updates_expression_column_and_resets(
     db.execute(1, "create index attmp_idx on attmp (a, (d + e), b)")
         .unwrap();
 
-    db.execute(1, "alter index attmp_idx alter column 2 set statistics 1000")
-        .unwrap();
+    db.execute(
+        1,
+        "alter index attmp_idx alter column 2 set statistics 1000",
+    )
+    .unwrap();
     assert_eq!(
         query_rows(
             &db,
@@ -7180,7 +7268,10 @@ fn alter_index_alter_column_set_statistics_rejects_non_expression_and_missing_co
     db.execute(1, "create index attmp_idx on attmp (a, (d + e), b)")
         .unwrap();
 
-    match db.execute(1, "alter index attmp_idx alter column 1 set statistics 1000") {
+    match db.execute(
+        1,
+        "alter index attmp_idx alter column 1 set statistics 1000",
+    ) {
         Err(ExecError::DetailedError {
             message,
             hint: Some(hint),
@@ -7193,7 +7284,10 @@ fn alter_index_alter_column_set_statistics_rejects_non_expression_and_missing_co
         other => panic!("expected non-expression index-column error, got {other:?}"),
     }
 
-    match db.execute(1, "alter index attmp_idx alter column 3 set statistics 1000") {
+    match db.execute(
+        1,
+        "alter index attmp_idx alter column 3 set statistics 1000",
+    ) {
         Err(ExecError::DetailedError {
             message,
             hint: Some(hint),
@@ -7206,7 +7300,10 @@ fn alter_index_alter_column_set_statistics_rejects_non_expression_and_missing_co
         other => panic!("expected non-expression index-column error, got {other:?}"),
     }
 
-    match db.execute(1, "alter index attmp_idx alter column 4 set statistics 1000") {
+    match db.execute(
+        1,
+        "alter index attmp_idx alter column 4 set statistics 1000",
+    ) {
         Err(ExecError::DetailedError {
             message, sqlstate, ..
         }) if message == "column number 4 of relation \"attmp_idx\" does not exist"
@@ -7259,8 +7356,11 @@ fn alter_index_and_table_set_statistics_clamp_and_emit_warning() {
     db.execute(1, "create table items (i int4)").unwrap();
 
     clear_backend_notices();
-    db.execute(1, "alter index attmp_idx alter column 2 set statistics 50000")
-        .unwrap();
+    db.execute(
+        1,
+        "alter index attmp_idx alter column 2 set statistics 50000",
+    )
+    .unwrap();
     assert_eq!(
         query_rows(
             &db,
@@ -12694,6 +12794,89 @@ fn unique_index_insert_rejects_duplicate_key() {
 }
 
 #[test]
+fn partial_index_catalog_persists_predicate_and_pg_get_indexdef_renders_where() {
+    let db = setup_partial_index_matrix_db("partial_index_catalog");
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indpred \
+             from pg_index \
+             where indexrelid = (select oid from pg_class where relname = 'items_keep_idx')",
+        ),
+        vec![vec![Value::Text("flag = 'keep'".into())]]
+    );
+    assert_eq!(
+        psql_index_definition(&db, 1, "items", "items_keep_idx"),
+        "CREATE INDEX items_keep_idx ON items USING btree (id) WHERE (flag = 'keep')"
+    );
+}
+
+#[test]
+fn partial_unique_index_build_and_insert_only_enforce_qualifying_rows() {
+    let base = temp_dir("partial_unique_index_build");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, flag text, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into items values \
+         (1, 'skip', 'outside1'), \
+         (1, 'skip', 'outside2'), \
+         (2, 'keep', 'inside')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create unique index items_keep_key on items (id) where flag = 'keep'",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into items values (1, 'skip', 'outside3')")
+        .unwrap();
+
+    match db.execute(1, "insert into items values (2, 'keep', 'dup')") {
+        Err(ExecError::UniqueViolation { constraint, detail }) => {
+            assert_eq!(constraint, "items_keep_key");
+            assert_eq!(detail.as_deref(), Some("Key (id)=(2) already exists."));
+        }
+        other => panic!("expected unique violation, got {:?}", other),
+    }
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id, flag, note from items order by id, flag, note"
+        ),
+        vec![
+            vec![
+                Value::Int32(1),
+                Value::Text("skip".into()),
+                Value::Text("outside1".into()),
+            ],
+            vec![
+                Value::Int32(1),
+                Value::Text("skip".into()),
+                Value::Text("outside2".into()),
+            ],
+            vec![
+                Value::Int32(1),
+                Value::Text("skip".into()),
+                Value::Text("outside3".into()),
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Text("keep".into()),
+                Value::Text("inside".into()),
+            ],
+        ]
+    );
+}
+
+#[test]
 fn unique_array_column_supports_duplicates_and_index_quals() {
     let base = temp_dir("unique_array_column_supports_duplicates_and_index_quals");
     let db = Database::open(&base, 16).unwrap();
@@ -12714,7 +12897,10 @@ fn unique_array_column_supports_duplicates_and_index_quals() {
     match db.execute(1, "insert into arr_tbl values ('{1,2,3}')") {
         Err(ExecError::UniqueViolation { constraint, detail }) => {
             assert_eq!(constraint, "arr_tbl_f1_key");
-            assert_eq!(detail.as_deref(), Some("Key (f1)=({1,2,3}) already exists."));
+            assert_eq!(
+                detail.as_deref(),
+                Some("Key (f1)=({1,2,3}) already exists.")
+            );
         }
         other => panic!("expected unique violation, got {:?}", other),
     }
@@ -12916,6 +13102,55 @@ fn indexed_update_and_delete_apply_residual_predicates() {
                 Value::Int32(2),
                 Value::Text("keep".into()),
                 Value::Text("gamma".into())
+            ],
+        ]
+    );
+}
+
+#[test]
+fn partial_unique_index_update_maintenance_tracks_predicate_boundary() {
+    let base = temp_dir("partial_unique_index_update_boundary");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, flag text, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into items values (1, 'skip', 'a'), (1, 'skip', 'b')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create unique index items_keep_key on items (id) where flag = 'keep'",
+    )
+    .unwrap();
+
+    db.execute(1, "update items set flag = 'keep' where note = 'a'")
+        .unwrap();
+    match db.execute(1, "update items set flag = 'keep' where note = 'b'") {
+        Err(ExecError::UniqueViolation { constraint, .. }) => {
+            assert_eq!(constraint, "items_keep_key");
+        }
+        other => panic!("expected unique violation, got {:?}", other),
+    }
+
+    db.execute(1, "update items set flag = 'skip' where note = 'a'")
+        .unwrap();
+    db.execute(1, "update items set flag = 'keep' where note = 'b'")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, flag, note from items order by note"),
+        vec![
+            vec![
+                Value::Int32(1),
+                Value::Text("skip".into()),
+                Value::Text("a".into()),
+            ],
+            vec![
+                Value::Int32(1),
+                Value::Text("keep".into()),
+                Value::Text("b".into()),
             ],
         ]
     );
@@ -14553,6 +14788,132 @@ fn index_matrix_insert_after_build_remains_queryable_via_index() {
 }
 
 #[test]
+fn partial_index_query_planner_uses_index_only_when_query_implies_predicate() {
+    let db = setup_partial_index_matrix_db("partial_index_planner");
+
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select note from items where flag = 'keep' and id = 2",
+        "items_keep_idx",
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select note from items where flag = 'keep' and id = 2",
+        ),
+        vec![vec![Value::Text("k2".into())]]
+    );
+
+    assert_explain_uses_seqscan(&db, 1, "select note from items where id = 2", "items");
+    assert_eq!(
+        query_rows(&db, 1, "select note from items where id = 2 order by note"),
+        vec![
+            vec![Value::Text("k2".into())],
+            vec![Value::Text("s2".into())],
+        ]
+    );
+}
+
+#[test]
+fn partial_unique_index_on_conflict_respects_predicate() {
+    let base = temp_dir("partial_unique_index_on_conflict");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, flag text, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create unique index items_keep_key on items (id) where flag = 'keep'",
+    )
+    .unwrap();
+    db.execute(1, "insert into items values (1, 'keep', 'alpha')")
+        .unwrap();
+
+    db.execute(
+        1,
+        "insert into items values (1, 'keep', 'beta') \
+         on conflict (id) where flag = 'keep' \
+         do update set note = excluded.note",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id, flag, note from items order by flag, note"
+        ),
+        vec![vec![
+            Value::Int32(1),
+            Value::Text("keep".into()),
+            Value::Text("beta".into()),
+        ]]
+    );
+
+    db.execute(
+        1,
+        "insert into items values (1, 'skip', 'gamma') \
+         on conflict (id) where flag = 'keep' \
+         do update set note = excluded.note",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id, flag, note from items order by flag, note"
+        ),
+        vec![
+            vec![
+                Value::Int32(1),
+                Value::Text("keep".into()),
+                Value::Text("beta".into()),
+            ],
+            vec![
+                Value::Int32(1),
+                Value::Text("skip".into()),
+                Value::Text("gamma".into()),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn partial_index_with_ctid_predicate_builds_and_persists_catalog_predicate() {
+    let base = temp_dir("partial_index_ctid_predicate");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into items values (1, 'alpha'), (2, 'beta'), (3, 'gamma')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index items_ctid_idx on items (id) where ctid >= '(0,1)'",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indpred \
+             from pg_index \
+             where indexrelid = (select oid from pg_class where relname = 'items_ctid_idx')",
+        ),
+        vec![vec![Value::Text("ctid >= '(0,1)'".into())]]
+    );
+    assert_eq!(
+        psql_index_definition(&db, 1, "items", "items_ctid_idx"),
+        "CREATE INDEX items_ctid_idx ON items USING btree (id) WHERE (ctid >= '(0,1)')"
+    );
+}
+
+#[test]
 fn copy_from_rows_inserts_typed_rows() {
     let base = temp_dir("copy_from_rows");
     let db = Database::open(&base, 16).unwrap();
@@ -14882,7 +15243,8 @@ fn create_operator_bool_bool_regression_debug() {
         .write()
         .create_operator_mvcc(row.clone(), &ctx)
         .unwrap();
-    db.apply_catalog_mutation_effect_immediate(&create_effect).unwrap();
+    db.apply_catalog_mutation_effect_immediate(&create_effect)
+        .unwrap();
 
     let mut current = row;
     current.oid = operator_oid;
@@ -15515,9 +15877,7 @@ fn drop_function_uses_search_path_and_signature() {
             "create function add_one(x int4) returns int4 language sql as $$ select x + 1 $$",
         )
         .unwrap();
-    session
-        .execute(&db, "drop function add_one(int4)")
-        .unwrap();
+    session.execute(&db, "drop function add_one(int4)").unwrap();
 
     let visible = db.backend_catcache(1, None).unwrap();
     assert!(
@@ -15532,9 +15892,14 @@ fn drop_table_cascade_notice_omits_temp_schema_name() {
     let db = Database::open(&base, 16).unwrap();
     let mut session = Session::new(1);
 
-    session.execute(&db, "create temp table some_tab (id int4)").unwrap();
     session
-        .execute(&db, "create temp table some_tab_child () inherits (some_tab)")
+        .execute(&db, "create temp table some_tab (id int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create temp table some_tab_child () inherits (some_tab)",
+        )
         .unwrap();
     take_backend_notice_messages();
 
@@ -18780,7 +19145,11 @@ fn plpgsql_alias_record_select_into_and_update_work() {
         vec![vec![Value::Int32(0)]]
     );
     assert_eq!(
-        query_rows(&db, 1, "select backlink from slots where slotname = 'PS.base.a1'"),
+        query_rows(
+            &db,
+            1,
+            "select backlink from slots where slotname = 'PS.base.a1'"
+        ),
         vec![vec![Value::Text("WS.001.1a".into())]]
     );
 }

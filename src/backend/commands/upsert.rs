@@ -15,7 +15,7 @@ use crate::include::nodes::execnodes::TupleSlot;
 use super::tablecmds::{
     WriteUpdatedRowResult, apply_assignment_target, build_index_insert_context,
     index_key_values_for_row, insert_index_entry_for_row, rollback_inserted_row,
-    slot_toast_context, write_insert_heap_row, write_updated_row,
+    row_matches_index_predicate, slot_toast_context, write_insert_heap_row, write_updated_row,
 };
 
 enum EvaluatedConflictAction {
@@ -79,6 +79,9 @@ fn arbiter_keys_for_row(
 ) -> Result<Vec<ArbiterKey>, ExecError> {
     let mut keys = Vec::with_capacity(arbiter_indexes.len());
     for index in arbiter_indexes {
+        if !row_matches_index_predicate(index, values, None, index.index_meta.indrelid, ctx)? {
+            continue;
+        }
         let mut key_values = index_key_values_for_row(index, desc, values, ctx)?;
         if !index.index_meta.indnullsnotdistinct
             && key_values.iter().any(|value| matches!(value, Value::Null))
@@ -154,6 +157,9 @@ fn probe_arbiter_conflict(
     ctx: &mut ExecutorContext,
 ) -> Result<Option<ArbiterConflict>, ExecError> {
     for index in arbiter_indexes {
+        if !row_matches_index_predicate(index, values, None, index.index_meta.indrelid, ctx)? {
+            continue;
+        }
         let key_values = index_key_values_for_row(index, &stmt.desc, values, ctx)?;
         let insert_ctx = build_index_insert_context(
             stmt.rel,
@@ -484,15 +490,22 @@ pub(crate) fn execute_insert_on_conflict_rows(
 
             let mut retry_conflict = false;
             for index in &arbiter_indexes {
+                if !row_matches_index_predicate(
+                    index,
+                    values,
+                    Some(heap_tid),
+                    stmt.relation_oid,
+                    ctx,
+                )? {
+                    continue;
+                }
                 match insert_index_entry_for_row(stmt.rel, &stmt.desc, index, values, heap_tid, ctx)
                 {
                     Ok(()) => {}
                     Err(ExecError::UniqueViolation {
                         constraint,
                         detail: _,
-                    })
-                        if constraint.eq_ignore_ascii_case(&index.name) =>
-                    {
+                    }) if constraint.eq_ignore_ascii_case(&index.name) => {
                         rollback_inserted_row(
                             stmt.rel, stmt.toast, &stmt.desc, heap_tid, ctx, xid,
                         )?;

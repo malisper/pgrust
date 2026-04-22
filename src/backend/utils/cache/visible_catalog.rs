@@ -185,6 +185,15 @@ impl CatalogLookup for VisibleCatalog {
                                 .ok()
                             })
                             .unwrap_or_default(),
+                        index_predicate: self.relation_by_oid(index_meta.indrelid).and_then(
+                            |heap| {
+                                crate::backend::parser::analyze::bind_index_predicate(
+                                    index_meta, &heap.desc, self,
+                                )
+                                .ok()
+                                .flatten()
+                            },
+                        ),
                     }
                 })
             })

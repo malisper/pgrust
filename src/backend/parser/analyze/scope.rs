@@ -1700,6 +1700,21 @@ pub(super) fn scope_for_base_relation(relation_name: &str, desc: &RelationDesc) 
     scope
 }
 
+pub(crate) fn scope_for_base_relation_with_optional_name(
+    relation_name: Option<&str>,
+    desc: &RelationDesc,
+) -> BoundScope {
+    let mut scope = scope_for_relation(relation_name, desc);
+    scope.output_exprs = default_scope_output_exprs(1, desc);
+    scope.relations = vec![ScopeRelation {
+        relation_names: relation_name.into_iter().map(str::to_string).collect(),
+        hidden_invalid_relation_names: vec![],
+        hidden_missing_relation_names: vec![],
+        system_varno: Some(1),
+    }];
+    scope
+}
+
 pub(crate) fn shift_scope_rtindexes(mut scope: BoundScope, offset: usize) -> BoundScope {
     if offset == 0 {
         return scope;

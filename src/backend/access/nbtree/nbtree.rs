@@ -5,6 +5,9 @@ use parking_lot::RwLockWriteGuard;
 
 use crate::backend::access::common::toast_compression::compress_inline_datum;
 use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_next_visible};
+use crate::backend::access::index::buildkeys::{
+    IndexBuildKeyProjector, materialize_heap_row_values,
+};
 use crate::backend::access::index::unique::{UniqueCandidateResult, classify_unique_candidate};
 use crate::backend::access::nbtree::nbtcompare::{compare_bt_keyspace, compare_bt_values};
 use crate::backend::access::nbtree::nbtpreprocesskeys::preprocess_scan_keys;
@@ -18,9 +21,7 @@ use crate::backend::access::transam::xlog::{
 };
 use crate::backend::catalog::CatalogError;
 use crate::backend::executor::render_datetime_value_text;
-use crate::backend::executor::value_io::{
-    decode_value, encode_anyarray_bytes, encode_array_bytes, missing_column_value,
-};
+use crate::backend::executor::value_io::{decode_value, encode_anyarray_bytes, encode_array_bytes};
 use crate::backend::storage::fsm::get_free_index_page;
 use crate::backend::storage::page::bufpage::{MAX_HEAP_TUPLE_SIZE, max_align, page_header};
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, StorageManager};
@@ -909,8 +910,9 @@ fn btbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, CatalogError> {
     )
     .map_err(|err| CatalogError::Io(format!("heap scan begin failed: {err:?}")))?;
     let attr_descs = ctx.heap_desc.attribute_descs();
+    let mut key_projector = IndexBuildKeyProjector::new(ctx)?;
     let mut spool = crate::backend::access::nbtree::nbtsort::BtSpool::default();
-    let mut heap_tuples = 0u64;
+    let mut result = IndexBuildResult::default();
     let mut approx_bytes = 0usize;
 
     loop {
@@ -927,21 +929,11 @@ fn btbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, CatalogError> {
         let datums = tuple
             .deform(&attr_descs)
             .map_err(|err| CatalogError::Io(format!("heap deform failed: {err:?}")))?;
-        let mut row_values = Vec::with_capacity(ctx.heap_desc.columns.len());
-        for (index, column) in ctx.heap_desc.columns.iter().enumerate() {
-            row_values.push(if let Some(datum) = datums.get(index) {
-                decode_value(column, *datum)
-                    .map_err(|err| CatalogError::Io(format!("heap decode failed: {err:?}")))?
-            } else {
-                missing_column_value(column)
-            });
-        }
-        let key_values = key_values_from_heap_row(
-            &ctx.heap_desc,
-            &ctx.index_desc,
-            &ctx.index_meta.indkey,
-            &row_values,
-        )?;
+        let row_values = materialize_heap_row_values(&ctx.heap_desc, &datums)?;
+        let Some(key_values) = key_projector.project(ctx, &row_values, tid)? else {
+            result.heap_tuples += 1;
+            continue;
+        };
         let payload =
             encode_key_payload(&ctx.index_desc, &key_values, ctx.default_toast_compression)?;
         let tuple = IndexTupleData::new_raw(tid, false, false, false, payload);
@@ -955,16 +947,15 @@ fn btbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, CatalogError> {
             ));
         }
         spool.push(BtSortTuple { tuple, key_values });
-        heap_tuples += 1;
+        result.heap_tuples += 1;
+        result.index_tuples += 1;
     }
 
     let tuples = spool.finish();
     if ctx.index_meta.indisunique {
         check_unique_build(&ctx.index_name, &tuples)?;
     }
-    let mut result = build_btree_pages(ctx, tuples)?;
-    result.heap_tuples = heap_tuples;
-    result.index_tuples = heap_tuples;
+    build_btree_pages(ctx, tuples)?;
     Ok(result)
 }
 

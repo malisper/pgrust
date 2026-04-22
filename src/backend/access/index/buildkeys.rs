@@ -2,14 +2,17 @@ use crate::backend::catalog::CatalogError;
 use crate::backend::commands::tablecmds::index_key_values_for_row;
 use crate::backend::executor::value_io::{decode_value, missing_column_value};
 use crate::backend::executor::{ExecError, ExecutorContext};
-use crate::backend::parser::{BoundIndexRelation, bind_index_exprs};
+use crate::backend::parser::{BoundIndexRelation, bind_index_exprs, bind_index_predicate};
 use crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot;
 use crate::include::access::amapi::IndexBuildContext;
+use crate::include::access::itemptr::ItemPointerData;
 use crate::include::nodes::datum::Value;
+use crate::include::nodes::execnodes::TupleSlot;
 use crate::include::nodes::primnodes::RelationDesc;
 
 pub(crate) struct IndexBuildKeyProjector {
     bound_index: Option<BoundIndexRelation>,
+    compiled_predicate: Option<crate::backend::executor::exec_expr::CompiledPredicate>,
     exec_ctx: Option<ExecutorContext>,
 }
 
@@ -57,20 +60,32 @@ pub(crate) fn project_index_key_values(
 
 impl IndexBuildKeyProjector {
     pub(crate) fn new(ctx: &IndexBuildContext) -> Result<Self, CatalogError> {
-        let Some(_) = ctx.index_meta.indexprs.as_ref() else {
+        let has_expression_keys = ctx.index_meta.indexprs.as_ref().is_some();
+        let has_predicate = ctx
+            .index_meta
+            .indpred
+            .as_deref()
+            .is_some_and(|predicate| !predicate.trim().is_empty());
+        if !has_expression_keys && !has_predicate {
             return Ok(Self {
                 bound_index: None,
+                compiled_predicate: None,
                 exec_ctx: None,
             });
-        };
+        }
         let expr_ctx = ctx.expr_eval.as_ref().ok_or_else(|| {
             CatalogError::Io("index build missing expression evaluation context".into())
         })?;
         let catalog = expr_ctx.visible_catalog.as_ref().ok_or_else(|| {
-            CatalogError::Io("index build missing visible catalog for expression keys".into())
+            CatalogError::Io("index build missing visible catalog for index evaluation".into())
         })?;
         let index_exprs = bind_index_exprs(&ctx.index_meta, &ctx.heap_desc, catalog)
             .map_err(|err| CatalogError::Io(format!("index expression bind failed: {err:?}")))?;
+        let index_predicate = bind_index_predicate(&ctx.index_meta, &ctx.heap_desc, catalog)
+            .map_err(|err| CatalogError::Io(format!("index predicate bind failed: {err:?}")))?;
+        let compiled_predicate = index_predicate
+            .as_ref()
+            .map(crate::backend::executor::exec_expr::compile_predicate);
         Ok(Self {
             bound_index: Some(BoundIndexRelation {
                 name: ctx.index_name.clone(),
@@ -79,7 +94,9 @@ impl IndexBuildKeyProjector {
                 desc: ctx.index_desc.clone(),
                 index_meta: ctx.index_meta.clone(),
                 index_exprs,
+                index_predicate,
             }),
+            compiled_predicate,
             exec_ctx: Some(ExecutorContext {
                 pool: ctx.pool.clone(),
                 txns: ctx.txns.clone(),
@@ -121,14 +138,27 @@ impl IndexBuildKeyProjector {
         &mut self,
         ctx: &IndexBuildContext,
         row_values: &[Value],
-    ) -> Result<Vec<Value>, CatalogError> {
+        heap_tid: ItemPointerData,
+    ) -> Result<Option<Vec<Value>>, CatalogError> {
         if let (Some(bound_index), Some(exec_ctx)) =
             (self.bound_index.as_ref(), self.exec_ctx.as_mut())
         {
+            if let Some(predicate) = self.compiled_predicate.as_ref() {
+                let mut slot = TupleSlot::virtual_row_with_metadata(
+                    row_values.to_vec(),
+                    Some(heap_tid),
+                    Some(ctx.index_meta.indrelid),
+                );
+                if !predicate(&mut slot, exec_ctx).map_err(map_build_exec_error)? {
+                    return Ok(None);
+                }
+            }
             index_key_values_for_row(bound_index, &ctx.heap_desc, row_values, exec_ctx)
+                .map(Some)
                 .map_err(map_build_exec_error)
         } else {
             project_index_key_values(&ctx.index_desc, &ctx.index_meta.indkey, row_values, &[])
+                .map(Some)
         }
     }
 }

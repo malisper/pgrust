@@ -1,3 +1,4 @@
+use super::index_predicates::predicate_implies_index_predicate;
 use super::*;
 use crate::backend::executor::cast_value;
 use crate::backend::utils::cache::catcache::sql_type_oid;
@@ -295,6 +296,7 @@ fn choose_index_path(
         index.index_meta.indisvalid
             && index.index_meta.indisready
             && !index.index_meta.indkey.is_empty()
+            && predicate_implies_index_predicate(filter, index.index_predicate.as_ref())
     }) {
         let (keys, _equality_prefix, removes_order) = match index.index_meta.am_oid {
             BTREE_AM_OID => {

@@ -3,7 +3,6 @@ use super::*;
 use crate::include::catalog::BTREE_AM_OID;
 use crate::include::nodes::parsenodes::{OnConflictAction, OnConflictClause, OnConflictTarget};
 use crate::include::nodes::primnodes::{AttrNumber, INNER_VAR, OUTER_VAR, Var, user_attrno};
-use crate::include::nodes::primnodes::{BoolExprType, OpExprKind};
 use std::collections::{BTreeSet, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,9 +113,11 @@ fn resolve_arbiter_indexes(
     catalog: &dyn CatalogLookup,
 ) -> Result<Vec<BoundIndexRelation>, ParseError> {
     match clause.target.as_ref() {
-        None => Ok(inferable_unique_indexes(
-            &catalog.index_relations_for_heap(relation_oid),
-        )),
+        None => {
+            let indexes = inferable_unique_indexes(&catalog.index_relations_for_heap(relation_oid));
+            reject_unsupported_arbiter_indexes(&indexes)?;
+            Ok(indexes)
+        }
         Some(OnConflictTarget::Inference(spec)) => {
             let scope = scope_for_relation(Some(relation_name), desc);
             let requested = spec
@@ -155,6 +156,7 @@ fn resolve_arbiter_indexes(
                             .into(),
                 });
             }
+            reject_unsupported_arbiter_indexes(&matches)?;
             Ok(matches)
         }
         Some(OnConflictTarget::Constraint(name)) => {
@@ -184,6 +186,7 @@ fn resolve_arbiter_indexes(
                         "there is no unique or exclusion constraint matching the ON CONFLICT specification"
                             .into(),
                 })?;
+            reject_unsupported_arbiter_indexes(std::slice::from_ref(&index))?;
             Ok(vec![index])
         }
     }
@@ -214,6 +217,18 @@ fn inferable_unique_indexes(indexes: &[BoundIndexRelation]) -> Vec<BoundIndexRel
         })
         .cloned()
         .collect()
+}
+
+fn reject_unsupported_arbiter_indexes(indexes: &[BoundIndexRelation]) -> Result<(), ParseError> {
+    if indexes
+        .iter()
+        .any(|index| index.index_predicate.as_ref().is_some_and(expr_uses_ctid))
+    {
+        return Err(ParseError::FeatureNotSupported(
+            "ON CONFLICT with partial indexes whose predicate uses ctid".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn bind_inference_element(
@@ -288,7 +303,7 @@ fn index_matches_inference(
     {
         return Ok(false);
     }
-    index_predicate_matches(index, requested_predicate, relation_name, desc, catalog)
+    Ok(index_predicate_matches(index, requested_predicate))
 }
 
 fn index_key_elements(
@@ -415,49 +430,8 @@ fn index_opclass_spec(
     }
 }
 
-fn index_predicate_matches(
-    index: &BoundIndexRelation,
-    requested_predicate: Option<&Expr>,
-    relation_name: &str,
-    desc: &RelationDesc,
-    catalog: &dyn CatalogLookup,
-) -> Result<bool, ParseError> {
-    let Some(predicate_sql) = index.index_meta.indpred.as_deref().map(str::trim) else {
-        return Ok(requested_predicate.is_none());
-    };
-    if predicate_sql.is_empty() {
-        return Ok(requested_predicate.is_none());
-    }
-    let Some(requested_predicate) = requested_predicate else {
-        return Ok(false);
-    };
-    let index_predicate = bind_relation_expr(predicate_sql, Some(relation_name), desc, catalog)?;
-    let index_conjuncts = flatten_and_clauses(&index_predicate);
-    let requested_conjuncts = flatten_and_clauses(requested_predicate);
-    Ok(index_conjuncts
-        .iter()
-        .all(|conjunct| requested_conjuncts.contains(conjunct)))
-}
-
-fn flatten_and_clauses(expr: &Expr) -> Vec<Expr> {
-    match expr {
-        Expr::Bool(bool_expr) if bool_expr.boolop == BoolExprType::And => bool_expr
-            .args
-            .iter()
-            .flat_map(flatten_and_clauses)
-            .collect(),
-        Expr::Op(op)
-            if op.op == OpExprKind::Eq
-                || op.op == OpExprKind::NotEq
-                || op.op == OpExprKind::Lt
-                || op.op == OpExprKind::LtEq
-                || op.op == OpExprKind::Gt
-                || op.op == OpExprKind::GtEq =>
-        {
-            vec![expr.clone()]
-        }
-        _ => vec![expr.clone()],
-    }
+fn index_predicate_matches(index: &BoundIndexRelation, requested_predicate: Option<&Expr>) -> bool {
+    predicate_implies_index_predicate(requested_predicate, index.index_predicate.as_ref())
 }
 
 fn normalize_lookup_name(name: &str) -> &str {

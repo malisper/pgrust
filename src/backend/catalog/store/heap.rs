@@ -532,6 +532,7 @@ impl CatalogStore {
                 primary,
                 columns,
                 options,
+                None,
                 &mut control,
             )?;
             let kinds = create_index_sync_kinds();
@@ -567,6 +568,7 @@ impl CatalogStore {
                 primary,
                 columns,
                 options,
+                None,
             )?
         };
         let kinds = create_index_sync_kinds();
@@ -2505,6 +2507,7 @@ impl CatalogStore {
             primary,
             columns,
             &options,
+            None,
             ctx,
         )
     }
@@ -2517,6 +2520,7 @@ impl CatalogStore {
         primary: bool,
         columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
         options: &CatalogIndexBuildOptions,
+        predicate_sql: Option<&str>,
         ctx: &CatalogWriteContext,
     ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
         let index_name = index_name.into();
@@ -2539,6 +2543,7 @@ impl CatalogStore {
             primary,
             columns,
             options,
+            predicate_sql,
             &mut control,
         )?;
         let kinds = create_index_sync_kinds();
@@ -4321,6 +4326,7 @@ fn build_index_entry(
     primary: bool,
     columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
     options: &CatalogIndexBuildOptions,
+    predicate_sql: Option<&str>,
     control: &mut CatalogControl,
 ) -> Result<CatalogEntry, CatalogError> {
     let _ = index_name;
@@ -4419,7 +4425,10 @@ fn build_index_entry(
                 .then(|| serde_json::to_string(&expr_sqls))
                 .transpose()
                 .map_err(|_| CatalogError::Corrupt("invalid index expression metadata"))?,
-            indpred: None,
+            indpred: predicate_sql
+                .map(str::trim)
+                .filter(|pred| !pred.is_empty())
+                .map(str::to_string),
         }),
     };
     control.next_rel_number = control.next_rel_number.saturating_add(1);
@@ -4484,6 +4493,7 @@ fn build_toast_catalog_changes(
             indcollation: vec![0, 0],
             indoption: vec![0, 0],
         },
+        None,
         control,
     )?;
     if let Some(index_meta) = index_entry.index_meta.as_mut() {
