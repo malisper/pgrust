@@ -174,10 +174,12 @@ fn execute_statement_with_source(
                 actual: "TRIGGER".into(),
             }))
         }
-        Statement::AlterTableRename(_) | Statement::AlterIndexRename(_) => {
+        Statement::AlterTableRename(_)
+        | Statement::AlterIndexRename(_)
+        | Statement::AlterIndexAlterColumnStatistics(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "ALTER TABLE/INDEX RENAME handled by database/session layer",
-                actual: "ALTER TABLE/INDEX RENAME".into(),
+                expected: "ALTER TABLE/INDEX handled by database/session layer",
+                actual: "ALTER TABLE/INDEX".into(),
             }))
         }
         Statement::AlterTableOwner(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {

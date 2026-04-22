@@ -8052,7 +8052,7 @@ fn array_slice_omitted_upper_and_mixed_slice_shape_work() {
                 vec![vec![
                     Value::PgArray(crate::include::nodes::datum::ArrayValue::from_dimensions(
                         vec![crate::include::nodes::datum::ArrayDimension {
-                            lower_bound: 2,
+                            lower_bound: 1,
                             length: 2,
                         }],
                         vec![Value::Int32(2), Value::Int32(3)],

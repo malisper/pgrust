@@ -3431,9 +3431,42 @@ impl CatalogStore {
         statistics_target: i16,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
+        self.set_relation_column_statistics_mvcc(
+            relation_oid,
+            column_name,
+            statistics_target,
+            ctx,
+            &['r'],
+        )
+    }
+
+    pub fn alter_index_set_column_statistics_mvcc(
+        &mut self,
+        relation_oid: u32,
+        column_name: &str,
+        statistics_target: i16,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        self.set_relation_column_statistics_mvcc(
+            relation_oid,
+            column_name,
+            statistics_target,
+            ctx,
+            &['i'],
+        )
+    }
+
+    fn set_relation_column_statistics_mvcc(
+        &mut self,
+        relation_oid: u32,
+        column_name: &str,
+        statistics_target: i16,
+        ctx: &CatalogWriteContext,
+        allowed_relkinds: &[char],
+    ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
-                if entry.relkind != 'r' {
+                if !allowed_relkinds.contains(&entry.relkind) {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 let column_index = relation_column_index_visible(&entry.desc, column_name)?;

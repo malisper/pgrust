@@ -292,6 +292,7 @@ pub enum Statement {
     AlterSequenceOwner(AlterRelationOwnerStatement),
     AlterSequenceRename(AlterTableRenameStatement),
     AlterIndexRename(AlterTableRenameStatement),
+    AlterIndexAlterColumnStatistics(AlterIndexAlterColumnStatisticsStatement),
     AlterTableAddColumn(AlterTableAddColumnStatement),
     AlterTableAddConstraint(AlterTableAddConstraintStatement),
     AlterTableDropColumn(AlterTableDropColumnStatement),
@@ -1416,7 +1417,15 @@ pub struct AlterTableAlterColumnStatisticsStatement {
     pub only: bool,
     pub table_name: String,
     pub column_name: String,
-    pub statistics_target: i16,
+    pub statistics_target: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterIndexAlterColumnStatisticsStatement {
+    pub if_exists: bool,
+    pub index_name: String,
+    pub column_number: i16,
+    pub statistics_target: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
