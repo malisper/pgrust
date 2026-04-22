@@ -204,7 +204,7 @@ fn merge_parent_column(
     parent: &crate::backend::parser::ColumnDef,
 ) -> Result<(), ParseError> {
     ensure_matching_column_type(&merged.column.name, &merged.column.ty, &parent.ty)?;
-    ensure_matching_column_compression(
+    merged.column.compression = merge_parent_column_compression(
         &merged.column.name,
         merged.column.compression,
         parent.compression,
@@ -356,6 +356,33 @@ fn ensure_matching_column_compression(
     })
 }
 
+fn merge_parent_column_compression(
+    name: &str,
+    left: Option<crate::include::access::htup::AttributeCompression>,
+    right: Option<crate::include::access::htup::AttributeCompression>,
+) -> Result<Option<crate::include::access::htup::AttributeCompression>, ParseError> {
+    if left == right {
+        return Ok(left);
+    }
+    if is_default_column_compression(left) {
+        return Ok(right);
+    }
+    if is_default_column_compression(right) {
+        return Ok(left);
+    }
+    ensure_matching_column_compression(name, left, right)?;
+    Ok(left)
+}
+
+fn is_default_column_compression(
+    compression: Option<crate::include::access::htup::AttributeCompression>,
+) -> bool {
+    matches!(
+        compression,
+        None | Some(crate::include::access::htup::AttributeCompression::Default)
+    )
+}
+
 fn format_column_compression(
     compression: Option<crate::include::access::htup::AttributeCompression>,
 ) -> &'static str {
@@ -387,5 +414,56 @@ fn default_exprs_equal(left: &str, right: &str) -> bool {
     ) {
         (Ok(left), Ok(right)) => left == right,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::include::access::htup::AttributeCompression;
+
+    #[test]
+    fn default_parent_compression_is_compatible_with_explicit_parent() {
+        assert_eq!(
+            merge_parent_column_compression(
+                "f1",
+                Some(AttributeCompression::Pglz),
+                Some(AttributeCompression::Default),
+            )
+            .unwrap(),
+            Some(AttributeCompression::Pglz)
+        );
+        assert_eq!(
+            merge_parent_column_compression(
+                "f1",
+                Some(AttributeCompression::Default),
+                Some(AttributeCompression::Pglz),
+            )
+            .unwrap(),
+            Some(AttributeCompression::Pglz)
+        );
+    }
+
+    #[test]
+    fn distinct_explicit_parent_compressions_conflict() {
+        let err = merge_parent_column_compression(
+            "f1",
+            Some(AttributeCompression::Pglz),
+            Some(AttributeCompression::Lz4),
+        )
+        .unwrap_err();
+        match err {
+            ParseError::DetailedError {
+                message,
+                detail,
+                sqlstate,
+                ..
+            } => {
+                assert_eq!(message, "column \"f1\" has a compression method conflict");
+                assert_eq!(detail.as_deref(), Some("pglz versus lz4"));
+                assert_eq!(sqlstate, "42P16");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }

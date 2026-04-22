@@ -907,6 +907,67 @@ fn expr_eval_obeys_null_semantics() {
 }
 
 #[test]
+fn pg_column_compression_reports_compressed_heap_values() {
+    let base = temp_dir("pg_column_compression_reports_compressed_heap_values");
+    let mut ctx = empty_executor_context(&base);
+    let input = "1234567890".repeat(1000);
+    let compressed = crate::backend::access::common::toast_compression::compress_inline_datum(
+        input.as_bytes(),
+        crate::include::access::htup::AttributeCompression::Pglz,
+        crate::include::access::htup::AttributeCompression::Pglz,
+    )
+    .unwrap()
+    .expect("value should compress inline");
+    let desc = Rc::new(relation_desc());
+    let attr_descs: Rc<[AttributeDesc]> = desc.attribute_descs().into();
+    let tuple = HeapTuple::from_values(
+        &attr_descs,
+        &[
+            TupleValue::Bytes(1i32.to_le_bytes().to_vec()),
+            TupleValue::EncodedVarlena(compressed.encoded),
+            TupleValue::Null,
+        ],
+    )
+    .unwrap();
+    let mut slot = TupleSlot::from_heap_tuple(
+        desc,
+        attr_descs,
+        crate::include::access::htup::ItemPointerData {
+            block_number: 0,
+            offset_number: 1,
+        },
+        tuple,
+    );
+    let expr = Expr::func_with_impl(
+        6604,
+        Some(crate::backend::parser::SqlType::new(
+            crate::backend::parser::SqlTypeKind::Text,
+        )),
+        false,
+        crate::include::nodes::primnodes::ScalarFunctionImpl::Builtin(
+            crate::include::nodes::primnodes::BuiltinScalarFunction::PgColumnCompression,
+        ),
+        vec![Expr::Var(Var {
+            varno: crate::include::nodes::primnodes::OUTER_VAR,
+            varattno: user_attrno(1),
+            varlevelsup: 0,
+            vartype: crate::backend::parser::SqlType::new(
+                crate::backend::parser::SqlTypeKind::Text,
+            ),
+        })],
+    );
+
+    assert_eq!(
+        eval_expr(&expr, &mut slot, &mut ctx).unwrap(),
+        Value::Text("pglz".into())
+    );
+    assert_eq!(
+        slot.values().unwrap(),
+        &[Value::Int32(1), Value::Text(input.into()), Value::Null]
+    );
+}
+
+#[test]
 fn advisory_lock_builtins_are_rejected_in_read_only_executor_context() {
     let base = temp_dir("advisory_lock_builtins_are_rejected_in_read_only_executor_context");
     let mut ctx = empty_executor_context(&base);
