@@ -118,6 +118,7 @@ use crate::pl::plpgsql::execute_user_defined_scalar_function;
 mod arrays;
 mod subquery;
 
+pub(crate) use arrays::{append_array_value, concatenate_arrays, eval_string_to_table_rows};
 use arrays::{
     eval_array_append_function, eval_array_cat_function, eval_array_contained, eval_array_contains,
     eval_array_dims_function, eval_array_fill_function, eval_array_length_function,
@@ -1920,13 +1921,22 @@ pub fn eval_expr(
             let value = eval_expr(expr, slot, ctx)?;
             eval_record_field(value, field)
         }
-        Expr::Cast(inner, ty) => cast_value_with_source_type_catalog_and_config(
-            eval_expr(inner, slot, ctx)?,
-            expr_sql_type_hint(inner),
-            *ty,
-            ctx.catalog.as_ref().map(|catalog| catalog as &dyn crate::backend::parser::CatalogLookup),
-            &ctx.datetime_config,
-        ),
+        Expr::Cast(inner, ty) => {
+            let value = eval_expr(inner, slot, ctx)?;
+            if let Value::Record(record) = value {
+                cast_record_value_for_target(record, *ty, ctx)
+            } else {
+                cast_value_with_source_type_catalog_and_config(
+                    value,
+                    expr_sql_type_hint(inner),
+                    *ty,
+                    ctx.catalog
+                        .as_ref()
+                        .map(|catalog| catalog as &dyn crate::backend::parser::CatalogLookup),
+                    &ctx.datetime_config,
+                )
+            }
+        }
         Expr::Collate { expr, .. } => eval_expr(expr, slot, ctx),
         Expr::Coalesce(left, right) => {
             let left = eval_expr(left, slot, ctx)?;
@@ -2449,6 +2459,97 @@ fn eval_record_field(value: Value, field: &str) -> Result<Value, ExecError> {
         })
 }
 
+fn cast_record_value_for_target(
+    record: crate::include::nodes::datum::RecordValue,
+    target: SqlType,
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    let descriptor = match target {
+        SqlType {
+            kind: SqlTypeKind::Composite,
+            typrelid,
+            ..
+        } if typrelid != 0 => {
+            let catalog = ctx
+                .catalog
+                .as_ref()
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: "named composite casts require catalog context".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "0A000",
+                })?;
+            let relation = catalog.lookup_relation_by_oid(typrelid).ok_or_else(|| {
+                ExecError::DetailedError {
+                    message: format!("unknown composite relation oid {typrelid}"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42704",
+                }
+            })?;
+            crate::include::nodes::datum::RecordDescriptor::named(
+                target.type_oid,
+                target.typrelid,
+                target.typmod,
+                relation
+                    .desc
+                    .columns
+                    .iter()
+                    .filter(|column| !column.dropped)
+                    .map(|column| (column.name.clone(), column.sql_type))
+                    .collect(),
+            )
+        }
+        SqlType {
+            kind: SqlTypeKind::Record,
+            typmod,
+            ..
+        } if typmod > 0 => crate::backend::utils::record::lookup_anonymous_record_descriptor(
+            typmod,
+        )
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("unknown anonymous record typmod {typmod}"),
+            detail: None,
+            hint: None,
+            sqlstate: "42704",
+        })?,
+        _ => return Ok(Value::Record(record)),
+    };
+
+    if descriptor.fields.len() != record.fields.len() {
+        return Err(ExecError::DetailedError {
+            message: "cannot cast record to target composite type".into(),
+            detail: Some(format!(
+                "target expects {} fields but source has {}",
+                descriptor.fields.len(),
+                record.fields.len()
+            )),
+            hint: None,
+            sqlstate: "42804",
+        });
+    }
+
+    let fields = record
+        .fields
+        .into_iter()
+        .zip(descriptor.fields.iter())
+        .map(|(value, field)| {
+            cast_value_with_source_type_catalog_and_config(
+                value,
+                None,
+                field.sql_type,
+                ctx.catalog
+                    .as_ref()
+                    .map(|catalog| catalog as &dyn crate::backend::parser::CatalogLookup),
+                &ctx.datetime_config,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Value::Record(
+        crate::include::nodes::datum::RecordValue::from_descriptor(descriptor, fields),
+    ))
+}
+
 fn eval_plpgsql_builtin_function(
     func: BuiltinScalarFunction,
     result_type: Option<SqlType>,
@@ -2665,6 +2766,22 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::Abs => eval_abs_function(&values),
         BuiltinScalarFunction::Gcd => eval_gcd_function(&values),
         BuiltinScalarFunction::Lcm => eval_lcm_function(&values),
+        BuiltinScalarFunction::ArrayNdims => eval_array_ndims_function(&values),
+        BuiltinScalarFunction::ArrayDims => eval_array_dims_function(&values),
+        BuiltinScalarFunction::ArrayLower => eval_array_lower_function(&values),
+        BuiltinScalarFunction::ArrayFill => eval_array_fill_function(&values),
+        BuiltinScalarFunction::StringToArray => eval_string_to_array_function(&values),
+        BuiltinScalarFunction::ArrayToString => eval_array_to_string_function(&values),
+        BuiltinScalarFunction::ArrayLength => eval_array_length_function(&values),
+        BuiltinScalarFunction::Cardinality => eval_cardinality_function(&values),
+        BuiltinScalarFunction::ArrayAppend => eval_array_append_function(&values),
+        BuiltinScalarFunction::ArrayPrepend => eval_array_prepend_function(&values),
+        BuiltinScalarFunction::ArrayCat => eval_array_cat_function(&values),
+        BuiltinScalarFunction::ArrayPosition => eval_array_position_function(&values),
+        BuiltinScalarFunction::ArrayPositions => eval_array_positions_function(&values),
+        BuiltinScalarFunction::ArrayRemove => eval_array_remove_function(&values),
+        BuiltinScalarFunction::ArrayReplace => eval_array_replace_function(&values),
+        BuiltinScalarFunction::ArraySort => eval_array_sort_function(&values),
         BuiltinScalarFunction::BoolEq => eval_booleq(&values),
         BuiltinScalarFunction::BoolNe => eval_boolne(&values),
         BuiltinScalarFunction::XmlComment => eval_xml_comment_function(&values, None),

@@ -422,6 +422,18 @@ pub(super) fn eval_string_to_array_function(values: &[Value]) -> Result<Value, E
     }
 }
 
+pub(crate) fn eval_string_to_table_rows(values: &[Value]) -> Result<Vec<Value>, ExecError> {
+    match values {
+        [Value::Null, _] | [Value::Null, _, _] => Ok(Vec::new()),
+        [input, delimiter] => string_to_table_values(input, delimiter, None),
+        [input, delimiter, null_text] => string_to_table_values(input, delimiter, Some(null_text)),
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "string_to_table(text, delimiter [, null_string])",
+            actual: format!("StringToTable({} args)", values.len()),
+        })),
+    }
+}
+
 fn string_to_array_values(
     input: &Value,
     delimiter: &Value,
@@ -438,29 +450,56 @@ fn string_to_array_values(
         right: Value::Text(input.into()),
     })?;
     let null_text = null_text.and_then(Value::as_text);
-    let parts: Vec<String> = if delimiter.is_empty() {
-        input.chars().map(|ch| ch.to_string()).collect()
-    } else if input.is_empty() {
-        Vec::new()
-    } else {
-        input
-            .split(delimiter)
-            .map(|part| part.to_string())
-            .collect()
-    };
+    let parts = split_text_values(input, Some(delimiter), null_text);
     Ok(Value::PgArray(ArrayValue::from_dimensions(
         vec![ArrayDimension {
             lower_bound: 1,
             length: parts.len(),
         }],
-        parts
-            .into_iter()
-            .map(|part| match null_text {
-                Some(null_marker) if part == null_marker => Value::Null,
-                _ => Value::Text(part.into()),
-            })
-            .collect(),
+        parts,
     )))
+}
+
+fn string_to_table_values(
+    input: &Value,
+    delimiter: &Value,
+    null_text: Option<&Value>,
+) -> Result<Vec<Value>, ExecError> {
+    let input = input.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "string_to_table",
+        left: input.clone(),
+        right: delimiter.clone(),
+    })?;
+    let delimiter = if matches!(delimiter, Value::Null) {
+        None
+    } else {
+        Some(delimiter.as_text().ok_or_else(|| ExecError::TypeMismatch {
+            op: "string_to_table",
+            left: delimiter.clone(),
+            right: Value::Text(input.into()),
+        })?)
+    };
+    let null_text = null_text.and_then(Value::as_text);
+    Ok(split_text_values(input, delimiter, null_text))
+}
+
+fn split_text_values(input: &str, delimiter: Option<&str>, null_text: Option<&str>) -> Vec<Value> {
+    let parts: Vec<String> = match delimiter {
+        Some(delimiter) if input.is_empty() => Vec::new(),
+        Some(delimiter) if delimiter.is_empty() => vec![input.to_string()],
+        Some(delimiter) => input
+            .split(delimiter)
+            .map(|part| part.to_string())
+            .collect(),
+        None => input.chars().map(|ch| ch.to_string()).collect(),
+    };
+    parts
+        .into_iter()
+        .map(|part| match null_text {
+            Some(null_marker) if part == null_marker => Value::Null,
+            _ => Value::Text(part.into()),
+        })
+        .collect()
 }
 
 pub(super) fn eval_array_to_string_function(values: &[Value]) -> Result<Value, ExecError> {
@@ -698,7 +737,11 @@ fn array_position_value(
     }
 }
 
-fn append_array_value(array: &Value, element: &Value, prepend: bool) -> Result<Value, ExecError> {
+pub(crate) fn append_array_value(
+    array: &Value,
+    element: &Value,
+    prepend: bool,
+) -> Result<Value, ExecError> {
     let Some(array) = normalize_array_value(array) else {
         return Ok(Value::Null);
     };
@@ -733,7 +776,10 @@ fn append_array_value(array: &Value, element: &Value, prepend: bool) -> Result<V
     Ok(Value::PgArray(result))
 }
 
-fn concatenate_arrays(left: ArrayValue, right: ArrayValue) -> Result<ArrayValue, ExecError> {
+pub(crate) fn concatenate_arrays(
+    left: ArrayValue,
+    right: ArrayValue,
+) -> Result<ArrayValue, ExecError> {
     if left.ndim() == 0 {
         return Ok(right);
     }

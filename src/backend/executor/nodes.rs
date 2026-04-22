@@ -7,8 +7,8 @@ use crate::backend::access::heap::heapam::{
 };
 use crate::backend::access::index::indexam;
 use crate::backend::commands::explain::format_explain_lines_with_costs;
-use crate::backend::executor::expr_geometry::render_geometry_text;
 use crate::backend::executor::exec_expr::{compare_order_by_keys, eval_expr};
+use crate::backend::executor::expr_geometry::render_geometry_text;
 use crate::backend::executor::pg_regex::explain_similar_pattern;
 use crate::backend::executor::srf::{
     eval_project_set_returning_call, eval_set_returning_call, set_returning_call_label,
@@ -868,12 +868,17 @@ fn render_index_scan_key(
         .ok()?
         .checked_sub(1)?;
     let column_name = desc.columns.get(heap_attno)?.name.clone();
-    let right_type_oid = key.argument.sql_type_hint().map(crate::backend::utils::cache::catcache::sql_type_oid);
+    let right_type_oid = key
+        .argument
+        .sql_type_hint()
+        .map(crate::backend::utils::cache::catcache::sql_type_oid);
     let operator = index_meta
         .amop_entries
         .get(index_attno)?
         .iter()
-        .filter(|entry| entry.purpose == 's' && u16::try_from(entry.strategy).ok() == Some(key.strategy))
+        .filter(|entry| {
+            entry.purpose == 's' && u16::try_from(entry.strategy).ok() == Some(key.strategy)
+        })
         .filter(|entry| {
             right_type_oid.is_none()
                 || Some(entry.righttype) == right_type_oid
@@ -1389,8 +1394,13 @@ fn render_explain_literal(value: &Value) -> String {
         Value::Text(_) | Value::TextRef(_, _) => {
             format!("'{}'", value.as_text().unwrap().replace('\'', "''"))
         }
-        Value::Point(_) | Value::Lseg(_) | Value::Path(_) | Value::Line(_) | Value::Box(_)
-        | Value::Polygon(_) | Value::Circle(_) => {
+        Value::Point(_)
+        | Value::Lseg(_)
+        | Value::Path(_)
+        | Value::Line(_)
+        | Value::Box(_)
+        | Value::Polygon(_)
+        | Value::Circle(_) => {
             let rendered = render_geometry_text(value, FloatFormatOptions::default())
                 .unwrap_or_else(|| format!("{value:?}"));
             format!("'{rendered}'")

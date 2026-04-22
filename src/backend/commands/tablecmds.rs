@@ -52,7 +52,9 @@ use crate::include::access::amapi::IndexUniqueCheck;
 use crate::include::access::htup::HeapTuple;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::catalog::builtin_range_name_for_sql_type;
-use crate::include::nodes::datum::{ArrayDimension, ArrayValue, Value, array_value_from_value};
+use crate::include::nodes::datum::{
+    ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value, array_value_from_value,
+};
 use crate::include::nodes::execnodes::TupleSlot;
 use crate::include::nodes::execnodes::*;
 use crate::include::nodes::primnodes::{QueryColumn, TargetEntry};
@@ -104,6 +106,8 @@ fn finalize_bound_insert(
                                     catalog,
                                     &mut subplans,
                                 ),
+                                field_path: assignment.field_path,
+                                target_sql_type: assignment.target_sql_type,
                                 subscripts: assignment
                                     .subscripts
                                     .into_iter()
@@ -170,6 +174,8 @@ fn finalize_bound_update(
                 .map(|assignment| BoundAssignment {
                     column_index: assignment.column_index,
                     expr: finalize_expr_subqueries(assignment.expr, catalog, &mut subplans),
+                    field_path: assignment.field_path,
+                    target_sql_type: assignment.target_sql_type,
                     subscripts: assignment
                         .subscripts
                         .into_iter()
@@ -786,19 +792,20 @@ pub(crate) fn insert_index_key_values(
 ) -> Result<(), ExecError> {
     let insert_ctx =
         build_index_insert_context(heap_rel, heap_desc, index, key_values, heap_tid, ctx);
-    indexam::index_insert_stub(&insert_ctx, index.index_meta.am_oid)
-        .map_err(|err| match err {
-            crate::backend::catalog::CatalogError::UniqueViolation(constraint) => {
-                ExecError::UniqueViolation {
-                    constraint,
-                    detail: Some(crate::backend::executor::value_io::format_unique_key_detail(
+    indexam::index_insert_stub(&insert_ctx, index.index_meta.am_oid).map_err(|err| match err {
+        crate::backend::catalog::CatalogError::UniqueViolation(constraint) => {
+            ExecError::UniqueViolation {
+                constraint,
+                detail: Some(
+                    crate::backend::executor::value_io::format_unique_key_detail(
                         &insert_ctx.index_desc.columns,
                         &insert_ctx.values,
-                    )),
-                }
+                    ),
+                ),
             }
-            other => map_index_insert_error(other),
-        })?;
+        }
+        other => map_index_insert_error(other),
+    })?;
     Ok(())
 }
 
@@ -2277,6 +2284,8 @@ fn execute_merge_update_row(
             &BoundAssignmentTarget {
                 column_index: assignment.column_index,
                 subscripts: assignment.subscripts.clone(),
+                field_path: assignment.field_path.clone(),
+                target_sql_type: assignment.target_sql_type,
             },
             value,
             slot,
@@ -2630,10 +2639,6 @@ pub(crate) fn apply_assignment_target(
     let assignment_type = assignment_target_sql_type(desc, target);
     let value = coerce_assignment_value(&value, assignment_type)
         .map_err(|err| rewrite_subscripted_assignment_error(desc, target, &value, err))?;
-    if target.subscripts.is_empty() {
-        values[target.column_index] = value;
-        return Ok(());
-    }
     let resolved = target
         .subscripts
         .iter()
@@ -2655,12 +2660,14 @@ pub(crate) fn apply_assignment_target(
         .collect::<Result<Vec<_>, ExecError>>()?;
     let current = values[target.column_index].clone();
     let column_type = desc.columns[target.column_index].sql_type;
-    values[target.column_index] = if column_type.kind == SqlTypeKind::Point && !column_type.is_array
-    {
-        assign_point_value(current, &resolved, value)?
-    } else {
-        assign_array_value(current, &resolved, value)?
-    };
+    values[target.column_index] = assign_typed_value(
+        current,
+        column_type,
+        &resolved,
+        &target.field_path,
+        value,
+        ctx,
+    )?;
     Ok(())
 }
 
@@ -2789,17 +2796,8 @@ fn sql_type_display_name(ty: SqlType) -> String {
 }
 
 fn assignment_target_sql_type(desc: &RelationDesc, target: &BoundAssignmentTarget) -> SqlType {
-    let column_type = desc.columns[target.column_index].sql_type;
-    if target.subscripts.is_empty() {
-        return column_type;
-    }
-    if column_type.kind == SqlTypeKind::Point && !column_type.is_array {
-        return SqlType::new(SqlTypeKind::Float8);
-    }
-    if target.subscripts.iter().any(|subscript| subscript.is_slice) {
-        return SqlType::array_of(column_type.element_type());
-    }
-    column_type.element_type()
+    let _ = desc;
+    target.target_sql_type
 }
 
 #[derive(Clone)]
@@ -2860,6 +2858,204 @@ fn assign_point_value(
         point.y = coordinate;
     }
     Ok(Value::Point(point))
+}
+
+fn assign_typed_value(
+    current: Value,
+    sql_type: SqlType,
+    subscripts: &[ResolvedAssignmentSubscript],
+    field_path: &[String],
+    replacement: Value,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    if subscripts.is_empty() {
+        if field_path.is_empty() {
+            return Ok(replacement);
+        }
+        return assign_record_field_path(current, sql_type, field_path, replacement, ctx);
+    }
+
+    if sql_type.kind == SqlTypeKind::Point && !sql_type.is_array {
+        if !field_path.is_empty() {
+            return Err(ExecError::DetailedError {
+                message: "cannot assign to a named field of type point".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42804",
+            });
+        }
+        return assign_point_value(current, subscripts, replacement);
+    }
+
+    if field_path.is_empty() {
+        return assign_array_value(current, subscripts, replacement);
+    }
+
+    assign_array_value_with_fields(current, sql_type, subscripts, field_path, replacement, ctx)
+}
+
+fn assignment_record_descriptor(
+    sql_type: SqlType,
+    ctx: &ExecutorContext,
+) -> Result<RecordDescriptor, ExecError> {
+    if matches!(sql_type.kind, SqlTypeKind::Composite) && sql_type.typrelid != 0 {
+        let catalog = ctx
+            .catalog
+            .as_ref()
+            .ok_or_else(|| ExecError::DetailedError {
+                message: "named composite assignment requires catalog context".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            })?;
+        let relation = catalog
+            .lookup_relation_by_oid(sql_type.typrelid)
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("unknown composite relation oid {}", sql_type.typrelid),
+                detail: None,
+                hint: None,
+                sqlstate: "42704",
+            })?;
+        return Ok(RecordDescriptor::named(
+            sql_type.type_oid,
+            sql_type.typrelid,
+            sql_type.typmod,
+            relation
+                .desc
+                .columns
+                .iter()
+                .filter(|column| !column.dropped)
+                .map(|column| (column.name.clone(), column.sql_type))
+                .collect(),
+        ));
+    }
+
+    if matches!(sql_type.kind, SqlTypeKind::Record)
+        && sql_type.typmod > 0
+        && let Some(descriptor) =
+            crate::backend::utils::record::lookup_anonymous_record_descriptor(sql_type.typmod)
+    {
+        return Ok(descriptor);
+    }
+
+    Err(ExecError::DetailedError {
+        message: format!(
+            "cannot assign to field of type {} because it is not a composite value",
+            sql_type_display_name(sql_type)
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "42804",
+    })
+}
+
+fn assignment_record_value(
+    current: Value,
+    sql_type: SqlType,
+    ctx: &ExecutorContext,
+) -> Result<RecordValue, ExecError> {
+    match current {
+        Value::Record(record) => Ok(record),
+        Value::Null => {
+            let descriptor = assignment_record_descriptor(sql_type, ctx)?;
+            Ok(RecordValue::from_descriptor(
+                descriptor.clone(),
+                vec![Value::Null; descriptor.fields.len()],
+            ))
+        }
+        other => Err(ExecError::TypeMismatch {
+            op: "record assignment",
+            left: other,
+            right: Value::Null,
+        }),
+    }
+}
+
+fn assign_record_field_path(
+    current: Value,
+    sql_type: SqlType,
+    field_path: &[String],
+    replacement: Value,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let mut record = assignment_record_value(current, sql_type, ctx)?;
+    let field = field_path.first().ok_or_else(|| ExecError::DetailedError {
+        message: "empty record field assignment path".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    let (field_index, field_type) = record
+        .descriptor
+        .fields
+        .iter()
+        .enumerate()
+        .find(|(_, candidate)| candidate.name.eq_ignore_ascii_case(field))
+        .map(|(index, candidate)| (index, candidate.sql_type))
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("record has no field \"{field}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "42703",
+        })?;
+
+    record.fields[field_index] = if field_path.len() == 1 {
+        replacement
+    } else {
+        assign_record_field_path(
+            record.fields[field_index].clone(),
+            field_type,
+            &field_path[1..],
+            replacement,
+            ctx,
+        )?
+    };
+    Ok(Value::Record(record))
+}
+
+fn assign_array_value_with_fields(
+    current: Value,
+    array_type: SqlType,
+    subscripts: &[ResolvedAssignmentSubscript],
+    field_path: &[String],
+    replacement: Value,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    if subscripts.is_empty() {
+        return assign_record_field_path(current, array_type, field_path, replacement, ctx);
+    }
+    if subscripts.iter().any(|subscript| subscript.is_slice) {
+        return Err(ExecError::DetailedError {
+            message: "sliced assignment into composite fields is not supported".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+
+    let subscript = &subscripts[0];
+    let (mut lower_bound, mut items) = assignment_top_level(current)?;
+    let Some(index) = assignment_subscript_index(subscript.lower.as_ref())? else {
+        return Err(ExecError::InvalidStorageValue {
+            column: "<array>".into(),
+            details: "array subscript in assignment must not be null".into(),
+        });
+    };
+    if items.is_empty() {
+        lower_bound = index;
+    }
+    extend_assignment_items(&mut lower_bound, &mut items, index, index)?;
+    let index = usize::try_from(i64::from(index) - i64::from(lower_bound))
+        .map_err(|_| array_assignment_limit_error())?;
+    items[index] = assign_typed_value(
+        items[index].clone(),
+        array_type.element_type(),
+        &subscripts[1..],
+        field_path,
+        replacement,
+        ctx,
+    )?;
+    build_assignment_array_value(lower_bound, items)
 }
 
 fn assign_array_value(
@@ -3750,6 +3946,8 @@ pub fn execute_update_with_waiter(
                         &BoundAssignmentTarget {
                             column_index: assignment.column_index,
                             subscripts: assignment.subscripts.clone(),
+                            field_path: assignment.field_path.clone(),
+                            target_sql_type: assignment.target_sql_type,
                         },
                         value,
                         &mut eval_slot,
@@ -3838,6 +4036,8 @@ pub fn execute_update_with_waiter(
                                     &BoundAssignmentTarget {
                                         column_index: assignment.column_index,
                                         subscripts: assignment.subscripts.clone(),
+                                        field_path: assignment.field_path.clone(),
+                                        target_sql_type: assignment.target_sql_type,
                                     },
                                     value,
                                     &mut eval_slot,
@@ -3935,6 +4135,8 @@ fn evaluate_update_from_assignments(
             &BoundAssignmentTarget {
                 column_index: assignment.column_index,
                 subscripts: assignment.subscripts.clone(),
+                field_path: assignment.field_path.clone(),
+                target_sql_type: assignment.target_sql_type,
             },
             value,
             &mut eval_slot,
@@ -4420,6 +4622,8 @@ pub(crate) fn materialize_update_row_events(
                     &BoundAssignmentTarget {
                         column_index: assignment.column_index,
                         subscripts: assignment.subscripts.clone(),
+                        field_path: assignment.field_path.clone(),
+                        target_sql_type: assignment.target_sql_type,
                     },
                     value,
                     &mut eval_slot,
@@ -4629,6 +4833,8 @@ pub(crate) fn apply_base_update_row(
                         &BoundAssignmentTarget {
                             column_index: assignment.column_index,
                             subscripts: assignment.subscripts.clone(),
+                            field_path: assignment.field_path.clone(),
+                            target_sql_type: assignment.target_sql_type,
                         },
                         value,
                         &mut eval_slot,

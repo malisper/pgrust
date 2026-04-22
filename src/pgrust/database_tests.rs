@@ -13534,6 +13534,95 @@ fn unique_index_insert_rejects_duplicate_key() {
 }
 
 #[test]
+fn unique_array_column_supports_duplicates_and_index_quals() {
+    let base = temp_dir("unique_array_column_supports_duplicates_and_index_quals");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create temp table arr_tbl (f1 int[] unique)")
+        .unwrap();
+    db.execute(1, "insert into arr_tbl values ('{1,2,3}')")
+        .unwrap();
+    db.execute(1, "insert into arr_tbl values ('{1,2}')")
+        .unwrap();
+    db.execute(1, "insert into arr_tbl values ('{2,3,4}')")
+        .unwrap();
+    db.execute(1, "insert into arr_tbl values ('{1,5,3}')")
+        .unwrap();
+    db.execute(1, "insert into arr_tbl values ('{1,2,10}')")
+        .unwrap();
+
+    match db.execute(1, "insert into arr_tbl values ('{1,2,3}')") {
+        Err(ExecError::UniqueViolation { constraint, detail }) => {
+            assert_eq!(constraint, "arr_tbl_f1_key");
+            assert_eq!(
+                detail.as_deref(),
+                Some("Key (f1)=({1,2,3}) already exists.")
+            );
+        }
+        other => panic!("expected unique violation, got {:?}", other),
+    }
+
+    db.execute(1, "set enable_seqscan to off").unwrap();
+    db.execute(1, "set enable_bitmapscan to off").unwrap();
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select * from arr_tbl where f1 > '{1,2,3}' and f1 <= '{1,5,3}'",
+        "arr_tbl_f1_key",
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select * from arr_tbl where f1 > '{1,2,3}' and f1 <= '{1,5,3}'"
+        ),
+        vec![
+            vec![Value::PgArray(
+                crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                    Value::Int32(1),
+                    Value::Int32(2),
+                    Value::Int32(10),
+                ])
+                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+            )],
+            vec![Value::PgArray(
+                crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                    Value::Int32(1),
+                    Value::Int32(5),
+                    Value::Int32(3),
+                ])
+                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+            )],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select * from arr_tbl where f1 >= '{1,2,3}' and f1 < '{1,5,3}'"
+        ),
+        vec![
+            vec![Value::PgArray(
+                crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                    Value::Int32(1),
+                    Value::Int32(2),
+                    Value::Int32(3),
+                ])
+                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+            )],
+            vec![Value::PgArray(
+                crate::include::nodes::datum::ArrayValue::from_1d(vec![
+                    Value::Int32(1),
+                    Value::Int32(2),
+                    Value::Int32(10),
+                ])
+                .with_element_type_oid(crate::include::catalog::INT4_TYPE_OID),
+            )],
+        ]
+    );
+}
+
+#[test]
 fn unique_index_update_rejects_duplicate_key() {
     let base = temp_dir("unique_index_update_rejects_duplicate_key");
     let db = Database::open(&base, 16).unwrap();
@@ -15579,6 +15668,97 @@ fn create_operator_class_persists_catalog_rows() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn create_operator_bool_bool_regression_debug() {
+    let base = temp_dir("create_operator_bool_bool_regression");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function alter_op_test_fn(boolean, boolean) returns boolean as $$ select null::boolean; $$ language sql immutable",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function customcontsel(internal, oid, internal, integer) returns float8 as 'contsel' language internal stable strict",
+    )
+    .unwrap();
+
+    let xid = db.txns.write().begin();
+    let cid = 0;
+    let catalog = db.lazy_catalog_lookup(1, Some((xid, cid)), None);
+    let proc_oid = catalog
+        .proc_rows_by_name("alter_op_test_fn")
+        .into_iter()
+        .find(|row| row.proargtypes == "16 16")
+        .expect("alter_op_test_fn(bool,bool)")
+        .oid;
+    let restrict_oid = catalog
+        .proc_rows_by_name("customcontsel")
+        .into_iter()
+        .find(|row| row.proargtypes == "2281 26 2281 23")
+        .expect("customcontsel(internal,oid,internal,int4)")
+        .oid;
+    let join_oid = catalog
+        .proc_rows_by_name("contjoinsel")
+        .into_iter()
+        .find(|row| row.proargtypes == "2281 26 2281 21 2281")
+        .expect("contjoinsel(internal,oid,internal,int2,internal)")
+        .oid;
+    let ctx = crate::backend::catalog::store::CatalogWriteContext {
+        pool: db.pool.clone(),
+        txns: db.txns.clone(),
+        xid,
+        cid,
+        client_id: 1,
+        waiter: Some(db.txn_waiter.clone()),
+        interrupts: db.interrupt_state(1),
+    };
+    let row = crate::include::catalog::PgOperatorRow {
+        oid: 0,
+        oprname: "===".into(),
+        oprnamespace: crate::include::catalog::PUBLIC_NAMESPACE_OID,
+        oprowner: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+        oprkind: 'b',
+        oprcanmerge: true,
+        oprcanhash: true,
+        oprleft: crate::include::catalog::BOOL_TYPE_OID,
+        oprright: crate::include::catalog::BOOL_TYPE_OID,
+        oprresult: crate::include::catalog::BOOL_TYPE_OID,
+        oprcom: 0,
+        oprnegate: 0,
+        oprcode: proc_oid,
+        oprrest: restrict_oid,
+        oprjoin: join_oid,
+    };
+    let (operator_oid, create_effect) = db
+        .catalog
+        .write()
+        .create_operator_mvcc(row.clone(), &ctx)
+        .unwrap();
+    db.apply_catalog_mutation_effect_immediate(&create_effect)
+        .unwrap();
+
+    let mut current = row;
+    current.oid = operator_oid;
+    let mut updated = current.clone();
+    updated.oprcom = operator_oid;
+    let replace_ctx = crate::backend::catalog::store::CatalogWriteContext {
+        pool: db.pool.clone(),
+        txns: db.txns.clone(),
+        xid,
+        cid: cid.saturating_add(1),
+        client_id: 1,
+        waiter: Some(db.txn_waiter.clone()),
+        interrupts: db.interrupt_state(1),
+    };
+    let replace_result = db
+        .catalog
+        .write()
+        .replace_operator_mvcc(&current, updated, &replace_ctx);
+    assert!(replace_result.is_ok(), "{replace_result:?}");
 }
 
 #[test]

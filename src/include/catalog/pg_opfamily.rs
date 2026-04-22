@@ -2,8 +2,7 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, GIST_AM_OID, PG_CATALOG_NAMESPACE_OID,
-    SPGIST_AM_OID,
+    BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, GIST_AM_OID, PG_CATALOG_NAMESPACE_OID, SPGIST_AM_OID,
 };
 
 pub const BTREE_INTEGER_FAMILY_OID: u32 = 1976;

@@ -368,7 +368,10 @@ impl Database {
             .as_ref()
             .and_then(|meta| meta.indexprs.as_ref())
             .is_some();
-        if has_expression_keys && access_method_oid != GIST_AM_OID && access_method_oid != SPGIST_AM_OID {
+        if has_expression_keys
+            && access_method_oid != GIST_AM_OID
+            && access_method_oid != SPGIST_AM_OID
+        {
             self.build_expression_index_rows_in_transaction(
                 client_id,
                 relation,
@@ -463,12 +466,10 @@ impl Database {
         };
         crate::backend::access::index::indexam::index_build_stub(&build_ctx, access_method_oid)
             .map_err(|err| match err {
-                CatalogError::UniqueViolation(constraint) => {
-                    ExecError::UniqueViolation {
-                        constraint,
-                        detail: None,
-                    }
-                }
+                CatalogError::UniqueViolation(constraint) => ExecError::UniqueViolation {
+                    constraint,
+                    detail: None,
+                },
                 CatalogError::Interrupted(reason) => ExecError::Interrupted(reason),
                 _ => ExecError::Parse(ParseError::UnexpectedToken {
                     expected: "index access method build",
@@ -674,12 +675,10 @@ impl Database {
                     access_method_oid,
                 )
                 .map_err(|err| match err {
-                    CatalogError::UniqueViolation(constraint) => {
-                        ExecError::UniqueViolation {
-                            constraint,
-                            detail: unique_detail.clone(),
-                        }
-                    }
+                    CatalogError::UniqueViolation(constraint) => ExecError::UniqueViolation {
+                        constraint,
+                        detail: unique_detail.clone(),
+                    },
                     _ => map_catalog_error(err),
                 })?;
             }

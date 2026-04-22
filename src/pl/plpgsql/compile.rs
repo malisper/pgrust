@@ -129,6 +129,10 @@ pub(crate) enum CompiledStmt {
         branches: Vec<(CompiledExpr, Vec<CompiledStmt>)>,
         else_branch: Vec<CompiledStmt>,
     },
+    While {
+        condition: CompiledExpr,
+        body: Vec<CompiledStmt>,
+    },
     ForInt {
         slot: usize,
         start_expr: CompiledExpr,
@@ -628,6 +632,10 @@ fn compile_stmt(
                 })
                 .collect::<Result<_, ParseError>>()?,
             else_branch: compile_stmt_list(else_branch, catalog, env, return_contract)?,
+        },
+        Stmt::While { condition, body } => CompiledStmt::While {
+            condition: compile_expr_text(condition, catalog, env)?,
+            body: compile_stmt_list(body, catalog, env, return_contract)?,
         },
         Stmt::ForInt {
             var_name,

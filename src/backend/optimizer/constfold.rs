@@ -296,6 +296,21 @@ fn simplify_set_returning_call(call: SetReturningCall) -> Result<SetReturningCal
             output_columns,
             with_ordinality,
         },
+        SetReturningCall::StringTableFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::StringTableFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args: simplify_exprs(args)?,
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::TextSearchTableFunction {
             kind,
             args,

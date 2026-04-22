@@ -1,3 +1,4 @@
+use super::exec_expr::eval_string_to_table_rows;
 use super::expr_json::{eval_json_record_set_returning_function, eval_json_table_function};
 use super::pg_regex::{eval_regexp_matches_rows, eval_regexp_split_to_table_rows};
 use super::{ExecError, ExecutorContext, Expr, SetReturningCall, TupleSlot, Value, eval_expr};
@@ -46,6 +47,9 @@ pub(crate) fn eval_set_returning_call(
         ),
         SetReturningCall::RegexTableFunction { kind, args, .. } => {
             eval_regex_table_function(*kind, args, slot, ctx)
+        }
+        SetReturningCall::StringTableFunction { kind, args, .. } => {
+            eval_string_table_function(*kind, args, slot, ctx)
         }
         SetReturningCall::TextSearchTableFunction { .. } => Err(ExecError::Parse(
             crate::backend::parser::ParseError::UnexpectedToken {
@@ -141,6 +145,11 @@ pub(crate) fn set_returning_call_label(call: &SetReturningCall) -> &'static str 
                 "regexp_split_to_table"
             }
         },
+        SetReturningCall::StringTableFunction { kind, .. } => match kind {
+            crate::include::nodes::primnodes::StringTableFunction::StringToTable => {
+                "string_to_table"
+            }
+        },
         SetReturningCall::TextSearchTableFunction { kind, .. } => match kind {
             crate::include::nodes::primnodes::TextSearchTableFunction::TokenType => "ts_token_type",
             crate::include::nodes::primnodes::TextSearchTableFunction::Parse => "ts_parse",
@@ -166,6 +175,27 @@ fn eval_regex_table_function(
         }
         crate::include::nodes::primnodes::RegexTableFunction::SplitToTable => {
             eval_regexp_split_to_table_rows(&values)?
+        }
+    };
+    Ok(rows
+        .into_iter()
+        .map(|value| TupleSlot::virtual_row(vec![value]))
+        .collect())
+}
+
+fn eval_string_table_function(
+    kind: crate::include::nodes::primnodes::StringTableFunction,
+    args: &[Expr],
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    let values = args
+        .iter()
+        .map(|arg| eval_expr(arg, slot, ctx))
+        .collect::<Result<Vec<_>, _>>()?;
+    let rows = match kind {
+        crate::include::nodes::primnodes::StringTableFunction::StringToTable => {
+            eval_string_to_table_rows(&values)?
         }
     };
     Ok(rows

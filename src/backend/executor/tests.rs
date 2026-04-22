@@ -4519,6 +4519,154 @@ fn array_append_prepend_and_cat_match_postgres() {
 }
 
 #[test]
+fn array_concat_operator_preserves_multidimensional_shape() {
+    let base = temp_dir("array_concat_operator_shape");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select ARRAY[[1,2],[3,4]] || ARRAY[5,6]",
+        )
+        .unwrap(),
+        vec![vec![Value::PgArray(ArrayValue::from_dimensions(
+            vec![
+                ArrayDimension {
+                    lower_bound: 1,
+                    length: 3,
+                },
+                ArrayDimension {
+                    lower_bound: 1,
+                    length: 2,
+                },
+            ],
+            vec![
+                Value::Int32(1),
+                Value::Int32(2),
+                Value::Int32(3),
+                Value::Int32(4),
+                Value::Int32(5),
+                Value::Int32(6),
+            ],
+        ))]],
+    );
+}
+
+#[test]
+fn implicit_row_constructor_works_in_array_position() {
+    let base = temp_dir("implicit_row_array_position");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select array_position(ids, (1, 1)), array_positions(ids, (1, 1)) from (values (ARRAY[(0, 0), (1, 1)]), (ARRAY[(1, 1)])) as f(ids)",
+        )
+        .unwrap(),
+        vec![
+            vec![
+                Value::Int32(2),
+                Value::PgArray(ArrayValue::from_dimensions(
+                    vec![ArrayDimension {
+                        lower_bound: 1,
+                        length: 1,
+                    }],
+                    vec![Value::Int32(2)],
+                )),
+            ],
+            vec![
+                Value::Int32(1),
+                Value::PgArray(ArrayValue::from_dimensions(
+                    vec![ArrayDimension {
+                        lower_bound: 1,
+                        length: 1,
+                    }],
+                    vec![Value::Int32(1)],
+                )),
+            ],
+        ],
+    );
+}
+
+#[test]
+fn row_to_array_concat_operator_keeps_row_elements() {
+    let base = temp_dir("row_to_array_concat");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select ((ROW(1,2) || array_agg(x))[1]).f1, ((ROW(1,2) || array_agg(x))[2]).f1, ((ROW(1,2) || array_agg(x))[3]).f2 from (values (ROW(3,4)), (ROW(5,6))) v(x)",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(1), Value::Int32(3), Value::Int32(6)]],
+    );
+}
+
+#[test]
+fn composite_array_field_assignment_and_selection_work() {
+    let db = Database::open(temp_dir("composite_array_field_assignment"), 16).unwrap();
+    let mut session = Session::new(1);
+
+    db.execute(1, "create type pair as (q1 int4, q2 int4)")
+        .unwrap();
+    db.execute(1, "create temp table t1 (f1 pair[])").unwrap();
+    db.execute(1, "insert into t1 (f1[5].q1) values (42)")
+        .unwrap();
+
+    match session
+        .execute(&db, "select (f1[5]).q1, (f1[5]).q2 from t1")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(42), Value::Null]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+
+    db.execute(1, "update t1 set f1[5].q2 = 43").unwrap();
+
+    match session
+        .execute(&db, "select (f1[5]).q1, (f1[5]).q2 from t1")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(42), Value::Int32(43)]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
+fn named_composite_array_field_selection_after_row_cast_works() {
+    let db = Database::open(temp_dir("named_composite_array_field_selection"), 16).unwrap();
+    let mut session = Session::new(1);
+
+    db.execute(1, "create type textpair as (c1 text, c2 text)")
+        .unwrap();
+    db.execute(1, "create temp table dest (f1 textpair[])")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into dest select array[row('left','right')::textpair]",
+    )
+    .unwrap();
+
+    match session.execute(&db, "select (f1[1]).c2 from dest").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("right".into())]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
 fn interval_array_literals_preserve_interval_array_values() {
     let base = temp_dir("interval_array_literals");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -13301,6 +13449,63 @@ fn regexp_set_returning_functions_work() {
                     vec![Value::Null, Value::Text("b".into())],
                     vec![Value::Null, Value::Text("c".into())],
                 ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn string_to_table_works_in_from_clause() {
+    let base = temp_dir("string_to_table_from");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select v, v is null as is_null from string_to_table('1,2,*,4', ',', '*') as t(v)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["v", "is_null"]);
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Text("1".into()), Value::Bool(false)],
+                    vec![Value::Text("2".into()), Value::Bool(false)],
+                    vec![Value::Null, Value::Bool(true)],
+                    vec![Value::Text("4".into()), Value::Bool(false)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn string_to_table_select_list_expands_rows() {
+    let base = temp_dir("string_to_table_select_list");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select string_to_table('ab', null)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["string_to_table"]);
+            assert_eq!(
+                rows,
+                vec![vec![Value::Text("a".into())], vec![Value::Text("b".into())],]
             );
         }
         other => panic!("expected query result, got {:?}", other),

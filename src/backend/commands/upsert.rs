@@ -252,6 +252,8 @@ fn eval_conflict_update_values(
                 &BoundAssignmentTarget {
                     column_index: assignment.column_index,
                     subscripts: assignment.subscripts.clone(),
+                    field_path: assignment.field_path.clone(),
+                    target_sql_type: assignment.target_sql_type,
                 },
                 value,
                 &mut eval_slot,
@@ -490,9 +492,7 @@ pub(crate) fn execute_insert_on_conflict_rows(
                     Err(ExecError::UniqueViolation {
                         constraint,
                         detail: _,
-                    })
-                        if constraint.eq_ignore_ascii_case(&index.name) =>
-                    {
+                    }) if constraint.eq_ignore_ascii_case(&index.name) => {
                         rollback_inserted_row(
                             stmt.rel, stmt.toast, &stmt.desc, heap_tid, ctx, xid,
                         )?;
