@@ -434,7 +434,13 @@ fn parse_fraction_to_usecs_rounded(text: &str) -> Option<(i64, bool)> {
     let trimmed = if text.len() > 6 { &text[..6] } else { text };
     let mut micros = parse_fraction_to_usecs(trimmed)?;
     let mut carry = false;
-    if text.len() > 6 && text.as_bytes().get(6).copied().is_some_and(|digit| digit >= b'5') {
+    if text.len() > 6
+        && text
+            .as_bytes()
+            .get(6)
+            .copied()
+            .is_some_and(|digit| digit >= b'5')
+    {
         micros += 1;
         if micros >= 1_000_000 {
             micros = 0;
@@ -513,8 +519,9 @@ fn parse_time_token(text: &str) -> Result<Option<(i64, Option<TimeZoneSpec>)>, D
             }
         };
         let (micros, carry_second) = match fraction {
-            Some(fraction) => parse_fraction_to_usecs_rounded(fraction)
-                .ok_or(DateTimeParseError::Invalid)?,
+            Some(fraction) => {
+                parse_fraction_to_usecs_rounded(fraction).ok_or(DateTimeParseError::Invalid)?
+            }
             None => (0, false),
         };
         (hour, minute, second + u32::from(carry_second), micros)

@@ -885,17 +885,18 @@ pub(super) fn expr_sql_type(expr: &Expr) -> SqlType {
         Expr::CurrentTimestamp { .. } => SqlType::new(SqlTypeKind::TimestampTz),
         Expr::LocalTime { .. } => SqlType::new(SqlTypeKind::Time),
         Expr::LocalTimestamp { .. } => SqlType::new(SqlTypeKind::Timestamp),
-        Expr::Xml(_) => crate::include::nodes::primnodes::expr_sql_type_hint(expr)
-            .unwrap_or(SqlType::new(SqlTypeKind::Xml)),
-        Expr::ArraySubscript { .. } => SqlType::new(SqlTypeKind::Text),
+        Expr::Xml(_) | Expr::ArraySubscript { .. } => {
+            crate::include::nodes::primnodes::expr_sql_type_hint(expr)
+                .unwrap_or(SqlType::new(SqlTypeKind::Text))
+        }
     }
 }
 
 fn expr_sql_type_maybe(expr: &Expr) -> Option<SqlType> {
     match expr {
-        Expr::ArraySubscript { .. } => None,
         Expr::Param(param) => Some(param.paramtype),
-        other => Some(expr_sql_type(other)),
+        other => crate::include::nodes::primnodes::expr_sql_type_hint(other)
+            .or_else(|| Some(expr_sql_type(other))),
     }
 }
 

@@ -1961,7 +1961,9 @@ fn advisory_session_and_xact_locks_on_same_key_do_not_block_same_backend() {
         ]
     );
 
-    session.execute(&db, "select pg_advisory_unlock_all()").unwrap();
+    session
+        .execute(&db, "select pg_advisory_unlock_all()")
+        .unwrap();
     session.execute(&db, "begin").unwrap();
     session
         .execute(
@@ -1996,7 +1998,10 @@ fn advisory_unlock_false_queues_warning() {
 
     session.execute(&db, "begin").unwrap();
     session
-        .execute(&db, "select pg_advisory_xact_lock(1), pg_advisory_xact_lock_shared(2)")
+        .execute(
+            &db,
+            "select pg_advisory_xact_lock(1), pg_advisory_xact_lock_shared(2)",
+        )
         .unwrap();
 
     clear_backend_notices();
@@ -4109,9 +4114,14 @@ fn create_view_supports_check_option_and_or_replace() {
     let db = Database::open(&dir, 128).unwrap();
     let mut session = Session::new(1);
 
-    session.execute(&db, "create table base_tbl(a int)").unwrap();
     session
-        .execute(&db, "create view rw_view1 as select * from base_tbl where a > 0")
+        .execute(&db, "create table base_tbl(a int)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view rw_view1 as select * from base_tbl where a > 0",
+        )
         .unwrap();
     session
         .execute(
@@ -4135,12 +4145,20 @@ fn create_view_supports_check_option_and_or_replace() {
         ]
     );
 
-    session.execute(&db, "insert into rw_view2 values (5)").unwrap();
+    session
+        .execute(&db, "insert into rw_view2 values (5)")
+        .unwrap();
     match session.execute(&db, "insert into rw_view2 values (-5)") {
         Err(ExecError::DetailedError {
-            message, detail, sqlstate, ..
+            message,
+            detail,
+            sqlstate,
+            ..
         }) => {
-            assert_eq!(message, "new row violates check option for view \"rw_view1\"");
+            assert_eq!(
+                message,
+                "new row violates check option for view \"rw_view1\""
+            );
             assert_eq!(detail.as_deref(), Some("Failing row contains (-5)."));
             assert_eq!(sqlstate, "44000");
         }
@@ -4148,9 +4166,15 @@ fn create_view_supports_check_option_and_or_replace() {
     }
     match session.execute(&db, "insert into rw_view2 values (15)") {
         Err(ExecError::DetailedError {
-            message, detail, sqlstate, ..
+            message,
+            detail,
+            sqlstate,
+            ..
         }) => {
-            assert_eq!(message, "new row violates check option for view \"rw_view2\"");
+            assert_eq!(
+                message,
+                "new row violates check option for view \"rw_view2\""
+            );
             assert_eq!(detail.as_deref(), Some("Failing row contains (15)."));
             assert_eq!(sqlstate, "44000");
         }
@@ -4168,16 +4192,24 @@ fn create_view_supports_check_option_and_or_replace() {
         .unwrap();
     match session.execute(&db, "insert into rw_view2 values (20)") {
         Err(ExecError::DetailedError {
-            message, detail, sqlstate, ..
+            message,
+            detail,
+            sqlstate,
+            ..
         }) => {
-            assert_eq!(message, "new row violates check option for view \"rw_view2\"");
+            assert_eq!(
+                message,
+                "new row violates check option for view \"rw_view2\""
+            );
             assert_eq!(detail.as_deref(), Some("Failing row contains (20)."));
             assert_eq!(sqlstate, "44000");
         }
         other => panic!("expected local check-option violation, got {other:?}"),
     }
 
-    session.execute(&db, "create table t1(a int, b text)").unwrap();
+    session
+        .execute(&db, "create table t1(a int, b text)")
+        .unwrap();
     session
         .execute(&db, "create view v1 as select null::int as a")
         .unwrap();
@@ -4192,7 +4224,10 @@ fn create_view_supports_check_option_and_or_replace() {
         .unwrap();
     match session.execute(&db, "insert into v1 values (-1, 'bad')") {
         Err(ExecError::DetailedError {
-            message, detail, sqlstate, ..
+            message,
+            detail,
+            sqlstate,
+            ..
         }) => {
             assert_eq!(message, "new row violates check option for view \"v1\"");
             assert_eq!(detail.as_deref(), Some("Failing row contains (-1, bad)."));
@@ -5615,8 +5650,11 @@ fn comment_on_trigger_upserts_and_clears_pg_description() {
     )
     .unwrap();
 
-    db.execute(1, "comment on trigger item_trigger on items is 'hello world'")
-        .unwrap();
+    db.execute(
+        1,
+        "comment on trigger item_trigger on items is 'hello world'",
+    )
+    .unwrap();
     assert_eq!(
         query_rows(
             &db,
@@ -5629,8 +5667,11 @@ fn comment_on_trigger_upserts_and_clears_pg_description() {
         vec![vec![Value::Text("hello world".into())]]
     );
 
-    db.execute(1, "comment on trigger item_trigger on items is 'second comment'")
-        .unwrap();
+    db.execute(
+        1,
+        "comment on trigger item_trigger on items is 'second comment'",
+    )
+    .unwrap();
     assert_eq!(
         query_rows(
             &db,
@@ -7078,8 +7119,11 @@ fn alter_index_alter_column_set_statistics_updates_expression_column_and_resets(
     db.execute(1, "create index attmp_idx on attmp (a, (d + e), b)")
         .unwrap();
 
-    db.execute(1, "alter index attmp_idx alter column 2 set statistics 1000")
-        .unwrap();
+    db.execute(
+        1,
+        "alter index attmp_idx alter column 2 set statistics 1000",
+    )
+    .unwrap();
     assert_eq!(
         query_rows(
             &db,
@@ -7115,7 +7159,10 @@ fn alter_index_alter_column_set_statistics_rejects_non_expression_and_missing_co
     db.execute(1, "create index attmp_idx on attmp (a, (d + e), b)")
         .unwrap();
 
-    match db.execute(1, "alter index attmp_idx alter column 1 set statistics 1000") {
+    match db.execute(
+        1,
+        "alter index attmp_idx alter column 1 set statistics 1000",
+    ) {
         Err(ExecError::DetailedError {
             message,
             hint: Some(hint),
@@ -7128,7 +7175,10 @@ fn alter_index_alter_column_set_statistics_rejects_non_expression_and_missing_co
         other => panic!("expected non-expression index-column error, got {other:?}"),
     }
 
-    match db.execute(1, "alter index attmp_idx alter column 3 set statistics 1000") {
+    match db.execute(
+        1,
+        "alter index attmp_idx alter column 3 set statistics 1000",
+    ) {
         Err(ExecError::DetailedError {
             message,
             hint: Some(hint),
@@ -7141,7 +7191,10 @@ fn alter_index_alter_column_set_statistics_rejects_non_expression_and_missing_co
         other => panic!("expected non-expression index-column error, got {other:?}"),
     }
 
-    match db.execute(1, "alter index attmp_idx alter column 4 set statistics 1000") {
+    match db.execute(
+        1,
+        "alter index attmp_idx alter column 4 set statistics 1000",
+    ) {
         Err(ExecError::DetailedError {
             message, sqlstate, ..
         }) if message == "column number 4 of relation \"attmp_idx\" does not exist"
@@ -7194,8 +7247,11 @@ fn alter_index_and_table_set_statistics_clamp_and_emit_warning() {
     db.execute(1, "create table items (i int4)").unwrap();
 
     clear_backend_notices();
-    db.execute(1, "alter index attmp_idx alter column 2 set statistics 50000")
-        .unwrap();
+    db.execute(
+        1,
+        "alter index attmp_idx alter column 2 set statistics 50000",
+    )
+    .unwrap();
     assert_eq!(
         query_rows(
             &db,
@@ -12649,7 +12705,10 @@ fn unique_array_column_supports_duplicates_and_index_quals() {
     match db.execute(1, "insert into arr_tbl values ('{1,2,3}')") {
         Err(ExecError::UniqueViolation { constraint, detail }) => {
             assert_eq!(constraint, "arr_tbl_f1_key");
-            assert_eq!(detail.as_deref(), Some("Key (f1)=({1,2,3}) already exists."));
+            assert_eq!(
+                detail.as_deref(),
+                Some("Key (f1)=({1,2,3}) already exists.")
+            );
         }
         other => panic!("expected unique violation, got {:?}", other),
     }
@@ -14817,7 +14876,8 @@ fn create_operator_bool_bool_regression_debug() {
         .write()
         .create_operator_mvcc(row.clone(), &ctx)
         .unwrap();
-    db.apply_catalog_mutation_effect_immediate(&create_effect).unwrap();
+    db.apply_catalog_mutation_effect_immediate(&create_effect)
+        .unwrap();
 
     let mut current = row;
     current.oid = operator_oid;
@@ -15450,9 +15510,7 @@ fn drop_function_uses_search_path_and_signature() {
             "create function add_one(x int4) returns int4 language sql as $$ select x + 1 $$",
         )
         .unwrap();
-    session
-        .execute(&db, "drop function add_one(int4)")
-        .unwrap();
+    session.execute(&db, "drop function add_one(int4)").unwrap();
 
     let visible = db.backend_catcache(1, None).unwrap();
     assert!(
@@ -15467,9 +15525,14 @@ fn drop_table_cascade_notice_omits_temp_schema_name() {
     let db = Database::open(&base, 16).unwrap();
     let mut session = Session::new(1);
 
-    session.execute(&db, "create temp table some_tab (id int4)").unwrap();
     session
-        .execute(&db, "create temp table some_tab_child () inherits (some_tab)")
+        .execute(&db, "create temp table some_tab (id int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create temp table some_tab_child () inherits (some_tab)",
+        )
         .unwrap();
     take_backend_notice_messages();
 
@@ -18715,7 +18778,11 @@ fn plpgsql_alias_record_select_into_and_update_work() {
         vec![vec![Value::Int32(0)]]
     );
     assert_eq!(
-        query_rows(&db, 1, "select backlink from slots where slotname = 'PS.base.a1'"),
+        query_rows(
+            &db,
+            1,
+            "select backlink from slots where slotname = 'PS.base.a1'"
+        ),
         vec![vec![Value::Text("WS.001.1a".into())]]
     );
 }

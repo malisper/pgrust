@@ -5,8 +5,8 @@ use crate::backend::access::heap::heapam::{
 };
 use crate::backend::access::index::indexam;
 use crate::backend::commands::explain::format_explain_lines_with_costs;
-use crate::backend::executor::expr_geometry::render_geometry_text;
 use crate::backend::executor::exec_expr::{compare_order_by_keys, eval_expr};
+use crate::backend::executor::expr_geometry::render_geometry_text;
 use crate::backend::executor::pg_regex::explain_similar_pattern;
 use crate::backend::executor::srf::{
     eval_project_set_returning_call, eval_set_returning_call, set_returning_call_label,
@@ -409,8 +409,7 @@ impl PlanNode for AppendState {
                     .current_bindings
                     .first()
                     .map(|binding| binding.table_oid);
-                self.slot
-                    .store_virtual_row(values, slot.tid(), table_oid);
+                self.slot.store_virtual_row(values, slot.tid(), table_oid);
                 set_active_system_bindings(ctx, &self.current_bindings);
                 finish_row(&mut self.stats, start);
                 return Ok(Some(&mut self.slot));
@@ -868,12 +867,17 @@ fn render_index_scan_key(
         .ok()?
         .checked_sub(1)?;
     let column_name = desc.columns.get(heap_attno)?.name.clone();
-    let right_type_oid = key.argument.sql_type_hint().map(crate::backend::utils::cache::catcache::sql_type_oid);
+    let right_type_oid = key
+        .argument
+        .sql_type_hint()
+        .map(crate::backend::utils::cache::catcache::sql_type_oid);
     let operator = index_meta
         .amop_entries
         .get(index_attno)?
         .iter()
-        .filter(|entry| entry.purpose == 's' && u16::try_from(entry.strategy).ok() == Some(key.strategy))
+        .filter(|entry| {
+            entry.purpose == 's' && u16::try_from(entry.strategy).ok() == Some(key.strategy)
+        })
         .filter(|entry| {
             right_type_oid.is_none()
                 || Some(entry.righttype) == right_type_oid
@@ -1036,7 +1040,9 @@ fn render_explain_expr_inner_with_qualifier(
                 let rendered = bool_expr
                     .args
                     .iter()
-                    .map(|arg| render_explain_expr_inner_with_qualifier(arg, qualifier, column_names))
+                    .map(|arg| {
+                        render_explain_expr_inner_with_qualifier(arg, qualifier, column_names)
+                    })
                     .collect::<Vec<_>>();
                 format!("({})", rendered.join(" AND "))
             }
@@ -1044,7 +1050,9 @@ fn render_explain_expr_inner_with_qualifier(
                 let rendered = bool_expr
                     .args
                     .iter()
-                    .map(|arg| render_explain_expr_inner_with_qualifier(arg, qualifier, column_names))
+                    .map(|arg| {
+                        render_explain_expr_inner_with_qualifier(arg, qualifier, column_names)
+                    })
                     .collect::<Vec<_>>();
                 format!("({})", rendered.join(" OR "))
             }
@@ -1385,8 +1393,13 @@ fn render_explain_literal(value: &Value) -> String {
         Value::Text(_) | Value::TextRef(_, _) => {
             format!("'{}'", value.as_text().unwrap().replace('\'', "''"))
         }
-        Value::Point(_) | Value::Lseg(_) | Value::Path(_) | Value::Line(_) | Value::Box(_)
-        | Value::Polygon(_) | Value::Circle(_) => {
+        Value::Point(_)
+        | Value::Lseg(_)
+        | Value::Path(_)
+        | Value::Line(_)
+        | Value::Box(_)
+        | Value::Polygon(_)
+        | Value::Circle(_) => {
             let rendered = render_geometry_text(value, FloatFormatOptions::default())
                 .unwrap_or_else(|| format!("{value:?}"));
             format!("'{rendered}'")
@@ -1931,12 +1944,8 @@ impl PlanNode for OrderByState {
             }
 
             let mut sort_error = None;
-            keyed_rows.sort_by(
-                |(left_keys, _), (right_keys, _)| match compare_order_by_keys(
-                    &self.items,
-                    left_keys,
-                    right_keys,
-                ) {
+            keyed_rows.sort_by(|(left_keys, _), (right_keys, _)| {
+                match compare_order_by_keys(&self.items, left_keys, right_keys) {
                     Ok(ordering) => ordering,
                     Err(err) => {
                         if sort_error.is_none() {
@@ -1944,8 +1953,8 @@ impl PlanNode for OrderByState {
                         }
                         std::cmp::Ordering::Equal
                     }
-                },
-            );
+                }
+            });
             if let Some(err) = sort_error {
                 return Err(err);
             }
@@ -3160,11 +3169,8 @@ impl PlanNode for ProjectSetState {
                 }
             }
 
-            self.slot.store_virtual_row(
-                values,
-                input_slot.slot.tid(),
-                input_slot.slot.table_oid,
-            );
+            self.slot
+                .store_virtual_row(values, input_slot.slot.tid(), input_slot.slot.table_oid);
             self.current_bindings = input_slot.system_bindings.clone();
             set_active_system_bindings(ctx, &self.current_bindings);
 

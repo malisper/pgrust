@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
+use crate::backend::commands::tablecmds::{execute_delete, execute_insert, execute_update};
 use crate::backend::executor::{
     ArrayDimension, ArrayValue, ExecError, ExecutorContext, Expr, RelationDesc, StatementResult,
     TupleSlot, Value, cast_value, eval_expr, eval_plpgsql_expr, execute_planned_stmt,
 };
-use crate::backend::commands::tablecmds::{execute_delete, execute_insert, execute_update};
 use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, TriggerLevel, TriggerTiming,
 };
@@ -408,6 +408,14 @@ fn exec_do_stmt(stmt: &CompiledStmt, values: &mut [Value]) -> Result<(), ExecErr
             }
             Ok(())
         }
+        CompiledStmt::While { condition, body } => {
+            while eval_plpgsql_condition(&eval_do_expr(condition, values)?)? {
+                for stmt in body {
+                    exec_do_stmt(stmt, values)?;
+                }
+            }
+            Ok(())
+        }
         CompiledStmt::ForInt {
             slot,
             start_expr,
@@ -538,6 +546,17 @@ fn exec_function_stmt(
                 }
             }
             exec_function_stmt_list(else_branch, compiled, expected_record_shape, state, ctx)
+        }
+        CompiledStmt::While { condition, body } => {
+            while eval_plpgsql_condition(&eval_function_expr(condition, &state.values, ctx)?)? {
+                if matches!(
+                    exec_function_stmt_list(body, compiled, expected_record_shape, state, ctx)?,
+                    FunctionControl::Return
+                ) {
+                    return Ok(FunctionControl::Return);
+                }
+            }
+            Ok(FunctionControl::Continue)
         }
         CompiledStmt::ForInt {
             slot,
@@ -798,22 +817,22 @@ fn exec_function_select_into(
         return Ok(());
     };
 
-    state.values[target_slot] = if matches!(target_ty.kind, SqlTypeKind::Record | SqlTypeKind::Composite)
-    {
-        Value::Record(RecordValue::from_descriptor(
-            RecordDescriptor::anonymous(
-                plan.columns()
-                    .into_iter()
-                    .map(|column| (column.name, column.sql_type))
-                    .collect(),
-                -1,
-            ),
-            row.clone(),
-        ))
-    } else {
-        let value = row.first().cloned().unwrap_or(Value::Null);
-        cast_value(value, target_ty)?
-    };
+    state.values[target_slot] =
+        if matches!(target_ty.kind, SqlTypeKind::Record | SqlTypeKind::Composite) {
+            Value::Record(RecordValue::from_descriptor(
+                RecordDescriptor::anonymous(
+                    plan.columns()
+                        .into_iter()
+                        .map(|column| (column.name, column.sql_type))
+                        .collect(),
+                    -1,
+                ),
+                row.clone(),
+            ))
+        } else {
+            let value = row.first().cloned().unwrap_or(Value::Null);
+            cast_value(value, target_ty)?
+        };
     state.values[compiled.found_slot] = Value::Bool(true);
     Ok(())
 }
@@ -942,7 +961,6 @@ fn statement_result_changed_rows(result: &StatementResult) -> bool {
     }
 }
 
-
 fn current_output_row(
     compiled: &CompiledFunction,
     state: &FunctionState,
@@ -1023,6 +1041,14 @@ fn eval_function_expr(
 ) -> Result<Value, ExecError> {
     let mut slot = TupleSlot::virtual_row(values.to_vec());
     eval_expr(&expr.expr, &mut slot, ctx)
+}
+
+fn eval_plpgsql_condition(value: &Value) -> Result<bool, ExecError> {
+    match value {
+        Value::Bool(true) => Ok(true),
+        Value::Bool(false) | Value::Null => Ok(false),
+        other => Err(ExecError::NonBoolQual(other.clone())),
+    }
 }
 
 fn finish_raise(level: &RaiseLevel, message: &str, params: &[Value]) -> Result<(), ExecError> {

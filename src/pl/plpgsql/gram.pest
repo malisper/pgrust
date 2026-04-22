@@ -12,12 +12,13 @@ var_decl = { !kw_begin ~ ident ~ type_name_text ~ default_clause? ~ semi }
 alias_decl = { !kw_begin ~ ident ~ kw_alias ~ kw_for ~ positional_param ~ semi }
 default_clause = { assign_op ~ expr_until_semi }
 
-stmt = { nested_block_stmt | null_stmt | if_stmt | for_int_stmt | raise_stmt | return_query_stmt | return_next_stmt | return_stmt | perform_stmt | assign_stmt | exec_sql_stmt }
+stmt = { nested_block_stmt | null_stmt | if_stmt | while_stmt | for_int_stmt | raise_stmt | return_query_stmt | return_next_stmt | return_stmt | perform_stmt | assign_stmt | exec_sql_stmt }
 nested_block_stmt = { block ~ semi }
 null_stmt = { kw_null ~ semi }
 assign_stmt = { assign_target ~ assign_op ~ expr_until_semi ~ semi }
 assign_target = { ident ~ ("." ~ ident)? }
 if_stmt = { kw_if ~ expr_until_then ~ kw_then ~ stmt* ~ elsif_clause* ~ else_clause? ~ kw_end ~ kw_if ~ semi }
+while_stmt = { kw_while ~ expr_until_loop ~ kw_loop ~ stmt* ~ kw_end ~ kw_loop ~ semi }
 elsif_clause = { kw_elsif ~ expr_until_then ~ kw_then ~ stmt* }
 else_clause = { kw_else ~ stmt* }
 for_int_stmt = { kw_for ~ ident ~ kw_in ~ !for_query_source_start ~ expr_until_range ~ range_op ~ expr_until_loop ~ kw_loop ~ stmt* ~ kw_end ~ kw_loop ~ semi }
@@ -37,6 +38,7 @@ stmt_keyword_start = _{
     | kw_end
     | kw_null
     | kw_if
+    | kw_while
     | kw_elsif
     | kw_else
     | kw_for
@@ -118,6 +120,7 @@ kw_declare = _{ kw_declare_atom }
 kw_end = _{ kw_end_atom }
 kw_null = _{ kw_null_atom }
 kw_if = _{ kw_if_atom }
+kw_while = _{ kw_while_atom }
 kw_then = _{ kw_then_atom }
 kw_elsif = _{ kw_elsif_atom }
 kw_else = _{ kw_else_atom }
@@ -144,6 +147,7 @@ kw_declare_atom = @{ ^"declare" ~ keyword_end }
 kw_end_atom = @{ ^"end" ~ keyword_end }
 kw_null_atom = @{ ^"null" ~ keyword_end }
 kw_if_atom = @{ ^"if" ~ keyword_end }
+kw_while_atom = @{ ^"while" ~ keyword_end }
 kw_then_atom = @{ ^"then" ~ keyword_end }
 kw_elsif_atom = @{ ^"elsif" ~ keyword_end }
 kw_else_atom = @{ ^"else" ~ keyword_end }

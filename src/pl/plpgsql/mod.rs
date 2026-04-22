@@ -161,6 +161,55 @@ mod tests {
     }
 
     #[test]
+    fn execute_do_runs_while_loop() {
+        std::thread::Builder::new()
+            .name("execute_do_runs_while_loop".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let stmt = DoStatement {
+                    language: None,
+                    code: r#"
+                        declare
+                            o int;
+                            a int[] := array[1,2,3,2,3,1,2];
+                        begin
+                            o := array_position(a, 2);
+                            while o is not null
+                            loop
+                                raise notice '%', o;
+                                o := array_position(a, 2, o + 1);
+                            end loop;
+                        end
+                    "#
+                    .into(),
+                };
+
+                let result = execute_do(&stmt).unwrap();
+                assert_eq!(result, StatementResult::AffectedRows(0));
+                assert_eq!(
+                    take_notices(),
+                    vec![
+                        PlpgsqlNotice {
+                            level: RaiseLevel::Notice,
+                            message: "2".into(),
+                        },
+                        PlpgsqlNotice {
+                            level: RaiseLevel::Notice,
+                            message: "4".into(),
+                        },
+                        PlpgsqlNotice {
+                            level: RaiseLevel::Notice,
+                            message: "7".into(),
+                        }
+                    ]
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
     fn parse_block_accepts_comments_in_declare_section() {
         let block = parse_block(
             r#"
@@ -184,10 +233,7 @@ mod tests {
         assert_eq!(n_decl.name, "n");
         assert_eq!(n_decl.default_expr.as_deref(), Some("1000"));
         assert_eq!(c_decl.name, "c");
-        assert_eq!(
-            c_decl.default_expr.as_deref(),
-            Some("1.94947")
-        );
+        assert_eq!(c_decl.default_expr.as_deref(), Some("1.94947"));
     }
 
     #[test]
