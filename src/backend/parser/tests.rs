@@ -5759,6 +5759,9 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("create schema tenant authorization app_user").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: Some(schema_name), auth_role: Some(auth_role), if_not_exists: false }) if schema_name == "tenant" && auth_role == "app_user")
     );
     assert!(
+        matches!(parse_statement("/* comment with doesn't in it */\ncreate schema collate_tests").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: Some(schema_name), auth_role: None, if_not_exists: false }) if schema_name == "collate_tests")
+    );
+    assert!(
         matches!(parse_statement("drop view if exists item_names, recent_items").unwrap(), Statement::DropView(DropViewStatement { if_exists: true, view_names }) if view_names == vec!["item_names", "recent_items"])
     );
     assert!(
