@@ -204,7 +204,8 @@ fn execute_statement_with_source(
         | Statement::AlterTableDropNotNull(_)
         | Statement::AlterTableValidateConstraint(_)
         | Statement::AlterTableInherit(_)
-        | Statement::AlterTableNoInherit(_) => {
+        | Statement::AlterTableNoInherit(_)
+        | Statement::AlterTableAttachPartition(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "ALTER TABLE constraint operations handled by database/session layer",
                 actual: "ALTER TABLE constraint operation".into(),
@@ -423,7 +424,8 @@ pub fn execute_readonly_statement(
         | Statement::AlterTableAlterColumnType(_)
         | Statement::AlterTableAlterColumnCompression(_)
         | Statement::AlterTableAlterColumnStorage(_)
-        | Statement::AlterTableAlterColumnDefault(_) => Ok(StatementResult::AffectedRows(0)),
+        | Statement::AlterTableAlterColumnDefault(_)
+        | Statement::AlterTableAttachPartition(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::AlterTableRename(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::Merge(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             "MERGE".into(),

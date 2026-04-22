@@ -2521,6 +2521,17 @@ pub(super) fn bind_scalar_function_call(
                 ],
             ))
         }
+        BuiltinScalarFunction::PgPartitionRoot => {
+            let coerced = bound_args
+                .into_iter()
+                .zip(arg_types)
+                .zip(declared_arg_types.iter().copied())
+                .map(|((arg, actual_type), declared_type)| {
+                    coerce_bound_expr(arg, actual_type, declared_type)
+                })
+                .collect();
+            Ok(build_func(func_variadic, coerced))
+        }
         BuiltinScalarFunction::RangeConstructor
         | BuiltinScalarFunction::RangeIsEmpty
         | BuiltinScalarFunction::RangeLower

@@ -10,10 +10,11 @@ use crate::include::catalog::{
     PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
     PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow,
     PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
-    PgOpfamilyRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
-    PgPublicationRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow,
-    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
-    bootstrap_composite_type_rows, builtin_type_rows,
+    PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow,
+    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
+    PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow,
+    PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow, bootstrap_composite_type_rows,
+    builtin_type_rows,
 };
 use crate::include::nodes::datum::{ArrayValue, Value};
 
@@ -180,6 +181,12 @@ pub(crate) fn catalog_row_values_for_kind(
             .cloned()
             .map(pg_index_row_values)
             .collect(),
+        BootstrapCatalogKind::PgPartitionedTable => rows
+            .partitioned_tables
+            .iter()
+            .cloned()
+            .map(pg_partitioned_table_row_values)
+            .collect(),
         BootstrapCatalogKind::PgRewrite => rows
             .rewrites
             .iter()
@@ -299,11 +306,27 @@ pub(crate) fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow,
         relhassubclass: expect_bool(&values[11])?,
         relhastriggers: expect_bool(&values[12])?,
         relispartition: expect_bool(&values[13])?,
-        relrowsecurity: expect_bool(&values[14])?,
-        relforcerowsecurity: expect_bool(&values[15])?,
-        relnatts: expect_int16(&values[16])?,
-        relpages: expect_int32(&values[17])?,
-        reltuples: expect_float64(&values[18])?,
+        relpartbound: nullable_text(&values[14])?,
+        relrowsecurity: expect_bool(&values[15])?,
+        relforcerowsecurity: expect_bool(&values[16])?,
+        relnatts: expect_int16(&values[17])?,
+        relpages: expect_int32(&values[18])?,
+        reltuples: expect_float64(&values[19])?,
+    })
+}
+
+pub(crate) fn pg_partitioned_table_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgPartitionedTableRow, CatalogError> {
+    Ok(PgPartitionedTableRow {
+        partrelid: expect_oid(&values[0])?,
+        partstrat: expect_char(&values[1], "partstrat")?,
+        partnatts: expect_int16(&values[2])?,
+        partdefid: expect_oid(&values[3])?,
+        partattrs: parse_indkey(&expect_text(&values[4])?),
+        partclass: parse_oidvector(&expect_text(&values[5])?),
+        partcollation: parse_oidvector(&expect_text(&values[6])?),
+        partexprs: nullable_text(&values[7])?,
     })
 }
 
@@ -955,11 +978,39 @@ fn pg_class_row_values(row: PgClassRow) -> Vec<Value> {
         Value::Bool(row.relhassubclass),
         Value::Bool(row.relhastriggers),
         Value::Bool(row.relispartition),
+        row.relpartbound.map_or(Value::Null, |value| Value::Text(value.into())),
         Value::Bool(row.relrowsecurity),
         Value::Bool(row.relforcerowsecurity),
         Value::Int16(row.relnatts),
         Value::Int32(row.relpages),
         Value::Float64(row.reltuples),
+    ]
+}
+
+fn pg_partitioned_table_row_values(row: PgPartitionedTableRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.partrelid as i32),
+        Value::Text(row.partstrat.to_string().into()),
+        Value::Int16(row.partnatts),
+        Value::Int32(row.partdefid as i32),
+        Value::Text(format_indkey(&row.partattrs).into()),
+        Value::Text(
+            row.partclass
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+                .into(),
+        ),
+        Value::Text(
+            row.partcollation
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+                .into(),
+        ),
+        nullable_text_value(row.partexprs),
     ]
 }
 

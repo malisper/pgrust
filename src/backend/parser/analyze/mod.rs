@@ -13,6 +13,7 @@ mod infer;
 mod modify;
 mod multiranges;
 mod on_conflict;
+mod partition;
 mod paths;
 mod query;
 mod ranges;
@@ -33,7 +34,8 @@ use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
     PgCollationRow, PgConstraintRow, PgInheritsRow, PgLanguageRow, PgOpclassRow, PgOperatorRow,
-    PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow, PgTypeRow, RECORD_TYPE_OID,
+    PgPartitionedTableRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow, PgTypeRow,
+    RECORD_TYPE_OID,
     bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
     bootstrap_pg_language_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
     bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
@@ -67,6 +69,7 @@ pub(crate) use constraints::*;
 pub(crate) use constraints::{BoundReferencedByForeignKey, BoundRelationConstraints};
 pub use create_table::*;
 pub use create_table_inherits::*;
+pub(crate) use partition::*;
 pub(crate) use expr::bind_expr_with_outer_and_ctes;
 use expr::*;
 use functions::*;
@@ -449,6 +452,14 @@ pub trait CatalogLookup {
         None
     }
 
+    fn partitioned_table_row(&self, _relation_oid: u32) -> Option<PgPartitionedTableRow> {
+        None
+    }
+
+    fn partitioned_table_rows(&self) -> Vec<PgPartitionedTableRow> {
+        Vec::new()
+    }
+
     fn inheritance_parents(&self, _relation_oid: u32) -> Vec<PgInheritsRow> {
         Vec::new()
     }
@@ -675,6 +686,16 @@ impl CatalogLookup for Catalog {
         catcache.class_by_oid(relation_oid).cloned()
     }
 
+    fn partitioned_table_row(&self, relation_oid: u32) -> Option<PgPartitionedTableRow> {
+        let catcache = crate::backend::utils::cache::catcache::CatCache::from_catalog(self);
+        catcache.partitioned_table_row(relation_oid).cloned()
+    }
+
+    fn partitioned_table_rows(&self) -> Vec<PgPartitionedTableRow> {
+        let catcache = crate::backend::utils::cache::catcache::CatCache::from_catalog(self);
+        catcache.partitioned_table_rows()
+    }
+
     fn inheritance_parents(&self, relation_oid: u32) -> Vec<PgInheritsRow> {
         self.inherit_rows()
             .iter()
@@ -796,7 +817,10 @@ impl CatalogLookup for RelCache {
             owner_oid: entry.owner_oid,
             relpersistence: entry.relpersistence,
             relkind: entry.relkind,
+            relispartition: entry.relispartition,
+            relpartbound: entry.relpartbound.clone(),
             desc: entry.desc.clone(),
+            partitioned_table: entry.partitioned_table.clone(),
         })
     }
 
@@ -832,6 +856,17 @@ impl CatalogLookup for RelCache {
     fn materialize_visible_catalog(&self) -> Option<VisibleCatalog> {
         Some(VisibleCatalog::new(self.clone(), None))
     }
+
+    fn partitioned_table_row(&self, relation_oid: u32) -> Option<PgPartitionedTableRow> {
+        self.get_by_oid(relation_oid)
+            .and_then(|entry| entry.partitioned_table.clone())
+    }
+
+    fn partitioned_table_rows(&self) -> Vec<PgPartitionedTableRow> {
+        self.entries()
+            .filter_map(|(_, entry)| entry.partitioned_table.clone())
+            .collect()
+    }
 }
 
 fn normalize_catalog_lookup_name(name: &str) -> &str {
@@ -864,7 +899,10 @@ fn bound_relation_from_relcache_entry(
         owner_oid: entry.owner_oid,
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
+        relispartition: entry.relispartition,
+        relpartbound: entry.relpartbound.clone(),
         desc: entry.desc.clone(),
+        partitioned_table: entry.partitioned_table.clone(),
     }
 }
 

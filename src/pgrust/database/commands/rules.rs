@@ -479,7 +479,7 @@ pub(crate) fn execute_bound_insert_with_rules(
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<StatementResult, ExecError> {
-    if stmt.relkind == 'r'
+    if matches!(stmt.relkind, 'r' | 'p')
         && catalog
             .rewrite_rows_for_relation(stmt.relation_oid)
             .into_iter()
@@ -530,7 +530,7 @@ pub(crate) fn execute_bound_insert_with_rules(
                 }
                 continue;
             }
-            if stmt.relkind != 'r' {
+            if !matches!(stmt.relkind, 'r' | 'p') {
                 return Err(ExecError::Parse(ParseError::WrongObjectType {
                     name: stmt.relation_name.clone(),
                     expected: "table",

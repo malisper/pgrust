@@ -22,11 +22,12 @@ use crate::backend::catalog::rowcodec::{
     pg_description_row_from_values, pg_foreign_data_wrapper_row_from_values,
     pg_index_row_from_values, pg_inherits_row_from_values, pg_language_row_from_values,
     pg_opclass_row_from_values, pg_operator_row_from_values, pg_opfamily_row_from_values,
-    pg_policy_row_from_values, pg_proc_row_from_values, pg_publication_namespace_row_from_values,
-    pg_publication_rel_row_from_values, pg_publication_row_from_values, pg_rewrite_row_from_values,
-    pg_statistic_row_from_values, pg_tablespace_row_from_values, pg_trigger_row_from_values,
-    pg_ts_config_map_row_from_values, pg_ts_config_row_from_values, pg_ts_dict_row_from_values,
-    pg_ts_parser_row_from_values, pg_ts_template_row_from_values, pg_type_row_from_values,
+    pg_partitioned_table_row_from_values, pg_policy_row_from_values, pg_proc_row_from_values,
+    pg_publication_namespace_row_from_values, pg_publication_rel_row_from_values,
+    pg_publication_row_from_values, pg_rewrite_row_from_values, pg_statistic_row_from_values,
+    pg_tablespace_row_from_values, pg_trigger_row_from_values, pg_ts_config_map_row_from_values,
+    pg_ts_config_row_from_values, pg_ts_dict_row_from_values, pg_ts_parser_row_from_values,
+    pg_ts_template_row_from_values, pg_type_row_from_values,
 };
 use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::executor::RelationDesc;
@@ -38,7 +39,8 @@ use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, RelFileLocator
 use crate::include::catalog::{
     BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
     PgClassRow, PgCollationRow, PgConstraintRow, PgIndexRow, PgNamespaceRow, PgOpclassRow,
-    PgOpfamilyRow, PgTypeRow, bootstrap_catalog_kinds, bootstrap_pg_aggregate_rows,
+    PgOpfamilyRow, PgPartitionedTableRow, PgTypeRow, bootstrap_catalog_kinds,
+    bootstrap_pg_aggregate_rows,
     bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows, bootstrap_pg_database_rows,
     bootstrap_pg_tablespace_rows, bootstrap_relation_desc, system_catalog_index_by_oid,
 };
@@ -126,6 +128,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
     let publication_rel_rows = rows.publication_rels;
     let publication_namespace_rows = rows.publication_namespaces;
     let index_rows = rows.indexes;
+    let partitioned_table_rows = rows.partitioned_tables;
     let _description_rows = rows.descriptions;
     let _am_rows = rows.ams;
     let authid_rows = rows.authids;
@@ -179,6 +182,11 @@ pub(crate) fn catalog_from_physical_rows_scoped(
     let indexes_by_relid = index_rows
         .into_iter()
         .map(|row| (row.indexrelid, row))
+        .collect::<BTreeMap<_, _>>();
+    let partitioned_tables_by_relid = partitioned_table_rows
+        .iter()
+        .cloned()
+        .map(|row| (row.partrelid, row))
         .collect::<BTreeMap<_, _>>();
     // :HACK: Keep a one-time compatibility path for stores created before `pg_attrdef`
     // existed. Once old datadirs no longer need migration, delete this fallback and
@@ -291,6 +299,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
         rewrites: Vec::new(),
         triggers: Vec::new(),
         policies: policy_rows.clone(),
+        partitioned_tables: partitioned_table_rows,
         publications: publication_rows,
         publication_rels: publication_rel_rows,
         publication_namespaces: publication_namespace_rows,
@@ -382,11 +391,13 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                 relhassubclass: row.relhassubclass,
                 relhastriggers: row.relhastriggers,
                 relispartition: row.relispartition,
+                relpartbound: row.relpartbound.clone(),
                 relrowsecurity: row.relrowsecurity,
                 relforcerowsecurity: row.relforcerowsecurity,
                 relpages: row.relpages,
                 reltuples: row.reltuples,
                 desc: RelationDesc { columns },
+                partitioned_table: partitioned_tables_by_relid.get(&row.oid).cloned(),
                 index_meta: indexes_by_relid
                     .get(&row.oid)
                     .map(|index| CatalogIndexMeta {
@@ -777,6 +788,12 @@ fn append_catalog_kind_rows(
             rows.inherits = values
                 .into_iter()
                 .map(pg_inherits_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgPartitionedTable => {
+            rows.partitioned_tables = values
+                .into_iter()
+                .map(pg_partitioned_table_row_from_values)
                 .collect::<Result<Vec<_>, _>>()?;
         }
         BootstrapCatalogKind::PgRewrite => {
@@ -1461,6 +1478,7 @@ fn load_physical_catalog_rows_legacy(base_dir: &Path) -> Result<PhysicalCatalogR
         operators: operator_rows,
         opclasses: opclass_rows,
         opfamilies: opfamily_rows,
+        partitioned_tables: Vec::new(),
         procs: proc_rows,
         aggregates: aggregate_rows,
         casts: cast_rows,
@@ -2129,6 +2147,7 @@ fn load_physical_catalog_rows_visible_legacy(
         operators: operator_rows,
         opclasses: opclass_rows,
         opfamilies: opfamily_rows,
+        partitioned_tables: Vec::new(),
         procs: proc_rows,
         aggregates: aggregate_rows,
         casts: cast_rows,

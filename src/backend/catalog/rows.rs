@@ -8,10 +8,10 @@ use crate::include::catalog::{
     PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
     PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow,
     PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
-    PgOpfamilyRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
-    PgPublicationRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow,
-    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
-    composite_array_type_row, composite_type_row,
+    PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow,
+    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow,
+    PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
+    PgTypeRow, composite_array_type_row, composite_type_row,
 };
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -22,6 +22,7 @@ pub(crate) struct PhysicalCatalogRows {
     pub attrdefs: Vec<PgAttrdefRow>,
     pub depends: Vec<PgDependRow>,
     pub inherits: Vec<PgInheritsRow>,
+    pub partitioned_tables: Vec<PgPartitionedTableRow>,
     pub descriptions: Vec<PgDescriptionRow>,
     pub foreign_data_wrappers: Vec<PgForeignDataWrapperRow>,
     pub indexes: Vec<PgIndexRow>,
@@ -80,6 +81,9 @@ pub(crate) fn create_table_sync_kinds(entry: &CatalogEntry) -> Vec<BootstrapCata
     {
         kinds.push(BootstrapCatalogKind::PgConstraint);
     }
+    if entry.partitioned_table.is_some() {
+        kinds.push(BootstrapCatalogKind::PgPartitionedTable);
+    }
     kinds
 }
 
@@ -120,6 +124,7 @@ pub(crate) fn drop_relation_sync_kinds() -> Vec<BootstrapCatalogKind> {
         BootstrapCatalogKind::PgConstraint,
         BootstrapCatalogKind::PgDepend,
         BootstrapCatalogKind::PgInherits,
+        BootstrapCatalogKind::PgPartitionedTable,
         BootstrapCatalogKind::PgDescription,
         BootstrapCatalogKind::PgIndex,
         BootstrapCatalogKind::PgRewrite,
@@ -158,6 +163,7 @@ pub(crate) fn extend_physical_catalog_rows(
     target.attrdefs.extend(source.attrdefs);
     target.depends.extend(source.depends);
     target.inherits.extend(source.inherits);
+    target.partitioned_tables.extend(source.partitioned_tables);
     target.descriptions.extend(source.descriptions);
     target
         .foreign_data_wrappers
@@ -203,6 +209,7 @@ pub(crate) fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> Physic
         attrdefs: catcache.attrdef_rows(),
         depends: catcache.depend_rows(),
         inherits: catcache.inherit_rows(),
+        partitioned_tables: catcache.partitioned_table_rows(),
         descriptions: Vec::new(),
         foreign_data_wrappers: catcache.foreign_data_wrapper_rows(),
         indexes: catcache.index_rows(),
@@ -264,6 +271,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
         relhassubclass: entry.relhassubclass,
         relhastriggers: entry.relhastriggers,
         relispartition: entry.relispartition,
+        relpartbound: entry.relpartbound.clone(),
         relrowsecurity: entry.relrowsecurity,
         relforcerowsecurity: entry.relforcerowsecurity,
         relnatts: entry.desc.columns.len() as i16,
@@ -358,6 +366,9 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
             .filter(|row| row.inhrelid == entry.relation_oid)
             .cloned(),
     );
+    if let Some(row) = &entry.partitioned_table {
+        rows.partitioned_tables.push(row.clone());
+    }
     object_oids.extend(rows.rewrites.iter().map(|row| row.oid));
     object_oids.extend(rows.triggers.iter().map(|row| row.oid));
     object_oids.extend(rows.policies.iter().map(|row| row.oid));

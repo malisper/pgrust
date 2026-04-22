@@ -2598,6 +2598,101 @@ fn collect_analyze_stats_treats_partitioned_relkind_as_inherited_only() {
 }
 
 #[test]
+fn drop_table_drops_partitioned_roots_and_subpartitioned_children() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table orders(id int4, region text) partition by list (region)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table orders_eu partition of orders for values in ('eu') partition by range (id)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table orders_eu_small partition of orders_eu for values from (minvalue) to (100)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table orders_eu_large partition of orders_eu for values from (100) to (maxvalue)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table orders_us partition of orders for values in ('us')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into orders values (1, 'eu'), (150, 'eu'), (5, 'us')",
+        )
+        .unwrap();
+
+    session.execute(&db, "drop table orders_eu").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, region from orders order by id"),
+        vec![vec![Value::Int32(5), Value::Text("us".into())]]
+    );
+    assert!(
+        query_rows(
+            &db,
+            1,
+            "select relname from pg_class where relname in ('orders_eu', 'orders_eu_small', 'orders_eu_large')",
+        )
+        .is_empty()
+    );
+
+    session.execute(&db, "drop table orders").unwrap();
+
+    assert!(
+        query_rows(
+            &db,
+            1,
+            "select relname from pg_class where relname like 'orders%'",
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn drop_table_still_rejects_legacy_inheritance_parents() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table parent_inh(a int4)")
+        .unwrap();
+    session
+        .execute(&db, "create table child_inh(extra int4) inherits (parent_inh)")
+        .unwrap();
+
+    match session.execute(&db, "drop table parent_inh") {
+        Err(ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            hint: Some(hint),
+            sqlstate,
+        }) if message == "cannot drop table parent_inh because other objects depend on it"
+            && detail.contains("table child_inh depends on table parent_inh")
+            && hint == "Use DROP ... CASCADE to drop the dependent objects too."
+            && sqlstate == "2BP01" => {}
+        other => panic!("expected legacy inheritance drop-table blocker, got {other:?}"),
+    }
+}
+
+#[test]
 fn new_tables_report_never_analyzed_reltuples() {
     let dir = temp_dir("new_table_reltuples");
     let db = Database::open(&dir, 128).unwrap();

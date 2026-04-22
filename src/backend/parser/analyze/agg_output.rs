@@ -280,6 +280,8 @@ fn query_references_local_cte(
                     SetReturningCall::GenerateSeries {
                         start, stop, step, ..
                     } => vec![start, stop, step],
+                    SetReturningCall::PartitionTree { relid, .. }
+                    | SetReturningCall::PartitionAncestors { relid, .. } => vec![relid],
                     SetReturningCall::Unnest { args, .. }
                     | SetReturningCall::JsonTableFunction { args, .. }
                     | SetReturningCall::JsonRecordFunction { args, .. }
@@ -383,6 +385,10 @@ fn query_references_local_cte(
                 } => expr_references_local_cte(start, local_ctes)
                     .or_else(|| expr_references_local_cte(stop, local_ctes))
                     .or_else(|| expr_references_local_cte(step, local_ctes)),
+                SetReturningCall::PartitionTree { relid, .. }
+                | SetReturningCall::PartitionAncestors { relid, .. } => {
+                    expr_references_local_cte(relid, local_ctes)
+                }
                 SetReturningCall::Unnest { args, .. }
                 | SetReturningCall::JsonTableFunction { args, .. }
                 | SetReturningCall::JsonRecordFunction { args, .. }

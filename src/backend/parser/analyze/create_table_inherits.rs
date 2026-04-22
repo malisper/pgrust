@@ -6,6 +6,7 @@ use super::create_table::{LoweredCreateTable, lower_create_table};
 use super::{
     BoundRelation, CatalogLookup, ColumnConstraint, ConstraintAttributes, CreateTableElement,
     CreateTableStatement, ParseError, RawTypeName, TableConstraint, TablePersistence,
+    lower_partition_clause,
 };
 
 #[derive(Debug, Clone)]
@@ -21,8 +22,13 @@ pub fn lower_create_table_with_catalog(
     catalog: &dyn CatalogLookup,
     persistence: TablePersistence,
 ) -> Result<LoweredCreateTable, ParseError> {
-    if stmt.inherits.is_empty() {
-        return lower_create_table(stmt, catalog);
+    if stmt.inherits.is_empty() && stmt.partition_of.is_none() {
+        let mut lowered = lower_create_table(stmt, catalog)?;
+        let partition = lower_partition_clause(stmt, &lowered.relation_desc, catalog, persistence)?;
+        lowered.partition_spec = partition.spec;
+        lowered.partition_parent_oid = partition.parent_oid;
+        lowered.partition_bound = partition.bound;
+        return Ok(lowered);
     }
 
     let parents = resolve_parent_relations(stmt, catalog, persistence)?;
@@ -60,6 +66,10 @@ pub fn lower_create_table_with_catalog(
         .into_iter()
         .map(|parent| parent.relation_oid)
         .collect();
+    let partition = lower_partition_clause(stmt, &lowered.relation_desc, catalog, persistence)?;
+    lowered.partition_spec = partition.spec;
+    lowered.partition_parent_oid = partition.parent_oid;
+    lowered.partition_bound = partition.bound;
     Ok(lowered)
 }
 
@@ -105,22 +115,47 @@ fn resolve_parent_relations(
     catalog: &dyn CatalogLookup,
     persistence: TablePersistence,
 ) -> Result<Vec<BoundRelation>, ParseError> {
+    let parent_names = if let Some(parent_name) = &stmt.partition_of {
+        vec![parent_name.clone()]
+    } else {
+        stmt.inherits.clone()
+    };
+    let allow_partitioned_parent = stmt.partition_of.is_some();
+
     let mut seen = BTreeSet::new();
-    let mut parents = Vec::with_capacity(stmt.inherits.len());
-    for parent_name in &stmt.inherits {
+    let mut parents = Vec::with_capacity(parent_names.len());
+    for parent_name in &parent_names {
         let parent = catalog
             .lookup_any_relation(parent_name)
             .ok_or_else(|| ParseError::UnknownTable(parent_name.clone()))?;
-        if parent.relkind != 'r' {
+        if !(parent.relkind == 'r' || allow_partitioned_parent && parent.relkind == 'p') {
             return Err(ParseError::WrongObjectType {
                 name: parent_name.clone(),
-                expected: "table",
+                expected: if allow_partitioned_parent {
+                    "partitioned table"
+                } else {
+                    "table"
+                },
             });
         }
         if !seen.insert(parent.relation_oid) {
             return Err(ParseError::DuplicateTableName(parent_name.clone()));
         }
-        if persistence == TablePersistence::Permanent && parent.relpersistence == 't' {
+        if allow_partitioned_parent && relation_persistence_code(persistence) != parent.relpersistence {
+            return Err(ParseError::DetailedError {
+                message: format!(
+                    "partition \"{}\" would have different persistence than partitioned table \"{}\"",
+                    stmt.table_name, parent_name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        }
+        if !allow_partitioned_parent
+            && persistence == TablePersistence::Permanent
+            && parent.relpersistence == 't'
+        {
             return Err(ParseError::UnexpectedToken {
                 expected: "permanent parent for permanent inherited table",
                 actual: format!("temporary parent {}", parent_name),
@@ -129,6 +164,13 @@ fn resolve_parent_relations(
         parents.push(parent);
     }
     Ok(parents)
+}
+
+fn relation_persistence_code(persistence: TablePersistence) -> char {
+    match persistence {
+        TablePersistence::Permanent => 'p',
+        TablePersistence::Temporary => 't',
+    }
 }
 
 fn merge_inherited_columns(

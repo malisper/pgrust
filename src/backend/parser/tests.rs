@@ -11,10 +11,11 @@ use crate::include::nodes::parsenodes::{
     AliasColumnDef, AliasColumnSpec, ColumnConstraint, CompositeTypeAttributeDef,
     CreateCompositeTypeStatement, CreateTriggerStatement, CreateTypeStatement,
     DropTriggerStatement, DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, IndexColumnDef,
-    InsertSource, InsertStatement, JoinTreeNode, PublicationObjectSpec, PublicationOption,
-    PublicationSchemaName, RangeTblEntryKind, RawTypeName, SetSessionAuthorizationStatement,
-    SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerTiming,
-    ViewCheckOption,
+    InsertSource, InsertStatement, JoinTreeNode, PartitionStrategy, PublicationObjectSpec,
+    PublicationOption, PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec,
+    RawPartitionKey, RawPartitionRangeDatum, RawPartitionSpec, RawTypeName,
+    SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint, TriggerEvent,
+    TriggerEventSpec, TriggerLevel, TriggerTiming, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -460,11 +461,13 @@ fn test_catalog_entry(rel_number: u32, desc: RelationDesc) -> CatalogEntry {
         relhastriggers: false,
         relhassubclass: false,
         relispartition: false,
+        relpartbound: None,
         relrowsecurity: false,
         relforcerowsecurity: false,
         relpages: 0,
         reltuples: 0.0,
         desc,
+        partitioned_table: None,
         index_meta: None,
     }
 }
@@ -513,6 +516,7 @@ fn people_view_entry() -> CatalogEntry {
         relhastriggers: false,
         relhassubclass: false,
         relispartition: false,
+        relpartbound: None,
         relrowsecurity: false,
         relforcerowsecurity: false,
         relpages: 0,
@@ -523,6 +527,7 @@ fn people_view_entry() -> CatalogEntry {
                 column_desc("name", SqlType::new(SqlTypeKind::Text), false),
             ],
         },
+        partitioned_table: None,
         index_meta: None,
     }
 }
@@ -698,6 +703,7 @@ fn catalog_with_people_id_index() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
+            relpartbound: None,
             relrowsecurity: false,
             relforcerowsecurity: false,
             relpages: 0,
@@ -705,6 +711,7 @@ fn catalog_with_people_id_index() -> Catalog {
             desc: RelationDesc {
                 columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
             },
+            partitioned_table: None,
             index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
                 indrelid: 65000,
                 indisunique: false,
@@ -750,6 +757,7 @@ fn catalog_with_people_primary_key_opclass(opclass_oid: u32) -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
+            relpartbound: None,
             relrowsecurity: false,
             relforcerowsecurity: false,
             relpages: 0,
@@ -757,6 +765,7 @@ fn catalog_with_people_primary_key_opclass(opclass_oid: u32) -> Catalog {
             desc: RelationDesc {
                 columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
             },
+            partitioned_table: None,
             index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
                 indrelid: 65000,
                 indisunique: true,
@@ -831,6 +840,7 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
+            relpartbound: None,
             relrowsecurity: false,
             relforcerowsecurity: false,
             relpages: 0,
@@ -838,6 +848,7 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
             desc: RelationDesc {
                 columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), false)],
             },
+            partitioned_table: None,
             index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
                 indrelid: people.relation_oid,
                 indisunique: true,
@@ -880,6 +891,7 @@ fn catalog_with_people_expression_unique_index() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
+            relpartbound: None,
             relrowsecurity: false,
             relforcerowsecurity: false,
             relpages: 0,
@@ -887,6 +899,7 @@ fn catalog_with_people_expression_unique_index() -> Catalog {
             desc: RelationDesc {
                 columns: vec![column_desc("lower", SqlType::new(SqlTypeKind::Text), false)],
             },
+            partitioned_table: None,
             index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
                 indrelid: people.relation_oid,
                 indisunique: true,
@@ -929,6 +942,7 @@ fn catalog_with_people_name_c_collation_index() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
+            relpartbound: None,
             relrowsecurity: false,
             relforcerowsecurity: false,
             relpages: 0,
@@ -936,6 +950,7 @@ fn catalog_with_people_name_c_collation_index() -> Catalog {
             desc: RelationDesc {
                 columns: vec![column_desc("name", SqlType::new(SqlTypeKind::Text), false)],
             },
+            partitioned_table: None,
             index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
                 indrelid: people.relation_oid,
                 indisunique: true,
@@ -986,6 +1001,7 @@ fn catalog_with_text_parent_primary_key() -> Catalog {
             relhastriggers: false,
             relhassubclass: false,
             relispartition: false,
+            relpartbound: None,
             relrowsecurity: false,
             relforcerowsecurity: false,
             relpages: 0,
@@ -993,6 +1009,7 @@ fn catalog_with_text_parent_primary_key() -> Catalog {
             desc: RelationDesc {
                 columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Text), false)],
             },
+            partitioned_table: None,
             index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
                 indrelid: 65030,
                 indisunique: true,
@@ -1050,6 +1067,7 @@ fn visible_catalog_without_text_input_cast(
         base.operator_rows(),
         base.opclass_rows(),
         base.opfamily_rows(),
+        base.partitioned_table_rows(),
         base.proc_rows(),
         base.aggregate_rows(),
         base.cast_rows()
@@ -1112,6 +1130,7 @@ fn visible_catalog_without_operator(
             .collect(),
         base.opclass_rows(),
         base.opfamily_rows(),
+        base.partitioned_table_rows(),
         base.proc_rows(),
         base.aggregate_rows(),
         base.cast_rows(),
@@ -1181,6 +1200,7 @@ fn visible_catalog_with_extra_opclasses(
         base.operator_rows(),
         opclass_rows,
         base.opfamily_rows(),
+        base.partitioned_table_rows(),
         base.proc_rows(),
         base.aggregate_rows(),
         base.cast_rows(),
@@ -6526,6 +6546,9 @@ fn create_table_temp_name_validation() {
             on_commit: OnCommitAction::PreserveRows,
             elements: vec![],
             inherits: Vec::new(),
+            partition_spec: None,
+            partition_of: None,
+            partition_bound: None,
             if_not_exists: false,
         })
         .unwrap();
@@ -6539,6 +6562,9 @@ fn create_table_temp_name_validation() {
         on_commit: OnCommitAction::PreserveRows,
         elements: vec![],
         inherits: Vec::new(),
+        partition_spec: None,
+        partition_of: None,
+        partition_bound: None,
         if_not_exists: false,
     })
     .unwrap_err();
@@ -6551,6 +6577,9 @@ fn create_table_temp_name_validation() {
         on_commit: OnCommitAction::DeleteRows,
         elements: vec![],
         inherits: Vec::new(),
+        partition_spec: None,
+        partition_of: None,
+        partition_bound: None,
         if_not_exists: false,
     })
     .unwrap_err();
@@ -6584,6 +6613,97 @@ fn parse_create_table_inherits_clause() {
             assert_eq!(ct.inherits, vec!["parent1", "parent2"]);
         }
         other => panic!("expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_create_table_partition_by_range() {
+    match parse_statement("create table measurement (a int, b int) partition by range (a, b)")
+        .unwrap()
+    {
+        Statement::CreateTable(ct) => {
+            assert_eq!(
+                ct.partition_spec,
+                Some(RawPartitionSpec {
+                    strategy: PartitionStrategy::Range,
+                    keys: vec![
+                        RawPartitionKey::Column("a".into()),
+                        RawPartitionKey::Column("b".into()),
+                    ],
+                })
+            );
+            assert_eq!(ct.partition_of, None);
+            assert_eq!(ct.partition_bound, None);
+        }
+        other => panic!("expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_create_table_partition_of_with_subpartition_spec() {
+    match parse_statement(
+        "create table measurement_lo partition of measurement \
+         for values from (minvalue) to (10) partition by list (b)",
+    )
+    .unwrap()
+    {
+        Statement::CreateTable(ct) => {
+            assert_eq!(ct.partition_of.as_deref(), Some("measurement"));
+            assert_eq!(
+                ct.partition_bound,
+                Some(RawPartitionBoundSpec::Range {
+                    from: vec![RawPartitionRangeDatum::MinValue],
+                    to: vec![RawPartitionRangeDatum::Value(SqlExpr::IntegerLiteral("10".into()))],
+                    is_default: false,
+                })
+            );
+            assert_eq!(
+                ct.partition_spec,
+                Some(RawPartitionSpec {
+                    strategy: PartitionStrategy::List,
+                    keys: vec![RawPartitionKey::Column("b".into())],
+                })
+            );
+        }
+        other => panic!("expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_alter_table_attach_partition() {
+    match parse_statement(
+        "alter table measurement attach partition measurement_mid \
+         for values from (10) to (20)",
+    )
+    .unwrap()
+    {
+        Statement::AlterTableAttachPartition(stmt) => {
+            assert_eq!(stmt.parent_table, "measurement");
+            assert_eq!(stmt.partition_table, "measurement_mid");
+            assert_eq!(
+                stmt.bound,
+                RawPartitionBoundSpec::Range {
+                    from: vec![RawPartitionRangeDatum::Value(SqlExpr::IntegerLiteral(
+                        "10".into(),
+                    ))],
+                    to: vec![RawPartitionRangeDatum::Value(SqlExpr::IntegerLiteral(
+                        "20".into(),
+                    ))],
+                    is_default: false,
+                }
+            );
+        }
+        other => panic!("expected AlterTableAttachPartition, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_hash_partition_syntax_remains_unsupported() {
+    match parse_statement("create table measurement (a int) partition by hash (a)").unwrap() {
+        Statement::Unsupported(stmt) => {
+            assert!(stmt.sql.to_ascii_lowercase().contains("partition by hash"));
+        }
+        other => panic!("expected Unsupported, got {:?}", other),
     }
 }
 

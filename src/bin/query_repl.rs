@@ -499,6 +499,7 @@ fn run_statement(
         | Statement::AlterTableValidateConstraint(_)
         | Statement::AlterTableInherit(_)
         | Statement::AlterTableNoInherit(_)
+        | Statement::AlterTableAttachPartition(_)
         | Statement::AlterIndexRename(_)
         | Statement::AlterTableSetRowSecurity(_)
         | Statement::CreatePolicy(_)

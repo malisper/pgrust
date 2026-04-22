@@ -18,6 +18,7 @@ mod inheritance;
 mod maintenance;
 mod opclass;
 mod owner;
+mod partition;
 mod policy;
 mod privilege;
 mod publication;
