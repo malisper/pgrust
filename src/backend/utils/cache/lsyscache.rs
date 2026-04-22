@@ -4,7 +4,7 @@ use crate::ClientId;
 use crate::backend::access::transam::xact::{CommandId, TransactionId};
 use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
 use crate::backend::parser::{BoundRelation, CatalogLookup};
-use crate::backend::storage::smgr::{ForkNumber, StorageManager};
+use crate::backend::storage::smgr::{BLCKSZ, ForkNumber, StorageManager};
 use crate::backend::utils::cache::catcache::normalize_catalog_name;
 use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
@@ -18,6 +18,9 @@ use crate::backend::utils::cache::system_views::{
     build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_views_rows,
 };
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
+use crate::include::access::brin_page::{
+    BRIN_PAGE_CONTENT_OFFSET, BrinMetaPageData, brin_is_meta_page,
+};
 use crate::include::catalog::{
     PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow,
     PgCollationRow, PgConstraintRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgOpclassRow,
@@ -797,6 +800,32 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             .pool
             .with_storage_mut(|storage| storage.smgr.nblocks(relation.rel, ForkNumber::Main))
             .ok()
+    }
+
+    fn brin_pages_per_range(&self, relation_oid: u32) -> Option<u32> {
+        let relation = self.relation_by_oid(relation_oid)?;
+        let mut page = [0u8; BLCKSZ];
+        self.db
+            .pool
+            .with_storage_mut(|storage| {
+                storage
+                    .smgr
+                    .read_block(relation.rel, ForkNumber::Main, 0, &mut page)
+            })
+            .ok()?;
+        if !brin_is_meta_page(&page).ok()? {
+            return None;
+        }
+        let bytes = page.get(
+            BRIN_PAGE_CONTENT_OFFSET..BRIN_PAGE_CONTENT_OFFSET + BrinMetaPageData::SIZE,
+        )?;
+        let meta = BrinMetaPageData {
+            brin_magic: u32::from_le_bytes(bytes[0..4].try_into().ok()?),
+            brin_version: u32::from_le_bytes(bytes[4..8].try_into().ok()?),
+            pages_per_range: u32::from_le_bytes(bytes[8..12].try_into().ok()?),
+            last_revmap_page: u32::from_le_bytes(bytes[12..16].try_into().ok()?),
+        };
+        (meta.pages_per_range > 0).then_some(meta.pages_per_range)
     }
 
     fn constraint_rows_for_relation(&self, relation_oid: u32) -> Vec<PgConstraintRow> {

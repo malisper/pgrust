@@ -8444,6 +8444,58 @@ fn create_gist_box_index_explain_and_query_use_it() {
 }
 
 #[test]
+fn create_brin_index_explain_uses_bitmap_scan_and_recheck() {
+    let base = temp_dir("brin_bitmap_scan_explain");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (a int4 not null, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into items select i, repeat('x', 200) from generate_series(1, 2000) i",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index items_a_brin on items using brin (a) with (pages_per_range = 1)",
+    )
+    .unwrap();
+    db.execute(1, "analyze items").unwrap();
+
+    let relfilenode = relfilenode_for(&db, 1, "items_a_brin");
+    let lines = explain_lines(&db, 1, "select a from items where a >= 200 and a < 210");
+    assert!(
+        lines.iter().any(|line| line.contains("Bitmap Heap Scan on items")),
+        "expected Bitmap Heap Scan in EXPLAIN, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains(&format!("Bitmap Index Scan using rel {relfilenode} "))),
+        "expected Bitmap Index Scan on items_a_brin, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Index Cond:") && line.contains("a >= 200") && line.contains("a < 210")),
+        "expected BRIN Index Cond in EXPLAIN, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Recheck Cond:") && line.contains("a >= 200") && line.contains("a < 210")),
+        "expected BRIN Recheck Cond in EXPLAIN, got {lines:?}"
+    );
+
+    assert_eq!(
+        query_rows(&db, 1, "select a from items where a >= 200 and a < 210 order by a"),
+        (200..210)
+            .map(|value| vec![Value::Int32(value)])
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn create_gist_box_index_supports_knn_order_by() {
     let base = temp_dir("gist_box_knn_order");
     let db = Database::open(&base, 16).unwrap();
