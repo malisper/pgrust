@@ -12,8 +12,8 @@ use crate::include::catalog::{
     INT2_TYPE_OID, INT4_TYPE_OID, INT4MULTIRANGE_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID,
     INT8MULTIRANGE_TYPE_OID, INTERNAL_CHAR_TYPE_OID, NAME_TYPE_OID, NUMERIC_TYPE_OID,
     NUMMULTIRANGE_TYPE_OID, OID_TYPE_OID, OIDVECTOR_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
-    TEXT_TYPE_OID, TIMESTAMP_TYPE_OID, TSMULTIRANGE_TYPE_OID, TSTZMULTIRANGE_TYPE_OID,
-    VARBIT_TYPE_OID, VARCHAR_TYPE_OID,
+    SPGIST_AM_OID, SPGIST_BOX_FAMILY_OID, TEXT_TYPE_OID, TIMESTAMP_TYPE_OID,
+    TSMULTIRANGE_TYPE_OID, TSTZMULTIRANGE_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_TYPE_OID,
 };
 
 pub const BOOL_BTREE_OPCLASS_OID: u32 = 424;
@@ -37,6 +37,7 @@ pub const VARBIT_BTREE_OPCLASS_OID: u32 = 10005;
 pub const MULTIRANGE_BTREE_OPCLASS_OID: u32 = 10033;
 pub const BOX_GIST_OPCLASS_OID: u32 = 76010;
 pub const RANGE_GIST_OPCLASS_OID: u32 = 76011;
+pub const BOX_SPGIST_OPCLASS_OID: u32 = 76012;
 pub const INT4RANGE_GIST_OPCLASS_OID: u32 = RANGE_GIST_OPCLASS_OID;
 pub const INT8RANGE_GIST_OPCLASS_OID: u32 = RANGE_GIST_OPCLASS_OID;
 pub const NUMRANGE_GIST_OPCLASS_OID: u32 = RANGE_GIST_OPCLASS_OID;
@@ -214,6 +215,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             GIST_RANGE_FAMILY_OID,
             INT4RANGE_TYPE_OID,
         ),
+        spgist_row(
+            BOX_SPGIST_OPCLASS_OID,
+            "box_ops",
+            SPGIST_BOX_FAMILY_OID,
+            BOX_TYPE_OID,
+        ),
     ]
 }
 
@@ -235,6 +242,20 @@ fn gist_row(oid: u32, opcname: &str, family: u32, input_type: u32) -> PgOpclassR
     PgOpclassRow {
         oid,
         opcmethod: GIST_AM_OID,
+        opcname: opcname.into(),
+        opcnamespace: PG_CATALOG_NAMESPACE_OID,
+        opcowner: BOOTSTRAP_SUPERUSER_OID,
+        opcfamily: family,
+        opcintype: input_type,
+        opcdefault: true,
+        opckeytype: 0,
+    }
+}
+
+fn spgist_row(oid: u32, opcname: &str, family: u32, input_type: u32) -> PgOpclassRow {
+    PgOpclassRow {
+        oid,
+        opcmethod: SPGIST_AM_OID,
         opcname: opcname.into(),
         opcnamespace: PG_CATALOG_NAMESPACE_OID,
         opcowner: BOOTSTRAP_SUPERUSER_OID,
