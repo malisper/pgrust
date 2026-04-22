@@ -1759,6 +1759,19 @@ fn parse_create_index_if_not_exists_requires_name() {
 }
 
 #[test]
+fn parse_create_table_rejects_malformed_tuple_default_expression() {
+    let err = parse_statement("CREATE TABLE error_tbl (i int DEFAULT (100, ))").unwrap_err();
+    assert_eq!(err.to_string(), "syntax error at or near \")\"");
+}
+
+#[test]
+fn parse_create_table_rejects_unparenthesized_in_default_expression() {
+    let err =
+        parse_statement("CREATE TABLE error_tbl (b1 bool DEFAULT 1 IN (1, 2))").unwrap_err();
+    assert_eq!(err.to_string(), "syntax error at or near \"IN\"");
+}
+
+#[test]
 fn parse_create_operator_class_hash_support() {
     let stmt = parse_statement(
         "create operator class part_test_int4_ops for type int4 using hash as operator 1 =, function 2 part_hashint4_noop(int4, int8)",
