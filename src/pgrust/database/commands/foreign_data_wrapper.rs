@@ -45,7 +45,7 @@ fn resolve_fdw_proc_oid(
     name: &str,
     expected_return_type_oid: u32,
     expected_pronargs: i16,
-    object_label: &'static str,
+    _object_label: &'static str,
 ) -> Result<u32, ExecError> {
     let normalized = normalize_foreign_data_wrapper_name(name).map_err(ExecError::Parse)?;
     let row = catalog
@@ -55,31 +55,28 @@ fn resolve_fdw_proc_oid(
             row.proname.eq_ignore_ascii_case(&normalized) && row.pronargs == expected_pronargs
         })
         .ok_or_else(|| ExecError::DetailedError {
-            message: format!("function \"{}\" does not exist", name),
+            message: format!("function {name} does not exist"),
             detail: None,
             hint: None,
             sqlstate: "42883",
         })?;
-    if row.prorettype != expected_return_type_oid {
-        let expected_name = if expected_return_type_oid == FDW_HANDLER_TYPE_OID {
-            "fdw_handler"
-        } else {
-            "boolean"
-        };
+    if expected_return_type_oid == FDW_HANDLER_TYPE_OID && row.prorettype != expected_return_type_oid
+    {
         return Err(ExecError::DetailedError {
-            message: format!(
-                "{} function {} must return {}",
-                object_label, name, expected_name
-            ),
+            message: format!("function {name} must return type fdw_handler"),
             detail: None,
             hint: None,
-            sqlstate: "42804",
+            sqlstate: "42809",
         });
     }
     Ok(row.oid)
 }
 
-fn ensure_current_user_is_superuser(db: &Database, client_id: ClientId) -> Result<(), ExecError> {
+fn ensure_current_user_is_superuser(
+    db: &Database,
+    client_id: ClientId,
+    fdw_name: &str,
+) -> Result<(), ExecError> {
     let auth = db.auth_state(client_id);
     let auth_catalog = db
         .auth_catalog(client_id, None)
@@ -91,9 +88,9 @@ fn ensure_current_user_is_superuser(db: &Database, client_id: ClientId) -> Resul
         return Ok(());
     }
     Err(ExecError::DetailedError {
-        message: "permission denied to create foreign-data wrapper".into(),
+        message: format!("permission denied to create foreign-data wrapper \"{fdw_name}\""),
         detail: None,
-        hint: None,
+        hint: Some("Must be superuser to create a foreign-data wrapper.".into()),
         sqlstate: "42501",
     })
 }
@@ -101,10 +98,11 @@ fn ensure_current_user_is_superuser(db: &Database, client_id: ClientId) -> Resul
 fn ensure_superuser_capability(
     db: &Database,
     client_id: ClientId,
+    fdw_name: &str,
     action: &'static str,
 ) -> Result<(), ExecError> {
-    ensure_current_user_is_superuser(db, client_id).map_err(|_| ExecError::DetailedError {
-        message: format!("permission denied to {action} foreign-data wrapper"),
+    ensure_current_user_is_superuser(db, client_id, fdw_name).map_err(|_| ExecError::DetailedError {
+        message: format!("permission denied to {action} foreign-data wrapper \"{fdw_name}\""),
         detail: None,
         hint: Some(format!(
             "Must be superuser to {action} a foreign-data wrapper."
@@ -175,7 +173,7 @@ fn validate_fdw_options(
             message: format!("invalid option \"{invalid}\""),
             detail: None,
             hint: Some("There are no valid options in this context.".into()),
-            sqlstate: "HV00D",
+            sqlstate: "42601",
         });
     }
     Ok(())
@@ -189,7 +187,7 @@ impl Database {
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
         let _ = configured_search_path;
-        ensure_current_user_is_superuser(self, client_id)?;
+        ensure_current_user_is_superuser(self, client_id, &stmt.fdw_name)?;
         let normalized =
             normalize_foreign_data_wrapper_name(&stmt.fdw_name).map_err(ExecError::Parse)?;
         if lookup_foreign_data_wrapper(self, client_id, None, &normalized)?.is_some() {
@@ -272,7 +270,7 @@ impl Database {
                 sqlstate: "42601",
             });
         }
-        ensure_superuser_capability(self, client_id, "alter")?;
+        ensure_superuser_capability(self, client_id, &stmt.fdw_name, "alter")?;
         let existing = lookup_foreign_data_wrapper(self, client_id, None, &stmt.fdw_name)?
             .ok_or_else(|| ExecError::DetailedError {
                 message: format!("foreign-data wrapper \"{}\" does not exist", stmt.fdw_name),
@@ -429,11 +427,11 @@ impl Database {
         if !new_owner.rolsuper {
             return Err(ExecError::DetailedError {
                 message: format!(
-                    "permission denied to change owner of foreign-data wrapper {}",
+                    "permission denied to change owner of foreign-data wrapper \"{}\"",
                     stmt.fdw_name
                 ),
-                detail: Some("new owner must be a superuser".into()),
-                hint: None,
+                detail: None,
+                hint: Some("The owner of a foreign-data wrapper must be a superuser.".into()),
                 sqlstate: "42501",
             });
         }
@@ -609,5 +607,116 @@ impl Database {
         );
         guard.disarm();
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::executor::ExecError;
+    use crate::pgrust::database::Database;
+    use crate::pgrust::session::Session;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(1);
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "pgrust_fdw_cmds_{}_{}_{}",
+            label,
+            std::process::id(),
+            NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn create_fdw_permission_error_matches_postgres_text() {
+        let base = temp_dir("create_permission");
+        let db = Database::open(&base, 16).unwrap();
+        let mut superuser = Session::new(1);
+        superuser.execute(&db, "create role tenant").unwrap();
+
+        let tenant_oid = db
+            .backend_catcache(1, None)
+            .unwrap()
+            .authid_rows()
+            .into_iter()
+            .find(|row| row.rolname == "tenant")
+            .unwrap()
+            .oid;
+
+        let mut tenant = Session::new(2);
+        tenant.set_session_authorization_oid(tenant_oid);
+
+        let err = tenant
+            .execute(&db, "create foreign data wrapper tenant_fdw")
+            .unwrap_err();
+        match err {
+            ExecError::DetailedError {
+                message, hint, sqlstate, ..
+            } => {
+                assert_eq!(
+                    message,
+                    "permission denied to create foreign-data wrapper \"tenant_fdw\""
+                );
+                assert_eq!(
+                    hint.as_deref(),
+                    Some("Must be superuser to create a foreign-data wrapper.")
+                );
+                assert_eq!(sqlstate, "42501");
+            }
+            other => panic!("expected detailed error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fdw_option_and_owner_errors_match_postgres_text() {
+        let base = temp_dir("option_and_owner_errors");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create foreign data wrapper fdw1")
+            .unwrap();
+        session.execute(&db, "create role target").unwrap();
+
+        let missing_option = session
+            .execute(&db, "alter foreign data wrapper fdw1 options (drop missing)")
+            .unwrap_err();
+        match missing_option {
+            ExecError::DetailedError {
+                message, sqlstate, ..
+            } => {
+                assert_eq!(message, "option \"missing\" not found");
+                assert_eq!(sqlstate, "42704");
+            }
+            other => panic!("expected detailed error, got {other:?}"),
+        }
+
+        let owner_err = session
+            .execute(&db, "alter foreign data wrapper fdw1 owner to target")
+            .unwrap_err();
+        match owner_err {
+            ExecError::DetailedError {
+                message,
+                hint,
+                sqlstate,
+                ..
+            } => {
+                assert_eq!(
+                    message,
+                    "permission denied to change owner of foreign-data wrapper \"fdw1\""
+                );
+                assert_eq!(
+                    hint.as_deref(),
+                    Some("The owner of a foreign-data wrapper must be a superuser.")
+                );
+                assert_eq!(sqlstate, "42501");
+            }
+            other => panic!("expected detailed error, got {other:?}"),
+        }
     }
 }
