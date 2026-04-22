@@ -15,7 +15,8 @@ use super::expr_multirange::{multirange_from_range, parse_multirange_text};
 use super::expr_range::{parse_range_text, render_range_text};
 use super::node_types::*;
 use crate::backend::executor::jsonb::{
-    parse_json_text_input, parse_jsonb_text, parse_jsonb_text_with_limit, render_jsonb_bytes,
+    JsonbValue, decode_jsonb, jsonb_to_value, parse_json_text_input, parse_jsonb_text,
+    parse_jsonb_text_with_limit, render_jsonb_bytes,
 };
 use crate::backend::libpq::pqformat::{FloatFormatOptions, format_float4_text, format_float8_text};
 use crate::backend::parser::{RawTypeName, SqlType, SqlTypeKind, parse_type_name};
@@ -66,6 +67,79 @@ fn unsupported_trigger_input() -> ExecError {
         detail: None,
         hint: None,
         sqlstate: "0A000",
+    }
+}
+
+fn jsonb_type_name(value: &JsonbValue) -> &'static str {
+    match value {
+        JsonbValue::Null => "null",
+        JsonbValue::String(_) => "string",
+        JsonbValue::Numeric(_) => "numeric",
+        JsonbValue::Bool(_) => "boolean",
+        JsonbValue::Date(_) => "date",
+        JsonbValue::Time(_) => "time without time zone",
+        JsonbValue::TimeTz(_) => "time with time zone",
+        JsonbValue::Timestamp(_) => "timestamp without time zone",
+        JsonbValue::TimestampTz(_) => "timestamp with time zone",
+        JsonbValue::Array(_) => "array",
+        JsonbValue::Object(_) => "object",
+    }
+}
+
+fn jsonb_cast_target_name(kind: SqlTypeKind) -> Option<&'static str> {
+    match kind {
+        SqlTypeKind::Bool => Some("boolean"),
+        SqlTypeKind::Float4 => Some("real"),
+        SqlTypeKind::Float8 => Some("double precision"),
+        SqlTypeKind::Int2 => Some("smallint"),
+        SqlTypeKind::Int4 => Some("integer"),
+        SqlTypeKind::Int8 => Some("bigint"),
+        SqlTypeKind::Numeric => Some("numeric"),
+        _ => None,
+    }
+}
+
+fn invalid_jsonb_scalar_cast(value: &JsonbValue, target: SqlTypeKind) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "cannot cast jsonb {} to type {}",
+            jsonb_type_name(value),
+            jsonb_cast_target_name(target).unwrap_or("unknown")
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "22023",
+    }
+}
+
+fn cast_jsonb_scalar_value(
+    parsed: &JsonbValue,
+    ty: SqlType,
+    config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
+    match ty.kind {
+        SqlTypeKind::Bool => match parsed {
+            JsonbValue::Null => Ok(Value::Null),
+            JsonbValue::Bool(value) => Ok(Value::Bool(*value)),
+            other => Err(invalid_jsonb_scalar_cast(other, ty.kind)),
+        },
+        SqlTypeKind::Float4
+        | SqlTypeKind::Float8
+        | SqlTypeKind::Int2
+        | SqlTypeKind::Int4
+        | SqlTypeKind::Int8
+        | SqlTypeKind::Numeric => match parsed {
+            JsonbValue::Null => Ok(Value::Null),
+            JsonbValue::Numeric(value) => {
+                cast_text_value_with_config(&value.render(), ty, true, config)
+            }
+            other => Err(invalid_jsonb_scalar_cast(other, ty.kind)),
+        },
+        _ => Err(ExecError::TypeMismatch {
+            op: "::jsonb",
+            left: jsonb_to_value(parsed),
+            right: Value::Null,
+        }),
     }
 }
 
@@ -2178,11 +2252,7 @@ pub(crate) fn cast_value_with_source_type_and_config(
             | SqlTypeKind::Varchar => {
                 cast_text_value_with_config(&render_jsonb_bytes(&bytes)?, ty, true, config)
             }
-            _ => Err(ExecError::TypeMismatch {
-                op: "::jsonb",
-                left: Value::Jsonb(bytes),
-                right: Value::Null,
-            }),
+            _ => cast_jsonb_scalar_value(&decode_jsonb(&bytes)?, ty, config),
         },
         Value::Int64(v) => match ty {
             ty if ty.is_range() => cast_text_value(&v.to_string(), ty, true),
