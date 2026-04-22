@@ -1,7 +1,7 @@
 use super::super::*;
+use crate::backend::parser::{parse_type_name, resolve_raw_type_name};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail};
-use crate::backend::parser::{parse_type_name, resolve_raw_type_name};
 use crate::include::catalog::{
     CONSTRAINT_FOREIGN, DEPENDENCY_NORMAL, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID,
     PG_REWRITE_RELATION_OID, PgConstraintRow, PgRewriteRow,

@@ -362,6 +362,7 @@ pub enum Statement {
     AlterPublication(AlterPublicationStatement),
     AlterOperator(AlterOperatorStatement),
     CommentOnTable(CommentOnTableStatement),
+    CommentOnIndex(CommentOnIndexStatement),
     CommentOnConstraint(CommentOnConstraintStatement),
     CommentOnRule(CommentOnRuleStatement),
     CommentOnTrigger(CommentOnTriggerStatement),
@@ -1648,6 +1649,12 @@ pub struct AlterTableInheritStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommentOnTableStatement {
     pub table_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnIndexStatement {
+    pub index_name: String,
     pub comment: Option<String>,
 }
 

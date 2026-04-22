@@ -63,7 +63,10 @@ pub(super) fn bind_explicit_collation(
 ) -> Result<Expr, ParseError> {
     if !is_collatable_type(sql_type) {
         return Err(ParseError::DetailedError {
-            message: format!("collations are not supported by type {}", sql_type_name(sql_type)),
+            message: format!(
+                "collations are not supported by type {}",
+                sql_type_name(sql_type)
+            ),
             detail: None,
             hint: None,
             sqlstate: "42804",
@@ -77,7 +80,10 @@ pub(super) fn bind_explicit_collation(
 
 pub(super) fn strip_explicit_collation(expr: Expr) -> (Expr, Option<u32>) {
     match expr {
-        Expr::Collate { expr, collation_oid } => (*expr, Some(collation_oid)),
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => (*expr, Some(collation_oid)),
         other => (other, None),
     }
 }
@@ -183,7 +189,9 @@ fn no_collation_message(consumer: CollationConsumer) -> &'static str {
         }
         CollationConsumer::Like => "could not determine which collation to use for LIKE",
         CollationConsumer::ILike => "could not determine which collation to use for ILIKE",
-        CollationConsumer::Similar => "could not determine which collation to use for regular expression",
+        CollationConsumer::Similar => {
+            "could not determine which collation to use for regular expression"
+        }
     }
 }
 

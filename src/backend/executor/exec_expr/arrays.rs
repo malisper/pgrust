@@ -1165,7 +1165,11 @@ pub(super) fn eval_array_contained(left: Value, right: Value) -> Result<Value, E
     eval_array_contains_internal("<@", right, left)
 }
 
-fn eval_array_contains_internal(op: &'static str, left: Value, right: Value) -> Result<Value, ExecError> {
+fn eval_array_contains_internal(
+    op: &'static str,
+    left: Value,
+    right: Value,
+) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
     }

@@ -355,17 +355,11 @@ pub(super) fn compare_subquery_values(
             }),
         },
         SubqueryComparisonOp::Like => eval_like(&left, &right, None, collation_oid, false, false),
-        SubqueryComparisonOp::NotLike => {
-            eval_like(&left, &right, None, collation_oid, false, true)
-        }
+        SubqueryComparisonOp::NotLike => eval_like(&left, &right, None, collation_oid, false, true),
         SubqueryComparisonOp::ILike => eval_like(&left, &right, None, collation_oid, true, false),
-        SubqueryComparisonOp::NotILike => {
-            eval_like(&left, &right, None, collation_oid, true, true)
-        }
+        SubqueryComparisonOp::NotILike => eval_like(&left, &right, None, collation_oid, true, true),
         SubqueryComparisonOp::Similar => eval_similar(&left, &right, None, collation_oid, false),
-        SubqueryComparisonOp::NotSimilar => {
-            eval_similar(&left, &right, None, collation_oid, true)
-        }
+        SubqueryComparisonOp::NotSimilar => eval_similar(&left, &right, None, collation_oid, true),
     }
 }
 
