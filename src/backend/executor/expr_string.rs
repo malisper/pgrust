@@ -2105,6 +2105,20 @@ pub(super) fn eval_pg_rust_test_enc_setup(values: &[Value]) -> Result<Value, Exe
     Ok(Value::Null)
 }
 
+pub(super) fn eval_pg_rust_test_opclass_options_func(values: &[Value]) -> Result<Value, ExecError> {
+    if values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(Value::Null);
+    }
+    if values.len() != 1 {
+        return Err(ExecError::TypeMismatch {
+            op: "pg_rust_test_opclass_options_func",
+            left: values.first().cloned().unwrap_or(Value::Null),
+            right: Value::Null,
+        });
+    }
+    Ok(Value::Null)
+}
+
 pub(super) fn eval_pg_rust_test_fdw_handler(values: &[Value]) -> Result<Value, ExecError> {
     if values.iter().any(|value| matches!(value, Value::Null)) {
         return Ok(Value::Null);
