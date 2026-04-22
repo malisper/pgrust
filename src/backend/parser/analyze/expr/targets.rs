@@ -428,6 +428,15 @@ fn visit_nested_srfs(
     ctes: &[BoundCte],
 ) {
     match expr {
+        SqlExpr::Collate { expr, .. } => visit_nested_srfs(
+            expr,
+            info,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        ),
         SqlExpr::FuncCall {
             name,
             args,

@@ -323,6 +323,7 @@ pub enum Statement {
     CommentOnTable(CommentOnTableStatement),
     CommentOnConstraint(CommentOnConstraintStatement),
     CommentOnRule(CommentOnRuleStatement),
+    CommentOnTrigger(CommentOnTriggerStatement),
     CommentOnDomain(CommentOnDomainStatement),
     CommentOnConversion(CommentOnConversionStatement),
     CommentOnForeignDataWrapper(CommentOnForeignDataWrapperStatement),
@@ -1561,6 +1562,13 @@ pub struct CommentOnRuleStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnTriggerStatement {
+    pub trigger_name: String,
+    pub table_name: String,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommentOnDomainStatement {
     pub domain_name: String,
     pub comment: Option<String>,
@@ -2640,6 +2648,10 @@ pub enum SqlExpr {
         expr: Box<SqlExpr>,
     },
     Cast(Box<SqlExpr>, RawTypeName),
+    Collate {
+        expr: Box<SqlExpr>,
+        collation: String,
+    },
     Eq(Box<SqlExpr>, Box<SqlExpr>),
     NotEq(Box<SqlExpr>, Box<SqlExpr>),
     Lt(Box<SqlExpr>, Box<SqlExpr>),

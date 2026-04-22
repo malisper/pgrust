@@ -173,6 +173,13 @@ pub(super) fn raise_expr_varlevels(expr: Expr, levels: usize) -> Expr {
             standalone: xml.standalone,
         })),
         Expr::Cast(inner, ty) => Expr::Cast(Box::new(raise_expr_varlevels(*inner, levels)), ty),
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => Expr::Collate {
+            expr: Box::new(raise_expr_varlevels(*expr, levels)),
+            collation_oid,
+        },
         Expr::IsNull(inner) => Expr::IsNull(Box::new(raise_expr_varlevels(*inner, levels))),
         Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(raise_expr_varlevels(*inner, levels))),
         Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
@@ -193,23 +200,27 @@ pub(super) fn raise_expr_varlevels(expr: Expr, levels: usize) -> Expr {
             escape,
             case_insensitive,
             negated,
+            collation_oid,
         } => Expr::Like {
             expr: Box::new(raise_expr_varlevels(*expr, levels)),
             pattern: Box::new(raise_expr_varlevels(*pattern, levels)),
             escape: escape.map(|expr| Box::new(raise_expr_varlevels(*expr, levels))),
             case_insensitive,
             negated,
+            collation_oid,
         },
         Expr::Similar {
             expr,
             pattern,
             escape,
             negated,
+            collation_oid,
         } => Expr::Similar {
             expr: Box::new(raise_expr_varlevels(*expr, levels)),
             pattern: Box::new(raise_expr_varlevels(*pattern, levels)),
             escape: escape.map(|expr| Box::new(raise_expr_varlevels(*expr, levels))),
             negated,
+            collation_oid,
         },
         Expr::ArrayLiteral {
             elements,
@@ -354,25 +365,28 @@ fn bind_window_agg_call(
     let bound_order_by = order_by
         .iter()
         .map(|item| {
+            let bound_expr = bind_expr_with_outer_and_ctes(
+                &item.expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?;
+            let (expr, collation_oid) = finalize_order_by_expr(bound_expr, catalog)?;
             Ok(OrderByEntry {
-                expr: bind_expr_with_outer_and_ctes(
-                    &item.expr,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                )?,
+                expr,
                 ressortgroupref: 0,
                 descending: item.descending,
                 nulls_first: item.nulls_first,
+                collation_oid,
             })
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
     for item in &bound_order_by {
         reject_nested_local_ctes_in_agg_expr(&item.expr)?;
     }
-    let spec = bind_window_spec(over, |expr| {
+    let spec = bind_window_spec(over, catalog, |expr| {
         bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)
     })?;
     let kind = WindowFuncKind::Aggregate(crate::include::nodes::primnodes::Aggref {
@@ -451,7 +465,7 @@ fn bind_window_func_call(
             actual: name.to_string(),
         });
     }
-    let spec = bind_window_spec(over, |expr| {
+    let spec = bind_window_spec(over, catalog, |expr| {
         bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)
     })?;
     if let Some(window_impl) = resolved.window_impl {
@@ -1116,6 +1130,19 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
             coerce_bound_expr(bound_inner, source_type, target_type)
         }
+        SqlExpr::Collate { expr, collation } => {
+            let inner_type =
+                infer_sql_expr_type_with_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes);
+            let bound_inner = bind_expr_with_outer_and_ctes(
+                expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?;
+            bind_explicit_collation(bound_inner, inner_type, collation, catalog)?
+        }
         SqlExpr::Eq(left, right) => {
             if let Some(result) = bind_maybe_multirange_comparison(
                 "=",
@@ -1432,22 +1459,28 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             case_insensitive,
             negated,
         } => Expr::Like {
-            expr: Box::new(bind_expr_with_outer_and_ctes(
-                expr,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-            pattern: Box::new(bind_expr_with_outer_and_ctes(
-                pattern,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
+            expr: Box::new({
+                let bound = bind_expr_with_outer_and_ctes(
+                    expr,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?;
+                strip_explicit_collation(bound).0
+            }),
+            pattern: Box::new({
+                let bound = bind_expr_with_outer_and_ctes(
+                    pattern,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?;
+                strip_explicit_collation(bound).0
+            }),
             escape: match escape {
                 Some(value) => Some(Box::new(bind_expr_with_outer_and_ctes(
                     value,
@@ -1461,6 +1494,58 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             },
             case_insensitive: *case_insensitive,
             negated: *negated,
+            collation_oid: {
+                let bound_expr = bind_expr_with_outer_and_ctes(
+                    expr,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?;
+                let bound_pattern = bind_expr_with_outer_and_ctes(
+                    pattern,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?;
+                let (_, expr_explicit_collation) = strip_explicit_collation(bound_expr);
+                let (_, pattern_explicit_collation) = strip_explicit_collation(bound_pattern);
+                derive_consumer_collation(
+                    catalog,
+                    if *case_insensitive {
+                        CollationConsumer::ILike
+                    } else {
+                        CollationConsumer::Like
+                    },
+                    &[
+                        (
+                            infer_sql_expr_type_with_ctes(
+                                expr,
+                                scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer,
+                                ctes,
+                            ),
+                            expr_explicit_collation,
+                        ),
+                        (
+                            infer_sql_expr_type_with_ctes(
+                                pattern,
+                                scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer,
+                                ctes,
+                            ),
+                            pattern_explicit_collation,
+                        ),
+                    ],
+                )?
+            },
         },
         SqlExpr::Similar {
             expr,
@@ -1468,22 +1553,28 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             escape,
             negated,
         } => Expr::Similar {
-            expr: Box::new(bind_expr_with_outer_and_ctes(
-                expr,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-            pattern: Box::new(bind_expr_with_outer_and_ctes(
-                pattern,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
+            expr: Box::new({
+                let bound = bind_expr_with_outer_and_ctes(
+                    expr,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?;
+                strip_explicit_collation(bound).0
+            }),
+            pattern: Box::new({
+                let bound = bind_expr_with_outer_and_ctes(
+                    pattern,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?;
+                strip_explicit_collation(bound).0
+            }),
             escape: match escape {
                 Some(value) => Some(Box::new(bind_expr_with_outer_and_ctes(
                     value,
@@ -1496,6 +1587,54 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 None => None,
             },
             negated: *negated,
+            collation_oid: {
+                let bound_expr = bind_expr_with_outer_and_ctes(
+                    expr,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?;
+                let bound_pattern = bind_expr_with_outer_and_ctes(
+                    pattern,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?;
+                let (_, expr_explicit_collation) = strip_explicit_collation(bound_expr);
+                let (_, pattern_explicit_collation) = strip_explicit_collation(bound_pattern);
+                derive_consumer_collation(
+                    catalog,
+                    CollationConsumer::Similar,
+                    &[
+                        (
+                            infer_sql_expr_type_with_ctes(
+                                expr,
+                                scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer,
+                                ctes,
+                            ),
+                            expr_explicit_collation,
+                        ),
+                        (
+                            infer_sql_expr_type_with_ctes(
+                                pattern,
+                                scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer,
+                                ctes,
+                            ),
+                            pattern_explicit_collation,
+                        ),
+                    ],
+                )?
+            },
         },
         SqlExpr::And(left, right) => Expr::bool_expr(
             BoolExprType::And,

@@ -157,6 +157,7 @@ fn build_minmax_sublink(query: &Query, accum: &AggAccum) -> Option<Expr> {
         tle_sort_group_ref: 1,
         descending,
         nulls_first: None,
+        collation_oid: None,
     }];
     let where_qual = combine_quals([
         query
@@ -302,7 +303,10 @@ fn expr_contains_sublink_for_minmax_rewrite(expr: &Expr) -> bool {
             expr_contains_sublink_for_minmax_rewrite(&saop.left)
                 || expr_contains_sublink_for_minmax_rewrite(&saop.right)
         }
-        Expr::Cast(inner, _) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => {
             expr_contains_sublink_for_minmax_rewrite(inner)
         }
         Expr::Like {
@@ -495,29 +499,37 @@ fn rewrite_minmax_aggrefs(expr: Expr, rewritten_aggs: &[Expr]) -> Expr {
         Expr::Cast(inner, ty) => {
             Expr::Cast(Box::new(rewrite_minmax_aggrefs(*inner, rewritten_aggs)), ty)
         }
+        Expr::Collate { expr, collation_oid } => Expr::Collate {
+            expr: Box::new(rewrite_minmax_aggrefs(*expr, rewritten_aggs)),
+            collation_oid,
+        },
         Expr::Like {
             expr,
             pattern,
             escape,
             case_insensitive,
             negated,
+            collation_oid,
         } => Expr::Like {
             expr: Box::new(rewrite_minmax_aggrefs(*expr, rewritten_aggs)),
             pattern: Box::new(rewrite_minmax_aggrefs(*pattern, rewritten_aggs)),
             escape: escape.map(|expr| Box::new(rewrite_minmax_aggrefs(*expr, rewritten_aggs))),
             case_insensitive,
             negated,
+            collation_oid,
         },
         Expr::Similar {
             expr,
             pattern,
             escape,
             negated,
+            collation_oid,
         } => Expr::Similar {
             expr: Box::new(rewrite_minmax_aggrefs(*expr, rewritten_aggs)),
             pattern: Box::new(rewrite_minmax_aggrefs(*pattern, rewritten_aggs)),
             escape: escape.map(|expr| Box::new(rewrite_minmax_aggrefs(*expr, rewritten_aggs))),
             negated,
+            collation_oid,
         },
         Expr::IsNull(inner) => {
             Expr::IsNull(Box::new(rewrite_minmax_aggrefs(*inner, rewritten_aggs)))
@@ -651,7 +663,10 @@ fn expr_contains_local_var_outside_subquery(expr: &Expr) -> bool {
         Expr::Xml(xml) => xml
             .child_exprs()
             .any(expr_contains_local_var_outside_subquery),
-        Expr::Cast(inner, _) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => {
             expr_contains_local_var_outside_subquery(inner)
         }
         Expr::Like {
@@ -1049,7 +1064,10 @@ fn expr_contains_window_func(expr: &Expr) -> bool {
         Expr::ScalarArrayOp(saop) => {
             expr_contains_window_func(&saop.left) || expr_contains_window_func(&saop.right)
         }
-        Expr::Cast(inner, _) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => {
             expr_contains_window_func(inner)
         }
         Expr::Param(_)
@@ -1171,7 +1189,10 @@ fn collect_group_input_exprs(expr: &Expr, group_by: &[Expr], exprs: &mut Vec<Exp
             collect_group_input_exprs(&saop.left, group_by, exprs);
             collect_group_input_exprs(&saop.right, group_by, exprs);
         }
-        Expr::Cast(inner, _) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => {
             collect_group_input_exprs(inner, group_by, exprs);
         }
         Expr::Like {
@@ -1309,7 +1330,10 @@ fn collect_supporting_inputs(expr: &Expr, exprs: &mut Vec<Expr>) {
             collect_supporting_inputs(&saop.left, exprs);
             collect_supporting_inputs(&saop.right, exprs);
         }
-        Expr::Cast(inner, _) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => {
             collect_supporting_inputs(inner, exprs);
         }
         Expr::Like {
@@ -1517,7 +1541,9 @@ fn collect_query_outer_refs_expr(expr: &Expr, levelsup: usize, exprs: &mut Vec<E
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. } => {}
-        Expr::FieldSelect { expr, .. } => collect_query_outer_refs_expr(expr, levelsup, exprs),
+        Expr::FieldSelect { expr, .. } | Expr::Collate { expr, .. } => {
+            collect_query_outer_refs_expr(expr, levelsup, exprs)
+        }
         Expr::Aggref(aggref) => {
             for arg in &aggref.args {
                 collect_query_outer_refs_expr(arg, levelsup, exprs);
@@ -1579,7 +1605,10 @@ fn collect_query_outer_refs_expr(expr: &Expr, levelsup: usize, exprs: &mut Vec<E
             collect_query_outer_refs_expr(&saop.left, levelsup, exprs);
             collect_query_outer_refs_expr(&saop.right, levelsup, exprs);
         }
-        Expr::Cast(inner, _) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => {
             collect_query_outer_refs_expr(inner, levelsup, exprs);
         }
         Expr::Like {

@@ -241,6 +241,7 @@ pub(super) fn expr_contains_window(expr: &SqlExpr) -> bool {
                 || defresult.as_deref().is_some_and(expr_contains_window)
         }
         SqlExpr::Cast(inner, _)
+        | SqlExpr::Collate { expr: inner, .. }
         | SqlExpr::UnaryPlus(inner)
         | SqlExpr::Negate(inner)
         | SqlExpr::BitNot(inner)
@@ -257,6 +258,7 @@ pub(super) fn expr_contains_window(expr: &SqlExpr) -> bool {
 
 pub(super) fn bind_window_spec(
     raw_spec: &RawWindowSpec,
+    catalog: &dyn CatalogLookup,
     mut bind_expr: impl FnMut(&SqlExpr) -> Result<Expr, ParseError>,
 ) -> Result<WindowSpec, ParseError> {
     let is_bare_named_ref = raw_spec.name.is_some()
@@ -282,6 +284,7 @@ pub(super) fn bind_window_spec(
     if is_bare_named_ref {
         return bind_window_spec(
             inherited.as_ref().expect("resolved named window"),
+            catalog,
             bind_expr,
         );
     }
@@ -333,11 +336,14 @@ pub(super) fn bind_window_spec(
             if expr_contains_window(&item.expr) {
                 return Err(nested_window_error());
             }
+            let bound_expr = bind_expr(&item.expr)?;
+            let (expr, collation_oid) = finalize_order_by_expr(bound_expr, catalog)?;
             Ok(OrderByEntry {
-                expr: bind_expr(&item.expr)?,
+                expr,
                 ressortgroupref: 0,
                 descending: item.descending,
                 nulls_first: item.nulls_first,
+                collation_oid,
             })
         })
         .collect::<Result<Vec<_>, ParseError>>()?;

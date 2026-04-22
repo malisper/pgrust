@@ -380,7 +380,9 @@ fn heap_has_matching_row(
 fn row_matches_key(values: &[Value], key_indexes: &[usize], key_values: &[Value]) -> bool {
     key_indexes.iter().zip(key_values).all(|(index, expected)| {
         values.get(*index).is_some_and(|actual| {
-            compare_order_values(actual, expected, None, false) == Ordering::Equal
+            compare_order_values(actual, expected, None, None, false)
+                .expect("foreign-key key comparisons use implicit default collation")
+                == Ordering::Equal
         })
     })
 }
@@ -389,7 +391,9 @@ fn key_columns_changed(previous_values: &[Value], values: &[Value], indexes: &[u
     indexes.iter().any(|index| {
         let previous = previous_values.get(*index).unwrap_or(&Value::Null);
         let current = values.get(*index).unwrap_or(&Value::Null);
-        compare_order_values(previous, current, None, false) != Ordering::Equal
+        compare_order_values(previous, current, None, None, false)
+            .expect("foreign-key key comparisons use implicit default collation")
+            != Ordering::Equal
     })
 }
 

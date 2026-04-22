@@ -5597,6 +5597,82 @@ fn comment_on_missing_constraint_reports_table_name() {
 }
 
 #[test]
+fn comment_on_trigger_upserts_and_clears_pg_description() {
+    let base = temp_dir("comment_on_trigger");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4)").unwrap();
+    db.execute(
+        1,
+        "create function trig_fn() returns trigger language plpgsql as 'begin return new; end;'",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger item_trigger before insert on items for each row execute procedure trig_fn()",
+    )
+    .unwrap();
+
+    db.execute(1, "comment on trigger item_trigger on items is 'hello world'")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select d.description \
+             from pg_description d \
+             join pg_trigger t on t.oid = d.objoid \
+             where t.tgname = 'item_trigger' and d.classoid = 2620 and d.objsubid = 0"
+        ),
+        vec![vec![Value::Text("hello world".into())]]
+    );
+
+    db.execute(1, "comment on trigger item_trigger on items is 'second comment'")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select d.description \
+             from pg_description d \
+             join pg_trigger t on t.oid = d.objoid \
+             where t.tgname = 'item_trigger' and d.classoid = 2620 and d.objsubid = 0"
+        ),
+        vec![vec![Value::Text("second comment".into())]]
+    );
+
+    db.execute(1, "comment on trigger item_trigger on items is null")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) \
+             from pg_description d \
+             join pg_trigger t on t.oid = d.objoid \
+             where t.tgname = 'item_trigger' and d.classoid = 2620 and d.objsubid = 0"
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn comment_on_missing_trigger_reports_table_name() {
+    let base = temp_dir("comment_on_missing_trigger");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4)").unwrap();
+
+    match db.execute(1, "comment on trigger missing on items is 'nope'") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message == "trigger \"missing\" for table \"items\" does not exist"
+            && sqlstate == "42704" => {}
+        other => panic!("expected missing trigger error, got {:?}", other),
+    }
+}
+
+#[test]
 fn create_comment_and_drop_rule_updates_catalogs() {
     let base = temp_dir("rule_catalog_rows");
     let db = Database::open(&base, 16).unwrap();

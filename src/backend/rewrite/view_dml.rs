@@ -372,7 +372,7 @@ fn expr_contains_sublink(expr: &Expr) -> bool {
             expr_contains_sublink(&saop.left) || expr_contains_sublink(&saop.right)
         }
         Expr::Xml(xml) => xml.child_exprs().any(expr_contains_sublink),
-        Expr::Cast(inner, _) => expr_contains_sublink(inner),
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => expr_contains_sublink(inner),
         Expr::Like {
             expr,
             pattern,

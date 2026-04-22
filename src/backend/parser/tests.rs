@@ -313,6 +313,52 @@ fn publication_describe_tokens_inside_quoted_identifiers_remain_identifiers() {
     }
 }
 
+#[test]
+fn parse_select_with_collate_expression() {
+    let stmt = parse_select("select name collate \"C\" from people").unwrap();
+    assert_eq!(
+        stmt.targets[0].expr,
+        SqlExpr::Collate {
+            expr: Box::new(SqlExpr::Column("name".into())),
+            collation: "C".into(),
+        }
+    );
+}
+
+#[test]
+fn parse_select_with_order_by_collate_and_ordinal() {
+    let stmt = parse_select("select name, note from people order by name collate \"C\", 2").unwrap();
+    assert_eq!(stmt.order_by.len(), 2);
+    assert_eq!(
+        stmt.order_by[0].expr,
+        SqlExpr::Collate {
+            expr: Box::new(SqlExpr::Column("name".into())),
+            collation: "C".into(),
+        }
+    );
+    assert_eq!(stmt.order_by[1].expr, SqlExpr::IntegerLiteral("2".into()));
+}
+
+#[test]
+fn parse_select_with_default_collation_keeps_raw_ast() {
+    let stmt = parse_select("select name collate pg_catalog.default from people").unwrap();
+    assert_eq!(
+        stmt.targets[0].expr,
+        SqlExpr::Collate {
+            expr: Box::new(SqlExpr::Column("name".into())),
+            collation: "pg_catalog.default".into(),
+        }
+    );
+    let stmt = parse_select("select 1 collate default").unwrap();
+    assert_eq!(
+        stmt.targets[0].expr,
+        SqlExpr::Collate {
+            expr: Box::new(SqlExpr::IntegerLiteral("1".into())),
+            collation: "default".into(),
+        }
+    );
+}
+
 fn is_outer_user_var(expr: &Expr, index: usize) -> bool {
     match expr {
         Expr::Var(Var {
@@ -1579,6 +1625,19 @@ fn parse_create_statistics_statement() {
             kinds: vec!["ndistinct".into(), "dependencies".into()],
             targets: vec!["a".into(), "(b + 1)".into()],
             from_clause: "items".into(),
+        })
+    );
+}
+
+#[test]
+fn parse_comment_on_trigger_statement() {
+    let stmt = parse_statement("comment on trigger trig1 on public.items is 'hello'").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CommentOnTrigger(CommentOnTriggerStatement {
+            trigger_name: "trig1".into(),
+            table_name: "public.items".into(),
+            comment: Some("hello".into()),
         })
     );
 }
@@ -5014,6 +5073,93 @@ fn parse_select_with_explicit_nulls_ordering() {
 }
 
 #[test]
+fn build_plan_tracks_order_by_collation_for_aliases_and_ordinals() {
+    fn order_by_items(
+        plan: &Plan,
+    ) -> &[crate::include::nodes::primnodes::OrderByEntry] {
+        match plan {
+            Plan::Projection { input, .. }
+            | Plan::Filter { input, .. }
+            | Plan::Limit { input, .. } => order_by_items(input),
+            Plan::OrderBy { items, .. } => items,
+            other => panic!("expected ORDER BY plan node, got {other:?}"),
+        }
+    }
+
+    let stmt = parse_select(
+        "select name as alias, note from people order by alias collate \"C\", 2 collate \"POSIX\"",
+    )
+    .unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+    let items = order_by_items(&plan);
+    assert_eq!(
+        items[0].collation_oid,
+        Some(crate::include::catalog::C_COLLATION_OID)
+    );
+    assert_eq!(
+        items[1].collation_oid,
+        Some(crate::include::catalog::POSIX_COLLATION_OID)
+    );
+}
+
+#[test]
+fn build_plan_tracks_expr_collations_on_bound_nodes() {
+    let stmt = parse_select(
+        "select \
+            name collate \"C\" = note collate \"C\", \
+            name collate \"C\" like 'a%', \
+            name collate \"POSIX\" similar to 'a.*', \
+            name collate \"C\" = any (array['alice']) \
+         from people",
+    )
+    .unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+    let Plan::Projection { targets, .. } = plan else {
+        panic!("expected projection plan");
+    };
+
+    assert!(matches!(
+        &targets[0].expr,
+        Expr::Op(op) if op.collation_oid == Some(crate::include::catalog::C_COLLATION_OID)
+    ));
+    assert!(matches!(
+        &targets[1].expr,
+        Expr::Like { collation_oid, .. }
+            if *collation_oid == Some(crate::include::catalog::C_COLLATION_OID)
+    ));
+    assert!(matches!(
+        &targets[2].expr,
+        Expr::Similar { collation_oid, .. }
+            if *collation_oid == Some(crate::include::catalog::POSIX_COLLATION_OID)
+    ));
+    assert!(matches!(
+        &targets[3].expr,
+        Expr::ScalarArrayOp(saop)
+            if saop.collation_oid == Some(crate::include::catalog::C_COLLATION_OID)
+    ));
+}
+
+#[test]
+fn build_plan_rejects_invalid_collation_usage() {
+    let stmt = parse_select("select 1 collate \"C\"").unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::DetailedError { message, sqlstate, .. })
+            if message == "collations are not supported by type integer"
+                && sqlstate == "42804"
+    ));
+
+    let stmt = parse_select("select name collate \"C\" = note collate \"POSIX\" from people").unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::DetailedError { message, sqlstate, .. })
+            if message
+                == "collation mismatch between explicit collations \"C\" and \"POSIX\""
+                && sqlstate == "42P21"
+    ));
+}
+
+#[test]
 fn build_plan_resolves_columns() {
     let stmt = parse_select("select name, note from people where id > 1").unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
@@ -5416,6 +5562,20 @@ fn parse_insert_update_delete() {
             && elements[0].expr == parse_expr("lower(name)").unwrap()
             && elements[0].collation.as_deref() == Some("C")
             && elements[0].opclass.as_deref() == Some("text_pattern_ops")
+    ));
+    assert!(matches!(
+        parse_statement("insert into people (id, name) values (1, 'alice') on conflict (lower(name) collate pg_catalog.default) do nothing").unwrap(),
+        Statement::Insert(InsertStatement {
+            on_conflict: Some(OnConflictClause {
+                target: Some(OnConflictTarget::Inference(OnConflictInferenceSpec { elements, predicate: None })),
+                action: OnConflictAction::Nothing,
+                ..
+            }),
+            ..
+        }) if elements.len() == 1
+            && elements[0].expr == parse_expr("lower(name)").unwrap()
+            && elements[0].collation.as_deref() == Some("pg_catalog.default")
+            && elements[0].opclass.is_none()
     ));
     assert!(
         matches!(parse_statement("create table widgets (id int4 not null, name text)").unwrap(), Statement::CreateTable(ct) if ct.table_name == "widgets" && ct.columns().count() == 2)

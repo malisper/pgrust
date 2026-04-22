@@ -3602,7 +3602,14 @@ fn oid_text_input_wraps_negative_values_and_orders_unsigned() {
     assert_eq!(wrapped, Value::Int64(4_294_966_256));
     assert_eq!(small, Value::Int64(1234));
     assert_eq!(
-        crate::backend::executor::expr_ops::compare_order_values(&small, &wrapped, None, false),
+        crate::backend::executor::expr_ops::compare_order_values(
+            &small,
+            &wrapped,
+            None,
+            None,
+            false,
+        )
+        .unwrap(),
         std::cmp::Ordering::Less
     );
 }

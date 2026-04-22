@@ -3,6 +3,7 @@ use super::expr_bit::render_bit_text;
 use super::expr_casts::{cast_value, parse_bytea_text, render_internal_char_text};
 use super::expr_datetime::render_datetime_value_text;
 use super::expr_format::{to_char_float, to_char_int, to_char_numeric, to_number_numeric};
+use super::expr_ops::ensure_builtin_collation_supported;
 use super::expr_range::render_range_text;
 use super::node_types::Value;
 use super::value_io::format_array_text;
@@ -1051,12 +1052,14 @@ pub(super) fn eval_like(
     left: &Value,
     pattern: &Value,
     escape: Option<&Value>,
+    collation_oid: Option<u32>,
     case_insensitive: bool,
     negated: bool,
 ) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(pattern, Value::Null) {
         return Ok(Value::Null);
     }
+    ensure_builtin_collation_supported(collation_oid)?;
     let matched = match (left, pattern, escape) {
         (Value::Bytea(text), Value::Bytea(pattern), escape) => {
             if case_insensitive {
@@ -2204,4 +2207,45 @@ fn validate_bytea_bit_index(bytes: &[u8], index: i32) -> Result<(), ExecError> {
         return Err(ExecError::BitIndexOutOfRange { index, max_index });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::eval_like;
+    use crate::backend::executor::ExecError;
+    use crate::include::catalog::{C_COLLATION_OID, DEFAULT_COLLATION_OID, POSIX_COLLATION_OID};
+    use crate::include::nodes::datum::Value;
+
+    #[test]
+    fn eval_like_accepts_builtin_collations() {
+        for oid in [DEFAULT_COLLATION_OID, C_COLLATION_OID, POSIX_COLLATION_OID] {
+            assert_eq!(
+                eval_like(
+                    &Value::Text("alpha".into()),
+                    &Value::Text("a%".into()),
+                    None,
+                    Some(oid),
+                    false,
+                    false,
+                )
+                .unwrap(),
+                Value::Bool(true)
+            );
+        }
+    }
+
+    #[test]
+    fn eval_like_rejects_unsupported_collation_oid() {
+        assert!(matches!(
+            eval_like(
+                &Value::Text("alpha".into()),
+                &Value::Text("a%".into()),
+                None,
+                Some(123_456),
+                false,
+                false,
+            ),
+            Err(ExecError::DetailedError { sqlstate, .. }) if sqlstate == "0A000"
+        ));
+    }
 }

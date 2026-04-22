@@ -264,6 +264,7 @@ fn window_pathkeys(clause: &WindowClause) -> Vec<PathKey> {
                 ressortgroupref: 0,
                 descending: false,
                 nulls_first: None,
+                collation_oid: None,
             }),
     );
     pathkeys.extend(clause.spec.order_by.iter().cloned().map(|item| PathKey {
@@ -271,6 +272,7 @@ fn window_pathkeys(clause: &WindowClause) -> Vec<PathKey> {
         ressortgroupref: item.ressortgroupref,
         descending: item.descending,
         nulls_first: item.nulls_first,
+        collation_oid: item.collation_oid,
     }));
     pathkeys
 }

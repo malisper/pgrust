@@ -1005,6 +1005,7 @@ pub(super) fn estimate_index_candidate(
                         ressortgroupref: item.ressortgroupref,
                         descending: item.descending,
                         nulls_first: item.nulls_first,
+                        collation_oid: item.collation_oid,
                     })
                     .collect()
             })
@@ -1393,7 +1394,10 @@ fn expr_uses_immediate_outer_columns(expr: &Expr) -> bool {
             expr_uses_immediate_outer_columns(&saop.left)
                 || expr_uses_immediate_outer_columns(&saop.right)
         }
-        Expr::Cast(inner, _) | Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => {
             expr_uses_immediate_outer_columns(inner)
         }
         Expr::Like {
@@ -2020,7 +2024,9 @@ fn histogram_fraction(hist: &ArrayValue, constant: &Value) -> f64 {
     }
     let bins = (hist.elements.len() - 1) as f64;
     for (idx, value) in hist.elements.iter().enumerate() {
-        match compare_order_values(value, constant, None, false) {
+        match compare_order_values(value, constant, None, None, false)
+            .expect("optimizer histogram comparisons use implicit default collation")
+        {
             Ordering::Greater => {
                 return (idx.saturating_sub(1) as f64 / bins).clamp(0.0, 1.0);
             }
@@ -2057,7 +2063,9 @@ fn slot_numbers(row: &PgStatisticRow, kind: i16) -> Option<ArrayValue> {
 }
 
 fn values_equal(left: &Value, right: &Value) -> bool {
-    compare_order_values(left, right, None, false) == Ordering::Equal
+    compare_order_values(left, right, None, None, false)
+        .expect("optimizer equality checks use implicit default collation")
+        == Ordering::Equal
 }
 
 fn float_value(value: &Value) -> Option<f64> {
