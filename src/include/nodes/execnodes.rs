@@ -338,8 +338,10 @@ impl std::fmt::Debug for SeqScanState {
 
 pub struct IndexScanState {
     pub(crate) rel: RelFileLocator,
+    pub(crate) relation_name: String,
     pub(crate) toast_relation: Option<ToastRelationRef>,
     pub(crate) index_rel: RelFileLocator,
+    pub(crate) index_name: String,
     pub(crate) am_oid: u32,
     pub(crate) column_names: Vec<String>,
     pub(crate) desc: Rc<RelationDesc>,
@@ -362,7 +364,9 @@ impl std::fmt::Debug for IndexScanState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IndexScanState")
             .field("rel", &self.rel)
+            .field("relation_name", &self.relation_name)
             .field("index_rel", &self.index_rel)
+            .field("index_name", &self.index_name)
             .field("am_oid", &self.am_oid)
             .finish()
     }
