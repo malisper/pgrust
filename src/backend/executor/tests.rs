@@ -2469,6 +2469,71 @@ fn explain_returns_plan_lines() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn explain_scan_filter_renders_single_seq_scan_line() {
+    let base = temp_dir("explain_single_scan_filter");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "explain (costs off) select * from people where id > 1",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                rendered
+                    .iter()
+                    .filter(|line| line.contains("Seq Scan on people"))
+                    .count(),
+                1,
+                "expected one Seq Scan line, got {rendered:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn explain_const_false_scan_filter_uses_one_time_filter() {
+    let base = temp_dir("explain_const_false_scan_filter");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "explain (costs off) select * from people where nullif(1, 2) = 2",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(rendered.iter().any(|line| line.as_str() == "Result"));
+            assert!(rendered.iter().any(|line| line.trim() == "One-Time Filter: false"));
+            assert!(
+                !rendered.iter().any(|line| line.contains("Seq Scan")),
+                "expected Result-only explain, got {rendered:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
 #[test]
 fn select_without_from_returns_constant_row() {
     let base = temp_dir("select_without_from");

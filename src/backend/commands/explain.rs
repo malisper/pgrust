@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::backend::executor::executor_start;
+use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::*;
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
@@ -60,6 +61,13 @@ pub(crate) fn format_explain_plan_with_subplans(
     show_costs: bool,
     lines: &mut Vec<String>,
 ) {
+    if let Some(plan_info) = const_false_filter_result_plan(plan) {
+        let prefix = "  ".repeat(indent);
+        push_explain_line(&format!("{prefix}Result"), plan_info, show_costs, lines);
+        lines.push(format!("{prefix}  One-Time Filter: false"));
+        return;
+    }
+
     if let Some(child) = explain_passthrough_plan_child(plan) {
         format_explain_plan_with_subplans(child, subplans, indent, show_costs, lines);
         return;
@@ -173,8 +181,8 @@ fn direct_plan_children(plan: &Plan) -> Vec<&Plan> {
         | Plan::WorkTableScan { .. }
         | Plan::Values { .. } => Vec::new(),
         Plan::Append { children, .. } | Plan::SetOp { children, .. } => children.iter().collect(),
+        Plan::Filter { input, .. } if matches!(input.as_ref(), Plan::SeqScan { .. }) => Vec::new(),
         Plan::Hash { input, .. }
-        | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::Limit { input, .. }
         | Plan::Projection { input, .. }
@@ -185,6 +193,7 @@ fn direct_plan_children(plan: &Plan) -> Vec<&Plan> {
         | Plan::CteScan {
             cte_plan: input, ..
         } => vec![input.as_ref()],
+        Plan::Filter { input, .. } => vec![input.as_ref()],
         Plan::NestedLoopJoin { left, right, .. }
         | Plan::HashJoin { left, right, .. }
         | Plan::RecursiveUnion {
@@ -192,6 +201,17 @@ fn direct_plan_children(plan: &Plan) -> Vec<&Plan> {
             recursive: right,
             ..
         } => vec![left.as_ref(), right.as_ref()],
+    }
+}
+
+fn const_false_filter_result_plan(plan: &Plan) -> Option<PlanEstimate> {
+    match plan {
+        Plan::Filter {
+            plan_info,
+            input,
+            predicate: Expr::Const(Value::Bool(false)),
+        } if matches!(input.as_ref(), Plan::SeqScan { .. }) => Some(*plan_info),
+        _ => None,
     }
 }
 
