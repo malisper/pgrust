@@ -613,6 +613,9 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::ObjDescription => args.len() == 2,
             BuiltinScalarFunction::PgGetExpr => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::PgRelationIsPublishable => args.len() == 1,
+            BuiltinScalarFunction::PgIndexAmHasProperty => args.len() == 2,
+            BuiltinScalarFunction::PgIndexHasProperty => args.len() == 2,
+            BuiltinScalarFunction::PgIndexColumnHasProperty => args.len() == 3,
             BuiltinScalarFunction::PgSizePretty | BuiltinScalarFunction::PgSizeBytes => {
                 args.len() == 1
             }
@@ -1367,6 +1370,18 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_relation_is_publishable",
             BuiltinScalarFunction::PgRelationIsPublishable,
         ),
+        (
+            "pg_indexam_has_property",
+            BuiltinScalarFunction::PgIndexAmHasProperty,
+        ),
+        (
+            "pg_index_has_property",
+            BuiltinScalarFunction::PgIndexHasProperty,
+        ),
+        (
+            "pg_index_column_has_property",
+            BuiltinScalarFunction::PgIndexColumnHasProperty,
+        ),
         ("pg_advisory_lock", BuiltinScalarFunction::PgAdvisoryLock),
         (
             "pg_advisory_xact_lock",
@@ -1676,6 +1691,18 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("regrole_to_text", BuiltinScalarFunction::RegRoleToText),
         ("regroleout", BuiltinScalarFunction::RegRoleToText),
         ("pg_get_userbyid", BuiltinScalarFunction::PgGetUserById),
+        (
+            "pg_indexam_has_property",
+            BuiltinScalarFunction::PgIndexAmHasProperty,
+        ),
+        (
+            "pg_index_has_property",
+            BuiltinScalarFunction::PgIndexHasProperty,
+        ),
+        (
+            "pg_index_column_has_property",
+            BuiltinScalarFunction::PgIndexColumnHasProperty,
+        ),
         ("position", BuiltinScalarFunction::Position),
         ("strpos", BuiltinScalarFunction::Strpos),
         ("substring", BuiltinScalarFunction::Substring),
@@ -2029,6 +2056,15 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
             ));
         }
         for func in [
+            BuiltinScalarFunction::PgIndexAmHasProperty,
+            BuiltinScalarFunction::PgIndexHasProperty,
+            BuiltinScalarFunction::PgIndexColumnHasProperty,
+        ] {
+            if by_func.iter().all(|(candidate, _)| *candidate != func) {
+                by_func.push((func, SqlType::new(SqlTypeKind::Bool)));
+            }
+        }
+        for func in [
             BuiltinScalarFunction::Now,
             BuiltinScalarFunction::TransactionTimestamp,
             BuiltinScalarFunction::StatementTimestamp,
@@ -2095,6 +2131,9 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::ObjDescription
             | BuiltinScalarFunction::PgGetExpr
             | BuiltinScalarFunction::PgRelationIsPublishable
+            | BuiltinScalarFunction::PgIndexAmHasProperty
+            | BuiltinScalarFunction::PgIndexHasProperty
+            | BuiltinScalarFunction::PgIndexColumnHasProperty
             | BuiltinScalarFunction::PgSizePretty
             | BuiltinScalarFunction::PgSizeBytes
             | BuiltinScalarFunction::PgAdvisoryLock
