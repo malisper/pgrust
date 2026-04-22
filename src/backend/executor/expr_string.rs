@@ -1,6 +1,8 @@
 use super::ExecError;
 use super::expr_bit::render_bit_text;
-use super::expr_casts::{cast_value, parse_bytea_text, render_internal_char_text};
+use super::expr_casts::{
+    cast_value, numeric_input_would_overflow, parse_bytea_text, render_internal_char_text,
+};
 use super::expr_datetime::render_datetime_value_text;
 use super::expr_format::{to_char_float, to_char_int, to_char_numeric, to_number_numeric};
 use super::expr_ops::ensure_builtin_collation_supported;
@@ -243,6 +245,9 @@ fn trunc_divide_numeric_by_pow2(value: &NumericValue, bits: u8) -> NumericValue 
 
 fn parse_size_bytes_numeric(input: &str) -> Result<NumericValue, ExecError> {
     let (number_text, unit_text) = split_size_bytes_input(input)?;
+    if numeric_input_would_overflow(number_text) {
+        return Err(size_numeric_overflow_error());
+    }
     let mut parsed = match cast_value(
         Value::Text(number_text.into()),
         SqlType::new(SqlTypeKind::Numeric),
@@ -356,6 +361,15 @@ fn invalid_size_unit_error(input: &str, unit: &str) -> ExecError {
                 .into(),
         ),
         sqlstate: "22023",
+    }
+}
+
+fn size_numeric_overflow_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "value overflows numeric format".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22003",
     }
 }
 

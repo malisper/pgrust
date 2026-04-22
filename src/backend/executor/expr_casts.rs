@@ -216,6 +216,27 @@ fn numeric_typmod_infinity_error(precision: i32, scale: i32) -> ExecError {
 }
 
 fn parse_numeric_input_exponent(text: &str) -> Option<i32> {
+    let (negative, normalized) = parse_numeric_input_exponent_digits(text)?;
+    let value = normalized.parse::<i32>().ok()?;
+    Some(if negative { -value } else { value })
+}
+
+fn numeric_input_exponent_would_overflow(text: &str) -> bool {
+    let Some((negative, normalized)) = parse_numeric_input_exponent_digits(text) else {
+        return false;
+    };
+    let limit = if negative {
+        i32::MIN.unsigned_abs().to_string()
+    } else {
+        i32::MAX.to_string()
+    };
+    if normalized.len() != limit.len() {
+        return normalized.len() > limit.len();
+    }
+    normalized > limit
+}
+
+fn parse_numeric_input_exponent_digits(text: &str) -> Option<(bool, String)> {
     let (negative, digits) = if let Some(rest) = text.strip_prefix('-') {
         (true, rest)
     } else if let Some(rest) = text.strip_prefix('+') {
@@ -234,8 +255,7 @@ fn parse_numeric_input_exponent(text: &str) -> Option<i32> {
     if normalized.is_empty() || !normalized.chars().all(|ch| ch.is_ascii_digit()) {
         return None;
     }
-    let value = normalized.parse::<i32>().ok()?;
-    Some(if negative { -value } else { value })
+    Some((negative, normalized))
 }
 
 fn normalize_numeric_input_digits(
@@ -256,7 +276,7 @@ fn normalize_numeric_input_digits(
     Some(normalized)
 }
 
-fn numeric_input_would_overflow(text: &str) -> bool {
+pub(crate) fn numeric_input_would_overflow(text: &str) -> bool {
     let trimmed = text.trim();
     if trimmed.is_empty()
         || trimmed.eq_ignore_ascii_case("nan")
@@ -310,6 +330,9 @@ fn numeric_input_would_overflow(text: &str) -> bool {
     let (mantissa, exponent) = match trimmed.find(['e', 'E']) {
         Some(index) => {
             let Some(exponent) = parse_numeric_input_exponent(&trimmed[index + 1..]) else {
+                if numeric_input_exponent_would_overflow(&trimmed[index + 1..]) {
+                    return true;
+                }
                 return false;
             };
             (&trimmed[..index], exponent)
