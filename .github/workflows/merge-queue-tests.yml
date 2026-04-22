@@ -40,19 +40,19 @@ jobs:
 
       - name: Run sharded cargo tests
         run: |
-          mkdir -p target/nextest
           cargo nextest run \
             --locked \
             --lib \
+            --profile ci \
             --partition "hash:${{ matrix.shard }}/${TOTAL_SHARDS}" \
-            --junit-report "target/nextest/junit-shard-${{ matrix.shard }}.xml"
+            --config-file .config/nextest.toml
 
       - name: Upload JUnit timing report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: junit-shard-${{ matrix.shard }}
-          path: target/nextest/junit-shard-${{ matrix.shard }}.xml
+          path: target/nextest/ci/junit.xml
           if-no-files-found: error
           retention-days: 14
 
