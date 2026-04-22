@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::backend::access::common::toast_compression::compression_name;
 use crate::backend::utils::misc::notices::push_notice;
 
 use super::create_table::{LoweredCreateTable, lower_create_table};
@@ -148,6 +149,7 @@ fn merge_inherited_columns(
                 name: column.name.clone(),
                 ty: RawTypeName::Builtin(column.sql_type),
                 default_expr: column.default_expr.clone(),
+                compression: Some(column.storage.attcompression),
                 constraints: inherited_constraints_for_parent(column),
             };
             if let Some(index) = column_lookup.get(&normalized).copied() {
@@ -202,6 +204,11 @@ fn merge_parent_column(
     parent: &crate::backend::parser::ColumnDef,
 ) -> Result<(), ParseError> {
     ensure_matching_column_type(&merged.column.name, &merged.column.ty, &parent.ty)?;
+    ensure_matching_column_compression(
+        &merged.column.name,
+        merged.column.compression,
+        parent.compression,
+    )?;
     push_notice(format!(
         "merging multiple inherited definitions of column \"{}\"",
         merged.column.name
@@ -229,6 +236,14 @@ fn merge_local_column(
         ));
     }
     merged.attislocal = true;
+    if let Some(local_compression) = local.compression {
+        ensure_matching_column_compression(
+            &merged.column.name,
+            merged.column.compression,
+            Some(local_compression),
+        )?;
+        merged.column.compression = Some(local_compression);
+    }
     if let Some(attributes) = local_not_null_constraint_attributes(local) {
         if merged.column.nullable() {
             merged.column.constraints.push(ColumnConstraint::NotNull {
@@ -319,6 +334,36 @@ fn ensure_matching_column_type(
         expected: "matching inherited column types",
         actual: format!("column {name} has incompatible inherited types"),
     })
+}
+
+fn ensure_matching_column_compression(
+    name: &str,
+    left: Option<crate::include::access::htup::AttributeCompression>,
+    right: Option<crate::include::access::htup::AttributeCompression>,
+) -> Result<(), ParseError> {
+    if left == right {
+        return Ok(());
+    }
+    Err(ParseError::DetailedError {
+        message: format!("column \"{name}\" has a compression method conflict"),
+        detail: Some(format!(
+            "{} versus {}",
+            format_column_compression(left),
+            format_column_compression(right)
+        )),
+        hint: None,
+        sqlstate: "42P16",
+    })
+}
+
+fn format_column_compression(
+    compression: Option<crate::include::access::htup::AttributeCompression>,
+) -> &'static str {
+    compression
+        .map(compression_name)
+        .unwrap_or(compression_name(
+            crate::include::access::htup::AttributeCompression::Default,
+        ))
 }
 
 fn merge_parent_default(current: &mut Option<String>, incoming: Option<&str>) -> bool {
