@@ -690,7 +690,7 @@ fn build_update_target(
         .map(|check| RlsWriteCheck {
             expr: rewrite_local_vars_for_output_exprs(check.expr.clone(), 1, &translation_exprs),
             policy_name: check.policy_name.clone(),
-            source: check.source,
+            source: check.source.clone(),
         })
         .collect();
 
@@ -851,7 +851,23 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
             stmt.returning,
             &resolved.visible_output_exprs,
         ),
-        rls_write_checks: stmt.rls_write_checks,
+        rls_write_checks: stmt
+            .rls_write_checks
+            .into_iter()
+            .chain(
+                resolved
+                    .view_check_options
+                    .iter()
+                    .cloned()
+                    .map(|check| RlsWriteCheck {
+                        expr: check.expr,
+                        policy_name: None,
+                        source: crate::backend::rewrite::RlsWriteCheckSource::ViewCheckOption(
+                            check.view_name,
+                        ),
+                    }),
+            )
+            .collect(),
         subplans: stmt.subplans,
     })
 }
@@ -929,6 +945,26 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
             .map_err(|err| ViewDmlRewriteError::UnsupportedViewShape(err.to_string()))
         })
         .collect::<Result<Vec<_>, ViewDmlRewriteError>>()?;
+
+    let targets = targets
+        .into_iter()
+        .map(|mut target| {
+            target.rls_write_checks.extend(
+                resolved
+                    .view_check_options
+                    .iter()
+                    .cloned()
+                    .map(|check| RlsWriteCheck {
+                        expr: check.expr,
+                        policy_name: None,
+                        source: crate::backend::rewrite::RlsWriteCheckSource::ViewCheckOption(
+                            check.view_name,
+                        ),
+                    }),
+            );
+            target
+        })
+        .collect();
 
     Ok(BoundUpdateStatement {
         targets,

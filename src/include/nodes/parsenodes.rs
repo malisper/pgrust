@@ -1164,6 +1164,15 @@ pub struct CreateViewStatement {
     pub view_name: String,
     pub query: SelectStatement,
     pub query_sql: String,
+    pub or_replace: bool,
+    pub check_option: ViewCheckOption,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewCheckOption {
+    None,
+    Local,
+    Cascaded,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

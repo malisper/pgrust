@@ -10,11 +10,12 @@ use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{Query, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{BoolExprType, Expr, RelationDesc};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RlsWriteCheckSource {
     Insert,
     Update,
     SelectVisibility,
+    ViewCheckOption(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -362,7 +363,7 @@ fn write_policy_checks(
         checks.push(RlsWriteCheck {
             expr: permissive_expr,
             policy_name: None,
-            source,
+            source: source.clone(),
         });
     }
 
@@ -392,7 +393,7 @@ fn write_policy_checks(
         checks.push(RlsWriteCheck {
             expr,
             policy_name: Some(policy.polname.clone()),
-            source,
+            source: source.clone(),
         });
     }
 

@@ -3,8 +3,10 @@ use std::collections::BTreeSet;
 use crate::backend::parser::{
     BoundRelation, CatalogLookup, ParseError, rewrite_local_vars_for_output_exprs,
 };
-use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntryKind, SelectStatement};
-use crate::include::nodes::primnodes::{Expr, RelationDesc, attrno_index, is_system_attr};
+use crate::include::nodes::parsenodes::{
+    JoinTreeNode, Query, RangeTblEntryKind, SelectStatement, ViewCheckOption,
+};
+use crate::include::nodes::primnodes::{attrno_index, is_system_attr, Expr, RelationDesc};
 
 use super::views::{load_view_return_query, load_view_return_select};
 
@@ -52,6 +54,14 @@ pub(crate) struct ResolvedAutoViewTarget {
     pub(crate) visible_output_exprs: Vec<Expr>,
     pub(crate) combined_predicate: Option<Expr>,
     pub(crate) updatable_column_map: Vec<Option<usize>>,
+    pub(crate) all_view_predicates: Vec<ViewCheck>,
+    pub(crate) view_check_options: Vec<ViewCheck>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ViewCheck {
+    pub(crate) view_name: String,
+    pub(crate) expr: Expr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,12 +118,26 @@ pub(crate) fn resolve_auto_updatable_view_target(
     };
 
     if analyzed.base_relkind == 'r' {
+        let mut view_check_options = Vec::new();
+        if matches!(
+            view_check_option(catalog, relation_oid),
+            ViewCheckOption::Local | ViewCheckOption::Cascaded
+        )
+            && let Some(predicate) = query.where_qual.clone()
+        {
+            view_check_options.push(ViewCheck {
+                view_name: display_name.clone(),
+                expr: predicate,
+            });
+        }
         return Ok(ResolvedAutoViewTarget {
             base_relation,
             base_inh: analyzed.base_inh,
             visible_output_exprs: analyzed.output_exprs,
             combined_predicate: query.where_qual.clone(),
             updatable_column_map: analyzed.updatable_column_map,
+            all_view_predicates: view_check_options.clone(),
+            view_check_options,
         });
     }
     if analyzed.base_relkind != 'v' {
@@ -131,6 +155,15 @@ pub(crate) fn resolve_auto_updatable_view_target(
         catalog,
         &next_views,
     )?;
+    let ResolvedAutoViewTarget {
+        base_relation,
+        base_inh,
+        visible_output_exprs: nested_visible_output_exprs,
+        combined_predicate: nested_combined_predicate,
+        updatable_column_map: nested_updatable_column_map,
+        all_view_predicates: nested_all_view_predicates,
+        view_check_options: nested_view_check_options,
+    } = nested;
     let output_exprs = analyzed
         .output_exprs
         .into_iter()
@@ -138,33 +171,88 @@ pub(crate) fn resolve_auto_updatable_view_target(
             rewrite_local_vars_for_output_exprs(
                 expr,
                 analyzed.base_rtindex,
-                &nested.visible_output_exprs,
+                &nested_visible_output_exprs,
             )
         })
         .collect::<Vec<_>>();
-    let local_predicate = query.where_qual.map(|expr| {
+    let local_predicate = query.where_qual.clone().map(|expr| {
         rewrite_local_vars_for_output_exprs(
             expr,
             analyzed.base_rtindex,
-            &nested.visible_output_exprs,
+            &nested_visible_output_exprs,
         )
     });
-    let combined_predicate = and_predicates(local_predicate, nested.combined_predicate);
+    let current_view_name = display_name.clone();
+    let combined_predicate = and_predicates(local_predicate.clone(), nested_combined_predicate);
+    let local_view_check = combined_predicate
+        .as_ref()
+        .and_then(|_| query.where_qual.as_ref())
+        .map(|expr| ViewCheck {
+            view_name: current_view_name,
+            expr: rewrite_local_vars_for_output_exprs(
+                expr.clone(),
+                analyzed.base_rtindex,
+                &nested_visible_output_exprs,
+            ),
+        });
     let updatable_column_map = analyzed
         .updatable_column_map
         .into_iter()
         .map(|column| {
-            column.and_then(|index| nested.updatable_column_map.get(index).copied().flatten())
+            column.and_then(|index| nested_updatable_column_map.get(index).copied().flatten())
         })
         .collect();
+    let mut all_view_predicates = nested_all_view_predicates;
+    if let Some(local_check) = local_view_check.clone() {
+        all_view_predicates.push(local_check);
+    }
+    let view_check_options = combine_view_checks(
+        nested_view_check_options,
+        &all_view_predicates,
+        local_view_check,
+        view_check_option(catalog, relation_oid),
+    );
 
     Ok(ResolvedAutoViewTarget {
-        base_relation: nested.base_relation,
-        base_inh: nested.base_inh,
+        base_relation,
+        base_inh,
         visible_output_exprs: output_exprs,
         combined_predicate,
         updatable_column_map,
+        all_view_predicates,
+        view_check_options,
     })
+}
+
+fn combine_view_checks(
+    nested_checks: Vec<ViewCheck>,
+    all_view_predicates: &[ViewCheck],
+    local_check: Option<ViewCheck>,
+    check_option: ViewCheckOption,
+) -> Vec<ViewCheck> {
+    let mut checks = nested_checks;
+    if matches!(check_option, ViewCheckOption::Cascaded) {
+        for predicate in all_view_predicates {
+            if !checks.iter().any(|check| check.view_name == predicate.view_name) {
+                checks.push(predicate.clone());
+            }
+        }
+    } else if let Some(local_check) = local_check {
+        if !checks.iter().any(|check| check.view_name == local_check.view_name) {
+            checks.push(local_check);
+        }
+    }
+    checks
+}
+
+fn view_check_option(catalog: &dyn CatalogLookup, relation_oid: u32) -> ViewCheckOption {
+    let sql = catalog
+        .rewrite_rows_for_relation(relation_oid)
+        .into_iter()
+        .find(|row| row.rulename == "_RETURN")
+        .map(|row| row.ev_action)
+        .unwrap_or_default();
+    crate::backend::rewrite::split_stored_view_definition_sql(&sql).1
 }
 
 struct SimpleViewAnalysis {
