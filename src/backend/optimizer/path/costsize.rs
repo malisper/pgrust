@@ -9,9 +9,8 @@ use crate::backend::storage::smgr::BLCKSZ;
 use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::access::htup::SIZEOF_HEAP_TUPLE_HEADER;
 use crate::include::catalog::{
-    BTREE_AM_OID, GIST_AM_OID, PgStatisticRow, bootstrap_pg_operator_rows,
-    builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
-    relkind_has_storage,
+    BTREE_AM_OID, GIST_AM_OID, SPGIST_AM_OID, PgStatisticRow, bootstrap_pg_operator_rows,
+    builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function, relkind_has_storage,
 };
 use crate::include::nodes::datum::ArrayValue;
 use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, PlannerInfo, RestrictInfo};
@@ -30,6 +29,10 @@ use super::super::{
     STATISTIC_KIND_HISTOGRAM, STATISTIC_KIND_MCV, path_relids, relids_subset,
 };
 use super::gistcost::estimate_gist_scan_cost;
+
+fn is_gist_like_am(am_oid: u32) -> bool {
+    am_oid == GIST_AM_OID || am_oid == SPGIST_AM_OID
+}
 
 pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
     if plan.plan_info() != PlanEstimate::default() {
@@ -977,7 +980,7 @@ pub(super) fn estimate_index_candidate(
         .product::<f64>()
         .clamp(0.0, 1.0);
     let index_rows = clamp_rows(stats.reltuples * used_sel);
-    let (startup_cost, base_cost) = if spec.index.index_meta.am_oid == GIST_AM_OID {
+    let (startup_cost, base_cost) = if is_gist_like_am(spec.index.index_meta.am_oid) {
         estimate_gist_scan_cost(
             index_pages,
             index_rows,
@@ -1793,7 +1796,7 @@ pub(super) fn build_index_path_spec(
         .collect::<Vec<_>>();
     let (keys, used_indexes, equality_prefix) = match index.index_meta.am_oid {
         BTREE_AM_OID => build_btree_index_keys(index, &parsed_quals),
-        GIST_AM_OID => {
+        GIST_AM_OID | SPGIST_AM_OID => {
             let (keys, used_indexes) = build_gist_index_keys(index, &parsed_quals);
             (keys, used_indexes, 0)
         }
@@ -1808,7 +1811,7 @@ pub(super) fn build_index_path_spec(
             Vec::new(),
             order_items.and_then(|items| index_order_match(items, index, equality_prefix)),
         )
-    } else if index.index_meta.am_oid == GIST_AM_OID {
+    } else if is_gist_like_am(index.index_meta.am_oid) {
         gist_order_match(order_items.unwrap_or(&[]), index)
     } else {
         (Vec::new(), None)
@@ -2378,7 +2381,7 @@ fn qual_strategy(
                 value_type_oid(&qual.argument),
             )
             .or_else(|| {
-                (index.index_meta.am_oid == GIST_AM_OID)
+                is_gist_like_am(index.index_meta.am_oid)
                     .then(|| gist_builtin_strategy(proc_oid, &qual.argument))
                     .flatten()
             }),
@@ -2605,7 +2608,7 @@ fn gist_order_match(
     Vec<crate::include::access::scankey::ScanKeyData>,
     Option<(usize, crate::include::access::relscan::ScanDirection)>,
 ) {
-    if items.is_empty() || index.index_meta.am_oid != GIST_AM_OID {
+    if items.is_empty() || !is_gist_like_am(index.index_meta.am_oid) {
         return (Vec::new(), None);
     }
     let mut keys = Vec::with_capacity(items.len());

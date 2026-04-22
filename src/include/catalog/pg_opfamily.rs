@@ -3,6 +3,7 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, BTREE_AM_OID, GIST_AM_OID, PG_CATALOG_NAMESPACE_OID,
+    SPGIST_AM_OID,
 };
 
 pub const BTREE_INTEGER_FAMILY_OID: u32 = 1976;
@@ -23,6 +24,7 @@ pub const GIST_BOX_FAMILY_OID: u32 = 2593;
 pub const GIST_POLY_FAMILY_OID: u32 = 2594;
 pub const GIST_CIRCLE_FAMILY_OID: u32 = 2595;
 pub const GIST_RANGE_FAMILY_OID: u32 = 3919;
+pub const SPGIST_BOX_FAMILY_OID: u32 = 4001;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgOpfamilyRow {
@@ -170,6 +172,13 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
             oid: GIST_RANGE_FAMILY_OID,
             opfmethod: GIST_AM_OID,
             opfname: "range_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
+            oid: SPGIST_BOX_FAMILY_OID,
+            opfmethod: SPGIST_AM_OID,
+            opfname: "box_ops".into(),
             opfnamespace: PG_CATALOG_NAMESPACE_OID,
             opfowner: BOOTSTRAP_SUPERUSER_OID,
         },

@@ -11,8 +11,9 @@ use crate::include::catalog::{
     GIST_TRANSLATE_CMPTYPE_COMMON_PROC_OID, INT4_CMP_EQ_PROC_OID, INT4_TYPE_OID,
     INT4RANGE_TYPE_OID, INT8RANGE_TYPE_OID, NUMRANGE_TYPE_OID, RANGE_GIST_CONSISTENT_PROC_OID,
     RANGE_GIST_PENALTY_PROC_OID, RANGE_GIST_PICKSPLIT_PROC_OID, RANGE_GIST_SAME_PROC_OID,
-    RANGE_GIST_UNION_PROC_OID, RANGE_SORTSUPPORT_PROC_OID, TEXT_CMP_EQ_PROC_OID, TEXT_TYPE_OID,
-    TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID, VARBIT_CMP_EQ_PROC_OID, VARBIT_TYPE_OID,
+    RANGE_GIST_UNION_PROC_OID, RANGE_SORTSUPPORT_PROC_OID, SPGIST_BOX_FAMILY_OID,
+    TEXT_CMP_EQ_PROC_OID, TEXT_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID,
+    VARBIT_CMP_EQ_PROC_OID, VARBIT_TYPE_OID,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,6 +93,33 @@ pub fn bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
     rows.push(PgAmprocRow {
         oid,
         amprocfamily: GIST_BOX_FAMILY_OID,
+        amproclefttype: ANYOID,
+        amprocrighttype: ANYOID,
+        amprocnum: 12,
+        amproc: GIST_TRANSLATE_CMPTYPE_COMMON_PROC_OID,
+    });
+    oid = oid.saturating_add(1);
+    for (procnum, proc_oid) in [
+        (1_i16, GIST_BOX_CONSISTENT_PROC_OID),
+        (2, GIST_BOX_UNION_PROC_OID),
+        (5, GIST_BOX_PENALTY_PROC_OID),
+        (6, GIST_BOX_PICKSPLIT_PROC_OID),
+        (7, GIST_BOX_SAME_PROC_OID),
+        (8, GIST_BOX_DISTANCE_PROC_OID),
+    ] {
+        rows.push(PgAmprocRow {
+            oid,
+            amprocfamily: SPGIST_BOX_FAMILY_OID,
+            amproclefttype: BOX_TYPE_OID,
+            amprocrighttype: BOX_TYPE_OID,
+            amprocnum: procnum,
+            amproc: proc_oid,
+        });
+        oid = oid.saturating_add(1);
+    }
+    rows.push(PgAmprocRow {
+        oid,
+        amprocfamily: SPGIST_BOX_FAMILY_OID,
         amproclefttype: ANYOID,
         amprocrighttype: ANYOID,
         amprocnum: 12,

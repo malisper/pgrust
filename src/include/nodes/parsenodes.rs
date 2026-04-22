@@ -39,6 +39,10 @@ pub enum ParseError {
     TableAlreadyExists(String),
     TableDoesNotExist(String),
     UnsupportedType(String),
+    MissingDefaultOpclass {
+        access_method: String,
+        type_name: String,
+    },
     WindowingError(String),
     UndefinedOperator {
         op: &'static str,
@@ -140,6 +144,13 @@ impl fmt::Display for ParseError {
                 write!(f, "relation \"{name}\" does not exist")
             }
             ParseError::UnsupportedType(name) => write!(f, "type \"{name}\" does not exist"),
+            ParseError::MissingDefaultOpclass {
+                access_method,
+                type_name,
+            } => write!(
+                f,
+                "data type {type_name} has no default operator class for access method \"{access_method}\""
+            ),
             ParseError::WindowingError(message) => write!(f, "{message}"),
             ParseError::UndefinedOperator {
                 op,
@@ -277,6 +288,14 @@ mod tests {
         assert_eq!(
             ParseError::UnsupportedType("widget".into()).to_string(),
             "type \"widget\" does not exist"
+        );
+        assert_eq!(
+            ParseError::MissingDefaultOpclass {
+                access_method: "spgist".into(),
+                type_name: "box".into(),
+            }
+            .to_string(),
+            "data type box has no default operator class for access method \"spgist\""
         );
     }
 }
