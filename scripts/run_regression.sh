@@ -73,6 +73,7 @@ transform_conversion_fixture() {
 
     perl -0pe "
         s/CREATE FUNCTION test_enc_setup\\(\\) RETURNS void\\n\\s+AS :'regresslib', 'test_enc_setup'\\n\\s+LANGUAGE C STRICT;\\nSELECT FROM test_enc_setup\\(\\);/SELECT pg_rust_test_enc_setup();/s;
+        s/SELECT pg_rust_test_enc_setup\\(\\);\\n--\\n\\(1 row\\)/SELECT pg_rust_test_enc_setup();\\n pg_rust_test_enc_setup \\n------------------------\\n \\n(1 row)/s;
         s/CREATE FUNCTION test_enc_conversion\\(bytea, name, name, bool, validlen OUT int, result OUT bytea\\)\\n\\s+AS :'regresslib', 'test_enc_conversion'\\n\\s+LANGUAGE C STRICT;\\n//s;
         s/\\btest_enc_conversion\\s*\\(/pg_rust_test_enc_conversion(/g;
         s/\\bcreate\\s+or\\s+replace\\s+function\\s+test_conv\\(/create function test_conv(/i;
