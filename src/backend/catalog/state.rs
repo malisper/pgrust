@@ -706,6 +706,7 @@ impl Catalog {
         &mut self,
         relation_oid: u32,
         conname: impl Into<String>,
+        conenforced: bool,
         convalidated: bool,
         conbin: impl Into<String>,
     ) -> Result<PgConstraintRow, CatalogError> {
@@ -732,7 +733,7 @@ impl Catalog {
             contype: crate::include::catalog::CONSTRAINT_CHECK,
             condeferrable: false,
             condeferred: false,
-            conenforced: true,
+            conenforced,
             convalidated,
             conrelid: relation_oid,
             contypid: 0,

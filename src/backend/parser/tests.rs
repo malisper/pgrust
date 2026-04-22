@@ -7279,6 +7279,21 @@ fn lower_create_table_rejects_invalid_key_constraints() {
 }
 
 #[test]
+fn lower_create_table_accepts_check_not_enforced() {
+    let stmt =
+        parse_statement("create table items (id int4 check (id > 0) not enforced)").unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+
+    let lowered = lower_create_table(&ct, &crate::backend::parser::analyze::LiteralDefaultCatalog)
+        .expect("lower create table");
+    assert_eq!(lowered.check_actions.len(), 1);
+    assert_eq!(lowered.check_actions[0].constraint_name, "items_id_check");
+    assert!(!lowered.check_actions[0].enforced);
+}
+
+#[test]
 fn lower_create_table_rejects_invalid_foreign_key_delete_set_columns() {
     let catalog = catalog_with_people_id_name_unique_index();
 
