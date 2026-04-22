@@ -4,8 +4,8 @@ use crate::backend::parser::{
     FunctionVolatility, OwnedSequenceSpec, SequenceOptionsSpec, SqlTypeKind, resolve_raw_type_name,
 };
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_PLPGSQL_OID,
-    PG_LANGUAGE_SQL_OID, PgProcRow, RECORD_TYPE_OID,
+    BOOTSTRAP_SUPERUSER_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID,
+    PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID, PgProcRow, RECORD_TYPE_OID,
 };
 use crate::include::nodes::parsenodes::{ForeignKeyAction, ForeignKeyMatchType};
 use crate::include::nodes::primnodes::{QueryColumn, ToastRelationRef};
@@ -540,16 +540,16 @@ impl Database {
             .language_row_by_name(&create_stmt.language)
             .ok_or_else(|| {
                 ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "LANGUAGE plpgsql or sql",
+                    expected: "LANGUAGE plpgsql, sql, or internal",
                     actual: format!("LANGUAGE {}", create_stmt.language),
                 })
             })?;
         if !matches!(
             language_row.oid,
-            PG_LANGUAGE_PLPGSQL_OID | PG_LANGUAGE_SQL_OID
+            PG_LANGUAGE_PLPGSQL_OID | PG_LANGUAGE_SQL_OID | PG_LANGUAGE_INTERNAL_OID
         ) {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "LANGUAGE plpgsql or sql",
+                expected: "LANGUAGE plpgsql, sql, or internal",
                 actual: format!("LANGUAGE {}", create_stmt.language),
             }));
         }

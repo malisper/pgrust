@@ -282,13 +282,25 @@ fn execute_statement_with_source(
             expected: "CREATE FUNCTION handled by database/session layer",
             actual: "CREATE FUNCTION".into(),
         })),
+        Statement::CreateOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "CREATE OPERATOR handled by database/session layer",
+            actual: "CREATE OPERATOR".into(),
+        })),
         Statement::DropFunction(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "DROP FUNCTION handled by database/session layer",
             actual: "DROP FUNCTION".into(),
         })),
+        Statement::DropOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "DROP OPERATOR handled by database/session layer",
+            actual: "DROP OPERATOR".into(),
+        })),
         Statement::CreateOperatorClass(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE OPERATOR CLASS handled by database/session layer",
             actual: "CREATE OPERATOR CLASS".into(),
+        })),
+        Statement::AlterOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER OPERATOR handled by database/session layer",
+            actual: "ALTER OPERATOR".into(),
         })),
         Statement::CreateDatabase(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE DATABASE handled by database/session layer",
@@ -465,13 +477,25 @@ pub fn execute_readonly_statement(
             expected: "read-only statement",
             actual: "CREATE FUNCTION".into(),
         })),
+        Statement::CreateOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "CREATE OPERATOR".into(),
+        })),
         Statement::DropFunction(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "DROP FUNCTION".into(),
         })),
+        Statement::DropOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "DROP OPERATOR".into(),
+        })),
         Statement::CreateOperatorClass(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE OPERATOR CLASS".into(),
+        })),
+        Statement::AlterOperator(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "ALTER OPERATOR".into(),
         })),
         Statement::CreateDatabase(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",

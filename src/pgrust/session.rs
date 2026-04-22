@@ -606,6 +606,24 @@ impl Session {
                     )
                 }
             }
+            Statement::CreateOperator(ref create_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_create_operator_stmt_with_search_path(
+                        self.client_id,
+                        create_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::DropFunction(ref drop_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -618,6 +636,24 @@ impl Session {
                 } else {
                     let search_path = self.configured_search_path();
                     db.execute_drop_function_stmt_with_search_path(
+                        self.client_id,
+                        drop_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::DropOperator(ref drop_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_drop_operator_stmt_with_search_path(
                         self.client_id,
                         drop_stmt,
                         search_path.as_deref(),
@@ -865,6 +901,24 @@ impl Session {
                 } else {
                     let search_path = self.configured_search_path();
                     db.execute_alter_publication_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::AlterOperator(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_operator_stmt_with_search_path(
                         self.client_id,
                         alter_stmt,
                         search_path.as_deref(),
@@ -1931,6 +1985,18 @@ impl Session {
                     catalog_effects,
                 )
             }
+            Statement::CreateOperator(ref create_stmt) => {
+                let search_path = self.configured_search_path();
+                let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                db.execute_create_operator_stmt_in_transaction_with_search_path(
+                    client_id,
+                    create_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    catalog_effects,
+                )
+            }
             Statement::AlterTableOwner(ref alter_stmt) => {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let relation = catalog
@@ -2851,14 +2917,8 @@ impl Session {
                 let catalog = self.catalog_lookup_for_command(db, xid, cid);
                 let bound = plan_merge(merge_stmt, &catalog)?;
                 let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
-                let mut ctx = self.executor_context_for_catalog(
-                    db,
-                    snapshot,
-                    cid,
-                    &catalog,
-                    None,
-                    None,
-                );
+                let mut ctx =
+                    self.executor_context_for_catalog(db, snapshot, cid, &catalog, None, None);
                 execute_merge(bound, &catalog, &mut ctx, xid, cid)
             }
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) => {
@@ -2866,14 +2926,8 @@ impl Session {
                 let search_path = self.configured_search_path();
                 let catalog =
                     db.lazy_catalog_lookup(client_id, Some((xid, cid)), search_path.as_deref());
-                let mut ctx = self.executor_context_for_catalog(
-                    db,
-                    snapshot,
-                    cid,
-                    &catalog,
-                    None,
-                    None,
-                );
+                let mut ctx =
+                    self.executor_context_for_catalog(db, snapshot, cid, &catalog, None, None);
                 execute_readonly_statement(stmt, &catalog, &mut ctx)
             }
             Statement::Insert(ref insert_stmt) => {
@@ -2998,6 +3052,18 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
+            Statement::AlterOperator(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_operator_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::CreateSchema(ref create_stmt) => {
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_create_schema_stmt_in_transaction_with_search_path(
@@ -3072,6 +3138,18 @@ impl Session {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_drop_function_stmt_in_transaction_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::DropOperator(ref drop_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_drop_operator_stmt_in_transaction_with_search_path(
                     client_id,
                     drop_stmt,
                     xid,

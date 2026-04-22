@@ -79,6 +79,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_drop_function_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_operator_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_create_operator_class_statement(&sql)? {
         return Ok(stmt);
     }
@@ -1012,6 +1015,7 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
             return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Char)));
         }
         "pg_node_tree" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::PgNodeTree))),
+        "internal" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Internal))),
         "trigger" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Trigger))),
         "void" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Void))),
         "fdw_handler" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::FdwHandler))),
@@ -1591,6 +1595,24 @@ fn try_parse_drop_function_statement(sql: &str) -> Result<Option<Statement>, Par
     Ok(Some(Statement::DropFunction(
         build_drop_function_statement(trimmed)?,
     )))
+}
+
+fn try_parse_operator_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("create operator ") && !lowered.starts_with("create operator class ") {
+        return build_create_operator_statement(trimmed)
+            .map(|stmt| Some(Statement::CreateOperator(stmt)));
+    }
+    if lowered.starts_with("alter operator ") {
+        return build_alter_operator_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterOperator(stmt)));
+    }
+    if lowered.starts_with("drop operator ") {
+        return build_drop_operator_statement(trimmed)
+            .map(|stmt| Some(Statement::DropOperator(stmt)));
+    }
+    Ok(None)
 }
 
 fn try_parse_create_operator_class_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
@@ -3340,6 +3362,66 @@ fn parse_qualified_sql_name(input: &str) -> Result<((Option<String>, String), &s
     Ok(((None, first), rest))
 }
 
+fn parse_operator_symbol(input: &str) -> Result<(String, &str), ParseError> {
+    let input = input.trim_start();
+    let mut end = 0usize;
+    for (index, ch) in input.char_indices() {
+        if ch.is_ascii_whitespace() || matches!(ch, '(' | ')' | ',') {
+            break;
+        }
+        end = index + ch.len_utf8();
+    }
+    if end == 0 {
+        return Err(ParseError::UnexpectedToken {
+            expected: "operator name",
+            actual: input.into(),
+        });
+    }
+    Ok((input[..end].to_string(), &input[end..]))
+}
+
+fn parse_operator_signature(
+    input: &str,
+) -> Result<(Option<RawTypeName>, Option<RawTypeName>, &str), ParseError> {
+    let (args_sql, rest) = take_parenthesized_segment(input.trim_start())?;
+    let parts = split_top_level_items(&args_sql, ',')?;
+    if parts.len() != 2 {
+        return Err(ParseError::UnexpectedToken {
+            expected: "(left_type, right_type)",
+            actual: args_sql,
+        });
+    }
+    let parse_arg = |value: &str| -> Result<Option<RawTypeName>, ParseError> {
+        let trimmed = value.trim();
+        if trimmed.eq_ignore_ascii_case("none") {
+            Ok(None)
+        } else {
+            Ok(Some(parse_type_name(trimmed)?))
+        }
+    };
+    Ok((parse_arg(&parts[0])?, parse_arg(&parts[1])?, rest))
+}
+
+fn parse_operator_function_ref(input: &str) -> Result<QualifiedNameRef, ParseError> {
+    let ((schema_name, name), rest) = parse_qualified_sql_name(input)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "function name",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(QualifiedNameRef { schema_name, name })
+}
+
+fn parse_optional_operator_arg_type(input: &str) -> Result<Option<RawTypeName>, ParseError> {
+    let trimmed = input.trim();
+    if trimmed.eq_ignore_ascii_case("none") {
+        Ok(None)
+    } else {
+        Ok(Some(parse_type_name(trimmed)?))
+    }
+}
+
 fn build_create_type_statement(sql: &str) -> Result<CreateTypeStatement, ParseError> {
     let prefix = "create type";
     let Some(rest) = sql.get(prefix.len()..) else {
@@ -3410,6 +3492,247 @@ fn build_create_type_statement(sql: &str) -> Result<CreateTypeStatement, ParseEr
             attributes,
         },
     ))
+}
+
+fn build_create_operator_statement(sql: &str) -> Result<CreateOperatorStatement, ParseError> {
+    let prefix = "create operator";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CREATE OPERATOR name (...)",
+            actual: sql.into(),
+        });
+    };
+    let rest = rest.trim_start();
+    let ((schema_name, operator_name), rest) =
+        if let Ok(((schema_name, name), rest)) = parse_qualified_sql_name(rest) {
+            ((schema_name, name), rest)
+        } else {
+            let (name, rest) = parse_operator_symbol(rest)?;
+            ((None, name), rest)
+        };
+    let (options_sql, rest) = take_parenthesized_segment(rest.trim_start())?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of statement",
+            actual: rest.trim().into(),
+        });
+    }
+
+    let mut left_arg = None;
+    let mut right_arg = None;
+    let mut procedure = None;
+    let mut commutator = None;
+    let mut negator = None;
+    let mut restrict = None;
+    let mut join = None;
+    let mut hashes = false;
+    let mut merges = false;
+
+    for item in split_top_level_items(&options_sql, ',')? {
+        let trimmed = item.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some((name_sql, value_sql)) = trimmed.split_once('=') {
+            let (option_name, rest) = parse_sql_identifier(name_sql)?;
+            if !rest.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "operator option name",
+                    actual: name_sql.trim().into(),
+                });
+            }
+            let value = value_sql.trim();
+            match option_name.as_str() {
+                "leftarg" => left_arg = parse_optional_operator_arg_type(value)?,
+                "rightarg" => right_arg = parse_optional_operator_arg_type(value)?,
+                "procedure" | "function" => procedure = Some(parse_operator_function_ref(value)?),
+                "commutator" => commutator = Some(parse_operator_symbol(value)?.0),
+                "negator" => negator = Some(parse_operator_symbol(value)?.0),
+                "restrict" => restrict = Some(parse_operator_function_ref(value)?),
+                "join" => join = Some(parse_operator_function_ref(value)?),
+                "hashes" => hashes = parse_publication_bool_value(value)?.0,
+                "merges" => merges = parse_publication_bool_value(value)?.0,
+                _ => {
+                    return Err(ParseError::FeatureNotSupported(format!(
+                        "unsupported CREATE OPERATOR option: {option_name}"
+                    )));
+                }
+            }
+            continue;
+        }
+
+        let (option_name, rest) = parse_sql_identifier(trimmed)?;
+        if !rest.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "operator option",
+                actual: trimmed.into(),
+            });
+        }
+        match option_name.as_str() {
+            "hashes" => hashes = true,
+            "merges" => merges = true,
+            _ => {
+                return Err(ParseError::FeatureNotSupported(format!(
+                    "unsupported CREATE OPERATOR option: {option_name}"
+                )));
+            }
+        }
+    }
+
+    Ok(CreateOperatorStatement {
+        schema_name,
+        operator_name,
+        left_arg,
+        right_arg,
+        procedure: procedure.ok_or(ParseError::UnexpectedToken {
+            expected: "PROCEDURE = function name",
+            actual: options_sql,
+        })?,
+        commutator,
+        negator,
+        restrict,
+        join,
+        hashes,
+        merges,
+    })
+}
+
+fn build_alter_operator_statement(sql: &str) -> Result<AlterOperatorStatement, ParseError> {
+    let prefix = "alter operator";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ALTER OPERATOR name (left_type, right_type) SET (...)",
+            actual: sql.into(),
+        });
+    };
+    let rest = rest.trim_start();
+    let (operator_name, rest) = parse_operator_symbol(rest)?;
+    let (left_arg, right_arg, rest) = parse_operator_signature(rest)?;
+    let rest = rest.trim_start();
+    if !keyword_at_start(rest, "set") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "SET",
+            actual: rest.into(),
+        });
+    }
+    let (options_sql, rest) =
+        take_parenthesized_segment(consume_keyword(rest, "set").trim_start())?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of statement",
+            actual: rest.trim().into(),
+        });
+    }
+    let options = split_top_level_items(&options_sql, ',')?
+        .into_iter()
+        .filter(|item| !item.trim().is_empty())
+        .map(parse_alter_operator_option)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(AlterOperatorStatement {
+        schema_name: None,
+        operator_name,
+        left_arg,
+        right_arg,
+        options,
+    })
+}
+
+fn parse_alter_operator_option(input: String) -> Result<AlterOperatorOption, ParseError> {
+    let trimmed = input.trim();
+    if let Some((name_sql, value_sql)) = trimmed.split_once('=') {
+        let (option_name, rest) = parse_sql_identifier(name_sql)?;
+        if !rest.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "operator attribute name",
+                actual: name_sql.trim().into(),
+            });
+        }
+        let value = value_sql.trim();
+        return Ok(match option_name.as_str() {
+            "restrict" => AlterOperatorOption::Restrict {
+                option_name,
+                function: if value.eq_ignore_ascii_case("none") {
+                    None
+                } else {
+                    Some(parse_operator_function_ref(value)?)
+                },
+            },
+            "join" => AlterOperatorOption::Join {
+                option_name,
+                function: if value.eq_ignore_ascii_case("none") {
+                    None
+                } else {
+                    Some(parse_operator_function_ref(value)?)
+                },
+            },
+            "commutator" => AlterOperatorOption::Commutator {
+                option_name,
+                operator_name: parse_operator_symbol(value)?.0,
+            },
+            "negator" => AlterOperatorOption::Negator {
+                option_name,
+                operator_name: parse_operator_symbol(value)?.0,
+            },
+            "merges" => AlterOperatorOption::Merges {
+                option_name,
+                enabled: parse_publication_bool_value(value)?.0,
+            },
+            "hashes" => AlterOperatorOption::Hashes {
+                option_name,
+                enabled: parse_publication_bool_value(value)?.0,
+            },
+            _ => AlterOperatorOption::Unrecognized { option_name },
+        });
+    }
+    let (option_name, rest) = parse_sql_identifier(trimmed)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "operator attribute name",
+            actual: trimmed.into(),
+        });
+    }
+    Ok(match option_name.as_str() {
+        "merges" => AlterOperatorOption::Merges {
+            option_name,
+            enabled: true,
+        },
+        "hashes" => AlterOperatorOption::Hashes {
+            option_name,
+            enabled: true,
+        },
+        _ => AlterOperatorOption::Unrecognized { option_name },
+    })
+}
+
+fn build_drop_operator_statement(sql: &str) -> Result<DropOperatorStatement, ParseError> {
+    let prefix = "drop operator";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "DROP OPERATOR name (left_type, right_type)",
+            actual: sql.into(),
+        });
+    };
+    let mut rest = rest.trim_start();
+    let mut if_exists = false;
+    if let Some(next) = consume_keywords(rest, &["if", "exists"]) {
+        if_exists = true;
+        rest = next.trim_start();
+    }
+    let (operator_name, rest_after_name) = parse_operator_symbol(rest)?;
+    let (left_arg, right_arg, rest) = parse_operator_signature(rest_after_name)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of statement",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(DropOperatorStatement {
+        if_exists,
+        schema_name: None,
+        operator_name,
+        left_arg,
+        right_arg,
+    })
 }
 
 fn build_create_operator_class_statement(
@@ -8354,6 +8677,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::TimestampTz => "timestamp with time zone",
         SqlTypeKind::TimestampTzRange => "tstzrange",
         SqlTypeKind::PgNodeTree => "pg_node_tree",
+        SqlTypeKind::Internal => "internal",
         SqlTypeKind::InternalChar => "char",
         SqlTypeKind::Char => "bpchar",
         SqlTypeKind::Varchar => "varchar",

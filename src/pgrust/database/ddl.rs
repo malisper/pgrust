@@ -614,6 +614,7 @@ pub(crate) fn format_sql_type_name(sql_type: SqlType) -> &'static str {
         SqlTypeKind::AnyCompatibleRange => "anycompatiblerange",
         SqlTypeKind::AnyCompatibleMultirange => "anycompatiblemultirange",
         SqlTypeKind::Record | SqlTypeKind::Composite => "record",
+        SqlTypeKind::Internal => "internal",
         SqlTypeKind::Trigger => "trigger",
         SqlTypeKind::Void => "void",
         SqlTypeKind::FdwHandler => "fdw_handler",
@@ -705,8 +706,9 @@ pub(super) fn normalize_statistics_target(
         });
     }
     Ok(NormalizedStatisticsTarget {
-        value: i16::try_from(statistics_target)
-            .map_err(|_| ExecError::Parse(ParseError::InvalidInteger(statistics_target.to_string())))?,
+        value: i16::try_from(statistics_target).map_err(|_| {
+            ExecError::Parse(ParseError::InvalidInteger(statistics_target.to_string()))
+        })?,
         warning: None,
     })
 }
@@ -907,22 +909,29 @@ pub(super) fn validate_alter_index_alter_column_statistics(
     column_number: i16,
     statistics_target: i32,
 ) -> Result<(String, NormalizedStatisticsTarget), ExecError> {
-    let index_meta = entry.index.as_ref().ok_or_else(|| ExecError::DetailedError {
-        message: format!("relation \"{index_name}\" is not an index"),
-        detail: None,
-        hint: None,
-        sqlstate: "42809",
-    })?;
+    let index_meta = entry
+        .index
+        .as_ref()
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("relation \"{index_name}\" is not an index"),
+            detail: None,
+            hint: None,
+            sqlstate: "42809",
+        })?;
     let column_index = usize::try_from(column_number - 1).unwrap_or(usize::MAX);
-    let column = entry.desc.columns.get(column_index).ok_or_else(|| ExecError::DetailedError {
-        message: format!(
-            "column number {} of relation \"{}\" does not exist",
-            column_number, index_name
-        ),
-        detail: None,
-        hint: None,
-        sqlstate: "42703",
-    })?;
+    let column = entry
+        .desc
+        .columns
+        .get(column_index)
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!(
+                "column number {} of relation \"{}\" does not exist",
+                column_number, index_name
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42703",
+        })?;
     if column_number > index_meta.indnkeyatts {
         return Err(ExecError::DetailedError {
             message: format!(

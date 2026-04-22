@@ -455,6 +455,12 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
+            Statement::CreateOperator(ref create_stmt) => self
+                .execute_create_operator_stmt_with_search_path(
+                    client_id,
+                    create_stmt,
+                    configured_search_path,
+                ),
             Statement::CreateOperatorClass(ref create_stmt) => self
                 .execute_create_operator_class_stmt_with_search_path(
                     client_id,
@@ -478,6 +484,12 @@ impl Database {
                 ),
             Statement::AlterPublication(ref alter_stmt) => self
                 .execute_alter_publication_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterOperator(ref alter_stmt) => self
+                .execute_alter_operator_stmt_with_search_path(
                     client_id,
                     alter_stmt,
                     configured_search_path,
@@ -512,7 +524,7 @@ impl Database {
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
-                    statement_lock_scope_id, 
+                    statement_lock_scope_id,
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -659,7 +671,7 @@ impl Database {
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
-                    statement_lock_scope_id, 
+                    statement_lock_scope_id,
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -726,7 +738,7 @@ impl Database {
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
-                    statement_lock_scope_id, 
+                    statement_lock_scope_id,
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -810,7 +822,7 @@ impl Database {
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
-                    statement_lock_scope_id, 
+                    statement_lock_scope_id,
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -895,7 +907,7 @@ impl Database {
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
-                    statement_lock_scope_id, 
+                    statement_lock_scope_id,
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -1042,11 +1054,18 @@ impl Database {
                 drop_stmt,
                 configured_search_path,
             ),
-            Statement::DropFunction(ref drop_stmt) => self.execute_drop_function_stmt_with_search_path(
-                client_id,
-                drop_stmt,
-                configured_search_path,
-            ),
+            Statement::DropFunction(ref drop_stmt) => self
+                .execute_drop_function_stmt_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    configured_search_path,
+                ),
+            Statement::DropOperator(ref drop_stmt) => self
+                .execute_drop_operator_stmt_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    configured_search_path,
+                ),
             Statement::DropConversion(ref drop_stmt) => self
                 .execute_drop_conversion_stmt_with_search_path(
                     client_id,
@@ -1201,7 +1220,7 @@ impl Database {
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
-                    statement_lock_scope_id, 
+                    statement_lock_scope_id,
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -1267,7 +1286,7 @@ impl Database {
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
-                    statement_lock_scope_id, 
+                    statement_lock_scope_id,
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,

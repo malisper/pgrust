@@ -506,6 +506,12 @@ fn array_element_layout(
                 details: "void arrays are unsupported".into(),
             });
         }
+        SqlTypeKind::Internal => {
+            return Err(ExecError::InvalidStorageValue {
+                column: column.into(),
+                details: "internal arrays are unsupported".into(),
+            });
+        }
         SqlTypeKind::Trigger => {
             return Err(ExecError::InvalidStorageValue {
                 column: column.into(),
@@ -815,6 +821,10 @@ fn decode_array_element_value(
         SqlTypeKind::Void => Err(ExecError::InvalidStorageValue {
             column: column.into(),
             details: "void arrays are unsupported".into(),
+        }),
+        SqlTypeKind::Internal => Err(ExecError::InvalidStorageValue {
+            column: column.into(),
+            details: "internal arrays are unsupported".into(),
         }),
         SqlTypeKind::Trigger => Err(ExecError::InvalidStorageValue {
             column: column.into(),
