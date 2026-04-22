@@ -327,7 +327,8 @@ fn parse_select_with_collate_expression() {
 
 #[test]
 fn parse_select_with_order_by_collate_and_ordinal() {
-    let stmt = parse_select("select name, note from people order by name collate \"C\", 2").unwrap();
+    let stmt =
+        parse_select("select name, note from people order by name collate \"C\", 2").unwrap();
     assert_eq!(stmt.order_by.len(), 2);
     assert_eq!(
         stmt.order_by[0].expr,
@@ -1850,10 +1851,23 @@ fn parse_alter_table_add_column_statement() {
                 name: "note".into(),
                 ty: builtin_type(SqlType::new(SqlTypeKind::Text)),
                 default_expr: Some("'hello'".into()),
+                compression: None,
                 constraints: vec![],
             },
         })
     );
+}
+
+#[test]
+fn parse_create_table_column_compression() {
+    let stmt = parse_statement("create table cmdata (f1 text compression pglz)").unwrap();
+    let Statement::CreateTable(create) = stmt else {
+        panic!("expected create table");
+    };
+    let columns = create.columns().collect::<Vec<_>>();
+    assert_eq!(columns.len(), 1);
+    assert_eq!(columns[0].name, "f1");
+    assert_eq!(columns[0].compression, Some(AttributeCompression::Pglz));
 }
 
 #[test]
@@ -2484,8 +2498,7 @@ fn parse_alter_index_rename_statement() {
 
 #[test]
 fn parse_alter_index_set_statistics_statement() {
-    let stmt =
-        parse_statement("alter index attmp_idx alter column 2 set statistics 1000").unwrap();
+    let stmt = parse_statement("alter index attmp_idx alter column 2 set statistics 1000").unwrap();
     assert_eq!(
         stmt,
         Statement::AlterIndexAlterColumnStatistics(AlterIndexAlterColumnStatisticsStatement {
@@ -2496,10 +2509,8 @@ fn parse_alter_index_set_statistics_statement() {
         })
     );
 
-    let stmt = parse_statement(
-        "alter index if exists attmp_idx alter column 2 set statistics -1",
-    )
-    .unwrap();
+    let stmt = parse_statement("alter index if exists attmp_idx alter column 2 set statistics -1")
+        .unwrap();
     assert_eq!(
         stmt,
         Statement::AlterIndexAlterColumnStatistics(AlterIndexAlterColumnStatisticsStatement {
@@ -4815,8 +4826,7 @@ fn build_plan_accepts_catalog_backed_text_array_casts() {
 #[test]
 fn analyze_interval_array_text_cast_keeps_outer_text_cast() {
     let stmt =
-        parse_select("select '{0 second,1 hour 42 minutes 20 seconds}'::interval[]::text")
-            .unwrap();
+        parse_select("select '{0 second,1 hour 42 minutes 20 seconds}'::interval[]::text").unwrap();
     let (query, _) =
         analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[]).unwrap();
     assert!(matches!(
@@ -5074,9 +5084,7 @@ fn parse_select_with_explicit_nulls_ordering() {
 
 #[test]
 fn build_plan_tracks_order_by_collation_for_aliases_and_ordinals() {
-    fn order_by_items(
-        plan: &Plan,
-    ) -> &[crate::include::nodes::primnodes::OrderByEntry] {
+    fn order_by_items(plan: &Plan) -> &[crate::include::nodes::primnodes::OrderByEntry] {
         match plan {
             Plan::Projection { input, .. }
             | Plan::Filter { input, .. }
@@ -5149,7 +5157,8 @@ fn build_plan_rejects_invalid_collation_usage() {
                 && sqlstate == "42804"
     ));
 
-    let stmt = parse_select("select name collate \"C\" = note collate \"POSIX\" from people").unwrap();
+    let stmt =
+        parse_select("select name collate \"C\" = note collate \"POSIX\" from people").unwrap();
     assert!(matches!(
         build_plan(&stmt, &catalog()),
         Err(ParseError::DetailedError { message, sqlstate, .. })
@@ -7886,7 +7895,10 @@ fn parse_array_and_unnest_expressions() {
 
     let stmt = parse_select("select ARRAY['a'] @> ARRAY['b'], ARRAY['a'] <@ ARRAY['b']").unwrap();
     assert!(matches!(stmt.targets[0].expr, SqlExpr::ArrayContains(_, _)));
-    assert!(matches!(stmt.targets[1].expr, SqlExpr::ArrayContained(_, _)));
+    assert!(matches!(
+        stmt.targets[1].expr,
+        SqlExpr::ArrayContained(_, _)
+    ));
 
     let stmt = parse_select("select '(0,0),(1,1)'::box && '(2,2),(3,3)'::box").unwrap();
     assert!(matches!(

@@ -2450,10 +2450,7 @@ fn build_alter_index_alter_column_statistics_statement(
         .map_err(|_| ParseError::InvalidInteger(column_number_sql.to_string()))?;
     if column_number_i32 <= 0 || column_number_i32 > i32::from(i16::MAX) {
         return Err(ParseError::DetailedError {
-            message: format!(
-                "column number must be in range from 1 to {}",
-                i16::MAX
-            ),
+            message: format!("column number must be in range from 1 to {}", i16::MAX),
             detail: None,
             hint: None,
             sqlstate: "22023",
@@ -4816,9 +4813,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             Ok(Statement::CommentOnTable(build_comment_on_table(inner)?))
         }
         Rule::comment_on_rule_stmt => Ok(Statement::CommentOnRule(build_comment_on_rule(inner)?)),
-        Rule::comment_on_trigger_stmt => {
-            Ok(Statement::CommentOnTrigger(build_comment_on_trigger(inner)?))
-        }
+        Rule::comment_on_trigger_stmt => Ok(Statement::CommentOnTrigger(build_comment_on_trigger(
+            inner,
+        )?)),
         Rule::create_schema_stmt => Ok(Statement::CreateSchema(build_create_schema(inner)?)),
         Rule::create_policy_stmt => Ok(Statement::CreatePolicy(build_create_policy_statement(
             inner.as_str(),
@@ -7675,7 +7672,9 @@ fn build_comment_on_trigger(pair: Pair<'_, Rule>) -> Result<CommentOnTriggerStat
     let mut comment = None;
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::identifier if trigger_name.is_none() => trigger_name = Some(build_identifier(part)),
+            Rule::identifier if trigger_name.is_none() => {
+                trigger_name = Some(build_identifier(part))
+            }
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::quoted_string_literal
             | Rule::string_literal
@@ -8444,6 +8443,7 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
         inner.next().ok_or(ParseError::UnexpectedEof)?,
     ))?;
     let mut default_expr = None;
+    let mut compression = None;
     let mut constraints = Vec::new();
     for flag in inner {
         let Some(flag) = (match flag.as_rule() {
@@ -8458,6 +8458,14 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
                     .into_inner()
                     .find(|part| part.as_rule() == Rule::expr)
                     .map(|expr| expr.as_str().to_string());
+            }
+            Rule::column_compression => {
+                let value = flag
+                    .into_inner()
+                    .last()
+                    .ok_or(ParseError::UnexpectedEof)?
+                    .as_str();
+                compression = Some(parse_attribute_compression(value)?);
             }
             Rule::nullable => {}
             Rule::named_column_constraint
@@ -8475,8 +8483,25 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
         name,
         ty,
         default_expr,
+        compression,
         constraints,
     })
+}
+
+fn parse_attribute_compression(
+    value: &str,
+) -> Result<crate::include::access::htup::AttributeCompression, ParseError> {
+    match value.to_ascii_lowercase().as_str() {
+        "default" => Ok(crate::include::access::htup::AttributeCompression::Default),
+        "pglz" => Ok(crate::include::access::htup::AttributeCompression::Pglz),
+        "lz4" => Ok(crate::include::access::htup::AttributeCompression::Lz4),
+        _ => Err(ParseError::DetailedError {
+            message: format!("invalid compression method \"{}\"", value),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        }),
+    }
 }
 
 fn canonicalize_column_type_name(ty: RawTypeName) -> Result<RawTypeName, ParseError> {
@@ -8874,17 +8899,7 @@ fn build_alter_table_alter_column_compression(
             Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
             Rule::identifier if column_name.is_none() => column_name = Some(build_identifier(part)),
             Rule::identifier => {
-                compression = Some(match build_identifier(part).to_ascii_lowercase().as_str() {
-                    "default" => crate::include::access::htup::AttributeCompression::Default,
-                    "pglz" => crate::include::access::htup::AttributeCompression::Pglz,
-                    "lz4" => crate::include::access::htup::AttributeCompression::Lz4,
-                    actual => {
-                        return Err(ParseError::UnexpectedToken {
-                            expected: "DEFAULT, PGLZ, or LZ4",
-                            actual: actual.to_string(),
-                        });
-                    }
-                });
+                compression = Some(parse_attribute_compression(&build_identifier(part))?);
             }
             Rule::kw_default => {
                 compression = Some(crate::include::access::htup::AttributeCompression::Default);

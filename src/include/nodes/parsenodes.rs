@@ -1989,6 +1989,7 @@ pub struct ColumnDef {
     pub name: String,
     pub ty: RawTypeName,
     pub default_expr: Option<String>,
+    pub compression: Option<crate::include::access::htup::AttributeCompression>,
     pub constraints: Vec<ColumnConstraint>,
 }
 
