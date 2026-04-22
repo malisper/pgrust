@@ -544,9 +544,13 @@ impl Session {
         db.install_row_security_enabled(self.client_id, self.row_security_enabled());
         db.install_temp_backend_id(self.client_id, self.temp_backend_id);
         db.install_stats_state(self.client_id, Arc::clone(&self.stats_state));
-        stacker::grow(32 * 1024 * 1024, || {
+        let result = stacker::grow(32 * 1024 * 1024, || {
             self.execute_internal(db, sql, statement_lock_scope.scope_id())
-        })
+        });
+        if matches!(result, Err(ExecError::Interrupted(_))) {
+            self.interrupts.reset_statement_state();
+        }
+        result
     }
 
     fn execute_internal(
@@ -1728,7 +1732,6 @@ impl Session {
         db: &'a Database,
         select_stmt: &SelectStatement,
     ) -> Result<SelectGuard<'a>, ExecError> {
-        let interrupt_guard = self.statement_interrupt_guard()?;
         db.install_auth_state(self.client_id, self.auth.clone());
         db.install_temp_backend_id(self.client_id, self.temp_backend_id);
         db.install_interrupt_state(self.client_id, self.interrupts());
@@ -1752,7 +1755,7 @@ impl Session {
             search_path.as_deref(),
             &self.datetime_config,
         )?;
-        guard.interrupt_guard = Some(interrupt_guard);
+        guard.interrupt_guard = Some(self.statement_interrupt_guard()?);
         Ok(guard)
     }
 
