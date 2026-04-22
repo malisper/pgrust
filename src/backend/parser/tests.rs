@@ -1586,6 +1586,30 @@ fn parse_comment_on_table_null_statement() {
 }
 
 #[test]
+fn parse_comment_on_index_statement() {
+    let stmt = parse_statement("comment on index public.items_idx is 'hello world'").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CommentOnIndex(CommentOnIndexStatement {
+            index_name: "public.items_idx".into(),
+            comment: Some("hello world".into()),
+        })
+    );
+}
+
+#[test]
+fn parse_comment_on_index_null_statement() {
+    let stmt = parse_statement("comment on index items_idx is null").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CommentOnIndex(CommentOnIndexStatement {
+            index_name: "items_idx".into(),
+            comment: None,
+        })
+    );
+}
+
+#[test]
 fn parse_comment_on_constraint_statement() {
     let stmt =
         parse_statement("comment on constraint items_pkey on public.items is 'hello'").unwrap();

@@ -1780,9 +1780,7 @@ fn advisory_session_and_transaction_locks_cleanup_and_encode_keys() {
         vec![vec![Value::Bool(false)]]
     );
 
-    session
-        .execute(&db, "select pg_advisory_unlock_all()")
-        .unwrap();
+    session.execute(&db, "select pg_advisory_unlock_all()").unwrap();
     assert_eq!(
         session_query_rows(
             &mut session,
@@ -1961,7 +1959,9 @@ fn advisory_session_and_xact_locks_on_same_key_do_not_block_same_backend() {
         ]
     );
 
-    session.execute(&db, "select pg_advisory_unlock_all()").unwrap();
+    session
+        .execute(&db, "select pg_advisory_unlock_all()")
+        .unwrap();
     session.execute(&db, "begin").unwrap();
     session
         .execute(
@@ -5519,6 +5519,71 @@ fn comment_on_table_upserts_and_clears_pg_description() {
         ),
         vec![vec![Value::Int64(0)]]
     );
+}
+
+#[test]
+fn comment_on_index_upserts_and_clears_pg_description() {
+    let base = temp_dir("comment_on_index");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null)")
+        .unwrap();
+    db.execute(1, "create index items_idx on items (id)")
+        .unwrap();
+    db.execute(1, "comment on index items_idx is 'hello world'")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select d.description \
+             from pg_description d \
+             join pg_class c on c.oid = d.objoid \
+             where c.relname = 'items_idx' and d.classoid = 1259 and d.objsubid = 0"
+        ),
+        vec![vec![Value::Text("hello world".into())]]
+    );
+
+    db.execute(1, "comment on index items_idx is 'second comment'")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select d.description \
+             from pg_description d \
+             join pg_class c on c.oid = d.objoid \
+             where c.relname = 'items_idx' and d.classoid = 1259 and d.objsubid = 0"
+        ),
+        vec![vec![Value::Text("second comment".into())]]
+    );
+
+    db.execute(1, "comment on index items_idx is null").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) \
+             from pg_description d \
+             join pg_class c on c.oid = d.objoid \
+             where c.relname = 'items_idx' and d.classoid = 1259 and d.objsubid = 0"
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn comment_on_missing_index_reports_relation_does_not_exist() {
+    let base = temp_dir("comment_on_missing_index");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4)").unwrap();
+
+    match db.execute(1, "comment on index missing_idx is 'nope'") {
+        Err(ExecError::Parse(ParseError::TableDoesNotExist(name))) if name == "missing_idx" => {}
+        other => panic!("expected missing index error, got {:?}", other),
+    }
 }
 
 #[test]
