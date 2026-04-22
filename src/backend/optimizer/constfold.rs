@@ -225,25 +225,29 @@ fn simplify_set_returning_call(call: SetReturningCall) -> Result<SetReturningCal
             start,
             stop,
             step,
-            output,
+            output_columns,
+            with_ordinality,
         } => SetReturningCall::GenerateSeries {
             func_oid,
             func_variadic,
             start: simplify_expr(start, None)?,
             stop: simplify_expr(stop, None)?,
             step: simplify_expr(step, None)?,
-            output,
+            output_columns,
+            with_ordinality,
         },
         SetReturningCall::Unnest {
             func_oid,
             func_variadic,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::Unnest {
             func_oid,
             func_variadic,
             args: simplify_exprs(args)?,
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::JsonTableFunction {
             func_oid,
@@ -251,12 +255,14 @@ fn simplify_set_returning_call(call: SetReturningCall) -> Result<SetReturningCal
             kind,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::JsonTableFunction {
             func_oid,
             func_variadic,
             kind,
             args: simplify_exprs(args)?,
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::JsonRecordFunction {
             func_oid,
@@ -265,6 +271,7 @@ fn simplify_set_returning_call(call: SetReturningCall) -> Result<SetReturningCal
             args,
             output_columns,
             record_type,
+            with_ordinality,
         } => SetReturningCall::JsonRecordFunction {
             func_oid,
             func_variadic,
@@ -272,6 +279,7 @@ fn simplify_set_returning_call(call: SetReturningCall) -> Result<SetReturningCal
             args: simplify_exprs(args)?,
             output_columns,
             record_type,
+            with_ordinality,
         },
         SetReturningCall::RegexTableFunction {
             func_oid,
@@ -279,32 +287,38 @@ fn simplify_set_returning_call(call: SetReturningCall) -> Result<SetReturningCal
             kind,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::RegexTableFunction {
             func_oid,
             func_variadic,
             kind,
             args: simplify_exprs(args)?,
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::TextSearchTableFunction {
             kind,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::TextSearchTableFunction {
             kind,
             args: simplify_exprs(args)?,
             output_columns,
+            with_ordinality,
         },
         SetReturningCall::UserDefined {
             proc_oid,
             func_variadic,
             args,
             output_columns,
+            with_ordinality,
         } => SetReturningCall::UserDefined {
             proc_oid,
             func_variadic,
             args: simplify_exprs(args)?,
             output_columns,
+            with_ordinality,
         },
     })
 }
