@@ -1,5 +1,8 @@
 use parking_lot::RwLock;
 
+use super::visibilitymap::{
+    VisibilityMapBuffer, VisibilityMapError, visibilitymap_clear, visibilitymap_pin,
+};
 use crate::backend::access::transam::xact::{
     CommandId, MvccError, Snapshot, TransactionId, TransactionManager, TransactionStatus,
 };
@@ -7,12 +10,16 @@ use crate::backend::storage::buffer::Page;
 use crate::backend::storage::page::bufpage::{
     ItemIdFlags, MAX_HEAP_TUPLE_SIZE, PageError, page_get_item, page_get_item_id,
     page_get_item_id_unchecked, page_get_item_unchecked, page_get_max_offset_number,
+    page_clear_all_visible, page_is_all_visible,
 };
 use crate::backend::storage::smgr::{ForkNumber, RelFileLocator, SmgrError, StorageManager};
 use crate::backend::utils::misc::interrupts::InterruptReason;
 use crate::include::access::htup::{
     HeapTuple, ItemPointerData, TupleError, heap_page_add_tuple, heap_page_get_ctid,
     heap_page_get_tuple, heap_page_init, heap_page_replace_tuple,
+};
+use crate::include::access::visibilitymapdefs::{
+    VISIBILITYMAP_ALL_FROZEN, VISIBILITYMAP_ALL_VISIBLE,
 };
 use crate::pgrust::database::TransactionWaiter;
 use crate::{
@@ -27,6 +34,7 @@ pub enum HeapError {
     Tuple(TupleError),
     Storage(SmgrError),
     Mvcc(MvccError),
+    VisibilityMap(VisibilityMapError),
     NoBufferAvailable,
     TupleNotVisible(ItemPointerData),
     TupleAlreadyModified(ItemPointerData),
@@ -73,6 +81,35 @@ impl From<MvccError> for HeapError {
     fn from(value: MvccError) -> Self {
         Self::Mvcc(value)
     }
+}
+
+impl From<PageError> for HeapError {
+    fn from(value: PageError) -> Self {
+        Self::Tuple(TupleError::from(value))
+    }
+}
+
+fn clear_page_visibility_if_needed(
+    pool: &BufferPool<SmgrStorageBackend>,
+    client_id: ClientId,
+    rel: RelFileLocator,
+    block: u32,
+    page: &mut Page,
+    vmbuf: &Option<VisibilityMapBuffer>,
+) -> Result<bool, HeapError> {
+    if !page_is_all_visible(page)? {
+        return Ok(false);
+    }
+    page_clear_all_visible(page)?;
+    let _ = visibilitymap_clear(
+        pool,
+        client_id,
+        rel,
+        block,
+        vmbuf,
+        VISIBILITYMAP_ALL_VISIBLE | VISIBILITYMAP_ALL_FROZEN,
+    )?;
+    Ok(true)
 }
 
 /// Maximum tuples per 8kB page: 8160 usable / 28 min per tuple = 291.
@@ -655,6 +692,8 @@ pub fn heap_delete(
 
     let pin = pin_existing_block(pool, client_id, rel, tid.block_number)?;
     let buffer_id = pin.buffer_id();
+    let mut vmbuf = None;
+    visibilitymap_pin(pool, rel, tid.block_number, &mut vmbuf)?;
 
     let mut guard = pool.lock_buffer_exclusive(buffer_id)?;
     let mut new_page = *guard;
@@ -671,6 +710,8 @@ pub fn heap_delete(
         }
     }
 
+    let _ =
+        clear_page_visibility_if_needed(pool, client_id, rel, tid.block_number, &mut new_page, &vmbuf)?;
     tuple.header.xmax = xid;
     // Clear HEAP_XMAX_INVALID — xmax is now a real transaction.
     tuple.header.infomask &= !crate::include::access::htup::HEAP_XMAX_INVALID;
@@ -696,6 +737,8 @@ pub fn heap_delete_with_waiter(
     loop {
         let pin = pin_existing_block(pool, client_id, rel, tid.block_number)?;
         let buffer_id = pin.buffer_id();
+        let mut vmbuf = None;
+        visibilitymap_pin(pool, rel, tid.block_number, &mut vmbuf)?;
 
         let mut guard = pool.lock_buffer_exclusive(buffer_id)?;
         let mut new_page = *guard;
@@ -710,6 +753,14 @@ pub fn heap_delete_with_waiter(
 
         let xmax = tuple.header.xmax;
         if xmax == 0 {
+            let _ = clear_page_visibility_if_needed(
+                pool,
+                client_id,
+                rel,
+                tid.block_number,
+                &mut new_page,
+                &vmbuf,
+            )?;
             tuple.header.xmax = xid;
             tuple.header.infomask &= !crate::include::access::htup::HEAP_XMAX_INVALID;
             heap_page_replace_tuple(&mut new_page, tid.offset_number, &tuple)?;
@@ -742,6 +793,8 @@ pub fn heap_delete_with_waiter(
                 // if xmax is still the aborted xid, we treat it as claimable.
                 let pin2 = pin_existing_block(pool, client_id, rel, tid.block_number)?;
                 let buffer_id2 = pin2.buffer_id();
+                let mut vmbuf2 = None;
+                visibilitymap_pin(pool, rel, tid.block_number, &mut vmbuf2)?;
                 let mut guard = pool.lock_buffer_exclusive(buffer_id2)?;
                 let mut new_page = *guard;
                 let mut recheck = heap_page_get_tuple(&new_page, tid.offset_number)?;
@@ -750,6 +803,14 @@ pub fn heap_delete_with_waiter(
                     drop(pin2);
                     continue;
                 }
+                let _ = clear_page_visibility_if_needed(
+                    pool,
+                    client_id,
+                    rel,
+                    tid.block_number,
+                    &mut new_page,
+                    &vmbuf2,
+                )?;
                 recheck.header.xmax = xid;
                 recheck.header.infomask &= !crate::include::access::htup::HEAP_XMAX_INVALID;
                 heap_page_replace_tuple(&mut new_page, tid.offset_number, &recheck)?;
@@ -812,9 +873,13 @@ pub fn heap_update_with_cid(
 
     let pin = pin_existing_block(pool, client_id, rel, tid.block_number)?;
     let buffer_id = pin.buffer_id();
+    let mut vmbuf = None;
+    visibilitymap_pin(pool, rel, tid.block_number, &mut vmbuf)?;
     let mut guard = pool.lock_buffer_exclusive(buffer_id)?;
     let mut new_page = *guard;
     let mut old_version = heap_page_get_tuple(&new_page, tid.offset_number)?;
+    let _ =
+        clear_page_visibility_if_needed(pool, client_id, rel, tid.block_number, &mut new_page, &vmbuf)?;
     old_version.header.xmax = xid;
     old_version.header.ctid = new_tid;
     // Clear HEAP_XMAX_INVALID — xmax is now a real transaction, not invalid.
@@ -843,6 +908,8 @@ fn try_claim_tuple(
 ) -> Result<(ClaimResult, ItemPointerData), HeapError> {
     let pin = pin_existing_block(pool, client_id, rel, target_tid.block_number)?;
     let buffer_id = pin.buffer_id();
+    let mut vmbuf = None;
+    visibilitymap_pin(pool, rel, target_tid.block_number, &mut vmbuf)?;
 
     let mut guard = pool.lock_buffer_exclusive(buffer_id)?;
     let mut new_page = *guard;
@@ -850,6 +917,14 @@ fn try_claim_tuple(
 
     if tuple.header.xmax == 0 {
         let mut modified = tuple;
+        let _ = clear_page_visibility_if_needed(
+            pool,
+            client_id,
+            rel,
+            target_tid.block_number,
+            &mut new_page,
+            &vmbuf,
+        )?;
         modified.header.xmax = xid;
         modified.header.infomask &= !crate::include::access::htup::HEAP_XMAX_INVALID;
         heap_page_replace_tuple(&mut new_page, target_tid.offset_number, &modified)?;
@@ -874,9 +949,19 @@ fn try_claim_tuple(
         Some(TransactionStatus::Aborted) => {
             let pin2 = pin_existing_block(pool, client_id, rel, target_tid.block_number)?;
             let buffer_id2 = pin2.buffer_id();
+            let mut vmbuf2 = None;
+            visibilitymap_pin(pool, rel, target_tid.block_number, &mut vmbuf2)?;
             let mut guard = pool.lock_buffer_exclusive(buffer_id2)?;
             let mut new_page = *guard;
             let mut modified = heap_page_get_tuple(&new_page, target_tid.offset_number)?;
+            let _ = clear_page_visibility_if_needed(
+                pool,
+                client_id,
+                rel,
+                target_tid.block_number,
+                &mut new_page,
+                &vmbuf2,
+            )?;
             modified.header.xmax = xid;
             modified.header.infomask &= !crate::include::access::htup::HEAP_XMAX_INVALID;
             heap_page_replace_tuple(&mut new_page, target_tid.offset_number, &modified)?;
@@ -1015,6 +1100,8 @@ fn heap_insert_version(
 
         let pin = pin_existing_block(pool, client_id, rel, target_block)?;
         let buffer_id = pin.buffer_id();
+        let mut vmbuf = None;
+        visibilitymap_pin(pool, rel, target_block, &mut vmbuf)?;
         let mut guard = pool.lock_buffer_exclusive(buffer_id)?;
         let mut new_page = *guard;
         let mut stored = tuple.clone();
@@ -1024,8 +1111,19 @@ fn heap_insert_version(
         stored.header.infomask |= crate::include::access::htup::HEAP_XMAX_INVALID;
 
         let serialized_tuple = stored.serialize();
+        let page_was_all_visible = page_is_all_visible(&new_page)?;
         match heap_page_add_tuple(&mut new_page, target_block, &stored) {
             Ok(offset_number) => {
+                if page_was_all_visible {
+                    let _ = clear_page_visibility_if_needed(
+                        pool,
+                        client_id,
+                        rel,
+                        target_block,
+                        &mut new_page,
+                        &vmbuf,
+                    )?;
+                }
                 pool.write_page_insert_locked(
                     buffer_id,
                     xmin,
