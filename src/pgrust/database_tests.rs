@@ -10797,6 +10797,36 @@ fn unsupported_create_table_like_does_not_poison_catalog_after_sequence_drop() {
 }
 
 #[test]
+fn create_table_check_not_enforced_skips_write_enforcement_and_cannot_validate() {
+    let base = temp_dir("check_not_enforced");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(
+        1,
+        "create table items (id int4 constraint items_id_check check (id > 0) not enforced)",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into items values (0)").unwrap();
+    db.execute(1, "insert into items values (1)").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conenforced, convalidated from pg_constraint where conname = 'items_id_check'"
+        ),
+        vec![vec![Value::Bool(false), Value::Bool(false)]]
+    );
+
+    match db.execute(1, "alter table items validate constraint items_id_check") {
+        Err(ExecError::DetailedError { message, sqlstate, .. })
+            if message == "cannot validate NOT ENFORCED constraint" && sqlstate == "0A000" => {}
+        other => panic!("expected validate-not-enforced failure, got {other:?}"),
+    }
+}
+
+#[test]
 fn update_and_copy_from_enforce_check_and_not_null_constraints() {
     let base = temp_dir("update_and_copy_constraint_checks");
     let db = Database::open(&base, 16).unwrap();

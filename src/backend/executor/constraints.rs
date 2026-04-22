@@ -41,6 +41,9 @@ pub(crate) fn enforce_relation_constraints(
 
     let mut slot = TupleSlot::virtual_row(values.to_vec());
     for check in &constraints.checks {
+        if !check.enforced {
+            continue;
+        }
         match eval_expr(&check.expr, &mut slot, ctx)? {
             Value::Null | Value::Bool(true) => {}
             Value::Bool(false) => {
