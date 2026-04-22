@@ -295,6 +295,7 @@ pub enum BuiltinScalarFunction {
     Random,
     RandomNormal,
     CurrentDatabase,
+    PgPartitionRoot,
     GetDatabaseEncoding,
     PgMyTempSchema,
     PgRustInternalBinaryCoercible,
@@ -338,6 +339,8 @@ pub enum BuiltinScalarFunction {
     PgStatGetXactFunctionCalls,
     PgStatGetXactFunctionTotalTime,
     PgStatGetXactFunctionSelfTime,
+    TextToRegClass,
+    RegClassToText,
     RegTypeToText,
     RegRoleToText,
     CashLarger,
@@ -740,6 +743,18 @@ pub enum SetReturningCall {
         args: Vec<Expr>,
         output_columns: Vec<QueryColumn>,
     },
+    PartitionTree {
+        func_oid: u32,
+        func_variadic: bool,
+        relid: Expr,
+        output_columns: Vec<QueryColumn>,
+    },
+    PartitionAncestors {
+        func_oid: u32,
+        func_variadic: bool,
+        relid: Expr,
+        output_columns: Vec<QueryColumn>,
+    },
     TextSearchTableFunction {
         kind: TextSearchTableFunction,
         args: Vec<Expr>,
@@ -761,6 +776,8 @@ impl SetReturningCall {
             | SetReturningCall::JsonTableFunction { output_columns, .. }
             | SetReturningCall::JsonRecordFunction { output_columns, .. }
             | SetReturningCall::RegexTableFunction { output_columns, .. }
+            | SetReturningCall::PartitionTree { output_columns, .. }
+            | SetReturningCall::PartitionAncestors { output_columns, .. }
             | SetReturningCall::TextSearchTableFunction { output_columns, .. }
             | SetReturningCall::UserDefined { output_columns, .. } => output_columns,
         }

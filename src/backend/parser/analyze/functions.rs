@@ -27,6 +27,8 @@ struct NamedArgSignature {
 pub(super) enum ResolvedSrfImpl {
     GenerateSeries,
     Unnest,
+    PartitionTree,
+    PartitionAncestors,
     JsonTable(JsonTableFunction),
     RegexTable(RegexTableFunction),
 }
@@ -232,6 +234,8 @@ fn builtin_srf_impl_for_proc_row(row: &PgProcRow) -> Option<ResolvedSrfImpl> {
     match row.proname.to_ascii_lowercase().as_str() {
         "generate_series" => Some(ResolvedSrfImpl::GenerateSeries),
         "unnest" => Some(ResolvedSrfImpl::Unnest),
+        "pg_partition_tree" => Some(ResolvedSrfImpl::PartitionTree),
+        "pg_partition_ancestors" => Some(ResolvedSrfImpl::PartitionAncestors),
         other => resolve_json_table_function(other)
             .map(ResolvedSrfImpl::JsonTable)
             .or_else(|| resolve_regex_table_function(other).map(ResolvedSrfImpl::RegexTable)),
@@ -367,8 +371,11 @@ fn resolve_function_row_shape(
     row: &crate::include::catalog::PgProcRow,
     result_type: SqlType,
 ) -> Option<ResolvedFunctionRowShape> {
+    if let Some(row_shape) = resolve_out_parameter_row_shape(catalog, row) {
+        return Some(row_shape);
+    }
     match result_type.kind {
-        SqlTypeKind::Record => resolve_record_row_shape(catalog, row),
+        SqlTypeKind::Record => Some(ResolvedFunctionRowShape::AnonymousRecord),
         SqlTypeKind::Composite => {
             let relation_oid = result_type.typrelid;
             let relation = catalog.lookup_relation_by_oid(relation_oid)?;
@@ -392,7 +399,7 @@ fn resolve_function_row_shape(
     }
 }
 
-fn resolve_record_row_shape(
+fn resolve_out_parameter_row_shape(
     catalog: &dyn CatalogLookup,
     row: &crate::include::catalog::PgProcRow,
 ) -> Option<ResolvedFunctionRowShape> {
@@ -423,7 +430,7 @@ fn resolve_record_row_shape(
     }
 
     if output_columns.is_empty() {
-        Some(ResolvedFunctionRowShape::AnonymousRecord)
+        None
     } else {
         Some(ResolvedFunctionRowShape::OutParameters(output_columns))
     }
@@ -578,6 +585,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::ClockTimestamp
             | BuiltinScalarFunction::TimeOfDay => args.is_empty(),
             BuiltinScalarFunction::CurrentDatabase => args.is_empty(),
+            BuiltinScalarFunction::PgPartitionRoot => args.len() == 1,
             BuiltinScalarFunction::DatePart | BuiltinScalarFunction::DateTrunc => args.len() == 2,
             BuiltinScalarFunction::IsFinite => args.len() == 1,
             BuiltinScalarFunction::MakeDate => args.len() == 3,
@@ -710,6 +718,8 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::QuoteLiteral
             | BuiltinScalarFunction::BitcastIntegerToFloat4
             | BuiltinScalarFunction::BitcastBigintToFloat8
+            | BuiltinScalarFunction::TextToRegClass
+            | BuiltinScalarFunction::RegClassToText
             | BuiltinScalarFunction::RegTypeToText
             | BuiltinScalarFunction::RegProcedureToText
             | BuiltinScalarFunction::RegRoleToText
@@ -1299,6 +1309,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "getdatabaseencoding",
             BuiltinScalarFunction::GetDatabaseEncoding,
         ),
+        (
+            "pg_partition_root",
+            BuiltinScalarFunction::PgPartitionRoot,
+        ),
         ("pg_my_temp_schema", BuiltinScalarFunction::PgMyTempSchema),
         (
             "pg_rust_internal_binary_coercible",
@@ -1630,6 +1644,9 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("replace", BuiltinScalarFunction::Replace),
         ("split_part", BuiltinScalarFunction::SplitPart),
         ("translate", BuiltinScalarFunction::Translate),
+        ("text_to_regclass", BuiltinScalarFunction::TextToRegClass),
+        ("regclass_to_text", BuiltinScalarFunction::RegClassToText),
+        ("regclassout", BuiltinScalarFunction::RegClassToText),
         ("regtype_to_text", BuiltinScalarFunction::RegTypeToText),
         ("regtypeout", BuiltinScalarFunction::RegTypeToText),
         (
@@ -2052,6 +2069,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::ClockTimestamp
             | BuiltinScalarFunction::TimeOfDay
             | BuiltinScalarFunction::CurrentDatabase
+            | BuiltinScalarFunction::PgPartitionRoot
             | BuiltinScalarFunction::NextVal
             | BuiltinScalarFunction::CurrVal
             | BuiltinScalarFunction::SetVal
@@ -2309,11 +2327,21 @@ fn catalog_builtin_type_oid(catalog: &dyn CatalogLookup, sql_type: SqlType) -> O
 }
 
 fn catalog_text_input_cast_exists(catalog: &dyn CatalogLookup, target_oid: u32) -> bool {
-    if catalog
-        .type_by_oid(target_oid)
-        .is_some_and(|row| row.sql_type.is_range() || row.sql_type.is_multirange())
-    {
-        return true;
+    if let Some(row) = catalog.type_by_oid(target_oid) {
+        if row.sql_type.is_range() || row.sql_type.is_multirange() {
+            return true;
+        }
+        if matches!(
+            row.sql_type.kind,
+            SqlTypeKind::RegClass
+                | SqlTypeKind::RegRole
+                | SqlTypeKind::RegType
+                | SqlTypeKind::RegProcedure
+                | SqlTypeKind::RegConfig
+                | SqlTypeKind::RegDictionary
+        ) {
+            return true;
+        }
     }
     catalog
         .cast_by_source_target(TEXT_TYPE_OID, target_oid)

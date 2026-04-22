@@ -310,6 +310,28 @@ fn finalize_set_returning_call(
             step: finalize_expr_subqueries(step, catalog, subplans),
             output,
         },
+        SetReturningCall::PartitionTree {
+            func_oid,
+            func_variadic,
+            relid,
+            output_columns,
+        } => SetReturningCall::PartitionTree {
+            func_oid,
+            func_variadic,
+            relid: finalize_expr_subqueries(relid, catalog, subplans),
+            output_columns,
+        },
+        SetReturningCall::PartitionAncestors {
+            func_oid,
+            func_variadic,
+            relid,
+            output_columns,
+        } => SetReturningCall::PartitionAncestors {
+            func_oid,
+            func_variadic,
+            relid: finalize_expr_subqueries(relid, catalog, subplans),
+            output_columns,
+        },
         SetReturningCall::Unnest {
             func_oid,
             func_variadic,
@@ -685,6 +707,28 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
             stop: rebase_expr_subplan_ids(stop, base),
             step: rebase_expr_subplan_ids(step, base),
             output,
+        },
+        SetReturningCall::PartitionTree {
+            func_oid,
+            func_variadic,
+            relid,
+            output_columns,
+        } => SetReturningCall::PartitionTree {
+            func_oid,
+            func_variadic,
+            relid: rebase_expr_subplan_ids(relid, base),
+            output_columns,
+        },
+        SetReturningCall::PartitionAncestors {
+            func_oid,
+            func_variadic,
+            relid,
+            output_columns,
+        } => SetReturningCall::PartitionAncestors {
+            func_oid,
+            func_variadic,
+            relid: rebase_expr_subplan_ids(relid, base),
+            output_columns,
         },
         SetReturningCall::Unnest {
             func_oid,

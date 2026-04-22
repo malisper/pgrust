@@ -531,6 +531,108 @@ fn eval_regrole_to_text_function(
     Ok(Value::Text(oid.to_string().into()))
 }
 
+fn relation_name_for_regclass_oid(
+    oid: u32,
+    catalog: Option<&crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
+) -> Option<String> {
+    let catalog = catalog?;
+    catalog
+        .relcache()
+        .entries()
+        .find_map(|(name, entry)| (entry.relation_oid == oid).then_some(name))
+        .map(|name| {
+            name.rsplit_once('.')
+                .map(|(_, relname)| relname)
+                .unwrap_or(name)
+                .to_string()
+        })
+}
+
+fn eval_regclass_to_text_function(
+    values: &[Value],
+    ctx: Option<&ExecutorContext>,
+) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let oid = match value {
+        Value::Int32(oid) if *oid >= 0 => *oid as u32,
+        Value::Int64(oid) if *oid >= 0 && *oid <= i64::from(u32::MAX) => *oid as u32,
+        _ => {
+            return Err(ExecError::TypeMismatch {
+                op: "::text",
+                left: value.clone(),
+                right: Value::Text("".into()),
+            });
+        }
+    };
+    if oid == 0 {
+        return Ok(Value::Text("-".into()));
+    }
+    if let Some(relation_name) =
+        relation_name_for_regclass_oid(oid, ctx.and_then(|ctx| ctx.catalog.as_ref()))
+    {
+        return Ok(Value::Text(
+            quote_identifier_if_needed(&relation_name).into(),
+        ));
+    }
+    Ok(Value::Text(oid.to_string().into()))
+}
+
+fn eval_text_to_regclass_function(
+    values: &[Value],
+    ctx: Option<&ExecutorContext>,
+) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let Some(text) = value.as_text() else {
+        return Err(ExecError::TypeMismatch {
+            op: "::regclass",
+            left: value.clone(),
+            right: Value::Int64(i64::from(crate::include::catalog::REGCLASS_TYPE_OID)),
+        });
+    };
+    if text
+        .chars()
+        .all(|ch| ch.is_ascii_digit() || matches!(ch, '+' | '-'))
+    {
+        let value = text
+            .parse::<i128>()
+            .map_err(|_| ExecError::InvalidIntegerInput {
+                ty: "oid",
+                value: text.to_string(),
+            })?;
+        let oid = if (0..=u32::MAX as i128).contains(&value) {
+            value as u32
+        } else if (i32::MIN as i128..=-1).contains(&value) {
+            (value as i32) as u32
+        } else {
+            return Err(ExecError::IntegerOutOfRange {
+                ty: "oid",
+                value: text.to_string(),
+            });
+        };
+        return Ok(Value::Int64(i64::from(oid)));
+    }
+    let catalog = ctx.and_then(|ctx| ctx.catalog.as_ref()).ok_or_else(|| ExecError::DetailedError {
+        message: "regclass lookup requires a visible catalog".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    })?;
+    let relation = catalog
+        .lookup_any_relation(text)
+        .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(text.to_string())))?;
+    Ok(Value::Int64(i64::from(relation.relation_oid)))
+}
+
 fn ensure_builtin_side_effects_allowed(
     func: BuiltinScalarFunction,
     ctx: &ExecutorContext,
@@ -750,6 +852,23 @@ fn eval_pg_relation_is_publishable(
         _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "pg_relation_is_publishable(oid)",
             actual: format!("PgRelationIsPublishable({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_pg_partition_root(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null] => Ok(Value::Null),
+        [value] => {
+            let relation_oid = oid_arg_to_u32(value, "pg_partition_root")?;
+            let catalog = executor_catalog(ctx)?;
+            Ok(crate::backend::commands::partition::partition_root_oid(catalog, relation_oid)?
+                .map(|oid| Value::Int64(i64::from(oid)))
+                .unwrap_or(Value::Null))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_partition_root(regclass)",
+            actual: format!("PgPartitionRoot({} args)", values.len()),
         })),
     }
 }
@@ -1991,6 +2110,8 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::Translate => eval_translate_function(&values),
         BuiltinScalarFunction::Ascii => eval_ascii_function(&values),
         BuiltinScalarFunction::Chr => eval_chr_function(&values),
+        BuiltinScalarFunction::TextToRegClass => eval_text_to_regclass_function(&values, None),
+        BuiltinScalarFunction::RegClassToText => eval_regclass_to_text_function(&values, None),
         BuiltinScalarFunction::RegRoleToText => eval_regrole_to_text_function(&values, None),
         BuiltinScalarFunction::QuoteLiteral => eval_quote_literal_function(&values),
         BuiltinScalarFunction::BpcharToText => eval_bpchar_to_text_function(&values),
@@ -2807,6 +2928,12 @@ fn eval_builtin_function(
             [value] => eval_regprocedure_to_text(value, ctx),
             _ => Err(malformed_expr_error("regprocedure_to_text")),
         },
+        BuiltinScalarFunction::TextToRegClass => {
+            eval_text_to_regclass_function(&values, Some(ctx))
+        }
+        BuiltinScalarFunction::RegClassToText => {
+            eval_regclass_to_text_function(&values, Some(ctx))
+        }
         BuiltinScalarFunction::PgGetUserById => match values.as_slice() {
             [..] => eval_pg_get_userbyid(&values, ctx),
             _ => Err(malformed_expr_error("pg_get_userbyid")),
@@ -3033,6 +3160,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::CurrentDatabase => {
             Ok(Value::Text(ctx.current_database_name.clone().into()))
         }
+        BuiltinScalarFunction::PgPartitionRoot => eval_pg_partition_root(&values, ctx),
         BuiltinScalarFunction::PgGetUserById => eval_pg_get_userbyid(&values, ctx),
         BuiltinScalarFunction::ObjDescription => eval_obj_description(&values, ctx),
         BuiltinScalarFunction::PgGetExpr => eval_pg_get_expr(&values),
@@ -3180,6 +3308,8 @@ fn eval_builtin_function(
         BuiltinScalarFunction::RTrim => eval_trim_function("rtrim", &values),
         BuiltinScalarFunction::Md5 => eval_md5_function(&values),
         BuiltinScalarFunction::Reverse => eval_reverse_function(&values),
+        BuiltinScalarFunction::TextToRegClass => eval_text_to_regclass_function(&values, Some(ctx)),
+        BuiltinScalarFunction::RegClassToText => eval_regclass_to_text_function(&values, Some(ctx)),
         BuiltinScalarFunction::RegRoleToText => eval_regrole_to_text_function(&values, Some(ctx)),
         BuiltinScalarFunction::BpcharToText => eval_bpchar_to_text_function(&values),
         BuiltinScalarFunction::QuoteLiteral => eval_quote_literal_function(&values),

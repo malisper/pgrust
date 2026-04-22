@@ -22,6 +22,7 @@ pub struct PgClassRow {
     pub relhassubclass: bool,
     pub relhastriggers: bool,
     pub relispartition: bool,
+    pub relpartbound: Option<String>,
     pub relrowsecurity: bool,
     pub relforcerowsecurity: bool,
     pub relnatts: i16,
@@ -50,6 +51,7 @@ pub fn pg_class_desc() -> RelationDesc {
             column_desc("relhassubclass", SqlType::new(SqlTypeKind::Bool), false),
             column_desc("relhastriggers", SqlType::new(SqlTypeKind::Bool), false),
             column_desc("relispartition", SqlType::new(SqlTypeKind::Bool), false),
+            column_desc("relpartbound", SqlType::new(SqlTypeKind::PgNodeTree), true),
             column_desc("relrowsecurity", SqlType::new(SqlTypeKind::Bool), false),
             column_desc(
                 "relforcerowsecurity",
@@ -64,7 +66,7 @@ pub fn pg_class_desc() -> RelationDesc {
 }
 
 pub const fn relkind_has_storage(relkind: char) -> bool {
-    !matches!(relkind, 'v' | 'c')
+    !matches!(relkind, 'v' | 'c' | 'p')
 }
 
 pub const fn relkind_is_analyzable(relkind: char) -> bool {
@@ -79,7 +81,7 @@ pub const fn relam_for_relkind(relkind: char) -> u32 {
     }
 }
 
-pub fn bootstrap_pg_class_rows() -> [PgClassRow; 28] {
+pub fn bootstrap_pg_class_rows() -> [PgClassRow; 29] {
     [
         bootstrap_pg_class_row(BootstrapCatalogKind::PgNamespace),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgType),
@@ -101,6 +103,7 @@ pub fn bootstrap_pg_class_rows() -> [PgClassRow; 28] {
         bootstrap_pg_class_row(BootstrapCatalogKind::PgForeignDataWrapper),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgIndex),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgInherits),
+        bootstrap_pg_class_row(BootstrapCatalogKind::PgPartitionedTable),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgRewrite),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgStatistic),
         bootstrap_pg_class_row(BootstrapCatalogKind::PgTrigger),
@@ -128,6 +131,7 @@ fn bootstrap_pg_class_row(kind: BootstrapCatalogKind) -> PgClassRow {
         relhassubclass: false,
         relhastriggers: false,
         relispartition: false,
+        relpartbound: None,
         relrowsecurity: false,
         relforcerowsecurity: false,
         relnatts: bootstrap_relation_desc(kind).columns.len() as i16,

@@ -44,8 +44,9 @@ use crate::include::catalog::{
     PgAttrdefRow,
     PgAttributeRow, PgClassRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow,
     PgForeignDataWrapperRow, PgInheritsRow, PgNamespaceRow, PgOpclassRow, PgOpfamilyRow,
-    PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow,
-    PgRewriteRow, PgStatisticRow, PgTablespaceRow, relkind_has_storage,
+    PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow,
+    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow,
+    relkind_has_storage,
 };
 use crate::include::nodes::datum::Value;
 
@@ -587,7 +588,7 @@ impl CatalogStore {
             let entry = relcache
                 .get_by_name(name)
                 .ok_or_else(|| CatalogError::UnknownTable(name.to_string()))?;
-            if entry.relkind != 'r' {
+            if !relkind_is_droppable_table(entry.relkind) {
                 return Err(CatalogError::UnknownTable(name.to_string()));
             }
             return self.drop_relation_by_oid(entry.relation_oid);
@@ -597,7 +598,7 @@ impl CatalogStore {
         let entry = catalog
             .get(name)
             .ok_or_else(|| CatalogError::UnknownTable(name.to_string()))?;
-        if entry.relkind != 'r' {
+        if !relkind_is_droppable_table(entry.relkind) {
             return Err(CatalogError::UnknownTable(name.to_string()));
         }
         let relation_oid = entry.relation_oid;
@@ -611,6 +612,11 @@ impl CatalogStore {
         if matches!(&self.mode, CatalogStoreMode::Durable { .. }) {
             let catcache = self.catcache()?;
             let relcache = self.relcache()?;
+            if has_nonpartition_inherited_children_visible(&catcache, relation_oid) {
+                return Err(CatalogError::Corrupt(
+                    "DROP TABLE with inherited children requires CASCADE, which is not supported yet",
+                ));
+            }
             let control = self.control_state()?;
             let (rows_to_delete, rows_to_insert, dropped, _affected_parent_oids) =
                 drop_relation_entries_visible(&catcache, &relcache, relation_oid)?;
@@ -634,6 +640,11 @@ impl CatalogStore {
         catalog: &mut Catalog,
         relation_oid: u32,
     ) -> Result<Vec<CatalogEntry>, CatalogError> {
+        if has_nonpartition_inherited_children(catalog, relation_oid) {
+            return Err(CatalogError::Corrupt(
+                "DROP TABLE with inherited children requires CASCADE, which is not supported yet",
+            ));
+        }
         let oids = drop_relation_oids_by_oid(catalog, relation_oid)?;
         let dropped_entries = oids
             .iter()
@@ -3142,11 +3153,7 @@ impl CatalogStore {
         ctx: &CatalogWriteContext,
     ) -> Result<(Vec<CatalogEntry>, CatalogMutationEffect), CatalogError> {
         let (catcache, relcache) = visible_catalog_caches_for_ctx(self, ctx)?;
-        if catcache
-            .inherit_rows()
-            .iter()
-            .any(|row| row.inhparent == relation_oid)
-        {
+        if has_nonpartition_inherited_children_visible(&catcache, relation_oid) {
             return Err(CatalogError::Corrupt(
                 "DROP TABLE with inherited children requires CASCADE, which is not supported yet",
             ));
@@ -3788,6 +3795,39 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn replace_relation_partitioning_mvcc(
+        &mut self,
+        relation_oid: u32,
+        relispartition: bool,
+        relpartbound: Option<String>,
+        partitioned_table: Option<PgPartitionedTableRow>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (old_entry, new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
+                entry.relispartition = relispartition;
+                entry.relpartbound = relpartbound;
+                entry.partitioned_table = partitioned_table;
+                let mut kinds = vec![BootstrapCatalogKind::PgClass];
+                if entry.partitioned_table.is_some() {
+                    kinds.push(BootstrapCatalogKind::PgPartitionedTable);
+                }
+                Ok(((), kinds))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        let mut touched_kinds = kinds;
+        if old_entry.partitioned_table.is_some() || new_entry.partitioned_table.is_some() {
+            merge_catalog_kinds(
+                &mut touched_kinds,
+                &[BootstrapCatalogKind::PgPartitionedTable],
+            );
+        }
+        effect_record_catalog_kinds(&mut effect, &touched_kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok(effect)
+    }
+
     pub fn set_relation_analyze_stats_mvcc(
         &mut self,
         relation_oid: u32,
@@ -4208,11 +4248,13 @@ fn build_relation_entry(
         relhassubclass: false,
         relhastriggers: false,
         relispartition: false,
+        relpartbound: None,
         relrowsecurity: false,
         relforcerowsecurity: false,
         relpages,
         reltuples,
         desc,
+        partitioned_table: None,
         index_meta: None,
     };
     if relkind_has_storage(relkind) {
@@ -4306,6 +4348,7 @@ fn build_index_entry(
         relhassubclass: false,
         relhastriggers: false,
         relispartition: false,
+        relpartbound: None,
         relrowsecurity: false,
         relforcerowsecurity: false,
         relpages: 0,
@@ -4313,6 +4356,7 @@ fn build_index_entry(
         desc: RelationDesc {
             columns: index_columns,
         },
+        partitioned_table: None,
         index_meta: Some(CatalogIndexMeta {
             indrelid: table.relation_oid,
             indkey,
@@ -4749,6 +4793,9 @@ fn rows_for_new_relation_entry(
     rows.constraints
         .extend(constraint_rows_for_relation_name(relation_name, entry));
     rows.depends.extend(derived_pg_depend_rows(entry));
+    if let Some(row) = &entry.partitioned_table {
+        rows.partitioned_tables.push(row.clone());
+    }
     if let Some(index_row) = index_row_for_entry(entry) {
         rows.indexes.push(index_row);
     }
@@ -4779,6 +4826,7 @@ fn class_row_for_relation_name(relation_name: &str, entry: &CatalogEntry) -> PgC
         relhassubclass: entry.relhassubclass,
         relhastriggers: entry.relhastriggers,
         relispartition: entry.relispartition,
+        relpartbound: entry.relpartbound.clone(),
         relrowsecurity: entry.relrowsecurity,
         relforcerowsecurity: entry.relforcerowsecurity,
         relnatts: entry.desc.columns.len() as i16,
@@ -4910,6 +4958,11 @@ fn rows_for_existing_relation(
         rewrites,
         triggers,
         inherits,
+        partitioned_tables: catcache
+            .partitioned_table_row(entry.relation_oid)
+            .cloned()
+            .into_iter()
+            .collect(),
         constraints,
         ..PhysicalCatalogRows::default()
     };
@@ -4962,11 +5015,13 @@ fn catalog_entry_from_visible_relation(
         relhassubclass: class_row.relhassubclass,
         relhastriggers: relation.relhastriggers,
         relispartition: class_row.relispartition,
+        relpartbound: class_row.relpartbound.clone(),
         relrowsecurity: class_row.relrowsecurity,
         relforcerowsecurity: class_row.relforcerowsecurity,
         relpages: class_row.relpages,
         reltuples: class_row.reltuples,
         desc: relation.desc.clone(),
+        partitioned_table: relation.partitioned_table.clone(),
         index_meta: relation.index.as_ref().map(|index| CatalogIndexMeta {
             indrelid: index.indrelid,
             indkey: index.indkey.clone(),
@@ -5007,6 +5062,30 @@ fn resolved_sql_type_oid(
         }
     }
     sql_type_oid(sql_type)
+}
+
+fn relkind_is_droppable_table(relkind: char) -> bool {
+    matches!(relkind, 'r' | 'p')
+}
+
+fn has_nonpartition_inherited_children_visible(catcache: &CatCache, relation_oid: u32) -> bool {
+    catcache.inherit_rows().iter().any(|row| {
+        row.inhparent == relation_oid
+            && match catcache.class_by_oid(row.inhrelid) {
+                Some(child) => !child.relispartition,
+                None => true,
+            }
+    })
+}
+
+fn has_nonpartition_inherited_children(catalog: &Catalog, relation_oid: u32) -> bool {
+    catalog.inherit_rows().iter().any(|row| {
+        row.inhparent == relation_oid
+            && match catalog.get_by_oid(row.inhrelid) {
+                Some(child) => !child.relispartition,
+                None => true,
+            }
+    })
 }
 
 fn drop_relation_entries_visible(
@@ -5118,7 +5197,7 @@ fn drop_relation_oids_by_oid_visible(
     let entry = relcache
         .get_by_oid(relation_oid)
         .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-    if !matches!(entry.relkind, 'r' | 'S') {
+    if !(relkind_is_droppable_table(entry.relkind) || entry.relkind == 'S') {
         return Err(CatalogError::UnknownTable(relation_oid.to_string()));
     }
     let mut seen = BTreeSet::new();
@@ -5170,7 +5249,7 @@ fn drop_relation_oids_by_oid(
     let entry = catalog
         .get_by_oid(relation_oid)
         .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-    if !matches!(entry.relkind, 'r' | 'S') {
+    if !(relkind_is_droppable_table(entry.relkind) || entry.relkind == 'S') {
         return Err(CatalogError::UnknownTable(relation_oid.to_string()));
     }
     let mut seen = BTreeSet::new();

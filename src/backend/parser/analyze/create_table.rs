@@ -6,7 +6,8 @@ use crate::backend::parser::{SerialKind, SqlType, SqlTypeKind};
 
 use super::{
     CatalogLookup, CheckConstraintAction, CreateTableStatement, ForeignKeyConstraintAction,
-    IndexBackedConstraintAction, NotNullConstraintAction, ParseError,
+    IndexBackedConstraintAction, LoweredPartitionSpec, NotNullConstraintAction, ParseError,
+    PartitionBoundSpec,
     normalize_create_table_constraints, raw_type_name_hint, resolve_raw_type_name,
 };
 
@@ -19,6 +20,9 @@ pub struct LoweredCreateTable {
     pub foreign_key_actions: Vec<ForeignKeyConstraintAction>,
     pub owned_sequences: Vec<OwnedSequenceSpec>,
     pub parent_oids: Vec<u32>,
+    pub partition_spec: Option<LoweredPartitionSpec>,
+    pub partition_parent_oid: Option<u32>,
+    pub partition_bound: Option<PartitionBoundSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,6 +137,9 @@ pub fn lower_create_table(
         foreign_key_actions: normalized.foreign_keys,
         owned_sequences,
         parent_oids: Vec::new(),
+        partition_spec: None,
+        partition_parent_oid: None,
+        partition_bound: None,
     })
 }
 
@@ -158,6 +165,9 @@ mod tests {
                 constraints: vec![],
             })],
             inherits: Vec::new(),
+            partition_spec: None,
+            partition_of: None,
+            partition_bound: None,
             if_not_exists: false,
         };
 
@@ -201,6 +211,9 @@ mod tests {
                 }),
             ],
             inherits: Vec::new(),
+            partition_spec: None,
+            partition_of: None,
+            partition_bound: None,
             if_not_exists: false,
         };
 
@@ -253,6 +266,9 @@ mod tests {
                 }),
             ],
             inherits: Vec::new(),
+            partition_spec: None,
+            partition_of: None,
+            partition_bound: None,
             if_not_exists: false,
         };
 
@@ -282,6 +298,9 @@ mod tests {
                 constraints: vec![],
             })],
             inherits: Vec::new(),
+            partition_spec: None,
+            partition_of: None,
+            partition_bound: None,
             if_not_exists: false,
         };
 
@@ -315,6 +334,9 @@ mod tests {
                 constraints: vec![],
             })],
             inherits: Vec::new(),
+            partition_spec: None,
+            partition_of: None,
+            partition_bound: None,
             if_not_exists: false,
         };
 

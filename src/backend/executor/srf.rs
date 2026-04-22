@@ -1,3 +1,6 @@
+use crate::backend::commands::partition::{
+    partition_ancestor_oids, partition_tree_entries,
+};
 use super::expr_json::{eval_json_record_set_returning_function, eval_json_table_function};
 use super::pg_regex::{eval_regexp_matches_rows, eval_regexp_split_to_table_rows};
 use super::{ExecError, ExecutorContext, Expr, SetReturningCall, TupleSlot, Value, eval_expr};
@@ -39,6 +42,12 @@ pub(crate) fn eval_set_returning_call(
         ),
         SetReturningCall::RegexTableFunction { kind, args, .. } => {
             eval_regex_table_function(*kind, args, slot, ctx)
+        }
+        SetReturningCall::PartitionTree { relid, .. } => {
+            eval_partition_tree(relid, slot, ctx)
+        }
+        SetReturningCall::PartitionAncestors { relid, .. } => {
+            eval_partition_ancestors(relid, slot, ctx)
         }
         SetReturningCall::TextSearchTableFunction { .. } => Err(ExecError::Parse(
             crate::backend::parser::ParseError::UnexpectedToken {
@@ -127,6 +136,8 @@ pub(crate) fn set_returning_call_label(call: &SetReturningCall) -> &'static str 
                 "regexp_split_to_table"
             }
         },
+        SetReturningCall::PartitionTree { .. } => "pg_partition_tree",
+        SetReturningCall::PartitionAncestors { .. } => "pg_partition_ancestors",
         SetReturningCall::TextSearchTableFunction { kind, .. } => match kind {
             crate::include::nodes::primnodes::TextSearchTableFunction::TokenType => "ts_token_type",
             crate::include::nodes::primnodes::TextSearchTableFunction::Parse => "ts_parse",
@@ -157,6 +168,72 @@ fn eval_regex_table_function(
     Ok(rows
         .into_iter()
         .map(|value| TupleSlot::virtual_row(vec![value]))
+        .collect())
+}
+
+fn partition_catalog(
+    ctx: &ExecutorContext,
+) -> Result<&crate::backend::utils::cache::visible_catalog::VisibleCatalog, ExecError> {
+    ctx.catalog.as_ref().ok_or_else(|| ExecError::DetailedError {
+        message: "partition lookup requires executor catalog context".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    })
+}
+
+fn partition_lookup_oid(value: Value, op: &'static str) -> Result<Option<u32>, ExecError> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Int32(v) if v >= 0 => Ok(Some(v as u32)),
+        Value::Int64(v) if v >= 0 && v <= i64::from(u32::MAX) => Ok(Some(v as u32)),
+        other => Err(ExecError::TypeMismatch {
+            op,
+            left: other,
+            right: Value::Int64(i64::from(crate::include::catalog::REGCLASS_TYPE_OID)),
+        }),
+    }
+}
+
+fn eval_partition_tree(
+    relid: &Expr,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    let Some(relation_oid) = partition_lookup_oid(eval_expr(relid, slot, ctx)?, "pg_partition_tree")? else {
+        return Ok(Vec::new());
+    };
+    let catalog = partition_catalog(ctx)?;
+    Ok(partition_tree_entries(catalog, relation_oid)?
+        .into_iter()
+        .map(|entry| {
+            TupleSlot::virtual_row(vec![
+                Value::Int64(i64::from(entry.relid)),
+                entry
+                    .parentrelid
+                    .map(|oid| Value::Int64(i64::from(oid)))
+                    .unwrap_or(Value::Null),
+                Value::Bool(entry.isleaf),
+                Value::Int32(entry.level),
+            ])
+        })
+        .collect())
+}
+
+fn eval_partition_ancestors(
+    relid: &Expr,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    let Some(relation_oid) =
+        partition_lookup_oid(eval_expr(relid, slot, ctx)?, "pg_partition_ancestors")?
+    else {
+        return Ok(Vec::new());
+    };
+    let catalog = partition_catalog(ctx)?;
+    Ok(partition_ancestor_oids(catalog, relation_oid)?
+        .into_iter()
+        .map(|oid| TupleSlot::virtual_row(vec![Value::Int64(i64::from(oid))]))
         .collect())
 }
 

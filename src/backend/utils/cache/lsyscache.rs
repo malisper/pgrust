@@ -549,6 +549,9 @@ pub fn lookup_any_relation(
             relpersistence: entry.relpersistence,
             relkind: entry.relkind,
             desc: entry.desc.clone(),
+            relispartition: entry.relispartition,
+            relpartbound: entry.relpartbound.clone(),
+            partitioned_table: entry.partitioned_table.clone(),
         });
     }
 
@@ -573,6 +576,9 @@ pub fn lookup_any_relation(
             relpersistence: temp.relpersistence,
             relkind: temp.relkind,
             desc: temp.desc.clone(),
+            relispartition: temp.relispartition,
+            relpartbound: temp.relpartbound.clone(),
+            partitioned_table: temp.partitioned_table.clone(),
         });
     }
 
@@ -600,6 +606,9 @@ pub fn lookup_any_relation(
             relpersistence: entry.relpersistence,
             relkind: entry.relkind,
             desc: entry.desc.clone(),
+            relispartition: entry.relispartition,
+            relpartbound: entry.relpartbound.clone(),
+            partitioned_table: entry.partitioned_table.clone(),
         });
     }
 
@@ -762,6 +771,9 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             relpersistence: entry.relpersistence,
             relkind: entry.relkind,
             desc: entry.desc.clone(),
+            relispartition: entry.relispartition,
+            relpartbound: entry.relpartbound.clone(),
+            partitioned_table: entry.partitioned_table.clone(),
         })
     }
 

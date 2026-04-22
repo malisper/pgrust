@@ -504,9 +504,12 @@ impl Database {
                     relpersistence: index_entry.relpersistence,
                     relkind: index_entry.relkind,
                     relhastriggers: index_entry.relhastriggers,
+                    relispartition: index_entry.relispartition,
+                    relpartbound: index_entry.relpartbound.clone(),
                     relrowsecurity: index_entry.relrowsecurity,
                     relforcerowsecurity: index_entry.relforcerowsecurity,
                     desc: index_entry.desc.clone(),
+                    partitioned_table: index_entry.partitioned_table.clone(),
                     index: Some(self.relcache_index_meta_from_catalog(
                         client_id,
                         Some((xid, cid)),

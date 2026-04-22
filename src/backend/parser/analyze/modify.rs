@@ -581,12 +581,38 @@ fn lookup_modify_relation(
     name: &str,
 ) -> Result<BoundRelation, ParseError> {
     match catalog.lookup_any_relation(name) {
-        Some(entry) if matches!(entry.relkind, 'r' | 'v') => Ok(entry),
+        Some(entry) if matches!(entry.relkind, 'r' | 'p' | 'v') => Ok(entry),
         Some(_) => Err(ParseError::WrongObjectType {
             name: name.to_string(),
             expected: "table or view",
         }),
         None => Err(ParseError::UnknownTable(name.to_string())),
+    }
+}
+
+fn partitioned_update_target_oids(
+    catalog: &dyn CatalogLookup,
+    entry: &BoundRelation,
+    only: bool,
+) -> Vec<u32> {
+    if entry.relkind == 'p' {
+        if only {
+            return Vec::new();
+        }
+        return catalog
+            .find_all_inheritors(entry.relation_oid)
+            .into_iter()
+            .filter(|oid| {
+                catalog
+                    .relation_by_oid(*oid)
+                    .is_some_and(|child| child.relkind == 'r')
+            })
+            .collect();
+    }
+    if only {
+        vec![entry.relation_oid]
+    } else {
+        catalog.find_all_inheritors(entry.relation_oid)
     }
 }
 
@@ -1232,6 +1258,11 @@ pub(crate) fn bind_insert_with_outer_scopes(
         &[],
     )?;
     let entry = lookup_modify_relation(catalog, &stmt.table_name)?;
+    if entry.relkind == 'p' && stmt.on_conflict.is_some() {
+        return Err(ParseError::FeatureNotSupported(
+            "INSERT ... ON CONFLICT on partitioned tables".into(),
+        ));
+    }
     if stmt.on_conflict.as_ref().is_some_and(|clause| {
         clause.action == crate::include::nodes::parsenodes::OnConflictAction::Update
     }) && relation_has_row_security(entry.relation_oid, catalog)
@@ -1424,6 +1455,20 @@ pub(crate) fn bind_update_with_outer_scopes(
         &[],
     )?;
     let entry = lookup_modify_relation(catalog, &stmt.table_name)?;
+    if entry.relkind == 'p'
+        && let Some(partitioned) = entry.partitioned_table.as_ref()
+    {
+        let assigned = assignments_partition_key_update(
+            &stmt.assignments,
+            &entry.desc,
+            partitioned.partattrs.as_slice(),
+        );
+        if assigned {
+            return Err(ParseError::FeatureNotSupported(
+                "updating partition key columns on partitioned tables".into(),
+            ));
+        }
+    }
     let scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
     let predicate = stmt
         .where_clause
@@ -1476,11 +1521,7 @@ pub(crate) fn bind_update_with_outer_scopes(
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
 
-    let targets = if stmt.only {
-        vec![entry.relation_oid]
-    } else {
-        catalog.find_all_inheritors(entry.relation_oid)
-    }
+    let targets = partitioned_update_target_oids(catalog, &entry, stmt.only)
     .into_iter()
     .map(|relation_oid| {
         let child = catalog
@@ -1618,11 +1659,7 @@ pub(crate) fn bind_delete_with_outer_scopes(
         (None, None) => None,
     };
 
-    let targets = if stmt.only {
-        vec![entry.relation_oid]
-    } else {
-        catalog.find_all_inheritors(entry.relation_oid)
-    }
+    let targets = partitioned_update_target_oids(catalog, &entry, stmt.only)
     .into_iter()
     .map(|relation_oid| {
         let child = catalog
@@ -1642,5 +1679,20 @@ pub(crate) fn bind_delete_with_outer_scopes(
         targets,
         returning,
         subplans: Vec::new(),
+    })
+}
+
+fn assignments_partition_key_update(
+    assignments: &[crate::include::nodes::parsenodes::Assignment],
+    desc: &RelationDesc,
+    partattrs: &[i16],
+) -> bool {
+    let key_columns = partattrs
+        .iter()
+        .filter_map(|attnum| desc.columns.get(attnum.saturating_sub(1) as usize))
+        .map(|column| column.name.to_ascii_lowercase())
+        .collect::<std::collections::BTreeSet<_>>();
+    assignments.iter().any(|assignment| {
+        key_columns.contains(&assignment.target.column.to_ascii_lowercase())
     })
 }

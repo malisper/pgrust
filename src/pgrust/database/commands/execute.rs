@@ -368,6 +368,12 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterTableAttachPartition(ref alter_stmt) => self
+                .execute_alter_table_attach_partition_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterTableSetRowSecurity(ref alter_stmt) => self
                 .execute_alter_table_set_row_security_stmt_with_search_path(
                     client_id,
