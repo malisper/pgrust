@@ -12,8 +12,7 @@ use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name, sql_type_oid};
 use crate::include::catalog::{
     ANYOID, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, PG_CATALOG_NAMESPACE_OID,
-    PG_CONSTRAINT_RELATION_OID, bootstrap_catalog_kinds, relam_for_relkind,
-    system_catalog_index_by_oid,
+    PG_CONSTRAINT_RELATION_OID, bootstrap_catalog_kinds, system_catalog_index_by_oid,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

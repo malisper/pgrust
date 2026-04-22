@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::backend::parser::CatalogLookup;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{

@@ -589,7 +589,7 @@ fn resolve_publication_targets(
     require_relation_ownership: bool,
 ) -> Result<ResolvedPublicationTargets, ExecError> {
     let catalog = db.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-    let catcache = db
+    let _catcache = db
         .backend_catcache(client_id, Some((xid, cid)))
         .map_err(map_catalog_error)?;
     let mut seen_relations = BTreeSet::new();

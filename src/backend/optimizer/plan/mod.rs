@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 mod planner;
 mod subselect;
 
@@ -5,7 +7,7 @@ use crate::backend::parser::CatalogLookup;
 use crate::include::nodes::parsenodes::Query;
 use crate::include::nodes::pathnodes::{PathTarget, PlannerInfo, RelOptInfo};
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
-use crate::include::nodes::primnodes::{Expr, TargetEntry};
+use crate::include::nodes::primnodes::Expr;
 
 pub(crate) fn planner(query: Query, catalog: &dyn CatalogLookup) -> PlannedStmt {
     planner::planner(query, catalog)

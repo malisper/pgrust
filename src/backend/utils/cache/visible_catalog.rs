@@ -1,5 +1,5 @@
 use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
-use crate::backend::parser::{BoundRelation, CatalogLookup, SqlType};
+use crate::backend::parser::{BoundRelation, CatalogLookup};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{
@@ -9,7 +9,7 @@ use crate::backend::utils::cache::system_views::{
 };
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
-    PgCollationRow, PgConstraintRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgOpclassRow,
+    PgCollationRow, PgConstraintRow, PgInheritsRow, PgLanguageRow, PgOpclassRow,
     PgOperatorRow, PgPolicyRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow, PgTriggerRow,
     PgTypeRow, bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
     bootstrap_pg_language_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,

@@ -73,7 +73,6 @@ fn parse_numeric_tokens(
     let second = tokens[1];
     let third = tokens[2];
 
-    let a = first.parse::<i32>().map_err(|_| DateParseError::Invalid)?;
     let b = second.parse::<u32>().map_err(|_| DateParseError::Invalid)?;
     let c = third.parse::<i32>().map_err(|_| DateParseError::Invalid)?;
 

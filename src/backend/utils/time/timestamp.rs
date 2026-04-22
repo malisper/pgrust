@@ -17,11 +17,8 @@ const MONTH_ABBREV: [&str; 12] = [
 ];
 
 fn format_timestamp_date(pg_days: i32, config: &DateTimeConfig, include_weekday: bool) -> String {
-    let (mut year, month, day) = ymd_from_days(pg_days);
+    let (year, month, day) = ymd_from_days(pg_days);
     let bc = year <= 0;
-    if bc {
-        year = 1 - year;
-    }
     let rendered = match config.date_style_format {
         DateStyleFormat::Postgres => {
             let month_name = MONTH_ABBREV[month.saturating_sub(1) as usize];

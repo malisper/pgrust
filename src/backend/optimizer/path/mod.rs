@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 mod allpaths;
 mod costsize;
 mod gistcost;

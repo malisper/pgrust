@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 
 mod bestpath;
@@ -14,18 +16,13 @@ mod tests;
 mod upperrels;
 mod util;
 
-use crate::RelFileLocator;
 use crate::backend::executor::Value;
-use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType, SqlTypeKind};
+use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType};
 use crate::include::catalog::PgStatisticRow;
-use crate::include::nodes::datum::ArrayValue;
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntryKind};
-use crate::include::nodes::pathnodes::{Path, PlannerInfo, RestrictInfo, SpecialJoinInfo};
+use crate::include::nodes::pathnodes::{Path, PlannerInfo, RestrictInfo};
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
-use crate::include::nodes::primnodes::{
-    AggAccum, Expr, JoinType, OpExprKind, ProjectSetTarget, RelationDesc, SetReturningCall,
-    SubLink, SubPlan, ToastRelationRef, Var,
-};
+use crate::include::nodes::primnodes::{Expr, JoinType, OpExprKind};
 
 const DEFAULT_EQ_SEL: f64 = 0.005;
 const DEFAULT_INEQ_SEL: f64 = 1.0 / 3.0;
