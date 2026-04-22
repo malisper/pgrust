@@ -696,9 +696,7 @@ impl Database {
                             ))
                         })?;
                 } else {
-                    return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                        "multi-OUT non-set functions are not supported yet".into(),
-                    )));
+                    prorettype = RECORD_TYPE_OID;
                 }
             }
         }

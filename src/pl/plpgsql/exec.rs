@@ -8,6 +8,7 @@ use crate::backend::commands::tablecmds::{execute_delete, execute_insert, execut
 use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, TriggerLevel, TriggerTiming,
 };
+use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::TEXT_TYPE_OID;
 use crate::include::nodes::datum::{RecordDescriptor, RecordValue};
 use crate::include::nodes::primnodes::QueryColumn;
@@ -98,19 +99,31 @@ pub fn execute_user_defined_scalar_function(
         .map(|arg| eval_expr(arg, slot, ctx))
         .collect::<Result<Vec<_>, _>>()?;
 
-    let FunctionReturnContract::Scalar { setof, ty, .. } = &compiled.return_contract else {
-        return Err(function_runtime_error(
-            "record-returning function called in scalar context",
-            None,
-            "0A000",
-        ));
-    };
-    if *setof {
-        return Err(function_runtime_error(
-            "set-returning function called in scalar context",
-            None,
-            "0A000",
-        ));
+    match &compiled.return_contract {
+        FunctionReturnContract::Scalar { setof: true, .. }
+        | FunctionReturnContract::FixedRow { setof: true, .. }
+        | FunctionReturnContract::AnonymousRecord { setof: true } => {
+            return Err(function_runtime_error(
+                "set-returning function called in scalar context",
+                None,
+                "0A000",
+            ));
+        }
+        FunctionReturnContract::Trigger { .. } => {
+            return Err(function_runtime_error(
+                "trigger function called in scalar context",
+                None,
+                "0A000",
+            ));
+        }
+        FunctionReturnContract::AnonymousRecord { setof: false } => {
+            return Err(function_runtime_error(
+                "record-returning function called in scalar context",
+                None,
+                "0A000",
+            ));
+        }
+        FunctionReturnContract::Scalar { .. } | FunctionReturnContract::FixedRow { .. } => {}
     }
 
     let track_stats = ctx.session_stats.read().track_functions.tracks_plpgsql();
@@ -129,13 +142,29 @@ pub fn execute_user_defined_scalar_function(
         )
     })?;
     let values = row.values()?;
-    match values {
-        [value] => cast_value(value.clone(), *ty),
-        other => Err(function_runtime_error(
-            "scalar function returned an unexpected row shape",
-            Some(format!("expected 1 column, got {}", other.len())),
-            "42804",
-        )),
+    match &compiled.return_contract {
+        FunctionReturnContract::Scalar { ty, .. } => match values {
+            [value] => cast_value(value.clone(), *ty),
+            other => Err(function_runtime_error(
+                "scalar function returned an unexpected row shape",
+                Some(format!("expected 1 column, got {}", other.len())),
+                "42804",
+            )),
+        },
+        FunctionReturnContract::FixedRow { columns, .. } => {
+            let descriptor = anonymous_record_descriptor_for_columns(columns);
+            Ok(Value::Record(RecordValue::from_descriptor(
+                descriptor,
+                values.to_vec(),
+            )))
+        }
+        FunctionReturnContract::AnonymousRecord { .. } | FunctionReturnContract::Trigger { .. } => {
+            Err(function_runtime_error(
+                "record-returning function called in scalar context",
+                None,
+                "0A000",
+            ))
+        }
     }
 }
 
@@ -354,6 +383,16 @@ fn execute_compiled_function(
             Ok(vec![TupleSlot::virtual_row(vec![
                 state.scalar_return.expect("scalar return set above"),
             ])])
+        }
+        FunctionReturnContract::FixedRow {
+            setof: false,
+            uses_output_vars: true,
+            ..
+        } => {
+            if state.rows.is_empty() {
+                state.rows.push(current_output_row(compiled, &state)?);
+            }
+            Ok(state.rows)
         }
         FunctionReturnContract::Scalar { setof: true, .. }
         | FunctionReturnContract::FixedRow { .. }
@@ -942,6 +981,14 @@ fn statement_result_changed_rows(result: &StatementResult) -> bool {
     }
 }
 
+fn anonymous_record_descriptor_for_columns(columns: &[QueryColumn]) -> RecordDescriptor {
+    assign_anonymous_record_descriptor(
+        columns
+            .iter()
+            .map(|column| (column.name.clone(), column.sql_type))
+            .collect(),
+    )
+}
 
 fn current_output_row(
     compiled: &CompiledFunction,

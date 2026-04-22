@@ -18236,6 +18236,27 @@ fn create_function_row_returns_work_for_table_and_record() {
 }
 
 #[test]
+fn create_function_multi_out_non_set_returns_expand_in_select_list() {
+    let dir = temp_dir("create_function_multi_out_non_set");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function pair_row(input in int4, left out int4, label out text) language plpgsql as $$ begin left := input; label := 'row'; return; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select (pair_row(7)).left, (pair_row(7)).label"),
+        vec![vec![Value::Int32(7), Value::Text("row".into())]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select (pair_row(7)).*"),
+        vec![vec![Value::Int32(7), Value::Text("row".into())]]
+    );
+}
+
+#[test]
 fn create_function_named_composite_rows_expand_from_relation_rowtype() {
     let dir = temp_dir("create_function_named_composite");
     let db = Database::open(&dir, 64).unwrap();
