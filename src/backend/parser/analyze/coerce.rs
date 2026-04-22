@@ -539,6 +539,13 @@ pub(super) fn infer_concat_sql_type(expr: &SqlExpr, left: SqlType, right: SqlTyp
     {
         return SqlType::new(SqlTypeKind::Jsonb);
     }
+    if left.kind == SqlTypeKind::Bytea
+        && !left.is_array
+        && right.kind == SqlTypeKind::Bytea
+        && !right.is_array
+    {
+        return SqlType::new(SqlTypeKind::Bytea);
+    }
     if is_bit_string_type(left) && is_bit_string_type(right) {
         return resolve_common_scalar_type(left, right)
             .unwrap_or(SqlType::new(SqlTypeKind::VarBit));

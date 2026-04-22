@@ -55,7 +55,7 @@ string_literal = @{ "'" ~ ( "''" | (!"'" ~ ANY) )* ~ "'" }
 escape_string = @{ (^"e" | ^"E") ~ string_literal }
 semi = _{ ";" }
 comma = _{ "," }
-assign_op = _{ ":=" }
+assign_op = _{ ":=" | "=" }
 range_op = _{ ".." }
 
 type_name_text = @{ type_name_chunk+ }

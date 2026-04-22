@@ -63,6 +63,12 @@ pub(crate) struct CompiledExpr {
     pub(crate) expr: Expr,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CompiledSelectIntoTarget {
+    pub(crate) slot: usize,
+    pub(crate) ty: SqlType,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum FunctionReturnContract {
     Scalar {
@@ -154,8 +160,7 @@ pub(crate) enum CompiledStmt {
     },
     SelectInto {
         plan: PlannedStmt,
-        target_slot: usize,
-        target_ty: SqlType,
+        targets: Vec<CompiledSelectIntoTarget>,
     },
     ExecInsert {
         stmt: BoundInsertStatement,
@@ -837,38 +842,20 @@ fn compile_exec_sql_stmt(
     env: &mut CompileEnv,
 ) -> Result<CompiledStmt, ParseError> {
     if let Some((target_name, select_sql)) = split_select_into_target(sql) {
-        let outer_scope = outer_scope_for_sql(env);
-        let target = env
-            .get_var(&target_name)
-            .ok_or_else(|| ParseError::UnexpectedToken {
-                expected: "declared SELECT INTO target",
-                actual: target_name.clone(),
-            })?
-            .clone();
-        let planned = pg_plan_query_with_outer_scopes(
-            &crate::backend::parser::parse_select(&select_sql)?,
+        return compile_select_into_stmt(
+            &select_sql,
+            &[AssignTarget::Name(target_name)],
             catalog,
-            &[outer_scope],
-        )?;
-        let target_ty = if target.ty.kind == SqlTypeKind::Record {
-            let descriptor = assign_anonymous_record_descriptor(
-                planned
-                    .columns()
-                    .into_iter()
-                    .map(|column| (column.name, column.sql_type))
-                    .collect(),
-            );
-            let ty = descriptor.sql_type();
-            env.update_slot_type(target.slot, ty);
-            ty
-        } else {
-            target.ty
-        };
-        return Ok(CompiledStmt::SelectInto {
-            plan: planned,
-            target_slot: target.slot,
-            target_ty,
-        });
+            env,
+        );
+    }
+
+    if let Some((target_names, select_sql)) = split_select_with_into_targets(sql) {
+        let targets = target_names
+            .iter()
+            .map(|target| parse_select_into_assign_target(target))
+            .collect::<Result<Vec<_>, _>>()?;
+        return compile_select_into_stmt(&select_sql, &targets, catalog, env);
     }
 
     let stmt = parse_statement(sql)?;
@@ -967,6 +954,243 @@ fn split_select_into_target(sql: &str) -> Option<(String, String)> {
     let target = rest[..end].trim().trim_matches('"').to_ascii_lowercase();
     let select_sql = format!("select {}", rest[end..].trim_start());
     Some((target, select_sql))
+}
+
+fn split_select_with_into_targets(sql: &str) -> Option<(Vec<String>, String)> {
+    let trimmed = sql.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("select ") || lower.starts_with("select into ") {
+        return None;
+    }
+
+    let into_idx = find_next_top_level_keyword(trimmed, &["into"])?;
+    let select_sql = trimmed[..into_idx].trim_end();
+    if select_sql.eq_ignore_ascii_case("select") {
+        return None;
+    }
+
+    let after_into = trimmed[into_idx + "into".len()..].trim_start();
+    let clause_idx = find_next_top_level_keyword(
+        after_into,
+        &[
+            "from",
+            "where",
+            "group",
+            "having",
+            "window",
+            "union",
+            "intersect",
+            "except",
+            "order",
+            "limit",
+            "offset",
+            "fetch",
+            "for",
+        ],
+    );
+    let (targets_sql, suffix) = match clause_idx {
+        Some(idx) => (&after_into[..idx], after_into[idx..].trim_start()),
+        None => (after_into, ""),
+    };
+    let targets = split_top_level_csv(targets_sql)?;
+    let rewritten = if suffix.is_empty() {
+        select_sql.to_string()
+    } else {
+        format!("{select_sql} {suffix}")
+    };
+    Some((targets, rewritten))
+}
+
+fn find_next_top_level_keyword(sql: &str, keywords: &[&str]) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut depth = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        let ch = bytes[idx] as char;
+        if in_single {
+            if ch == '\'' {
+                if bytes.get(idx + 1) == Some(&b'\'') {
+                    idx += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_double {
+            if ch == '"' {
+                if bytes.get(idx + 1) == Some(&b'"') {
+                    idx += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            idx += 1;
+            continue;
+        }
+
+        match ch {
+            '\'' => {
+                in_single = true;
+                idx += 1;
+                continue;
+            }
+            '"' => {
+                in_double = true;
+                idx += 1;
+                continue;
+            }
+            '(' => {
+                depth += 1;
+                idx += 1;
+                continue;
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                idx += 1;
+                continue;
+            }
+            _ => {}
+        }
+
+        if depth == 0 && keywords.iter().any(|keyword| keyword_at(sql, idx, keyword)) {
+            return Some(idx);
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn keyword_at(sql: &str, idx: usize, keyword: &str) -> bool {
+    let bytes = sql.as_bytes();
+    let end = idx.saturating_add(keyword.len());
+    if end > bytes.len() || !sql[idx..end].eq_ignore_ascii_case(keyword) {
+        return false;
+    }
+    let before_ok = idx == 0 || !is_identifier_char(bytes[idx - 1] as char);
+    let after_ok = end == bytes.len() || !is_identifier_char(bytes[end] as char);
+    before_ok && after_ok
+}
+
+fn is_identifier_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+fn split_top_level_csv(input: &str) -> Option<Vec<String>> {
+    let bytes = input.as_bytes();
+    let mut depth = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut start = 0usize;
+    let mut parts = Vec::new();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        let ch = bytes[idx] as char;
+        if in_single {
+            if ch == '\'' {
+                if bytes.get(idx + 1) == Some(&b'\'') {
+                    idx += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_double {
+            if ch == '"' {
+                if bytes.get(idx + 1) == Some(&b'"') {
+                    idx += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            idx += 1;
+            continue;
+        }
+
+        match ch {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                let part = input[start..idx].trim();
+                if part.is_empty() {
+                    return None;
+                }
+                parts.push(part.to_string());
+                start = idx + 1;
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+
+    let tail = input[start..].trim();
+    if tail.is_empty() {
+        return None;
+    }
+    parts.push(tail.to_string());
+    Some(parts)
+}
+
+fn parse_select_into_assign_target(target: &str) -> Result<AssignTarget, ParseError> {
+    let trimmed = target.trim();
+    match parse_expr(trimmed)? {
+        SqlExpr::Column(name) => Ok(AssignTarget::Name(name)),
+        SqlExpr::FieldSelect { expr, field } => match *expr {
+            SqlExpr::Column(relation) => Ok(AssignTarget::Field { relation, field }),
+            _ => Err(ParseError::UnexpectedToken {
+                expected: "PL/pgSQL SELECT INTO target",
+                actual: trimmed.into(),
+            }),
+        },
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "PL/pgSQL SELECT INTO target",
+            actual: trimmed.into(),
+        }),
+    }
+}
+
+fn compile_select_into_stmt(
+    select_sql: &str,
+    target_refs: &[AssignTarget],
+    catalog: &dyn CatalogLookup,
+    env: &mut CompileEnv,
+) -> Result<CompiledStmt, ParseError> {
+    let planned = pg_plan_query_with_outer_scopes(
+        &crate::backend::parser::parse_select(select_sql)?,
+        catalog,
+        &[outer_scope_for_sql(env)],
+    )?;
+    let mut targets = target_refs
+        .iter()
+        .map(|target| {
+            resolve_assign_target(target, env).map(|(slot, ty)| CompiledSelectIntoTarget {
+                slot,
+                ty,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if let [target] = targets.as_mut_slice()
+        && target.ty.kind == SqlTypeKind::Record
+    {
+        let descriptor = assign_anonymous_record_descriptor(
+            planned
+                .columns()
+                .into_iter()
+                .map(|column| (column.name, column.sql_type))
+                .collect(),
+        );
+        let ty = descriptor.sql_type();
+        env.update_slot_type(target.slot, ty);
+        target.ty = ty;
+    }
+    Ok(CompiledStmt::SelectInto { plan: planned, targets })
 }
 
 fn compile_stmt_list(

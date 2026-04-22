@@ -1,5 +1,6 @@
 use super::query::{AnalyzedFrom, JoinAliasInfo, shift_expr_rtindexes};
 use super::*;
+use super::expr::bind_resolved_scalar_function_call;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::record::lookup_anonymous_record_descriptor;
 use crate::include::nodes::primnodes::{
@@ -1256,8 +1257,21 @@ fn bind_function_from_item_with_ctes(
                     alias_single_function_output,
                 ))
             } else if let Some(resolved) = resolved.as_ref() {
-                if resolved.prokind != 'f' || !resolved.proretset {
+                if resolved.prokind != 'f' {
                     return Err(ParseError::UnknownTable(other.to_string()));
+                }
+                if !resolved.proretset {
+                    return bind_single_row_function_from_item_with_ctes(
+                        name,
+                        &args,
+                        resolved,
+                        resolved_row_columns,
+                        with_ordinality,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    );
                 }
                 let bound_args = bind_user_defined_table_function_args(
                     &args,
@@ -1305,6 +1319,86 @@ fn bind_function_from_item_with_ctes(
             }
         }
     }
+}
+
+fn bind_single_row_function_from_item_with_ctes(
+    name: &str,
+    args: &[SqlExpr],
+    resolved: &ResolvedFunctionCall,
+    resolved_row_columns: Option<Vec<QueryColumn>>,
+    with_ordinality: bool,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<(AnalyzedFrom, BoundScope, bool), ParseError> {
+    let function_expr = bind_resolved_scalar_function_call(
+        resolved,
+        args,
+        &empty_scope(),
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    let mut plan = AnalyzedFrom::result().with_projection(vec![TargetEntry::new(
+        name.to_string(),
+        function_expr,
+        resolved.result_type,
+        1,
+    )]);
+
+    let alias_single_function_output = resolved_row_columns.is_none() && !with_ordinality;
+    if let Some(output_columns) = resolved_row_columns {
+        let base_expr = plan.output_exprs[0].clone();
+        let mut targets = output_columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| {
+                TargetEntry::new(
+                    column.name.clone(),
+                    Expr::FieldSelect {
+                        expr: Box::new(base_expr.clone()),
+                        field: column.name.clone(),
+                        field_type: column.sql_type,
+                    },
+                    column.sql_type,
+                    index + 1,
+                )
+            })
+            .collect::<Vec<_>>();
+        if with_ordinality {
+            let ordinality_type = SqlType::new(SqlTypeKind::Int8);
+            targets.push(TargetEntry::new(
+                "ordinality",
+                Expr::Const(Value::Int64(1)),
+                ordinality_type,
+                targets.len() + 1,
+            ));
+        }
+        plan = plan.with_projection(targets);
+    } else if with_ordinality {
+        let base_expr = plan.output_exprs[0].clone();
+        let ordinality_type = SqlType::new(SqlTypeKind::Int8);
+        plan = plan.with_projection(vec![
+            TargetEntry::new(
+                name.to_string(),
+                base_expr,
+                resolved.result_type,
+                1,
+            ),
+            TargetEntry::new(
+                "ordinality",
+                Expr::Const(Value::Int64(1)),
+                ordinality_type,
+                2,
+            ),
+        ]);
+    }
+
+    let desc = plan.desc();
+    let scope = scope_with_output_exprs(scope_for_relation(Some(name), &desc), &plan.output_exprs);
+    Ok((plan, scope, alias_single_function_output))
 }
 
 fn maybe_append_function_ordinality(
