@@ -7453,6 +7453,12 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
                 .into_inner()
                 .find(|part| part.as_rule() == Rule::unique_table_constraint_body)
                 .ok_or(ParseError::UnexpectedEof)?;
+            let nulls_not_distinct = body
+                .clone()
+                .into_inner()
+                .any(|part| part.as_rule() == Rule::unique_nulls_not_distinct_clause);
+            let mut attributes = attributes;
+            attributes.nulls_not_distinct = nulls_not_distinct;
             Ok(TableConstraint::Unique {
                 attributes,
                 columns: body
@@ -7619,7 +7625,17 @@ fn build_column_constraint(pair: Pair<'_, Rule>) -> Result<ColumnConstraint, Par
             })
         }
         Rule::primary_key_column_constraint => Ok(ColumnConstraint::PrimaryKey { attributes }),
-        Rule::unique_column_constraint => Ok(ColumnConstraint::Unique { attributes }),
+        Rule::unique_column_constraint => {
+            let body = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::unique_column_constraint_body)
+                .ok_or(ParseError::UnexpectedEof)?;
+            let mut attributes = attributes;
+            attributes.nulls_not_distinct = body
+                .into_inner()
+                .any(|part| part.as_rule() == Rule::unique_nulls_not_distinct_clause);
+            Ok(ColumnConstraint::Unique { attributes })
+        }
         Rule::references_column_constraint => {
             let body = pair
                 .into_inner()

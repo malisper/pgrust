@@ -2129,6 +2129,7 @@ pub struct ConstraintAttributes {
     pub deferrable: Option<bool>,
     pub initially_deferred: Option<bool>,
     pub enforced: Option<bool>,
+    pub nulls_not_distinct: bool,
 }
 
 impl Default for ConstraintAttributes {
@@ -2140,6 +2141,7 @@ impl Default for ConstraintAttributes {
             deferrable: None,
             initially_deferred: None,
             enforced: None,
+            nulls_not_distinct: false,
         }
     }
 }

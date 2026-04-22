@@ -16,6 +16,7 @@ pub struct IndexBackedConstraintAction {
     pub constraint_name: Option<String>,
     pub columns: Vec<String>,
     pub primary: bool,
+    pub nulls_not_distinct: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,6 +144,7 @@ struct PendingIndexConstraint {
     generated_base: String,
     columns: Vec<String>,
     primary: bool,
+    nulls_not_distinct: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -265,6 +267,7 @@ pub fn normalize_create_table_constraints(
                         generated_base: format!("{}_pkey", stmt.table_name),
                         columns: vec![column.name.clone()],
                         primary: true,
+                        nulls_not_distinct: false,
                     });
                 }
                 ColumnConstraint::Unique { attributes } => {
@@ -274,6 +277,7 @@ pub fn normalize_create_table_constraints(
                         generated_base: format!("{}_{}_key", stmt.table_name, column.name),
                         columns: vec![column.name.clone()],
                         primary: false,
+                        nulls_not_distinct: attributes.nulls_not_distinct,
                     });
                 }
                 ColumnConstraint::References {
@@ -347,6 +351,7 @@ pub fn normalize_create_table_constraints(
                     generated_base: format!("{}_pkey", stmt.table_name),
                     columns: resolve_constraint_columns(key_columns, &columns, &column_lookup)?,
                     primary: true,
+                    nulls_not_distinct: false,
                 });
             }
             TableConstraint::Unique {
@@ -360,6 +365,7 @@ pub fn normalize_create_table_constraints(
                     generated_base: format!("{}_{}_key", stmt.table_name, resolved.join("_")),
                     columns: resolved,
                     primary: false,
+                    nulls_not_distinct: attributes.nulls_not_distinct,
                 });
             }
             TableConstraint::ForeignKey {
@@ -487,6 +493,7 @@ pub fn normalize_create_table_constraints(
             })),
             columns: constraint.columns,
             primary: constraint.primary,
+            nulls_not_distinct: constraint.nulls_not_distinct,
         })
         .collect();
 
@@ -753,6 +760,7 @@ pub fn normalize_alter_table_add_constraint(
                     constraint_name: Some(constraint_name),
                     columns: resolve_relation_constraint_columns(columns, desc, &column_lookup)?,
                     primary: true,
+                    nulls_not_distinct: false,
                 },
             ))
         }
@@ -772,6 +780,7 @@ pub fn normalize_alter_table_add_constraint(
                     constraint_name: Some(constraint_name),
                     columns: resolved,
                     primary: false,
+                    nulls_not_distinct: attributes.nulls_not_distinct,
                 },
             ))
         }

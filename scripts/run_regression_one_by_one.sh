@@ -119,6 +119,7 @@ DATA_DIR=""
 SERVER_PID=""
 USE_PGRUST_SETUP=true
 REGRESS_USER="${PGRUST_REGRESS_USER:-${PGUSER:-$(id -un)}}"
+STARTUP_WAIT_SECS="${PGRUST_STARTUP_WAIT_SECS:-300}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -165,6 +166,10 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+
+port_is_listening() {
+    lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+}
 
 run_bootstrap_setup_one_by_one() {
     local setup_sql=""
@@ -221,9 +226,10 @@ run_bootstrap_setup_one_by_one() {
 
 wait_for_server_ready() {
     local pid="$1"
+    local attempts=$((STARTUP_WAIT_SECS * 2))
 
     echo "Waiting for server to accept connections..."
-    for i in $(seq 1 60); do
+    for i in $(seq 1 "$attempts"); do
         if psql -X -h 127.0.0.1 -p "$PORT" -U "$REGRESS_USER" postgres -c "SELECT 1" >/dev/null 2>&1; then
             echo "Server ready."
             return 0
@@ -239,6 +245,10 @@ wait_for_server_ready() {
 
 start_server() {
     echo "Starting pgrust server on port $PORT (data: $DATA_DIR)..."
+    if port_is_listening "$PORT"; then
+        echo "ERROR: port $PORT is already in use; refusing to treat another server as ready."
+        return 1
+    fi
     "$SERVER_BIN" "$DATA_DIR" "$PORT" &
     SERVER_PID=$!
 

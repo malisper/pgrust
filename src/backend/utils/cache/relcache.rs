@@ -670,7 +670,7 @@ fn from_catalog_entry(entry: &CatalogEntry, support_lookup: &IndexSupportLookup)
                 indnatts: index.indkey.len() as i16,
                 indnkeyatts: index.indkey.len() as i16,
                 indisunique: index.indisunique,
-                indnullsnotdistinct: false,
+                indnullsnotdistinct: index.indnullsnotdistinct,
                 indisprimary: index.indisprimary,
                 indisexclusion: false,
                 indimmediate: true,
@@ -775,6 +775,7 @@ mod tests {
                     indclass: vec![BOX_GIST_OPCLASS_OID],
                     indcollation: vec![0],
                     indoption: vec![0],
+                    indnullsnotdistinct: false,
                 },
             )
             .unwrap();
@@ -796,6 +797,43 @@ mod tests {
             Some(GIST_BOX_CONSISTENT_PROC_OID)
         );
         assert!(!index.amop_entries.is_empty());
+    }
+
+    #[test]
+    fn relcache_preserves_nulls_not_distinct_metadata() {
+        let mut catalog = Catalog::default();
+        let table = catalog
+            .create_table(
+                "items",
+                RelationDesc {
+                    columns: vec![column_desc("id", SqlType::new(SqlTypeKind::Int4), true)],
+                },
+            )
+            .unwrap();
+
+        catalog
+            .create_index_for_relation_with_options(
+                "items_id_key",
+                table.relation_oid,
+                true,
+                &["id".into()],
+                &CatalogIndexBuildOptions {
+                    am_oid: crate::include::catalog::BTREE_AM_OID,
+                    indclass: vec![crate::include::catalog::INT4_BTREE_OPCLASS_OID],
+                    indcollation: vec![0],
+                    indoption: vec![0],
+                    indnullsnotdistinct: true,
+                },
+            )
+            .unwrap();
+
+        let cache = RelCache::from_catalog(&catalog);
+        let index = cache
+            .get_by_name("items_id_key")
+            .and_then(|entry| entry.index.as_ref())
+            .expect("btree index entry should be present");
+
+        assert!(index.indnullsnotdistinct);
     }
 
     #[test]

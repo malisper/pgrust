@@ -40,6 +40,7 @@ pub struct CatalogIndexMeta {
     pub indrelid: u32,
     pub indkey: Vec<i16>,
     pub indisunique: bool,
+    pub indnullsnotdistinct: bool,
     pub indisprimary: bool,
     pub indisvalid: bool,
     pub indisready: bool,
@@ -57,6 +58,7 @@ pub struct CatalogIndexBuildOptions {
     pub indclass: Vec<u32>,
     pub indcollation: Vec<u32>,
     pub indoption: Vec<i16>,
+    pub indnullsnotdistinct: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -600,6 +602,7 @@ impl Catalog {
                 indrelid: table.relation_oid,
                 indkey,
                 indisunique: unique,
+                indnullsnotdistinct: options.indnullsnotdistinct,
                 indisprimary: primary,
                 indisvalid: false,
                 indisready: false,
@@ -1231,6 +1234,7 @@ impl Catalog {
             indclass,
             indcollation,
             indoption,
+            indnullsnotdistinct: false,
         })
     }
 

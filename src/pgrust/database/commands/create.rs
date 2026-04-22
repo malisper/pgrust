@@ -183,6 +183,7 @@ impl Database {
                 &index_columns,
                 true,
                 action.primary,
+                action.nulls_not_distinct,
                 xid,
                 action_cid,
                 build_options.0,

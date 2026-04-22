@@ -490,6 +490,7 @@ impl CatalogStore {
             indclass: Vec::new(),
             indcollation: Vec::new(),
             indoption: Vec::new(),
+            indnullsnotdistinct: false,
         };
         self.create_index_for_relation_with_options(
             index_name,
@@ -2497,6 +2498,7 @@ impl CatalogStore {
             indclass: Vec::new(),
             indcollation: Vec::new(),
             indoption: Vec::new(),
+            indnullsnotdistinct: false,
         };
         self.create_index_for_relation_mvcc_with_options(
             index_name,
@@ -4409,6 +4411,7 @@ fn build_index_entry(
             indrelid: table.relation_oid,
             indkey,
             indisunique: unique,
+            indnullsnotdistinct: options.indnullsnotdistinct,
             indisprimary: primary,
             indisvalid: false,
             indisready: false,
@@ -4484,6 +4487,7 @@ fn build_toast_catalog_changes(
             ],
             indcollation: vec![0, 0],
             indoption: vec![0, 0],
+            indnullsnotdistinct: false,
         },
         control,
     )?;
@@ -4537,6 +4541,7 @@ fn default_index_build_options_for_relation(
         indclass,
         indcollation,
         indoption,
+        indnullsnotdistinct: false,
     })
 }
 
@@ -4929,7 +4934,7 @@ fn index_row_for_entry(entry: &CatalogEntry) -> Option<crate::include::catalog::
         indnatts: index_meta.indkey.len() as i16,
         indnkeyatts: index_meta.indkey.len() as i16,
         indisunique: index_meta.indisunique,
-        indnullsnotdistinct: false,
+        indnullsnotdistinct: index_meta.indnullsnotdistinct,
         indisprimary: index_meta.indisprimary,
         indisexclusion: false,
         indimmediate: true,
@@ -5063,6 +5068,7 @@ fn catalog_entry_from_visible_relation(
             indrelid: index.indrelid,
             indkey: index.indkey.clone(),
             indisunique: index.indisunique,
+            indnullsnotdistinct: index.indnullsnotdistinct,
             indisprimary: index.indisprimary,
             indisvalid: index.indisvalid,
             indisready: index.indisready,
