@@ -11,12 +11,61 @@ use crate::backend::executor::jsonb::render_jsonb_bytes;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{ParseError, SqlType, SqlTypeKind};
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
+use crate::include::nodes::datum::NumericValue;
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::session::ByteaOutputFormat;
 use base64::Engine as _;
 use encoding_rs::{DecoderResult, EncoderResult, Encoding};
 use md5::{Digest, Md5};
+use num_bigint::BigInt;
+use num_traits::Signed;
 use sha2::{Sha224, Sha256, Sha384, Sha512};
+
+struct SizePrettyUnit {
+    name: &'static str,
+    limit: u64,
+    round: bool,
+    unitbits: u8,
+}
+
+const SIZE_PRETTY_UNITS: [SizePrettyUnit; 6] = [
+    SizePrettyUnit {
+        name: "bytes",
+        limit: 10 * 1024,
+        round: false,
+        unitbits: 0,
+    },
+    SizePrettyUnit {
+        name: "kB",
+        limit: 20 * 1024 - 1,
+        round: true,
+        unitbits: 10,
+    },
+    SizePrettyUnit {
+        name: "MB",
+        limit: 20 * 1024 - 1,
+        round: true,
+        unitbits: 20,
+    },
+    SizePrettyUnit {
+        name: "GB",
+        limit: 20 * 1024 - 1,
+        round: true,
+        unitbits: 30,
+    },
+    SizePrettyUnit {
+        name: "TB",
+        limit: 20 * 1024 - 1,
+        round: true,
+        unitbits: 40,
+    },
+    SizePrettyUnit {
+        name: "PB",
+        limit: 20 * 1024 - 1,
+        round: true,
+        unitbits: 50,
+    },
+];
 
 pub(super) fn eval_to_char_function(values: &[Value]) -> Result<Value, ExecError> {
     let Some(value) = values.first() else {
@@ -72,6 +121,250 @@ pub(super) fn eval_to_number_function(values: &[Value]) -> Result<Value, ExecErr
             right: format_value.clone(),
         })?;
     Ok(Value::Numeric(to_number_numeric(text, format)?))
+}
+
+pub(super) fn eval_pg_size_pretty_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let rendered = match value {
+        Value::Int64(size) => format_size_pretty_int64(*size),
+        Value::Numeric(size) => format_size_pretty_numeric(size)?,
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: "pg_size_pretty",
+                left: other.clone(),
+                right: Value::Null,
+            });
+        }
+    };
+    Ok(Value::Text(rendered.into()))
+}
+
+pub(super) fn eval_pg_size_bytes_function(values: &[Value]) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let input = value.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "pg_size_bytes",
+        left: value.clone(),
+        right: Value::Text("".into()),
+    })?;
+    let parsed = parse_size_bytes_numeric(input)?;
+    cast_value(Value::Numeric(parsed), SqlType::new(SqlTypeKind::Int8))
+}
+
+fn format_size_pretty_int64(mut size: i64) -> String {
+    for (idx, unit) in SIZE_PRETTY_UNITS.iter().enumerate() {
+        let abs_size = i128::from(size).unsigned_abs();
+        let next = SIZE_PRETTY_UNITS.get(idx + 1);
+        if next.is_none() || abs_size < u128::from(unit.limit) {
+            if unit.round {
+                size = half_rounded_i64(size);
+            }
+            return format!("{size} {}", unit.name);
+        }
+        let next = next.expect("checked above");
+        let shift_by =
+            next.unitbits - unit.unitbits - u8::from(next.round) + u8::from(unit.round);
+        size /= 1_i64 << shift_by;
+    }
+    unreachable!("size units are non-empty")
+}
+
+fn format_size_pretty_numeric(size: &NumericValue) -> Result<String, ExecError> {
+    match size {
+        NumericValue::Finite { .. } => {
+            let mut current = size.clone();
+            for (idx, unit) in SIZE_PRETTY_UNITS.iter().enumerate() {
+                let next = SIZE_PRETTY_UNITS.get(idx + 1);
+                if next.is_none() || numeric_abs_less_than_limit(&current, unit.limit) {
+                    if unit.round {
+                        current = half_rounded_numeric(&current);
+                    }
+                    return Ok(format!("{} {}", current.render(), unit.name));
+                }
+                let next = next.expect("checked above");
+                let shift_by =
+                    next.unitbits - unit.unitbits - u8::from(next.round) + u8::from(unit.round);
+                current = trunc_divide_numeric_by_pow2(&current, shift_by);
+            }
+            unreachable!("size units are non-empty")
+        }
+        NumericValue::PosInf | NumericValue::NegInf | NumericValue::NaN => {
+            Ok(format!("{} bytes", size.render()))
+        }
+    }
+}
+
+fn half_rounded_i64(size: i64) -> i64 {
+    if size >= 0 {
+        (size + 1) / 2
+    } else {
+        (size - 1) / 2
+    }
+}
+
+fn numeric_abs_less_than_limit(value: &NumericValue, limit: u64) -> bool {
+    let NumericValue::Finite { coeff, scale, .. } = value else {
+        return false;
+    };
+    coeff.abs() < BigInt::from(limit) * pow10(*scale)
+}
+
+fn half_rounded_numeric(value: &NumericValue) -> NumericValue {
+    let NumericValue::Finite { coeff, scale, .. } = value else {
+        return value.clone();
+    };
+    if *scale != 0 {
+        return value.clone();
+    }
+    let adjusted = if coeff.sign() == num_bigint::Sign::Minus {
+        coeff - 1
+    } else {
+        coeff + 1
+    };
+    NumericValue::finite(adjusted / 2, 0).normalize()
+}
+
+fn trunc_divide_numeric_by_pow2(value: &NumericValue, bits: u8) -> NumericValue {
+    let NumericValue::Finite { coeff, scale, .. } = value else {
+        return value.clone();
+    };
+    let divisor = BigInt::from(1_u64 << bits) * pow10(*scale);
+    NumericValue::finite(coeff / divisor, 0).normalize()
+}
+
+fn parse_size_bytes_numeric(input: &str) -> Result<NumericValue, ExecError> {
+    let (number_text, unit_text) = split_size_bytes_input(input)?;
+    let mut parsed = match cast_value(
+        Value::Text(number_text.into()),
+        SqlType::new(SqlTypeKind::Numeric),
+    )? {
+        Value::Numeric(numeric) => numeric,
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: "pg_size_bytes",
+                left: other,
+                right: Value::Null,
+            });
+        }
+    };
+
+    if let Some(unit) = unit_text {
+        let multiplier_bits =
+            match_size_unit(unit).ok_or_else(|| invalid_size_unit_error(input, unit))?;
+        if multiplier_bits > 0 {
+            let multiplier = NumericValue::from_i64(1_i64 << multiplier_bits);
+            parsed = parsed.mul(&multiplier);
+        }
+    }
+
+    Ok(parsed)
+}
+
+fn split_size_bytes_input(input: &str) -> Result<(&str, Option<&str>), ExecError> {
+    let bytes = input.as_bytes();
+    let mut idx = 0usize;
+    while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    let start = idx;
+
+    if idx < bytes.len() && matches!(bytes[idx], b'+' | b'-') {
+        idx += 1;
+    }
+
+    let mut have_digits = false;
+    while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+        have_digits = true;
+        idx += 1;
+    }
+
+    if idx < bytes.len() && bytes[idx] == b'.' {
+        idx += 1;
+        while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+            have_digits = true;
+            idx += 1;
+        }
+    }
+
+    if !have_digits {
+        return Err(invalid_size_error(input));
+    }
+
+    if idx < bytes.len() && matches!(bytes[idx], b'e' | b'E') {
+        let mut exp = idx + 1;
+        if exp < bytes.len() && matches!(bytes[exp], b'+' | b'-') {
+            exp += 1;
+        }
+        let exp_start = exp;
+        while exp < bytes.len() && bytes[exp].is_ascii_digit() {
+            exp += 1;
+        }
+        if exp > exp_start {
+            idx = exp;
+        }
+    }
+
+    let number = &input[start..idx];
+    while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    if idx >= bytes.len() {
+        return Ok((number, None));
+    }
+    Ok((
+        number,
+        Some(input[idx..].trim_end_matches(|ch: char| ch.is_ascii_whitespace())),
+    ))
+}
+
+fn match_size_unit(unit: &str) -> Option<u8> {
+    for candidate in &SIZE_PRETTY_UNITS {
+        if candidate.name.eq_ignore_ascii_case(unit) {
+            return Some(candidate.unitbits);
+        }
+    }
+    if unit.eq_ignore_ascii_case("B") {
+        return Some(0);
+    }
+    None
+}
+
+fn invalid_size_error(input: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("invalid size: \"{input}\""),
+        detail: None,
+        hint: None,
+        sqlstate: "22023",
+    }
+}
+
+fn invalid_size_unit_error(input: &str, unit: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("invalid size: \"{input}\""),
+        detail: Some(format!("Invalid size unit: \"{unit}\".")),
+        hint: Some(
+            "Valid units are \"bytes\", \"B\", \"kB\", \"MB\", \"GB\", \"TB\", and \"PB\"."
+                .into(),
+        ),
+        sqlstate: "22023",
+    }
+}
+
+fn pow10(exp: u32) -> BigInt {
+    let mut out = BigInt::from(1u8);
+    for _ in 0..exp {
+        out *= 10u8;
+    }
+    out
 }
 
 fn render_integer_base(op: &'static str, value: &Value, base: u32) -> Result<Value, ExecError> {
@@ -2211,10 +2504,11 @@ fn validate_bytea_bit_index(bytes: &[u8], index: i32) -> Result<(), ExecError> {
 
 #[cfg(test)]
 mod tests {
-    use super::eval_like;
+    use super::{eval_like, eval_pg_size_bytes_function, eval_pg_size_pretty_function};
     use crate::backend::executor::ExecError;
+    use crate::backend::libpq::pqformat::format_exec_error;
     use crate::include::catalog::{C_COLLATION_OID, DEFAULT_COLLATION_OID, POSIX_COLLATION_OID};
-    use crate::include::nodes::datum::Value;
+    use crate::include::nodes::datum::{NumericValue, Value};
 
     #[test]
     fn eval_like_accepts_builtin_collations() {
@@ -2246,6 +2540,47 @@ mod tests {
                 false,
             ),
             Err(ExecError::DetailedError { sqlstate, .. }) if sqlstate == "0A000"
+        ));
+    }
+
+    #[test]
+    fn pg_size_pretty_formats_bigint_and_numeric_inputs() {
+        assert_eq!(
+            eval_pg_size_pretty_function(&[Value::Int64(1_000_000)]).unwrap(),
+            Value::Text("977 kB".into())
+        );
+        assert_eq!(
+            eval_pg_size_pretty_function(&[Value::Numeric(NumericValue::from("1000.5"))]).unwrap(),
+            Value::Text("1000.5 bytes".into())
+        );
+        assert_eq!(
+            eval_pg_size_pretty_function(&[Value::Numeric(NumericValue::from("1000000.5"))])
+                .unwrap(),
+            Value::Text("977 kB".into())
+        );
+    }
+
+    #[test]
+    fn pg_size_bytes_parses_units_and_reports_invalid_inputs() {
+        assert_eq!(
+            eval_pg_size_bytes_function(&[Value::Text("1.5 GB ".into())]).unwrap(),
+            Value::Int64(1_610_612_736)
+        );
+        assert_eq!(
+            eval_pg_size_bytes_function(&[Value::Text("-.1 kb".into())]).unwrap(),
+            Value::Int64(-102)
+        );
+
+        let err = eval_pg_size_bytes_function(&[Value::Text("1 AB".into())]).unwrap_err();
+        assert_eq!(format_exec_error(&err), "invalid size: \"1 AB\"");
+        assert!(matches!(
+            err,
+            ExecError::DetailedError {
+                detail: Some(detail),
+                hint: Some(_),
+                sqlstate,
+                ..
+            } if detail == "Invalid size unit: \"AB\"." && sqlstate == "22023"
         ));
     }
 }

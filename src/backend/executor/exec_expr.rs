@@ -65,7 +65,8 @@ use super::expr_string::{
     eval_get_byte, eval_initcap_function, eval_left_function, eval_length_function, eval_like,
     eval_lower_function, eval_lpad_function, eval_md5_function, eval_pg_rust_test_enc_conversion,
     eval_pg_rust_test_enc_setup, eval_pg_rust_test_fdw_handler, eval_position_function,
-    eval_quote_literal_function, eval_repeat_function, eval_replace_function,
+    eval_pg_size_bytes_function, eval_pg_size_pretty_function, eval_quote_literal_function,
+    eval_repeat_function, eval_replace_function,
     eval_reverse_function, eval_right_function, eval_rpad_function, eval_set_bit_bytes,
     eval_set_byte, eval_sha224_function, eval_sha256_function, eval_sha384_function,
     eval_sha512_function, eval_split_part_function, eval_strpos_function, eval_text_overlay,
@@ -1972,6 +1973,8 @@ fn eval_plpgsql_builtin_function(
             hint: None,
             sqlstate: "0A000",
         }),
+        BuiltinScalarFunction::PgSizePretty => eval_pg_size_pretty_function(&values),
+        BuiltinScalarFunction::PgSizeBytes => eval_pg_size_bytes_function(&values),
         BuiltinScalarFunction::Lower => eval_lower_function(&values),
         BuiltinScalarFunction::Unistr => eval_unistr_function(&values),
         BuiltinScalarFunction::Initcap => eval_initcap_function(&values),
@@ -3035,6 +3038,8 @@ fn eval_builtin_function(
         BuiltinScalarFunction::PgRelationIsPublishable => {
             eval_pg_relation_is_publishable(&values, ctx)
         }
+        BuiltinScalarFunction::PgSizePretty => eval_pg_size_pretty_function(&values),
+        BuiltinScalarFunction::PgSizeBytes => eval_pg_size_bytes_function(&values),
         BuiltinScalarFunction::PgLsn => eval_pg_lsn_function(&values),
         BuiltinScalarFunction::Trunc => eval_trunc_function(&values),
         BuiltinScalarFunction::Round => eval_round_function(&values),
