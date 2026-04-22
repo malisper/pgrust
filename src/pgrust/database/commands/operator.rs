@@ -56,6 +56,7 @@ fn lookup_operator_row(
     db: &Database,
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
+    namespace_oid: Option<u32>,
     name: &str,
     left_type: u32,
     right_type: u32,
@@ -66,6 +67,7 @@ fn lookup_operator_row(
         .into_iter()
         .find(|row| {
             row.oprname.eq_ignore_ascii_case(name)
+                && namespace_oid.is_none_or(|oid| row.oprnamespace == oid)
                 && row.oprleft == left_type
                 && row.oprright == right_type
         }))
@@ -289,6 +291,7 @@ impl Database {
             self,
             client_id,
             Some((xid, current_cid)),
+            Some(namespace_oid),
             &stmt.operator_name,
             left_type,
             right_type,
@@ -369,6 +372,7 @@ impl Database {
                 self,
                 client_id,
                 Some((xid, current_cid)),
+                None,
                 name,
                 left_type,
                 right_type,
@@ -431,6 +435,19 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let namespace_oid = stmt
+            .schema_name
+            .as_deref()
+            .map(|schema| {
+                normalize_operator_namespace(
+                    self,
+                    client_id,
+                    Some((xid, cid)),
+                    Some(schema),
+                    configured_search_path,
+                )
+            })
+            .transpose()?;
         for option in &stmt.options {
             match option {
                 AlterOperatorOption::Restrict { option_name, .. }
@@ -455,6 +472,7 @@ impl Database {
             self,
             client_id,
             Some((xid, cid)),
+            namespace_oid,
             &stmt.operator_name,
             left_type,
             right_type,
@@ -517,6 +535,7 @@ impl Database {
                         self,
                         client_id,
                         Some((xid, cid)),
+                        None,
                         operator_name,
                         right_type,
                         left_type,
@@ -569,6 +588,7 @@ impl Database {
                         self,
                         client_id,
                         Some((xid, cid)),
+                        None,
                         operator_name,
                         left_type,
                         right_type,
@@ -718,12 +738,26 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let namespace_oid = stmt
+            .schema_name
+            .as_deref()
+            .map(|schema| {
+                normalize_operator_namespace(
+                    self,
+                    client_id,
+                    Some((xid, cid)),
+                    Some(schema),
+                    configured_search_path,
+                )
+            })
+            .transpose()?;
         let left_type = resolve_operator_type_oid(&catalog, &stmt.left_arg)?;
         let right_type = resolve_operator_type_oid(&catalog, &stmt.right_arg)?;
         let Some(row) = lookup_operator_row(
             self,
             client_id,
             Some((xid, cid)),
+            namespace_oid,
             &stmt.operator_name,
             left_type,
             right_type,
