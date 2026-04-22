@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 
 mod catalog_access;
 pub(crate) mod commands;
-mod ddl;
+pub(crate) mod ddl;
 pub(crate) mod foreign_keys;
 mod large_objects;
 mod relation_refs;

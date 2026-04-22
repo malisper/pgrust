@@ -226,7 +226,7 @@ fn materialize_cte_row(slot: &mut TupleSlot) -> Result<MaterializedRow, ExecErro
     let mut values = slot.values()?.to_vec();
     Value::materialize_all(&mut values);
     Ok(MaterializedRow::new(
-        TupleSlot::virtual_row(values),
+        TupleSlot::virtual_row_with_metadata(values, slot.tid(), slot.table_oid),
         Vec::new(),
     ))
 }
@@ -339,10 +339,7 @@ impl PlanNode for ResultState {
             Ok(None)
         } else {
             self.emitted = true;
-            self.slot.kind = SlotKind::Virtual;
-            self.slot.virtual_tid = None;
-            self.slot.tts_values.clear();
-            self.slot.tts_nvalid = 0;
+            self.slot.store_virtual_row(Vec::new(), None, None);
             ctx.system_bindings.clear();
             finish_row(&mut self.stats, start);
             Ok(Some(&mut self.slot))
@@ -392,15 +389,10 @@ impl PlanNode for AppendState {
         begin_node(&mut self.stats, ctx);
         while self.current_child < self.children.len() {
             if let Some(slot) = self.children[self.current_child].exec_proc_node(ctx)? {
+                let child_bindings = ctx.system_bindings.clone();
                 let mut values = slot.values()?.to_vec();
                 Value::materialize_all(&mut values);
-                self.slot.kind = SlotKind::Virtual;
-                self.slot.virtual_tid = None;
-                self.slot.tts_nvalid = values.len();
-                self.slot.tts_values = values;
-                self.slot.decode_offset = 0;
-                self.current_bindings = self.children[self.current_child]
-                    .current_system_bindings()
+                self.current_bindings = child_bindings
                     .first()
                     .map(|binding| {
                         vec![SystemVarBinding {
@@ -409,10 +401,12 @@ impl PlanNode for AppendState {
                         }]
                     })
                     .unwrap_or_default();
-                self.slot.table_oid = self
+                let table_oid = self
                     .current_bindings
                     .first()
                     .map(|binding| binding.table_oid);
+                self.slot
+                    .store_virtual_row(values, slot.tid(), table_oid);
                 set_active_system_bindings(ctx, &self.current_bindings);
                 finish_row(&mut self.stats, start);
                 return Ok(Some(&mut self.slot));
@@ -477,13 +471,8 @@ impl PlanNode for SeqScanState {
                     return Ok(None);
                 };
                 self.scan_index += 1;
-                self.slot.kind = SlotKind::Virtual;
-                self.slot.virtual_tid = None;
-                self.slot.tts_values = values;
-                self.slot.tts_nvalid = self.slot.tts_values.len();
-                self.slot.decode_offset = 0;
-                self.slot.toast = None;
-                self.slot.table_oid = Some(self.relation_oid);
+                self.slot
+                    .store_virtual_row(values, None, Some(self.relation_oid));
                 self.current_bindings = vec![SystemVarBinding {
                     varno: self.source_id,
                     table_oid: self.relation_oid,
@@ -523,13 +512,8 @@ impl PlanNode for SeqScanState {
                     hint: None,
                     sqlstate: "42P01",
                 })?;
-            self.slot.kind = SlotKind::Virtual;
-            self.slot.virtual_tid = None;
-            self.slot.tts_values = values;
-            self.slot.tts_nvalid = self.slot.tts_values.len();
-            self.slot.decode_offset = 0;
-            self.slot.toast = None;
-            self.slot.table_oid = Some(self.relation_oid);
+            self.slot
+                .store_virtual_row(values, None, Some(self.relation_oid));
             self.current_bindings = vec![SystemVarBinding {
                 varno: self.source_id,
                 table_oid: self.relation_oid,
@@ -1953,12 +1937,8 @@ impl PlanNode for ProjectionState {
             values.push(eval_expr(&target.expr, input_slot, ctx)?.to_owned_value());
         }
 
-        let nvalid = values.len();
-        self.slot.tts_values = values;
-        self.slot.tts_nvalid = nvalid;
-        self.slot.kind = SlotKind::Virtual;
-        self.slot.virtual_tid = None;
-        self.slot.decode_offset = 0;
+        self.slot
+            .store_virtual_row(values, input_slot.tid(), input_slot.table_oid);
         self.current_bindings = self.input.current_system_bindings().to_vec();
         set_active_system_bindings(ctx, &self.current_bindings);
         finish_row(&mut self.stats, start);
@@ -2971,11 +2951,11 @@ impl PlanNode for ProjectSetState {
                 }
             }
 
-            self.slot.kind = SlotKind::Virtual;
-            self.slot.virtual_tid = None;
-            self.slot.tts_values = values;
-            self.slot.tts_nvalid = self.slot.tts_values.len();
-            self.slot.decode_offset = 0;
+            self.slot.store_virtual_row(
+                values,
+                input_slot.slot.tid(),
+                input_slot.slot.table_oid,
+            );
             self.current_bindings = input_slot.system_bindings.clone();
             set_active_system_bindings(ctx, &self.current_bindings);
 

@@ -1343,6 +1343,25 @@ impl Catalog {
         column_name: &str,
         statistics_target: i16,
     ) -> Result<(String, CatalogEntry, CatalogEntry), CatalogError> {
+        self.set_relation_column_statistics(relation_oid, column_name, statistics_target, &['r'])
+    }
+
+    pub fn alter_index_set_column_statistics(
+        &mut self,
+        relation_oid: u32,
+        column_name: &str,
+        statistics_target: i16,
+    ) -> Result<(String, CatalogEntry, CatalogEntry), CatalogError> {
+        self.set_relation_column_statistics(relation_oid, column_name, statistics_target, &['i'])
+    }
+
+    fn set_relation_column_statistics(
+        &mut self,
+        relation_oid: u32,
+        column_name: &str,
+        statistics_target: i16,
+        allowed_relkinds: &[char],
+    ) -> Result<(String, CatalogEntry, CatalogEntry), CatalogError> {
         let name = self
             .tables
             .iter()
@@ -1354,7 +1373,7 @@ impl Catalog {
             .get(&name)
             .cloned()
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        if old_entry.relkind != 'r' {
+        if !allowed_relkinds.contains(&old_entry.relkind) {
             return Err(CatalogError::UnknownTable(relation_oid.to_string()));
         }
         let column_index = relation_column_index(&old_entry.desc, column_name)?;

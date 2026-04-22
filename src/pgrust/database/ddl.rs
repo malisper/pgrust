@@ -11,6 +11,7 @@ use crate::backend::parser::{
     bind_scalar_expr_in_scope, derive_literal_default_value,
     normalize_alter_table_add_column_constraints, raw_type_name_hint, resolve_raw_type_name,
 };
+use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
     ensure_class_rows, ensure_depend_rows, ensure_namespace_rows, ensure_rewrite_rows,
 };
@@ -595,7 +596,7 @@ fn is_text_like_type(ty: SqlType) -> bool {
         )
 }
 
-pub(super) fn format_sql_type_name(sql_type: SqlType) -> &'static str {
+pub(crate) fn format_sql_type_name(sql_type: SqlType) -> &'static str {
     if sql_type.is_range() {
         return builtin_range_name_for_sql_type(sql_type).unwrap_or("range");
     }
@@ -672,6 +673,42 @@ pub(super) fn format_sql_type_name(sql_type: SqlType) -> &'static str {
         | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
         SqlTypeKind::Multirange => unreachable!("multirange handled above"),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct NormalizedStatisticsTarget {
+    pub value: i16,
+    pub warning: Option<&'static str>,
+}
+
+pub(super) fn normalize_statistics_target(
+    statistics_target: i32,
+) -> Result<NormalizedStatisticsTarget, ExecError> {
+    if statistics_target == -1 {
+        return Ok(NormalizedStatisticsTarget {
+            value: -1,
+            warning: None,
+        });
+    }
+    if statistics_target < 0 {
+        return Err(ExecError::DetailedError {
+            message: format!("statistics target {} is too low", statistics_target),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        });
+    }
+    if statistics_target > 10000 {
+        return Ok(NormalizedStatisticsTarget {
+            value: 10000,
+            warning: Some("lowering statistics target to 10000"),
+        });
+    }
+    Ok(NormalizedStatisticsTarget {
+        value: i16::try_from(statistics_target)
+            .map_err(|_| ExecError::Parse(ParseError::InvalidInteger(statistics_target.to_string())))?,
+        warning: None,
+    })
 }
 
 pub(super) fn automatic_alter_type_cast_allowed(
@@ -845,8 +882,8 @@ pub(super) fn validate_alter_table_alter_column_compression(
 pub(super) fn validate_alter_table_alter_column_statistics(
     desc: &RelationDesc,
     column_name: &str,
-    statistics_target: i16,
-) -> Result<(String, i16), ExecError> {
+    statistics_target: i32,
+) -> Result<(String, NormalizedStatisticsTarget), ExecError> {
     if is_system_column_name(column_name) {
         return Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "user column name for ALTER COLUMN SET STATISTICS",
@@ -858,23 +895,65 @@ pub(super) fn validate_alter_table_alter_column_statistics(
         .iter()
         .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
         .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.to_string())))?;
+    Ok((
+        column.name.clone(),
+        normalize_statistics_target(statistics_target)?,
+    ))
+}
 
-    let statistics_target = if statistics_target == -1 {
-        -1
-    } else if statistics_target < 0 {
+pub(super) fn validate_alter_index_alter_column_statistics(
+    entry: &RelCacheEntry,
+    index_name: &str,
+    column_number: i16,
+    statistics_target: i32,
+) -> Result<(String, NormalizedStatisticsTarget), ExecError> {
+    let index_meta = entry.index.as_ref().ok_or_else(|| ExecError::DetailedError {
+        message: format!("relation \"{index_name}\" is not an index"),
+        detail: None,
+        hint: None,
+        sqlstate: "42809",
+    })?;
+    let column_index = usize::try_from(column_number - 1).unwrap_or(usize::MAX);
+    let column = entry.desc.columns.get(column_index).ok_or_else(|| ExecError::DetailedError {
+        message: format!(
+            "column number {} of relation \"{}\" does not exist",
+            column_number, index_name
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "42703",
+    })?;
+    if column_number > index_meta.indnkeyatts {
         return Err(ExecError::DetailedError {
-            message: format!("statistics target {} is too low", statistics_target),
+            message: format!(
+                "cannot alter statistics on included column \"{}\" of index \"{}\"",
+                column.name, index_name
+            ),
             detail: None,
             hint: None,
-            sqlstate: "22023",
+            sqlstate: "0A000",
         });
-    } else if statistics_target > 10000 {
-        10000
-    } else {
-        statistics_target
-    };
-
-    Ok((column.name.clone(), statistics_target))
+    }
+    if index_meta
+        .indkey
+        .get(column_index)
+        .copied()
+        .is_none_or(|attnum| attnum != 0)
+    {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "cannot alter statistics on non-expression column \"{}\" of index \"{}\"",
+                column.name, index_name
+            ),
+            detail: None,
+            hint: Some("Alter statistics on table column instead.".into()),
+            sqlstate: "0A000",
+        });
+    }
+    Ok((
+        column.name.clone(),
+        normalize_statistics_target(statistics_target)?,
+    ))
 }
 
 fn alter_column_type_error(

@@ -735,6 +735,24 @@ impl Session {
                     )
                 }
             }
+            Statement::AlterIndexAlterColumnStatistics(ref alter_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_index_alter_column_statistics_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::AlterViewOwner(ref alter_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt);
@@ -1882,6 +1900,22 @@ impl Session {
                 db.execute_alter_index_rename_stmt_in_transaction_with_search_path(
                     client_id,
                     rename_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::AlterIndexAlterColumnStatistics(ref alter_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                if let Some(relation) = catalog.lookup_any_relation(&alter_stmt.index_name) {
+                    self.lock_table_if_needed(db, relation.rel, TableLockMode::AccessExclusive)?;
+                }
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_index_alter_column_statistics_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
                     xid,
                     cid,
                     search_path.as_deref(),

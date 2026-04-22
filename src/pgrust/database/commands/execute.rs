@@ -241,6 +241,12 @@ impl Database {
                     rename_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterIndexAlterColumnStatistics(ref alter_stmt) => self
+                .execute_alter_index_alter_column_statistics_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterViewOwner(ref alter_stmt) => self
                 .execute_alter_view_owner_stmt_with_search_path(
                     client_id,

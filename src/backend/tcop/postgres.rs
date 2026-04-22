@@ -25,8 +25,7 @@ use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
 use crate::backend::parser::{SqlType, SqlTypeKind, parse_expr};
 use crate::backend::utils::misc::guc_datetime::{DateTimeConfig, format_datestyle};
 use crate::backend::utils::misc::notices::{
-    BackendNoticeLevel, clear_notices as clear_backend_notices,
-    take_notice_entries as take_backend_notice_entries,
+    clear_notices as clear_backend_notices, take_notices as take_backend_notices,
 };
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::access::htup::TupleError;
@@ -35,6 +34,8 @@ use crate::include::nodes::datetime::{DateADT, TimeADT, TimeTzADT, TimestampADT,
 use crate::include::nodes::datum::{
     ArrayDimension, ArrayValue, RecordDescriptor, RecordValue, Value,
 };
+use crate::include::nodes::primnodes::RelationDesc;
+use crate::pgrust::database::ddl::format_sql_type_name;
 use crate::pgrust::compact_string::CompactString;
 use crate::pl::plpgsql::{PlpgsqlNotice, RaiseLevel, clear_notices, take_notices};
 
@@ -1631,6 +1632,10 @@ fn psql_describe_columns_query(
     let include_attcompression = lower.contains("attcompression");
     let include_attstattarget = lower.contains("attstattarget");
     let include_attdescr = lower.contains("pg_catalog.col_description(");
+    let index_display_columns = entry
+        .index
+        .as_ref()
+        .map(|index_meta| psql_index_display_columns(db, session, &entry.desc, index_meta));
 
     let mut columns = vec![
         QueryColumn::text("attname"),
@@ -1703,9 +1708,27 @@ fn psql_describe_columns_query(
         .iter()
         .enumerate()
         .map(|(index, column)| {
+            let index_display = index_display_columns
+                .as_ref()
+                .and_then(|columns| columns.get(index));
+            let index_display_type_oid = entry.index.as_ref().and_then(|index_meta| {
+                index_meta
+                    .opckeytype_oids
+                    .get(index)
+                    .copied()
+                    .filter(|oid| *oid != 0)
+            });
             let mut row = vec![
-                Value::Text(column.name.clone().into()),
-                Value::Text(format_psql_type(column.sql_type).into()),
+                Value::Text(
+                    index_display
+                        .map(|display| display.display_name.clone())
+                        .unwrap_or_else(|| column.name.clone())
+                        .into(),
+                ),
+                Value::Text(
+                    format_psql_display_type(db, session, column.sql_type, index_display_type_oid)
+                        .into(),
+                ),
             ];
             if include_attrdef {
                 row.push(
@@ -1740,7 +1763,12 @@ fn psql_describe_columns_query(
                 row.push(Value::Text(if is_key { "yes" } else { "no" }.into()));
             }
             if include_indexdef {
-                row.push(Value::Text(column.name.clone().into()));
+                row.push(Value::Text(
+                    index_display
+                        .map(|display| display.definition.clone())
+                        .unwrap_or_else(|| column.name.clone())
+                        .into(),
+                ));
             }
             if include_attfdwoptions {
                 row.push(Value::Text("".into()));
@@ -1769,6 +1797,74 @@ fn psql_describe_columns_query(
         })
         .collect::<Vec<_>>();
     Some((columns, rows))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PsqlIndexDisplayColumn {
+    display_name: String,
+    definition: String,
+}
+
+fn psql_index_display_columns(
+    db: &Database,
+    session: &Session,
+    index_desc: &RelationDesc,
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+) -> Vec<PsqlIndexDisplayColumn> {
+    let base_relation = db.describe_relation_by_oid(
+        session.client_id,
+        session.catalog_txn_ctx(),
+        index_meta.indrelid,
+    );
+    let expression_sqls = index_meta
+        .indexprs
+        .as_deref()
+        .and_then(|sql| serde_json::from_str::<Vec<String>>(sql).ok())
+        .unwrap_or_default();
+    let mut expression_index = 0usize;
+    index_meta
+        .indkey
+        .iter()
+        .enumerate()
+        .map(|(index, attnum)| {
+            if *attnum > 0 {
+                let name = base_relation
+                    .as_ref()
+                    .and_then(|relation| {
+                        relation
+                            .desc
+                            .columns
+                            .get((*attnum as usize).saturating_sub(1))
+                            .map(|column| column.name.clone())
+                    })
+                    .or_else(|| index_desc.columns.get(index).map(|column| column.name.clone()))
+                    .unwrap_or_else(|| format!("column{}", index + 1));
+                return PsqlIndexDisplayColumn {
+                    display_name: name.clone(),
+                    definition: name,
+                };
+            }
+            let expression_sql = expression_sqls
+                .get(expression_index)
+                .cloned()
+                .or_else(|| index_desc.columns.get(index).map(|column| column.name.clone()))
+                .unwrap_or_else(|| format!("expr{}", index + 1));
+            expression_index += 1;
+            PsqlIndexDisplayColumn {
+                display_name: "expr".into(),
+                definition: parenthesized_index_expression(&expression_sql),
+            }
+        })
+        .collect()
+}
+
+fn parenthesized_index_expression(expr_sql: &str) -> String {
+    let trimmed = expr_sql.trim();
+    if trimmed.starts_with('(') && trimmed.ends_with(')') {
+        trimmed.to_string()
+    } else {
+        format!("({trimmed})")
+    }
 }
 
 fn psql_describe_constraints_query(
@@ -2397,29 +2493,10 @@ fn format_psql_indexdef(
     let amname = db
         .access_method_name_for_relation(session.client_id, txn_ctx, index.relation_oid)
         .unwrap_or_else(|| "btree".to_string());
-    let column_names = db
-        .describe_relation_by_oid(session.client_id, txn_ctx, index.index_meta.indrelid)
-        .map(|relation| {
-            index
-                .index_meta
-                .indkey
-                .iter()
-                .enumerate()
-                .map(|(idx, attnum)| {
-                    if *attnum > 0 {
-                        relation
-                            .desc
-                            .columns
-                            .get((*attnum as usize).saturating_sub(1))
-                            .map(|column| column.name.clone())
-                            .unwrap_or_else(|| format!("column{}", idx + 1))
-                    } else {
-                        format!("expr{}", idx + 1)
-                    }
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let column_names = psql_index_display_columns(db, session, &index.desc, &index.index_meta)
+        .into_iter()
+        .map(|column| column.definition)
+        .collect::<Vec<_>>();
     let unique = if index.index_meta.indisunique {
         "UNIQUE "
     } else {
@@ -2583,6 +2660,25 @@ fn sql_quote_literal(value: &str) -> String {
     value.replace('\'', "''")
 }
 
+const CSTRING_TYPE_OID: u32 = 2275;
+
+fn format_psql_display_type(
+    db: &Database,
+    session: &Session,
+    fallback_sql_type: SqlType,
+    display_type_oid: Option<u32>,
+) -> String {
+    match display_type_oid {
+        Some(CSTRING_TYPE_OID) => "cstring".into(),
+        Some(type_oid) => session
+            .catalog_lookup(db)
+            .type_by_oid(type_oid)
+            .map(|row| format_psql_type(row.sql_type))
+            .unwrap_or_else(|| format_psql_type(fallback_sql_type)),
+        None => format_psql_type(fallback_sql_type),
+    }
+}
+
 fn format_psql_type(sql_type: SqlType) -> String {
     match sql_type.kind {
         SqlTypeKind::Bit => format!("bit({})", sql_type.bit_len().unwrap_or(1)),
@@ -2590,18 +2686,12 @@ fn format_psql_type(sql_type: SqlType) -> String {
             Some(len) => format!("bit varying({len})"),
             None => "bit varying".into(),
         },
-        SqlTypeKind::Text => "text".into(),
-        SqlTypeKind::Bool => "boolean".into(),
-        SqlTypeKind::Int2 => "smallint".into(),
-        SqlTypeKind::Int4 => "integer".into(),
-        SqlTypeKind::Int8 => "bigint".into(),
-        SqlTypeKind::Oid => "oid".into(),
         SqlTypeKind::Varchar => match sql_type.char_len() {
             Some(len) => format!("character varying({len})"),
             None => "character varying".into(),
         },
         SqlTypeKind::Char => format!("character({})", sql_type.char_len().unwrap_or(1)),
-        _ => format!("{sql_type:?}").to_ascii_lowercase(),
+        _ => format_sql_type_name(sql_type).into(),
     }
 }
 
@@ -3072,18 +3162,14 @@ fn send_plpgsql_notices(stream: &mut impl Write, notices: &[PlpgsqlNotice]) -> i
 }
 
 fn send_queued_notices(stream: &mut impl Write) -> io::Result<()> {
-    for notice in take_backend_notice_entries() {
-        let (severity, sqlstate) = match notice.level {
-            BackendNoticeLevel::Notice => ("NOTICE", "00000"),
-            BackendNoticeLevel::Warning => ("WARNING", "01000"),
-        };
+    for notice in take_backend_notices() {
         send_notice_with_severity(
             stream,
-            severity,
-            sqlstate,
+            notice.severity,
+            notice.sqlstate,
             &notice.message,
             notice.detail.as_deref(),
-            None,
+            notice.position,
         )?;
     }
     send_plpgsql_notices(stream, &take_notices())
@@ -4838,6 +4924,45 @@ mod tests {
     }
 
     #[test]
+    fn psql_describe_columns_query_formats_expression_index_columns_like_postgres() {
+        let db = Database::open(temp_dir("describe_expression_index_columns"), 16).unwrap();
+        let session = Session::new(1);
+        db.execute(1, "create table attmp (a int4, d float8, e float8, b name)")
+            .unwrap();
+        db.execute(1, "create index attmp_idx on attmp (a, (d + e), b)")
+            .unwrap();
+        db.execute(1, "alter index attmp_idx alter column 2 set statistics 1000")
+            .unwrap();
+        let entry = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("attmp_idx")
+            .unwrap();
+
+        let sql = format!(
+            "SELECT a.attname, \
+                 pg_catalog.format_type(a.atttypid, a.atttypmod), \
+                 false AS is_key, \
+                 pg_catalog.pg_get_indexdef(a.attrelid, a.attnum, true) AS indexdef, \
+                 a.attstorage, \
+                 CASE WHEN a.attstattarget=-1 THEN NULL ELSE a.attstattarget END AS attstattarget \
+             FROM pg_catalog.pg_attribute a \
+             WHERE a.attrelid = '{}' AND a.attnum > 0 AND NOT a.attisdropped \
+             ORDER BY a.attnum",
+            entry.relation_oid
+        );
+        let (_, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0][0], Value::Text("a".into()));
+        assert_eq!(rows[0][1], Value::Text("integer".into()));
+        assert_eq!(rows[1][0], Value::Text("expr".into()));
+        assert_eq!(rows[1][1], Value::Text("double precision".into()));
+        assert_eq!(rows[1][3], Value::Text("(d + e)".into()));
+        assert_eq!(rows[1][5], Value::Int16(1000));
+        assert_eq!(rows[2][0], Value::Text("b".into()));
+        assert_eq!(rows[2][1], Value::Text("cstring".into()));
+    }
+
+    #[test]
     fn psql_describe_constraint_query_matches_referenced_by_partition_shape() {
         let db = Database::open(temp_dir("describe_constraints_referenced_by"), 16).unwrap();
         let session = Session::new(1);
@@ -5487,5 +5612,17 @@ mod tests {
                 "\n",
             ]
         );
+    }
+
+    #[test]
+    fn send_queued_notices_emits_backend_warning_severity() {
+        clear_backend_notices();
+        crate::backend::utils::misc::notices::push_warning("lowering statistics target to 10000");
+        let mut buf = Vec::new();
+        send_queued_notices(&mut buf).unwrap();
+        let payload = String::from_utf8_lossy(&buf);
+        assert!(payload.contains("WARNING"));
+        assert!(payload.contains("01000"));
+        assert!(payload.contains("lowering statistics target to 10000"));
     }
 }

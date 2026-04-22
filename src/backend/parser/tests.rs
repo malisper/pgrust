@@ -2423,6 +2423,46 @@ fn parse_alter_index_rename_statement() {
 }
 
 #[test]
+fn parse_alter_index_set_statistics_statement() {
+    let stmt =
+        parse_statement("alter index attmp_idx alter column 2 set statistics 1000").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterIndexAlterColumnStatistics(AlterIndexAlterColumnStatisticsStatement {
+            if_exists: false,
+            index_name: "attmp_idx".into(),
+            column_number: 2,
+            statistics_target: 1000,
+        })
+    );
+
+    let stmt = parse_statement(
+        "alter index if exists attmp_idx alter column 2 set statistics -1",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterIndexAlterColumnStatistics(AlterIndexAlterColumnStatisticsStatement {
+            if_exists: true,
+            index_name: "attmp_idx".into(),
+            column_number: 2,
+            statistics_target: -1,
+        })
+    );
+}
+
+#[test]
+fn parse_alter_index_set_statistics_rejects_column_zero() {
+    match parse_statement("alter index attmp_idx alter column 0 set statistics 1000") {
+        Err(ParseError::DetailedError {
+            message, sqlstate, ..
+        }) if message == "column number must be in range from 1 to 32767"
+            && sqlstate == "22023" => {}
+        other => panic!("expected column-number range error, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_alter_table_rename_column_statement() {
     let stmt = parse_statement("alter table items rename column note to body").unwrap();
     assert_eq!(

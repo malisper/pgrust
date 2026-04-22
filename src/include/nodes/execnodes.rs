@@ -231,7 +231,7 @@ pub trait PlanNode: std::fmt::Debug {
         let mut values = slot.values()?.iter().cloned().collect::<Vec<_>>();
         Value::materialize_all(&mut values);
         Ok(MaterializedRow::new(
-            TupleSlot::virtual_row_with_tid(values, slot.tid(), slot.table_oid),
+            TupleSlot::virtual_row_with_metadata(values, slot.tid(), slot.table_oid),
             bindings,
         ))
     }
@@ -650,10 +650,10 @@ impl TupleSlot {
     }
 
     pub fn virtual_row(values: Vec<Value>) -> Self {
-        Self::virtual_row_with_tid(values, None, None)
+        Self::virtual_row_with_metadata(values, None, None)
     }
 
-    pub fn virtual_row_with_tid(
+    pub fn virtual_row_with_metadata(
         values: Vec<Value>,
         tid: Option<ItemPointerData>,
         table_oid: Option<u32>,
@@ -669,6 +669,21 @@ impl TupleSlot {
             table_oid,
             virtual_tid: tid,
         }
+    }
+
+    pub fn store_virtual_row(
+        &mut self,
+        values: Vec<Value>,
+        tid: Option<ItemPointerData>,
+        table_oid: Option<u32>,
+    ) {
+        self.kind = SlotKind::Virtual;
+        self.tts_nvalid = values.len();
+        self.tts_values = values;
+        self.decode_offset = 0;
+        self.toast = None;
+        self.table_oid = table_oid;
+        self.virtual_tid = tid;
     }
 
     pub(crate) fn empty(ncols: usize) -> Self {
@@ -726,9 +741,9 @@ impl TupleSlot {
     /// Convert to a self-contained Virtual slot, decoding all columns and
     /// materializing TextRef → owned Text. Releases the buffer pin.
     pub fn materialize(mut self) -> Result<Self, ExecError> {
-        let tid = self.tid();
         self.values()?;
         Value::materialize_all(&mut self.tts_values);
+        let virtual_tid = self.tid();
         Ok(Self {
             kind: SlotKind::Virtual,
             tts_values: self.tts_values,
@@ -737,15 +752,14 @@ impl TupleSlot {
             decoder: None,
             toast: self.toast,
             table_oid: self.table_oid,
-            virtual_tid: tid,
+            virtual_tid,
         })
     }
 
     pub fn tid(&self) -> Option<ItemPointerData> {
         match &self.kind {
             SlotKind::HeapTuple { tid, .. } | SlotKind::BufferHeapTuple { tid, .. } => Some(*tid),
-            SlotKind::Virtual => self.virtual_tid,
-            SlotKind::Empty => None,
+            _ => self.virtual_tid,
         }
     }
 }

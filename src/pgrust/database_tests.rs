@@ -180,7 +180,6 @@ fn analyze_executor_context(
         txn_waiter: Some(db.txn_waiter.clone()),
         sequences: Some(db.sequences.clone()),
         large_objects: Some(db.large_objects.clone()),
-        advisory_locks: db.advisory_locks.clone(),
         checkpoint_stats: db.checkpoint_stats_snapshot(),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         interrupts: db.interrupt_state(client_id),
@@ -188,11 +187,9 @@ fn analyze_executor_context(
         session_stats: db.session_stats_state(client_id),
         snapshot: db.txns.read().snapshot_for_command(xid, cid).unwrap(),
         client_id,
-        current_database_name: db.current_database_name(),
         session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
-        current_xid: xid,
-        statement_lock_scope_id: None,
+        active_role_oid: None,
         next_command_id: cid,
         default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
         timed: false,
@@ -1064,6 +1061,13 @@ fn session_query_rows(session: &mut Session, db: &Database, sql: &str) -> Vec<Ve
 
 fn take_notice_messages() -> Vec<String> {
     take_notices()
+        .into_iter()
+        .map(|notice| notice.message)
+        .collect()
+}
+
+fn take_backend_notice_messages() -> Vec<String> {
+    take_backend_notices()
         .into_iter()
         .map(|notice| notice.message)
         .collect()
@@ -2002,7 +2006,7 @@ fn advisory_unlock_false_queues_warning() {
         vec![vec![Value::Bool(false), Value::Bool(false)]]
     );
     assert_eq!(
-        take_backend_notices(),
+        take_backend_notice_messages(),
         vec![
             "you don't own a lock of type ExclusiveLock".to_string(),
             "you don't own a lock of type ShareLock".to_string(),
@@ -2995,7 +2999,7 @@ fn inheritance_multi_parent_create_and_drop_clean_up_catalog_rows() {
         .execute(&db, "create table d (dd text) inherits (b, c, a)")
         .unwrap();
     assert_eq!(
-        take_notice_messages(),
+        take_backend_notice_messages(),
         vec![
             r#"merging multiple inherited definitions of column "aa""#.to_string(),
             r#"merging multiple inherited definitions of column "aa""#.to_string(),
@@ -6847,7 +6851,7 @@ fn alter_index_rename_if_exists_missing_pushes_notice() {
     .unwrap();
 
     assert_eq!(
-        take_backend_notices().into_iter().collect::<Vec<_>>(),
+        take_backend_notice_messages(),
         vec![r#"relation "missing_idx" does not exist, skipping"#.to_string()]
     );
 }
@@ -6869,9 +6873,173 @@ fn alter_index_rename_if_exists_missing_in_transaction_pushes_notice() {
     session.execute(&db, "commit").unwrap();
 
     assert_eq!(
-        take_backend_notices().into_iter().collect::<Vec<_>>(),
+        take_backend_notice_messages(),
         vec![r#"relation "missing_idx" does not exist, skipping"#.to_string()]
     );
+}
+
+#[test]
+fn alter_index_alter_column_set_statistics_updates_expression_column_and_resets() {
+    let base = temp_dir("alter_index_set_statistics_update");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table attmp (a int4, d float8, e float8, b name)")
+        .unwrap();
+    db.execute(1, "create index attmp_idx on attmp (a, (d + e), b)")
+        .unwrap();
+
+    db.execute(1, "alter index attmp_idx alter column 2 set statistics 1000")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select attstattarget from pg_attribute \
+             where attrelid = (select oid from pg_class where relname = 'attmp_idx') \
+               and attname = 'expr2'",
+        ),
+        vec![vec![Value::Int16(1000)]]
+    );
+
+    db.execute(1, "alter index attmp_idx alter column 2 set statistics -1")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select attstattarget from pg_attribute \
+             where attrelid = (select oid from pg_class where relname = 'attmp_idx') \
+               and attname = 'expr2'",
+        ),
+        vec![vec![Value::Int16(-1)]]
+    );
+}
+
+#[test]
+fn alter_index_alter_column_set_statistics_rejects_non_expression_and_missing_columns() {
+    let base = temp_dir("alter_index_set_statistics_errors");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table attmp (a int4, d float8, e float8, b name)")
+        .unwrap();
+    db.execute(1, "create index attmp_idx on attmp (a, (d + e), b)")
+        .unwrap();
+
+    match db.execute(1, "alter index attmp_idx alter column 1 set statistics 1000") {
+        Err(ExecError::DetailedError {
+            message,
+            hint: Some(hint),
+            sqlstate,
+            ..
+        }) if message
+            == "cannot alter statistics on non-expression column \"a\" of index \"attmp_idx\""
+            && hint == "Alter statistics on table column instead."
+            && sqlstate == "0A000" => {}
+        other => panic!("expected non-expression index-column error, got {other:?}"),
+    }
+
+    match db.execute(1, "alter index attmp_idx alter column 3 set statistics 1000") {
+        Err(ExecError::DetailedError {
+            message,
+            hint: Some(hint),
+            sqlstate,
+            ..
+        }) if message
+            == "cannot alter statistics on non-expression column \"b\" of index \"attmp_idx\""
+            && hint == "Alter statistics on table column instead."
+            && sqlstate == "0A000" => {}
+        other => panic!("expected non-expression index-column error, got {other:?}"),
+    }
+
+    match db.execute(1, "alter index attmp_idx alter column 4 set statistics 1000") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message == "column number 4 of relation \"attmp_idx\" does not exist"
+            && sqlstate == "42703" => {}
+        other => panic!("expected missing index-column error, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_index_alter_column_set_statistics_if_exists_missing_pushes_notice() {
+    let base = temp_dir("alter_index_set_statistics_if_exists_missing");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    clear_backend_notices();
+    db.execute(
+        1,
+        "alter index if exists missing_idx alter column 2 set statistics 1000",
+    )
+    .unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![r#"relation "missing_idx" does not exist, skipping"#.to_string()]
+    );
+
+    clear_backend_notices();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "alter index if exists missing_idx alter column 2 set statistics 1000",
+        )
+        .unwrap();
+    session.execute(&db, "commit").unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![r#"relation "missing_idx" does not exist, skipping"#.to_string()]
+    );
+}
+
+#[test]
+fn alter_index_and_table_set_statistics_clamp_and_emit_warning() {
+    let base = temp_dir("alter_index_set_statistics_warning");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table attmp (a int4, d float8, e float8, b name)")
+        .unwrap();
+    db.execute(1, "create index attmp_idx on attmp (a, (d + e), b)")
+        .unwrap();
+    db.execute(1, "create table items (i int4)").unwrap();
+
+    clear_backend_notices();
+    db.execute(1, "alter index attmp_idx alter column 2 set statistics 50000")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select attstattarget from pg_attribute \
+             where attrelid = (select oid from pg_class where relname = 'attmp_idx') \
+               and attname = 'expr2'",
+        ),
+        vec![vec![Value::Int16(10000)]]
+    );
+    let notices = take_backend_notices();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].severity, "WARNING");
+    assert_eq!(notices[0].sqlstate, "01000");
+    assert_eq!(notices[0].message, "lowering statistics target to 10000");
+
+    clear_backend_notices();
+    db.execute(1, "alter table items alter column i set statistics 50000")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select attstattarget from pg_attribute \
+             where attrelid = (select oid from pg_class where relname = 'items') \
+               and attname = 'i'",
+        ),
+        vec![vec![Value::Int16(10000)]]
+    );
+    let notices = take_backend_notices();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].severity, "WARNING");
+    assert_eq!(notices[0].sqlstate, "01000");
+    assert_eq!(notices[0].message, "lowering statistics target to 10000");
 }
 
 #[test]
@@ -7462,7 +7630,7 @@ fn alter_table_add_column_merges_temp_multi_parent_child_metadata() {
         .execute(&db, "alter table pp1 add column a2 int4")
         .unwrap();
     assert_eq!(
-        take_notice_messages(),
+        take_backend_notice_messages(),
         vec![r#"merging definition of column "a2" for child "cc2""#.to_string()]
     );
 
@@ -11614,6 +11782,11 @@ fn foreign_keys_block_parent_ddl_and_allow_child_drop() {
             other => panic!("expected foreign-key DDL blocker for `{sql}`, got {other:?}"),
         }
     }
+
+    db.execute(1, "alter table parents alter column id type int8")
+        .unwrap();
+    db.execute(1, "alter table children alter column parent_id type int8")
+        .unwrap();
 
     db.execute(1, "drop table children").unwrap();
     db.execute(1, "drop table parents").unwrap();
