@@ -2604,6 +2604,7 @@ fn sql_type_display_name(ty: SqlType) -> String {
         SqlTypeKind::AnyCompatibleRange => "anycompatiblerange",
         SqlTypeKind::AnyCompatibleMultirange => "anycompatiblemultirange",
         SqlTypeKind::Record | SqlTypeKind::Composite => "record",
+        SqlTypeKind::Internal => "internal",
         SqlTypeKind::Void => "void",
         SqlTypeKind::Trigger => "trigger",
         SqlTypeKind::FdwHandler => "fdw_handler",
@@ -2871,8 +2872,9 @@ fn assign_array_slice_value(
 
         if ndim == 1 {
             if lower < dimensions[0].lower_bound {
-                let extension = usize::try_from(i64::from(dimensions[0].lower_bound) - i64::from(lower))
-                    .map_err(|_| array_assignment_limit_error())?;
+                let extension =
+                    usize::try_from(i64::from(dimensions[0].lower_bound) - i64::from(lower))
+                        .map_err(|_| array_assignment_limit_error())?;
                 dimensions[0].lower_bound = lower;
                 dimensions[0].length = dimensions[0]
                     .length
@@ -2891,7 +2893,9 @@ fn assign_array_slice_value(
                     .ok_or_else(array_assignment_limit_error)?;
                 dimensions[0].length = checked_array_item_count(dimensions[0].length)?;
             }
-        } else if lower < dim.lower_bound || upper > checked_array_upper_bound(dim.lower_bound, dim.length)? {
+        } else if lower < dim.lower_bound
+            || upper > checked_array_upper_bound(dim.lower_bound, dim.length)?
+        {
             return Err(array_assignment_error("array subscript out of range"));
         }
 
@@ -2933,8 +2937,9 @@ fn assign_array_slice_value(
             .map_err(|_| array_assignment_limit_error())?;
             elements[target_idx] = value.clone();
         }
-        let start_idx = usize::try_from(i64::from(lower_bounds[0]) - i64::from(dimensions[0].lower_bound))
-            .map_err(|_| array_assignment_limit_error())?;
+        let start_idx =
+            usize::try_from(i64::from(lower_bounds[0]) - i64::from(dimensions[0].lower_bound))
+                .map_err(|_| array_assignment_limit_error())?;
         for (offset, value) in source_array
             .elements
             .into_iter()

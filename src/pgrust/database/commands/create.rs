@@ -4,8 +4,8 @@ use crate::backend::parser::{
     FunctionVolatility, OwnedSequenceSpec, SequenceOptionsSpec, SqlTypeKind, resolve_raw_type_name,
 };
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_PLPGSQL_OID,
-    PG_LANGUAGE_SQL_OID, PgProcRow, RECORD_TYPE_OID,
+    BOOTSTRAP_SUPERUSER_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID,
+    PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID, PgProcRow, RECORD_TYPE_OID,
 };
 use crate::include::nodes::parsenodes::{ForeignKeyAction, ForeignKeyMatchType};
 use crate::include::nodes::primnodes::{QueryColumn, ToastRelationRef};
@@ -35,12 +35,14 @@ fn existing_view_prefix_matches(
     new_desc: &crate::backend::executor::RelationDesc,
 ) -> bool {
     old_desc.columns.len() <= new_desc.columns.len()
-        && old_desc.columns.iter().zip(new_desc.columns.iter()).all(
-            |(old_column, new_column)| {
+        && old_desc
+            .columns
+            .iter()
+            .zip(new_desc.columns.iter())
+            .all(|(old_column, new_column)| {
                 old_column.name.eq_ignore_ascii_case(&new_column.name)
                     && old_column.sql_type == new_column.sql_type
-            },
-        )
+            })
 }
 
 fn normalize_create_function_name_for_search_path(
@@ -538,16 +540,16 @@ impl Database {
             .language_row_by_name(&create_stmt.language)
             .ok_or_else(|| {
                 ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "LANGUAGE plpgsql or sql",
+                    expected: "LANGUAGE plpgsql, sql, or internal",
                     actual: format!("LANGUAGE {}", create_stmt.language),
                 })
             })?;
         if !matches!(
             language_row.oid,
-            PG_LANGUAGE_PLPGSQL_OID | PG_LANGUAGE_SQL_OID
+            PG_LANGUAGE_PLPGSQL_OID | PG_LANGUAGE_SQL_OID | PG_LANGUAGE_INTERNAL_OID
         ) {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "LANGUAGE plpgsql or sql",
+                expected: "LANGUAGE plpgsql, sql, or internal",
                 actual: format!("LANGUAGE {}", create_stmt.language),
             }));
         }
@@ -1097,8 +1099,7 @@ impl Database {
             }
             if !existing_view_prefix_matches(&existing_relation.desc, &desc) {
                 return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
-                    "CREATE OR REPLACE VIEW can only add new columns at the end of the view"
-                        .into(),
+                    "CREATE OR REPLACE VIEW can only add new columns at the end of the view".into(),
                 )));
             }
             let replace_effect = self

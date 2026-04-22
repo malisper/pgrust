@@ -17,6 +17,7 @@ mod index;
 mod inheritance;
 mod maintenance;
 mod opclass;
+mod operator;
 mod owner;
 mod policy;
 mod privilege;

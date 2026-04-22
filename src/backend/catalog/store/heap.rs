@@ -41,11 +41,11 @@ use crate::include::catalog::{
     PG_OPFAMILY_RELATION_OID, PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID,
     PG_PUBLICATION_REL_RELATION_OID, PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID,
     PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PUBLISH_GENCOLS_NONE, PgAmopRow, PgAmprocRow,
-    PgAttrdefRow,
-    PgAttributeRow, PgClassRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow,
-    PgForeignDataWrapperRow, PgInheritsRow, PgNamespaceRow, PgOpclassRow, PgOpfamilyRow,
-    PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow,
-    PgRewriteRow, PgStatisticRow, PgTablespaceRow, relkind_has_storage,
+    PgAttrdefRow, PgAttributeRow, PgClassRow, PgConstraintRow, PgDatabaseRow, PgDependRow,
+    PgDescriptionRow, PgForeignDataWrapperRow, PgInheritsRow, PgNamespaceRow, PgOpclassRow,
+    PgOperatorRow, PgOpfamilyRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow,
+    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow,
+    relkind_has_storage,
 };
 use crate::include::nodes::datum::Value;
 
@@ -1104,6 +1104,98 @@ impl CatalogStore {
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
         Ok((proc_row, effect))
+    }
+
+    pub fn create_operator_mvcc(
+        &mut self,
+        mut row: PgOperatorRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
+        let mut control = self.control_state()?;
+        if row.oid == 0 {
+            row.oid = control.next_oid;
+        }
+        control.next_oid = control.next_oid.max(row.oid.saturating_add(1));
+        self.persist_control_values_without_relcache_invalidation(
+            control.next_oid,
+            control.next_rel_number,
+        )?;
+        self.control = control;
+
+        let rows = PhysicalCatalogRows {
+            operators: vec![row.clone()],
+            depends: operator_depend_rows(&row),
+            ..PhysicalCatalogRows::default()
+        };
+        let kinds = [
+            BootstrapCatalogKind::PgOperator,
+            BootstrapCatalogKind::PgDepend,
+        ];
+        insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, row.oid);
+        Ok((row.oid, effect))
+    }
+
+    pub fn replace_operator_mvcc(
+        &mut self,
+        old_row: &PgOperatorRow,
+        mut row: PgOperatorRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
+        let old_rows = PhysicalCatalogRows {
+            operators: vec![old_row.clone()],
+            depends: operator_depend_rows(old_row),
+            ..PhysicalCatalogRows::default()
+        };
+        let kinds = [
+            BootstrapCatalogKind::PgOperator,
+            BootstrapCatalogKind::PgDepend,
+        ];
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
+
+        row.oid = old_row.oid;
+        let new_rows = PhysicalCatalogRows {
+            operators: vec![row.clone()],
+            depends: operator_depend_rows(&row),
+            ..PhysicalCatalogRows::default()
+        };
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, row.oid);
+        Ok((row.oid, effect))
+    }
+
+    pub fn drop_operator_by_oid_mvcc(
+        &mut self,
+        operator_oid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(PgOperatorRow, CatalogMutationEffect), CatalogError> {
+        let catcache = visible_catalog_caches_for_ctx(self, ctx)?.0;
+        let row = catcache
+            .operator_rows()
+            .into_iter()
+            .find(|row| row.oid == operator_oid)
+            .ok_or_else(|| CatalogError::UnknownTable(operator_oid.to_string()))?;
+        let rows = PhysicalCatalogRows {
+            operators: vec![row.clone()],
+            depends: operator_depend_rows(&row),
+            ..PhysicalCatalogRows::default()
+        };
+        let kinds = [
+            BootstrapCatalogKind::PgOperator,
+            BootstrapCatalogKind::PgDepend,
+        ];
+        delete_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, row.oid);
+        Ok((row, effect))
     }
 
     pub fn create_operator_class_mvcc(
@@ -5220,6 +5312,84 @@ fn parse_proc_argtype_oids(argtypes: &str) -> Vec<u32> {
         .split_ascii_whitespace()
         .filter_map(|part| part.parse::<u32>().ok())
         .collect()
+}
+
+fn operator_depend_rows(row: &PgOperatorRow) -> Vec<PgDependRow> {
+    let mut rows = vec![
+        PgDependRow {
+            classid: PG_OPERATOR_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+            refclassid: PG_NAMESPACE_RELATION_OID,
+            refobjid: row.oprnamespace,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        },
+        PgDependRow {
+            classid: PG_OPERATOR_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+            refclassid: PG_PROC_RELATION_OID,
+            refobjid: row.oprcode,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        },
+        PgDependRow {
+            classid: PG_OPERATOR_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+            refclassid: PG_TYPE_RELATION_OID,
+            refobjid: row.oprresult,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        },
+    ];
+    if row.oprleft != 0 {
+        rows.push(PgDependRow {
+            classid: PG_OPERATOR_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+            refclassid: PG_TYPE_RELATION_OID,
+            refobjid: row.oprleft,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        });
+    }
+    if row.oprright != 0 {
+        rows.push(PgDependRow {
+            classid: PG_OPERATOR_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+            refclassid: PG_TYPE_RELATION_OID,
+            refobjid: row.oprright,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        });
+    }
+    if row.oprrest != 0 {
+        rows.push(PgDependRow {
+            classid: PG_OPERATOR_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+            refclassid: PG_PROC_RELATION_OID,
+            refobjid: row.oprrest,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        });
+    }
+    if row.oprjoin != 0 {
+        rows.push(PgDependRow {
+            classid: PG_OPERATOR_RELATION_OID,
+            objid: row.oid,
+            objsubid: 0,
+            refclassid: PG_PROC_RELATION_OID,
+            refobjid: row.oprjoin,
+            refobjsubid: 0,
+            deptype: DEPENDENCY_NORMAL,
+        });
+    }
+    sort_pg_depend_rows(&mut rows);
+    rows
 }
 
 fn effect_record_catalog_kinds(effect: &mut CatalogMutationEffect, kinds: &[BootstrapCatalogKind]) {
