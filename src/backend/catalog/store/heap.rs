@@ -40,11 +40,12 @@ use crate::include::catalog::{
     PG_NAMESPACE_RELATION_OID, PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID,
     PG_OPFAMILY_RELATION_OID, PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID,
     PG_PUBLICATION_REL_RELATION_OID, PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID,
-    PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PgAmopRow, PgAmprocRow, PgAttrdefRow,
-    PgAttributeRow, PgClassRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow,
-    PgForeignDataWrapperRow, PgInheritsRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
-    PgOpfamilyRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow,
-    PgPublicationRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow, relkind_has_storage,
+    PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PUBLISH_GENCOLS_NONE, PgAmopRow, PgAmprocRow,
+    PgAttrdefRow, PgAttributeRow, PgClassRow, PgConstraintRow, PgDatabaseRow, PgDependRow,
+    PgDescriptionRow, PgForeignDataWrapperRow, PgInheritsRow, PgNamespaceRow, PgOpclassRow,
+    PgOperatorRow, PgOpfamilyRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow,
+    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow,
+    relkind_has_storage,
 };
 use crate::include::nodes::datum::Value;
 

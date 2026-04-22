@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+mod async_notify;
 mod catalog_access;
 pub(crate) mod commands;
 pub(crate) mod ddl;
@@ -134,6 +135,12 @@ impl From<ControlFileError> for DatabaseError {
 
 pub use crate::backend::storage::lmgr::TransactionWaiter;
 pub use crate::pgrust::session::{SelectGuard, Session};
+pub(crate) use async_notify::{
+    ASYNC_NOTIFY_CHANNEL_MAX_LEN, ASYNC_NOTIFY_PAYLOAD_MAX_LEN, ASYNC_NOTIFY_QUEUE_CAPACITY_BYTES,
+    AsyncListenAction, AsyncListenOp, AsyncNotifyRuntime, DeliveredNotification,
+    PendingNotification, merge_pending_notifications, queue_pending_notification,
+    validate_pending_notification,
+};
 pub(crate) use ddl::reject_relation_with_referencing_foreign_keys;
 pub(crate) use foreign_keys::{
     alter_table_add_constraint_lock_requests, alter_table_validate_constraint_lock_requests,
@@ -195,6 +202,7 @@ pub struct Database {
     pub(crate) conversions: Arc<RwLock<BTreeMap<String, ConversionEntry>>>,
     pub(crate) sequences: Arc<SequenceRuntime>,
     pub(crate) advisory_locks: Arc<AdvisoryLockManager>,
+    pub(crate) async_notify_runtime: Arc<AsyncNotifyRuntime>,
     pub(crate) stats: Arc<RwLock<DatabaseStatsStore>>,
     pub(crate) large_objects: Arc<LargeObjectRuntime>,
     pub(crate) _wal_bg_writer: Option<Arc<WalBgWriter>>,

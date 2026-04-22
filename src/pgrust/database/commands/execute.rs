@@ -168,6 +168,66 @@ impl Database {
         result
     }
 
+    fn finish_txn_with_async_notifications(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        result: Result<StatementResult, ExecError>,
+        catalog_effects: &[CatalogMutationEffect],
+        temp_effects: &[TempMutationEffect],
+        sequence_effects: &[SequenceMutationEffect],
+        pending_async_notifications: Vec<PendingNotification>,
+    ) -> Result<StatementResult, ExecError> {
+        let result = self.finish_txn(
+            client_id,
+            xid,
+            result,
+            catalog_effects,
+            temp_effects,
+            sequence_effects,
+        );
+        if result.is_ok() {
+            self.async_notify_runtime
+                .publish(client_id, &pending_async_notifications);
+        }
+        result
+    }
+
+    fn execute_notify_stmt(
+        &self,
+        client_id: ClientId,
+        stmt: &crate::backend::parser::NotifyStatement,
+    ) -> Result<StatementResult, ExecError> {
+        let mut pending_async_notifications = Vec::new();
+        queue_pending_notification(
+            &mut pending_async_notifications,
+            &stmt.channel,
+            stmt.payload.as_deref().unwrap_or(""),
+        )?;
+        self.async_notify_runtime
+            .publish(client_id, &pending_async_notifications);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn execute_listen_stmt(
+        &self,
+        client_id: ClientId,
+        stmt: &crate::backend::parser::ListenStatement,
+    ) -> StatementResult {
+        self.async_notify_runtime.listen(client_id, &stmt.channel);
+        StatementResult::AffectedRows(0)
+    }
+
+    fn execute_unlisten_stmt(
+        &self,
+        client_id: ClientId,
+        stmt: &crate::backend::parser::UnlistenStatement,
+    ) -> StatementResult {
+        self.async_notify_runtime
+            .unlisten(client_id, stmt.channel.as_deref());
+        StatementResult::AffectedRows(0)
+    }
+
     fn execute_statement_with_search_path_inner(
         &self,
         client_id: ClientId,
@@ -210,6 +270,13 @@ impl Database {
                     crate::backend::access::transam::CheckpointRequestFlags::sql(),
                 )?;
                 Ok(StatementResult::AffectedRows(0))
+            }
+            Statement::Notify(ref notify_stmt) => self.execute_notify_stmt(client_id, notify_stmt),
+            Statement::Listen(ref listen_stmt) => {
+                Ok(self.execute_listen_stmt(client_id, listen_stmt))
+            }
+            Statement::Unlisten(ref unlisten_stmt) => {
+                Ok(self.execute_unlisten_stmt(client_id, unlisten_stmt))
             }
             Statement::Analyze(ref analyze_stmt) => self.execute_analyze_stmt_with_search_path(
                 client_id,
@@ -512,6 +579,7 @@ impl Database {
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    async_notify_runtime: Some(self.async_notify_runtime.clone()),
                     advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
@@ -534,6 +602,7 @@ impl Database {
                     subplans: Vec::new(),
                     timed: false,
                     allow_side_effects: true,
+                    pending_async_notifications: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -544,8 +613,18 @@ impl Database {
                 let result = crate::backend::commands::tablecmds::execute_merge(
                     bound, &catalog, &mut ctx, xid, 0,
                 );
+                let pending_async_notifications =
+                    std::mem::take(&mut ctx.pending_async_notifications);
                 drop(ctx);
-                let result = self.finish_txn(client_id, xid, result, &[], &[], &[]);
+                let result = self.finish_txn_with_async_notifications(
+                    client_id,
+                    xid,
+                    result,
+                    &[],
+                    &[],
+                    &[],
+                    pending_async_notifications,
+                );
                 guard.disarm();
                 result
             }
@@ -665,6 +744,7 @@ impl Database {
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    async_notify_runtime: Some(self.async_notify_runtime.clone()),
                     advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
@@ -687,6 +767,7 @@ impl Database {
                     subplans: Vec::new(),
                     timed: false,
                     allow_side_effects: true,
+                    pending_async_notifications: Vec::new(),
                     catalog: visible_catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -698,8 +779,18 @@ impl Database {
                     Some(planned_stmt) => execute_planned_stmt(planned_stmt, &mut ctx),
                     None => execute_readonly_statement(stmt, &visible_catalog, &mut ctx),
                 };
+                let pending_async_notifications =
+                    std::mem::take(&mut ctx.pending_async_notifications);
                 drop(ctx);
-                let result = self.finish_txn(client_id, xid, result, &[], &[], &[]);
+                let result = self.finish_txn_with_async_notifications(
+                    client_id,
+                    xid,
+                    result,
+                    &[],
+                    &[],
+                    &[],
+                    pending_async_notifications,
+                );
                 guard.disarm();
 
                 unlock_relations(&self.table_locks, client_id, &rels);
@@ -732,6 +823,7 @@ impl Database {
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    async_notify_runtime: Some(self.async_notify_runtime.clone()),
                     advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
@@ -754,6 +846,7 @@ impl Database {
                     subplans: Vec::new(),
                     timed: false,
                     allow_side_effects: true,
+                    pending_async_notifications: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -768,6 +861,8 @@ impl Database {
                     xid,
                     0,
                 );
+                let pending_async_notifications =
+                    std::mem::take(&mut ctx.pending_async_notifications);
                 drop(ctx);
                 let validation_catalog =
                     self.lazy_catalog_lookup(client_id, Some((xid, 1)), configured_search_path);
@@ -784,7 +879,15 @@ impl Database {
                     )?;
                     Ok(result)
                 });
-                let result = self.finish_txn(client_id, xid, result, &[], &[], &[]);
+                let result = self.finish_txn_with_async_notifications(
+                    client_id,
+                    xid,
+                    result,
+                    &[],
+                    &[],
+                    &[],
+                    pending_async_notifications,
+                );
                 guard.disarm();
                 unlock_relations(&self.table_locks, client_id, &locked_rels);
                 result
@@ -816,6 +919,7 @@ impl Database {
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    async_notify_runtime: Some(self.async_notify_runtime.clone()),
                     advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
@@ -838,6 +942,7 @@ impl Database {
                     subplans: Vec::new(),
                     timed: false,
                     allow_side_effects: true,
+                    pending_async_notifications: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -853,6 +958,8 @@ impl Database {
                     0,
                     Some((&self.txns, &self.txn_waiter, interrupts.as_ref())),
                 );
+                let pending_async_notifications =
+                    std::mem::take(&mut ctx.pending_async_notifications);
                 drop(ctx);
                 let validation_catalog =
                     self.lazy_catalog_lookup(client_id, Some((xid, 1)), configured_search_path);
@@ -869,7 +976,15 @@ impl Database {
                     )?;
                     Ok(result)
                 });
-                let result = self.finish_txn(client_id, xid, result, &[], &[], &[]);
+                let result = self.finish_txn_with_async_notifications(
+                    client_id,
+                    xid,
+                    result,
+                    &[],
+                    &[],
+                    &[],
+                    pending_async_notifications,
+                );
                 guard.disarm();
                 unlock_relations(&self.table_locks, client_id, &locked_rels);
                 result
@@ -901,6 +1016,7 @@ impl Database {
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    async_notify_runtime: Some(self.async_notify_runtime.clone()),
                     advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
@@ -923,6 +1039,7 @@ impl Database {
                     subplans: Vec::new(),
                     timed: false,
                     allow_side_effects: true,
+                    pending_async_notifications: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -937,6 +1054,8 @@ impl Database {
                     xid,
                     Some((&self.txns, &self.txn_waiter, interrupts.as_ref())),
                 );
+                let pending_async_notifications =
+                    std::mem::take(&mut ctx.pending_async_notifications);
                 drop(ctx);
                 let validation_catalog =
                     self.lazy_catalog_lookup(client_id, Some((xid, 1)), configured_search_path);
@@ -953,7 +1072,15 @@ impl Database {
                     )?;
                     Ok(result)
                 });
-                let result = self.finish_txn(client_id, xid, result, &[], &[], &[]);
+                let result = self.finish_txn_with_async_notifications(
+                    client_id,
+                    xid,
+                    result,
+                    &[],
+                    &[],
+                    &[],
+                    pending_async_notifications,
+                );
                 guard.disarm();
                 unlock_relations(&self.table_locks, client_id, &locked_rels);
                 result
@@ -1214,6 +1341,7 @@ impl Database {
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    async_notify_runtime: Some(self.async_notify_runtime.clone()),
                     advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
@@ -1236,6 +1364,7 @@ impl Database {
                     subplans: Vec::new(),
                     timed: false,
                     allow_side_effects: true,
+                    pending_async_notifications: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -1281,6 +1410,7 @@ impl Database {
                     txn_waiter: Some(self.txn_waiter.clone()),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
+                    async_notify_runtime: Some(self.async_notify_runtime.clone()),
                     advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     interrupts: Arc::clone(&interrupts),
@@ -1303,6 +1433,7 @@ impl Database {
                     subplans: Vec::new(),
                     timed: false,
                     allow_side_effects: false,
+                    pending_async_notifications: Vec::new(),
                     catalog: catalog.materialize_visible_catalog(),
                     compiled_functions: std::collections::HashMap::new(),
                     cte_tables: std::collections::HashMap::new(),
@@ -1394,6 +1525,7 @@ impl Database {
             txn_waiter: Some(self.txn_waiter.clone()),
             sequences: Some(self.sequences.clone()),
             large_objects: Some(self.large_objects.clone()),
+            async_notify_runtime: Some(self.async_notify_runtime.clone()),
             advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
             checkpoint_stats: self.checkpoint_stats_snapshot(),
             datetime_config: datetime_config.clone(),
@@ -1415,6 +1547,7 @@ impl Database {
             subplans: query_desc.planned_stmt.subplans,
             timed: false,
             allow_side_effects: true,
+            pending_async_notifications: Vec::new(),
             catalog: visible_catalog_snapshot,
             compiled_functions: std::collections::HashMap::new(),
             cte_tables: std::collections::HashMap::new(),

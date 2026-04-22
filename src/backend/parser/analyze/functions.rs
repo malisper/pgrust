@@ -603,6 +603,8 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgRustTestEncSetup => args.is_empty(),
             BuiltinScalarFunction::PgRustTestEncConversion => args.len() == 4,
             BuiltinScalarFunction::CurrentSetting => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::PgNotify => args.len() == 2,
+            BuiltinScalarFunction::PgNotificationQueueUsage => args.is_empty(),
             BuiltinScalarFunction::PgTypeof => args.len() == 1,
             BuiltinScalarFunction::NextVal | BuiltinScalarFunction::CurrVal => args.len() == 1,
             BuiltinScalarFunction::SetVal => matches!(args.len(), 2 | 3),
@@ -1337,6 +1339,11 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_rust_test_enc_conversion",
             BuiltinScalarFunction::PgRustTestEncConversion,
+        ),
+        ("pg_notify", BuiltinScalarFunction::PgNotify),
+        (
+            "pg_notification_queue_usage",
+            BuiltinScalarFunction::PgNotificationQueueUsage,
         ),
         ("current_setting", BuiltinScalarFunction::CurrentSetting),
         ("nextval", BuiltinScalarFunction::NextVal),
@@ -2104,6 +2111,8 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::GetDatabaseEncoding
             | BuiltinScalarFunction::PgMyTempSchema
             | BuiltinScalarFunction::PgRustTestFdwHandler
+            | BuiltinScalarFunction::PgNotify
+            | BuiltinScalarFunction::PgNotificationQueueUsage
             | BuiltinScalarFunction::PgStatGetCheckpointerNumTimed
             | BuiltinScalarFunction::PgStatGetCheckpointerNumRequested
             | BuiltinScalarFunction::PgStatGetCheckpointerNumPerformed
@@ -2818,6 +2827,25 @@ mod tests {
             )
             .is_err()
         );
+        assert!(
+            validate_scalar_function_arity(
+                BuiltinScalarFunction::PgNotify,
+                &[SqlExpr::Default, SqlExpr::Default]
+            )
+            .is_ok()
+        );
+        assert!(validate_scalar_function_arity(BuiltinScalarFunction::PgNotify, &[]).is_err());
+        assert!(
+            validate_scalar_function_arity(BuiltinScalarFunction::PgNotificationQueueUsage, &[])
+                .is_ok()
+        );
+        assert!(
+            validate_scalar_function_arity(
+                BuiltinScalarFunction::PgNotificationQueueUsage,
+                &[SqlExpr::Default]
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2930,6 +2958,14 @@ mod tests {
         assert_eq!(
             fixed_scalar_return_type(BuiltinScalarFunction::PgAdvisoryUnlockAll),
             Some(SqlType::new(SqlTypeKind::Void))
+        );
+        assert_eq!(
+            fixed_scalar_return_type(BuiltinScalarFunction::PgNotify),
+            Some(SqlType::new(SqlTypeKind::Void))
+        );
+        assert_eq!(
+            fixed_scalar_return_type(BuiltinScalarFunction::PgNotificationQueueUsage),
+            Some(SqlType::new(SqlTypeKind::Float8))
         );
         assert_eq!(fixed_scalar_return_type(BuiltinScalarFunction::Abs), None);
         assert_eq!(

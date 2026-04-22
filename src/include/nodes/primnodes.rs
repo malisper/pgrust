@@ -303,6 +303,8 @@ pub enum BuiltinScalarFunction {
     PgRustTestEncSetup,
     PgRustTestEncConversion,
     CurrentSetting,
+    PgNotify,
+    PgNotificationQueueUsage,
     PgTypeof,
     PgStatGetCheckpointerNumTimed,
     PgStatGetCheckpointerNumRequested,

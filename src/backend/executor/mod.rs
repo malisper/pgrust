@@ -5,6 +5,7 @@ mod constraints;
 mod driver;
 pub mod exec_expr;
 pub(crate) mod exec_tuples;
+mod expr_async;
 mod expr_bit;
 mod expr_bool;
 mod expr_casts;
@@ -114,7 +115,8 @@ use crate::backend::utils::misc::interrupts::{
 };
 use crate::include::access::htup::TupleError;
 use crate::pgrust::database::{
-    DatabaseStatsStore, LargeObjectRuntime, SequenceRuntime, SessionStatsState, TransactionWaiter,
+    AsyncNotifyRuntime, DatabaseStatsStore, LargeObjectRuntime, PendingNotification,
+    SequenceRuntime, SessionStatsState, TransactionWaiter,
 };
 use crate::pl::plpgsql::CompiledFunction;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
@@ -174,6 +176,7 @@ pub struct ExecutorContext {
     pub txn_waiter: Option<std::sync::Arc<TransactionWaiter>>,
     pub sequences: Option<std::sync::Arc<SequenceRuntime>>,
     pub large_objects: Option<std::sync::Arc<LargeObjectRuntime>>,
+    pub async_notify_runtime: Option<std::sync::Arc<AsyncNotifyRuntime>>,
     pub advisory_locks: std::sync::Arc<AdvisoryLockManager>,
     pub checkpoint_stats: CheckpointStatsSnapshot,
     pub datetime_config: DateTimeConfig,
@@ -196,6 +199,7 @@ pub struct ExecutorContext {
     /// When true, each node records per-node timing stats (for EXPLAIN ANALYZE).
     pub timed: bool,
     pub allow_side_effects: bool,
+    pub pending_async_notifications: Vec<PendingNotification>,
     pub catalog: Option<VisibleCatalog>,
     pub compiled_functions: HashMap<u32, Arc<CompiledFunction>>,
     pub cte_tables: HashMap<usize, Rc<RefCell<MaterializedCteTable>>>,

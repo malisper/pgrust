@@ -11,10 +11,10 @@ use crate::include::nodes::parsenodes::{
     AliasColumnDef, AliasColumnSpec, ColumnConstraint, CompositeTypeAttributeDef,
     CreateCompositeTypeStatement, CreateTriggerStatement, CreateTypeStatement,
     DropTriggerStatement, DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, IndexColumnDef,
-    InsertSource, InsertStatement, JoinTreeNode, PublicationObjectSpec, PublicationOption,
-    PublicationSchemaName, RangeTblEntryKind, RawTypeName, SetSessionAuthorizationStatement,
-    SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerTiming,
-    ViewCheckOption,
+    InsertSource, InsertStatement, JoinTreeNode, ListenStatement, NotifyStatement,
+    PublicationObjectSpec, PublicationOption, PublicationSchemaName, RangeTblEntryKind,
+    RawTypeName, SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint, TriggerEvent,
+    TriggerEventSpec, TriggerLevel, TriggerTiming, UnlistenStatement, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -10445,6 +10445,61 @@ fn parse_trim_without_explicit_trim_chars() {
         &stmt.targets[2].expr,
         SqlExpr::FuncCall { name, args, .. } if name == "rtrim" && args.args().len() == 1
     ));
+}
+
+#[test]
+fn parse_notify_statement() {
+    let stmt = parse_statement("notify foo").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::Notify(NotifyStatement {
+            channel: "foo".into(),
+            payload: None,
+        })
+    );
+}
+
+#[test]
+fn parse_notify_statement_with_payload() {
+    let stmt = parse_statement("notify foo, 'bar'").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::Notify(NotifyStatement {
+            channel: "foo".into(),
+            payload: Some("bar".into()),
+        })
+    );
+}
+
+#[test]
+fn parse_listen_statement() {
+    let stmt = parse_statement("listen foo").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::Listen(ListenStatement {
+            channel: "foo".into(),
+        })
+    );
+}
+
+#[test]
+fn parse_unlisten_statement() {
+    let stmt = parse_statement("unlisten foo").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::Unlisten(UnlistenStatement {
+            channel: Some("foo".into()),
+        })
+    );
+}
+
+#[test]
+fn parse_unlisten_all_statement() {
+    let stmt = parse_statement("unlisten *").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::Unlisten(UnlistenStatement { channel: None })
+    );
 }
 
 #[test]

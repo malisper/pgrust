@@ -185,6 +185,9 @@ pub(crate) fn infer_command_tag(sql: &str, affected: usize) -> String {
         ("COMMENT", _) => "COMMENT".to_string(),
         ("CHECKPOINT", _) => "CHECKPOINT".to_string(),
         ("DO", _) => "DO".to_string(),
+        ("LISTEN", _) => "LISTEN".to_string(),
+        ("NOTIFY", _) => "NOTIFY".to_string(),
+        ("UNLISTEN", _) => "UNLISTEN".to_string(),
         ("VACUUM", _) => "VACUUM".to_string(),
         ("SET", _) => "SET".to_string(),
         ("RESET", _) => "RESET".to_string(),
@@ -1093,6 +1096,23 @@ pub(crate) fn send_copy_in_response(w: &mut impl Write) -> io::Result<()> {
     w.write_all(&7_i32.to_be_bytes())?;
     w.write_all(&[0])?;
     w.write_all(&0_i16.to_be_bytes())?;
+    Ok(())
+}
+
+pub(crate) fn send_notification_response(
+    w: &mut impl Write,
+    sender_pid: i32,
+    channel: &str,
+    payload: &str,
+) -> io::Result<()> {
+    let len = 4 + 4 + channel.len() + 1 + payload.len() + 1;
+    w.write_all(&[b'A'])?;
+    w.write_all(&(len as i32).to_be_bytes())?;
+    w.write_all(&sender_pid.to_be_bytes())?;
+    w.write_all(channel.as_bytes())?;
+    w.write_all(&[0])?;
+    w.write_all(payload.as_bytes())?;
+    w.write_all(&[0])?;
     Ok(())
 }
 
