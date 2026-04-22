@@ -2704,6 +2704,7 @@ fn parse_alter_group_add_user_statement() {
             inherit_option: None,
             set_option: None,
             granted_by: None,
+            legacy_group_syntax: true,
         })
     );
 }
@@ -2722,6 +2723,7 @@ fn parse_multiline_alter_group_add_user_statement() {
             inherit_option: None,
             set_option: None,
             granted_by: None,
+            legacy_group_syntax: true,
         })
     );
 }
@@ -2740,6 +2742,7 @@ fn parse_alter_group_drop_user_statement() {
             set_option: false,
             cascade: false,
             granted_by: None,
+            legacy_group_syntax: true,
         })
     );
 }
@@ -2978,6 +2981,7 @@ fn parse_grant_role_membership_with_options_statement() {
             inherit_option: Some(true),
             set_option: Some(false),
             granted_by: None,
+            legacy_group_syntax: false,
         })
     );
 }
@@ -2997,6 +3001,7 @@ fn parse_grant_role_membership_granted_by_statement() {
             inherit_option: None,
             set_option: None,
             granted_by: Some(RoleGrantorSpec::CurrentRole),
+            legacy_group_syntax: false,
         })
     );
 }
@@ -3016,6 +3021,7 @@ fn parse_revoke_role_membership_option_statement() {
             set_option: false,
             cascade: false,
             granted_by: None,
+            legacy_group_syntax: false,
         })
     );
 }
@@ -3037,6 +3043,7 @@ fn parse_revoke_role_membership_granted_by_statement() {
             set_option: false,
             cascade: false,
             granted_by: Some(RoleGrantorSpec::CurrentUser),
+            legacy_group_syntax: false,
         })
     );
 }
@@ -3058,6 +3065,7 @@ fn parse_revoke_role_membership_admin_option_granted_by_cascade_statement() {
             set_option: false,
             cascade: true,
             granted_by: Some(RoleGrantorSpec::RoleName("regress_admin".into())),
+            legacy_group_syntax: false,
         })
     );
 }
@@ -3079,6 +3087,7 @@ fn parse_plain_revoke_role_membership_granted_by_cascade_statement() {
             set_option: false,
             cascade: true,
             granted_by: Some(RoleGrantorSpec::RoleName("regress_admin".into())),
+            legacy_group_syntax: false,
         })
     );
 }
