@@ -1306,7 +1306,9 @@ fn bind_function_from_item_with_ctes(
                 if resolved.prokind != 'f' {
                     return Err(ParseError::UnknownTable(other.to_string()));
                 }
-                if let Some(srf_impl) = resolved.srf_impl {
+                if let Some(srf_impl @ (ResolvedSrfImpl::PartitionTree | ResolvedSrfImpl::PartitionAncestors)) =
+                    resolved.srf_impl
+                {
                     if with_ordinality {
                         return Err(ParseError::FeatureNotSupported(format!(
                             "WITH ORDINALITY on {other}"

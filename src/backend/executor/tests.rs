@@ -4175,6 +4175,11 @@ fn pg_class_exposes_oid_column_through_normal_catalog_plan() {
 fn pg_attribute_exposes_bootstrap_columns() {
     let base = temp_dir("pg_attribute_bootstrap");
     let txns = TransactionManager::new_durable(&base).unwrap();
+    let expected = crate::include::catalog::pg_class_desc()
+        .columns
+        .into_iter()
+        .map(|column| vec![Value::Text(column.name.into())])
+        .collect();
 
     assert_query_rows(
         run_sql(
@@ -4184,27 +4189,7 @@ fn pg_attribute_exposes_bootstrap_columns() {
             "select attname from pg_attribute where attrelid = 1259 order by attnum",
         )
         .unwrap(),
-        vec![
-            vec![Value::Text("oid".into())],
-            vec![Value::Text("relname".into())],
-            vec![Value::Text("relnamespace".into())],
-            vec![Value::Text("reltype".into())],
-            vec![Value::Text("relowner".into())],
-            vec![Value::Text("relam".into())],
-            vec![Value::Text("reltablespace".into())],
-            vec![Value::Text("relfilenode".into())],
-            vec![Value::Text("reltoastrelid".into())],
-            vec![Value::Text("relpersistence".into())],
-            vec![Value::Text("relkind".into())],
-            vec![Value::Text("relhassubclass".into())],
-            vec![Value::Text("relhastriggers".into())],
-            vec![Value::Text("relispartition".into())],
-            vec![Value::Text("relrowsecurity".into())],
-            vec![Value::Text("relforcerowsecurity".into())],
-            vec![Value::Text("relnatts".into())],
-            vec![Value::Text("relpages".into())],
-            vec![Value::Text("reltuples".into())],
-        ],
+        expected,
     );
 }
 

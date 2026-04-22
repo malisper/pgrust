@@ -3937,10 +3937,12 @@ impl Session {
         columns: Option<&[String]>,
         num_params: usize,
     ) -> Result<PreparedInsert, ExecError> {
-        let catalog = self.catalog_lookup(db);
-        Ok(bind_insert_prepared(
-            table_name, columns, num_params, &catalog,
-        )?)
+        stacker::grow(32 * 1024 * 1024, || {
+            let catalog = self.catalog_lookup(db);
+            Ok(bind_insert_prepared(
+                table_name, columns, num_params, &catalog,
+            )?)
+        })
     }
 
     pub fn execute_prepared_insert(
@@ -3949,41 +3951,43 @@ impl Session {
         prepared: &PreparedInsert,
         params: &[Value],
     ) -> Result<(), ExecError> {
-        let txn = self.active_txn.as_mut().ok_or_else(|| {
-            ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "active transaction",
-                actual: "no active transaction for prepared insert".into(),
-            })
-        })?;
-        let xid = txn.xid;
-        let cid = txn.next_command_id;
-        txn.next_command_id = txn.next_command_id.saturating_add(1);
-        let _client_id = self.client_id;
+        stacker::grow(32 * 1024 * 1024, || {
+            let txn = self.active_txn.as_mut().ok_or_else(|| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "active transaction",
+                    actual: "no active transaction for prepared insert".into(),
+                })
+            })?;
+            let xid = txn.xid;
+            let cid = txn.next_command_id;
+            txn.next_command_id = txn.next_command_id.saturating_add(1);
+            let _client_id = self.client_id;
 
-        let lock_requests = prepared_insert_foreign_key_lock_requests(prepared);
-        self.lock_table_requests_if_needed(db, &lock_requests)?;
+            let lock_requests = prepared_insert_foreign_key_lock_requests(prepared);
+            self.lock_table_requests_if_needed(db, &lock_requests)?;
 
-        let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
-        let catalog = self.catalog_lookup_for_command(db, xid, cid);
-        let interrupts = self.interrupts();
-        let deferred_foreign_keys = self
-            .active_txn
-            .as_ref()
-            .unwrap()
-            .deferred_foreign_keys
-            .clone();
-        let mut ctx = self.executor_context_for_catalog(
-            db,
-            snapshot,
-            cid,
-            &catalog,
-            Some(deferred_foreign_keys),
-            None,
-        );
-        ctx.interrupts = interrupts;
-        let result = execute_prepared_insert_row(prepared, params, &mut ctx, xid, cid);
-        self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
-        result
+            let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+            let catalog = self.catalog_lookup_for_command(db, xid, cid);
+            let interrupts = self.interrupts();
+            let deferred_foreign_keys = self
+                .active_txn
+                .as_ref()
+                .unwrap()
+                .deferred_foreign_keys
+                .clone();
+            let mut ctx = self.executor_context_for_catalog(
+                db,
+                snapshot,
+                cid,
+                &catalog,
+                Some(deferred_foreign_keys),
+                None,
+            );
+            ctx.interrupts = interrupts;
+            let result = execute_prepared_insert_row(prepared, params, &mut ctx, xid, cid);
+            self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
+            result
+        })
     }
 
     pub fn copy_from_rows(
@@ -4014,24 +4018,25 @@ impl Session {
         target_columns: Option<&[String]>,
         rows: &[Vec<String>],
     ) -> Result<usize, ExecError> {
-        db.install_interrupt_state(self.client_id, self.interrupts());
-        let started_txn = if self.active_txn.is_none() {
-            let xid = db.txns.write().begin();
-            self.active_txn = Some(self.active_transaction_for_xid(xid));
-            self.stats_state.write().begin_top_level_xact();
-            true
-        } else {
-            false
-        };
-
-        let result = (|| -> Result<usize, ExecError> {
-            let (xid, cid) = {
-                let txn = self.active_txn.as_mut().unwrap();
-                let xid = txn.xid;
-                let cid = txn.next_command_id;
-                txn.next_command_id = txn.next_command_id.saturating_add(1);
-                (xid, cid)
+        stacker::grow(32 * 1024 * 1024, || {
+            db.install_interrupt_state(self.client_id, self.interrupts());
+            let started_txn = if self.active_txn.is_none() {
+                let xid = db.txns.write().begin();
+                self.active_txn = Some(self.active_transaction_for_xid(xid));
+                self.stats_state.write().begin_top_level_xact();
+                true
+            } else {
+                false
             };
+
+            let result = (|| -> Result<usize, ExecError> {
+                let (xid, cid) = {
+                    let txn = self.active_txn.as_mut().unwrap();
+                    let xid = txn.xid;
+                    let cid = txn.next_command_id;
+                    txn.next_command_id = txn.next_command_id.saturating_add(1);
+                    (xid, cid)
+                };
 
             let catalog = self.catalog_lookup_for_command(db, xid, cid);
             let (relation_oid, rel, toast, toast_index, desc, indexes) = {
@@ -4230,26 +4235,26 @@ impl Session {
                 cid,
             );
             self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
-            result
-        })();
+                result
+            })();
 
-        let final_result = if started_txn {
-            let result = result.and_then(|n| {
-                self.validate_deferred_foreign_keys_for_active_txn(db)?;
-                Ok(StatementResult::AffectedRows(n))
-            });
-            let txn = self.active_txn.take().unwrap();
-            self.finalize_taken_transaction(db, txn, result)
-                .map(|result| match result {
-                    StatementResult::AffectedRows(rows) => rows as usize,
-                    other => {
-                        panic!("expected COPY finalization to return affected rows, got {other:?}")
-                    }
-                })
-        } else {
-            result
-        };
-        final_result
+            if started_txn {
+                let result = result.and_then(|n| {
+                    self.validate_deferred_foreign_keys_for_active_txn(db)?;
+                    Ok(StatementResult::AffectedRows(n))
+                });
+                let txn = self.active_txn.take().unwrap();
+                self.finalize_taken_transaction(db, txn, result)
+                    .map(|result| match result {
+                        StatementResult::AffectedRows(rows) => rows as usize,
+                        other => {
+                            panic!("expected COPY finalization to return affected rows, got {other:?}")
+                        }
+                    })
+            } else {
+                result
+            }
+        })
     }
 
     fn execute_copy_from_file(

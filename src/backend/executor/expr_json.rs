@@ -2750,7 +2750,7 @@ fn render_serde_json_value_text(value: &SerdeJsonValue) -> String {
             let mut out = String::from("[");
             for (idx, item) in items.iter().enumerate() {
                 if idx > 0 {
-                    out.push_str(", ");
+                    out.push(',');
                 }
                 out.push_str(&render_serde_json_value_text(item));
             }
@@ -2761,10 +2761,10 @@ fn render_serde_json_value_text(value: &SerdeJsonValue) -> String {
             let mut out = String::from("{");
             for (idx, (key, value)) in map.iter().enumerate() {
                 if idx > 0 {
-                    out.push_str(", ");
+                    out.push(',');
                 }
                 out.push_str(&serde_json::to_string(key).unwrap());
-                out.push_str(": ");
+                out.push(':');
                 out.push_str(&render_serde_json_value_text(value));
             }
             out.push('}');
@@ -2949,7 +2949,7 @@ fn render_json_value_text_with_config(
             let mut out = String::from("[");
             for (idx, item) in items.iter().enumerate() {
                 if idx > 0 {
-                    out.push_str(", ");
+                    out.push(',');
                 }
                 out.push_str(&render_json_value_text_with_config(
                     item,
@@ -2964,10 +2964,10 @@ fn render_json_value_text_with_config(
             let mut out = String::from("{");
             for (idx, (field, item)) in record.iter().enumerate() {
                 if idx > 0 {
-                    out.push_str(", ");
+                    out.push(',');
                 }
                 out.push_str(&serde_json::to_string(&field.name).unwrap());
-                out.push_str(": ");
+                out.push(':');
                 out.push_str(&render_json_field_value_text(
                     item,
                     field.sql_type,
@@ -2982,7 +2982,7 @@ fn render_json_value_text_with_config(
             let mut out = String::from("[");
             for (idx, item) in array.to_nested_values().iter().enumerate() {
                 if idx > 0 {
-                    out.push_str(", ");
+                    out.push(',');
                 }
                 out.push_str(&render_json_value_text_with_config(
                     item,
