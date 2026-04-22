@@ -246,6 +246,9 @@ fn collect_rels_from_set_returning_call(
         | crate::include::nodes::primnodes::SetReturningCall::JsonTableFunction { args, .. }
         | crate::include::nodes::primnodes::SetReturningCall::JsonRecordFunction { args, .. }
         | crate::include::nodes::primnodes::SetReturningCall::RegexTableFunction { args, .. }
+        | crate::include::nodes::primnodes::SetReturningCall::StringTableFunction {
+            args, ..
+        }
         | crate::include::nodes::primnodes::SetReturningCall::TextSearchTableFunction {
             args,
             ..
@@ -401,6 +404,10 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
             | crate::include::nodes::primnodes::SetReturningCall::RegexTableFunction {
                 args, ..
             }
+            | crate::include::nodes::primnodes::SetReturningCall::StringTableFunction {
+                args,
+                ..
+            }
             | crate::include::nodes::primnodes::SetReturningCall::TextSearchTableFunction {
                 args,
                 ..
@@ -459,6 +466,9 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                                 args, ..
                             }
                             | crate::include::nodes::primnodes::SetReturningCall::RegexTableFunction {
+                                args, ..
+                            }
+                            | crate::include::nodes::primnodes::SetReturningCall::StringTableFunction {
                                 args, ..
                             }
                             | crate::include::nodes::primnodes::SetReturningCall::TextSearchTableFunction {

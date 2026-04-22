@@ -496,6 +496,14 @@ fn exec_do_stmt(stmt: &CompiledStmt, values: &mut [Value]) -> Result<(), ExecErr
             }
             Ok(())
         }
+        CompiledStmt::While { condition, body } => {
+            while eval_plpgsql_condition(&eval_do_expr(condition, values)?)? {
+                for stmt in body {
+                    exec_do_stmt(stmt, values)?;
+                }
+            }
+            Ok(())
+        }
         CompiledStmt::ForInt {
             slot,
             start_expr,
@@ -626,6 +634,17 @@ fn exec_function_stmt(
                 }
             }
             exec_function_stmt_list(else_branch, compiled, expected_record_shape, state, ctx)
+        }
+        CompiledStmt::While { condition, body } => {
+            while eval_plpgsql_condition(&eval_function_expr(condition, &state.values, ctx)?)? {
+                if matches!(
+                    exec_function_stmt_list(body, compiled, expected_record_shape, state, ctx)?,
+                    FunctionControl::Return
+                ) {
+                    return Ok(FunctionControl::Return);
+                }
+            }
+            Ok(FunctionControl::Continue)
         }
         CompiledStmt::ForInt {
             slot,
@@ -891,13 +910,7 @@ fn exec_function_select_into(
             if matches!(ty.kind, SqlTypeKind::Record | SqlTypeKind::Composite) =>
         {
             state.values[*slot] = Value::Record(RecordValue::from_descriptor(
-                RecordDescriptor::anonymous(
-                    plan.columns()
-                        .into_iter()
-                        .map(|column| (column.name, column.sql_type))
-                        .collect(),
-                    -1,
-                ),
+                anonymous_record_descriptor_for_columns(&plan.columns()),
                 row.clone(),
             ));
         }
@@ -1134,6 +1147,14 @@ fn eval_function_expr(
 ) -> Result<Value, ExecError> {
     let mut slot = TupleSlot::virtual_row(values.to_vec());
     eval_expr(&expr.expr, &mut slot, ctx)
+}
+
+fn eval_plpgsql_condition(value: &Value) -> Result<bool, ExecError> {
+    match value {
+        Value::Bool(true) => Ok(true),
+        Value::Bool(false) | Value::Null => Ok(false),
+        other => Err(ExecError::NonBoolQual(other.clone())),
+    }
 }
 
 fn finish_raise(level: &RaiseLevel, message: &str, params: &[Value]) -> Result<(), ExecError> {

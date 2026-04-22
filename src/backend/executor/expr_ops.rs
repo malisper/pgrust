@@ -5,6 +5,7 @@ use num_integer::Integer;
 use num_traits::{Signed, ToPrimitive, Zero};
 
 use super::ExecError;
+use super::exec_expr::{append_array_value, concatenate_arrays};
 use super::expr_bit::{
     bitwise_binary as bitwise_binary_bits, bitwise_not as bitwise_not_bits, compare_bit_strings,
     concat_bit_strings, shift_left as shift_left_bits, shift_right as shift_right_bits,
@@ -591,29 +592,16 @@ pub(crate) fn concat_values(left: Value, right: Value) -> Result<Value, ExecErro
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
     }
-    if let (Some(mut left_array), Some(right_array)) =
+    if let (Some(left_array), Some(right_array)) =
         (normalize_array_value(&left), normalize_array_value(&right))
     {
-        left_array.elements.extend(right_array.elements);
-        left_array.dimensions = vec![ArrayDimension {
-            lower_bound: 1,
-            length: left_array.elements.len(),
-        }];
-        return Ok(Value::PgArray(left_array));
+        return Ok(Value::PgArray(concatenate_arrays(left_array, right_array)?));
     }
-    if let Some(mut left_array) = normalize_array_value(&left) {
-        left_array.elements.push(right);
-        left_array.dimensions = vec![ArrayDimension {
-            lower_bound: 1,
-            length: left_array.elements.len(),
-        }];
-        return Ok(Value::PgArray(left_array));
+    if normalize_array_value(&left).is_some() {
+        return append_array_value(&left, &right, false);
     }
-    if let Some(right_array) = normalize_array_value(&right) {
-        let mut elements = Vec::with_capacity(right_array.elements.len() + 1);
-        elements.push(left);
-        elements.extend(right_array.elements);
-        return Ok(Value::PgArray(ArrayValue::from_1d(elements)));
+    if normalize_array_value(&right).is_some() {
+        return append_array_value(&right, &left, true);
     }
     match (&left, &right) {
         (Value::Bit(l), Value::Bit(r)) => Ok(Value::Bit(concat_bit_strings(l, r))),
@@ -732,9 +720,7 @@ pub(crate) fn order_values(
             op,
         ))),
         (Value::Timestamp(l), Value::Timestamp(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
-        (Value::TimestampTz(l), Value::TimestampTz(r)) => {
-            Ok(Value::Bool(compare_ord(*l, *r, op)))
-        }
+        (Value::TimestampTz(l), Value::TimestampTz(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(match op {
             "<" => pg_float_cmp(*l, *r) == Ordering::Less,
             "<=" => pg_float_cmp(*l, *r) != Ordering::Greater,

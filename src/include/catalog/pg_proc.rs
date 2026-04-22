@@ -2317,6 +2317,22 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             2,
         ),
         set_returning_proc_row(
+            6160,
+            "string_to_table",
+            TEXT_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID, TEXT_TYPE_OID]),
+            "text_to_table",
+            2,
+        ),
+        set_returning_proc_row(
+            6161,
+            "string_to_table",
+            TEXT_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID, TEXT_TYPE_OID, TEXT_TYPE_OID]),
+            "text_to_table_null",
+            3,
+        ),
+        set_returning_proc_row(
             6261,
             "generate_series",
             INT4_TYPE_OID,
@@ -3344,6 +3360,12 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_get_serial_sequence",
             BuiltinScalarFunction::PgGetSerialSequence,
         ),
+        ("pg_size_pretty", BuiltinScalarFunction::PgSizePretty),
+        (
+            "pg_size_pretty_numeric",
+            BuiltinScalarFunction::PgSizePretty,
+        ),
+        ("pg_size_bytes", BuiltinScalarFunction::PgSizeBytes),
         ("pg_advisory_lock", BuiltinScalarFunction::PgAdvisoryLock),
         (
             "pg_advisory_xact_lock",

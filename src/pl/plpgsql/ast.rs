@@ -56,6 +56,10 @@ pub enum Stmt {
         branches: Vec<(String, Vec<Stmt>)>,
         else_branch: Vec<Stmt>,
     },
+    While {
+        condition: String,
+        body: Vec<Stmt>,
+    },
     ForInt {
         var_name: String,
         start_expr: String,

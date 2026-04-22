@@ -8932,12 +8932,57 @@ fn build_assignment_target(pair: Pair<'_, Rule>) -> Result<AssignmentTarget, Par
     let mut inner = pair.into_inner();
     let column = build_identifier(inner.next().ok_or(ParseError::UnexpectedEof)?);
     let mut subscripts = Vec::new();
+    let mut field_path = Vec::new();
     for part in inner {
-        if part.as_rule() == Rule::subscript_suffix {
-            subscripts.push(build_array_subscript(part)?);
+        match part.as_rule() {
+            Rule::assignment_target_suffix => {
+                let suffix = part.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+                match suffix.as_rule() {
+                    Rule::subscript_suffix => {
+                        if !field_path.is_empty() {
+                            return Err(ParseError::UnexpectedToken {
+                                expected: "record field selection at end of assignment target",
+                                actual: suffix.as_str().into(),
+                            });
+                        }
+                        subscripts.push(build_array_subscript(suffix)?);
+                    }
+                    Rule::field_select_suffix => {
+                        let field = suffix
+                            .into_inner()
+                            .find(|part| part.as_rule() == Rule::identifier)
+                            .map(build_identifier)
+                            .ok_or(ParseError::UnexpectedEof)?;
+                        field_path.push(field);
+                    }
+                    _ => {}
+                }
+            }
+            Rule::subscript_suffix => {
+                if !field_path.is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "record field selection at end of assignment target",
+                        actual: part.as_str().into(),
+                    });
+                }
+                subscripts.push(build_array_subscript(part)?);
+            }
+            Rule::field_select_suffix => {
+                let field = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::identifier)
+                    .map(build_identifier)
+                    .ok_or(ParseError::UnexpectedEof)?;
+                field_path.push(field);
+            }
+            _ => {}
         }
     }
-    Ok(AssignmentTarget { column, subscripts })
+    Ok(AssignmentTarget {
+        column,
+        subscripts,
+        field_path,
+    })
 }
 
 fn build_array_subscript(pair: Pair<'_, Rule>) -> Result<ArraySubscript, ParseError> {
@@ -10511,17 +10556,19 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 ty.ok_or(ParseError::UnexpectedEof)?,
             ))
         }
-        Rule::row_expr => Ok(SqlExpr::Row(
+        Rule::row_expr | Rule::implicit_row_expr => Ok(SqlExpr::Row(
             pair.into_inner()
-                .find(|part| part.as_rule() == Rule::expr_list)
-                .map(|list| {
-                    list.into_inner()
-                        .filter(|part| part.as_rule() == Rule::expr)
-                        .map(build_expr)
-                        .collect::<Result<Vec<_>, _>>()
+                .filter(|part| part.as_rule() == Rule::expr || part.as_rule() == Rule::expr_list)
+                .flat_map(|part| match part.as_rule() {
+                    Rule::expr => vec![part],
+                    Rule::expr_list => part
+                        .into_inner()
+                        .filter(|inner| inner.as_rule() == Rule::expr)
+                        .collect(),
+                    _ => Vec::new(),
                 })
-                .transpose()?
-                .unwrap_or_default(),
+                .map(build_expr)
+                .collect::<Result<Vec<_>, _>>()?,
         )),
         Rule::func_call => build_func_call(pair),
         Rule::qualified_star => Ok(SqlExpr::Column(pair.as_str().to_string())),

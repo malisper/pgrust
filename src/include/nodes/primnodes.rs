@@ -711,6 +711,11 @@ pub enum RegexTableFunction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StringTableFunction {
+    StringToTable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextSearchTableFunction {
     TokenType,
     Parse,
@@ -760,6 +765,14 @@ pub enum SetReturningCall {
         output_columns: Vec<QueryColumn>,
         with_ordinality: bool,
     },
+    StringTableFunction {
+        func_oid: u32,
+        func_variadic: bool,
+        kind: StringTableFunction,
+        args: Vec<Expr>,
+        output_columns: Vec<QueryColumn>,
+        with_ordinality: bool,
+    },
     TextSearchTableFunction {
         kind: TextSearchTableFunction,
         args: Vec<Expr>,
@@ -783,6 +796,7 @@ impl SetReturningCall {
             | SetReturningCall::JsonTableFunction { output_columns, .. }
             | SetReturningCall::JsonRecordFunction { output_columns, .. }
             | SetReturningCall::RegexTableFunction { output_columns, .. }
+            | SetReturningCall::StringTableFunction { output_columns, .. }
             | SetReturningCall::TextSearchTableFunction { output_columns, .. }
             | SetReturningCall::UserDefined { output_columns, .. } => output_columns,
         }
@@ -803,6 +817,9 @@ impl SetReturningCall {
                 with_ordinality, ..
             }
             | SetReturningCall::RegexTableFunction {
+                with_ordinality, ..
+            }
+            | SetReturningCall::StringTableFunction {
                 with_ordinality, ..
             }
             | SetReturningCall::TextSearchTableFunction {
@@ -1468,6 +1485,20 @@ fn binary_result_type(left: &Expr, right: &Expr) -> SqlType {
         .unwrap_or(SqlType::new(SqlTypeKind::Text))
 }
 
+fn array_subscript_result_type(array: &Expr, subscripts: &[ExprArraySubscript]) -> Option<SqlType> {
+    let array_type = expr_sql_type_hint(array)?;
+    let element_type = match array_type.kind {
+        SqlTypeKind::Int2Vector => SqlType::new(SqlTypeKind::Int2),
+        SqlTypeKind::OidVector => SqlType::new(SqlTypeKind::Oid),
+        _ => array_type.element_type(),
+    };
+    if subscripts.iter().any(|subscript| subscript.is_slice) {
+        Some(SqlType::array_of(element_type))
+    } else {
+        Some(element_type)
+    }
+}
+
 pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
     match expr {
         Expr::Var(var) => Some(var.vartype),
@@ -1544,9 +1575,11 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
         }
         Expr::SubPlan(subplan) => subplan.first_col_type,
         Expr::Collate { expr, .. } => expr_sql_type_hint(expr),
+        Expr::ArraySubscript { array, subscripts } => {
+            array_subscript_result_type(array, subscripts)
+        }
         Expr::Like { .. }
         | Expr::Similar { .. }
-        | Expr::ArraySubscript { .. }
         | Expr::Random
         | Expr::CurrentDate
         | Expr::CurrentTime { .. }

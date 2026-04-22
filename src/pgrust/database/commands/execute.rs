@@ -237,9 +237,7 @@ impl Database {
         datetime_config: &DateTimeConfig,
     ) -> Result<StatementResult, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
-        use crate::backend::commands::tablecmds::{
-            execute_truncate_table,
-        };
+        use crate::backend::commands::tablecmds::{execute_truncate_table, execute_vacuum};
         let interrupts = self.interrupt_state(client_id);
 
         match stmt {

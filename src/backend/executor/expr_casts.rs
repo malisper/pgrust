@@ -614,7 +614,8 @@ pub(crate) fn canonicalize_interval_text(text: &str) -> Result<String, ExecError
     }
 
     if rest.contains(':') {
-        let parsed = parse_time_text(rest, &DateTimeConfig::default()).map_err(|_| invalid(text))?;
+        let parsed =
+            parse_time_text(rest, &DateTimeConfig::default()).map_err(|_| invalid(text))?;
         return Ok(render_interval(0, 0, parsed.0, negative));
     }
 

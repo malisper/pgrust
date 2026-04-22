@@ -264,11 +264,8 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let mut current_cid = cid;
-        let catalog = self.lazy_catalog_lookup(
-            client_id,
-            Some((xid, current_cid)),
-            configured_search_path,
-        );
+        let catalog =
+            self.lazy_catalog_lookup(client_id, Some((xid, current_cid)), configured_search_path);
         let namespace_oid = normalize_operator_namespace(
             self,
             client_id,

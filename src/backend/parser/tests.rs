@@ -4170,6 +4170,19 @@ fn parse_row_constructor_expression() {
 }
 
 #[test]
+fn parse_implicit_row_constructor_expression() {
+    let stmt = parse_select("select (1, 'x')").unwrap();
+    match &stmt.targets[0].expr {
+        SqlExpr::Row(args) => {
+            assert_eq!(args.len(), 2);
+            assert!(matches!(&args[0], SqlExpr::IntegerLiteral(value) if value == "1"));
+            assert!(matches!(&args[1], SqlExpr::Const(Value::Text(text)) if text.as_str() == "x"));
+        }
+        other => panic!("expected implicit row constructor, got {other:?}"),
+    }
+}
+
+#[test]
 fn analyze_extract_keeps_extract_as_default_output_name() {
     let stmt = parse_select("select extract(week from date '2020-08-11')").unwrap();
     let (query, _) =
@@ -4789,8 +4802,19 @@ fn parse_array_subscript_expressions_and_targets() {
         Statement::Update(UpdateStatement { assignments, .. }) => {
             assert_eq!(assignments[0].target.column, "a");
             assert_eq!(assignments[0].target.subscripts.len(), 1);
+            assert!(assignments[0].target.field_path.is_empty());
             assert_eq!(assignments[1].target.column, "b");
             assert_eq!(assignments[1].target.subscripts.len(), 1);
+            assert!(assignments[1].target.field_path.is_empty());
+        }
+        other => panic!("expected update, got {:?}", other),
+    }
+
+    match parse_statement("update widgets set a[1].q1 = 1").unwrap() {
+        Statement::Update(UpdateStatement { assignments, .. }) => {
+            assert_eq!(assignments[0].target.column, "a");
+            assert_eq!(assignments[0].target.subscripts.len(), 1);
+            assert_eq!(assignments[0].target.field_path, vec!["q1".to_string()]);
         }
         other => panic!("expected update, got {:?}", other),
     }
@@ -4802,8 +4826,22 @@ fn parse_array_subscript_expressions_and_targets() {
         }) => {
             assert_eq!(columns[0].column, "a");
             assert_eq!(columns[0].subscripts.len(), 1);
+            assert!(columns[0].field_path.is_empty());
             assert_eq!(columns[1].column, "b");
             assert_eq!(columns[1].subscripts.len(), 1);
+            assert!(columns[1].field_path.is_empty());
+        }
+        other => panic!("expected insert, got {:?}", other),
+    }
+
+    match parse_statement("insert into widgets (a[1].q1) values (1)").unwrap() {
+        Statement::Insert(InsertStatement {
+            columns: Some(columns),
+            ..
+        }) => {
+            assert_eq!(columns[0].column, "a");
+            assert_eq!(columns[0].subscripts.len(), 1);
+            assert_eq!(columns[0].field_path, vec!["q1".to_string()]);
         }
         other => panic!("expected insert, got {:?}", other),
     }
@@ -4888,6 +4926,79 @@ fn build_plan_accepts_catalog_backed_text_input_casts() {
         &catalog(),
     )
     .is_ok());
+}
+
+#[test]
+fn build_plan_accepts_catalog_backed_time_casts_and_comparisons() {
+    assert!(
+        build_plan(
+            &parse_select("select time('05:06:07'), time '05:06:07', time '05:06:07' < '06:07:08'")
+                .unwrap(),
+            &catalog(),
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn build_plan_coerces_time_comparison_string_literals() {
+    let mut catalog = catalog();
+    catalog.insert(
+        "time_tbl",
+        test_catalog_entry(
+            15040,
+            RelationDesc {
+                columns: vec![column_desc("f1", SqlType::new(SqlTypeKind::Time), false)],
+            },
+        ),
+    );
+    let plan = build_plan(
+        &parse_select("select * from time_tbl where f1 < '05:06:07'").unwrap(),
+        &catalog,
+    )
+    .unwrap();
+    let Plan::Filter { predicate, .. } = plan else {
+        panic!("expected filter plan");
+    };
+    assert!(matches!(
+        predicate,
+        Expr::Op(op)
+            if op.op == crate::include::nodes::primnodes::OpExprKind::Lt
+                && matches!(op.args.as_slice(), [Expr::Var(var), Expr::Cast(inner, ty)]
+                    if var.vartype == SqlType::new(SqlTypeKind::Time)
+                        && *ty == SqlType::new(SqlTypeKind::Time)
+                        && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _))))
+    ));
+}
+
+#[test]
+fn build_plan_rejects_ambiguous_time_addition() {
+    match build_plan(
+        &parse_select("select time '01:02' + time '03:04'").unwrap(),
+        &catalog(),
+    )
+    .unwrap_err()
+    {
+        ParseError::DetailedError {
+            message,
+            hint,
+            sqlstate,
+            ..
+        } => {
+            assert_eq!(
+                message,
+                "operator is not unique: time without time zone + time without time zone"
+            );
+            assert_eq!(
+                hint.as_deref(),
+                Some(
+                    "Could not choose a best candidate operator. You might need to add explicit type casts."
+                )
+            );
+            assert_eq!(sqlstate, "42725");
+        }
+        other => panic!("expected detailed error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -6383,10 +6494,12 @@ fn people_insert_with_on_conflict(
             crate::include::nodes::parsenodes::AssignmentTarget {
                 column: "id".into(),
                 subscripts: vec![],
+                field_path: vec![],
             },
             crate::include::nodes::parsenodes::AssignmentTarget {
                 column: "name".into(),
                 subscripts: vec![],
+                field_path: vec![],
             },
         ]),
         source: InsertSource::Values(vec![vec![
@@ -6430,6 +6543,7 @@ fn bind_insert_resolves_on_conflict_constraint_name() {
             target: crate::include::nodes::parsenodes::AssignmentTarget {
                 column: "name".into(),
                 subscripts: vec![],
+                field_path: vec![],
             },
             expr: parse_expr("excluded.name").unwrap(),
         }],
@@ -6456,6 +6570,7 @@ fn bind_insert_rejects_on_conflict_do_update_without_target() {
             target: crate::include::nodes::parsenodes::AssignmentTarget {
                 column: "name".into(),
                 subscripts: vec![],
+                field_path: vec![],
             },
             expr: parse_expr("excluded.name").unwrap(),
         }],

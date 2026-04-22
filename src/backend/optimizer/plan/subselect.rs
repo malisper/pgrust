@@ -386,6 +386,24 @@ fn finalize_set_returning_call(
             output_columns,
             with_ordinality,
         },
+        SetReturningCall::StringTableFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::StringTableFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args: args
+                .into_iter()
+                .map(|arg| finalize_expr_subqueries(arg, catalog, subplans))
+                .collect(),
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::TextSearchTableFunction {
             kind,
             args,
@@ -766,6 +784,24 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
             output_columns,
             with_ordinality,
         } => SetReturningCall::RegexTableFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args: args
+                .into_iter()
+                .map(|arg| rebase_expr_subplan_ids(arg, base))
+                .collect(),
+            output_columns,
+            with_ordinality,
+        },
+        SetReturningCall::StringTableFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::StringTableFunction {
             func_oid,
             func_variadic,
             kind,

@@ -1,6 +1,8 @@
 use super::agg_output_special::*;
-use super::expr::raise_expr_varlevels;
+use super::expr::{raise_expr_varlevels, resolve_bound_field_select_type};
 use super::*;
+use crate::backend::utils::record::assign_anonymous_record_descriptor;
+use crate::include::nodes::primnodes::expr_sql_type_hint;
 use crate::include::nodes::primnodes::{OpExprKind, WindowFuncKind};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -282,6 +284,7 @@ fn query_references_local_cte(
                     | SetReturningCall::JsonTableFunction { args, .. }
                     | SetReturningCall::JsonRecordFunction { args, .. }
                     | SetReturningCall::RegexTableFunction { args, .. }
+                    | SetReturningCall::StringTableFunction { args, .. }
                     | SetReturningCall::TextSearchTableFunction { args, .. }
                     | SetReturningCall::UserDefined { args, .. } => args.iter().collect(),
                 };
@@ -385,6 +388,7 @@ fn query_references_local_cte(
                 | SetReturningCall::JsonTableFunction { args, .. }
                 | SetReturningCall::JsonRecordFunction { args, .. }
                 | SetReturningCall::RegexTableFunction { args, .. }
+                | SetReturningCall::StringTableFunction { args, .. }
                 | SetReturningCall::TextSearchTableFunction { args, .. }
                 | SetReturningCall::UserDefined { args, .. } => args
                     .iter()
@@ -788,10 +792,55 @@ pub(super) fn bind_agg_output_expr_in_clause(
             expected: "expression",
             actual: "DEFAULT".into(),
         }),
-        SqlExpr::Row(_) => Err(ParseError::UnexpectedToken {
-            expected: "implemented row expression",
-            actual: "ROW(...)".into(),
-        }),
+        SqlExpr::Row(items) => {
+            let mut field_exprs = Vec::new();
+            for item in items {
+                if let SqlExpr::Column(name) = item
+                    && let Some(relation_name) = name.strip_suffix(".*")
+                {
+                    let fields = resolve_relation_row_expr_with_outer(
+                        input_scope,
+                        outer_scopes,
+                        relation_name,
+                    )
+                    .ok_or_else(|| ParseError::UnknownColumn(name.clone()))?;
+                    for (_, expr) in fields {
+                        let field_name = format!("f{}", field_exprs.len() + 1);
+                        field_exprs.push((field_name, expr));
+                    }
+                    continue;
+                }
+                let expr = bind_agg_output_expr_in_clause(
+                    item,
+                    clause.clone(),
+                    group_by_exprs,
+                    group_key_exprs,
+                    input_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    agg_list,
+                    n_keys,
+                )?;
+                let field_name = format!("f{}", field_exprs.len() + 1);
+                field_exprs.push((field_name, expr));
+            }
+            let descriptor = assign_anonymous_record_descriptor(
+                field_exprs
+                    .iter()
+                    .map(|(name, expr)| {
+                        (
+                            name.clone(),
+                            expr_sql_type_hint(expr).unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                        )
+                    })
+                    .collect(),
+            );
+            Ok(Expr::Row {
+                descriptor,
+                fields: field_exprs,
+            })
+        }
         SqlExpr::FuncCall {
             name,
             args,
@@ -2648,10 +2697,25 @@ pub(super) fn bind_agg_output_expr_in_clause(
             expected: "grouped expression",
             actual: format!("unsupported operator {op}"),
         }),
-        SqlExpr::FieldSelect { field, .. } => Err(ParseError::UnexpectedToken {
-            expected: "grouped expression",
-            actual: format!("unsupported field selection .{field}"),
-        }),
+        SqlExpr::FieldSelect { expr, field } => {
+            let bound_inner = bind_agg_output_expr(
+                expr,
+                group_by_exprs,
+                group_key_exprs,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                agg_list,
+                n_keys,
+            )?;
+            let field_type = resolve_bound_field_select_type(&bound_inner, field, catalog)?;
+            Ok(Expr::FieldSelect {
+                expr: Box::new(bound_inner),
+                field: field.clone(),
+                field_type,
+            })
+        }
         SqlExpr::CurrentDate => Ok(Expr::CurrentDate),
         SqlExpr::CurrentUser => Ok(Expr::CurrentUser),
         SqlExpr::SessionUser => Ok(Expr::SessionUser),

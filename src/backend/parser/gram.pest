@@ -355,7 +355,8 @@ character_varying_type = { kw_character ~ kw_varying ~ ("(" ~ integer ~ ")")? }
 
 assignment = { assignment_target ~ "=" ~ expr }
 assignment_target_list = { assignment_target ~ ("," ~ assignment_target)* }
-assignment_target = { identifier ~ subscript_suffix* }
+assignment_target = { identifier ~ assignment_target_suffix* }
+assignment_target_suffix = { subscript_suffix | field_select_suffix }
 
 expr = { or_expr }
 or_expr = { and_expr ~ (kw_or ~ and_expr)* }
@@ -412,13 +413,14 @@ field_select_suffix = { "." ~ (identifier | star) }
 collate_suffix = { kw_collate ~ collation_name }
 positive_expr = { "+" ~ unary_expr }
 negated_expr = { ("!!" | "@-@" | "@@" | "?|" | "?-" | "||/" | "|/" | "#" | "-" | "~" | "@") ~ unary_expr }
-primary_expr = { kw_default | kw_null | kw_true | kw_false | kw_current_date | kw_current_user | kw_session_user | kw_current_role | kw_current_time | kw_current_timestamp | kw_localtime | kw_localtimestamp | exists_expr | scalar_subquery_expr | array_subquery_expr | case_expr | array_expr | row_expr | cast_expr | typed_string_literal | extract_expr | position_expr | substring_expr | overlay_expr | trim_expr | xml_element_expr | xml_forest_expr | xml_parse_expr | xml_pi_expr | xml_root_expr | xml_serialize_expr | func_call | qualified_star | bit_string_literal | quoted_string_literal | identifier | numeric_literal | integer | "(" ~ expr ~ ")" }
+primary_expr = { kw_default | kw_null | kw_true | kw_false | kw_current_date | kw_current_user | kw_session_user | kw_current_role | kw_current_time | kw_current_timestamp | kw_localtime | kw_localtimestamp | exists_expr | scalar_subquery_expr | array_subquery_expr | case_expr | array_expr | row_expr | implicit_row_expr | cast_expr | typed_string_literal | extract_expr | position_expr | substring_expr | overlay_expr | trim_expr | xml_element_expr | xml_forest_expr | xml_parse_expr | xml_pi_expr | xml_root_expr | xml_serialize_expr | func_call | qualified_star | bit_string_literal | quoted_string_literal | identifier | numeric_literal | integer | "(" ~ expr ~ ")" }
 case_expr = { kw_case ~ (searched_case_body | simple_case_body) ~ kw_end }
 searched_case_body = { when_clause+ ~ else_clause? }
 simple_case_body = { expr ~ when_clause+ ~ else_clause? }
 when_clause = { kw_when ~ expr ~ kw_then ~ expr }
 else_clause = { kw_else ~ expr }
 row_expr = { kw_row ~ "(" ~ expr_list? ~ ")" }
+implicit_row_expr = { "(" ~ expr ~ ("," ~ expr)+ ~ ")" }
 scalar_subquery_expr = { "(" ~ (select_stmt | values_stmt) ~ ")" }
 array_subquery_expr = { kw_array ~ "(" ~ (select_stmt | values_stmt) ~ ")" }
 exists_expr = { kw_exists ~ "(" ~ select_stmt ~ ")" }
