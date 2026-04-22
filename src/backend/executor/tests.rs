@@ -6305,6 +6305,28 @@ fn pg_input_error_info_reports_float_out_of_range() {
 }
 
 #[test]
+fn pg_input_error_info_reports_time_out_of_range_sqlstate() {
+    let base = temp_dir("pg_input_error_info_time_out_of_range");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select * from pg_input_error_info('25:00:00', 'time')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("date/time field value out of range: \"25:00:00\"".into()),
+            Value::Null,
+            Value::Null,
+            Value::Text("22008".into()),
+        ]],
+    );
+}
+
+#[test]
 fn pg_input_error_info_reports_numeric_overflow() {
     let base = temp_dir("pg_input_error_info_numeric_overflow");
     let txns = TransactionManager::new_durable(&base).unwrap();

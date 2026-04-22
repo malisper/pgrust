@@ -4715,6 +4715,64 @@ fn build_plan_accepts_catalog_backed_time_casts_and_comparisons() {
 }
 
 #[test]
+fn build_plan_coerces_time_comparison_string_literals() {
+    let mut catalog = catalog();
+    catalog.insert(
+        "time_tbl",
+        test_catalog_entry(
+            15040,
+            RelationDesc {
+                columns: vec![column_desc("f1", SqlType::new(SqlTypeKind::Time), false)],
+            },
+        ),
+    );
+    let plan = build_plan(
+        &parse_select("select * from time_tbl where f1 < '05:06:07'").unwrap(),
+        &catalog,
+    )
+    .unwrap();
+    let Plan::Filter { predicate, .. } = plan else {
+        panic!("expected filter plan");
+    };
+    assert!(matches!(
+        predicate,
+        Expr::Op(op)
+            if op.op == crate::include::nodes::primnodes::OpExprKind::Lt
+                && matches!(op.args.as_slice(), [Expr::Var(var), Expr::Cast(inner, ty)]
+                    if var.vartype == SqlType::new(SqlTypeKind::Time)
+                        && *ty == SqlType::new(SqlTypeKind::Time)
+                        && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _))))
+    ));
+}
+
+#[test]
+fn build_plan_rejects_ambiguous_time_addition() {
+    match build_plan(&parse_select("select time '01:02' + time '03:04'").unwrap(), &catalog())
+        .unwrap_err()
+    {
+        ParseError::DetailedError {
+            message,
+            hint,
+            sqlstate,
+            ..
+        } => {
+            assert_eq!(
+                message,
+                "operator is not unique: time without time zone + time without time zone"
+            );
+            assert_eq!(
+                hint.as_deref(),
+                Some(
+                    "Could not choose a best candidate operator. You might need to add explicit type casts."
+                )
+            );
+            assert_eq!(sqlstate, "42725");
+        }
+        other => panic!("expected detailed error, got {other:?}"),
+    }
+}
+
+#[test]
 fn build_plan_accepts_catalog_backed_bit_comparisons() {
     assert!(build_plan(
         &parse_select(

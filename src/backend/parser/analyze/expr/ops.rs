@@ -21,6 +21,23 @@ pub(super) fn bind_arithmetic_expr(
     let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
     if !left_type.is_array
         && !right_type.is_array
+        && op == "+"
+        && matches!(left_type.kind, SqlTypeKind::Time)
+        && matches!(right_type.kind, SqlTypeKind::Time)
+    {
+        return Err(ParseError::DetailedError {
+            message: "operator is not unique: time without time zone + time without time zone"
+                .into(),
+            detail: None,
+            hint: Some(
+                "Could not choose a best candidate operator. You might need to add explicit type casts."
+                    .into(),
+            ),
+            sqlstate: "42725",
+        });
+    }
+    if !left_type.is_array
+        && !right_type.is_array
         && (matches!(left_type.kind, SqlTypeKind::Money)
             || matches!(right_type.kind, SqlTypeKind::Money))
     {

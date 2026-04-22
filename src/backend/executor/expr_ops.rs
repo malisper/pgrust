@@ -161,6 +161,9 @@ pub(crate) fn compare_values(
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
     }
+    if let Some((left, right)) = coerce_temporal_text_pair(&left, &right) {
+        return compare_values(op, left, right, collation_oid);
+    }
     match (&left, &right) {
         (Value::Int16(l), Value::Int16(r)) => Ok(Value::Bool(l == r)),
         (Value::Int16(l), Value::Int32(r)) => Ok(Value::Bool((*l as i32) == *r)),
@@ -685,6 +688,9 @@ pub(crate) fn order_values(
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
     }
+    if let Some((left, right)) = coerce_temporal_text_pair(&left, &right) {
+        return order_values(op, left, right, collation_oid);
+    }
     match (&left, &right) {
         (Value::Int16(l), Value::Int16(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::Int16(l), Value::Int32(r)) => Ok(Value::Bool(compare_ord(*l as i32, *r, op))),
@@ -708,6 +714,16 @@ pub(crate) fn order_values(
         }
         (Value::Bytea(l), Value::Bytea(r)) => Ok(Value::Bool(compare_ord(l, r, op))),
         (Value::Date(l), Value::Date(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
+        (Value::Time(l), Value::Time(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
+        (Value::TimeTz(l), Value::TimeTz(r)) => Ok(Value::Bool(compare_ord(
+            (l.time, l.offset_seconds),
+            (r.time, r.offset_seconds),
+            op,
+        ))),
+        (Value::Timestamp(l), Value::Timestamp(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
+        (Value::TimestampTz(l), Value::TimestampTz(r)) => {
+            Ok(Value::Bool(compare_ord(*l, *r, op)))
+        }
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(match op {
             "<" => pg_float_cmp(*l, *r) == Ordering::Less,
             "<=" => pg_float_cmp(*l, *r) != Ordering::Greater,
@@ -813,6 +829,38 @@ fn compare_text_values(
 ) -> Result<Ordering, ExecError> {
     ensure_builtin_collation_supported(collation_oid)?;
     Ok(left.cmp(right))
+}
+
+fn coerce_temporal_text_pair(left: &Value, right: &Value) -> Option<(Value, Value)> {
+    let left_target = match left {
+        Value::Date(_) => Some(SqlType::new(SqlTypeKind::Date)),
+        Value::Time(_) => Some(SqlType::new(SqlTypeKind::Time)),
+        Value::TimeTz(_) => Some(SqlType::new(SqlTypeKind::TimeTz)),
+        Value::Timestamp(_) => Some(SqlType::new(SqlTypeKind::Timestamp)),
+        Value::TimestampTz(_) => Some(SqlType::new(SqlTypeKind::TimestampTz)),
+        _ => None,
+    };
+    if let (Some(target), true) = (left_target, right.as_text().is_some()) {
+        return cast_value(right.clone(), target)
+            .ok()
+            .map(|right| (left.clone(), right));
+    }
+
+    let right_target = match right {
+        Value::Date(_) => Some(SqlType::new(SqlTypeKind::Date)),
+        Value::Time(_) => Some(SqlType::new(SqlTypeKind::Time)),
+        Value::TimeTz(_) => Some(SqlType::new(SqlTypeKind::TimeTz)),
+        Value::Timestamp(_) => Some(SqlType::new(SqlTypeKind::Timestamp)),
+        Value::TimestampTz(_) => Some(SqlType::new(SqlTypeKind::TimestampTz)),
+        _ => None,
+    };
+    if let (Some(target), true) = (right_target, left.as_text().is_some()) {
+        return cast_value(left.clone(), target)
+            .ok()
+            .map(|left| (left, right.clone()));
+    }
+
+    None
 }
 
 fn compare_ord<T: Ord>(left: T, right: T, op: &'static str) -> bool {
