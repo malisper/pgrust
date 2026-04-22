@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use pest::Parser as _;
 use pest::iterators::Pair;
 use pest_derive::Parser;

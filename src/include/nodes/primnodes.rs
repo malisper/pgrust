@@ -4,7 +4,7 @@ use crate::backend::parser::{
 };
 use crate::include::access::htup::AttributeDesc;
 use crate::include::catalog::{
-    RECORD_TYPE_OID, builtin_scalar_function_for_proc_oid, builtin_window_function_for_proc_oid,
+    builtin_scalar_function_for_proc_oid, builtin_window_function_for_proc_oid,
     proc_oid_for_builtin_scalar_function, proc_oid_for_builtin_window_function,
 };
 use crate::include::nodes::datum::{MultirangeTypeRef, RangeTypeRef, RecordDescriptor, Value};
@@ -1496,16 +1496,10 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
         }
         Expr::SubPlan(subplan) => subplan.first_col_type,
         Expr::Collate { expr, .. } => expr_sql_type_hint(expr),
-        Expr::CurrentUser | Expr::SessionUser | Expr::CurrentRole => {
-            Some(SqlType::new(SqlTypeKind::Name))
-        }
         Expr::Like { .. }
         | Expr::Similar { .. }
         | Expr::ArraySubscript { .. }
         | Expr::Random
-        | Expr::CurrentUser
-        | Expr::SessionUser
-        | Expr::CurrentRole
         | Expr::CurrentDate
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }

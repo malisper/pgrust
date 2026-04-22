@@ -1,3 +1,5 @@
+#![allow(unused_imports)]
+
 mod agg;
 mod constraints;
 mod driver;

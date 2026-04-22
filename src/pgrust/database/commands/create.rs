@@ -590,7 +590,7 @@ impl Database {
         }
 
         let mut proretset = false;
-        let mut prorettype = 0u32;
+        let prorettype: u32;
         let mut proallargtypes = None;
         let mut proargmodes = None;
         let mut proargnames = all_arg_names

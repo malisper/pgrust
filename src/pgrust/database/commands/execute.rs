@@ -178,8 +178,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         use crate::backend::commands::tablecmds::{
-            execute_delete_with_waiter, execute_insert, execute_truncate_table,
-            execute_update_with_waiter, execute_vacuum,
+            execute_truncate_table, execute_vacuum,
         };
         let interrupts = self.interrupt_state(client_id);
 

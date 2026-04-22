@@ -1,6 +1,5 @@
 use super::super::*;
 use crate::backend::commands::tablecmds::collect_matching_rows_heap;
-use crate::backend::executor::value_io::format_failing_row_detail;
 use crate::backend::executor::{ExecutorContext, eval_expr};
 use crate::backend::parser::{
     BoundCheckConstraint, BoundForeignKeyConstraint, ForeignKeyConstraintAction,
