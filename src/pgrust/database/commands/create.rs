@@ -181,6 +181,7 @@ impl Database {
                 &index_name,
                 catalog.materialize_visible_catalog(),
                 &index_columns,
+                None,
                 true,
                 action.primary,
                 xid,

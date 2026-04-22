@@ -2611,7 +2611,7 @@ fn psql_relation_obj_description_query(
     ))
 }
 
-fn format_psql_indexdef(
+pub(crate) fn format_psql_indexdef(
     db: &Database,
     session: &Session,
     index: &crate::backend::parser::BoundIndexRelation,
@@ -5648,7 +5648,10 @@ mod tests {
             sqlstate: "42725",
         });
 
-        assert_eq!(exec_error_position(sql, &err), sql.find('+').map(|index| index + 1));
+        assert_eq!(
+            exec_error_position(sql, &err),
+            sql.find('+').map(|index| index + 1)
+        );
     }
 
     #[test]

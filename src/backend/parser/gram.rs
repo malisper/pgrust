@@ -7759,6 +7759,7 @@ fn build_create_index(pair: Pair<'_, Rule>) -> Result<CreateIndexStatement, Pars
     let mut columns = Vec::new();
     let mut include_columns = Vec::new();
     let mut predicate = None;
+    let mut predicate_sql = None;
     let mut options = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
@@ -7788,6 +7789,7 @@ fn build_create_index(pair: Pair<'_, Rule>) -> Result<CreateIndexStatement, Pars
                     .into_inner()
                     .find(|inner| inner.as_rule() == Rule::expr)
                     .ok_or(ParseError::UnexpectedEof)?;
+                predicate_sql = Some(expr.as_str().trim().to_string());
                 predicate = Some(build_expr(expr)?);
             }
             Rule::create_index_with_clause => {
@@ -7819,6 +7821,7 @@ fn build_create_index(pair: Pair<'_, Rule>) -> Result<CreateIndexStatement, Pars
         columns,
         include_columns,
         predicate,
+        predicate_sql,
         options,
     })
 }
