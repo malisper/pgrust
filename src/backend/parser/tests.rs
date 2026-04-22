@@ -6864,7 +6864,10 @@ fn build_plan_for_recursive_mixed_cte_query() {
             | Plan::Aggregate { input, .. }
             | Plan::WindowAgg { input, .. }
             | Plan::SubqueryScan { input, .. }
-            | Plan::ProjectSet { input, .. } => plan_contains_cte_scan(input),
+            | Plan::ProjectSet { input, .. }
+            | Plan::BitmapHeapScan {
+                bitmapqual: input, ..
+            } => plan_contains_cte_scan(input),
             Plan::NestedLoopJoin { left, right, .. } | Plan::HashJoin { left, right, .. } => {
                 plan_contains_cte_scan(left) || plan_contains_cte_scan(right)
             }
@@ -6874,6 +6877,7 @@ fn build_plan_for_recursive_mixed_cte_query() {
             Plan::Result { .. }
             | Plan::SeqScan { .. }
             | Plan::IndexScan { .. }
+            | Plan::BitmapIndexScan { .. }
             | Plan::FunctionScan { .. }
             | Plan::WorkTableScan { .. }
             | Plan::Values { .. } => false,

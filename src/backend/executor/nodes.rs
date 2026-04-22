@@ -13,6 +13,10 @@ use crate::backend::executor::srf::{
 use crate::backend::executor::value_io::{decode_value_with_toast, missing_column_value};
 use crate::backend::executor::window::execute_window_clause;
 use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::backend::storage::page::bufpage::{
+    ItemIdFlags, page_get_item_id_unchecked, page_get_item_unchecked, page_get_max_offset_number,
+};
+use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::time::date::format_date_text;
 use crate::backend::utils::time::instant::Instant;
@@ -20,11 +24,12 @@ use crate::include::catalog::PG_LARGEOBJECT_METADATA_RELATION_OID;
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
-    AggregateState, AppendState, CteScanState, FilterState, FunctionScanState, IndexScanState,
-    LimitState, MaterializedRow, NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode,
-    PlanState, ProjectSetState, ProjectionState, RecursiveUnionState, ResultState, SeqScanState,
-    SetOpState, SlotKind, SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot,
-    ValuesState, WindowAggState, WorkTableScanState,
+    AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, CteScanState,
+    FilterState, FunctionScanState, IndexScanState, LimitState, MaterializedRow,
+    NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, PlanState, ProjectSetState,
+    ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SetOpState, SlotKind,
+    SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot, ValuesState,
+    WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::primnodes::{
     Expr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR, Var, attrno_index,
@@ -231,6 +236,44 @@ fn materialize_cte_row(slot: &mut TupleSlot) -> Result<MaterializedRow, ExecErro
         TupleSlot::virtual_row_with_metadata(values, slot.tid(), slot.table_oid),
         Vec::new(),
     ))
+}
+
+fn internal_exec_error(message: impl Into<String>) -> ExecError {
+    ExecError::DetailedError {
+        message: message.into(),
+        detail: None,
+        hint: None,
+        sqlstate: "XX000",
+    }
+}
+
+fn bitmap_am_error(operation: &'static str, err: impl std::fmt::Debug) -> ExecError {
+    ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+        expected: operation,
+        actual: format!("{err:?}"),
+    })
+}
+
+fn collect_visible_page_offsets(
+    page: &crate::backend::storage::buffer::Page,
+    snapshot: &crate::backend::utils::time::snapmgr::Snapshot,
+    txns: &parking_lot::RwLock<crate::backend::access::transam::xact::TransactionManager>,
+) -> Result<Vec<u16>, ExecError> {
+    let max_offset = page_get_max_offset_number(page)
+        .map_err(crate::include::access::htup::TupleError::from)?;
+    let txns_guard = txns.read();
+    let mut offsets = Vec::new();
+    for off in 1..=max_offset {
+        let item_id = page_get_item_id_unchecked(page, off);
+        if item_id.lp_flags != ItemIdFlags::Normal || !item_id.has_storage() {
+            continue;
+        }
+        let tuple_bytes = page_get_item_unchecked(page, off);
+        if snapshot.tuple_bytes_visible(&txns_guard, tuple_bytes) {
+            offsets.push(off);
+        }
+    }
+    Ok(offsets)
 }
 
 fn set_op_result_rows(
@@ -827,6 +870,333 @@ impl PlanNode for IndexScanState {
         _show_costs: bool,
         _lines: &mut Vec<String>,
     ) {
+    }
+}
+
+impl BitmapIndexScanState {
+    fn fill_bitmap(&mut self, ctx: &mut ExecutorContext) -> Result<(), ExecError> {
+        if self.executed {
+            return Ok(());
+        }
+
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        begin_node(&mut self.stats, ctx);
+
+        let begin = crate::include::access::amapi::IndexBeginScanContext {
+            pool: ctx.pool.clone(),
+            client_id: ctx.client_id,
+            snapshot: ctx.snapshot.clone(),
+            heap_relation: self.rel,
+            index_relation: self.index_rel,
+            index_desc: (*self.index_desc).clone(),
+            index_meta: self.index_meta.clone(),
+            key_data: self.keys.clone(),
+            order_by_data: Vec::new(),
+            direction: crate::include::access::relscan::ScanDirection::Forward,
+            want_itup: false,
+        };
+        let mut scan = indexam::index_beginscan(&begin, self.am_oid)
+            .map_err(|err| bitmap_am_error("index access method begin bitmap scan", err))?;
+        {
+            let mut session_stats = ctx.session_stats.write();
+            session_stats.note_relation_scan(self.index_meta.indexrelid);
+            session_stats.note_io_read("client backend", "relation", "normal", 8192);
+        }
+        let tuples = indexam::index_getbitmap(&mut scan, self.am_oid, &mut self.bitmap)
+            .map_err(|err| bitmap_am_error("index access method bitmap scan", err))?;
+        indexam::index_endscan(scan, self.am_oid)
+            .map_err(|err| bitmap_am_error("index access method end bitmap scan", err))?;
+
+        self.executed = true;
+        self.stats.rows = tuples.max(0) as u64;
+        finish_eof(&mut self.stats, start, ctx);
+        Ok(())
+    }
+}
+
+impl PlanNode for BitmapIndexScanState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        _ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        Err(internal_exec_error(
+            "bitmap index scan cannot produce tuples directly",
+        ))
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        None
+    }
+
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &EMPTY_SYSTEM_BINDINGS
+    }
+
+    fn column_names(&self) -> &[String] {
+        &self.column_names
+    }
+
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
+
+    fn node_label(&self) -> String {
+        format!(
+            "Bitmap Index Scan using rel {} on rel {}",
+            self.index_rel.rel_number, self.rel.rel_number
+        )
+    }
+
+    fn explain_details(
+        &self,
+        indent: usize,
+        analyze: bool,
+        _show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        if !self.index_quals.is_empty() {
+            let prefix = "  ".repeat(indent + 1);
+            lines.push(format!(
+                "{prefix}Index Cond: {}",
+                render_explain_expr(&format_qual_list(&self.index_quals), &self.column_names)
+            ));
+        }
+        if analyze
+            && (self.stats.buffer_usage.shared_hit > 0
+                || self.stats.buffer_usage.shared_read > 0
+                || self.stats.buffer_usage.shared_written > 0)
+        {
+            let prefix = "  ".repeat(indent + 1);
+            lines.push(format!(
+                "{prefix}{}",
+                crate::backend::commands::explain::format_buffer_usage(self.stats.buffer_usage)
+            ));
+        }
+    }
+
+    fn explain_children(
+        &self,
+        _indent: usize,
+        _analyze: bool,
+        _show_costs: bool,
+        _lines: &mut Vec<String>,
+    ) {
+    }
+}
+
+impl BitmapHeapScanState {
+    fn load_next_bitmap_page(&mut self, ctx: &mut ExecutorContext) -> Result<bool, ExecError> {
+        self.current_page_offsets.clear();
+        self.current_offset_index = 0;
+        self.current_page_pin = None;
+
+        while let Some(block) = self.bitmap_pages.get(self.current_page_index).copied() {
+            self.current_page_index += 1;
+
+            let pin = ctx
+                .pool
+                .pin_existing_block(ctx.client_id, self.rel, ForkNumber::Main, block)
+                .map_err(|err| internal_exec_error(format!("bitmap heap pin block failed: {err:?}")))?;
+            let buffer_id = pin.into_raw();
+            let owned_pin =
+                crate::OwnedBufferPin::wrap_existing(std::sync::Arc::clone(&ctx.pool), buffer_id);
+            let pin_rc = Rc::new(owned_pin);
+
+            let guard = ctx
+                .pool
+                .lock_buffer_shared(buffer_id)
+                .map_err(|err| internal_exec_error(format!("bitmap heap shared lock failed: {err:?}")))?;
+            let offsets = collect_visible_page_offsets(&guard, &ctx.snapshot, &ctx.txns)?;
+            drop(guard);
+
+            if offsets.is_empty() {
+                continue;
+            }
+
+            {
+                let mut session_stats = ctx.session_stats.write();
+                session_stats.note_relation_block_fetched(self.relation_oid);
+                session_stats.note_io_read("client backend", "relation", "normal", 8192);
+            }
+
+            self.current_page_pin = Some(pin_rc);
+            self.current_page_offsets = offsets;
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+}
+
+impl PlanNode for BitmapHeapScanState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        begin_node(&mut self.stats, ctx);
+
+        if self.bitmap_pages.is_empty() && self.current_page_index == 0 {
+            self.bitmap_index.fill_bitmap(ctx)?;
+            self.bitmap_pages = self.bitmap_index.bitmap.iter().collect();
+        }
+
+        loop {
+            ctx.check_for_interrupts()?;
+
+            if self.current_offset_index >= self.current_page_offsets.len() {
+                if !self.load_next_bitmap_page(ctx)? {
+                    finish_eof(&mut self.stats, start, ctx);
+                    return Ok(None);
+                }
+            }
+
+            let offset = self.current_page_offsets[self.current_offset_index];
+            self.current_offset_index += 1;
+            let pin = self
+                .current_page_pin
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| internal_exec_error("bitmap heap scan lost current page pin"))?;
+            let buffer_id = pin.buffer_id();
+            let page = unsafe { ctx.pool.page_unlocked(buffer_id) }
+                .ok_or_else(|| internal_exec_error("bitmap heap scan page vanished"))?;
+            let tuple_bytes = page_get_item_unchecked(page, offset);
+
+            self.slot.kind = SlotKind::BufferHeapTuple {
+                desc: self.desc.clone(),
+                attr_descs: self.attr_descs.clone(),
+                tid: crate::include::access::itemptr::ItemPointerData {
+                    block_number: self.bitmap_pages[self.current_page_index - 1],
+                    offset_number: offset,
+                },
+                tuple_ptr: tuple_bytes.as_ptr(),
+                tuple_len: tuple_bytes.len(),
+                pin,
+            };
+            self.slot.toast = slot_toast_context(self.toast_relation, ctx);
+            self.slot.tts_nvalid = 0;
+            self.slot.tts_values.clear();
+            self.slot.decode_offset = 0;
+            self.slot.table_oid = Some(self.relation_oid);
+            self.current_bindings = vec![SystemVarBinding {
+                varno: self.source_id,
+                table_oid: self.relation_oid,
+            }];
+            set_active_system_bindings(ctx, &self.current_bindings);
+
+            if let Some(recheck) = &self.compiled_recheck {
+                let outer_values = materialize_slot_values(&mut self.slot)?;
+                let current_bindings = self.current_bindings.clone();
+                set_outer_expr_bindings(ctx, outer_values, &current_bindings);
+                clear_inner_expr_bindings(ctx);
+                if !recheck(&mut self.slot, ctx)? {
+                    note_filtered_row(&mut self.stats);
+                    continue;
+                }
+            }
+
+            {
+                let mut session_stats = ctx.session_stats.write();
+                session_stats.note_relation_tuple_returned(self.relation_oid);
+                session_stats.note_relation_tuple_fetched(self.relation_oid);
+            }
+            finish_row(&mut self.stats, start);
+            return Ok(Some(&mut self.slot));
+        }
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        Some(&mut self.slot)
+    }
+
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
+    }
+
+    fn column_names(&self) -> &[String] {
+        &self.column_names
+    }
+
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
+
+    fn node_label(&self) -> String {
+        format!("Bitmap Heap Scan on {}", self.relation_name)
+    }
+
+    fn explain_details(
+        &self,
+        indent: usize,
+        analyze: bool,
+        _show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        if let Some(recheck_qual) = &self.recheck_qual {
+            let prefix = "  ".repeat(indent + 1);
+            lines.push(format!(
+                "{prefix}Recheck Cond: {}",
+                render_explain_expr(recheck_qual, &self.column_names)
+            ));
+        }
+        let prefix = "  ".repeat(indent + 1);
+        if analyze && self.stats.rows_removed_by_filter > 0 {
+            lines.push(format!(
+                "{prefix}Rows Removed by Recheck: {}",
+                self.stats.rows_removed_by_filter
+            ));
+        }
+        if analyze
+            && (self.stats.buffer_usage.shared_hit > 0
+                || self.stats.buffer_usage.shared_read > 0
+                || self.stats.buffer_usage.shared_written > 0)
+        {
+            lines.push(format!(
+                "{prefix}{}",
+                crate::backend::commands::explain::format_buffer_usage(self.stats.buffer_usage)
+            ));
+        }
+    }
+
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        format_explain_lines_with_costs(
+            self.bitmap_index.as_ref(),
+            indent + 1,
+            analyze,
+            show_costs,
+            lines,
+        );
     }
 }
 

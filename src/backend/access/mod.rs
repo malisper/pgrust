@@ -1,3 +1,4 @@
+pub mod brin;
 pub mod common;
 pub mod gist;
 pub mod heap;

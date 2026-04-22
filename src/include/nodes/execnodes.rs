@@ -6,6 +6,7 @@ use crate::include::access::htup::{AttributeDesc, HeapTuple, ItemPointerData};
 use crate::include::access::relscan::IndexScanDesc;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::scankey::ScanKeyData;
+use crate::include::access::tidbitmap::TidBitmap;
 use crate::include::nodes::plannodes::PlanEstimate;
 use crate::include::storage::buf_internals::BufferUsageStats;
 use crate::{BufferPool, ClientId, OwnedBufferPin, RelFileLocator, SmgrStorageBackend};
@@ -364,6 +365,63 @@ impl std::fmt::Debug for IndexScanState {
             .field("rel", &self.rel)
             .field("index_rel", &self.index_rel)
             .field("am_oid", &self.am_oid)
+            .finish()
+    }
+}
+
+pub struct BitmapIndexScanState {
+    pub(crate) rel: RelFileLocator,
+    pub(crate) index_rel: RelFileLocator,
+    pub(crate) am_oid: u32,
+    pub(crate) column_names: Vec<String>,
+    pub(crate) index_desc: Rc<RelationDesc>,
+    pub(crate) index_meta: IndexRelCacheEntry,
+    pub(crate) keys: Vec<ScanKeyData>,
+    pub(crate) index_quals: Vec<Expr>,
+    pub(crate) bitmap: TidBitmap,
+    pub(crate) executed: bool,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+}
+
+impl std::fmt::Debug for BitmapIndexScanState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BitmapIndexScanState")
+            .field("rel", &self.rel)
+            .field("index_rel", &self.index_rel)
+            .field("am_oid", &self.am_oid)
+            .finish()
+    }
+}
+
+pub struct BitmapHeapScanState {
+    pub(crate) rel: RelFileLocator,
+    pub(crate) relation_name: String,
+    pub(crate) toast_relation: Option<ToastRelationRef>,
+    pub(crate) column_names: Vec<String>,
+    pub(crate) desc: Rc<RelationDesc>,
+    pub(crate) attr_descs: Rc<[AttributeDesc]>,
+    pub(crate) bitmap_index: Box<BitmapIndexScanState>,
+    pub(crate) bitmap_pages: Vec<u32>,
+    pub(crate) current_page_index: usize,
+    pub(crate) current_page_offsets: Vec<u16>,
+    pub(crate) current_offset_index: usize,
+    pub(crate) current_page_pin: Option<Rc<OwnedBufferPin<SmgrStorageBackend>>>,
+    pub(crate) recheck_qual: Option<Expr>,
+    pub(crate) compiled_recheck: Option<crate::backend::executor::expr::CompiledPredicate>,
+    pub(crate) slot: TupleSlot,
+    pub(crate) source_id: usize,
+    pub(crate) relation_oid: u32,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+}
+
+impl std::fmt::Debug for BitmapHeapScanState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BitmapHeapScanState")
+            .field("rel", &self.rel)
+            .field("relation_name", &self.relation_name)
             .finish()
     }
 }

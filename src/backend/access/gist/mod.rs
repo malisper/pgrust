@@ -27,12 +27,14 @@ pub fn gist_am_handler() -> IndexAmRoutine {
         amstorage: true,
         amclusterable: true,
         ampredlocks: false,
+        amsummarizing: false,
         ambuild: Some(build::gistbuild),
         ambuildempty: Some(build::gistbuildempty),
         aminsert: Some(insert::gistinsert),
         ambeginscan: Some(scan::gistbeginscan),
         amrescan: Some(scan::gistrescan),
         amgettuple: Some(scan::gistgettuple),
+        amgetbitmap: None,
         amendscan: Some(scan::gistendscan),
         ambulkdelete: Some(vacuum::gistbulkdelete),
         amvacuumcleanup: Some(vacuum::gistvacuumcleanup),
@@ -49,5 +51,6 @@ mod tests {
 
         assert!(!am.amcanorder);
         assert!(am.amcanorderbyop);
+        assert!(!am.amsummarizing);
     }
 }

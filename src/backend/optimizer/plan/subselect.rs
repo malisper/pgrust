@@ -881,6 +881,58 @@ fn rebase_window_frame_bound_subplan_ids(
 fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
     match plan {
         Plan::Result { .. } | Plan::SeqScan { .. } | Plan::IndexScan { .. } => plan,
+        Plan::BitmapIndexScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_oid,
+            index_rel,
+            am_oid,
+            desc,
+            index_desc,
+            index_meta,
+            keys,
+            index_quals,
+        } => Plan::BitmapIndexScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_oid,
+            index_rel,
+            am_oid,
+            desc,
+            index_desc,
+            index_meta,
+            keys,
+            index_quals: index_quals
+                .into_iter()
+                .map(|expr| rebase_expr_subplan_ids(expr, base))
+                .collect(),
+        },
+        Plan::BitmapHeapScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            toast,
+            desc,
+            bitmapqual,
+            recheck_qual,
+        } => Plan::BitmapHeapScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            toast,
+            desc,
+            bitmapqual: Box::new(rebase_plan_subplan_ids(*bitmapqual, base)),
+            recheck_qual: recheck_qual
+                .into_iter()
+                .map(|expr| rebase_expr_subplan_ids(expr, base))
+                .collect(),
+        },
         Plan::Append {
             plan_info,
             source_id,
@@ -1174,7 +1226,32 @@ pub(super) fn finalize_plan_subqueries(
         Plan::Result { .. }
         | Plan::SeqScan { .. }
         | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
         | Plan::WorkTableScan { .. } => plan,
+        Plan::BitmapHeapScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            toast,
+            desc,
+            bitmapqual,
+            recheck_qual,
+        } => Plan::BitmapHeapScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            toast,
+            desc,
+            bitmapqual: Box::new(finalize_plan_subqueries(*bitmapqual, catalog, subplans)),
+            recheck_qual: recheck_qual
+                .into_iter()
+                .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
+                .collect(),
+        },
         Plan::Append {
             plan_info,
             source_id,

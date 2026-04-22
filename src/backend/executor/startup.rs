@@ -4,10 +4,11 @@ use crate::backend::executor::hashjoin::HashJoinPhase;
 use crate::backend::parser::SqlType;
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::execnodes::{
-    AggregateState, AppendState, CteScanState, FilterState, FunctionScanState, HashJoinState,
-    HashState, IndexScanState, LimitState, NestedLoopJoinState, NodeExecStats, OrderByState,
-    ProjectSetState, ProjectionState, RecursiveUnionState, RecursiveWorkTable, ResultState,
-    SeqScanState, SetOpState, SubqueryScanState, ValuesState, WindowAggState, WorkTableScanState,
+    AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, CteScanState,
+    FilterState, FunctionScanState, HashJoinState, HashState, IndexScanState, LimitState,
+    NestedLoopJoinState, NodeExecStats, OrderByState, ProjectSetState, ProjectionState,
+    RecursiveUnionState, RecursiveWorkTable, ResultState, SeqScanState, SetOpState,
+    SubqueryScanState, ValuesState, WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::parsenodes::SqlTypeKind;
 use crate::include::nodes::primnodes::{Expr, SetReturningCall};
@@ -169,7 +170,15 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
         | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
         | Plan::WorkTableScan { .. } => false,
+        Plan::BitmapHeapScan {
+            bitmapqual,
+            recheck_qual,
+            ..
+        } => {
+            plan_uses_outer_columns(bitmapqual) || recheck_qual.iter().any(expr_uses_outer_columns)
+        }
         Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
             children.iter().any(plan_uses_outer_columns)
         }
@@ -374,6 +383,84 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 order_by_keys,
                 direction,
                 scan: None,
+                slot,
+                source_id,
+                relation_oid,
+                current_bindings: Vec::new(),
+                plan_info,
+                stats: NodeExecStats::default(),
+            })
+        }
+        Plan::BitmapIndexScan {
+            plan_info,
+            source_id: _,
+            rel,
+            relation_oid: _,
+            index_rel,
+            am_oid,
+            desc,
+            index_desc,
+            index_meta,
+            keys,
+            index_quals,
+        } => Box::new(BitmapIndexScanState {
+            rel,
+            index_rel,
+            am_oid,
+            column_names: desc.columns.iter().map(|c| c.name.clone()).collect(),
+            index_desc: Rc::new(index_desc),
+            index_meta,
+            keys,
+            index_quals,
+            bitmap: crate::include::access::tidbitmap::TidBitmap::new(),
+            executed: false,
+            plan_info,
+            stats: NodeExecStats::default(),
+        }),
+        Plan::BitmapHeapScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            toast,
+            desc,
+            bitmapqual,
+            recheck_qual,
+        } => {
+            let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
+            let desc = Rc::new(desc);
+            let attr_descs: Rc<[_]> = desc.attribute_descs().into();
+            let decoder = Rc::new(tuple_decoder::CompiledTupleDecoder::compile(
+                &desc,
+                &attr_descs,
+            ));
+            let ncols = desc.columns.len();
+            let mut slot = TupleSlot::empty(ncols);
+            slot.decoder = Some(decoder.clone());
+            let recheck_qual = (!recheck_qual.is_empty()).then(|| {
+                let mut quals = recheck_qual;
+                let first = quals.remove(0);
+                quals.into_iter().fold(first, Expr::and)
+            });
+            let compiled_recheck = recheck_qual
+                .as_ref()
+                .map(|qual| expr::compile_predicate_with_decoder(qual, &decoder));
+            Box::new(BitmapHeapScanState {
+                rel,
+                relation_name,
+                toast_relation: toast,
+                column_names,
+                desc,
+                attr_descs,
+                bitmap_index: build_bitmap_index_state(*bitmapqual),
+                bitmap_pages: Vec::new(),
+                current_page_index: 0,
+                current_page_offsets: Vec::new(),
+                current_offset_index: 0,
+                current_page_pin: None,
+                recheck_qual,
+                compiled_recheck,
                 slot,
                 source_id,
                 relation_oid,
@@ -833,5 +920,37 @@ fn build_hash_state(
         built: false,
         plan_info,
         stats: NodeExecStats::default(),
+    }
+}
+
+fn build_bitmap_index_state(plan: Plan) -> Box<BitmapIndexScanState> {
+    match plan {
+        Plan::BitmapIndexScan {
+            plan_info,
+            source_id: _,
+            rel,
+            relation_oid: _,
+            index_rel,
+            am_oid,
+            desc,
+            index_desc,
+            index_meta,
+            keys,
+            index_quals,
+        } => Box::new(BitmapIndexScanState {
+            rel,
+            index_rel,
+            am_oid,
+            column_names: desc.columns.iter().map(|c| c.name.clone()).collect(),
+            index_desc: Rc::new(index_desc),
+            index_meta,
+            keys,
+            index_quals,
+            bitmap: crate::include::access::tidbitmap::TidBitmap::new(),
+            executed: false,
+            plan_info,
+            stats: NodeExecStats::default(),
+        }),
+        other => panic!("bitmap heap scan requires bitmap index child, got {other:?}"),
     }
 }

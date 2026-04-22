@@ -169,9 +169,11 @@ fn direct_plan_children(plan: &Plan) -> Vec<&Plan> {
         Plan::Result { .. }
         | Plan::SeqScan { .. }
         | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
         | Plan::FunctionScan { .. }
         | Plan::WorkTableScan { .. }
         | Plan::Values { .. } => Vec::new(),
+        Plan::BitmapHeapScan { bitmapqual, .. } => vec![bitmapqual.as_ref()],
         Plan::Append { children, .. } | Plan::SetOp { children, .. } => children.iter().collect(),
         Plan::Hash { input, .. }
         | Plan::Filter { input, .. }
@@ -202,6 +204,8 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
         | Plan::Append { .. }
         | Plan::SeqScan { .. }
         | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::BitmapHeapScan { .. }
         | Plan::Limit { .. }
         | Plan::SubqueryScan { .. }
         | Plan::CteScan { .. }

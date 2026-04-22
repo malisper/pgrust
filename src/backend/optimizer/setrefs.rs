@@ -1,6 +1,7 @@
 use super::inherit::append_translation;
 use super::pathnodes::{
     aggregate_output_vars, expr_sql_type, lower_agg_output_expr, rte_slot_id, rte_slot_varno,
+    slot_output_target,
 };
 use super::plan::append_planned_subquery;
 use super::{expand_join_rte_vars, flatten_join_alias_vars, planner_with_param_base};
@@ -1084,7 +1085,9 @@ fn path_single_relid(path: &Path) -> Option<usize> {
     match path {
         Path::Append { source_id, .. }
         | Path::SeqScan { source_id, .. }
-        | Path::IndexScan { source_id, .. } => Some(*source_id),
+        | Path::IndexScan { source_id, .. }
+        | Path::BitmapIndexScan { source_id, .. }
+        | Path::BitmapHeapScan { source_id, .. } => Some(*source_id),
         Path::Filter { input, .. }
         | Path::Projection { input, .. }
         | Path::OrderBy { input, .. }
@@ -2249,13 +2252,23 @@ fn validate_agg_accum(
 
 fn validate_executable_plan(plan: &Plan) {
     match plan {
-        Plan::Result { .. } | Plan::SeqScan { .. } => {}
+        Plan::Result { .. } | Plan::SeqScan { .. } | Plan::BitmapIndexScan { .. } => {}
         Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
             for child in children {
                 validate_executable_plan(child);
             }
         }
         Plan::IndexScan { .. } => {}
+        Plan::BitmapHeapScan {
+            bitmapqual,
+            recheck_qual,
+            ..
+        } => {
+            recheck_qual
+                .iter()
+                .for_each(|expr| validate_executable_expr(expr, "BitmapHeapScan", "recheck_qual"));
+            validate_executable_plan(bitmapqual);
+        }
         Plan::Hash {
             input, hash_keys, ..
         } => {
@@ -2573,11 +2586,24 @@ fn validate_planner_agg_accum(
 
 fn validate_planner_path(path: &Path) {
     match path {
-        Path::Result { .. } | Path::SeqScan { .. } | Path::IndexScan { .. } => {}
+        Path::Result { .. }
+        | Path::SeqScan { .. }
+        | Path::IndexScan { .. }
+        | Path::BitmapIndexScan { .. } => {}
         Path::Append { children, .. } | Path::SetOp { children, .. } => {
             for child in children {
                 validate_planner_path(child);
             }
+        }
+        Path::BitmapHeapScan {
+            bitmapqual,
+            recheck_qual,
+            ..
+        } => {
+            for expr in recheck_qual {
+                validate_planner_expr(expr, "BitmapHeapScan", "recheck_qual");
+            }
+            validate_planner_path(bitmapqual);
         }
         Path::Filter {
             input, predicate, ..
@@ -2846,6 +2872,76 @@ fn set_index_scan_references(
         keys,
         order_by_keys,
         direction,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn set_bitmap_index_scan_references(
+    ctx: &mut SetRefsContext<'_>,
+    plan_info: PlanEstimate,
+    source_id: usize,
+    rel: crate::RelFileLocator,
+    relation_oid: u32,
+    index_rel: crate::RelFileLocator,
+    am_oid: u32,
+    desc: crate::include::nodes::primnodes::RelationDesc,
+    index_desc: crate::include::nodes::primnodes::RelationDesc,
+    index_meta: crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    keys: Vec<crate::include::access::scankey::ScanKeyData>,
+    index_quals: Vec<Expr>,
+) -> Plan {
+    let scan_tlist = build_simple_tlist(
+        &slot_output_target(source_id, &desc.columns, |column| column.sql_type).exprs,
+    );
+    let index_quals = index_quals
+        .into_iter()
+        .map(|expr| lower_expr(ctx, expr, LowerMode::Input { tlist: &scan_tlist }))
+        .collect();
+    Plan::BitmapIndexScan {
+        plan_info,
+        source_id,
+        rel,
+        relation_oid,
+        index_rel,
+        am_oid,
+        desc,
+        index_desc,
+        index_meta,
+        keys,
+        index_quals,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn set_bitmap_heap_scan_references(
+    ctx: &mut SetRefsContext<'_>,
+    plan_info: PlanEstimate,
+    source_id: usize,
+    rel: crate::RelFileLocator,
+    relation_name: String,
+    relation_oid: u32,
+    toast: Option<crate::include::nodes::primnodes::ToastRelationRef>,
+    desc: crate::include::nodes::primnodes::RelationDesc,
+    bitmapqual: Box<Path>,
+    recheck_qual: Vec<Expr>,
+) -> Plan {
+    let scan_tlist = build_simple_tlist(
+        &slot_output_target(source_id, &desc.columns, |column| column.sql_type).exprs,
+    );
+    let recheck_qual = recheck_qual
+        .into_iter()
+        .map(|expr| lower_expr(ctx, expr, LowerMode::Input { tlist: &scan_tlist }))
+        .collect();
+    Plan::BitmapHeapScan {
+        plan_info,
+        source_id,
+        rel,
+        relation_name,
+        relation_oid,
+        toast,
+        desc,
+        bitmapqual: Box::new(set_plan_refs(ctx, *bitmapqual)),
+        recheck_qual,
     }
 }
 
@@ -3513,6 +3609,56 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             keys,
             order_by_keys,
             direction,
+        ),
+        Path::BitmapIndexScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_oid,
+            index_rel,
+            am_oid,
+            desc,
+            index_desc,
+            index_meta,
+            keys,
+            index_quals,
+            ..
+        } => set_bitmap_index_scan_references(
+            ctx,
+            plan_info,
+            source_id,
+            rel,
+            relation_oid,
+            index_rel,
+            am_oid,
+            desc,
+            index_desc,
+            index_meta,
+            keys,
+            index_quals,
+        ),
+        Path::BitmapHeapScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            toast,
+            desc,
+            bitmapqual,
+            recheck_qual,
+            ..
+        } => set_bitmap_heap_scan_references(
+            ctx,
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            toast,
+            desc,
+            bitmapqual,
+            recheck_qual,
         ),
         Path::Filter {
             plan_info,
