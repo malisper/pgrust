@@ -5443,6 +5443,16 @@ fn parse_insert_update_delete() {
         })
     ));
     assert!(matches!(
+        parse_statement("explain (verbose, costs off) select name from people").unwrap(),
+        Statement::Explain(ExplainStatement {
+            analyze: false,
+            buffers: false,
+            costs: false,
+            verbose: true,
+            ..
+        })
+    ));
+    assert!(matches!(
         parse_statement(
             "explain (costs off) merge into target t using source as s on t.id = s.id when matched then delete"
         )

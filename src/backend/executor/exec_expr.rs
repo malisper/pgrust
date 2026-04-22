@@ -32,6 +32,7 @@ use super::expr_json::{
     eval_json_builtin_function, eval_json_get, eval_json_path, eval_json_record_builtin_function,
     eval_jsonpath_operator,
 };
+use super::expr_locks::eval_advisory_lock_builtin_function;
 use super::expr_math::{
     cosd, cotd, eval_abs_function, eval_acosd, eval_acosh, eval_asind, eval_atanh,
     eval_binary_float_function, eval_bitcast_bigint_to_float8, eval_bitcast_integer_to_float4,
@@ -540,6 +541,17 @@ fn ensure_builtin_side_effects_allowed(
             | BuiltinScalarFunction::SetVal
             | BuiltinScalarFunction::LoCreate
             | BuiltinScalarFunction::LoUnlink
+            | BuiltinScalarFunction::PgAdvisoryLock
+            | BuiltinScalarFunction::PgAdvisoryXactLock
+            | BuiltinScalarFunction::PgAdvisoryLockShared
+            | BuiltinScalarFunction::PgAdvisoryXactLockShared
+            | BuiltinScalarFunction::PgTryAdvisoryLock
+            | BuiltinScalarFunction::PgTryAdvisoryXactLock
+            | BuiltinScalarFunction::PgTryAdvisoryLockShared
+            | BuiltinScalarFunction::PgTryAdvisoryXactLockShared
+            | BuiltinScalarFunction::PgAdvisoryUnlock
+            | BuiltinScalarFunction::PgAdvisoryUnlockShared
+            | BuiltinScalarFunction::PgAdvisoryUnlockAll
     ) && !ctx.allow_side_effects
     {
         return Err(ExecError::DetailedError {
@@ -550,6 +562,27 @@ fn ensure_builtin_side_effects_allowed(
                     BuiltinScalarFunction::SetVal => "setval",
                     BuiltinScalarFunction::LoCreate => "lo_create",
                     BuiltinScalarFunction::LoUnlink => "lo_unlink",
+                    BuiltinScalarFunction::PgAdvisoryLock => "pg_advisory_lock",
+                    BuiltinScalarFunction::PgAdvisoryXactLock => "pg_advisory_xact_lock",
+                    BuiltinScalarFunction::PgAdvisoryLockShared => "pg_advisory_lock_shared",
+                    BuiltinScalarFunction::PgAdvisoryXactLockShared => {
+                        "pg_advisory_xact_lock_shared"
+                    }
+                    BuiltinScalarFunction::PgTryAdvisoryLock => "pg_try_advisory_lock",
+                    BuiltinScalarFunction::PgTryAdvisoryXactLock => {
+                        "pg_try_advisory_xact_lock"
+                    }
+                    BuiltinScalarFunction::PgTryAdvisoryLockShared => {
+                        "pg_try_advisory_lock_shared"
+                    }
+                    BuiltinScalarFunction::PgTryAdvisoryXactLockShared => {
+                        "pg_try_advisory_xact_lock_shared"
+                    }
+                    BuiltinScalarFunction::PgAdvisoryUnlock => "pg_advisory_unlock",
+                    BuiltinScalarFunction::PgAdvisoryUnlockShared => {
+                        "pg_advisory_unlock_shared"
+                    }
+                    BuiltinScalarFunction::PgAdvisoryUnlockAll => "pg_advisory_unlock_all",
                     _ => unreachable!(),
                 }
             ),
@@ -1302,6 +1335,11 @@ pub fn eval_expr(
                 eval_bound_tuple_var(ctx.expr_bindings.inner_tuple.as_ref(), var)
             } else if var.varno == INDEX_VAR {
                 eval_bound_tuple_var(ctx.expr_bindings.index_tuple.as_ref(), var)
+            } else if var.varlevelsup == 1 {
+                let mut outer_var = var.clone();
+                outer_var.varno = OUTER_VAR;
+                outer_var.varlevelsup = 0;
+                eval_bound_tuple_var(ctx.expr_bindings.outer_tuple.as_ref(), &outer_var)
             } else if var.varlevelsup > 0 {
                 Err(ExecError::DetailedError {
                     message: "unlowered outer Var reached executor".into(),
@@ -2719,6 +2757,9 @@ fn eval_builtin_function(
     ) {
         return eval_sequence_builtin_function(func, &values, ctx);
     }
+    if let Some(result) = eval_advisory_lock_builtin_function(func, &values, ctx) {
+        return result;
+    }
     if matches!(
         func,
         BuiltinScalarFunction::LoCreate | BuiltinScalarFunction::LoUnlink
@@ -2989,6 +3030,9 @@ fn eval_builtin_function(
         BuiltinScalarFunction::ArrayRemove => eval_array_remove_function(&values),
         BuiltinScalarFunction::ArrayReplace => eval_array_replace_function(&values),
         BuiltinScalarFunction::ArraySort => eval_array_sort_function(&values),
+        BuiltinScalarFunction::CurrentDatabase => {
+            Ok(Value::Text(ctx.current_database_name.clone().into()))
+        }
         BuiltinScalarFunction::PgGetUserById => eval_pg_get_userbyid(&values, ctx),
         BuiltinScalarFunction::ObjDescription => eval_obj_description(&values, ctx),
         BuiltinScalarFunction::PgGetExpr => eval_pg_get_expr(&values),

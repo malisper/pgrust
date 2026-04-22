@@ -237,6 +237,16 @@ impl Database {
                         .iter()
                         .find(|row| row.sql_type == sql_type)
                         .map(|row| row.oid)
+                        .or_else(|| {
+                            type_rows
+                                .iter()
+                                .find(|row| {
+                                    row.sql_type.kind == sql_type.kind
+                                        && row.sql_type.is_array == sql_type.is_array
+                                        && row.typrelid == 0
+                                })
+                                .map(|row| row.oid)
+                        })
                 })
                 .ok_or_else(|| {
                     ExecError::Parse(ParseError::UnsupportedType(
@@ -545,6 +555,7 @@ impl Database {
                 txn_waiter: Some(self.txn_waiter.clone()),
                 sequences: Some(self.sequences.clone()),
                 large_objects: Some(self.large_objects.clone()),
+                advisory_locks: Arc::clone(&self.advisory_locks),
                 checkpoint_stats: CheckpointStatsSnapshot::default(),
                 datetime_config: DateTimeConfig::default(),
                 interrupts,
@@ -552,9 +563,11 @@ impl Database {
                 session_stats: self.session_stats_state(client_id),
                 snapshot: self.txns.read().snapshot_for_command(xid, cid)?,
                 client_id,
+                current_database_name: self.current_database_name(),
                 session_user_oid: self.auth_state(client_id).session_user_oid(),
                 current_user_oid: self.auth_state(client_id).current_user_oid(),
                 active_role_oid: self.auth_state(client_id).active_role_oid(),
+                statement_lock_scope_id: None,
                 next_command_id: cid,
                 default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
                 expr_bindings: crate::backend::executor::ExprEvalBindings::default(),

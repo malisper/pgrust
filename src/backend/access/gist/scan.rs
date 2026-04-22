@@ -139,7 +139,8 @@ fn scan_page(scan: &mut IndexScanDesc, block: u32, parent_lsn: u64) -> Result<()
     let IndexScanOpaque::Gist(scan_state) = &mut scan.opaque else {
         return Err(CatalogError::Corrupt("GiST scan state missing opaque"));
     };
-    if opaque.follows_right() && opaque.nsn > parent_lsn && opaque.rightlink != GIST_INVALID_BLOCKNO
+    if opaque.rightlink != GIST_INVALID_BLOCKNO
+        && (opaque.follows_right() || opaque.nsn > parent_lsn)
     {
         let ordinal = next_ordinal(scan_state);
         scan_state.search_queue.push(GistSearchItem {

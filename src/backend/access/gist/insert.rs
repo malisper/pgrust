@@ -11,6 +11,7 @@ use crate::include::access::gist::{
 use crate::include::access::itup::IndexTupleData;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::RelationDesc;
+use std::sync::OnceLock;
 
 use super::page::{
     GistLoggedPage, allocate_new_block, clear_follow_right, ensure_empty_gist, init_opaque,
@@ -18,6 +19,11 @@ use super::page::{
 };
 use super::state::{GistPageSplit, GistState};
 use super::tuple::{decode_tuple_values, make_downlink_tuple, make_leaf_tuple, tuple_storage_size};
+
+fn gist_insert_mutex() -> &'static parking_lot::Mutex<()> {
+    static GIST_INSERT_MUTEX: OnceLock<parking_lot::Mutex<()>> = OnceLock::new();
+    GIST_INSERT_MUTEX.get_or_init(|| parking_lot::Mutex::new(()))
+}
 
 enum GistWriteError {
     NoSpace,
@@ -41,16 +47,17 @@ struct ChildSplit {
     right_block: u32,
     left_union: Vec<Value>,
     right_union: Vec<Value>,
-    split_nsn: u64,
 }
 
 #[derive(Debug, Clone)]
 struct InsertOutcome {
     union: Vec<Value>,
     split: Option<ChildSplit>,
+    write_lsn: u64,
 }
 
 pub(crate) fn gistinsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError> {
+    let _guard = gist_insert_mutex().lock();
     if relation_nblocks(&ctx.pool, ctx.index_relation)? == 0 {
         ensure_empty_gist(
             &ctx.pool,
@@ -140,7 +147,7 @@ fn try_write_page(
     opaque: crate::include::access::gist::GistPageOpaqueData,
     items: &[GistTupleEntry],
     wal_info: u8,
-) -> Result<(), GistWriteError> {
+) -> Result<u64, GistWriteError> {
     let mut rebuilt = [0u8; crate::backend::storage::smgr::BLCKSZ];
     let tuples = items
         .iter()
@@ -219,14 +226,18 @@ fn write_or_split_page(
         &items,
         page_update_wal_info,
     ) {
-        Ok(()) => {
+        Ok(write_lsn) => {
             let union = state.union_all(
                 &items
                     .iter()
                     .map(|item| item.values.clone())
                     .collect::<Vec<_>>(),
             )?;
-            Ok(InsertOutcome { union, split: None })
+            Ok(InsertOutcome {
+                union,
+                split: None,
+                write_lsn,
+            })
         }
         Err(GistWriteError::NoSpace) => {
             let split = state.picksplit(
@@ -236,7 +247,7 @@ fn write_or_split_page(
                     .collect::<Vec<_>>(),
             )?;
             let (left_items, right_items) = split_page_entries(&items, &split)?;
-            let split_nsn = opaque.nsn.saturating_add(1);
+            let inherited_nsn = opaque.nsn;
             if is_root {
                 let left_block = allocate_new_block(pool, rel)?;
                 let right_block = allocate_new_block(pool, rel)?;
@@ -262,7 +273,7 @@ fn write_or_split_page(
                         .iter()
                         .map(|item| item.tuple.clone())
                         .collect::<Vec<_>>(),
-                    init_opaque(child_flags, right_block, split_nsn),
+                    init_opaque(child_flags, right_block, inherited_nsn),
                 )
                 .map_err(|err| CatalogError::Io(format!("gist split rebuild failed: {err:?}")))?;
                 gist_page_replace_items(
@@ -271,7 +282,7 @@ fn write_or_split_page(
                         .iter()
                         .map(|item| item.tuple.clone())
                         .collect::<Vec<_>>(),
-                    init_opaque(child_flags, opaque.rightlink, split_nsn),
+                    init_opaque(child_flags, opaque.rightlink, inherited_nsn),
                 )
                 .map_err(|err| CatalogError::Io(format!("gist split rebuild failed: {err:?}")))?;
                 gist_page_replace_items(
@@ -280,10 +291,10 @@ fn write_or_split_page(
                         .iter()
                         .map(|item| item.tuple.clone())
                         .collect::<Vec<_>>(),
-                    init_opaque(0, GIST_INVALID_BLOCKNO, split_nsn),
+                    init_opaque(0, GIST_INVALID_BLOCKNO, inherited_nsn),
                 )
                 .map_err(|err| CatalogError::Io(format!("gist split rebuild failed: {err:?}")))?;
-                write_logged_pages(
+                let write_lsn = write_logged_pages(
                     pool,
                     client_id,
                     xid,
@@ -310,6 +321,7 @@ fn write_or_split_page(
                 Ok(InsertOutcome {
                     union: root_union,
                     split: None,
+                    write_lsn,
                 })
             } else {
                 let right_block = allocate_new_block(pool, rel)?;
@@ -322,7 +334,7 @@ fn write_or_split_page(
                         .iter()
                         .map(|item| item.tuple.clone())
                         .collect::<Vec<_>>(),
-                    init_opaque(child_flags | F_FOLLOW_RIGHT, right_block, split_nsn),
+                    init_opaque(child_flags | F_FOLLOW_RIGHT, right_block, inherited_nsn),
                 )
                 .map_err(|err| CatalogError::Io(format!("gist split rebuild failed: {err:?}")))?;
                 gist_page_replace_items(
@@ -331,10 +343,10 @@ fn write_or_split_page(
                         .iter()
                         .map(|item| item.tuple.clone())
                         .collect::<Vec<_>>(),
-                    init_opaque(child_flags, opaque.rightlink, split_nsn),
+                    init_opaque(child_flags, opaque.rightlink, inherited_nsn),
                 )
                 .map_err(|err| CatalogError::Io(format!("gist split rebuild failed: {err:?}")))?;
-                write_logged_pages(
+                let write_lsn = write_logged_pages(
                     pool,
                     client_id,
                     xid,
@@ -359,8 +371,8 @@ fn write_or_split_page(
                         right_block,
                         left_union: split.left_union,
                         right_union: split.right_union,
-                        split_nsn,
                     }),
+                    write_lsn,
                 })
             }
         }
@@ -416,7 +428,11 @@ fn insert_into_block(
                 .map(|item| item.values.clone())
                 .collect::<Vec<_>>(),
         )?;
-        return Ok(InsertOutcome { union, split: None });
+        return Ok(InsertOutcome {
+            union,
+            split: None,
+            write_lsn: child_outcome.write_lsn,
+        });
     }
 
     items[child_index] = GistTupleEntry {
@@ -441,7 +457,7 @@ fn insert_into_block(
         pool, client_id, xid, rel, desc, state, block, opaque, items, is_root,
     )?;
     if let Some(split) = child_outcome.split {
-        clear_follow_right(pool, client_id, xid, rel, child_block, split.split_nsn)?;
+        clear_follow_right(pool, client_id, xid, rel, child_block, outcome.write_lsn)?;
     }
     Ok(outcome)
 }

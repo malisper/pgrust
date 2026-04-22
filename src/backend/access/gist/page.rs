@@ -52,7 +52,7 @@ pub(crate) fn write_buffered_page(
     block: u32,
     page: &[u8; crate::backend::storage::smgr::BLCKSZ],
     wal_info: u8,
-) -> Result<(), CatalogError> {
+) -> Result<u64, CatalogError> {
     write_logged_pages(
         pool,
         client_id,
@@ -74,7 +74,7 @@ pub(crate) fn write_logged_pages(
     rel: RelFileLocator,
     wal_info: u8,
     pages: &[GistLoggedPage<'_>],
-) -> Result<(), CatalogError> {
+) -> Result<u64, CatalogError> {
     for logged in pages {
         pool.ensure_block_exists(rel, ForkNumber::Main, logged.block)
             .map_err(|err| CatalogError::Io(format!("gist extend failed: {err:?}")))?;
@@ -107,7 +107,7 @@ pub(crate) fn write_logged_pages(
         pool.install_page_image_locked(pin.buffer_id(), logged.page, lsn, &mut guard)
             .map_err(|err| CatalogError::Io(format!("gist buffered write failed: {err:?}")))?;
     }
-    Ok(())
+    Ok(lsn)
 }
 
 pub(crate) fn ensure_relation_exists(
@@ -170,7 +170,8 @@ pub(crate) fn ensure_empty_gist(
             page: &root,
             will_init: true,
         }],
-    )
+    )?;
+    Ok(())
 }
 
 pub(crate) fn page_lsn(page: &[u8; crate::backend::storage::smgr::BLCKSZ]) -> u64 {
@@ -203,7 +204,8 @@ pub(crate) fn clear_follow_right(
         block,
         &page,
         XLOG_GIST_SPLIT_COMPLETE,
-    )
+    )?;
+    Ok(())
 }
 
 pub(crate) fn init_opaque(flags: u16, rightlink: u32, nsn: u64) -> GistPageOpaqueData {
