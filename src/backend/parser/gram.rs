@@ -132,9 +132,60 @@ fn parse_statement_with_options_inner(
     match SqlParser::parse(Rule::statement, &sql) {
         Ok(mut pairs) => build_statement(pairs.next().ok_or(ParseError::UnexpectedEof)?),
         Err(err) => {
+            if let Some(compression_error) = unsupported_create_table_compression_error(&sql) {
+                return Err(compression_error);
+            }
             try_parse_unsupported_statement(&sql).ok_or_else(|| map_pest_error("statement", err))
         }
     }
+}
+
+fn unsupported_create_table_compression_error(sql: &str) -> Option<ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !(lowered.starts_with("create table ") || lowered.starts_with("create temp table ")) {
+        return None;
+    }
+    let compression_value = compression_identifier_in_sql(trimmed)?;
+    let compression = match parse_attribute_compression(&compression_value) {
+        Ok(compression) => compression,
+        Err(err) => return Some(err),
+    };
+    crate::backend::access::common::toast_compression::ensure_attribute_compression_supported(
+        compression,
+    )
+    .err()
+    .map(|err| match err {
+        crate::backend::executor::ExecError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        } => ParseError::DetailedError {
+            message,
+            detail,
+            hint,
+            sqlstate,
+        },
+        other => ParseError::FeatureNotSupportedMessage(format!("{other:?}")),
+    })
+}
+
+fn compression_identifier_in_sql(sql: &str) -> Option<String> {
+    let mut saw_compression = false;
+    for token in sql.split_whitespace() {
+        let ident = token.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_');
+        if ident.is_empty() {
+            continue;
+        }
+        if saw_compression {
+            return Some(ident.to_string());
+        }
+        if ident.eq_ignore_ascii_case("compression") {
+            saw_compression = true;
+        }
+    }
+    None
 }
 
 fn try_parse_alter_table_add_unnamed_foreign_key_statement(
@@ -8817,12 +8868,13 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
 fn parse_attribute_compression(
     value: &str,
 ) -> Result<crate::include::access::htup::AttributeCompression, ParseError> {
-    match value.to_ascii_lowercase().as_str() {
+    let normalized = value.to_ascii_lowercase();
+    match normalized.as_str() {
         "default" => Ok(crate::include::access::htup::AttributeCompression::Default),
         "pglz" => Ok(crate::include::access::htup::AttributeCompression::Pglz),
         "lz4" => Ok(crate::include::access::htup::AttributeCompression::Lz4),
         _ => Err(ParseError::DetailedError {
-            message: format!("invalid compression method \"{}\"", value),
+            message: format!("invalid compression method \"{}\"", normalized),
             detail: None,
             hint: None,
             sqlstate: "22023",
