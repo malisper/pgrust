@@ -510,6 +510,14 @@ fn function_return_contract(
         SqlTypeKind::Trigger => Err(ParseError::FeatureNotSupported(
             "trigger functions cannot be called in SQL expressions".into(),
         )),
+        SqlTypeKind::Record if !output_slots.is_empty() => Ok(FunctionReturnContract::FixedRow {
+            columns: output_slots
+                .iter()
+                .map(|slot| slot.column.clone())
+                .collect(),
+            setof: false,
+            uses_output_vars: true,
+        }),
         SqlTypeKind::Record | SqlTypeKind::Composite => Err(ParseError::FeatureNotSupported(
             "non-set record/composite returns are not supported yet".into(),
         )),
