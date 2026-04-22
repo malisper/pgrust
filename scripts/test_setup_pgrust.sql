@@ -14,8 +14,12 @@ SET synchronous_commit = on;
 
 GRANT ALL ON SCHEMA public TO public;
 
-SET allow_in_place_tablespaces = true;
-CREATE TABLESPACE regress_tblspace LOCATION '';
+-- :HACK: Fresh psql sessions on this branch can surface a phantom
+-- regress_tblspace row immediately after SET allow_in_place_tablespaces = true,
+-- which breaks the regression bootstrap before fixture loading starts.
+-- Use a fixed absolute location instead of the upstream in-place tablespace
+-- path until the session/catalog contamination is fixed in the engine.
+CREATE TABLESPACE regress_tblspace LOCATION '/tmp/pgrust_regress_tblspace';
 
 CREATE TABLE CHAR_TBL(f1 char(4));
 INSERT INTO CHAR_TBL (f1) VALUES
