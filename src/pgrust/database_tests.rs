@@ -6991,6 +6991,19 @@ fn regtype_literal_cast_resolves_type_name() {
 }
 
 #[test]
+fn regclass_literal_cast_resolves_relation_name() {
+    let base = temp_dir("regclass_literal_cast");
+    let db = Database::open(&base, 16).unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select 'pg_operator'::regclass::oid"),
+        vec![vec![Value::Int64(
+            crate::include::catalog::PG_OPERATOR_RELATION_OID as i64
+        )]]
+    );
+}
+
+#[test]
 fn alter_index_rename_supports_if_exists_and_rename() {
     let base = temp_dir("alter_index_rename");
     let db = Database::open(&base, 16).unwrap();
