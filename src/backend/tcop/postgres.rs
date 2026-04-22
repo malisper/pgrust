@@ -68,14 +68,24 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         ExecError::NotNullViolation { .. } => "23502",
         ExecError::CheckViolation { .. } => "23514",
         ExecError::ForeignKeyViolation { .. } => "23503",
-        ExecError::Parse(crate::backend::parser::ParseError::UnknownConfigurationParameter(_)) => {
-            "42704"
+        ExecError::Parse(crate::backend::parser::ParseError::UnknownTable(_))
+        | ExecError::Parse(crate::backend::parser::ParseError::TableDoesNotExist(_))
+        | ExecError::Parse(crate::backend::parser::ParseError::InvalidFromClauseReference(_))
+        | ExecError::Parse(crate::backend::parser::ParseError::MissingFromClauseEntry(_)) => {
+            "42P01"
         }
+        ExecError::Parse(crate::backend::parser::ParseError::UnknownColumn(_)) => "42703",
+        ExecError::Parse(crate::backend::parser::ParseError::AmbiguousColumn(_)) => "42702",
+        ExecError::Parse(crate::backend::parser::ParseError::DuplicateTableName(_)) => "42712",
+        ExecError::Parse(crate::backend::parser::ParseError::TableAlreadyExists(_)) => "42P07",
+        ExecError::Parse(crate::backend::parser::ParseError::UnknownConfigurationParameter(_))
+        | ExecError::Parse(crate::backend::parser::ParseError::UnsupportedType(_)) => "42704",
         ExecError::Parse(crate::backend::parser::ParseError::CantChangeRuntimeParam(_)) => "55P02",
         ExecError::Parse(crate::backend::parser::ParseError::NoSchemaSelectedForCreate) => "3F000",
         ExecError::Parse(crate::backend::parser::ParseError::WindowingError(_)) => "42P20",
         ExecError::Parse(crate::backend::parser::ParseError::InvalidRecursion(_)) => "42P19",
         ExecError::Parse(crate::backend::parser::ParseError::InvalidTableDefinition(_)) => "42P16",
+        ExecError::Parse(crate::backend::parser::ParseError::WrongObjectType { .. }) => "42809",
         ExecError::Parse(crate::backend::parser::ParseError::DetailedError {
             sqlstate, ..
         }) => sqlstate,
@@ -4079,6 +4089,55 @@ mod tests {
             }
         }
         None
+    }
+
+    #[test]
+    fn parse_errors_use_postgres_sqlstates() {
+        assert_eq!(
+            exec_error_sqlstate(&ExecError::Parse(crate::backend::parser::ParseError::UnknownTable(
+                "items".into(),
+            ))),
+            "42P01"
+        );
+        assert_eq!(
+            exec_error_sqlstate(&ExecError::Parse(
+                crate::backend::parser::ParseError::UnknownColumn("name".into()),
+            )),
+            "42703"
+        );
+        assert_eq!(
+            exec_error_sqlstate(&ExecError::Parse(
+                crate::backend::parser::ParseError::AmbiguousColumn("name".into()),
+            )),
+            "42702"
+        );
+        assert_eq!(
+            exec_error_sqlstate(&ExecError::Parse(
+                crate::backend::parser::ParseError::DuplicateTableName("items".into()),
+            )),
+            "42712"
+        );
+        assert_eq!(
+            exec_error_sqlstate(&ExecError::Parse(
+                crate::backend::parser::ParseError::TableAlreadyExists("items".into()),
+            )),
+            "42P07"
+        );
+        assert_eq!(
+            exec_error_sqlstate(&ExecError::Parse(
+                crate::backend::parser::ParseError::UnsupportedType("widget".into()),
+            )),
+            "42704"
+        );
+        assert_eq!(
+            exec_error_sqlstate(&ExecError::Parse(
+                crate::backend::parser::ParseError::WrongObjectType {
+                    name: "items".into(),
+                    expected: "table",
+                },
+            )),
+            "42809"
+        );
     }
 
     fn parameter_status_value(output: &[u8], key: &str) -> Option<String> {
