@@ -8512,6 +8512,51 @@ fn create_spgist_text_index_reports_missing_default_opclass() {
 }
 
 #[test]
+fn create_spgist_rejects_multicolumn_indexes() {
+    let base = temp_dir("spgist_reject_multicolumn");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table boxes (a box, b box)").unwrap();
+
+    match db.execute(1, "create index boxes_ab_spgist on boxes using spgist (a, b)") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "access method \"spgist\" does not support multicolumn indexes"
+            );
+            assert_eq!(sqlstate, "0A000");
+        }
+        other => panic!("expected multicolumn SP-GiST rejection, got {:?}", other),
+    }
+}
+
+#[test]
+fn create_spgist_rejects_expression_indexes() {
+    let base = temp_dir("spgist_reject_expression");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table boxes (b box)").unwrap();
+
+    match db.execute(
+        1,
+        "create index boxes_expr_spgist on boxes using spgist ((box('(0,0)'::point)))",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "access method \"spgist\" does not support expression indexes"
+            );
+            assert_eq!(sqlstate, "0A000");
+        }
+        other => panic!("expected expression SP-GiST rejection, got {:?}", other),
+    }
+}
+
+#[test]
 fn create_spgist_box_index_supports_overlap_and_knn_order_by() {
     let base = temp_dir("spgist_box_overlap_knn");
     let db = Database::open(&base, 16).unwrap();
@@ -8568,7 +8613,7 @@ fn create_spgist_box_index_supports_overlap_and_knn_order_by() {
     );
 
     let knn_sql = "select id from boxes \
-                   order by b <-> '(5.2,5.2),(5.2,5.2)'::box \
+                   order by b <-> '(5.2,5.2)'::point \
                    limit 3";
     let expected = query_rows(&db, 1, knn_sql);
     assert_eq!(
@@ -8580,6 +8625,110 @@ fn create_spgist_box_index_supports_overlap_and_knn_order_by() {
         ]
     );
     assert_explain_uses_index(&db, 1, knn_sql, "boxes_b_spgist");
+}
+
+#[test]
+fn spgist_box_index_matches_seq_scan_on_medium_dataset() {
+    let base = temp_dir("spgist_box_medium_semantics");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table boxes (id int4 not null, b box)")
+        .unwrap();
+    for row in 0..8 {
+        for col in 0..8 {
+            let id = row * 8 + col + 1;
+            let x = col as f64 * 10.0;
+            let y = row as f64 * 7.0;
+            db.execute(
+                1,
+                &format!(
+                    "insert into boxes values ({id}, '({x},{y}),({},{})'::box)",
+                    x + 2.5,
+                    y + 3.5
+                ),
+            )
+            .unwrap();
+        }
+    }
+
+    let overlap_sql =
+        "select id from boxes where b && '(15,10),(32,23)'::box order by id";
+    let left_sql =
+        "select id from boxes where b << '(40,0),(80,80)'::box order by id";
+    let contained_sql =
+        "select id from boxes where b <@ '(0,0),(35,26)'::box order by id";
+    let knn_sql =
+        "select id from boxes order by b <-> '(23,19)'::point limit 10";
+
+    let expected_overlap = query_rows(&db, 1, overlap_sql);
+    let expected_left = query_rows(&db, 1, left_sql);
+    let expected_contained = query_rows(&db, 1, contained_sql);
+    let expected_knn = query_rows(&db, 1, knn_sql);
+
+    db.execute(1, "create index boxes_b_spgist on boxes using spgist (b)")
+        .unwrap();
+
+    assert_explain_uses_index(&db, 1, overlap_sql, "boxes_b_spgist");
+    assert_explain_uses_index(&db, 1, knn_sql, "boxes_b_spgist");
+    assert_eq!(query_rows(&db, 1, overlap_sql), expected_overlap);
+    assert_eq!(query_rows(&db, 1, left_sql), expected_left);
+    assert_eq!(query_rows(&db, 1, contained_sql), expected_contained);
+    assert_eq!(query_rows(&db, 1, knn_sql), expected_knn);
+}
+
+#[test]
+fn spgist_box_window_knn_avoids_sort_when_index_can_supply_order() {
+    let base = temp_dir("spgist_box_window_knn");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table boxes (id int4 not null, b box)")
+        .unwrap();
+    for row in 0..24 {
+        for col in 0..24 {
+            let id = row * 24 + col + 1;
+            let x = col as f64 * 10.0;
+            let y = row as f64 * 7.0;
+            db.execute(
+                1,
+                &format!(
+                    "insert into boxes values ({id}, '({x},{y}),({},{})'::box)",
+                    x + 3.0,
+                    y + 2.0
+                ),
+            )
+            .unwrap();
+        }
+    }
+    db.execute(1, "create index boxes_b_spgist on boxes using spgist (b)")
+        .unwrap();
+
+    let window_sql = "select rank() over (order by b <-> '(123,456)'::point) from boxes";
+    let window_lines = explain_lines(&db, 1, window_sql);
+    assert!(
+        window_lines
+            .iter()
+            .any(|line| line.contains("Index Scan using boxes_b_spgist on boxes")),
+        "expected ordered window query to use SP-GiST index, got {window_lines:?}"
+    );
+    assert!(
+        !window_lines.iter().any(|line| line.contains("Sort")),
+        "expected ordered window query to avoid Sort, got {window_lines:?}"
+    );
+
+    let filtered_window_sql = "select rank() over (order by b <-> '(123,456)'::point) \
+                               from boxes \
+                               where b <@ '(100,150),(220,320)'::box";
+    let filtered_window_lines = explain_lines(&db, 1, filtered_window_sql);
+    assert!(
+        filtered_window_lines
+            .iter()
+            .any(|line| line.contains("Index Scan using boxes_b_spgist on boxes")),
+        "expected filtered ordered window query to use SP-GiST index, got {filtered_window_lines:?}"
+    );
+    assert!(
+        !filtered_window_lines.iter().any(|line| line.contains("Sort")),
+        "expected filtered ordered window query to avoid Sort, got {filtered_window_lines:?}"
+    );
 }
 
 #[test]

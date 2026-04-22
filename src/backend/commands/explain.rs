@@ -4,8 +4,8 @@ use crate::backend::executor::executor_start;
 use crate::include::nodes::execnodes::*;
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
-    AggAccum, Expr, ProjectSetTarget, SetReturningCall, SubPlan, WindowClause, WindowFrameBound,
-    WindowFuncKind,
+    AggAccum, Expr, ProjectSetTarget, SetReturningCall, SubPlan, TargetEntry, WindowClause,
+    WindowFrameBound, WindowFuncKind,
 };
 use crate::include::storage::buf_internals::BufferUsageStats;
 
@@ -95,17 +95,32 @@ pub(crate) fn format_explain_plan_with_subplans(
 fn explain_passthrough_plan_child(plan: &Plan) -> Option<&Plan> {
     match plan {
         Plan::Projection { input, targets, .. } => {
-            let input_names = input.column_names();
-            (targets.len() == input_names.len()
-                && targets.iter().enumerate().all(|(index, target)| {
-                    !target.resjunk
-                        && target.input_resno == Some(index + 1)
-                        && target.name == input_names[index]
-                }))
-            .then_some(input.as_ref())
+            projection_targets_are_explain_passthrough(input, targets).then_some(input.as_ref())
         }
         _ => None,
     }
+}
+
+fn projection_targets_are_explain_passthrough(input: &Plan, targets: &[TargetEntry]) -> bool {
+    let input_names = input.column_names();
+    let identity_projection = targets.len() == input_names.len()
+        && targets.iter().enumerate().all(|(index, target)| {
+            !target.resjunk
+                && target.input_resno == Some(index + 1)
+                && target.name == input_names[index]
+        });
+    if identity_projection {
+        return true;
+    }
+    let full_width_projection =
+        targets.len() == input_names.len() && targets.iter().all(|target| !target.resjunk);
+    if matches!(input, Plan::WindowAgg { .. }) && full_width_projection {
+        return true;
+    }
+    full_width_projection
+        && targets
+            .iter()
+            .all(|target| matches!(target.expr, Expr::Var(_)))
 }
 
 pub(crate) fn format_buffer_usage(stats: BufferUsageStats) -> String {

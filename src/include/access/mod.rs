@@ -9,6 +9,7 @@ pub mod itup;
 pub mod nbtree;
 pub mod relscan;
 pub mod scankey;
+pub mod spgist;
 pub mod toast_compression;
 pub mod toast_helper;
 pub mod toast_internals;
