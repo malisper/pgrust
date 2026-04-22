@@ -154,6 +154,22 @@ pub(crate) fn format_failing_row_detail(
     format!("Failing row contains ({body}).")
 }
 
+pub(crate) fn format_unique_key_detail(columns: &[ColumnDesc], values: &[Value]) -> String {
+    let datetime_config = DateTimeConfig::default();
+    let names = columns
+        .iter()
+        .take(values.len())
+        .map(|column| column.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let body = values
+        .iter()
+        .map(|value| format_failing_row_value(value, &datetime_config))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("Key ({names})=({body}) already exists.")
+}
+
 fn format_failing_row_value(value: &Value, datetime_config: &DateTimeConfig) -> String {
     match value {
         Value::Null => "null".to_string(),

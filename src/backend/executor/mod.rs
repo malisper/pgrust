@@ -228,6 +228,7 @@ pub enum ExecError {
     Parse(ParseError),
     UniqueViolation {
         constraint: String,
+        detail: Option<String>,
     },
     NotNullViolation {
         relation: String,
@@ -402,7 +403,10 @@ impl From<ParseError> for ExecError {
 impl From<CatalogError> for ExecError {
     fn from(value: CatalogError) -> Self {
         match value {
-            CatalogError::UniqueViolation(constraint) => Self::UniqueViolation { constraint },
+            CatalogError::UniqueViolation(constraint) => Self::UniqueViolation {
+                constraint,
+                detail: None,
+            },
             CatalogError::Interrupted(reason) => Self::Interrupted(reason),
             other => Self::Parse(ParseError::UnexpectedToken {
                 expected: "catalog operation",

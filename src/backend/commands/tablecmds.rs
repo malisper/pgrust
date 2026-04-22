@@ -734,7 +734,10 @@ pub(crate) fn build_index_insert_context(
 fn map_index_insert_error(err: crate::backend::catalog::CatalogError) -> ExecError {
     match err {
         crate::backend::catalog::CatalogError::UniqueViolation(constraint) => {
-            ExecError::UniqueViolation { constraint }
+            ExecError::UniqueViolation {
+                constraint,
+                detail: None,
+            }
         }
         crate::backend::catalog::CatalogError::Io(message)
             if message.starts_with("index row size ") =>
@@ -767,7 +770,18 @@ pub(crate) fn insert_index_key_values(
     let insert_ctx =
         build_index_insert_context(heap_rel, heap_desc, index, key_values, heap_tid, ctx);
     indexam::index_insert_stub(&insert_ctx, index.index_meta.am_oid)
-        .map_err(map_index_insert_error)?;
+        .map_err(|err| match err {
+            crate::backend::catalog::CatalogError::UniqueViolation(constraint) => {
+                ExecError::UniqueViolation {
+                    constraint,
+                    detail: Some(crate::backend::executor::value_io::format_unique_key_detail(
+                        &insert_ctx.index_desc.columns,
+                        &insert_ctx.values,
+                    )),
+                }
+            }
+            other => map_index_insert_error(other),
+        })?;
     Ok(())
 }
 
