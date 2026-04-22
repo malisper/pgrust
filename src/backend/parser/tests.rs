@@ -5404,6 +5404,35 @@ fn build_plan_case_raises_reachable_division_by_zero() {
 }
 
 #[test]
+fn build_plan_case_skips_unreachable_else_division_by_zero() {
+    let stmt = parse_select("select case when 1 = 0 then 1/0 when 1 = 1 then 1 else 2/0 end")
+        .unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+
+    match plan {
+        Plan::Projection { targets, .. } => {
+            assert_eq!(targets.len(), 1);
+            assert_eq!(targets[0].expr, Expr::Const(Value::Int32(1)));
+        }
+        other => panic!("expected projection, got {:?}", other),
+    }
+}
+
+#[test]
+fn build_plan_simple_case_skips_unreachable_else_division_by_zero() {
+    let stmt = parse_select("select case 1 when 0 then 1/0 when 1 then 1 else 2/0 end").unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+
+    match plan {
+        Plan::Projection { targets, .. } => {
+            assert_eq!(targets.len(), 1);
+            assert_eq!(targets[0].expr, Expr::Const(Value::Int32(1)));
+        }
+        other => panic!("expected projection, got {:?}", other),
+    }
+}
+
+#[test]
 fn build_join_plan_resolves_qualified_columns() {
     let mut catalog = catalog();
     catalog.insert("pets", pets_entry());
