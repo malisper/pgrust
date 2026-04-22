@@ -7,6 +7,7 @@ use crate::backend::executor::{ExecError, Value, cast_value};
 use crate::backend::parser::ParseError;
 use crate::include::nodes::parsenodes::{
     JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind, RecursiveUnionQuery, SetOperationQuery,
+    SqlType, SqlTypeKind,
 };
 use crate::include::nodes::primnodes::{
     AggAccum, Aggref, BoolExpr, BoolExprType, CaseExpr, CaseWhen, Expr, ExprArraySubscript, OpExpr,
@@ -553,7 +554,9 @@ fn simplify_expr(expr: Expr, case_test_value: Option<&Value>) -> Result<Expr, Pa
         Expr::Cast(inner, ty) => {
             let inner = simplify_expr(*inner, case_test_value)?;
             if let Expr::Const(value) = &inner {
-                if let Some(expr) = try_fold_eval(cast_value(value.clone(), ty))? {
+                if cast_is_const_fold_safe(value, ty)
+                    && let Some(expr) = try_fold_eval(cast_value(value.clone(), ty))?
+                {
                     return Ok(expr);
                 }
             }
@@ -676,6 +679,17 @@ fn simplify_expr(expr: Expr, case_test_value: Option<&Value>) -> Result<Expr, Pa
                 .collect::<Result<Vec<_>, _>>()?,
         }),
     }
+}
+
+fn cast_is_const_fold_safe(value: &Value, target: SqlType) -> bool {
+    let Some(source) = value.sql_type_hint() else {
+        return true;
+    };
+    !matches!(
+        (source.element_type().kind, target.element_type().kind),
+        (SqlTypeKind::TimestampTz | SqlTypeKind::TimeTz, _)
+            | (_, SqlTypeKind::TimestampTz | SqlTypeKind::TimeTz)
+    )
 }
 
 fn simplify_array_subscript(

@@ -19215,7 +19215,7 @@ fn lock_ordering_deadlock_repro() {
         }));
     }
 
-    join_all_with_timeout(handles, HEAVY_CONTENTION_TEST_TIMEOUT);
+    join_all_with_timeout(handles, PIN_LEAK_CONTENTION_TEST_TIMEOUT);
 }
 
 #[test]

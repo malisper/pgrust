@@ -278,6 +278,10 @@ pub fn heap_scan_next_visible_raw<T, E: From<HeapError>>(
             }
         };
 
+        // Acquire txns.read() before the page lock so readers never hold a
+        // content lock while blocked behind a pending transaction writer.
+        let txns_guard = txns.read();
+
         // Acquire shared content lock briefly for this tuple batch.
         // Released after processing — does NOT block writers across exec_next calls.
         let guard = pool
@@ -318,12 +322,9 @@ pub fn heap_scan_next_visible_raw<T, E: From<HeapError>>(
                     return Ok(Some(process(tid, tuple_bytes)?));
                 }
 
-                // Slow path: need CLOG lookup — acquire the txns lock.
-                let (visible, hints) = {
-                    let txns_guard = txns.read();
-                    scan.snapshot
-                        .tuple_bytes_visible_with_hints(&txns_guard, tuple_bytes)
-                };
+                let (visible, hints) = scan
+                    .snapshot
+                    .tuple_bytes_visible_with_hints(&txns_guard, tuple_bytes);
 
                 if hints != 0 {
                     unsafe {
@@ -357,6 +358,7 @@ pub fn heap_scan_next_visible_raw<T, E: From<HeapError>>(
             pool.mark_buffer_dirty_hint(buffer_id);
         }
         drop(guard);
+        drop(txns_guard);
 
         if let Some(result) = found? {
             // Keep buffer pinned — next call will likely need the same page.
@@ -511,6 +513,7 @@ pub fn heap_scan_all_visible_raw<E: From<HeapError>>(
         let pin = pin_existing_block(pool, client_id, scan.scan.rel, block).map_err(E::from)?;
         let buffer_id = pin.buffer_id();
 
+        let txns_guard = txns.read();
         let guard = pool
             .lock_buffer_shared(buffer_id)
             .map_err(|e| E::from(HeapError::Buffer(e)))?;
@@ -546,12 +549,9 @@ pub fn heap_scan_all_visible_raw<E: From<HeapError>>(
                     continue;
                 }
 
-                // Slow path: need CLOG lookup — acquire the txns lock.
-                let (visible, hints) = {
-                    let txns_guard = txns.read();
-                    scan.snapshot
-                        .tuple_bytes_visible_with_hints(&txns_guard, tuple_bytes)
-                };
+                let (visible, hints) = scan
+                    .snapshot
+                    .tuple_bytes_visible_with_hints(&txns_guard, tuple_bytes);
 
                 if hints != 0 {
                     unsafe {
@@ -580,6 +580,7 @@ pub fn heap_scan_all_visible_raw<E: From<HeapError>>(
             pool.mark_buffer_dirty_hint(buffer_id);
         }
         drop(guard);
+        drop(txns_guard);
         drop(pin);
 
         result?;
@@ -656,10 +657,15 @@ pub fn heap_fetch_visible_with_txns(
     txns: &RwLock<TransactionManager>,
     snapshot: &Snapshot,
 ) -> Result<Option<HeapTuple>, HeapError> {
-    heap_fetch_visible_impl(pool, client_id, rel, tid, |tuple| {
-        let txns_guard = txns.read();
-        snapshot.tuple_visible(&txns_guard, tuple)
-    })
+    let txns_guard = txns.read();
+    let pin = pin_existing_block(pool, client_id, rel, tid.block_number)?;
+    let buffer_id = pin.buffer_id();
+    let guard = pool.lock_buffer_shared(buffer_id)?;
+    let tuple = heap_page_get_tuple(&guard, tid.offset_number)?;
+    let visible = snapshot.tuple_visible(&txns_guard, &tuple);
+    drop(guard);
+    drop(pin);
+    if visible { Ok(Some(tuple)) } else { Ok(None) }
 }
 
 fn heap_fetch_visible_impl(
@@ -741,6 +747,7 @@ pub fn heap_delete_with_waiter(
     )>,
 ) -> Result<(), HeapError> {
     loop {
+        let txns_guard = txns.read();
         let pin = pin_existing_block(pool, client_id, rel, tid.block_number)?;
         let buffer_id = pin.buffer_id();
         let mut vmbuf = None;
@@ -750,12 +757,10 @@ pub fn heap_delete_with_waiter(
         let mut new_page = *guard;
         let mut tuple = heap_page_get_tuple(&new_page, tid.offset_number)?;
 
-        {
-            let txns_guard = txns.read();
-            if !snapshot.tuple_visible(&txns_guard, &tuple) {
-                return Err(HeapError::TupleNotVisible(tid));
-            }
+        if !snapshot.tuple_visible(&txns_guard, &tuple) {
+            return Err(HeapError::TupleNotVisible(tid));
         }
+        drop(txns_guard);
 
         let xmax = tuple.header.xmax;
         if xmax == 0 {

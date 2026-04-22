@@ -712,7 +712,7 @@ fn eval_regprocedure_to_text(value: &Value, ctx: &ExecutorContext) -> Result<Val
         return Ok(Value::Null);
     };
     Ok(Value::Text(
-        function_identity_text(&proc_row, role_catalog(ctx)?).into(),
+        function_signature_text(&proc_row, role_catalog(ctx)?).into(),
     ))
 }
 
@@ -731,7 +731,7 @@ fn type_identity_text(catalog: &dyn CatalogLookup, type_oid: u32) -> String {
         .unwrap_or_else(|| type_oid.to_string())
 }
 
-fn function_identity_text(
+fn function_signature_text(
     proc_row: &crate::include::catalog::PgProcRow,
     catalog: &dyn CatalogLookup,
 ) -> String {
@@ -742,7 +742,14 @@ fn function_identity_text(
         .map(|oid| type_identity_text(catalog, oid))
         .collect::<Vec<_>>()
         .join(",");
-    format!("function {}({arg_types})", proc_row.proname)
+    format!("{}({arg_types})", proc_row.proname)
+}
+
+fn function_identity_text(
+    proc_row: &crate::include::catalog::PgProcRow,
+    catalog: &dyn CatalogLookup,
+) -> String {
+    format!("function {}", function_signature_text(proc_row, catalog))
 }
 
 fn operator_identity_text(
