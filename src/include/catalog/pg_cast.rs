@@ -205,6 +205,7 @@ fn text_input_cast_rows(first_oid: u32) -> Vec<PgCastRow> {
         VARBIT_TYPE_OID,
         TSVECTOR_TYPE_OID,
         TSQUERY_TYPE_OID,
+        REGCLASS_TYPE_OID,
         REGCONFIG_TYPE_OID,
         REGDICTIONARY_TYPE_OID,
         REGTYPE_TYPE_OID,
@@ -361,6 +362,12 @@ mod tests {
         assert!(rows.iter().any(|row| {
             row.castsource == TEXT_TYPE_OID
                 && row.casttarget == NAME_TYPE_OID
+                && row.castcontext == 'e'
+                && row.castmethod == 'i'
+        }));
+        assert!(rows.iter().any(|row| {
+            row.castsource == TEXT_TYPE_OID
+                && row.casttarget == REGCLASS_TYPE_OID
                 && row.castcontext == 'e'
                 && row.castmethod == 'i'
         }));
