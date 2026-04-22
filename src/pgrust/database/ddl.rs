@@ -1121,6 +1121,14 @@ pub(super) fn map_catalog_error(err: CatalogError) -> ExecError {
         CatalogError::UnknownType(name) => ExecError::Parse(ParseError::UnsupportedType(name)),
         CatalogError::UniqueViolation(constraint) => ExecError::UniqueViolation { constraint },
         CatalogError::Interrupted(reason) => ExecError::Interrupted(reason),
+        CatalogError::Io(message) if message.starts_with("index row size ") => {
+            ExecError::DetailedError {
+                message,
+                detail: None,
+                hint: Some("Values larger than 1/3 of a buffer page cannot be indexed.".into()),
+                sqlstate: "54000",
+            }
+        }
         CatalogError::Io(_) | CatalogError::Corrupt(_) => {
             ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "valid catalog state",

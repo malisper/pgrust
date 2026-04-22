@@ -110,6 +110,7 @@ pub(crate) fn store_external_value(
                     index_name: index.name.clone(),
                     index_desc: index.desc.clone(),
                     index_meta: index.index_meta.clone(),
+                    default_toast_compression: ctx.default_toast_compression,
                     heap_tid: tid,
                     values: row,
                     unique_check: if index.index_meta.indisunique {

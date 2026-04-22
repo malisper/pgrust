@@ -228,6 +228,7 @@ pub fn rebuild_system_catalog_indexes_in_pool_for_db(
             index_name: descriptor.relation_name.to_string(),
             index_desc: system_catalog_index_desc(*descriptor),
             index_meta: system_catalog_index_relcache(*descriptor),
+            default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             maintenance_work_mem_kb: 65_536,
             expr_eval: None,
         };
@@ -277,6 +278,7 @@ pub fn maintain_catalog_indexes_for_insert_in_db(
             index_name: descriptor.relation_name.to_string(),
             index_desc: system_catalog_index_desc(*descriptor),
             index_meta: system_catalog_index_relcache(*descriptor),
+            default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             heap_tid,
             values: values.to_vec(),
             unique_check: if descriptor.unique {
