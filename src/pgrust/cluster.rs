@@ -25,9 +25,9 @@ use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::include::catalog::relkind_has_storage;
 use crate::pgrust::auth::AuthState;
 use crate::pgrust::database::{
-    ConversionEntry, Database, DatabaseCreateGrant, DatabaseError, DatabaseOpenOptions,
-    DatabaseStatsStore, DomainEntry, EnumTypeEntry, LargeObjectRuntime, RangeTypeEntry,
-    SequenceRuntime, SessionStatsState, TempBackendId, TempNamespace,
+    AsyncNotifyRuntime, ConversionEntry, Database, DatabaseCreateGrant, DatabaseError,
+    DatabaseOpenOptions, DatabaseStatsStore, DomainEntry, EnumTypeEntry, LargeObjectRuntime,
+    RangeTypeEntry, SequenceRuntime, SessionStatsState, TempBackendId, TempNamespace,
 };
 use crate::{BufferPool, ClientId};
 
@@ -101,6 +101,7 @@ pub(crate) struct OpenDatabaseState {
     pub conversions: Arc<RwLock<BTreeMap<String, ConversionEntry>>>,
     pub sequences: Arc<SequenceRuntime>,
     pub advisory_locks: Arc<AdvisoryLockManager>,
+    pub async_notify_runtime: Arc<AsyncNotifyRuntime>,
     pub next_statement_lock_scope_id: AtomicU64,
     pub stats: Arc<RwLock<DatabaseStatsStore>>,
     pub large_objects: Arc<LargeObjectRuntime>,
@@ -127,6 +128,7 @@ impl OpenDatabaseState {
             conversions: Arc::new(RwLock::new(BTreeMap::new())),
             sequences,
             advisory_locks: Arc::new(AdvisoryLockManager::new()),
+            async_notify_runtime: Arc::new(AsyncNotifyRuntime::new()),
             next_statement_lock_scope_id: AtomicU64::new(1),
             stats: Arc::new(RwLock::new(DatabaseStatsStore::with_default_io_rows())),
             large_objects: Arc::new(LargeObjectRuntime::new_ephemeral()),
@@ -449,6 +451,7 @@ impl Cluster {
             conversions: Arc::clone(&state.conversions),
             sequences: Arc::clone(&state.sequences),
             advisory_locks: Arc::clone(&state.advisory_locks),
+            async_notify_runtime: Arc::clone(&state.async_notify_runtime),
             stats: Arc::clone(&state.stats),
             large_objects: Arc::clone(&state.large_objects),
             _wal_bg_writer: self.shared.wal_bg_writer.clone(),

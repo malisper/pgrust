@@ -5,6 +5,7 @@ use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
 use crate::include::nodes::primnodes::expr_sql_type_hint;
 use rand::{Rng, RngCore};
 
+use super::expr_async::{eval_pg_notification_queue_usage_function, eval_pg_notify_function};
 use super::expr_bit::{
     bit_count as eval_bit_count, bit_length as eval_bit_length, get_bit as eval_get_bit,
     overlay as eval_bit_overlay, position as eval_bit_position, set_bit as eval_set_bit,
@@ -112,14 +113,14 @@ mod arrays;
 mod subquery;
 
 use arrays::{
-    eval_array_append_function, eval_array_cat_function, eval_array_contained,
-    eval_array_contains, eval_array_dims_function, eval_array_fill_function,
-    eval_array_length_function, eval_array_lower_function, eval_array_ndims_function,
-    eval_array_overlap, eval_array_position_function, eval_array_positions_function,
-    eval_array_prepend_function, eval_array_remove_function, eval_array_replace_function,
-    eval_array_sort_function, eval_array_subscript, eval_array_subscript_plpgsql,
-    eval_array_to_string_function, eval_array_upper_function, eval_cardinality_function,
-    eval_quantified_array, eval_string_to_array_function, eval_width_bucket_thresholds,
+    eval_array_append_function, eval_array_cat_function, eval_array_contained, eval_array_contains,
+    eval_array_dims_function, eval_array_fill_function, eval_array_length_function,
+    eval_array_lower_function, eval_array_ndims_function, eval_array_overlap,
+    eval_array_position_function, eval_array_positions_function, eval_array_prepend_function,
+    eval_array_remove_function, eval_array_replace_function, eval_array_sort_function,
+    eval_array_subscript, eval_array_subscript_plpgsql, eval_array_to_string_function,
+    eval_array_upper_function, eval_cardinality_function, eval_quantified_array,
+    eval_string_to_array_function, eval_width_bucket_thresholds,
 };
 use subquery::{
     eval_array_subquery, eval_exists_subquery, eval_quantified_subquery, eval_scalar_subquery,
@@ -539,6 +540,7 @@ fn ensure_builtin_side_effects_allowed(
         func,
         BuiltinScalarFunction::NextVal
             | BuiltinScalarFunction::SetVal
+            | BuiltinScalarFunction::PgNotify
             | BuiltinScalarFunction::LoCreate
             | BuiltinScalarFunction::LoUnlink
             | BuiltinScalarFunction::PgAdvisoryLock
@@ -560,6 +562,7 @@ fn ensure_builtin_side_effects_allowed(
                 match func {
                     BuiltinScalarFunction::NextVal => "nextval",
                     BuiltinScalarFunction::SetVal => "setval",
+                    BuiltinScalarFunction::PgNotify => "pg_notify",
                     BuiltinScalarFunction::LoCreate => "lo_create",
                     BuiltinScalarFunction::LoUnlink => "lo_unlink",
                     BuiltinScalarFunction::PgAdvisoryLock => "pg_advisory_lock",
@@ -2748,6 +2751,12 @@ fn eval_builtin_function(
     ) {
         return result;
     }
+    if matches!(func, BuiltinScalarFunction::PgNotify) {
+        return eval_pg_notify_function(&values, ctx);
+    }
+    if matches!(func, BuiltinScalarFunction::PgNotificationQueueUsage) {
+        return Ok(eval_pg_notification_queue_usage_function(ctx));
+    }
     if matches!(
         func,
         BuiltinScalarFunction::NextVal
@@ -2848,6 +2857,10 @@ fn eval_builtin_function(
         BuiltinScalarFunction::PgRustTestEncSetup => eval_pg_rust_test_enc_setup(&values),
         BuiltinScalarFunction::PgRustTestEncConversion => eval_pg_rust_test_enc_conversion(&values),
         BuiltinScalarFunction::CurrentSetting => eval_current_setting(&values, ctx),
+        BuiltinScalarFunction::PgNotify => unreachable!("pg_notify handled earlier"),
+        BuiltinScalarFunction::PgNotificationQueueUsage => {
+            unreachable!("pg_notification_queue_usage handled earlier")
+        }
         BuiltinScalarFunction::PgStatGetCheckpointerNumTimed
         | BuiltinScalarFunction::PgStatGetCheckpointerNumRequested
         | BuiltinScalarFunction::PgStatGetCheckpointerNumPerformed

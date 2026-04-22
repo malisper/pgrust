@@ -5057,6 +5057,9 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::copy_stmt => Ok(Statement::CopyFrom(build_copy_from(inner)?)),
         Rule::analyze_stmt => Ok(Statement::Analyze(build_analyze(inner)?)),
         Rule::checkpoint_stmt => Ok(Statement::Checkpoint(CheckpointStatement)),
+        Rule::notify_stmt => Ok(Statement::Notify(build_notify(inner)?)),
+        Rule::listen_stmt => Ok(Statement::Listen(build_listen(inner)?)),
+        Rule::unlisten_stmt => Ok(Statement::Unlisten(build_unlisten(inner)?)),
         Rule::show_stmt => Ok(Statement::Show(build_show(inner)?)),
         Rule::set_session_authorization_stmt => Ok(Statement::SetSessionAuthorization(
             build_set_session_authorization(inner)?,
@@ -5396,6 +5399,43 @@ fn build_show(pair: Pair<'_, Rule>) -> Result<ShowStatement, ParseError> {
         });
     }
     Ok(ShowStatement { name })
+}
+
+fn build_notify(pair: Pair<'_, Rule>) -> Result<NotifyStatement, ParseError> {
+    let mut channel = None;
+    let mut payload = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => channel = Some(build_identifier(part)),
+            Rule::notify_payload => {
+                let literal = part.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+                payload = Some(decode_string_literal_pair(literal)?);
+            }
+            _ => {}
+        }
+    }
+    Ok(NotifyStatement {
+        channel: channel.ok_or(ParseError::UnexpectedEof)?,
+        payload,
+    })
+}
+
+fn build_listen(pair: Pair<'_, Rule>) -> Result<ListenStatement, ParseError> {
+    let channel = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::identifier)
+        .map(build_identifier)
+        .ok_or(ParseError::UnexpectedEof)?;
+    Ok(ListenStatement { channel })
+}
+
+fn build_unlisten(pair: Pair<'_, Rule>) -> Result<UnlistenStatement, ParseError> {
+    Ok(UnlistenStatement {
+        channel: pair
+            .into_inner()
+            .find(|part| part.as_rule() == Rule::identifier)
+            .map(build_identifier),
+    })
 }
 
 fn build_set_session_authorization(

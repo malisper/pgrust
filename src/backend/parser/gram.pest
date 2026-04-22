@@ -1,7 +1,7 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 statement = { SOI ~ stmt ~ EOI }
-stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | copy_stmt | analyze_stmt | checkpoint_stmt | show_stmt | set_session_authorization_stmt | reset_session_authorization_stmt | set_role_stmt | reset_role_stmt | set_stmt | reset_stmt | create_role_stmt | alter_role_stmt | alter_group_stmt | create_database_stmt | create_schema_stmt | create_policy_stmt | create_index_stmt | alter_table_add_column_stmt | alter_table_add_constraint_stmt | alter_table_drop_constraint_stmt | alter_table_alter_constraint_stmt | alter_table_rename_constraint_stmt | alter_table_drop_column_stmt | alter_table_alter_column_type_stmt | alter_table_alter_column_default_stmt | alter_table_alter_column_compression_stmt | alter_table_alter_column_storage_stmt | alter_table_alter_column_options_stmt | alter_table_alter_column_statistics_stmt | alter_table_owner_stmt | alter_table_rename_column_stmt | alter_table_rename_stmt | alter_view_owner_stmt | alter_schema_owner_stmt | alter_table_set_stmt | alter_table_set_row_security_stmt | alter_policy_stmt | alter_table_set_not_null_stmt | alter_table_drop_not_null_stmt | alter_table_validate_constraint_stmt | alter_table_inherit_stmt | alter_table_no_inherit_stmt | comment_on_role_stmt | comment_on_table_stmt | comment_on_index_stmt | comment_on_rule_stmt | comment_on_trigger_stmt | create_table_stmt | create_view_stmt | create_rule_stmt | drop_role_stmt | drop_database_stmt | drop_table_stmt | drop_index_stmt | drop_view_stmt | drop_rule_stmt | drop_policy_stmt | drop_schema_stmt | drop_owned_stmt | reassign_owned_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | merge_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
+stmt = _{ do_stmt | explain_stmt | table_stmt | select_stmt | values_stmt | copy_stmt | analyze_stmt | checkpoint_stmt | notify_stmt | listen_stmt | unlisten_stmt | show_stmt | set_session_authorization_stmt | reset_session_authorization_stmt | set_role_stmt | reset_role_stmt | set_stmt | reset_stmt | create_role_stmt | alter_role_stmt | alter_group_stmt | create_database_stmt | create_schema_stmt | create_policy_stmt | create_index_stmt | alter_table_add_column_stmt | alter_table_add_constraint_stmt | alter_table_drop_constraint_stmt | alter_table_alter_constraint_stmt | alter_table_rename_constraint_stmt | alter_table_drop_column_stmt | alter_table_alter_column_type_stmt | alter_table_alter_column_default_stmt | alter_table_alter_column_compression_stmt | alter_table_alter_column_storage_stmt | alter_table_alter_column_options_stmt | alter_table_alter_column_statistics_stmt | alter_table_owner_stmt | alter_table_rename_column_stmt | alter_table_rename_stmt | alter_view_owner_stmt | alter_schema_owner_stmt | alter_table_set_stmt | alter_table_set_row_security_stmt | alter_policy_stmt | alter_table_set_not_null_stmt | alter_table_drop_not_null_stmt | alter_table_validate_constraint_stmt | alter_table_inherit_stmt | alter_table_no_inherit_stmt | comment_on_role_stmt | comment_on_table_stmt | comment_on_index_stmt | comment_on_rule_stmt | comment_on_trigger_stmt | create_table_stmt | create_view_stmt | create_rule_stmt | drop_role_stmt | drop_database_stmt | drop_table_stmt | drop_index_stmt | drop_view_stmt | drop_rule_stmt | drop_policy_stmt | drop_schema_stmt | drop_owned_stmt | reassign_owned_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | merge_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_stmt }
 
 do_stmt = { kw_do ~ do_body ~ do_language_clause? | kw_do ~ do_language_clause ~ do_body }
 do_body = { quoted_string_literal }
@@ -9,6 +9,10 @@ do_language_clause = { kw_language ~ identifier }
 
 analyze_stmt = { kw_analyze ~ analyze_option_block? ~ maintenance_target_list? }
 checkpoint_stmt = { kw_checkpoint }
+notify_stmt = { kw_notify ~ identifier ~ notify_payload? }
+notify_payload = { "," ~ quoted_string_literal }
+listen_stmt = { kw_listen ~ identifier }
+unlisten_stmt = { kw_unlisten ~ (identifier | "*") }
 show_stmt = { kw_show ~ identifier }
 explain_stmt = { kw_explain ~ (kw_analyze | "(" ~ explain_option ~ ("," ~ explain_option)* ~ ")")? ~ (select_stmt | insert_stmt | merge_stmt | update_stmt | delete_stmt) }
 explain_option = { explain_option_name ~ explain_option_value? }
@@ -504,6 +508,9 @@ kw_select = _{ kw_select_atom }
 kw_do = _{ kw_do_atom }
 kw_language = _{ kw_language_atom }
 kw_show = _{ kw_show_atom }
+kw_notify = _{ kw_notify_atom }
+kw_listen = _{ kw_listen_atom }
+kw_unlisten = _{ kw_unlisten_atom }
 kw_add = _{ kw_add_atom }
 kw_column = _{ kw_column_atom }
 kw_data = _{ kw_data_atom }
@@ -806,6 +813,9 @@ kw_rollback = _{ kw_rollback_atom }
 
 kw_select_atom = @{ ^"select" ~ keyword_end }
 kw_show_atom = @{ ^"show" ~ keyword_end }
+kw_notify_atom = @{ ^"notify" ~ keyword_end }
+kw_listen_atom = @{ ^"listen" ~ keyword_end }
+kw_unlisten_atom = @{ ^"unlisten" ~ keyword_end }
 kw_reset_atom = @{ ^"reset" ~ keyword_end }
 kw_do_atom = @{ ^"do" ~ keyword_end }
 kw_language_atom = @{ ^"language" ~ keyword_end }

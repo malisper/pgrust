@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::Expr;
 use crate::backend::executor::RelationDesc;
+use crate::backend::parser::analyze::scope_for_relation;
 use crate::backend::parser::{
     BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, CatalogLookup, ParseError,
     SlotScopeColumn, SqlExpr, SqlType, SqlTypeKind, Statement, bind_delete_with_outer_scopes,
