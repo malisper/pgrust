@@ -2674,8 +2674,10 @@ pub struct UpdateStatement {
     pub with_recursive: bool,
     pub with: Vec<CommonTableExpr>,
     pub table_name: String,
+    pub target_alias: Option<String>,
     pub only: bool,
     pub assignments: Vec<Assignment>,
+    pub from: Option<FromItem>,
     pub where_clause: Option<SqlExpr>,
     pub returning: Vec<SelectItem>,
 }

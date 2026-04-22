@@ -1267,6 +1267,164 @@ fn insert_and_update_returning_target_lists() {
 }
 
 #[test]
+fn update_from_updates_rows_and_returns_source_columns() {
+    let dir = temp_dir("update_from_returning");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table people (id int, name text)")
+        .unwrap();
+    session
+        .execute(&db, "create table pets (owner_id int, name text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into people values (1, 'alice'), (2, 'bob')")
+        .unwrap();
+    session
+        .execute(&db, "insert into pets values (1, 'fido'), (2, 'spot')")
+        .unwrap();
+
+    match session
+        .execute(
+            &db,
+            "update people p set name = s.name from pets s where s.owner_id = p.id and p.id = 1 returning p.id, p.name, s.name",
+        )
+        .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["id", "name", "name"]);
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Int32(1),
+                    Value::Text("fido".into()),
+                    Value::Text("fido".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select id, name from people order by id"),
+        vec![
+            vec![Value::Int32(1), Value::Text("fido".into())],
+            vec![Value::Int32(2), Value::Text("bob".into())],
+        ]
+    );
+}
+
+#[test]
+fn update_from_updates_inherited_children() {
+    let dir = temp_dir("update_from_inherited");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table parent_inh (id int, name text)")
+        .unwrap();
+    session
+        .execute(&db, "create table child_inh (extra int) inherits (parent_inh)")
+        .unwrap();
+    session
+        .execute(&db, "create table src_inh (id int, name text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into child_inh values (1, 'old', 7)")
+        .unwrap();
+    session
+        .execute(&db, "insert into src_inh values (1, 'new')")
+        .unwrap();
+
+    assert!(matches!(
+        session
+            .execute(
+                &db,
+                "update parent_inh p set name = s.name from src_inh s where s.id = p.id",
+            )
+            .unwrap(),
+        StatementResult::AffectedRows(1)
+    ));
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select id, name, extra from child_inh"),
+        vec![vec![
+            Value::Int32(1),
+            Value::Text("new".into()),
+            Value::Int32(7),
+        ]]
+    );
+}
+
+#[test]
+fn update_from_duplicate_source_matches_only_updates_once() {
+    let dir = temp_dir("update_from_duplicate_matches");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table target_dup (id int, note text)")
+        .unwrap();
+    session
+        .execute(&db, "create table source_dup (id int, note text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into target_dup values (1, 'old')")
+        .unwrap();
+    session
+        .execute(&db, "insert into source_dup values (1, 'a'), (1, 'b')")
+        .unwrap();
+
+    assert!(matches!(
+        session
+            .execute(
+                &db,
+                "update target_dup t set note = s.note from source_dup s where s.id = t.id",
+            )
+            .unwrap(),
+        StatementResult::AffectedRows(1)
+    ));
+
+    let rows = session_query_rows(&mut session, &db, "select note from target_dup");
+    assert_eq!(rows.len(), 1);
+    assert!(matches!(
+        rows[0].first(),
+        Some(Value::Text(text)) if text.as_str() == "a" || text.as_str() == "b"
+    ));
+}
+
+#[test]
+fn update_from_rejects_view_targets() {
+    let dir = temp_dir("update_from_view_target");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table base_view_target (id int, name text)")
+        .unwrap();
+    session
+        .execute(&db, "create view view_target as select * from base_view_target")
+        .unwrap();
+    session
+        .execute(&db, "create table src_view_target (id int, name text)")
+        .unwrap();
+
+    let err = session
+        .execute(
+            &db,
+            "update view_target v set name = s.name from src_view_target s where s.id = v.id",
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::FeatureNotSupportedMessage(message))
+            if message == "UPDATE ... FROM is not yet supported for views"
+    ));
+}
+
+#[test]
 fn delete_returning_target_lists() {
     let dir = temp_dir("delete_returning_target_lists");
     let db = Database::open(&dir, 128).unwrap();
@@ -3635,6 +3793,38 @@ fn explain_verbose_update_where_false_is_accepted() {
             .iter()
             .any(|line| line == "        One-Time Filter: false"),
         "expected EXPLAIN VERBOSE UPDATE to show false one-time filter, got {lines:?}"
+    );
+}
+
+#[test]
+fn explain_update_from_uses_join_plan_and_alias_header() {
+    let dir = temp_dir("explain_update_from");
+    let db = Database::open(&dir, 128).unwrap();
+
+    db.execute(1, "create table some_tab (id int, name text)")
+        .unwrap();
+    db.execute(1, "create table src_tab (id int, name text)")
+        .unwrap();
+
+    let lines = explain_lines(
+        &db,
+        1,
+        "(verbose, costs off) update some_tab t set name = s.name from src_tab s where s.id = t.id returning t.id, s.name",
+    );
+
+    assert_eq!(
+        lines.first().map(String::as_str),
+        Some("Update on public.some_tab t")
+    );
+    assert!(
+        lines.iter().any(|line| line.starts_with("  Output: ")),
+        "expected EXPLAIN VERBOSE UPDATE ... FROM to render statement output, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Join") || line.contains("Nested Loop")),
+        "expected EXPLAIN UPDATE ... FROM to show a join plan, got {lines:?}"
     );
 }
 
