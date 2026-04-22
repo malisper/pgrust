@@ -596,6 +596,9 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::ObjDescription => args.len() == 2,
             BuiltinScalarFunction::PgGetExpr => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::PgRelationIsPublishable => args.len() == 1,
+            BuiltinScalarFunction::PgSizePretty | BuiltinScalarFunction::PgSizeBytes => {
+                args.len() == 1
+            }
             BuiltinScalarFunction::PgAdvisoryUnlockAll => args.is_empty(),
             BuiltinScalarFunction::PgAdvisoryLock
             | BuiltinScalarFunction::PgAdvisoryXactLock
@@ -2060,6 +2063,8 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::ObjDescription
             | BuiltinScalarFunction::PgGetExpr
             | BuiltinScalarFunction::PgRelationIsPublishable
+            | BuiltinScalarFunction::PgSizePretty
+            | BuiltinScalarFunction::PgSizeBytes
             | BuiltinScalarFunction::PgAdvisoryLock
             | BuiltinScalarFunction::PgAdvisoryXactLock
             | BuiltinScalarFunction::PgAdvisoryLockShared
