@@ -298,6 +298,7 @@ pub enum BuiltinScalarFunction {
     GetDatabaseEncoding,
     PgMyTempSchema,
     PgRustInternalBinaryCoercible,
+    PgRustTestOpclassOptionsFunc,
     PgRustTestFdwHandler,
     PgRustTestEncSetup,
     PgRustTestEncConversion,

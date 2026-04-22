@@ -217,6 +217,18 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
+            6405,
+            "pg_rust_test_opclass_options_func",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID]),
+            "pg_rust_test_opclass_options_func",
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        ),
+        proc_row(
             6404,
             "pg_my_temp_schema",
             TEXT_TYPE_OID,
@@ -3336,6 +3348,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         (
             "pg_rust_internal_binary_coercible",
             BuiltinScalarFunction::PgRustInternalBinaryCoercible,
+        ),
+        (
+            "pg_rust_test_opclass_options_func",
+            BuiltinScalarFunction::PgRustTestOpclassOptionsFunc,
         ),
         (
             "pg_rust_test_fdw_handler",

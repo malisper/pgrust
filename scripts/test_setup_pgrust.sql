@@ -9,17 +9,16 @@
 
 -- directory paths are passed to us in environment variables
 \getenv abs_srcdir PG_ABS_SRCDIR
+\getenv regress_tblspace_dir PGRUST_REGRESS_TABLESPACE_DIR
 
 SET synchronous_commit = on;
 
 GRANT ALL ON SCHEMA public TO public;
 
--- :HACK: Fresh psql sessions on this branch can surface a phantom
--- regress_tblspace row immediately after SET allow_in_place_tablespaces = true,
--- which breaks the regression bootstrap before fixture loading starts.
--- Use a fixed absolute location instead of the upstream in-place tablespace
--- path until the session/catalog contamination is fixed in the engine.
-CREATE TABLESPACE regress_tblspace LOCATION '/tmp/pgrust_regress_tblspace';
+-- :HACK: The upstream bootstrap uses in-place tablespaces, but this branch
+-- can leak tablespace state across regression runs. Use a per-run absolute
+-- directory supplied by the harness so bootstrap state stays isolated.
+CREATE TABLESPACE regress_tblspace LOCATION :'regress_tblspace_dir';
 
 CREATE TABLE CHAR_TBL(f1 char(4));
 INSERT INTO CHAR_TBL (f1) VALUES
