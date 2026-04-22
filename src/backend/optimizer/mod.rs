@@ -41,6 +41,7 @@ const CPU_OPERATOR_COST: f64 = 0.0025;
 
 const STATISTIC_KIND_MCV: i16 = 1;
 const STATISTIC_KIND_HISTOGRAM: i16 = 2;
+const STATISTIC_KIND_CORRELATION: i16 = 3;
 
 #[derive(Debug, Clone)]
 struct RelationStats {
