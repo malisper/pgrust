@@ -131,6 +131,7 @@ pub(super) fn validate_check_rows(
     let check = BoundCheckConstraint {
         constraint_name: constraint_name.to_string(),
         expr,
+        enforced: true,
     };
     let mut ctx = ddl_executor_context(db, catalog, client_id, xid, cid, interrupts)?;
     let rows =
@@ -840,7 +841,8 @@ impl Database {
                     .create_check_constraint_mvcc(
                         relation.relation_oid,
                         action.constraint_name,
-                        !action.not_valid,
+                        action.enforced,
+                        action.enforced && !action.not_valid,
                         action.no_inherit,
                         action.expr_sql,
                         &ctx,
@@ -949,6 +951,7 @@ impl Database {
                     &index_columns,
                     true,
                     action.primary,
+                    action.nulls_not_distinct,
                     xid,
                     index_cid,
                     build_options.0,
@@ -1615,6 +1618,14 @@ impl Database {
                     ),
                 })
             })?;
+        if !row.conenforced {
+            return Err(ExecError::DetailedError {
+                message: "cannot validate NOT ENFORCED constraint".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
         if row.convalidated {
             return Ok(StatementResult::AffectedRows(0));
         }

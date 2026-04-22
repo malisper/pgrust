@@ -11380,6 +11380,36 @@ fn unsupported_create_table_like_does_not_poison_catalog_after_sequence_drop() {
 }
 
 #[test]
+fn create_table_check_not_enforced_skips_write_enforcement_and_cannot_validate() {
+    let base = temp_dir("check_not_enforced");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(
+        1,
+        "create table items (id int4 constraint items_id_check check (id > 0) not enforced)",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into items values (0)").unwrap();
+    db.execute(1, "insert into items values (1)").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select conenforced, convalidated from pg_constraint where conname = 'items_id_check'"
+        ),
+        vec![vec![Value::Bool(false), Value::Bool(false)]]
+    );
+
+    match db.execute(1, "alter table items validate constraint items_id_check") {
+        Err(ExecError::DetailedError { message, sqlstate, .. })
+            if message == "cannot validate NOT ENFORCED constraint" && sqlstate == "0A000" => {}
+        other => panic!("expected validate-not-enforced failure, got {other:?}"),
+    }
+}
+
+#[test]
 fn update_and_copy_from_enforce_check_and_not_null_constraints() {
     let base = temp_dir("update_and_copy_constraint_checks");
     let db = Database::open(&base, 16).unwrap();
@@ -11790,6 +11820,33 @@ fn alter_table_add_foreign_key_without_constraint_name_accepts_no_space_before_c
             "select confmatchtype, convalidated from pg_constraint where conname = 'children_parent_id_parent_code_fkey'",
         ),
         vec![vec![Value::Text("f".into()), Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn create_table_unique_nulls_not_distinct_treats_nulls_as_conflicting() {
+    let base = temp_dir("unique_nulls_not_distinct");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+
+    db.execute(
+        1,
+        "create table items (id int4 unique nulls not distinct, note text)",
+    )
+    .unwrap();
+    db.execute(1, "insert into items (note) values ('first')").unwrap();
+
+    match db.execute(1, "insert into items (note) values ('second')") {
+        Err(ExecError::UniqueViolation { constraint }) if constraint == "items_id_key" => {}
+        other => panic!("expected null unique violation, got {other:?}"),
+    }
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indnullsnotdistinct from pg_index i join pg_class c on c.oid = i.indexrelid where c.relname = 'items_id_key'"
+        ),
+        vec![vec![Value::Bool(true)]]
     );
 }
 
@@ -13607,6 +13664,18 @@ fn durable_open_bootstraps_control_file_and_clean_shutdown_marks_shutdown() {
 
     let control = ControlFileStore::load(&base).unwrap().snapshot();
     assert_eq!(control.state, ControlFileState::ShutDown);
+}
+
+#[test]
+fn durable_open_ignores_non_cluster_files_in_empty_data_dir() {
+    use crate::backend::access::transam::ControlFileStore;
+
+    let base = scratch_temp_dir("control_file_ignores_junk");
+    std::fs::write(base.join("server.log"), b"bootstrap probe").unwrap();
+
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(32)).unwrap();
+    assert!(ControlFileStore::path(&base).exists());
+    assert_eq!(query_rows(&db, 1, "select 1"), vec![vec![Value::Int32(1)]]);
 }
 
 #[test]
