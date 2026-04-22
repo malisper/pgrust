@@ -19,7 +19,7 @@ mod expr_math;
 mod expr_money;
 mod expr_multirange;
 mod expr_numeric;
-mod expr_ops;
+pub(crate) mod expr_ops;
 pub(crate) mod expr_range;
 mod expr_string;
 mod expr_xml;

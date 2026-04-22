@@ -2509,7 +2509,7 @@ fn build_values_plan_with_outer(
     let [query] = pg_rewrite_query(query, catalog)?
         .try_into()
         .expect("values rewrite should return a single query");
-    Ok(planner(query, catalog))
+    Ok(crate::backend::optimizer::fold_query_constants(query).map(|query| planner(query, catalog))?)
 }
 
 fn bind_select_query_with_outer(
@@ -3321,5 +3321,5 @@ fn build_plan_with_outer(
     let [query] = pg_rewrite_query(query, catalog)?
         .try_into()
         .expect("select rewrite should return a single query");
-    Ok(planner(query, catalog))
+    Ok(crate::backend::optimizer::fold_query_constants(query).map(|query| planner(query, catalog))?)
 }

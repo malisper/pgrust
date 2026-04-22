@@ -554,7 +554,8 @@ pub fn plan_merge(
         target_ctid_index,
         source_present_index,
         when_clauses,
-        input_plan: planner(query, catalog),
+        input_plan: crate::backend::optimizer::fold_query_constants(query)
+            .map(|query| planner(query, catalog))?,
     })
 }
 
