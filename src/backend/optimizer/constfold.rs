@@ -681,8 +681,10 @@ fn simplify_case_expr(
         });
     }
 
-    let defresult = defresult
-        .unwrap_or(simplify_expr(*case_expr.defresult, case_test_value.as_ref())?);
+    let defresult = match defresult {
+        Some(result) => result,
+        None => simplify_expr(*case_expr.defresult, case_test_value.as_ref())?,
+    };
     if new_args.is_empty() {
         return Ok(defresult);
     }

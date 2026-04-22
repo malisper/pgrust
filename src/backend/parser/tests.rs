@@ -5401,6 +5401,62 @@ fn build_plan_resolves_aliased_columns() {
 }
 
 #[test]
+fn build_plan_constant_folds_nullif_filter_to_false() {
+    let stmt = parse_select("select * from people where nullif(1, 2) = 2").unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+
+    match plan {
+        Plan::Filter {
+            predicate, input, ..
+        } => {
+            assert_eq!(predicate, Expr::Const(Value::Bool(false)));
+            assert!(matches!(*input, Plan::SeqScan { .. }));
+        }
+        other => panic!("expected filter, got {:?}", other),
+    }
+}
+
+#[test]
+fn build_plan_case_raises_reachable_division_by_zero() {
+    let stmt = parse_select("select case when id > 0 then id else 1/0 end from people").unwrap();
+
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::DetailedError { message, sqlstate, .. })
+            if message == "division by zero" && sqlstate == "22012"
+    ));
+}
+
+#[test]
+fn build_plan_case_skips_unreachable_else_division_by_zero() {
+    let stmt = parse_select("select case when 1 = 0 then 1/0 when 1 = 1 then 1 else 2/0 end")
+        .unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+
+    match plan {
+        Plan::Projection { targets, .. } => {
+            assert_eq!(targets.len(), 1);
+            assert_eq!(targets[0].expr, Expr::Const(Value::Int32(1)));
+        }
+        other => panic!("expected projection, got {:?}", other),
+    }
+}
+
+#[test]
+fn build_plan_simple_case_skips_unreachable_else_division_by_zero() {
+    let stmt = parse_select("select case 1 when 0 then 1/0 when 1 then 1 else 2/0 end").unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+
+    match plan {
+        Plan::Projection { targets, .. } => {
+            assert_eq!(targets.len(), 1);
+            assert_eq!(targets[0].expr, Expr::Const(Value::Int32(1)));
+        }
+        other => panic!("expected projection, got {:?}", other),
+    }
+}
+
+#[test]
 fn build_join_plan_resolves_qualified_columns() {
     let mut catalog = catalog();
     catalog.insert("pets", pets_entry());
@@ -5901,10 +5957,10 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("vacuum (analyze, full) vactst").unwrap(), Statement::Vacuum(VacuumStatement { analyze: true, full: true, targets, .. }) if targets == vec![MaintenanceTarget { table_name: "vactst".into(), columns: vec![], only: false }])
     );
     assert!(
-        matches!(parse_statement("update people set note = 'x' where id = 1").unwrap(), Statement::Update(UpdateStatement { table_name, only, .. }) if table_name == "people" && !only)
+        matches!(parse_statement("update people set note = 'x' where id = 1").unwrap(), Statement::Update(UpdateStatement { table_name, target_alias, only, from, .. }) if table_name == "people" && target_alias.is_none() && !only && from.is_none())
     );
     assert!(
-        matches!(parse_statement("update only people set note = 'x' where id = 1").unwrap(), Statement::Update(UpdateStatement { table_name, only, .. }) if table_name == "people" && only)
+        matches!(parse_statement("update only people set note = 'x' where id = 1").unwrap(), Statement::Update(UpdateStatement { table_name, target_alias, only, from, .. }) if table_name == "people" && target_alias.is_none() && only && from.is_none())
     );
     assert!(
         matches!(parse_statement("delete from people where note is null").unwrap(), Statement::Delete(DeleteStatement { table_name, only, .. }) if table_name == "people" && !only)
@@ -5916,6 +5972,55 @@ fn parse_insert_update_delete() {
         .unwrap()
         .join()
         .unwrap();
+}
+
+#[test]
+fn parse_update_statement_with_from_and_aliases() {
+    let stmt = parse_statement(
+        "update only case_tbl c set i = b.i from case2_tbl b where b.j = -c.i returning c.i, b.j",
+    )
+    .unwrap();
+    let stmt = match stmt {
+        Statement::Update(stmt) => stmt,
+        other => panic!("expected update statement, got {other:?}"),
+    };
+    assert_eq!(stmt.table_name, "case_tbl");
+    assert_eq!(stmt.target_alias.as_deref(), Some("c"));
+    assert!(stmt.only);
+    assert_eq!(stmt.assignments.len(), 1);
+    assert_eq!(stmt.returning.len(), 2);
+    assert!(matches!(
+        stmt.from,
+        Some(FromItem::Alias { alias, source, .. })
+            if alias == "b"
+                && matches!(
+                    source.as_ref(),
+                    FromItem::Table { name, only } if name == "case2_tbl" && !only
+                )
+    ));
+}
+
+#[test]
+fn parse_update_statement_with_as_target_alias() {
+    let stmt = parse_statement(
+        "update case_tbl as c set i = b.i from case2_tbl as b where b.j = -c.i",
+    )
+    .unwrap();
+    let stmt = match stmt {
+        Statement::Update(stmt) => stmt,
+        other => panic!("expected update statement, got {other:?}"),
+    };
+    assert_eq!(stmt.table_name, "case_tbl");
+    assert_eq!(stmt.target_alias.as_deref(), Some("c"));
+    assert!(matches!(
+        stmt.from,
+        Some(FromItem::Alias { alias, source, .. })
+            if alias == "b"
+                && matches!(
+                    source.as_ref(),
+                    FromItem::Table { name, only } if name == "case2_tbl" && !only
+                )
+    ));
 }
 
 #[test]
@@ -6172,6 +6277,80 @@ fn bind_update_prefers_index_row_source_for_equality_predicate() {
         }
         other => panic!("expected index row source, got {other:?}"),
     }
+}
+
+#[test]
+fn bind_update_from_uses_source_columns_in_set_where_and_returning() {
+    let mut catalog = catalog();
+    catalog.insert("pets", pets_entry());
+    let stmt =
+        match parse_statement(
+            "update people p set id = pets.id from pets where pets.owner_id = p.id returning p.id, pets.owner_id",
+        )
+        .unwrap()
+        {
+            Statement::Update(stmt) => stmt,
+            other => panic!("expected update statement, got {other:?}"),
+        };
+    let bound = bind_update(&stmt, &catalog).unwrap();
+    assert_eq!(bound.target_relation_name, "p");
+    assert_eq!(bound.explain_target_name, "people p");
+    assert!(bound.input_plan.is_some());
+    assert_eq!(bound.target_visible_count, 3);
+    assert_eq!(bound.visible_column_count, 5);
+    assert_eq!(bound.target_ctid_index, 5);
+    assert_eq!(bound.target_tableoid_index, 6);
+    assert_eq!(bound.returning.len(), 2);
+}
+
+#[test]
+fn bind_update_alias_hides_base_table_name() {
+    let mut catalog = catalog();
+    catalog.insert("pets", pets_entry());
+    let stmt = match parse_statement(
+        "update people p set id = pets.id from pets where people.id = pets.owner_id",
+    )
+    .unwrap()
+    {
+        Statement::Update(stmt) => stmt,
+        other => panic!("expected update statement, got {other:?}"),
+    };
+    match bind_update(&stmt, &catalog) {
+        Err(ParseError::MissingFromClauseEntry(name)) if name == "people" => {}
+        Err(ParseError::UnknownColumn(name)) if name == "people.id" => {}
+        other => panic!("expected hidden-target name resolution error, got {other:?}"),
+    }
+}
+
+#[test]
+fn bind_update_from_rejects_duplicate_target_alias_name() {
+    let mut catalog = catalog();
+    catalog.insert("pets", pets_entry());
+    let stmt =
+        match parse_statement("update people p set id = 1 from pets p where p.owner_id = 1")
+            .unwrap()
+        {
+            Statement::Update(stmt) => stmt,
+            other => panic!("expected update statement, got {other:?}"),
+        };
+    assert!(matches!(
+        bind_update(&stmt, &catalog),
+        Err(ParseError::DuplicateTableName(name)) if name == "p"
+    ));
+}
+
+#[test]
+fn bind_update_from_subquery_cannot_see_target_relation() {
+    let stmt = match parse_statement("update people p set id = 1 from (select p.id) s where true")
+        .unwrap()
+    {
+        Statement::Update(stmt) => stmt,
+        other => panic!("expected update statement, got {other:?}"),
+    };
+    assert!(matches!(
+        bind_update(&stmt, &catalog()),
+        Err(ParseError::UnknownColumn(name)) if name == "p.id"
+    ));
 }
 
 #[test]
