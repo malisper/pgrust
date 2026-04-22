@@ -596,6 +596,9 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::ObjDescription => args.len() == 2,
             BuiltinScalarFunction::PgGetExpr => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::PgRelationIsPublishable => args.len() == 1,
+            BuiltinScalarFunction::PgSizePretty | BuiltinScalarFunction::PgSizeBytes => {
+                args.len() == 1
+            }
             BuiltinScalarFunction::PgAdvisoryUnlockAll => args.is_empty(),
             BuiltinScalarFunction::PgAdvisoryLock
             | BuiltinScalarFunction::PgAdvisoryXactLock
@@ -1324,6 +1327,9 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_get_serial_sequence",
             BuiltinScalarFunction::PgGetSerialSequence,
         ),
+        ("pg_size_pretty", BuiltinScalarFunction::PgSizePretty),
+        ("pg_size_pretty_numeric", BuiltinScalarFunction::PgSizePretty),
+        ("pg_size_bytes", BuiltinScalarFunction::PgSizeBytes),
         ("pg_get_userbyid", BuiltinScalarFunction::PgGetUserById),
         ("obj_description", BuiltinScalarFunction::ObjDescription),
         ("pg_get_expr", BuiltinScalarFunction::PgGetExpr),
@@ -2060,6 +2066,8 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::ObjDescription
             | BuiltinScalarFunction::PgGetExpr
             | BuiltinScalarFunction::PgRelationIsPublishable
+            | BuiltinScalarFunction::PgSizePretty
+            | BuiltinScalarFunction::PgSizeBytes
             | BuiltinScalarFunction::PgAdvisoryLock
             | BuiltinScalarFunction::PgAdvisoryXactLock
             | BuiltinScalarFunction::PgAdvisoryLockShared
