@@ -1,5 +1,7 @@
 use super::super::*;
-use crate::backend::commands::tablecmds::{collect_matching_rows_heap, index_key_values_for_row};
+use crate::backend::commands::tablecmds::{
+    collect_matching_rows_heap, index_key_values_for_row, row_matches_index_predicate,
+};
 use crate::backend::utils::cache::relcache::{IndexAmOpEntry, IndexAmProcEntry};
 use crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
@@ -7,8 +9,8 @@ use crate::include::access::amapi::{
     IndexBuildEmptyContext, IndexBuildExprContext, IndexInsertContext, IndexUniqueCheck,
 };
 use crate::include::catalog::{
-    GIST_AM_OID, GIST_RANGE_FAMILY_OID, SPGIST_AM_OID, builtin_range_rows,
-    range_type_ref_for_sql_type,
+    builtin_range_rows, range_type_ref_for_sql_type, GIST_AM_OID, GIST_RANGE_FAMILY_OID,
+    SPGIST_AM_OID,
 };
 use std::collections::BTreeSet;
 
@@ -322,6 +324,7 @@ impl Database {
         index_name: &str,
         visible_catalog: Option<crate::backend::utils::cache::visible_catalog::VisibleCatalog>,
         columns: &[crate::backend::parser::IndexColumnDef],
+        predicate_sql: Option<&str>,
         unique: bool,
         primary: bool,
         nulls_not_distinct: bool,
@@ -344,6 +347,10 @@ impl Database {
             waiter: None,
             interrupts: Arc::clone(&interrupts),
         };
+        let build_options = CatalogIndexBuildOptions {
+            indnullsnotdistinct: nulls_not_distinct,
+            ..build_options.clone()
+        };
         let (index_entry, effect) = catalog_guard
             .create_index_for_relation_mvcc_with_options(
                 index_name.to_string(),
@@ -351,10 +358,8 @@ impl Database {
                 unique,
                 primary,
                 columns,
-                &CatalogIndexBuildOptions {
-                    indnullsnotdistinct: nulls_not_distinct,
-                    ..build_options.clone()
-                },
+                &build_options,
+                predicate_sql,
                 &ctx,
             )
             .map_err(map_catalog_error)?;
@@ -368,6 +373,11 @@ impl Database {
             .as_ref()
             .and_then(|meta| meta.indexprs.as_ref())
             .is_some();
+        let has_predicate = index_entry
+            .index_meta
+            .as_ref()
+            .and_then(|meta| meta.indpred.as_deref())
+            .is_some_and(|predicate| !predicate.trim().is_empty());
         if has_expression_keys
             && access_method_oid != GIST_AM_OID
             && access_method_oid != SPGIST_AM_OID
@@ -448,7 +458,7 @@ impl Database {
             index_meta: relcache_index_meta,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             maintenance_work_mem_kb,
-            expr_eval: has_expression_keys.then_some(IndexBuildExprContext {
+            expr_eval: (has_expression_keys || has_predicate).then_some(IndexBuildExprContext {
                 txn_waiter: Some(self.txn_waiter.clone()),
                 sequences: Some(self.sequences.clone()),
                 large_objects: Some(self.large_objects.clone()),
@@ -634,6 +644,14 @@ impl Database {
                         .expect("visible catalog for expression index build"),
                 )
                 .map_err(ExecError::Parse)?,
+                index_predicate: crate::backend::parser::bind_index_predicate(
+                    &relcache_index_meta,
+                    &relation.desc,
+                    &ctx.catalog
+                        .clone()
+                        .expect("visible catalog for expression index build"),
+                )
+                .map_err(ExecError::Parse)?,
             };
             let mut index_meta = bound_index.index_meta.clone();
             index_meta.indkey = (1..=index_meta.indkey.len())
@@ -641,6 +659,15 @@ impl Database {
                 .collect::<Vec<_>>();
             index_meta.indexprs = None;
             for (heap_tid, values) in rows {
+                if !row_matches_index_predicate(
+                    &bound_index,
+                    &values,
+                    Some(heap_tid),
+                    relation.relation_oid,
+                    &mut ctx,
+                )? {
+                    continue;
+                }
                 let key_values =
                     index_key_values_for_row(&bound_index, &relation.desc, &values, &mut ctx)?;
                 let unique_detail = index_meta.indisunique.then(|| {
@@ -783,7 +810,6 @@ impl Database {
         ensure_relation_owner(self, client_id, &entry, &create_stmt.table_name)?;
         if !create_stmt.include_columns.is_empty()
             || !create_stmt.options.is_empty()
-            || create_stmt.predicate.is_some()
             || create_stmt
                 .columns
                 .iter()
@@ -814,6 +840,21 @@ impl Database {
                     .map_err(ExecError::Parse)?,
                 );
             }
+        }
+        if let Some(predicate_sql) = create_stmt.predicate_sql.as_deref() {
+            crate::backend::parser::bind_index_predicate_sql_expr(
+                predicate_sql,
+                Some(
+                    create_stmt
+                        .table_name
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or(&create_stmt.table_name),
+                ),
+                &entry.desc,
+                &catalog,
+            )
+            .map_err(ExecError::Parse)?;
         }
         let (access_method_oid, access_method_handler, build_options) = self
             .resolve_simple_index_build_options(
@@ -871,6 +912,7 @@ impl Database {
             &index_name,
             catalog.materialize_visible_catalog(),
             &index_columns,
+            create_stmt.predicate_sql.as_deref(),
             create_stmt.unique,
             false,
             false,

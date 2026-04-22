@@ -4866,6 +4866,24 @@ fn assert_explain_uses_seqscan(db: &Database, client_id: u32, sql: &str, heap_na
     );
 }
 
+fn psql_index_definition(
+    db: &Database,
+    client_id: u32,
+    table_name: &str,
+    index_name: &str,
+) -> String {
+    let lookup = db.lazy_catalog_lookup(client_id, None, None);
+    let relation = lookup
+        .lookup_any_relation(table_name)
+        .unwrap_or_else(|| panic!("expected relation {table_name}"));
+    let index = lookup
+        .index_relations_for_heap(relation.relation_oid)
+        .into_iter()
+        .find(|index| index.name == index_name)
+        .unwrap_or_else(|| panic!("expected index {index_name}"));
+    crate::backend::tcop::postgres::format_psql_indexdef(db, &Session::new(client_id), &index)
+}
+
 fn setup_index_matrix_db(label: &str) -> Database {
     let base = temp_dir(label);
     let db = Database::open(&base, 16).unwrap();
@@ -4893,6 +4911,32 @@ fn setup_index_matrix_db(label: &str) -> Database {
         .unwrap();
     db.execute(1, "create index items_ba_idx on items (b, a)")
         .unwrap();
+    db
+}
+
+fn setup_partial_index_matrix_db(label: &str) -> Database {
+    let base = temp_dir(label);
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(
+        1,
+        "create table items (id int4 not null, flag text not null, note text)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into items values \
+         (1, 'skip', 's1'), \
+         (1, 'keep', 'k1'), \
+         (2, 'keep', 'k2'), \
+         (2, 'skip', 's2'), \
+         (3, 'skip', 's3')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index items_keep_idx on items (id) where flag = 'keep'",
+    )
+    .unwrap();
     db
 }
 
@@ -13773,6 +13817,89 @@ fn unique_index_insert_rejects_duplicate_key() {
 }
 
 #[test]
+fn partial_index_catalog_persists_predicate_and_pg_get_indexdef_renders_where() {
+    let db = setup_partial_index_matrix_db("partial_index_catalog");
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indpred \
+             from pg_index \
+             where indexrelid = (select oid from pg_class where relname = 'items_keep_idx')",
+        ),
+        vec![vec![Value::Text("flag = 'keep'".into())]]
+    );
+    assert_eq!(
+        psql_index_definition(&db, 1, "items", "items_keep_idx"),
+        "CREATE INDEX items_keep_idx ON items USING btree (id) WHERE (flag = 'keep')"
+    );
+}
+
+#[test]
+fn partial_unique_index_build_and_insert_only_enforce_qualifying_rows() {
+    let base = temp_dir("partial_unique_index_build");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, flag text, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into items values \
+         (1, 'skip', 'outside1'), \
+         (1, 'skip', 'outside2'), \
+         (2, 'keep', 'inside')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create unique index items_keep_key on items (id) where flag = 'keep'",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into items values (1, 'skip', 'outside3')")
+        .unwrap();
+
+    match db.execute(1, "insert into items values (2, 'keep', 'dup')") {
+        Err(ExecError::UniqueViolation { constraint, detail }) => {
+            assert_eq!(constraint, "items_keep_key");
+            assert_eq!(detail.as_deref(), Some("Key (id)=(2) already exists."));
+        }
+        other => panic!("expected unique violation, got {:?}", other),
+    }
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id, flag, note from items order by id, flag, note"
+        ),
+        vec![
+            vec![
+                Value::Int32(1),
+                Value::Text("skip".into()),
+                Value::Text("outside1".into()),
+            ],
+            vec![
+                Value::Int32(1),
+                Value::Text("skip".into()),
+                Value::Text("outside2".into()),
+            ],
+            vec![
+                Value::Int32(1),
+                Value::Text("skip".into()),
+                Value::Text("outside3".into()),
+            ],
+            vec![
+                Value::Int32(2),
+                Value::Text("keep".into()),
+                Value::Text("inside".into()),
+            ],
+        ]
+    );
+}
+
+#[test]
 fn unique_array_column_supports_duplicates_and_index_quals() {
     let base = temp_dir("unique_array_column_supports_duplicates_and_index_quals");
     let db = Database::open(&base, 16).unwrap();
@@ -13998,6 +14125,55 @@ fn indexed_update_and_delete_apply_residual_predicates() {
                 Value::Int32(2),
                 Value::Text("keep".into()),
                 Value::Text("gamma".into())
+            ],
+        ]
+    );
+}
+
+#[test]
+fn partial_unique_index_update_maintenance_tracks_predicate_boundary() {
+    let base = temp_dir("partial_unique_index_update_boundary");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, flag text, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into items values (1, 'skip', 'a'), (1, 'skip', 'b')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create unique index items_keep_key on items (id) where flag = 'keep'",
+    )
+    .unwrap();
+
+    db.execute(1, "update items set flag = 'keep' where note = 'a'")
+        .unwrap();
+    match db.execute(1, "update items set flag = 'keep' where note = 'b'") {
+        Err(ExecError::UniqueViolation { constraint, .. }) => {
+            assert_eq!(constraint, "items_keep_key");
+        }
+        other => panic!("expected unique violation, got {:?}", other),
+    }
+
+    db.execute(1, "update items set flag = 'skip' where note = 'a'")
+        .unwrap();
+    db.execute(1, "update items set flag = 'keep' where note = 'b'")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, flag, note from items order by note"),
+        vec![
+            vec![
+                Value::Int32(1),
+                Value::Text("skip".into()),
+                Value::Text("a".into()),
+            ],
+            vec![
+                Value::Int32(1),
+                Value::Text("keep".into()),
+                Value::Text("b".into()),
             ],
         ]
     );
@@ -15644,6 +15820,132 @@ fn index_matrix_insert_after_build_remains_queryable_via_index() {
     assert_eq!(
         query_rows(&db, 1, "select note from items where a = 4"),
         vec![vec![Value::Text("d1".into())]]
+    );
+}
+
+#[test]
+fn partial_index_query_planner_uses_index_only_when_query_implies_predicate() {
+    let db = setup_partial_index_matrix_db("partial_index_planner");
+
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select note from items where flag = 'keep' and id = 2",
+        "items_keep_idx",
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select note from items where flag = 'keep' and id = 2",
+        ),
+        vec![vec![Value::Text("k2".into())]]
+    );
+
+    assert_explain_uses_seqscan(&db, 1, "select note from items where id = 2", "items");
+    assert_eq!(
+        query_rows(&db, 1, "select note from items where id = 2 order by note"),
+        vec![
+            vec![Value::Text("k2".into())],
+            vec![Value::Text("s2".into())],
+        ]
+    );
+}
+
+#[test]
+fn partial_unique_index_on_conflict_respects_predicate() {
+    let base = temp_dir("partial_unique_index_on_conflict");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, flag text, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create unique index items_keep_key on items (id) where flag = 'keep'",
+    )
+    .unwrap();
+    db.execute(1, "insert into items values (1, 'keep', 'alpha')")
+        .unwrap();
+
+    db.execute(
+        1,
+        "insert into items values (1, 'keep', 'beta') \
+         on conflict (id) where flag = 'keep' \
+         do update set note = excluded.note",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id, flag, note from items order by flag, note"
+        ),
+        vec![vec![
+            Value::Int32(1),
+            Value::Text("keep".into()),
+            Value::Text("beta".into()),
+        ]]
+    );
+
+    db.execute(
+        1,
+        "insert into items values (1, 'skip', 'gamma') \
+         on conflict (id) where flag = 'keep' \
+         do update set note = excluded.note",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id, flag, note from items order by flag, note"
+        ),
+        vec![
+            vec![
+                Value::Int32(1),
+                Value::Text("keep".into()),
+                Value::Text("beta".into()),
+            ],
+            vec![
+                Value::Int32(1),
+                Value::Text("skip".into()),
+                Value::Text("gamma".into()),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn partial_index_with_ctid_predicate_builds_and_persists_catalog_predicate() {
+    let base = temp_dir("partial_index_ctid_predicate");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into items values (1, 'alpha'), (2, 'beta'), (3, 'gamma')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index items_ctid_idx on items (id) where ctid >= '(0,1)'",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indpred \
+             from pg_index \
+             where indexrelid = (select oid from pg_class where relname = 'items_ctid_idx')",
+        ),
+        vec![vec![Value::Text("ctid >= '(0,1)'".into())]]
+    );
+    assert_eq!(
+        psql_index_definition(&db, 1, "items", "items_ctid_idx"),
+        "CREATE INDEX items_ctid_idx ON items USING btree (id) WHERE (ctid >= '(0,1)')"
     );
 }
 

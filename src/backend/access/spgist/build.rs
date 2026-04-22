@@ -1,6 +1,6 @@
 use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_next_visible};
 use crate::backend::access::index::buildkeys::{
-    IndexBuildKeyProjector, materialize_heap_row_values,
+    materialize_heap_row_values, IndexBuildKeyProjector,
 };
 use crate::backend::catalog::CatalogError;
 use crate::include::access::amapi::{
@@ -25,11 +25,9 @@ pub(crate) fn spgbuild(ctx: &IndexBuildContext) -> Result<IndexBuildResult, Cata
         ctx.snapshot.current_xid,
         ctx.index_relation,
     )?;
-    let mut result = scan_visible_heap(ctx, |tid, key_values| {
+    scan_visible_heap(ctx, |tid, key_values| {
         spginsert_build_tuple(ctx, tid, key_values)
-    })?;
-    result.index_tuples = result.heap_tuples;
-    Ok(result)
+    })
 }
 
 pub(crate) fn spgbuildempty(ctx: &IndexBuildEmptyContext) -> Result<(), CatalogError> {
@@ -66,9 +64,12 @@ fn scan_visible_heap(
             .deform(&attr_descs)
             .map_err(|err| CatalogError::Io(format!("heap deform failed: {err:?}")))?;
         let row_values = materialize_heap_row_values(&ctx.heap_desc, &datums)?;
-        let key_values = key_projector.project(ctx, &row_values)?;
-        visit(tid, key_values)?;
+        let key_values = key_projector.project(ctx, &row_values, tid)?;
         result.heap_tuples += 1;
+        if let Some(key_values) = key_values {
+            visit(tid, key_values)?;
+            result.index_tuples += 1;
+        }
     }
     Ok(result)
 }

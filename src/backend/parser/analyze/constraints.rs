@@ -960,18 +960,66 @@ pub fn bind_check_constraint_expr(
     bind_check_constraint_sql_expr(&parsed, relation_name, desc, catalog)
 }
 
+pub fn bind_index_predicate_sql_expr(
+    expr_sql: &str,
+    relation_name: Option<&str>,
+    desc: &RelationDesc,
+    catalog: &dyn super::CatalogLookup,
+) -> Result<Expr, ParseError> {
+    let parsed = parse_expr(expr_sql)?;
+    bind_index_predicate_expr(&parsed, relation_name, desc, catalog)
+}
+
 pub fn bind_check_constraint_sql_expr(
     expr: &SqlExpr,
     relation_name: Option<&str>,
     desc: &RelationDesc,
     catalog: &dyn super::CatalogLookup,
 ) -> Result<Expr, ParseError> {
+    bind_boolean_relation_predicate(
+        expr,
+        relation_name,
+        desc,
+        catalog,
+        "boolean CHECK constraint expression",
+        "CHECK constraint expression must return boolean",
+    )
+}
+
+pub fn bind_index_predicate_expr(
+    expr: &SqlExpr,
+    relation_name: Option<&str>,
+    desc: &RelationDesc,
+    catalog: &dyn super::CatalogLookup,
+) -> Result<Expr, ParseError> {
+    let scope = super::scope_for_base_relation_with_optional_name(relation_name, desc);
+    let inferred = super::infer_sql_expr_type_with_ctes(expr, &scope, catalog, &[], None, &[]);
+    if inferred != SqlType::new(SqlTypeKind::Bool) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "boolean index predicate expression",
+            actual: "index predicate expression must return boolean".into(),
+        });
+    }
+
+    let bound = super::bind_expr_with_outer_and_ctes(expr, &scope, catalog, &[], None, &[])?;
+    reject_unsupported_check_expr(&bound)?;
+    Ok(bound)
+}
+
+fn bind_boolean_relation_predicate(
+    expr: &SqlExpr,
+    relation_name: Option<&str>,
+    desc: &RelationDesc,
+    catalog: &dyn super::CatalogLookup,
+    expected: &'static str,
+    actual: &'static str,
+) -> Result<Expr, ParseError> {
     let scope = super::scope_for_relation(relation_name, desc);
     let inferred = super::infer_sql_expr_type_with_ctes(expr, &scope, catalog, &[], None, &[]);
     if inferred != SqlType::new(SqlTypeKind::Bool) {
         return Err(ParseError::UnexpectedToken {
-            expected: "boolean CHECK constraint expression",
-            actual: "CHECK constraint expression must return boolean".into(),
+            expected,
+            actual: actual.into(),
         });
     }
 

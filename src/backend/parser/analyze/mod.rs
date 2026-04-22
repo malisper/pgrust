@@ -9,6 +9,7 @@ mod create_table_inherits;
 mod expr;
 mod functions;
 mod geometry;
+mod index_predicates;
 mod infer;
 mod modify;
 mod multiranges;
@@ -71,6 +72,7 @@ pub(crate) use expr::bind_expr_with_outer_and_ctes;
 use expr::*;
 use functions::*;
 use geometry::*;
+pub(crate) use index_predicates::*;
 use infer::*;
 pub use modify::{
     BoundArraySubscript, BoundAssignment, BoundAssignmentTarget, BoundDeleteStatement,
@@ -112,6 +114,7 @@ pub struct BoundIndexRelation {
     pub desc: RelationDesc,
     pub index_meta: crate::backend::utils::cache::relcache::IndexRelCacheEntry,
     pub index_exprs: Vec<Expr>,
+    pub index_predicate: Option<Expr>,
 }
 
 fn dedup_proc_rows(rows: &mut Vec<PgProcRow>) {
@@ -145,6 +148,26 @@ pub(crate) fn bind_index_exprs(
         .into_iter()
         .map(|expr_sql| bind_relation_expr(&expr_sql, None, heap_desc, catalog))
         .collect()
+}
+
+pub(crate) fn bind_index_predicate(
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    heap_desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<Expr>, ParseError> {
+    let Some(predicate_sql) = index_meta.indpred.as_deref().map(str::trim) else {
+        return Ok(None);
+    };
+    if predicate_sql.is_empty() {
+        return Ok(None);
+    }
+    let relation_name = catalog
+        .class_row_by_oid(index_meta.indrelid)
+        .map(|row| row.relname);
+    let relation_name = relation_name
+        .as_deref()
+        .map(|name| name.rsplit('.').next().unwrap_or(name));
+    bind_index_predicate_sql_expr(predicate_sql, relation_name, heap_desc, catalog).map(Some)
 }
 
 fn build_sort_clause(
@@ -641,6 +664,10 @@ impl CatalogLookup for Catalog {
                         .relation_by_oid(index_meta.indrelid)
                         .and_then(|heap| bind_index_exprs(index_meta, &heap.desc, self).ok())
                         .unwrap_or_default(),
+                    index_predicate: self
+                        .relation_by_oid(index_meta.indrelid)
+                        .and_then(|heap| bind_index_predicate(index_meta, &heap.desc, self).ok())
+                        .flatten(),
                 })
             })
             .collect()
@@ -906,6 +933,10 @@ impl CatalogLookup for RelCache {
                         .relation_by_oid(index_meta.indrelid)
                         .and_then(|heap| bind_index_exprs(index_meta, &heap.desc, self).ok())
                         .unwrap_or_default(),
+                    index_predicate: self
+                        .relation_by_oid(index_meta.indrelid)
+                        .and_then(|heap| bind_index_predicate(index_meta, &heap.desc, self).ok())
+                        .flatten(),
                 })
             })
             .collect()

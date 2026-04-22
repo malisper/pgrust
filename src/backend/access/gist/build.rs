@@ -115,11 +115,9 @@ fn has_all_sortsupport(state: &GistState) -> bool {
 }
 
 fn gistbuild_repeated(ctx: &IndexBuildContext) -> Result<IndexBuildResult, CatalogError> {
-    let mut result = scan_visible_heap(ctx, |tid, key_values| {
+    scan_visible_heap(ctx, |tid, key_values| {
         gistinsert_build_tuple(ctx, tid, key_values)
-    })?;
-    result.index_tuples = result.heap_tuples;
-    Ok(result)
+    })
 }
 
 fn gistbuild_buffered(
@@ -136,7 +134,7 @@ fn gistbuild_buffered(
         .max(GIST_BUFFERING_MIN_WORK_MEM_KB * 1024);
     let mut spool = Vec::new();
     let mut spool_bytes = 0usize;
-    let mut result = scan_visible_heap(ctx, |tid, key_values| {
+    scan_visible_heap(ctx, |tid, key_values| {
         let build_tuple = make_build_tuple(&ctx.index_desc, tid, key_values)?;
         spool_bytes = spool_bytes.saturating_add(build_tuple.approx_size);
         spool.push(build_tuple);
@@ -147,10 +145,11 @@ fn gistbuild_buffered(
             spool_bytes = 0;
         }
         Ok(())
-    })?;
-    flush_buffered_tuples(ctx, state, &mut spool)?;
-    result.index_tuples = result.heap_tuples;
-    Ok(result)
+    })
+    .and_then(|result| {
+        flush_buffered_tuples(ctx, state, &mut spool)?;
+        Ok(result)
+    })
 }
 
 fn gistbuild_sorted(
@@ -158,7 +157,7 @@ fn gistbuild_sorted(
     state: &GistState,
 ) -> Result<IndexBuildResult, CatalogError> {
     let mut build_tuples = Vec::new();
-    let mut result = scan_visible_heap(ctx, |tid, key_values| {
+    let result = scan_visible_heap(ctx, |tid, key_values| {
         build_tuples.push(make_build_tuple(&ctx.index_desc, tid, key_values)?);
         Ok(())
     })?;
@@ -173,7 +172,6 @@ fn gistbuild_sorted(
         page_fillfactor_reserve(GIST_DEFAULT_FILLFACTOR),
     )?;
     write_sorted_build_plan(ctx, &plan)?;
-    result.index_tuples = result.heap_tuples;
     Ok(result)
 }
 
@@ -207,8 +205,10 @@ fn scan_visible_heap(
             .deform(&attr_descs)
             .map_err(|err| CatalogError::Io(format!("heap deform failed: {err:?}")))?;
         let row_values = materialize_heap_row_values(&ctx.heap_desc, &datums)?;
-        let key_values = key_projector.project(ctx, &row_values)?;
-        visit(tid, key_values)?;
+        if let Some(key_values) = key_projector.project(ctx, &row_values, tid)? {
+            visit(tid, key_values)?;
+            result.index_tuples += 1;
+        }
         result.heap_tuples += 1;
     }
     Ok(result)
