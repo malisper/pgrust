@@ -230,6 +230,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::InvalidFloatInput { value, .. } => value.as_str(),
         ExecError::FloatOutOfRange { value, .. } => value.as_str(),
         ExecError::DetailedError { message, .. } => {
+            if message.starts_with("invalid size: \"") {
+                return None;
+            }
             if let Some(target) = extract_subscripted_assignment_target(message) {
                 return find_subscripted_assignment_position(sql, target);
             }
@@ -5606,6 +5609,22 @@ mod tests {
             detail: None,
             hint: None,
             sqlstate: "22P02",
+        };
+
+        assert_eq!(exec_error_position(sql, &err), None);
+    }
+
+    #[test]
+    fn exec_error_position_omits_invalid_size_detail_errors() {
+        let sql = "SELECT pg_size_bytes('1 AB');";
+        let err = ExecError::DetailedError {
+            message: "invalid size: \"1 AB\"".into(),
+            detail: Some("Invalid size unit: \"AB\".".into()),
+            hint: Some(
+                "Valid units are \"bytes\", \"B\", \"kB\", \"MB\", \"GB\", \"TB\", and \"PB\"."
+                    .into(),
+            ),
+            sqlstate: "22023",
         };
 
         assert_eq!(exec_error_position(sql, &err), None);
