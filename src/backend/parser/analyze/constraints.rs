@@ -212,6 +212,10 @@ pub fn normalize_create_table_constraints(
     catalog: &dyn super::CatalogLookup,
 ) -> Result<NormalizedCreateTableConstraints, ParseError> {
     let columns = stmt.columns().cloned().collect::<Vec<_>>();
+    let relation_columns = columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>();
     let column_lookup = columns
         .iter()
         .enumerate()
@@ -550,6 +554,7 @@ pub fn normalize_create_table_constraints(
                 on_delete: constraint.on_delete,
                 on_delete_set_columns: resolve_foreign_key_delete_set_columns(
                     constraint.on_delete_set_columns.as_deref(),
+                    &relation_columns,
                     &constraint.columns,
                 )?,
                 on_update: constraint.on_update,
@@ -649,6 +654,12 @@ pub fn normalize_alter_table_add_constraint(
     catalog: &dyn super::CatalogLookup,
 ) -> Result<NormalizedAlterTableConstraint, ParseError> {
     let column_lookup = relation_column_lookup(desc);
+    let relation_columns = desc
+        .columns
+        .iter()
+        .filter(|column| !column.dropped)
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>();
     let mut used_names = existing_constraint_names(existing_constraints);
 
     match constraint {
@@ -814,6 +825,7 @@ pub fn normalize_alter_table_add_constraint(
                     on_delete: *on_delete,
                     on_delete_set_columns: resolve_foreign_key_delete_set_columns(
                         on_delete_set_columns.as_deref(),
+                        &relation_columns,
                         columns,
                     )?,
                     on_update: *on_update,
@@ -1094,6 +1106,7 @@ fn validate_foreign_key(
 
 fn resolve_foreign_key_delete_set_columns(
     delete_set_columns: Option<&[String]>,
+    relation_columns: &[String],
     foreign_key_columns: &[String],
 ) -> Result<Option<Vec<String>>, ParseError> {
     let Some(delete_set_columns) = delete_set_columns else {
@@ -1102,17 +1115,35 @@ fn resolve_foreign_key_delete_set_columns(
     let mut resolved = Vec::new();
     let mut seen = BTreeSet::new();
     for column_name in delete_set_columns {
+        let Some(relation_column) = relation_columns
+            .iter()
+            .find(|candidate| candidate.eq_ignore_ascii_case(column_name))
+        else {
+            return Err(ParseError::DetailedError {
+                message: format!(
+                    "column \"{column_name}\" referenced in foreign key constraint does not exist"
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42703",
+            });
+        };
         let Some(foreign_key_column) = foreign_key_columns
             .iter()
             .find(|candidate| candidate.eq_ignore_ascii_case(column_name))
         else {
-            return Err(ParseError::FeatureNotSupported(format!(
-                "column \"{column_name}\" referenced in ON DELETE SET action must be part of foreign key"
-            )));
+            return Err(ParseError::DetailedError {
+                message: format!(
+                    "column \"{column_name}\" referenced in ON DELETE SET action must be part of foreign key"
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P10",
+            });
         };
         let normalized = foreign_key_column.to_ascii_lowercase();
         if seen.insert(normalized) {
-            resolved.push(foreign_key_column.clone());
+            resolved.push(relation_column.clone());
         }
     }
     Ok(Some(resolved))
