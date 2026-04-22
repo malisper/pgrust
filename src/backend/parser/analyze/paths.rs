@@ -2,8 +2,8 @@ use super::*;
 use crate::backend::executor::cast_value;
 use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::catalog::{
-    BTREE_AM_OID, GIST_AM_OID, bootstrap_pg_operator_rows, builtin_scalar_function_for_proc_oid,
-    proc_oid_for_builtin_scalar_function,
+    BTREE_AM_OID, GIST_AM_OID, SPGIST_AM_OID, bootstrap_pg_operator_rows,
+    builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
 };
 use crate::include::nodes::primnodes::{BuiltinScalarFunction, OpExprKind, expr_sql_type_hint};
 
@@ -196,7 +196,8 @@ fn qual_strategy(
                 value_type_oid(&qual.argument),
             )
             .or_else(|| {
-                (index.index_meta.am_oid == GIST_AM_OID)
+                ((index.index_meta.am_oid == GIST_AM_OID)
+                    || (index.index_meta.am_oid == SPGIST_AM_OID))
                     .then(|| gist_builtin_strategy(proc_oid, &qual.argument))
                     .flatten()
             }),
@@ -303,7 +304,7 @@ fn choose_index_path(
                     .is_some();
                 (keys, equality_prefix, removes_order)
             }
-            GIST_AM_OID => (build_gist_scan_keys(index, &parsed_quals), 0, false),
+            GIST_AM_OID | SPGIST_AM_OID => (build_gist_scan_keys(index, &parsed_quals), 0, false),
             _ => continue,
         };
 
