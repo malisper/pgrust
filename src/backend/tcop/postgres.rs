@@ -79,7 +79,10 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         ExecError::Parse(crate::backend::parser::ParseError::DuplicateTableName(_)) => "42712",
         ExecError::Parse(crate::backend::parser::ParseError::TableAlreadyExists(_)) => "42P07",
         ExecError::Parse(crate::backend::parser::ParseError::UnknownConfigurationParameter(_))
-        | ExecError::Parse(crate::backend::parser::ParseError::UnsupportedType(_)) => "42704",
+        | ExecError::Parse(crate::backend::parser::ParseError::UnsupportedType(_))
+        | ExecError::Parse(crate::backend::parser::ParseError::MissingDefaultOpclass { .. }) => {
+            "42704"
+        }
         ExecError::Parse(crate::backend::parser::ParseError::CantChangeRuntimeParam(_)) => "55P02",
         ExecError::Parse(crate::backend::parser::ParseError::NoSchemaSelectedForCreate) => "3F000",
         ExecError::Parse(crate::backend::parser::ParseError::WindowingError(_)) => "42P20",

@@ -7,7 +7,8 @@ use crate::include::access::amapi::{
     IndexBuildEmptyContext, IndexBuildExprContext, IndexInsertContext, IndexUniqueCheck,
 };
 use crate::include::catalog::{
-    GIST_AM_OID, GIST_RANGE_FAMILY_OID, builtin_range_rows, range_type_ref_for_sql_type,
+    GIST_AM_OID, GIST_RANGE_FAMILY_OID, SPGIST_AM_OID, builtin_range_rows,
+    range_type_ref_for_sql_type,
 };
 use std::collections::BTreeSet;
 
@@ -256,6 +257,11 @@ impl Database {
                             .unwrap_or_else(|| column.name.clone()),
                     ))
                 })?;
+            let type_name = type_rows
+                .iter()
+                .find(|row| row.oid == type_oid)
+                .map(|row| row.typname.clone())
+                .unwrap_or_else(|| type_oid.to_string());
             let opclass = if let Some(opclass_name) = column.opclass.as_deref() {
                 let is_range_type = builtin_range_rows()
                     .iter()
@@ -279,12 +285,10 @@ impl Database {
                 )
             }
             .ok_or_else(|| {
-                ExecError::Parse(ParseError::UnsupportedType(
-                    column
-                        .expr_sql
-                        .clone()
-                        .unwrap_or_else(|| column.name.clone()),
-                ))
+                ExecError::Parse(ParseError::MissingDefaultOpclass {
+                    access_method: access_method_name.to_string(),
+                    type_name: type_name.clone(),
+                })
             })?;
             indclass.push(opclass.oid);
             indcollation.push(0);
@@ -359,7 +363,7 @@ impl Database {
             .as_ref()
             .and_then(|meta| meta.indexprs.as_ref())
             .is_some();
-        if has_expression_keys && access_method_oid != GIST_AM_OID {
+        if has_expression_keys && access_method_oid != GIST_AM_OID && access_method_oid != SPGIST_AM_OID {
             self.build_expression_index_rows_in_transaction(
                 client_id,
                 relation,

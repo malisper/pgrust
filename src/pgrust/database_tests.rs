@@ -8481,6 +8481,81 @@ fn create_gist_box_index_supports_knn_order_by() {
 }
 
 #[test]
+fn create_spgist_text_index_reports_missing_default_opclass() {
+    let base = temp_dir("spgist_missing_default_opclass");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table texts (t text)").unwrap();
+
+    match db.execute(1, "create index texts_t_spgist on texts using spgist (t)") {
+        Err(ExecError::Parse(ParseError::MissingDefaultOpclass {
+            access_method,
+            type_name,
+        })) => {
+            assert_eq!(access_method, "spgist");
+            assert_eq!(type_name, "text");
+        }
+        other => panic!("expected missing default opclass error, got {:?}", other),
+    }
+}
+
+#[test]
+fn create_spgist_box_index_supports_overlap_and_knn_order_by() {
+    let base = temp_dir("spgist_box_overlap_knn");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table boxes (id int4 not null, b box)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into boxes values \
+         (1, '(0,0),(1,1)'::box), \
+         (2, '(5,5),(6,6)'::box), \
+         (3, '(10,10),(12,12)'::box), \
+         (4, '(7,7),(8,8)'::box)",
+    )
+    .unwrap();
+    db.execute(1, "create index boxes_b_spgist on boxes using spgist (b)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indclass \
+             from pg_index \
+             where indexrelid = (select oid from pg_class where relname = 'boxes_b_spgist')",
+        ),
+        vec![vec![Value::Text(
+            crate::include::catalog::BOX_SPGIST_OPCLASS_OID
+                .to_string()
+                .into()
+        )]]
+    );
+
+    let overlap_sql = "select id from boxes where b && '(6,6),(7,7)'::box order by id";
+    assert_explain_uses_index(&db, 1, overlap_sql, "boxes_b_spgist");
+    assert_eq!(
+        query_rows(&db, 1, overlap_sql),
+        vec![vec![Value::Int32(2)], vec![Value::Int32(4)]]
+    );
+
+    let knn_sql = "select id from boxes \
+                   order by b <-> '(5.2,5.2),(5.2,5.2)'::box \
+                   limit 3";
+    let expected = query_rows(&db, 1, knn_sql);
+    assert_eq!(
+        expected,
+        vec![
+            vec![Value::Int32(2)],
+            vec![Value::Int32(4)],
+            vec![Value::Int32(1)],
+        ]
+    );
+    assert_explain_uses_index(&db, 1, knn_sql, "boxes_b_spgist");
+}
+
+#[test]
 fn create_gist_range_index_explain_and_query_use_it() {
     let base = temp_dir("gist_range_index_scan_explain");
     let db = Database::open(&base, 16).unwrap();
