@@ -1814,6 +1814,7 @@ fn build_grant_role_membership(sql: &str) -> Result<GrantRoleMembershipStatement
         inherit_option: None,
         set_option: None,
         granted_by: granted_by_clause.map(parse_role_grantor_spec).transpose()?,
+        legacy_group_syntax: false,
     };
     if let Some(with_clause) = with_clause {
         let lowered = with_clause.to_ascii_lowercase();
@@ -1880,6 +1881,7 @@ fn build_revoke_role_membership(sql: &str) -> Result<RevokeRoleMembershipStateme
         set_option: flags.2,
         cascade,
         granted_by: granted_by_clause.map(parse_role_grantor_spec).transpose()?,
+        legacy_group_syntax: false,
     })
 }
 
@@ -5203,6 +5205,7 @@ fn build_alter_group(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
                 inherit_option: None,
                 set_option: None,
                 granted_by: None,
+                legacy_group_syntax: true,
             },
         ))
     } else {
@@ -5216,6 +5219,7 @@ fn build_alter_group(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
                 set_option: false,
                 cascade: false,
                 granted_by: None,
+                legacy_group_syntax: true,
             },
         ))
     }

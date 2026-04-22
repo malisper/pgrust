@@ -1791,6 +1791,7 @@ pub struct GrantRoleMembershipStatement {
     pub inherit_option: Option<bool>,
     pub set_option: Option<bool>,
     pub granted_by: Option<RoleGrantorSpec>,
+    pub legacy_group_syntax: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1803,6 +1804,7 @@ pub struct RevokeRoleMembershipStatement {
     pub set_option: bool,
     pub cascade: bool,
     pub granted_by: Option<RoleGrantorSpec>,
+    pub legacy_group_syntax: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

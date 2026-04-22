@@ -251,6 +251,7 @@ impl Database {
                     &role,
                     stmt.granted_by.as_ref(),
                     true,
+                    stmt.legacy_group_syntax,
                 )?;
                 let grantee = lookup_membership_grantee(&auth_catalog, grantee_name)?;
                 if stmt.admin_option {
@@ -328,6 +329,7 @@ impl Database {
                     &role,
                     stmt.granted_by.as_ref(),
                     false,
+                    stmt.legacy_group_syntax,
                 )?;
                 let role_rows = auth_catalog
                     .memberships()
@@ -741,9 +743,16 @@ fn resolve_role_grantor(
     role: &PgAuthIdRow,
     grantor: Option<&RoleGrantorSpec>,
     is_grant: bool,
+    legacy_group_syntax: bool,
 ) -> Result<u32, ExecError> {
     let Some(grantor) = grantor else {
-        return select_best_role_grantor(auth, catalog, role.oid, is_grant);
+        return select_best_role_grantor(
+            auth,
+            catalog,
+            role.oid,
+            is_grant,
+            legacy_group_syntax,
+        );
     };
     let grantor = resolve_role_grantor_spec(auth, catalog, grantor)?;
 
@@ -805,6 +814,7 @@ fn select_best_role_grantor(
     catalog: &AuthCatalog,
     role_oid: u32,
     is_grant: bool,
+    legacy_group_syntax: bool,
 ) -> Result<u32, ExecError> {
     if catalog
         .role_by_oid(auth.current_user_oid())
@@ -853,17 +863,30 @@ fn select_best_role_grantor(
             .role_by_oid(role_oid)
             .map(|row| row.rolname.as_str())
             .unwrap_or("unknown");
-        ExecError::DetailedError {
-            message: format!(
+        let message = if legacy_group_syntax {
+            "permission denied to alter role".to_string()
+        } else {
+            format!(
                 "permission denied to {} role \"{}\"",
                 if is_grant { "grant" } else { "revoke" },
                 role_name,
-            ),
-            detail: Some(format!(
+            )
+        };
+        let detail = if legacy_group_syntax {
+            format!(
+                "Only roles with the ADMIN option on role \"{}\" may add or drop members.",
+                role_name,
+            )
+        } else {
+            format!(
                 "Only roles with the ADMIN option on role \"{}\" may {} this role.",
                 role_name,
                 if is_grant { "grant" } else { "revoke" },
-            )),
+            )
+        };
+        ExecError::DetailedError {
+            message,
+            detail: Some(detail),
             hint: None,
             sqlstate: "42501",
         }
@@ -1262,6 +1285,51 @@ mod tests {
                 );
             }
             other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn alter_group_permission_denied_uses_legacy_wording() {
+        let base = temp_dir("alter_group_permission_denied");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session.execute(&db, "create role regress_priv_group2").unwrap();
+        session.execute(&db, "create role regress_priv_user1 login").unwrap();
+        session.execute(&db, "create role regress_priv_user2 login").unwrap();
+        session.execute(&db, "create role regress_priv_user3 login").unwrap();
+        session
+            .execute(
+                &db,
+                "grant regress_priv_group2 to regress_priv_user1 with admin option",
+            )
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "grant regress_priv_group2 to regress_priv_user2 granted by regress_priv_user1",
+            )
+            .unwrap();
+        session
+            .execute(&db, "set session authorization regress_priv_user3")
+            .unwrap();
+
+        for sql in [
+            "alter group regress_priv_group2 add user regress_priv_user2",
+            "alter group regress_priv_group2 drop user regress_priv_user2",
+        ] {
+            let err = session.execute(&db, sql).unwrap_err();
+            match err {
+                ExecError::DetailedError { message, detail, .. } => {
+                    assert_eq!(message, "permission denied to alter role");
+                    assert_eq!(
+                        detail.as_deref(),
+                        Some(
+                            "Only roles with the ADMIN option on role \"regress_priv_group2\" may add or drop members."
+                        )
+                    );
+                }
+                other => panic!("unexpected error for {sql}: {other:?}"),
+            }
         }
     }
 
