@@ -10222,6 +10222,7 @@ fn parse_case_expressions() {
             defresult: Some(_),
         } if matches!(arg.as_ref(), SqlExpr::Column(name) if name == "id") && args.len() == 1
     ));
+    assert_eq!(stmt.targets[0].output_name, "case");
     assert!(matches!(
         &stmt.targets[1].expr,
         SqlExpr::Case {
@@ -10230,6 +10231,7 @@ fn parse_case_expressions() {
             defresult: Some(_),
         } if args.len() == 1
     ));
+    assert_eq!(stmt.targets[1].output_name, "case");
 }
 
 #[test]

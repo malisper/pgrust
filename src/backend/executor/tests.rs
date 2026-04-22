@@ -2485,6 +2485,28 @@ fn select_without_from_returns_constant_row() {
 }
 
 #[test]
+fn select_case_without_from_uses_case_column_name() {
+    let base = temp_dir("select_case_without_from");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select case when true then 1 else 0 end",
+    )
+    .unwrap()
+    {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["case".to_string()]);
+            assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn select_array_literal_uses_array_column_name() {
     let base = temp_dir("select_array_literal_column_name");
     let txns = TransactionManager::new_durable(&base).unwrap();
