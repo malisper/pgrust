@@ -474,6 +474,8 @@ pub enum BuiltinScalarFunction {
     ObjDescription,
     PgGetExpr,
     PgRelationIsPublishable,
+    PgSizePretty,
+    PgSizeBytes,
     PgAdvisoryLock,
     PgAdvisoryXactLock,
     PgAdvisoryLockShared,
