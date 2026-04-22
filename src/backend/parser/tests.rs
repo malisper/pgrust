@@ -718,6 +718,7 @@ fn catalog_with_people_id_index() -> Catalog {
                 indoption: vec![],
                 indexprs: None,
                 indpred: None,
+                brin_options: None,
             }),
         },
     );
@@ -770,6 +771,7 @@ fn catalog_with_people_primary_key_opclass(opclass_oid: u32) -> Catalog {
                 indoption: vec![0],
                 indexprs: None,
                 indpred: None,
+                brin_options: None,
             }),
         },
     );
@@ -851,6 +853,7 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
                 indoption: vec![0],
                 indexprs: None,
                 indpred: Some("(id > 0)".into()),
+                brin_options: None,
             }),
         },
     );
@@ -900,6 +903,7 @@ fn catalog_with_people_expression_unique_index() -> Catalog {
                 indoption: vec![0],
                 indexprs: Some(serde_json::to_string(&vec!["lower(name)"]).unwrap()),
                 indpred: None,
+                brin_options: None,
             }),
         },
     );
@@ -949,6 +953,7 @@ fn catalog_with_people_name_c_collation_index() -> Catalog {
                 indoption: vec![0],
                 indexprs: None,
                 indpred: None,
+                brin_options: None,
             }),
         },
     );
@@ -1006,6 +1011,7 @@ fn catalog_with_text_parent_primary_key() -> Catalog {
                 indoption: vec![0],
                 indexprs: None,
                 indpred: None,
+                brin_options: None,
             }),
         },
     );

@@ -92,6 +92,8 @@ pub struct IndexBuildEmptyContext {
     pub client_id: ClientId,
     pub xid: u32,
     pub index_relation: RelFileLocator,
+    pub index_desc: RelationDesc,
+    pub index_meta: IndexRelCacheEntry,
 }
 
 #[derive(Clone)]

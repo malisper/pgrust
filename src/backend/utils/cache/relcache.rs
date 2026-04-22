@@ -3,6 +3,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::include::access::brin::BrinOptions;
 use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
 use crate::backend::catalog::catalog::{Catalog, CatalogEntry, column_desc};
@@ -65,6 +66,7 @@ pub struct IndexRelCacheEntry {
     pub amproc_entries: Vec<Vec<IndexAmProcEntry>>,
     pub indexprs: Option<String>,
     pub indpred: Option<String>,
+    pub brin_options: Option<BrinOptions>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -509,6 +511,7 @@ impl RelCache {
                             amproc_entries: Vec::new(),
                             indexprs: None,
                             indpred: None,
+                            brin_options: None,
                         };
                     };
                     let indclass = index.indclass.clone();
@@ -542,6 +545,7 @@ impl RelCache {
                         amproc_entries: support.amproc_entries,
                         indexprs: index.indexprs.clone(),
                         indpred: index.indpred.clone(),
+                        brin_options: None,
                     }
                 }),
             };
@@ -694,6 +698,7 @@ fn from_catalog_entry(entry: &CatalogEntry, support_lookup: &IndexSupportLookup)
                 amproc_entries: support.amproc_entries,
                 indexprs: index.indexprs.clone(),
                 indpred: index.indpred.clone(),
+                brin_options: index.brin_options.clone(),
             }
         }),
     }
@@ -776,6 +781,7 @@ mod tests {
                     indclass: vec![BOX_GIST_OPCLASS_OID],
                     indcollation: vec![0],
                     indoption: vec![0],
+                    brin_options: None,
                 },
             )
             .unwrap();
@@ -840,6 +846,7 @@ mod tests {
             amproc_entries: support.amproc_entries,
             indexprs: None,
             indpred: None,
+            brin_options: None,
         };
         let contains_proc_oid = bootstrap_pg_operator_rows()
             .into_iter()
@@ -902,6 +909,7 @@ mod tests {
             amproc_entries: support.amproc_entries,
             indexprs: None,
             indpred: None,
+            brin_options: None,
         };
         let distance_operator = bootstrap_pg_operator_rows()
             .into_iter()

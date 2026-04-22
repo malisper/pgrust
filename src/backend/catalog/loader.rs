@@ -402,6 +402,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                         indoption: index.indoption.clone(),
                         indexprs: index.indexprs.clone(),
                         indpred: index.indpred.clone(),
+                        brin_options: None,
                     }),
             },
         );

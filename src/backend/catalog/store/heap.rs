@@ -491,6 +491,7 @@ impl CatalogStore {
             indclass: Vec::new(),
             indcollation: Vec::new(),
             indoption: Vec::new(),
+            brin_options: None,
         };
         self.create_index_for_relation_with_options(
             index_name,
@@ -2406,6 +2407,7 @@ impl CatalogStore {
             indclass: Vec::new(),
             indcollation: Vec::new(),
             indoption: Vec::new(),
+            brin_options: None,
         };
         self.create_index_for_relation_mvcc_with_options(
             index_name,
@@ -4329,6 +4331,7 @@ fn build_index_entry(
                 .transpose()
                 .map_err(|_| CatalogError::Corrupt("invalid index expression metadata"))?,
             indpred: None,
+            brin_options: resolved_options.brin_options.clone(),
         }),
     };
     control.next_rel_number = control.next_rel_number.saturating_add(1);
@@ -4392,6 +4395,7 @@ fn build_toast_catalog_changes(
             ],
             indcollation: vec![0, 0],
             indoption: vec![0, 0],
+            brin_options: None,
         },
         control,
     )?;
@@ -4445,6 +4449,7 @@ fn default_index_build_options_for_relation(
         indclass,
         indcollation,
         indoption,
+        brin_options: None,
     })
 }
 
@@ -4980,6 +4985,7 @@ fn catalog_entry_from_visible_relation(
             indoption: index.indoption.clone(),
             indexprs: index.indexprs.clone(),
             indpred: index.indpred.clone(),
+            brin_options: index.brin_options.clone(),
         }),
     })
 }

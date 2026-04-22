@@ -3,12 +3,15 @@ use crate::backend::commands::tablecmds::{collect_matching_rows_heap, index_key_
 use crate::backend::utils::cache::relcache::{IndexAmOpEntry, IndexAmProcEntry};
 use crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+use crate::include::access::brin::BrinOptions;
 use crate::include::access::amapi::{
     IndexBuildEmptyContext, IndexBuildExprContext, IndexInsertContext, IndexUniqueCheck,
 };
 use crate::include::catalog::{
-    GIST_AM_OID, GIST_RANGE_FAMILY_OID, builtin_range_rows, range_type_ref_for_sql_type,
+    BRIN_AM_OID, GIST_AM_OID, GIST_RANGE_FAMILY_OID, builtin_range_rows,
+    range_type_ref_for_sql_type,
 };
+use crate::include::nodes::parsenodes::RelOption;
 use std::collections::BTreeSet;
 
 struct ResolvedIndexSupportMetadata {
@@ -59,7 +62,44 @@ impl Database {
             amproc_entries: support.amproc_entries,
             indexprs: meta.indexprs.clone(),
             indpred: meta.indpred.clone(),
+            brin_options: meta.brin_options.clone(),
         })
+    }
+
+    fn resolve_brin_options(&self, options: &[RelOption]) -> Result<BrinOptions, ExecError> {
+        let mut resolved = BrinOptions::default();
+        for option in options {
+            if option.name.eq_ignore_ascii_case("pages_per_range") {
+                let pages_per_range =
+                    option
+                        .value
+                        .parse::<u32>()
+                        .map_err(|_| ExecError::Parse(ParseError::UnexpectedToken {
+                            expected: "positive integer pages_per_range",
+                            actual: option.value.clone(),
+                        }))?;
+                if pages_per_range == 0 {
+                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "positive integer pages_per_range",
+                        actual: option.value.clone(),
+                    }));
+                }
+                resolved.pages_per_range = pages_per_range;
+                continue;
+            }
+
+            if option.name.eq_ignore_ascii_case("autosummarize") {
+                return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                    "BRIN option \"autosummarize\"".into(),
+                )));
+            }
+
+            return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+                "BRIN option \"{}\"",
+                option.name
+            ))));
+        }
+        Ok(resolved)
     }
 
     fn resolve_index_support_metadata(
@@ -180,6 +220,7 @@ impl Database {
         access_method_name: &str,
         relation: &crate::backend::parser::BoundRelation,
         columns: &[crate::backend::parser::IndexColumnDef],
+        options: &[RelOption],
     ) -> Result<(u32, u32, CatalogIndexBuildOptions), ExecError> {
         let access_method = crate::backend::utils::cache::lsyscache::access_method_row_by_name(
             self,
@@ -298,6 +339,18 @@ impl Database {
             indoption.push(option);
         }
 
+        let brin_options = if access_method.oid == BRIN_AM_OID {
+            Some(self.resolve_brin_options(options)?)
+        } else {
+            if !options.is_empty() {
+                return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "simple index definition",
+                    actual: "unsupported CREATE INDEX feature".into(),
+                }));
+            }
+            None
+        };
+
         Ok((
             access_method.oid,
             access_method.amhandler,
@@ -306,6 +359,7 @@ impl Database {
                 indclass,
                 indcollation,
                 indoption,
+                brin_options,
             },
         ))
     }
@@ -538,12 +592,28 @@ impl Database {
     ) -> Result<(), ExecError> {
         stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || {
             let interrupts = self.interrupt_state(client_id);
+            let catalog_index_meta = index_entry.index_meta.clone().ok_or_else(|| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "index metadata",
+                    actual: "missing index metadata".into(),
+                })
+            })?;
+            let relcache_index_meta = self.relcache_index_meta_from_catalog(
+                client_id,
+                Some((xid, cid)),
+                index_entry.relation_oid,
+                &catalog_index_meta,
+                access_method_oid,
+                access_method_handler,
+            )?;
             crate::backend::access::index::indexam::index_build_empty_stub(
                 &IndexBuildEmptyContext {
                     pool: self.pool.clone(),
                     client_id,
                     xid,
                     index_relation: index_entry.rel,
+                    index_desc: index_entry.desc.clone(),
+                    index_meta: relcache_index_meta.clone(),
                 },
                 access_method_oid,
             )
@@ -589,20 +659,6 @@ impl Database {
                 relation.toast,
                 None,
                 &mut ctx,
-            )?;
-            let catalog_index_meta = index_entry.index_meta.clone().ok_or_else(|| {
-                ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "index metadata",
-                    actual: "missing index metadata".into(),
-                })
-            })?;
-            let relcache_index_meta = self.relcache_index_meta_from_catalog(
-                client_id,
-                Some((xid, cid)),
-                index_entry.relation_oid,
-                &catalog_index_meta,
-                access_method_oid,
-                access_method_handler,
             )?;
             let bound_index = crate::backend::parser::BoundIndexRelation {
                 name: index_name.to_string(),
@@ -758,7 +814,6 @@ impl Database {
         }
         ensure_relation_owner(self, client_id, &entry, &create_stmt.table_name)?;
         if !create_stmt.include_columns.is_empty()
-            || !create_stmt.options.is_empty()
             || create_stmt.predicate.is_some()
             || create_stmt
                 .columns
@@ -771,6 +826,13 @@ impl Database {
             }));
         }
         let access_method_name = create_stmt.using_method.as_deref().unwrap_or("btree");
+        if access_method_name.eq_ignore_ascii_case("brin")
+            && create_stmt.columns.iter().any(|column| column.expr_sql.is_some())
+        {
+            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "BRIN expression indexes".into(),
+            )));
+        }
         let mut index_columns = create_stmt.columns.clone();
         for column in &mut index_columns {
             if let Some(expr_sql) = column.expr_sql.as_deref() {
@@ -798,6 +860,7 @@ impl Database {
                 access_method_name,
                 &entry,
                 &index_columns,
+                &create_stmt.options,
             )?;
         let am_routine = crate::backend::access::index::amapi::index_am_handler(access_method_oid)
             .ok_or_else(|| {
@@ -848,5 +911,46 @@ impl Database {
             Err(err) => return Err(err),
         }
         Ok(StatementResult::AffectedRows(0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(label: &str) -> std::path::PathBuf {
+        crate::pgrust::test_support::seeded_temp_dir("database", label)
+    }
+
+    #[test]
+    fn resolve_brin_options_accepts_pages_per_range() {
+        let dir = temp_dir("brin_pages_per_range");
+        let db = Database::open(&dir, 16).unwrap();
+
+        let options = db
+            .resolve_brin_options(&[RelOption {
+                name: "pages_per_range".into(),
+                value: "32".into(),
+            }])
+            .unwrap();
+        assert_eq!(options.pages_per_range, 32);
+    }
+
+    #[test]
+    fn resolve_brin_options_rejects_autosummarize() {
+        let dir = temp_dir("brin_autosummarize");
+        let db = Database::open(&dir, 16).unwrap();
+
+        let err = db
+            .resolve_brin_options(&[RelOption {
+                name: "autosummarize".into(),
+                value: "true".into(),
+            }])
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            ExecError::Parse(ParseError::FeatureNotSupported(message))
+                if message == "BRIN option \"autosummarize\""
+        ));
     }
 }
