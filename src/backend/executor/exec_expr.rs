@@ -64,14 +64,14 @@ use super::expr_string::{
     eval_decode_function, eval_encode_function, eval_format_function, eval_get_bit_bytes,
     eval_get_byte, eval_initcap_function, eval_left_function, eval_length_function, eval_like,
     eval_lower_function, eval_lpad_function, eval_md5_function, eval_pg_rust_test_enc_conversion,
-    eval_pg_rust_test_enc_setup, eval_pg_rust_test_fdw_handler, eval_position_function,
-    eval_quote_literal_function, eval_repeat_function, eval_replace_function,
-    eval_reverse_function, eval_right_function, eval_rpad_function, eval_set_bit_bytes,
-    eval_set_byte, eval_sha224_function, eval_sha256_function, eval_sha384_function,
-    eval_sha512_function, eval_split_part_function, eval_strpos_function, eval_text_overlay,
-    eval_text_substring, eval_to_bin_function, eval_to_char_function, eval_to_hex_function,
-    eval_to_number_function, eval_to_oct_function, eval_translate_function, eval_trim_function,
-    eval_unistr_function,
+    eval_pg_rust_test_enc_setup, eval_pg_rust_test_fdw_handler,
+    eval_pg_rust_test_opclass_options_func, eval_position_function, eval_quote_literal_function,
+    eval_repeat_function, eval_replace_function, eval_reverse_function, eval_right_function,
+    eval_rpad_function, eval_set_bit_bytes, eval_set_byte, eval_sha224_function,
+    eval_sha256_function, eval_sha384_function, eval_sha512_function, eval_split_part_function,
+    eval_strpos_function, eval_text_overlay, eval_text_substring, eval_to_bin_function,
+    eval_to_char_function, eval_to_hex_function, eval_to_number_function, eval_to_oct_function,
+    eval_translate_function, eval_trim_function, eval_unistr_function,
 };
 use super::expr_xml::{eval_xml_comment_function, eval_xml_expr, eval_xml_is_well_formed_function};
 use super::node_types::*;
@@ -83,7 +83,6 @@ use super::pg_regex::{
 pub(crate) use super::value_io::{format_array_text, format_array_value_text};
 use super::{ExecError, ExecutorContext, exec_next, executor_start};
 use crate::backend::catalog::indexing::probe_system_catalog_rows_visible_in_db;
-use crate::backend::utils::misc::guc::normalize_guc_name;
 use crate::backend::catalog::rowcodec::pg_description_row_from_values;
 use crate::backend::executor::jsonb::{
     JsonbValue, jsonb_contains, jsonb_exists, jsonb_exists_all, jsonb_exists_any, jsonb_from_value,
@@ -93,6 +92,7 @@ use crate::backend::parser::analyze::is_binary_coercible_type;
 use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp,
 };
+use crate::backend::utils::misc::guc::normalize_guc_name;
 use crate::backend::utils::misc::checkpoint::checkpoint_stats_value;
 use crate::include::catalog::{
     CURRENT_DATABASE_OID, FLOAT8_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID,
@@ -118,8 +118,7 @@ use arrays::{
     eval_array_prepend_function, eval_array_remove_function, eval_array_replace_function,
     eval_array_sort_function, eval_array_subscript, eval_array_subscript_plpgsql,
     eval_array_to_string_function, eval_array_upper_function, eval_cardinality_function,
-    eval_quantified_array, eval_string_to_array_function,
-    eval_width_bucket_thresholds,
+    eval_quantified_array, eval_string_to_array_function, eval_width_bucket_thresholds,
 };
 use subquery::{
     eval_array_subquery, eval_exists_subquery, eval_quantified_subquery, eval_scalar_subquery,
@@ -2843,6 +2842,9 @@ fn eval_builtin_function(
             .unwrap_or(Value::Null)),
         BuiltinScalarFunction::PgRustInternalBinaryCoercible => {
             eval_pg_rust_internal_binary_coercible(&values)
+        }
+        BuiltinScalarFunction::PgRustTestOpclassOptionsFunc => {
+            eval_pg_rust_test_opclass_options_func(&values)
         }
         BuiltinScalarFunction::PgRustTestFdwHandler => eval_pg_rust_test_fdw_handler(&values),
         BuiltinScalarFunction::PgRustTestEncSetup => eval_pg_rust_test_enc_setup(&values),
