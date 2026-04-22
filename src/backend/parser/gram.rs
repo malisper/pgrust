@@ -5103,6 +5103,7 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::do_stmt => Ok(Statement::Do(build_do(inner)?)),
         Rule::explain_stmt => Ok(Statement::Explain(build_explain(inner)?)),
         Rule::table_stmt => Ok(Statement::Select(build_table_select(inner)?)),
+        Rule::select_into_stmt => Ok(Statement::CreateTableAs(build_select_into(inner)?)),
         Rule::select_stmt => Ok(Statement::Select(build_select(inner)?)),
         Rule::values_stmt => Ok(Statement::Values(build_values_statement(inner)?)),
         Rule::copy_stmt => Ok(Statement::CopyFrom(build_copy_from(inner)?)),
@@ -5906,6 +5907,12 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
             });
         }
     };
+    build_simple_select_statement(parts)
+}
+
+fn build_simple_select_statement(
+    parts: Vec<Pair<'_, Rule>>,
+) -> Result<SelectStatement, ParseError> {
     let mut with_recursive = false;
     let mut with = Vec::new();
     let mut distinct = false;
@@ -5974,6 +5981,62 @@ pub(crate) fn build_select(pair: Pair<'_, Rule>) -> Result<SelectStatement, Pars
         locking_clause,
         set_operation: None,
     })
+}
+
+fn build_select_into(pair: Pair<'_, Rule>) -> Result<CreateTableAsStatement, ParseError> {
+    let mut query_parts = Vec::new();
+    let mut relation = None;
+
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::cte_clause
+            | Rule::window_clause
+            | Rule::order_by_clause
+            | Rule::limit_clause
+            | Rule::offset_clause
+            | Rule::locking_clause => query_parts.push(part),
+            Rule::select_into_core => {
+                for inner in part.into_inner() {
+                    match inner.as_rule() {
+                        Rule::select_into_target => {
+                            relation = Some(build_select_into_target(inner)?);
+                        }
+                        _ => query_parts.push(inner),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let (schema_name, table_name, persistence) = relation.ok_or(ParseError::UnexpectedEof)?;
+    Ok(CreateTableAsStatement {
+        schema_name,
+        table_name,
+        persistence,
+        on_commit: OnCommitAction::PreserveRows,
+        column_names: Vec::new(),
+        query: build_simple_select_statement(query_parts)?,
+        if_not_exists: false,
+    })
+}
+
+fn build_select_into_target(
+    pair: Pair<'_, Rule>,
+) -> Result<(Option<String>, String, TablePersistence), ParseError> {
+    let mut persistence = TablePersistence::Permanent;
+    let mut relation_name = None;
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::temp_clause => persistence = TablePersistence::Temporary,
+            Rule::identifier => relation_name = Some(build_relation_name(inner)),
+            _ => {}
+        }
+    }
+
+    let (schema_name, table_name) = relation_name.ok_or(ParseError::UnexpectedEof)?;
+    Ok((schema_name, table_name, persistence))
 }
 
 fn build_set_operation_term(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseError> {
