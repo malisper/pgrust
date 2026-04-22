@@ -4952,9 +4952,10 @@ fn assert_explain_uses_index(db: &Database, client_id: u32, sql: &str, index_nam
     let relfilenode = relfilenode_for(db, client_id, index_name);
     let lines = explain_lines(db, client_id, sql);
     assert!(
-        lines
-            .iter()
-            .any(|line| line.contains(&format!("Index Scan using rel {relfilenode} "))),
+        lines.iter().any(|line| {
+            line.contains(&format!("Index Scan using rel {relfilenode} "))
+                || line.contains(&format!("Index Scan using {index_name} "))
+        }),
         "expected EXPLAIN to use index {index_name} (relfilenode {relfilenode}), got {lines:?}"
     );
 }
@@ -15719,9 +15720,10 @@ fn index_matrix_projection_over_ordered_index_keeps_order_without_sort() {
     let lines = explain_lines(&db, 1, "select a + 1 from items order by a");
     let relfilenode = relfilenode_for(&db, 1, "items_a_idx");
     assert!(
-        lines
-            .iter()
-            .any(|line| line.contains(&format!("Index Scan using rel {relfilenode} "))),
+        lines.iter().any(|line| {
+            line.contains(&format!("Index Scan using rel {relfilenode} "))
+                || line.contains("Index Scan using items_a_idx ")
+        }),
         "expected ordered index scan, got {lines:?}"
     );
     assert!(

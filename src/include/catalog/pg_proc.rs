@@ -225,6 +225,41 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'f',
             'v',
         ),
+        proc_row(
+            1302,
+            "contsel",
+            FLOAT8_TYPE_OID,
+            &oid_argtypes(&[
+                INTERNAL_TYPE_OID,
+                OID_TYPE_OID,
+                INTERNAL_TYPE_OID,
+                INT4_TYPE_OID,
+            ]),
+            "contsel",
+            4,
+            false,
+            false,
+            'f',
+            's',
+        ),
+        proc_row(
+            1303,
+            "contjoinsel",
+            FLOAT8_TYPE_OID,
+            &oid_argtypes(&[
+                INTERNAL_TYPE_OID,
+                OID_TYPE_OID,
+                INTERNAL_TYPE_OID,
+                INT2_TYPE_OID,
+                INTERNAL_TYPE_OID,
+            ]),
+            "contjoinsel",
+            5,
+            false,
+            false,
+            'f',
+            's',
+        ),
         PgProcRow {
             proallargtypes: Some(vec![
                 REGCLASS_TYPE_OID,
@@ -3140,7 +3175,6 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
     rows.extend(spgist_support_proc_rows());
     rows.extend(brin_scalar_comparison_proc_rows());
     rows.extend(brin_support_proc_rows());
-    rows.extend(spgist_support_proc_rows());
     rows
 }
 
@@ -3998,6 +4032,24 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ),
         ("pg_get_userbyid", BuiltinScalarFunction::PgGetUserById),
         ("obj_description", BuiltinScalarFunction::ObjDescription),
+        ("pg_describe_object", BuiltinScalarFunction::PgDescribeObject),
+        ("pg_notify", BuiltinScalarFunction::PgNotify),
+        (
+            "pg_notification_queue_usage",
+            BuiltinScalarFunction::PgNotificationQueueUsage,
+        ),
+        (
+            "pg_indexam_has_property",
+            BuiltinScalarFunction::PgIndexAmHasProperty,
+        ),
+        (
+            "pg_index_has_property",
+            BuiltinScalarFunction::PgIndexHasProperty,
+        ),
+        (
+            "pg_index_column_has_property",
+            BuiltinScalarFunction::PgIndexColumnHasProperty,
+        ),
         ("pg_get_expr", BuiltinScalarFunction::PgGetExpr),
         ("pg_get_expr_ext", BuiltinScalarFunction::PgGetExpr),
         (
@@ -7342,6 +7394,12 @@ mod tests {
             BuiltinScalarFunction::RegProcedureToText,
             BuiltinScalarFunction::RegRoleToText,
             BuiltinScalarFunction::PgGetUserById,
+            BuiltinScalarFunction::PgDescribeObject,
+            BuiltinScalarFunction::PgNotify,
+            BuiltinScalarFunction::PgNotificationQueueUsage,
+            BuiltinScalarFunction::PgIndexAmHasProperty,
+            BuiltinScalarFunction::PgIndexHasProperty,
+            BuiltinScalarFunction::PgIndexColumnHasProperty,
             BuiltinScalarFunction::Float8Accum,
             BuiltinScalarFunction::Float8Combine,
             BuiltinScalarFunction::Float8RegrAccum,

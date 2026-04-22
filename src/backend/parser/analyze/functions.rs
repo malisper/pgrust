@@ -427,7 +427,7 @@ fn resolve_out_parameter_row_shape(
     row: &crate::include::catalog::PgProcRow,
 ) -> Option<ResolvedFunctionRowShape> {
     let (Some(arg_types), Some(arg_modes)) = (&row.proallargtypes, &row.proargmodes) else {
-        return Some(ResolvedFunctionRowShape::AnonymousRecord);
+        return None;
     };
     if arg_types.len() != arg_modes.len() {
         return None;
@@ -2104,6 +2104,20 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
                 SqlType::new(SqlTypeKind::Bool),
             ));
         }
+        if by_func
+            .iter()
+            .all(|(candidate, _)| *candidate != BuiltinScalarFunction::PgNotify)
+        {
+            by_func.push((BuiltinScalarFunction::PgNotify, SqlType::new(SqlTypeKind::Void)));
+        }
+        if by_func.iter().all(|(candidate, _)| {
+            *candidate != BuiltinScalarFunction::PgNotificationQueueUsage
+        }) {
+            by_func.push((
+                BuiltinScalarFunction::PgNotificationQueueUsage,
+                SqlType::new(SqlTypeKind::Float8),
+            ));
+        }
         for func in [
             BuiltinScalarFunction::PgIndexAmHasProperty,
             BuiltinScalarFunction::PgIndexHasProperty,
@@ -2506,6 +2520,7 @@ enum ScalarFunctionArity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::include::catalog::INT4_TYPE_OID;
 
     #[test]
     fn resolve_scalar_function_uses_pg_proc_and_filters_non_scalar_rows() {
@@ -3071,6 +3086,26 @@ mod tests {
         assert_eq!(
             fixed_scalar_return_type(BuiltinScalarFunction::Substring),
             None
+        );
+    }
+
+    #[test]
+    fn non_record_functions_without_out_parameters_do_not_gain_record_row_shape() {
+        let catalog = Catalog::default();
+        let row = catalog
+            .proc_rows_by_name("generate_series")
+            .into_iter()
+            .find(|row| row.proretset && row.prorettype == INT4_TYPE_OID && row.pronargs == 2)
+            .expect("generate_series(int4, int4) row");
+        let result_type = catalog.type_by_oid(row.prorettype).expect("result type").sql_type;
+
+        assert_eq!(
+            resolve_out_parameter_row_shape(&catalog, &row),
+            None,
+        );
+        assert_eq!(
+            resolve_function_row_shape(&catalog, &row, result_type),
+            Some(ResolvedFunctionRowShape::None),
         );
     }
 }

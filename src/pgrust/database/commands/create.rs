@@ -816,16 +816,16 @@ impl Database {
             .language_row_by_name(&create_stmt.language)
             .ok_or_else(|| {
                 ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "LANGUAGE plpgsql or sql",
+                    expected: "LANGUAGE plpgsql, sql, or internal",
                     actual: format!("LANGUAGE {}", create_stmt.language),
                 })
             })?;
         if !matches!(
             language_row.oid,
-            PG_LANGUAGE_PLPGSQL_OID | PG_LANGUAGE_SQL_OID
+            PG_LANGUAGE_PLPGSQL_OID | PG_LANGUAGE_SQL_OID | PG_LANGUAGE_INTERNAL_OID
         ) {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "LANGUAGE plpgsql or sql",
+                expected: "LANGUAGE plpgsql, sql, or internal",
                 actual: format!("LANGUAGE {}", create_stmt.language),
             }));
         }
@@ -1447,33 +1447,57 @@ impl Database {
                         let partitioned_table = lowered.partition_spec.as_ref().map(|spec| {
                             pg_partitioned_table_row(created.entry.relation_oid, spec, 0)
                         });
-                        let relation = self.replace_relation_partition_metadata_in_transaction(
-                            client_id,
-                            created.entry.relation_oid,
-                            lowered.partition_parent_oid.is_some(),
-                            relpartbound,
-                            partitioned_table,
-                            xid,
-                            table_cid.saturating_add(2),
-                            configured_search_path,
-                            catalog_effects,
-                        )?;
-                        if lowered
-                            .partition_bound
-                            .as_ref()
-                            .is_some_and(PartitionBoundSpec::is_default)
-                            && let Some(parent_oid) = lowered.partition_parent_oid
+                        let relation = if lowered.partition_parent_oid.is_some()
+                            || lowered.partition_spec.is_some()
                         {
-                            self.update_partitioned_table_default_partition_in_transaction(
+                            let relation = self.replace_relation_partition_metadata_in_transaction(
                                 client_id,
-                                parent_oid,
                                 created.entry.relation_oid,
+                                lowered.partition_parent_oid.is_some(),
+                                relpartbound,
+                                partitioned_table,
                                 xid,
-                                table_cid.saturating_add(3),
+                                table_cid.saturating_add(2),
                                 configured_search_path,
                                 catalog_effects,
                             )?;
-                        }
+                            if lowered
+                                .partition_bound
+                                .as_ref()
+                                .is_some_and(PartitionBoundSpec::is_default)
+                                && let Some(parent_oid) = lowered.partition_parent_oid
+                            {
+                                self.update_partitioned_table_default_partition_in_transaction(
+                                    client_id,
+                                    parent_oid,
+                                    created.entry.relation_oid,
+                                    xid,
+                                    table_cid.saturating_add(3),
+                                    configured_search_path,
+                                    catalog_effects,
+                                )?;
+                            }
+                            relation
+                        } else {
+                            crate::backend::parser::BoundRelation {
+                                rel: created.entry.rel,
+                                relation_oid: created.entry.relation_oid,
+                                toast: created.toast.as_ref().map(|toast| {
+                                    crate::include::nodes::primnodes::ToastRelationRef {
+                                        rel: toast.toast_entry.rel,
+                                        relation_oid: toast.toast_entry.relation_oid,
+                                    }
+                                }),
+                                namespace_oid: created.entry.namespace_oid,
+                                owner_oid: created.entry.owner_oid,
+                                relpersistence: created.entry.relpersistence,
+                                relkind: created.entry.relkind,
+                                relispartition: created.entry.relispartition,
+                                relpartbound: created.entry.relpartbound.clone(),
+                                desc: created.entry.desc.clone(),
+                                partitioned_table: created.entry.partitioned_table.clone(),
+                            }
+                        };
                         let constraint_cid_base = table_cid
                             .saturating_add(u32::from(!lowered.parent_oids.is_empty()))
                             .saturating_add(u32::from(
@@ -1544,33 +1568,57 @@ impl Database {
                     .partition_spec
                     .as_ref()
                     .map(|spec| pg_partitioned_table_row(created.entry.relation_oid, spec, 0));
-                let relation = self.replace_relation_partition_metadata_in_transaction(
-                    client_id,
-                    created.entry.relation_oid,
-                    lowered.partition_parent_oid.is_some(),
-                    relpartbound,
-                    partitioned_table,
-                    xid,
-                    table_cid.saturating_add(2),
-                    configured_search_path,
-                    catalog_effects,
-                )?;
-                if lowered
-                    .partition_bound
-                    .as_ref()
-                    .is_some_and(PartitionBoundSpec::is_default)
-                    && let Some(parent_oid) = lowered.partition_parent_oid
+                let relation = if lowered.partition_parent_oid.is_some()
+                    || lowered.partition_spec.is_some()
                 {
-                    self.update_partitioned_table_default_partition_in_transaction(
+                    let relation = self.replace_relation_partition_metadata_in_transaction(
                         client_id,
-                        parent_oid,
                         created.entry.relation_oid,
+                        lowered.partition_parent_oid.is_some(),
+                        relpartbound,
+                        partitioned_table,
                         xid,
-                        table_cid.saturating_add(3),
+                        table_cid.saturating_add(2),
                         configured_search_path,
                         catalog_effects,
                     )?;
-                }
+                    if lowered
+                        .partition_bound
+                        .as_ref()
+                        .is_some_and(PartitionBoundSpec::is_default)
+                        && let Some(parent_oid) = lowered.partition_parent_oid
+                    {
+                        self.update_partitioned_table_default_partition_in_transaction(
+                            client_id,
+                            parent_oid,
+                            created.entry.relation_oid,
+                            xid,
+                            table_cid.saturating_add(3),
+                            configured_search_path,
+                            catalog_effects,
+                        )?;
+                    }
+                    relation
+                } else {
+                    crate::backend::parser::BoundRelation {
+                        rel: created.entry.rel,
+                        relation_oid: created.entry.relation_oid,
+                        toast: created.toast.as_ref().map(|toast| {
+                            crate::include::nodes::primnodes::ToastRelationRef {
+                                rel: toast.toast_entry.rel,
+                                relation_oid: toast.toast_entry.relation_oid,
+                            }
+                        }),
+                        namespace_oid: created.entry.namespace_oid,
+                        owner_oid: created.entry.owner_oid,
+                        relpersistence: created.entry.relpersistence,
+                        relkind: created.entry.relkind,
+                        relispartition: created.entry.relispartition,
+                        relpartbound: created.entry.relpartbound.clone(),
+                        desc: created.entry.desc.clone(),
+                        partitioned_table: created.entry.partitioned_table.clone(),
+                    }
+                };
                 let constraint_cid_base = table_cid
                     .saturating_add(u32::from(!lowered.parent_oids.is_empty()))
                     .saturating_add(u32::from(

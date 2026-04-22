@@ -202,13 +202,6 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
             opfnamespace: PG_CATALOG_NAMESPACE_OID,
             opfowner: BOOTSTRAP_SUPERUSER_OID,
         },
-        PgOpfamilyRow {
-            oid: SPGIST_BOX_FAMILY_OID,
-            opfmethod: SPGIST_AM_OID,
-            opfname: "box_ops".into(),
-            opfnamespace: PG_CATALOG_NAMESPACE_OID,
-            opfowner: BOOTSTRAP_SUPERUSER_OID,
-        },
         brin_row(BRIN_BYTEA_MINMAX_FAMILY_OID, "bytea_minmax_ops"),
         brin_row(BRIN_CHAR_MINMAX_FAMILY_OID, "char_minmax_ops"),
         brin_row(BRIN_INTEGER_MINMAX_FAMILY_OID, "integer_minmax_ops"),
