@@ -30,6 +30,19 @@ fn relation_exists_in_namespace(
         .is_some_and(|relation| relation.namespace_oid == namespace_oid)
 }
 
+fn existing_view_prefix_matches(
+    old_desc: &crate::backend::executor::RelationDesc,
+    new_desc: &crate::backend::executor::RelationDesc,
+) -> bool {
+    old_desc.columns.len() <= new_desc.columns.len()
+        && old_desc.columns.iter().zip(new_desc.columns.iter()).all(
+            |(old_column, new_column)| {
+                old_column.name.eq_ignore_ascii_case(&new_column.name)
+                    && old_column.sql_type == new_column.sql_type
+            },
+        )
+}
+
 fn normalize_create_function_name_for_search_path(
     db: &Database,
     client_id: ClientId,
@@ -1059,6 +1072,9 @@ impl Database {
             &mut Vec::new(),
             &mut referenced_relation_oids,
         );
+        let existing_relation = catalog
+            .lookup_any_relation(&view_name)
+            .filter(|relation| relation.namespace_oid == namespace_oid);
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
@@ -1068,20 +1084,46 @@ impl Database {
             waiter: None,
             interrupts,
         };
-        let (entry, create_effect) = self
-            .catalog
-            .write()
-            .create_view_relation_mvcc(
-                view_name.clone(),
-                desc,
-                namespace_oid,
-                self.auth_state(client_id).current_user_oid(),
-                &ctx,
-            )
-            .map_err(map_catalog_error)?;
-        catalog_effects.push(create_effect);
+        let relation_oid = if let Some(existing_relation) = existing_relation {
+            if !create_stmt.or_replace {
+                return Err(ExecError::Parse(ParseError::TableAlreadyExists(view_name)));
+            }
+            if existing_relation.relkind != 'v' {
+                return Err(ExecError::Parse(ParseError::WrongObjectType {
+                    name: create_stmt.view_name.clone(),
+                    expected: "view",
+                }));
+            }
+            if !existing_view_prefix_matches(&existing_relation.desc, &desc) {
+                return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+                    "CREATE OR REPLACE VIEW can only add new columns at the end of the view"
+                        .into(),
+                )));
+            }
+            let replace_effect = self
+                .catalog
+                .write()
+                .alter_view_relation_desc_mvcc(existing_relation.relation_oid, desc, &ctx)
+                .map_err(map_catalog_error)?;
+            catalog_effects.push(replace_effect);
+            existing_relation.relation_oid
+        } else {
+            let (entry, create_effect) = self
+                .catalog
+                .write()
+                .create_view_relation_mvcc(
+                    view_name.clone(),
+                    desc,
+                    namespace_oid,
+                    self.auth_state(client_id).current_user_oid(),
+                    &ctx,
+                )
+                .map_err(map_catalog_error)?;
+            catalog_effects.push(create_effect);
+            entry.relation_oid
+        };
 
-        let rule_ctx = CatalogWriteContext {
+        let rule_drop_ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
             xid,
@@ -1090,11 +1132,29 @@ impl Database {
             waiter: None,
             interrupts: Arc::clone(&ctx.interrupts),
         };
+        if create_stmt.or_replace
+            && let Some(rewrite_oid) = catalog
+                .rewrite_rows_for_relation(relation_oid)
+                .into_iter()
+                .find(|row| row.rulename == "_RETURN")
+                .map(|row| row.oid)
+        {
+            let drop_effect = self
+                .catalog
+                .write()
+                .drop_rule_mvcc(rewrite_oid, &rule_drop_ctx)
+                .map_err(map_catalog_error)?;
+            catalog_effects.push(drop_effect);
+        }
+        let rule_ctx = CatalogWriteContext {
+            cid: cid.saturating_add(2),
+            ..rule_drop_ctx
+        };
         let rule_effect = self
             .catalog
             .write()
             .create_rule_mvcc_with_owner_dependency(
-                entry.relation_oid,
+                relation_oid,
                 "_RETURN",
                 '1',
                 true,

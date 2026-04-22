@@ -1,6 +1,6 @@
 use crate::backend::parser::analyze::analyze_select_query_with_outer;
 use crate::backend::parser::{CatalogLookup, ParseError, Statement};
-use crate::include::nodes::parsenodes::{Query, SelectStatement};
+use crate::include::nodes::parsenodes::{Query, SelectStatement, ViewCheckOption};
 use crate::include::nodes::primnodes::RelationDesc;
 
 const RETURN_RULE_NAME: &str = "_RETURN";
@@ -29,6 +29,25 @@ fn return_rule_sql(
             actual: format!("multiple rewrite rules for view {display_name}"),
         }),
     }
+}
+
+pub(crate) fn split_stored_view_definition_sql(sql: &str) -> (&str, ViewCheckOption) {
+    let normalized = sql.trim().trim_end_matches(';').trim();
+    let lowered = normalized.to_ascii_lowercase();
+
+    if lowered.ends_with("with local check option") {
+        let cutoff = normalized.len() - "with local check option".len();
+        return (normalized[..cutoff].trim(), ViewCheckOption::Local);
+    }
+    if lowered.ends_with("with cascaded check option") {
+        let cutoff = normalized.len() - "with cascaded check option".len();
+        return (normalized[..cutoff].trim(), ViewCheckOption::Cascaded);
+    }
+    if lowered.ends_with("with check option") {
+        let cutoff = normalized.len() - "with check option".len();
+        return (normalized[..cutoff].trim(), ViewCheckOption::Cascaded);
+    }
+    (normalized, ViewCheckOption::None)
 }
 
 fn validate_view_shape(
@@ -86,6 +105,7 @@ pub(crate) fn load_view_return_select(
         return Err(ParseError::RecursiveView(display_name));
     }
     let sql = return_rule_sql(catalog, relation_oid, &display_name)?;
+    let (sql, _) = split_stored_view_definition_sql(&sql);
     // :HACK: PostgreSQL stores analyzed rule query trees in `pg_rewrite`.
     // pgrust still stores SQL text and reparses it here until the catalog
     // format is upgraded to preserve analyzed query trees directly.
@@ -93,7 +113,7 @@ pub(crate) fn load_view_return_select(
     let Statement::Select(select) = stmt else {
         return Err(ParseError::UnexpectedToken {
             expected: "SELECT view definition",
-            actual: sql,
+            actual: sql.to_string(),
         });
     };
     Ok(select)

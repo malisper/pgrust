@@ -5,13 +5,16 @@ mod views;
 
 use row_security::apply_query_row_security_with_active_relations;
 pub(crate) use row_security::{
-    RlsWriteCheck, build_target_relation_row_security, relation_has_row_security,
+    build_target_relation_row_security, relation_has_row_security, RlsWriteCheck,
+    RlsWriteCheckSource,
 };
 pub(crate) use rules::{format_stored_rule_definition, split_stored_rule_action_sql};
 pub(crate) use view_dml::{
     ResolvedAutoViewTarget, ViewDmlEvent, ViewDmlRewriteError, resolve_auto_updatable_view_target,
 };
-pub(crate) use views::{load_view_return_query, load_view_return_select};
+pub(crate) use views::{
+    load_view_return_query, load_view_return_select, split_stored_view_definition_sql,
+};
 
 use crate::backend::parser::{CatalogLookup, ParseError};
 use crate::include::nodes::parsenodes::{Query, RangeTblEntry, RangeTblEntryKind};

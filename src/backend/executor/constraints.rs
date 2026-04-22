@@ -81,6 +81,18 @@ pub(crate) fn enforce_row_security_write_checks(
         match eval_expr(&check.expr, &mut slot, ctx)? {
             Value::Null | Value::Bool(true) => {}
             Value::Bool(false) => {
+                if let crate::backend::rewrite::RlsWriteCheckSource::ViewCheckOption(view_name) =
+                    &check.source
+                {
+                    return Err(ExecError::DetailedError {
+                        message: format!(
+                            "new row violates check option for view \"{view_name}\""
+                        ),
+                        detail: Some(format_failing_row_detail(values, &ctx.datetime_config)),
+                        hint: None,
+                        sqlstate: "44000",
+                    });
+                }
                 return Err(ExecError::DetailedError {
                     message: check
                         .policy_name
@@ -101,6 +113,18 @@ pub(crate) fn enforce_row_security_write_checks(
                 });
             }
             _ => {
+                if let crate::backend::rewrite::RlsWriteCheckSource::ViewCheckOption(view_name) =
+                    &check.source
+                {
+                    return Err(ExecError::DetailedError {
+                        message: "view CHECK OPTION expression must return boolean".into(),
+                        detail: Some(format!(
+                            "check option for view \"{view_name}\" produced a non-boolean value"
+                        )),
+                        hint: None,
+                        sqlstate: "42804",
+                    });
+                }
                 return Err(ExecError::DetailedError {
                     message: "row-level security policy expression must return boolean".into(),
                     detail: Some(

@@ -788,22 +788,15 @@ fn view_definition_and_check_option(
         .find(|row| row.rulename == "_RETURN")
         .map(|row| row.ev_action)
         .unwrap_or_default();
-    let normalized = sql.trim().trim_end_matches(';').trim();
-    let lowered = normalized.to_ascii_lowercase();
-
-    if lowered.ends_with("with local check option") {
-        let cutoff = normalized.len() - "with local check option".len();
-        return (normalized[..cutoff].trim().to_string(), "LOCAL");
-    }
-    if lowered.ends_with("with cascaded check option") {
-        let cutoff = normalized.len() - "with cascaded check option".len();
-        return (normalized[..cutoff].trim().to_string(), "CASCADED");
-    }
-    if lowered.ends_with("with check option") {
-        let cutoff = normalized.len() - "with check option".len();
-        return (normalized[..cutoff].trim().to_string(), "CASCADED");
-    }
-    (normalized.to_string(), "NONE")
+    let (definition, check_option) = crate::backend::rewrite::split_stored_view_definition_sql(&sql);
+    (
+        definition.to_string(),
+        match check_option {
+            crate::include::nodes::parsenodes::ViewCheckOption::None => "NONE",
+            crate::include::nodes::parsenodes::ViewCheckOption::Local => "LOCAL",
+            crate::include::nodes::parsenodes::ViewCheckOption::Cascaded => "CASCADED",
+        },
+    )
 }
 
 fn describe_view_updatability(
