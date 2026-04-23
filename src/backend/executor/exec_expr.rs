@@ -3873,6 +3873,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::CurrentDatabase => {
             Ok(Value::Text(ctx.current_database_name.clone().into()))
         }
+        BuiltinScalarFunction::PgBackendPid => Ok(Value::Int32(ctx.client_id as i32)),
         BuiltinScalarFunction::PgColumnCompression => eval_pg_column_compression_values(&values),
         BuiltinScalarFunction::PgPartitionRoot => eval_pg_partition_root(&values, ctx),
         BuiltinScalarFunction::ObjDescription => eval_obj_description(&values, ctx),
