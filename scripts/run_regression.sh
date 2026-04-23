@@ -262,6 +262,12 @@ ensure_port_available() {
     return 0
 }
 
+write_regression_config() {
+    cat > "$DATA_DIR/postgresql.conf" <<'EOF'
+fsync = off
+EOF
+}
+
 start_server() {
     if ! ensure_port_available; then
         return 1
@@ -286,6 +292,7 @@ restart_server() {
     cleanup
     rm -rf "$DATA_DIR"
     mkdir -p "$DATA_DIR"
+    write_regression_config
 
     if ! start_server; then
         echo "  -> Restart failed; aborting run to avoid contaminating later results."
@@ -338,6 +345,7 @@ if [[ "$SKIP_SERVER" == false ]]; then
     # Fresh data directory for each run
     rm -rf "$DATA_DIR"
     mkdir -p "$DATA_DIR"
+    write_regression_config
 
     if ! start_server; then
         echo "ERROR: Server did not become ready in time"

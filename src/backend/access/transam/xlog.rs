@@ -940,6 +940,7 @@ struct WalWriterInner {
     wal_dir: PathBuf,
     current_segno: Option<WalSegNo>,
     file: Option<BufWriter<File>>,
+    fsync_on_flush: bool,
     insert_lsn: Lsn,
     written_lsn: Lsn,
     flushed_lsn: Lsn,
@@ -962,6 +963,10 @@ impl Drop for WalWriter {
 
 impl WalWriter {
     pub fn new(wal_dir: &Path) -> Result<Self, WalError> {
+        Self::new_with_fsync(wal_dir, true)
+    }
+
+    pub fn new_with_fsync(wal_dir: &Path, fsync_on_flush: bool) -> Result<Self, WalError> {
         std::fs::create_dir_all(wal_dir)?;
         let (size, last_record_ptr) = scan_existing_wal_state(wal_dir)?;
         Ok(Self {
@@ -969,6 +974,7 @@ impl WalWriter {
                 wal_dir: wal_dir.to_path_buf(),
                 current_segno: None,
                 file: None,
+                fsync_on_flush,
                 insert_lsn: size,
                 written_lsn: size,
                 flushed_lsn: size,
@@ -1383,8 +1389,10 @@ impl WalWriter {
                 guard.written_lsn = guard.insert_lsn;
             }
             let dirty_segments = std::mem::take(&mut guard.dirty_segments);
-            for segno in dirty_segments {
-                Self::fsync_segment(guard, segno)?;
+            if guard.fsync_on_flush {
+                for segno in dirty_segments {
+                    Self::fsync_segment(guard, segno)?;
+                }
             }
             guard.flushed_lsn = guard.insert_lsn;
         }

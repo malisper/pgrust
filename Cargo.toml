@@ -55,7 +55,7 @@ web-time = "1"
 split-debuginfo = "unpacked"
 
 [profile.test]
-opt-level = 3
+opt-level = 0
 split-debuginfo = "unpacked"
 
 [profile.release]
