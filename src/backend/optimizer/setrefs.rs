@@ -58,6 +58,7 @@ impl IndexedTlist {
 enum LowerMode<'a> {
     Scalar,
     Input {
+        path: Option<&'a Path>,
         tlist: &'a IndexedTlist,
     },
     Aggregate {
@@ -150,7 +151,7 @@ fn special_slot_var(varno: usize, index: usize, sql_type: crate::backend::parser
     })
 }
 
-fn build_simple_tlist(output_vars: &[Expr]) -> IndexedTlist {
+fn build_simple_tlist_from_exprs(output_vars: &[Expr]) -> IndexedTlist {
     IndexedTlist {
         entries: output_vars
             .iter()
@@ -163,6 +164,33 @@ fn build_simple_tlist(output_vars: &[Expr]) -> IndexedTlist {
             })
             .collect(),
     }
+}
+
+fn build_simple_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
+    let output_vars = path.output_vars();
+    let append_info = root
+        .and_then(|root| path_single_relid(path).and_then(|relid| append_translation(root, relid)));
+    let mut tlist = build_simple_tlist_from_exprs(&output_vars);
+    if let Some(info) = append_info {
+        for (index, entry) in tlist.entries.iter_mut().enumerate() {
+            if info
+                .translated_vars
+                .get(index)
+                .is_some_and(|translated| translated == &output_vars[index])
+            {
+                entry.match_exprs = dedup_match_exprs(vec![
+                    entry.match_exprs[0].clone(),
+                    Expr::Var(Var {
+                        varno: info.parent_relid,
+                        varattno: user_attrno(index),
+                        varlevelsup: 0,
+                        vartype: entry.sql_type,
+                    }),
+                ]);
+            }
+        }
+    }
+    tlist
 }
 
 fn aggregate_output_expr(accum: &crate::include::nodes::primnodes::AggAccum, aggno: usize) -> Expr {
@@ -549,7 +577,7 @@ fn build_path_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
         Path::NestedLoopJoin { left, right, .. } | Path::HashJoin { left, right, .. } => {
             build_join_tlist(root, path, left, right)
         }
-        _ => build_simple_tlist(&path.output_vars()),
+        _ => build_simple_tlist(root, path),
     }
 }
 
@@ -1346,7 +1374,7 @@ fn fix_upper_expr_for_input(
 fn lower_direct_ref(expr: &Expr, mode: LowerMode<'_>) -> Option<Expr> {
     match mode {
         LowerMode::Scalar => None,
-        LowerMode::Input { tlist } => search_tlist_entry(None, expr, tlist)
+        LowerMode::Input { tlist, .. } => search_tlist_entry(None, expr, tlist)
             .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type)),
         LowerMode::Aggregate { layout, tlist, .. } => search_tlist_entry(None, expr, tlist)
             .map(|entry| special_slot_var(OUTER_VAR, entry.index, entry.sql_type))
@@ -1973,7 +2001,14 @@ fn lower_agg_accum(
             .into_iter()
             .map(|arg| {
                 let arg = fix_upper_expr_for_input(ctx.root, arg, path, input_tlist);
-                lower_expr(ctx, arg, LowerMode::Input { tlist: input_tlist })
+                lower_expr(
+                    ctx,
+                    arg,
+                    LowerMode::Input {
+                        path: Some(path),
+                        tlist: input_tlist,
+                    },
+                )
             })
             .collect(),
         order_by: accum
@@ -1983,7 +2018,14 @@ fn lower_agg_accum(
             .collect(),
         filter: accum.filter.map(|filter| {
             let filter = fix_upper_expr_for_input(ctx.root, filter, path, input_tlist);
-            lower_expr(ctx, filter, LowerMode::Input { tlist: input_tlist })
+            lower_expr(
+                ctx,
+                filter,
+                LowerMode::Input {
+                    path: Some(path),
+                    tlist: input_tlist,
+                },
+            )
         }),
         ..accum
     }
@@ -2016,7 +2058,9 @@ fn lower_sublink(
         .map(|param| {
             let expr = match mode {
                 LowerMode::Scalar => param.expr.clone(),
-                LowerMode::Input { tlist } => fix_upper_expr(ctx.root, param.expr.clone(), tlist),
+                LowerMode::Input { path, tlist } => path
+                    .map(|path| fix_upper_expr_for_input(ctx.root, param.expr.clone(), path, tlist))
+                    .unwrap_or_else(|| fix_upper_expr(ctx.root, param.expr.clone(), tlist)),
                 LowerMode::Aggregate {
                     group_by, layout, ..
                 } => match ctx.root {
@@ -2898,6 +2942,7 @@ fn set_filter_references(
         ctx,
         predicate,
         LowerMode::Input {
+            path: Some(&input),
             tlist: &input_tlist,
         },
     );
@@ -3034,12 +3079,21 @@ fn set_bitmap_index_scan_references(
     keys: Vec<crate::include::access::scankey::ScanKeyData>,
     index_quals: Vec<Expr>,
 ) -> Plan {
-    let scan_tlist = build_simple_tlist(
+    let scan_tlist = build_simple_tlist_from_exprs(
         &slot_output_target(source_id, &desc.columns, |column| column.sql_type).exprs,
     );
     let index_quals = index_quals
         .into_iter()
-        .map(|expr| lower_expr(ctx, expr, LowerMode::Input { tlist: &scan_tlist }))
+        .map(|expr| {
+            lower_expr(
+                ctx,
+                expr,
+                LowerMode::Input {
+                    path: None,
+                    tlist: &scan_tlist,
+                },
+            )
+        })
         .collect();
     Plan::BitmapIndexScan {
         plan_info,
@@ -3069,12 +3123,21 @@ fn set_bitmap_heap_scan_references(
     bitmapqual: Box<Path>,
     recheck_qual: Vec<Expr>,
 ) -> Plan {
-    let scan_tlist = build_simple_tlist(
+    let scan_tlist = build_simple_tlist_from_exprs(
         &slot_output_target(source_id, &desc.columns, |column| column.sql_type).exprs,
     );
     let recheck_qual = recheck_qual
         .into_iter()
-        .map(|expr| lower_expr(ctx, expr, LowerMode::Input { tlist: &scan_tlist }))
+        .map(|expr| {
+            lower_expr(
+                ctx,
+                expr,
+                LowerMode::Input {
+                    path: None,
+                    tlist: &scan_tlist,
+                },
+            )
+        })
         .collect();
     Plan::BitmapHeapScan {
         plan_info,
@@ -3142,7 +3205,14 @@ fn set_nested_loop_join_references(
                     consumed_parent_params.extend(param_consumed_parent_params);
                     params.push(ExecParamSource {
                         paramid: param.paramid,
-                        expr: lower_expr(ctx, fixed_expr, LowerMode::Input { tlist: &left_tlist }),
+                        expr: lower_expr(
+                            ctx,
+                            fixed_expr,
+                            LowerMode::Input {
+                                path: Some(&left),
+                                tlist: &left_tlist,
+                            },
+                        ),
                     });
                 } else {
                     propagated_params.push(ExecParamSource {
@@ -3215,7 +3285,16 @@ fn set_hash_join_references(
         .collect::<Vec<_>>();
     let outer_hash_keys = outer_hash_keys
         .into_iter()
-        .map(|expr| lower_expr(ctx, expr, LowerMode::Input { tlist: &left_tlist }))
+        .map(|expr| {
+            lower_expr(
+                ctx,
+                expr,
+                LowerMode::Input {
+                    path: Some(&left),
+                    tlist: &left_tlist,
+                },
+            )
+        })
         .collect::<Vec<_>>();
     let inner_hash_keys = inner_hash_keys
         .into_iter()
@@ -3224,6 +3303,7 @@ fn set_hash_join_references(
                 ctx,
                 expr,
                 LowerMode::Input {
+                    path: Some(&right),
                     tlist: &right_tlist,
                 },
             )
@@ -3295,6 +3375,7 @@ fn set_projection_references(
             ctx,
             TargetEntry { expr, ..target },
             LowerMode::Input {
+                path: Some(&input),
                 tlist: &input_tlist,
             },
         ));
@@ -3324,6 +3405,7 @@ fn set_order_references(
                 ctx,
                 item,
                 LowerMode::Input {
+                    path: Some(&input),
                     tlist: &input_tlist,
                 },
             )
@@ -3375,6 +3457,7 @@ fn set_aggregate_references(
                 ctx,
                 expr,
                 LowerMode::Input {
+                    path: Some(&input),
                     tlist: &input_tlist,
                 },
             )
@@ -3427,7 +3510,14 @@ fn lower_window_clause_for_input(
         } else {
             fix_upper_expr_for_input(root, lowered, input, input_tlist)
         };
-        lower_expr(ctx, fixed, LowerMode::Input { tlist: input_tlist })
+        lower_expr(
+            ctx,
+            fixed,
+            LowerMode::Input {
+                path: Some(input),
+                tlist: input_tlist,
+            },
+        )
     };
     WindowClause {
         spec: crate::include::nodes::primnodes::WindowSpec {
@@ -3672,6 +3762,7 @@ fn set_project_set_references(
                 ctx,
                 target,
                 LowerMode::Input {
+                    path: Some(&input),
                     tlist: &input_tlist,
                 },
             )
