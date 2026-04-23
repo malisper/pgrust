@@ -5,10 +5,10 @@ use crate::backend::commands::tablecmds::{
 use crate::backend::utils::cache::relcache::{IndexAmOpEntry, IndexAmProcEntry};
 use crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
-use crate::include::access::brin::BrinOptions;
 use crate::include::access::amapi::{
     IndexBuildEmptyContext, IndexBuildExprContext, IndexInsertContext, IndexUniqueCheck,
 };
+use crate::include::access::brin::BrinOptions;
 use crate::include::catalog::{
     BRIN_AM_OID, GIST_AM_OID, GIST_RANGE_FAMILY_OID, SPGIST_AM_OID, builtin_range_rows,
     range_type_ref_for_sql_type,
@@ -72,14 +72,12 @@ impl Database {
         let mut resolved = BrinOptions::default();
         for option in options {
             if option.name.eq_ignore_ascii_case("pages_per_range") {
-                let pages_per_range =
-                    option
-                        .value
-                        .parse::<u32>()
-                        .map_err(|_| ExecError::Parse(ParseError::UnexpectedToken {
-                            expected: "positive integer pages_per_range",
-                            actual: option.value.clone(),
-                        }))?;
+                let pages_per_range = option.value.parse::<u32>().map_err(|_| {
+                    ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "positive integer pages_per_range",
+                        actual: option.value.clone(),
+                    })
+                })?;
                 if pages_per_range == 0 {
                     return Err(ExecError::Parse(ParseError::UnexpectedToken {
                         expected: "positive integer pages_per_range",
@@ -885,7 +883,10 @@ impl Database {
             )));
         }
         if access_method_name.eq_ignore_ascii_case("brin")
-            && create_stmt.columns.iter().any(|column| column.expr_sql.is_some())
+            && create_stmt
+                .columns
+                .iter()
+                .any(|column| column.expr_sql.is_some())
         {
             return Err(ExecError::Parse(ParseError::FeatureNotSupported(
                 "BRIN expression indexes".into(),

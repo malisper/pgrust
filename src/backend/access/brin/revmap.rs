@@ -14,7 +14,8 @@ use crate::include::access::brin_revmap::{
 
 use super::pageops::{
     brin_metapage_data, brin_page_get_freespace, brin_page_init, brin_page_start_evacuating,
-    brin_regular_page_add_item, brin_set_metapage_last_revmap_page, page_index_tuple_delete_no_compact,
+    brin_regular_page_add_item, brin_set_metapage_last_revmap_page,
+    page_index_tuple_delete_no_compact,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,7 +35,9 @@ pub(crate) fn brin_revmap_initialize(
         return Err(CatalogError::Corrupt("invalid BRIN metapage magic"));
     }
     if metadata.pages_per_range == 0 {
-        return Err(CatalogError::Corrupt("BRIN pages_per_range must be positive"));
+        return Err(CatalogError::Corrupt(
+            "BRIN pages_per_range must be positive",
+        ));
     }
     Ok(BrinRevmap {
         pages_per_range: metadata.pages_per_range,
@@ -66,7 +69,12 @@ pub(crate) fn brin_revmap_extend(
         if brin_page_start_evacuating(&mut index_pages[map_block as usize])? {
             let moved = evacuate_regular_page(index_pages, map_block)?;
             for (tuple_heap_blk, location) in moved {
-                revmap_write_entry(index_pages, revmap.pages_per_range, tuple_heap_blk, location)?;
+                revmap_write_entry(
+                    index_pages,
+                    revmap.pages_per_range,
+                    tuple_heap_blk,
+                    location,
+                )?;
             }
         }
 
@@ -97,10 +105,15 @@ pub(crate) fn brin_revmap_get_location(
     if crate::include::access::brin_page::brin_page_type(page).map_err(page_error)?
         != BRIN_PAGETYPE_REVMAP
     {
-        return Err(CatalogError::Corrupt("BRIN revmap page has wrong page type"));
+        return Err(CatalogError::Corrupt(
+            "BRIN revmap page has wrong page type",
+        ));
     }
 
-    let entry = revmap_read_entry(page, heap_blk_to_revmap_index(revmap.pages_per_range, heap_blk))?;
+    let entry = revmap_read_entry(
+        page,
+        heap_blk_to_revmap_index(revmap.pages_per_range, heap_blk),
+    )?;
     Ok(entry)
 }
 
@@ -132,7 +145,9 @@ pub(crate) fn brin_revmap_desummarize_range(
     if crate::include::access::brin_page::brin_page_type(page).map_err(page_error)?
         != BRIN_PAGETYPE_REGULAR
     {
-        return Err(CatalogError::Corrupt("BRIN revmap points to non-regular page"));
+        return Err(CatalogError::Corrupt(
+            "BRIN revmap points to non-regular page",
+        ));
     }
     let max_offset = page_get_max_offset_number(page).map_err(page_error)?;
     if location.offset == 0 || location.offset > max_offset {
@@ -168,7 +183,9 @@ pub(crate) fn brin_revmap_get_tuple_bytes<'a>(
     if crate::include::access::brin_page::brin_page_type(page).map_err(page_error)?
         != BRIN_PAGETYPE_REGULAR
     {
-        return Err(CatalogError::Corrupt("BRIN revmap points to non-regular page"));
+        return Err(CatalogError::Corrupt(
+            "BRIN revmap points to non-regular page",
+        ));
     }
     let bytes = page_get_item(page, location.offset).map_err(page_error)?;
     Ok(Some((location, bytes)))
@@ -184,10 +201,7 @@ fn ensure_page_slot(index_pages: &mut Vec<[u8; BLCKSZ]>, block: u32) {
     }
 }
 
-fn revmap_read_entry(
-    page: &[u8; BLCKSZ],
-    index: usize,
-) -> Result<BrinTupleLocation, CatalogError> {
+fn revmap_read_entry(page: &[u8; BLCKSZ], index: usize) -> Result<BrinTupleLocation, CatalogError> {
     if index >= REVMAP_PAGE_MAXITEMS {
         return Err(CatalogError::Corrupt("BRIN revmap index out of range"));
     }
@@ -211,7 +225,9 @@ fn revmap_write_entry(
     if crate::include::access::brin_page::brin_page_type(page).map_err(page_error)?
         != BRIN_PAGETYPE_REVMAP
     {
-        return Err(CatalogError::Corrupt("BRIN revmap page has wrong page type"));
+        return Err(CatalogError::Corrupt(
+            "BRIN revmap page has wrong page type",
+        ));
     }
     let index = heap_blk_to_revmap_index(pages_per_range, heap_blk);
     if index >= REVMAP_PAGE_MAXITEMS {
@@ -229,7 +245,9 @@ fn evacuate_regular_page(
 ) -> Result<Vec<(u32, BrinTupleLocation)>, CatalogError> {
     let snapshot = *index_pages
         .get(source_block as usize)
-        .ok_or(CatalogError::Corrupt("missing BRIN source page for evacuation"))?;
+        .ok_or(CatalogError::Corrupt(
+            "missing BRIN source page for evacuation",
+        ))?;
     let max_offset = page_get_max_offset_number(&snapshot).map_err(page_error)?;
     let mut tuples = Vec::new();
     for offnum in 1..=max_offset {
@@ -237,9 +255,13 @@ fn evacuate_regular_page(
         if item_id.lp_flags == ItemIdFlags::Unused || !item_id.has_storage() {
             continue;
         }
-        let bytes = page_get_item(&snapshot, offnum).map_err(page_error)?.to_vec();
+        let bytes = page_get_item(&snapshot, offnum)
+            .map_err(page_error)?
+            .to_vec();
         if bytes.len() < 4 {
-            return Err(CatalogError::Corrupt("truncated BRIN tuple during evacuation"));
+            return Err(CatalogError::Corrupt(
+                "truncated BRIN tuple during evacuation",
+            ));
         }
         let heap_blk = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
         tuples.push((offnum, heap_blk, bytes));
@@ -251,7 +273,9 @@ fn evacuate_regular_page(
         page_index_tuple_delete_no_compact(
             index_pages
                 .get_mut(source_block as usize)
-                .ok_or(CatalogError::Corrupt("missing BRIN source page for deletion"))?,
+                .ok_or(CatalogError::Corrupt(
+                    "missing BRIN source page for deletion",
+                ))?,
             offnum,
         )?;
         moved.push((heap_blk, location));
@@ -292,20 +316,18 @@ fn insert_regular_tuple(
     }
 }
 
-fn page_error(
-    err: crate::backend::storage::page::bufpage::PageError,
-) -> CatalogError {
+fn page_error(err: crate::backend::storage::page::bufpage::PageError) -> CatalogError {
     CatalogError::Io(format!("BRIN page error: {err:?}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::catalog::catalog::column_desc;
     use crate::backend::access::brin::pageops::{brin_metapage_init, brin_page_init};
     use crate::backend::access::brin::tuple::{brin_build_desc, brin_form_tuple};
-    use crate::include::access::brin_internal::BrinMemTuple;
+    use crate::backend::catalog::catalog::column_desc;
     use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::access::brin_internal::BrinMemTuple;
     use crate::include::nodes::primnodes::RelationDesc;
 
     fn int4_index_desc() -> RelationDesc {
@@ -335,7 +357,10 @@ mod tests {
         brin_revmap_set_location(&mut pages, &mut revmap, 0, location).unwrap();
 
         assert_eq!(revmap.last_revmap_page, 1);
-        assert_eq!(brin_revmap_get_location(&pages, &revmap, 0).unwrap(), location);
+        assert_eq!(
+            brin_revmap_get_location(&pages, &revmap, 0).unwrap(),
+            location
+        );
         let raw = &pages[1][revmap_entry_offset(0)..revmap_entry_offset(0) + 6];
         assert_eq!(raw, &[9, 0, 0, 0, 3, 0]);
     }
@@ -349,8 +374,8 @@ mod tests {
         brin_set_metapage_last_revmap_page(&mut pages[0], 1).unwrap();
 
         let tuple = sample_summary_bytes(0);
-        let tuple_off = crate::backend::storage::page::bufpage::page_add_item(&mut pages[2], &tuple)
-            .unwrap();
+        let tuple_off =
+            crate::backend::storage::page::bufpage::page_add_item(&mut pages[2], &tuple).unwrap();
 
         let mut revmap = brin_revmap_initialize(&pages).unwrap();
         brin_revmap_set_location(
@@ -380,7 +405,10 @@ mod tests {
 
         let new_location = brin_revmap_get_location(&pages, &revmap, 0).unwrap();
         assert_eq!(new_location.block, 3);
-        assert_eq!(page_get_item(&pages[3], new_location.offset).unwrap(), tuple.as_slice());
+        assert_eq!(
+            page_get_item(&pages[3], new_location.offset).unwrap(),
+            tuple.as_slice()
+        );
     }
 
     #[test]
@@ -393,8 +421,8 @@ mod tests {
         brin_page_init(&mut pages[2], BRIN_PAGETYPE_REGULAR).unwrap();
 
         let tuple = sample_summary_bytes(0);
-        let off = crate::backend::storage::page::bufpage::page_add_item(&mut pages[2], &tuple)
-            .unwrap();
+        let off =
+            crate::backend::storage::page::bufpage::page_add_item(&mut pages[2], &tuple).unwrap();
         brin_revmap_set_location(
             &mut pages,
             &mut revmap,

@@ -130,7 +130,7 @@ impl TransactionManager {
     fn write_initial_status_file(file: &mut File, clog_buf: &[u8]) -> Result<(), MvccError> {
         file.write_all(clog_buf)
             .map_err(|e| MvccError::Io(e.to_string()))?;
-        file.sync_data().map_err(|e| MvccError::Io(e.to_string()))?;
+        crate::backend::storage::sync_file_data(file).map_err(|e| MvccError::Io(e.to_string()))?;
         file.seek(SeekFrom::Start(0))
             .map_err(|e| MvccError::Io(e.to_string()))?;
         Ok(())
@@ -294,7 +294,7 @@ impl TransactionManager {
             .map_err(|e| MvccError::Io(e.to_string()))?;
         file.write_all(&self.clog_buf)
             .map_err(|e| MvccError::Io(e.to_string()))?;
-        file.sync_data().map_err(|e| MvccError::Io(e.to_string()))?;
+        crate::backend::storage::sync_file_data(file).map_err(|e| MvccError::Io(e.to_string()))?;
         file.seek(SeekFrom::Start(0))
             .map_err(|e| MvccError::Io(e.to_string()))?;
         Ok(())

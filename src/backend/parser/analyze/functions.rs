@@ -2108,11 +2108,15 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
             .iter()
             .all(|(candidate, _)| *candidate != BuiltinScalarFunction::PgNotify)
         {
-            by_func.push((BuiltinScalarFunction::PgNotify, SqlType::new(SqlTypeKind::Void)));
+            by_func.push((
+                BuiltinScalarFunction::PgNotify,
+                SqlType::new(SqlTypeKind::Void),
+            ));
         }
-        if by_func.iter().all(|(candidate, _)| {
-            *candidate != BuiltinScalarFunction::PgNotificationQueueUsage
-        }) {
+        if by_func
+            .iter()
+            .all(|(candidate, _)| *candidate != BuiltinScalarFunction::PgNotificationQueueUsage)
+        {
             by_func.push((
                 BuiltinScalarFunction::PgNotificationQueueUsage,
                 SqlType::new(SqlTypeKind::Float8),
@@ -3097,12 +3101,12 @@ mod tests {
             .into_iter()
             .find(|row| row.proretset && row.prorettype == INT4_TYPE_OID && row.pronargs == 2)
             .expect("generate_series(int4, int4) row");
-        let result_type = catalog.type_by_oid(row.prorettype).expect("result type").sql_type;
+        let result_type = catalog
+            .type_by_oid(row.prorettype)
+            .expect("result type")
+            .sql_type;
 
-        assert_eq!(
-            resolve_out_parameter_row_shape(&catalog, &row),
-            None,
-        );
+        assert_eq!(resolve_out_parameter_row_shape(&catalog, &row), None,);
         assert_eq!(
             resolve_function_row_shape(&catalog, &row, result_type),
             Some(ResolvedFunctionRowShape::None),
