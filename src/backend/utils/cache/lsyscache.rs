@@ -8,13 +8,13 @@ use crate::backend::storage::smgr::{BLCKSZ, ForkNumber, StorageManager};
 use crate::backend::utils::cache::catcache::normalize_catalog_name;
 use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
-    backend_catcache, backend_relcache, ensure_attribute_rows, ensure_class_rows,
+    backend_catcache, backend_relcache, ensure_am_rows, ensure_attribute_rows, ensure_class_rows,
     ensure_constraint_rows, ensure_index_rows, ensure_inherit_rows, ensure_namespace_rows,
     ensure_proc_rows, ensure_rewrite_rows, ensure_statistic_rows, ensure_type_rows,
 };
 use crate::backend::utils::cache::system_views::{
-    build_pg_locks_rows, build_pg_policies_rows, build_pg_rules_rows, build_pg_stat_io_rows,
-    build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
+    build_pg_indexes_rows, build_pg_locks_rows, build_pg_policies_rows, build_pg_rules_rows,
+    build_pg_stat_io_rows, build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
     build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_views_rows,
 };
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
@@ -990,6 +990,16 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             authids,
             ensure_class_rows(self.db, self.client_id, self.txn_ctx),
             ensure_rewrite_rows(self.db, self.client_id, self.txn_ctx),
+        )
+    }
+
+    fn pg_indexes_rows(&self) -> Vec<Vec<Value>> {
+        build_pg_indexes_rows(
+            ensure_namespace_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_class_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_attribute_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_index_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_am_rows(self.db, self.client_id, self.txn_ctx),
         )
     }
 

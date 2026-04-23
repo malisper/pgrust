@@ -1647,6 +1647,10 @@ fn try_parse_index_statement(sql: &str) -> Result<Option<Statement>, ParseError>
         return build_alter_index_rename_statement(trimmed)
             .map(|stmt| Some(Statement::AlterIndexRename(stmt)));
     }
+    if lowered.contains(" attach partition ") {
+        return build_alter_index_attach_partition_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterIndexAttachPartition(stmt)));
+    }
     if lowered.contains(" set statistics ") {
         return build_alter_index_alter_column_statistics_statement(trimmed)
             .map(|stmt| Some(Statement::AlterIndexAlterColumnStatistics(stmt)));
@@ -2989,6 +2993,30 @@ fn build_alter_index_rename_statement(sql: &str) -> Result<AlterTableRenameState
         only: false,
         table_name,
         new_table_name,
+    })
+}
+
+fn build_alter_index_attach_partition_statement(
+    sql: &str,
+) -> Result<AlterIndexAttachPartitionStatement, ParseError> {
+    let mut rest = consume_keyword(sql.trim_start(), "alter").trim_start();
+    rest = consume_keyword(rest, "index").trim_start();
+    let (parent_parts, rest_after_parent) = parse_qualified_identifier_parts(rest)?;
+    let parent_index_name = parent_parts.join(".");
+    let mut rest = rest_after_parent.trim_start();
+    rest = consume_keyword(rest, "attach").trim_start();
+    rest = consume_keyword(rest, "partition").trim_start();
+    let (child_parts, rest_after_child) = parse_qualified_identifier_parts(rest)?;
+    let child_index_name = child_parts.join(".");
+    if !rest_after_child.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER INDEX ATTACH PARTITION statement",
+            actual: rest_after_child.trim().into(),
+        });
+    }
+    Ok(AlterIndexAttachPartitionStatement {
+        parent_index_name,
+        child_index_name,
     })
 }
 
@@ -9433,8 +9461,12 @@ fn set_column_constraint_name(constraint: &mut ColumnConstraint, name: String) {
 
 fn build_create_index(pair: Pair<'_, Rule>) -> Result<CreateIndexStatement, ParseError> {
     let raw = pair.as_str().to_ascii_lowercase();
-    let unique = raw.starts_with("create unique index");
+    let words = raw.split_ascii_whitespace().collect::<Vec<_>>();
+    let unique = words.get(1) == Some(&"unique");
+    let concurrently_index = if unique { 3 } else { 2 };
+    let concurrently = words.get(concurrently_index) == Some(&"concurrently");
     let mut nulls_not_distinct = false;
+    let mut only = false;
     let mut if_not_exists = false;
     let mut index_name = None;
     let mut table_name = None;
@@ -9447,6 +9479,7 @@ fn build_create_index(pair: Pair<'_, Rule>) -> Result<CreateIndexStatement, Pars
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::if_not_exists_clause => if_not_exists = true,
+            Rule::only_clause => only = true,
             Rule::create_index_name if index_name.is_none() => {
                 index_name = Some(build_identifier(
                     part.into_inner().next().ok_or(ParseError::UnexpectedEof)?,
@@ -9499,6 +9532,8 @@ fn build_create_index(pair: Pair<'_, Rule>) -> Result<CreateIndexStatement, Pars
     Ok(CreateIndexStatement {
         unique,
         nulls_not_distinct,
+        concurrently,
+        only,
         if_not_exists,
         index_name: index_name.unwrap_or_default(),
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
@@ -9917,6 +9952,8 @@ fn build_drop_database(pair: Pair<'_, Rule>) -> Result<DropDatabaseStatement, Pa
 }
 
 fn build_drop_index(pair: Pair<'_, Rule>) -> Result<DropIndexStatement, ParseError> {
+    let raw = pair.as_str().to_ascii_lowercase();
+    let concurrently = raw.split_ascii_whitespace().nth(2) == Some("concurrently");
     let mut if_exists = false;
     let mut index_names = Vec::new();
     for part in pair.into_inner() {
@@ -9931,6 +9968,7 @@ fn build_drop_index(pair: Pair<'_, Rule>) -> Result<DropIndexStatement, ParseErr
         return Err(ParseError::UnexpectedEof);
     }
     Ok(DropIndexStatement {
+        concurrently,
         if_exists,
         index_names,
     })

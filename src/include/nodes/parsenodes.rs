@@ -304,6 +304,7 @@ pub enum Statement {
     AlterSequenceRename(AlterTableRenameStatement),
     AlterIndexRename(AlterTableRenameStatement),
     AlterViewRename(AlterTableRenameStatement),
+    AlterIndexAttachPartition(AlterIndexAttachPartitionStatement),
     AlterIndexAlterColumnStatistics(AlterIndexAlterColumnStatisticsStatement),
     AlterTableAddColumn(AlterTableAddColumnStatement),
     AlterTableAddConstraint(AlterTableAddConstraintStatement),
@@ -1415,6 +1416,8 @@ pub struct AlterStatisticsStatement {
 pub struct CreateIndexStatement {
     pub unique: bool,
     pub nulls_not_distinct: bool,
+    pub concurrently: bool,
+    pub only: bool,
     pub if_not_exists: bool,
     pub index_name: String,
     pub table_name: String,
@@ -1424,6 +1427,12 @@ pub struct CreateIndexStatement {
     pub predicate: Option<SqlExpr>,
     pub predicate_sql: Option<String>,
     pub options: Vec<RelOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterIndexAttachPartitionStatement {
+    pub parent_index_name: String,
+    pub child_index_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2217,6 +2226,7 @@ pub struct DropTriggerStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DropIndexStatement {
+    pub concurrently: bool,
     pub if_exists: bool,
     pub index_names: Vec<String>,
 }

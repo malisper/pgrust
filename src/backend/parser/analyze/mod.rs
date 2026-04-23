@@ -59,8 +59,8 @@ static NEXT_WORKTABLE_ID: AtomicUsize = AtomicUsize::new(1);
 static NEXT_CTE_ID: AtomicUsize = AtomicUsize::new(1);
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{
-    build_pg_locks_rows, build_pg_policies_rows, build_pg_rules_rows, build_pg_stats_rows,
-    build_pg_views_rows,
+    build_pg_indexes_rows, build_pg_locks_rows, build_pg_policies_rows, build_pg_rules_rows,
+    build_pg_stats_rows, build_pg_views_rows,
 };
 use agg::*;
 use agg_output::*;
@@ -617,6 +617,10 @@ pub trait CatalogLookup {
         Vec::new()
     }
 
+    fn pg_indexes_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
+
     fn pg_policies_rows(&self) -> Vec<Vec<Value>> {
         Vec::new()
     }
@@ -876,6 +880,17 @@ impl CatalogLookup for Catalog {
             catcache.authid_rows(),
             catcache.class_rows(),
             catcache.rewrite_rows(),
+        )
+    }
+
+    fn pg_indexes_rows(&self) -> Vec<Vec<Value>> {
+        let catcache = crate::backend::utils::cache::catcache::CatCache::from_catalog(self);
+        build_pg_indexes_rows(
+            catcache.namespace_rows(),
+            catcache.class_rows(),
+            catcache.attribute_rows(),
+            catcache.index_rows(),
+            catcache.am_rows(),
         )
     }
 

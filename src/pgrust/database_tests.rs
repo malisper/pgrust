@@ -3148,6 +3148,407 @@ fn partitioned_primary_keys_support_rename_flow_and_index_tree_metadata() {
 }
 
 #[test]
+fn create_index_on_partitioned_table_builds_index_tree() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table idxpart (a int4, b int4) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart1 partition of idxpart for values from (0) to (10)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart2 partition of idxpart for values from (10) to (20) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart2a partition of idxpart2 for values from (10) to (15)",
+        )
+        .unwrap();
+
+    session.execute(&db, "create index on idxpart(a)").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relname, relkind::text, relhassubclass \
+               from pg_class \
+              where relname in ('idxpart_a_idx', 'idxpart1_a_idx', 'idxpart2_a_idx', 'idxpart2a_a_idx') \
+              order by relname",
+        ),
+        vec![
+            vec![
+                Value::Text("idxpart1_a_idx".into()),
+                Value::Text("i".into()),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("idxpart2_a_idx".into()),
+                Value::Text("I".into()),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("idxpart2a_a_idx".into()),
+                Value::Text("i".into()),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("idxpart_a_idx".into()),
+                Value::Text("I".into()),
+                Value::Bool(true),
+            ],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select child.relname, parent.relname \
+               from pg_inherits i \
+               join pg_class child on child.oid = i.inhrelid \
+               join pg_class parent on parent.oid = i.inhparent \
+              where parent.relname in ('idxpart_a_idx', 'idxpart2_a_idx') \
+              order by parent.relname, child.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("idxpart2a_a_idx".into()),
+                Value::Text("idxpart2_a_idx".into()),
+            ],
+            vec![
+                Value::Text("idxpart1_a_idx".into()),
+                Value::Text("idxpart_a_idx".into()),
+            ],
+            vec![
+                Value::Text("idxpart2_a_idx".into()),
+                Value::Text("idxpart_a_idx".into()),
+            ],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indexdef from pg_indexes where tablename = 'idxpart' and indexname = 'idxpart_a_idx'",
+        ),
+        vec![vec![Value::Text(
+            "CREATE INDEX idxpart_a_idx ON ONLY public.idxpart USING btree (a)".into(),
+        )]]
+    );
+}
+
+#[test]
+fn create_index_on_partitioned_table_reuses_only_child_without_recursing() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table idxpart (a int4) partition by range (a)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart1 partition of idxpart for values from (0) to (100)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart2 partition of idxpart for values from (100) to (1000) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart21 partition of idxpart2 for values from (100) to (200)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart22 partition of idxpart2 for values from (200) to (300)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create index on idxpart22(a)")
+        .unwrap();
+    session
+        .execute(&db, "create index on only idxpart2(a)")
+        .unwrap();
+    session.execute(&db, "create index on idxpart(a)").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select idxcls.relname, heap.relname, coalesce(parent.relname, ''), idx.indisvalid \
+               from pg_index idx \
+               join pg_class idxcls on idxcls.oid = idx.indexrelid \
+               join pg_class heap on heap.oid = idx.indrelid \
+               left join pg_inherits inh on inh.inhrelid = idx.indexrelid \
+               left join pg_class parent on parent.oid = inh.inhparent \
+              where idxcls.relname like 'idxpart%' \
+              order by idxcls.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("idxpart1_a_idx".into()),
+                Value::Text("idxpart1".into()),
+                Value::Text("idxpart_a_idx".into()),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("idxpart22_a_idx".into()),
+                Value::Text("idxpart22".into()),
+                Value::Text("".into()),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("idxpart2_a_idx".into()),
+                Value::Text("idxpart2".into()),
+                Value::Text("idxpart_a_idx".into()),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("idxpart_a_idx".into()),
+                Value::Text("idxpart".into()),
+                Value::Text("".into()),
+                Value::Bool(false),
+            ],
+        ]
+    );
+    assert!(
+        query_rows(
+            &db,
+            1,
+            "select relname from pg_class where relname = 'idxpart21_a_idx'",
+        )
+        .is_empty()
+    );
+
+    session
+        .execute(
+            &db,
+            "alter index idxpart2_a_idx attach partition idxpart22_a_idx",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter index idxpart2_a_idx attach partition idxpart22_a_idx",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relname, indisvalid \
+               from pg_class join pg_index on indexrelid = oid \
+              where relname in ('idxpart2_a_idx', 'idxpart_a_idx') \
+              order by relname",
+        ),
+        vec![
+            vec![Value::Text("idxpart2_a_idx".into()), Value::Bool(false)],
+            vec![Value::Text("idxpart_a_idx".into()), Value::Bool(false)],
+        ]
+    );
+
+    session
+        .execute(&db, "create index on idxpart21(a)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter index idxpart2_a_idx attach partition idxpart21_a_idx",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relname, indisvalid \
+               from pg_class join pg_index on indexrelid = oid \
+              where relname in ('idxpart21_a_idx', 'idxpart22_a_idx', 'idxpart2_a_idx', 'idxpart_a_idx') \
+              order by relname",
+        ),
+        vec![
+            vec![Value::Text("idxpart21_a_idx".into()), Value::Bool(true)],
+            vec![Value::Text("idxpart22_a_idx".into()), Value::Bool(true)],
+            vec![Value::Text("idxpart2_a_idx".into()), Value::Bool(true)],
+            vec![Value::Text("idxpart_a_idx".into()), Value::Bool(true)],
+        ]
+    );
+}
+
+#[test]
+fn partitioned_index_only_and_future_partition_reconciliation() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table onlypart (a int4, b int4) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table onlypart1 partition of onlypart for values from (0) to (10)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create index on only onlypart(a)")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relkind::text, relhassubclass from pg_class where relname = 'onlypart_a_idx'",
+        ),
+        vec![vec![Value::Text("I".into()), Value::Bool(false)]]
+    );
+    assert!(
+        query_rows(
+            &db,
+            1,
+            "select relname from pg_class where relname = 'onlypart1_a_idx'"
+        )
+        .is_empty()
+    );
+
+    session
+        .execute(
+            &db,
+            "create table futpart (a int4, b int4) partition by range (a)",
+        )
+        .unwrap();
+    session.execute(&db, "create index on futpart(a)").unwrap();
+    session
+        .execute(
+            &db,
+            "create table futpart1 partition of futpart for values from (0) to (10)",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select child.relname, parent.relname \
+               from pg_inherits i \
+               join pg_class child on child.oid = i.inhrelid \
+               join pg_class parent on parent.oid = i.inhparent \
+              where parent.relname = 'futpart_a_idx'",
+        ),
+        vec![vec![
+            Value::Text("futpart1_a_idx".into()),
+            Value::Text("futpart_a_idx".into()),
+        ]]
+    );
+}
+
+#[test]
+fn partitioned_index_reuses_explicit_child_and_supports_attach_drop() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table preidx (a int4, b int4) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table preidx1 partition of preidx for values from (0) to (10)",
+        )
+        .unwrap();
+    session.execute(&db, "create index on preidx1(a)").unwrap();
+    session.execute(&db, "create index on preidx(a)").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_class where relname like 'preidx1_a_idx%'",
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select child.relname, parent.relname \
+               from pg_inherits i \
+               join pg_class child on child.oid = i.inhrelid \
+               join pg_class parent on parent.oid = i.inhparent \
+              where parent.relname = 'preidx_a_idx'",
+        ),
+        vec![vec![
+            Value::Text("preidx1_a_idx".into()),
+            Value::Text("preidx_a_idx".into()),
+        ]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create table attachidx (a int4, b int4) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table attachidx1 partition of attachidx for values from (0) to (10)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create index on only attachidx(a)")
+        .unwrap();
+    session
+        .execute(&db, "create index on attachidx1(a)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter index attachidx_a_idx attach partition attachidx1_a_idx",
+        )
+        .unwrap();
+
+    let err = session
+        .execute(&db, "drop index attachidx1_a_idx")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, hint: Some(hint), sqlstate, .. }
+            if message.contains("requires it")
+                && hint == "You can drop index attachidx_a_idx instead."
+                && sqlstate == "2BP01"
+    ));
+    session.execute(&db, "drop index attachidx_a_idx").unwrap();
+    assert!(
+        query_rows(
+            &db,
+            1,
+            "select relname from pg_class where relname in ('attachidx_a_idx', 'attachidx1_a_idx')",
+        )
+        .is_empty()
+    );
+}
+
+#[test]
 fn partitioned_key_coverage_checks_fire_for_root_partition_of_and_attach_partition() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
