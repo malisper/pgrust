@@ -53,9 +53,13 @@ ident = { quoted_ident | bare_ident }
 bare_ident = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 quoted_ident = @{ "\"" ~ ("\"\"" | !("\"") ~ ANY)* ~ "\"" }
 
-sql_string = @{ escape_string | string_literal }
+sql_string = @{ escape_string | dollar_string_literal | string_literal }
 string_literal = @{ "'" ~ ( "''" | (!"'" ~ ANY) )* ~ "'" }
 escape_string = @{ (^"e" | ^"E") ~ string_literal }
+dollar_string_literal = @{ dollar_quote_start ~ dollar_string_body ~ dollar_quote_end }
+dollar_quote_start = ${ "$" ~ PUSH(bare_ident?) ~ "$" }
+dollar_quote_end = ${ "$" ~ POP ~ "$" }
+dollar_string_body = { (!( "$" ~ PEEK ~ "$") ~ ANY)* }
 semi = _{ ";" }
 comma = _{ "," }
 assign_op = _{ ":=" | "=" }

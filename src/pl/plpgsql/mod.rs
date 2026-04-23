@@ -164,6 +164,22 @@ mod tests {
     }
 
     #[test]
+    fn execute_do_raise_accepts_dollar_quoted_message() {
+        run_plpgsql_test("execute_do_raise_accepts_dollar_quoted_message", || {
+            let stmt = DoStatement {
+                language: None,
+                code: r#"begin raise exception $$Patchfield "%" does not exist$$, 'PF0_1'; end"#
+                    .into(),
+            };
+            let err = execute_do(&stmt).unwrap_err();
+            assert!(matches!(
+                err,
+                ExecError::RaiseException(message) if message == "Patchfield \"PF0_1\" does not exist"
+            ));
+        });
+    }
+
+    #[test]
     fn execute_do_accepts_top_level_end_semicolon() {
         run_plpgsql_test("execute_do_accepts_top_level_end_semicolon", || {
             let stmt = DoStatement {
