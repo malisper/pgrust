@@ -646,6 +646,11 @@ pub(crate) fn execute_bound_update_with_rules(
     let result = (|| {
         let mut affected_rows = 0usize;
         let mut returned_rows = Vec::new();
+        let joined_update_events = if stmt.input_plan.is_some() {
+            Some(materialize_update_row_events(&stmt, ctx)?)
+        } else {
+            None
+        };
         for target in &stmt.targets {
             let view_has_user_rules =
                 relation_has_user_rules_for_event(target.relation_oid, RuleEvent::Update, catalog);
@@ -716,21 +721,31 @@ pub(crate) fn execute_bound_update_with_rules(
                 continue;
             }
 
-            for event in materialize_update_row_events(
-                &crate::backend::parser::BoundUpdateStatement {
-                    target_relation_name: target.relation_name.clone(),
-                    explain_target_name: target.relation_name.clone(),
-                    targets: vec![target.clone()],
-                    returning: Vec::new(),
-                    input_plan: None,
-                    target_visible_count: target.desc.columns.len(),
-                    visible_column_count: target.desc.columns.len(),
-                    target_ctid_index: target.desc.columns.len(),
-                    target_tableoid_index: target.desc.columns.len() + 1,
-                    subplans: Vec::new(),
-                },
-                ctx,
-            )? {
+            let target_events = if let Some(events) = &joined_update_events {
+                events
+                    .iter()
+                    .filter(|event| event.target.relation_oid == target.relation_oid)
+                    .cloned()
+                    .collect()
+            } else {
+                materialize_update_row_events(
+                    &crate::backend::parser::BoundUpdateStatement {
+                        target_relation_name: target.relation_name.clone(),
+                        explain_target_name: target.relation_name.clone(),
+                        targets: vec![target.clone()],
+                        returning: Vec::new(),
+                        input_plan: None,
+                        target_visible_count: target.desc.columns.len(),
+                        visible_column_count: target.desc.columns.len(),
+                        target_ctid_index: target.desc.columns.len(),
+                        target_tableoid_index: target.desc.columns.len() + 1,
+                        subplans: Vec::new(),
+                    },
+                    ctx,
+                )?
+            };
+
+            for event in target_events {
                 let outcome = execute_matching_rules(
                     &rules,
                     &event.old_values,
