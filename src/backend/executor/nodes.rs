@@ -1510,7 +1510,7 @@ fn builtin_scalar_function_infix_operator(
     }
 }
 
-fn render_explain_projection_expr_inner_with_qualifier(
+pub(crate) fn render_explain_projection_expr_inner_with_qualifier(
     expr: &Expr,
     qualifier: Option<&str>,
     column_names: &[String],
@@ -1586,7 +1586,7 @@ fn render_explain_infix_operand(
     }
 }
 
-fn render_explain_join_expr_inner(
+pub(crate) fn render_explain_join_expr_inner(
     expr: &Expr,
     outer_names: &[String],
     inner_names: &[String],

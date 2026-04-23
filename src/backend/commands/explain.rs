@@ -1,12 +1,17 @@
 use std::collections::BTreeSet;
 
 use crate::backend::executor::executor_start;
+use crate::backend::executor::{
+    render_explain_expr, render_explain_join_expr_inner,
+    render_explain_projection_expr_inner_with_qualifier,
+};
+use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::*;
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
-    AggAccum, Expr, ProjectSetTarget, SetReturningCall, SubPlan, TargetEntry, WindowClause,
-    WindowFrameBound, WindowFuncKind,
+    attrno_index, AggAccum, Expr, INDEX_VAR, INNER_VAR, OUTER_VAR, OrderByEntry, ProjectSetTarget,
+    SetReturningCall, SubPlan, TargetEntry, WindowClause, WindowFrameBound, WindowFuncKind,
 };
 use crate::include::storage::buf_internals::BufferUsageStats;
 
@@ -59,6 +64,22 @@ pub(crate) fn format_explain_plan_with_subplans(
     subplans: &[Plan],
     indent: usize,
     show_costs: bool,
+    verbose: bool,
+    lines: &mut Vec<String>,
+) {
+    format_explain_plan_with_subplans_ctx(
+        plan, subplans, indent, show_costs, verbose, None, None, lines,
+    );
+}
+
+fn format_explain_plan_with_subplans_ctx(
+    plan: &Plan,
+    subplans: &[Plan],
+    indent: usize,
+    show_costs: bool,
+    verbose: bool,
+    outer_names: Option<&[String]>,
+    rename_output: Option<&[String]>,
     lines: &mut Vec<String>,
 ) {
     if let Some(plan_info) = const_false_filter_result_plan(plan) {
@@ -69,13 +90,33 @@ pub(crate) fn format_explain_plan_with_subplans(
     }
 
     if let Some(child) = explain_passthrough_plan_child(plan) {
-        format_explain_plan_with_subplans(child, subplans, indent, show_costs, lines);
+        let output_names = verbose.then(|| plan.column_names());
+        format_explain_plan_with_subplans_ctx(
+            child,
+            subplans,
+            indent,
+            show_costs,
+            verbose,
+            outer_names,
+            output_names.as_deref().or(rename_output),
+            lines,
+        );
         return;
     }
 
     let state = executor_start(plan.clone());
-    push_explain_state_line(state.as_ref(), indent, false, show_costs, lines);
-    state.explain_details(indent, false, show_costs, lines);
+    push_explain_plan_line(
+        &plan_node_label(plan, state.as_ref(), verbose, rename_output),
+        plan.plan_info(),
+        indent,
+        show_costs,
+        lines,
+    );
+    if verbose {
+        format_verbose_plan_details(plan, indent, outer_names, rename_output, lines);
+    } else {
+        state.explain_details(indent, false, show_costs, lines);
+    }
 
     for subplan in direct_plan_subplans(plan) {
         let prefix = "  ".repeat(indent + 1);
@@ -86,7 +127,16 @@ pub(crate) fn format_explain_plan_with_subplans(
         };
         lines.push(label);
         if let Some(child) = subplans.get(subplan.plan_id) {
-            format_explain_plan_with_subplans(child, subplans, indent + 2, show_costs, lines);
+            format_explain_plan_with_subplans_ctx(
+                child,
+                subplans,
+                indent + 2,
+                show_costs,
+                verbose,
+                outer_names,
+                None,
+                lines,
+            );
         }
     }
 
@@ -95,8 +145,485 @@ pub(crate) fn format_explain_plan_with_subplans(
     } else {
         indent + 1
     };
-    for child in direct_plan_children(plan) {
-        format_explain_plan_with_subplans(child, subplans, child_indent, show_costs, lines);
+    match plan {
+        Plan::NestedLoopJoin { left, right, .. } if verbose => {
+            format_explain_plan_with_subplans_ctx(
+                left,
+                subplans,
+                child_indent,
+                show_costs,
+                verbose,
+                outer_names,
+                None,
+                lines,
+            );
+            let left_outputs = verbose_plan_output_names_with_alias(left, outer_names, None);
+            format_explain_plan_with_subplans_ctx(
+                right,
+                subplans,
+                child_indent,
+                show_costs,
+                verbose,
+                Some(&left_outputs),
+                None,
+                lines,
+            );
+        }
+        _ => {
+            for child in direct_plan_children(plan) {
+                format_explain_plan_with_subplans_ctx(
+                    child,
+                    subplans,
+                    child_indent,
+                    show_costs,
+                    verbose,
+                    outer_names,
+                    None,
+                    lines,
+                );
+            }
+        }
+    }
+}
+
+fn push_explain_plan_line(
+    label: &str,
+    plan_info: PlanEstimate,
+    indent: usize,
+    show_costs: bool,
+    lines: &mut Vec<String>,
+) {
+    let prefix = if indent == 0 {
+        String::new()
+    } else {
+        format!("{}->  ", " ".repeat(2 + 6 * (indent - 1)))
+    };
+    push_explain_line(&format!("{prefix}{label}"), plan_info, show_costs, lines);
+}
+
+fn explain_detail_prefix(indent: usize) -> String {
+    " ".repeat(2 + 6 * indent)
+}
+
+fn plan_node_label(
+    plan: &Plan,
+    state: &dyn PlanNode,
+    verbose: bool,
+    rename_output: Option<&[String]>,
+) -> String {
+    match plan {
+        Plan::Aggregate { group_by, .. } if verbose && !group_by.is_empty() => "HashAggregate".into(),
+        Plan::FunctionScan { call, .. } if verbose => verbose_function_scan_label(call, rename_output),
+        _ => state.node_label(),
+    }
+}
+
+fn format_verbose_plan_details(
+    plan: &Plan,
+    indent: usize,
+    outer_names: Option<&[String]>,
+    rename_output: Option<&[String]>,
+    lines: &mut Vec<String>,
+) {
+    let prefix = explain_detail_prefix(indent);
+    match plan {
+        Plan::OrderBy { input, items, .. } => {
+            lines.push(format!(
+                "{prefix}Output: {}",
+                verbose_plan_output_names_with_alias(input, outer_names, None).join(", ")
+            ));
+            lines.push(format!(
+                "{prefix}Sort Key: {}",
+                render_verbose_order_by(
+                    items,
+                    outer_names,
+                    &verbose_plan_output_names_with_alias(input, outer_names, None)
+                )
+            ));
+        }
+        Plan::NestedLoopJoin { left, right, .. } => {
+            let left_outputs = verbose_plan_output_names_with_alias(left, outer_names, None);
+            let right_outputs =
+                verbose_plan_output_names_with_alias(right, Some(&left_outputs), None);
+            let mut combined = left_outputs;
+            combined.extend(right_outputs);
+            lines.push(format!("{prefix}Output: {}", combined.join(", ")));
+        }
+        Plan::FunctionScan { call, .. } => {
+            lines.push(format!(
+                "{prefix}Output: {}",
+                verbose_function_scan_outputs(call, rename_output).join(", ")
+            ));
+            lines.push(format!("{prefix}Function Call: {}", render_set_returning_call(call)));
+        }
+        Plan::Aggregate {
+            group_by,
+            accumulators,
+            input,
+            ..
+        } => {
+            let input_names = verbose_plan_output_names_with_alias(input, outer_names, None);
+            let output = verbose_aggregate_outputs(group_by, accumulators, outer_names, &input_names);
+            lines.push(format!("{prefix}Output: {}", output.join(", ")));
+            if !group_by.is_empty() {
+                lines.push(format!(
+                    "{prefix}Group Key: {}",
+                    render_group_keys(group_by, outer_names, &input_names)
+                ));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn verbose_plan_output_names(plan: &Plan, outer_names: Option<&[String]>) -> Vec<String> {
+    verbose_plan_output_names_with_alias(plan, outer_names, None)
+}
+
+fn verbose_plan_output_names_with_alias(
+    plan: &Plan,
+    outer_names: Option<&[String]>,
+    rename_output: Option<&[String]>,
+) -> Vec<String> {
+    match plan {
+        Plan::FunctionScan { call, .. } => verbose_function_scan_outputs(call, rename_output),
+        Plan::Aggregate {
+            group_by,
+            accumulators,
+            input,
+            ..
+        } => {
+            let input_names = verbose_plan_output_names_with_alias(input, outer_names, rename_output);
+            verbose_aggregate_outputs(group_by, accumulators, outer_names, &input_names)
+        }
+        Plan::NestedLoopJoin { left, right, .. } => {
+            let left_outputs = verbose_plan_output_names_with_alias(left, outer_names, rename_output);
+            let right_outputs =
+                verbose_plan_output_names_with_alias(right, Some(&left_outputs), rename_output);
+            let mut combined = left_outputs;
+            combined.extend(right_outputs);
+            combined
+        }
+        Plan::OrderBy { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::Hash { input, .. } => {
+            verbose_plan_output_names_with_alias(input, outer_names, rename_output)
+        }
+        Plan::Projection { input, targets, .. }
+            if projection_targets_are_explain_passthrough(input, targets) =>
+        {
+            let output_names = plan.column_names();
+            verbose_plan_output_names_with_alias(input, outer_names, Some(&output_names))
+        }
+        Plan::Projection { .. } => plan.column_names(),
+        _ => plan.column_names(),
+    }
+}
+
+fn verbose_function_scan_label(
+    call: &SetReturningCall,
+    rename_output: Option<&[String]>,
+) -> String {
+    let name = set_returning_call_name(call);
+    let alias = rename_output
+        .and_then(|names| names.first())
+        .cloned()
+        .or_else(|| call.output_columns().first().map(|column| column.name.clone()));
+    match alias {
+        Some(column) => format!("Function Scan on pg_catalog.{name} {column}"),
+        None => format!("Function Scan on pg_catalog.{name}"),
+    }
+}
+
+fn verbose_function_scan_outputs(
+    call: &SetReturningCall,
+    rename_output: Option<&[String]>,
+) -> Vec<String> {
+    let output_names = rename_output.unwrap_or_else(|| {
+        // Projection passthroughs carry alias-renamed output names for SRFs.
+        // Fall back to the call's native output names when there is no alias layer.
+        &[]
+    });
+    let effective_names = if output_names.is_empty() {
+        call.output_columns()
+            .iter()
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>()
+    } else {
+        output_names.to_vec()
+    };
+    match effective_names.first() {
+        Some(column) => call
+            .output_columns()
+            .iter()
+            .enumerate()
+            .map(|(index, output)| {
+                let name = effective_names.get(index).unwrap_or(&output.name);
+                format!("{}.{}", column, name)
+            })
+            .collect(),
+        None => effective_names,
+    }
+}
+
+fn render_set_returning_call(call: &SetReturningCall) -> String {
+    match call {
+        SetReturningCall::GenerateSeries {
+            start, stop, step, ..
+        } => {
+            let mut args = vec![
+                render_set_returning_arg(start),
+                render_set_returning_arg(stop),
+            ];
+            if !matches!(step, Expr::Const(Value::Int32(1))) {
+                args.push(render_set_returning_arg(step));
+            }
+            format!("{}({})", set_returning_call_name(call), args.join(", "))
+        }
+        _ => set_returning_call_name(call).to_string(),
+    }
+}
+
+fn render_set_returning_arg(expr: &Expr) -> String {
+    match expr {
+        Expr::Const(Value::Int32(v)) => v.to_string(),
+        Expr::Const(Value::Int64(v)) => v.to_string(),
+        _ => render_explain_expr(expr, &[]),
+    }
+}
+
+fn set_returning_call_name(call: &SetReturningCall) -> &'static str {
+    match call {
+        SetReturningCall::GenerateSeries { .. } => "generate_series",
+        SetReturningCall::Unnest { .. } => "unnest",
+        SetReturningCall::JsonTableFunction { kind, .. } => match kind {
+            crate::include::nodes::primnodes::JsonTableFunction::ObjectKeys => "json_object_keys",
+            crate::include::nodes::primnodes::JsonTableFunction::Each => "json_each",
+            crate::include::nodes::primnodes::JsonTableFunction::EachText => "json_each_text",
+            crate::include::nodes::primnodes::JsonTableFunction::ArrayElements => {
+                "json_array_elements"
+            }
+            crate::include::nodes::primnodes::JsonTableFunction::ArrayElementsText => {
+                "json_array_elements_text"
+            }
+            crate::include::nodes::primnodes::JsonTableFunction::JsonbPathQuery => {
+                "jsonb_path_query"
+            }
+            crate::include::nodes::primnodes::JsonTableFunction::JsonbObjectKeys => {
+                "jsonb_object_keys"
+            }
+            crate::include::nodes::primnodes::JsonTableFunction::JsonbEach => "jsonb_each",
+            crate::include::nodes::primnodes::JsonTableFunction::JsonbEachText => {
+                "jsonb_each_text"
+            }
+            crate::include::nodes::primnodes::JsonTableFunction::JsonbArrayElements => {
+                "jsonb_array_elements"
+            }
+            crate::include::nodes::primnodes::JsonTableFunction::JsonbArrayElementsText => {
+                "jsonb_array_elements_text"
+            }
+        },
+        SetReturningCall::JsonRecordFunction { kind, .. } => kind.name(),
+        SetReturningCall::RegexTableFunction { kind, .. } => match kind {
+            crate::include::nodes::primnodes::RegexTableFunction::Matches => "regexp_matches",
+            crate::include::nodes::primnodes::RegexTableFunction::SplitToTable => {
+                "regexp_split_to_table"
+            }
+        },
+        SetReturningCall::StringTableFunction { kind, .. } => match kind {
+            crate::include::nodes::primnodes::StringTableFunction::StringToTable => {
+                "string_to_table"
+            }
+        },
+        SetReturningCall::PartitionTree { .. } => "pg_partition_tree",
+        SetReturningCall::PartitionAncestors { .. } => "pg_partition_ancestors",
+        SetReturningCall::TextSearchTableFunction { kind, .. } => match kind {
+            crate::include::nodes::primnodes::TextSearchTableFunction::TokenType => {
+                "ts_token_type"
+            }
+            crate::include::nodes::primnodes::TextSearchTableFunction::Parse => "ts_parse",
+            crate::include::nodes::primnodes::TextSearchTableFunction::Debug => "ts_debug",
+        },
+        SetReturningCall::UserDefined { .. } => "function",
+    }
+}
+
+fn render_verbose_order_by(
+    items: &[OrderByEntry],
+    outer_names: Option<&[String]>,
+    input_names: &[String],
+) -> String {
+    items.iter()
+        .map(|item| render_verbose_expr(&item.expr, outer_names, input_names, false))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn verbose_aggregate_outputs(
+    group_by: &[Expr],
+    accumulators: &[AggAccum],
+    outer_names: Option<&[String]>,
+    input_names: &[String],
+) -> Vec<String> {
+    let mut outputs = group_by
+        .iter()
+        .map(|expr| render_verbose_group_expr(expr, outer_names, input_names))
+        .collect::<Vec<_>>();
+    outputs.extend(accumulators.iter().map(|accum| render_aggregate_call(accum, outer_names, input_names)));
+    outputs
+}
+
+fn render_group_keys(group_by: &[Expr], outer_names: Option<&[String]>, input_names: &[String]) -> String {
+    group_by
+        .iter()
+        .map(|expr| render_verbose_group_expr(expr, outer_names, input_names))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn render_verbose_group_expr(
+    expr: &Expr,
+    outer_names: Option<&[String]>,
+    input_names: &[String],
+) -> String {
+    render_aggregate_expr(expr, outer_names, input_names, false)
+}
+
+fn render_aggregate_call(
+    accum: &AggAccum,
+    outer_names: Option<&[String]>,
+    input_names: &[String],
+) -> String {
+    let name = builtin_aggregate_function_for_proc_oid(accum.aggfnoid)
+        .map(|func| func.name().to_string())
+        .unwrap_or_else(|| "aggregate".into());
+    if accum.args.is_empty() {
+        return format!("{name}(*)");
+    }
+    let args = accum
+        .args
+        .iter()
+        .map(|expr| render_aggregate_expr(expr, outer_names, input_names, true))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{name}({args})")
+}
+
+fn render_aggregate_expr(
+    expr: &Expr,
+    outer_names: Option<&[String]>,
+    input_names: &[String],
+    wrap: bool,
+) -> String {
+    let bare = match expr {
+        Expr::Param(param) => outer_names
+            .and_then(|names| names.get(param.paramid))
+            .cloned()
+            .unwrap_or_else(|| format!("{expr:?}")),
+        Expr::Var(var) => attrno_index(var.varattno)
+            .and_then(|index| input_names.get(index))
+            .cloned()
+            .unwrap_or_else(|| format!("{expr:?}")),
+        Expr::Op(op)
+            if matches!(
+                op.op,
+                crate::include::nodes::primnodes::OpExprKind::Add
+                    | crate::include::nodes::primnodes::OpExprKind::Sub
+                    | crate::include::nodes::primnodes::OpExprKind::Mul
+                    | crate::include::nodes::primnodes::OpExprKind::Div
+                    | crate::include::nodes::primnodes::OpExprKind::Mod
+            ) =>
+        {
+            let [left, right] = op.args.as_slice() else {
+                return format!("{expr:?}");
+            };
+            let op_text = match op.op {
+                crate::include::nodes::primnodes::OpExprKind::Add => "+",
+                crate::include::nodes::primnodes::OpExprKind::Sub => "-",
+                crate::include::nodes::primnodes::OpExprKind::Mul => "*",
+                crate::include::nodes::primnodes::OpExprKind::Div => "/",
+                crate::include::nodes::primnodes::OpExprKind::Mod => "%",
+                _ => unreachable!(),
+            };
+            format!(
+                "{} {} {}",
+                render_aggregate_expr(left, outer_names, input_names, false),
+                op_text,
+                render_aggregate_expr(right, outer_names, input_names, false)
+            )
+        }
+        _ => render_verbose_expr(expr, outer_names, input_names, false),
+    };
+    if wrap {
+        format!("({bare})")
+    } else {
+        bare
+    }
+}
+
+fn render_verbose_expr(
+    expr: &Expr,
+    outer_names: Option<&[String]>,
+    input_names: &[String],
+    wrap: bool,
+) -> String {
+    let bare = match expr {
+        Expr::Param(param) => outer_names
+            .and_then(|names| names.get(param.paramid))
+            .cloned()
+            .unwrap_or_else(|| format!("{expr:?}")),
+        Expr::Var(var) if var.varno == OUTER_VAR => outer_names
+            .and_then(|names| attrno_index(var.varattno).and_then(|index| names.get(index)))
+            .or_else(|| attrno_index(var.varattno).and_then(|index| input_names.get(index)))
+            .cloned()
+            .unwrap_or_else(|| format!("{expr:?}")),
+        Expr::Var(var) if matches!(var.varno, INNER_VAR | INDEX_VAR) => attrno_index(var.varattno)
+            .and_then(|index| input_names.get(index))
+            .cloned()
+            .unwrap_or_else(|| format!("{expr:?}")),
+        Expr::Var(var) => attrno_index(var.varattno)
+            .and_then(|index| input_names.get(index))
+            .cloned()
+            .unwrap_or_else(|| format!("{expr:?}")),
+        Expr::Op(op)
+            if matches!(
+                op.op,
+                crate::include::nodes::primnodes::OpExprKind::Add
+                    | crate::include::nodes::primnodes::OpExprKind::Sub
+                    | crate::include::nodes::primnodes::OpExprKind::Mul
+                    | crate::include::nodes::primnodes::OpExprKind::Div
+                    | crate::include::nodes::primnodes::OpExprKind::Mod
+            ) =>
+        {
+            let [left, right] = op.args.as_slice() else {
+                return format!("{expr:?}");
+            };
+            let op_text = match op.op {
+                crate::include::nodes::primnodes::OpExprKind::Add => "+",
+                crate::include::nodes::primnodes::OpExprKind::Sub => "-",
+                crate::include::nodes::primnodes::OpExprKind::Mul => "*",
+                crate::include::nodes::primnodes::OpExprKind::Div => "/",
+                crate::include::nodes::primnodes::OpExprKind::Mod => "%",
+                _ => unreachable!(),
+            };
+            format!(
+                "{} {} {}",
+                render_verbose_expr(left, outer_names, input_names, false),
+                op_text,
+                render_verbose_expr(right, outer_names, input_names, false)
+            )
+        }
+        _ => match outer_names {
+            Some(outer) => render_explain_join_expr_inner(expr, outer, input_names),
+            None => render_explain_projection_expr_inner_with_qualifier(expr, None, input_names),
+        },
+    };
+    if wrap {
+        format!("({bare})")
+    } else {
+        bare
     }
 }
 
