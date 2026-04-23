@@ -1278,6 +1278,7 @@ fn seed_trigger_state(
         match call.timing {
             TriggerTiming::Before => "BEFORE",
             TriggerTiming::After => "AFTER",
+            TriggerTiming::InsteadOf => "INSTEAD OF",
         }
         .into(),
     );
