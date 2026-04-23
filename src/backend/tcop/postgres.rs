@@ -1290,6 +1290,7 @@ fn execute_query_statement(
                 let mut columns = guard.columns.clone();
                 let catalog = state.session.catalog_lookup(db);
                 let role_names = role_name_map(&catalog);
+                let relation_names = relation_name_map(&catalog);
                 let proc_names = proc_name_map(&catalog);
                 annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
                 let mut row_buf = Vec::new();
@@ -1321,6 +1322,7 @@ fn execute_query_statement(
                                                 .clone(),
                                         },
                                         Some(&role_names),
+                                        Some(&relation_names),
                                         Some(&proc_names),
                                     )?;
                                     row_count += 1;
@@ -1369,6 +1371,7 @@ fn execute_query_statement(
         }) => {
             let catalog = state.session.catalog_lookup(db);
             let role_names = role_name_map(&catalog);
+            let relation_names = relation_name_map(&catalog);
             let proc_names = proc_name_map(&catalog);
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
             flush_pending_backend_messages(stream, db, &state.session)?;
@@ -1383,6 +1386,7 @@ fn execute_query_statement(
                     datetime_config: state.session.datetime_config().clone(),
                 },
                 Some(&role_names),
+                Some(&relation_names),
                 Some(&proc_names),
             )?;
             Ok(QueryStatementFlow::Continue)
@@ -1539,6 +1543,22 @@ fn role_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
         .unwrap_or_default()
 }
 
+fn relation_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
+    catalog
+        .materialize_visible_catalog()
+        .map(|visible| {
+            visible
+                .relcache()
+                .entries()
+                .map(|(name, entry)| {
+                    let relname = name.rsplit('.').next().unwrap_or(name).to_string();
+                    (entry.relation_oid, relname)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn proc_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
     catalog
         .materialize_visible_catalog()
@@ -1568,6 +1588,7 @@ fn try_handle_psql_describe_query(
     };
     let catalog = state.session.catalog_lookup(db);
     let role_names = role_name_map(&catalog);
+    let relation_names = relation_name_map(&catalog);
     let proc_names = proc_name_map(&catalog);
     send_query_result(
         stream,
@@ -1580,6 +1601,7 @@ fn try_handle_psql_describe_query(
             datetime_config: state.session.datetime_config().clone(),
         },
         Some(&role_names),
+        Some(&relation_names),
         Some(&proc_names),
     )?;
     Ok(true)
@@ -1771,6 +1793,7 @@ fn try_handle_statistics_catalog_query(
     };
     let catalog = state.session.catalog_lookup(db);
     let role_names = role_name_map(&catalog);
+    let relation_names = relation_name_map(&catalog);
     let proc_names = proc_name_map(&catalog);
     send_query_result(
         stream,
@@ -1783,6 +1806,7 @@ fn try_handle_statistics_catalog_query(
             datetime_config: state.session.datetime_config().clone(),
         },
         Some(&role_names),
+        Some(&relation_names),
         Some(&proc_names),
     )?;
     Ok(true)
@@ -2948,6 +2972,11 @@ pub(crate) fn format_psql_indexdef(
     let amname = db
         .access_method_name_for_relation(session.client_id, txn_ctx, index.relation_oid)
         .unwrap_or_else(|| "btree".to_string());
+    let only = db
+        .describe_relation_by_oid(session.client_id, txn_ctx, index.relation_oid)
+        .filter(|relation| relation.relkind == 'I')
+        .map(|_| " ONLY")
+        .unwrap_or("");
     let column_names = psql_index_display_columns(db, session, &index.desc, &index.index_meta)
         .into_iter()
         .map(|column| column.definition)
@@ -2958,7 +2987,7 @@ pub(crate) fn format_psql_indexdef(
         ""
     };
     let mut definition = format!(
-        "CREATE {unique}INDEX {} ON {} USING {} ({})",
+        "CREATE {unique}INDEX {} ON{only} {} USING {} ({})",
         index.name,
         table_name,
         amname,
@@ -3595,6 +3624,7 @@ fn execute_portal(
         }) => {
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
             let role_names = role_name_map(&catalog);
+            let relation_names = relation_name_map(&catalog);
             let proc_names = proc_name_map(&catalog);
             if let Err(e) = validate_binary_result_formats(&rows, &columns, &portal.result_formats)
             {
@@ -3624,6 +3654,7 @@ fn execute_portal(
                         datetime_config: session.datetime_config().clone(),
                     },
                     Some(&role_names),
+                    Some(&relation_names),
                     Some(&proc_names),
                 )?;
             }

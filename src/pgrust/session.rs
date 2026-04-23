@@ -1128,6 +1128,24 @@ impl Session {
                     )
                 }
             }
+            Statement::AlterIndexAttachPartition(ref attach_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_index_attach_partition_stmt_with_search_path(
+                        self.client_id,
+                        attach_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::AlterIndexAlterColumnStatistics(ref alter_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -2470,6 +2488,18 @@ impl Session {
                 db.execute_alter_index_rename_stmt_in_transaction_with_search_path(
                     client_id,
                     rename_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::AlterIndexAttachPartition(ref attach_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_alter_index_attach_partition_stmt_in_transaction_with_search_path(
+                    client_id,
+                    attach_stmt,
                     xid,
                     cid,
                     search_path.as_deref(),

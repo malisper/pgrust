@@ -1663,6 +1663,8 @@ fn parse_create_unique_index_statement() {
         Statement::CreateIndex(CreateIndexStatement {
             unique: true,
             nulls_not_distinct: false,
+            concurrently: false,
+            only: false,
             if_not_exists: false,
             index_name: "num_exp_add_idx".into(),
             table_name: "num_exp_add".into(),
@@ -1854,6 +1856,8 @@ fn parse_create_index_with_method_and_ordering() {
         Statement::CreateIndex(CreateIndexStatement {
             unique: false,
             nulls_not_distinct: false,
+            concurrently: false,
+            only: false,
             if_not_exists: false,
             index_name: "num_exp_add_idx".into(),
             table_name: "num_exp_add".into(),
@@ -1897,6 +1901,8 @@ fn parse_create_index_with_if_not_exists_and_opclass() {
         Statement::CreateIndex(CreateIndexStatement {
             unique: false,
             nulls_not_distinct: false,
+            concurrently: false,
+            only: false,
             if_not_exists: true,
             index_name: "onek_unique1".into(),
             table_name: "onek".into(),
@@ -1926,6 +1932,8 @@ fn parse_create_index_without_name() {
         Statement::CreateIndex(CreateIndexStatement {
             unique: false,
             nulls_not_distinct: false,
+            concurrently: false,
+            only: false,
             if_not_exists: false,
             index_name: String::new(),
             table_name: "tenk1".into(),
@@ -2010,6 +2018,43 @@ fn parse_create_operator_class_hash_support() {
 }
 
 #[test]
+fn parse_partitioned_index_ddl_forms() {
+    assert!(matches!(
+        parse_statement("create index concurrently on idxpart(a)").unwrap(),
+        Statement::CreateIndex(CreateIndexStatement {
+            concurrently: true,
+            index_name,
+            table_name,
+            ..
+        }) if index_name.is_empty() && table_name == "idxpart"
+    ));
+    assert!(matches!(
+        parse_statement("create index on only idxpart(a)").unwrap(),
+        Statement::CreateIndex(CreateIndexStatement {
+            only: true,
+            index_name,
+            table_name,
+            ..
+        }) if index_name.is_empty() && table_name == "idxpart"
+    ));
+    assert!(matches!(
+        parse_statement("drop index concurrently idxpart_a_idx").unwrap(),
+        Statement::DropIndex(DropIndexStatement {
+            concurrently: true,
+            if_exists: false,
+            index_names,
+        }) if index_names == vec!["idxpart_a_idx"]
+    ));
+    assert_eq!(
+        parse_statement("alter index idxpart_a_idx attach partition idxpart1_a_idx").unwrap(),
+        Statement::AlterIndexAttachPartition(AlterIndexAttachPartitionStatement {
+            parent_index_name: "idxpart_a_idx".into(),
+            child_index_name: "idxpart1_a_idx".into(),
+        })
+    );
+}
+
+#[test]
 fn parse_create_index_with_expression_item() {
     let stmt = parse_statement("create index attmp_idx on attmp (a, (d + e), b)").unwrap();
     assert_eq!(
@@ -2017,6 +2062,8 @@ fn parse_create_index_with_expression_item() {
         Statement::CreateIndex(CreateIndexStatement {
             unique: false,
             nulls_not_distinct: false,
+            concurrently: false,
+            only: false,
             if_not_exists: false,
             index_name: "attmp_idx".into(),
             table_name: "attmp".into(),
@@ -2069,6 +2116,8 @@ fn parse_create_partial_index_statement_captures_predicate_sql() {
         Statement::CreateIndex(CreateIndexStatement {
             unique: false,
             nulls_not_distinct: false,
+            concurrently: false,
+            only: false,
             if_not_exists: false,
             index_name: "onek2_u1_prtl".into(),
             table_name: "onek2".into(),
@@ -6581,7 +6630,7 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("drop table if exists pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers").unwrap(), Statement::DropTable(DropTableStatement { if_exists: true, table_names, .. }) if table_names == vec!["pgbench_accounts", "pgbench_branches", "pgbench_history", "pgbench_tellers"])
     );
     assert!(
-        matches!(parse_statement("drop index tenant_idx").unwrap(), Statement::DropIndex(DropIndexStatement { if_exists: false, index_names }) if index_names == vec!["tenant_idx"])
+        matches!(parse_statement("drop index tenant_idx").unwrap(), Statement::DropIndex(DropIndexStatement { concurrently: false, if_exists: false, index_names }) if index_names == vec!["tenant_idx"])
     );
     assert!(
         matches!(parse_statement("drop schema if exists tenant_a, tenant_b").unwrap(), Statement::DropSchema(DropSchemaStatement { if_exists: true, schema_names, cascade: false }) if schema_names == vec!["tenant_a", "tenant_b"])

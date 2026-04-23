@@ -190,7 +190,7 @@ impl Database {
         })
     }
 
-    fn default_index_base_name(
+    pub(super) fn default_index_base_name(
         relation_name: &str,
         columns: &[crate::backend::parser::IndexColumnDef],
     ) -> String {
@@ -863,7 +863,18 @@ impl Database {
                 ))
             })?;
 
-        if entry.relkind != 'r' {
+        if entry.relkind == 'p' && create_stmt.concurrently {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "cannot create index on partitioned table \"{}\" concurrently",
+                    create_stmt.table_name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
+        if !matches!(entry.relkind, 'r' | 'p') {
             return Err(ExecError::Parse(ParseError::WrongObjectType {
                 name: create_stmt.table_name.clone(),
                 expected: "table",
@@ -983,6 +994,35 @@ impl Database {
         } else {
             create_stmt.index_name.clone()
         };
+        if entry.relkind == 'p' {
+            match self.build_partitioned_index_in_transaction(
+                client_id,
+                &entry,
+                &index_name,
+                &index_columns,
+                create_stmt.predicate_sql.as_deref(),
+                create_stmt.unique,
+                create_stmt.nulls_not_distinct,
+                create_stmt.only,
+                xid,
+                cid,
+                access_method_oid,
+                access_method_handler,
+                &build_options,
+                maintenance_work_mem_kb,
+                configured_search_path,
+                catalog_effects,
+            ) {
+                Ok(_) => {}
+                Err(ExecError::Parse(ParseError::TableAlreadyExists(_)))
+                    if create_stmt.if_not_exists =>
+                {
+                    return Ok(StatementResult::AffectedRows(0));
+                }
+                Err(err) => return Err(err),
+            }
+            return Ok(StatementResult::AffectedRows(0));
+        }
         match self.build_simple_index_in_transaction(
             client_id,
             &entry,
