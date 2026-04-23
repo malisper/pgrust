@@ -238,7 +238,8 @@ impl CompileEnv {
         let slot = self.define_var(name, ty);
         self.parameter_slots.push(ScopeVar { slot, ty });
         let positional_name = positional_parameter_var_name(self.parameter_slots.len());
-        self.vars.insert(positional_name.clone(), ScopeVar { slot, ty });
+        self.vars
+            .insert(positional_name.clone(), ScopeVar { slot, ty });
         self.positional_parameter_names.push(positional_name);
         slot
     }
@@ -1123,12 +1124,12 @@ fn rewrite_plpgsql_sql_text(sql: &str, env: &CompileEnv) -> Result<String, Parse
                 }
                 if end > idx + 1 && (end == bytes.len() || !is_identifier_char(bytes[end] as char))
                 {
-                    let index = sql[idx + 1..end]
-                        .parse::<usize>()
-                        .map_err(|_| ParseError::UnexpectedToken {
+                    let index = sql[idx + 1..end].parse::<usize>().map_err(|_| {
+                        ParseError::UnexpectedToken {
                             expected: "valid positional parameter reference",
                             actual: sql[idx..end].to_string(),
-                        })?;
+                        }
+                    })?;
                     let name = env.positional_parameter_name(index).ok_or_else(|| {
                         ParseError::UnexpectedToken {
                             expected: "existing positional parameter reference",

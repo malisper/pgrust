@@ -7,8 +7,8 @@ use crate::backend::parser::{ParseError, SqlExpr, SqlType, parse_expr, parse_typ
 use crate::include::catalog::RECORD_TYPE_OID;
 
 use super::ast::{
-    AliasDecl, AssignTarget, Block, Decl, ForQuerySource, ForTarget, RaiseLevel,
-    ReturnQueryKind, Stmt, VarDecl,
+    AliasDecl, AssignTarget, Block, Decl, ForQuerySource, ForTarget, RaiseLevel, ReturnQueryKind,
+    Stmt, VarDecl,
 };
 
 #[derive(Parser)]
@@ -502,10 +502,11 @@ fn split_execute_query_source(source: &str) -> Result<(String, Vec<String>), Par
             actual: source.to_string(),
         });
     }
-    let using_exprs = split_top_level_csv(using_sql).ok_or_else(|| ParseError::UnexpectedToken {
-        expected: "FOR ... IN EXECUTE <query> USING expr [, ...]",
-        actual: source.to_string(),
-    })?;
+    let using_exprs =
+        split_top_level_csv(using_sql).ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "FOR ... IN EXECUTE <query> USING expr [, ...]",
+            actual: source.to_string(),
+        })?;
     Ok((sql_expr.to_string(), using_exprs))
 }
 
@@ -922,7 +923,12 @@ mod tests {
         )
         .unwrap();
 
-        let Stmt::ForQuery { target, source, body } = &block.statements[0] else {
+        let Stmt::ForQuery {
+            target,
+            source,
+            body,
+        } = &block.statements[0]
+        else {
             panic!("expected query FOR loop");
         };
         assert_eq!(

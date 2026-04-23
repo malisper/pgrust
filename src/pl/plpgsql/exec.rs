@@ -20,10 +20,9 @@ use crate::pgrust::session::ByteaOutputFormat;
 
 use super::ast::RaiseLevel;
 use super::compile::{
-    CompiledBlock, CompiledExpr, CompiledForQuerySource, CompiledForQueryTarget,
-    CompiledFunction, CompiledSelectIntoTarget, CompiledStmt, FunctionReturnContract,
-    TriggerReturnedRow, compile_function_from_proc,
-    compile_trigger_function_from_proc,
+    CompiledBlock, CompiledExpr, CompiledForQuerySource, CompiledForQueryTarget, CompiledFunction,
+    CompiledSelectIntoTarget, CompiledStmt, FunctionReturnContract, TriggerReturnedRow,
+    compile_function_from_proc, compile_trigger_function_from_proc,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1236,7 +1235,11 @@ fn record_descriptor_for_query_target(
 ) -> Result<RecordDescriptor, ExecError> {
     if target_ty.kind == SqlTypeKind::Composite && target_ty.typrelid != 0 {
         let catalog = ctx.catalog.as_ref().ok_or_else(|| {
-            function_runtime_error("named composite assignment requires catalog context", None, "0A000")
+            function_runtime_error(
+                "named composite assignment requires catalog context",
+                None,
+                "0A000",
+            )
         })?;
         let relation = catalog
             .lookup_relation_by_oid(target_ty.typrelid)
@@ -1384,9 +1387,11 @@ fn render_dynamic_query_param_sql(
     catalog: &dyn CatalogLookup,
     ctx: &ExecutorContext,
 ) -> Result<String, ExecError> {
-    let declared_type_oid = value
-        .sql_type_hint()
-        .and_then(|ty| catalog.type_oid_for_sql_type(ty).or((ty.type_oid != 0).then_some(ty.type_oid)));
+    let declared_type_oid = value.sql_type_hint().and_then(|ty| {
+        catalog
+            .type_oid_for_sql_type(ty)
+            .or((ty.type_oid != 0).then_some(ty.type_oid))
+    });
     let base = render_dynamic_query_param_base_sql(value, declared_type_oid, catalog, ctx)?;
     if let Some(type_oid) = declared_type_oid.filter(|oid| *oid != 0) {
         return Ok(format!(
@@ -1458,18 +1463,19 @@ fn render_dynamic_query_param_base_sql(
             &crate::backend::executor::render_geometry_text(value, Default::default())
                 .unwrap_or_default(),
         ),
-        Value::Range(_) => {
-            quote_sql_string(&crate::backend::executor::render_range_text(value).unwrap_or_default())
-        }
+        Value::Range(_) => quote_sql_string(
+            &crate::backend::executor::render_range_text(value).unwrap_or_default(),
+        ),
         Value::Multirange(_) => quote_sql_string(
             &crate::backend::executor::render_multirange_text(value).unwrap_or_default(),
         ),
         Value::Record(record) => {
             let mut fields = Vec::with_capacity(record.fields.len());
             for (field, field_value) in record.iter() {
-                let field_type_oid = catalog
-                    .type_oid_for_sql_type(field.sql_type)
-                    .or((field.sql_type.type_oid != 0).then_some(field.sql_type.type_oid));
+                let field_type_oid =
+                    catalog
+                        .type_oid_for_sql_type(field.sql_type)
+                        .or((field.sql_type.type_oid != 0).then_some(field.sql_type.type_oid));
                 fields.push(render_dynamic_query_param_sql_with_type(
                     field_value,
                     field_type_oid,
@@ -1483,7 +1489,9 @@ fn render_dynamic_query_param_base_sql(
             let array = ArrayValue::from_1d(items.clone());
             render_dynamic_query_array_sql(&array, declared_type_oid, catalog, ctx)?
         }
-        Value::PgArray(array) => render_dynamic_query_array_sql(array, declared_type_oid, catalog, ctx)?,
+        Value::PgArray(array) => {
+            render_dynamic_query_array_sql(array, declared_type_oid, catalog, ctx)?
+        }
     })
 }
 
@@ -1537,17 +1545,21 @@ fn render_dynamic_query_array_dimension_sql(
     catalog: &dyn CatalogLookup,
     ctx: &ExecutorContext,
 ) -> Result<String, ExecError> {
-    let dim = dimensions.get(depth).ok_or_else(|| ExecError::InvalidStorageValue {
-        column: "<bind>".into(),
-        details: "array dimension index out of bounds".into(),
-    })?;
+    let dim = dimensions
+        .get(depth)
+        .ok_or_else(|| ExecError::InvalidStorageValue {
+            column: "<bind>".into(),
+            details: "array dimension index out of bounds".into(),
+        })?;
     let mut parts = Vec::with_capacity(dim.length);
     for _ in 0..dim.length {
         if depth + 1 == dimensions.len() {
-            let value = elements.get(*index).ok_or_else(|| ExecError::InvalidStorageValue {
-                column: "<bind>".into(),
-                details: "array element index out of bounds".into(),
-            })?;
+            let value = elements
+                .get(*index)
+                .ok_or_else(|| ExecError::InvalidStorageValue {
+                    column: "<bind>".into(),
+                    details: "array element index out of bounds".into(),
+                })?;
             parts.push(render_dynamic_query_param_sql_with_type(
                 value,
                 element_type_oid,
@@ -1575,7 +1587,11 @@ fn render_dynamic_query_type_name(
     catalog: &dyn CatalogLookup,
 ) -> Result<String, ExecError> {
     let row = catalog.type_by_oid(type_oid).ok_or_else(|| {
-        function_runtime_error(&format!("type oid {type_oid} is not available"), None, "42704")
+        function_runtime_error(
+            &format!("type oid {type_oid} is not available"),
+            None,
+            "42704",
+        )
     })?;
     Ok(quote_identifier(&row.typname))
 }
