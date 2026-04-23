@@ -45,6 +45,21 @@ pub enum AssignTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForTarget {
+    Single(AssignTarget),
+    List(Vec<AssignTarget>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForQuerySource {
+    Static(String),
+    Execute {
+        sql_expr: String,
+        using_exprs: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
     Block(Block),
     Assign {
@@ -64,6 +79,11 @@ pub enum Stmt {
         var_name: String,
         start_expr: String,
         end_expr: String,
+        body: Vec<Stmt>,
+    },
+    ForQuery {
+        target: ForTarget,
+        source: ForQuerySource,
         body: Vec<Stmt>,
     },
     Raise {
