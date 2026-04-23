@@ -487,24 +487,24 @@ fn normalize_rte_path_projects_internal_values_slots_to_rte_vars() {
 fn planner_info_for_sql(sql: &str) -> PlannerInfo {
     let catalog = LiteralDefaultCatalog;
     let stmt = parse_select(sql).expect("parse");
-    let (query, _) =
-        analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+        .expect("analyze");
     PlannerInfo::new(query)
 }
 
 fn planned_stmt_for_sql(sql: &str) -> crate::include::nodes::plannodes::PlannedStmt {
     let catalog = LiteralDefaultCatalog;
     let stmt = parse_select(sql).expect("parse");
-    let (query, _) =
-        analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+        .expect("analyze");
     super::planner(query, &catalog).expect("plan")
 }
 
 fn planned_stmt_for_values_sql(sql: &str) -> crate::include::nodes::plannodes::PlannedStmt {
     let catalog = LiteralDefaultCatalog;
     let stmt = parse_select(sql).expect("parse");
-    let (query, _) =
-        analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+        .expect("analyze");
     super::planner(query, &catalog).expect("plan")
 }
 
@@ -530,6 +530,27 @@ fn catalog_with_indexed_items() -> Catalog {
     catalog
         .set_relation_stats(index.relation_oid, 32, 10_000.0)
         .expect("seed test catalog index stats");
+    catalog
+}
+
+fn catalog_with_people_and_pets() -> Catalog {
+    let mut catalog = Catalog::default();
+    catalog
+        .create_table(
+            "people",
+            RelationDesc {
+                columns: vec![column_desc("id", int4(), false)],
+            },
+        )
+        .expect("create people table");
+    catalog
+        .create_table(
+            "pets",
+            RelationDesc {
+                columns: vec![column_desc("owner_id", int4(), true)],
+            },
+        )
+        .expect("create pets table");
     catalog
 }
 
@@ -766,8 +787,8 @@ fn planned_grouped_window_aggregate_uses_aggregate_output_slot() {
         from (values (1, 1, 10), (2, 1, 20), (1, 2, 7)) as t(x, y, z) group by x, y";
     let catalog = LiteralDefaultCatalog;
     let stmt = parse_select(sql).expect("parse");
-    let (query, _) =
-        analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+        .expect("analyze");
     let func = &query.window_clauses[0].functions[0];
     assert!(matches!(
         &func.kind,
@@ -803,8 +824,8 @@ fn planned_grouped_named_window_uses_named_spec() {
         group by x, y window win as (partition by y order by x)";
     let catalog = LiteralDefaultCatalog;
     let stmt = parse_select(sql).expect("parse");
-    let (query, _) =
-        analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+        .expect("analyze");
     let planned = super::planner(query, &catalog).expect("plan");
 
     assert!(plan_contains(&planned.plan_tree, |plan| match plan {
@@ -1173,8 +1194,8 @@ fn planner_places_lock_rows_between_order_by_and_limit() {
         )
         .expect("create table");
     let stmt = parse_select("select id from items order by id limit 1 for update").expect("parse");
-    let (query, _) =
-        analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+        .expect("analyze");
     let planned = super::planner(query, &catalog).expect("plan");
 
     let Plan::Limit { input, .. } = &planned.plan_tree else {
@@ -1272,8 +1293,8 @@ fn planner_uses_metadata_fallback_when_live_pages_are_unavailable() {
         .expect("create test catalog relation");
 
     let stmt = parse_select("select * from items").expect("parse");
-    let (query, _) =
-        analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+        .expect("analyze");
     let planned = super::planner(query, &catalog).expect("plan");
 
     match find_seq_scan(&planned.plan_tree).expect("seq scan plan") {
@@ -1286,8 +1307,8 @@ fn planner_uses_metadata_fallback_when_live_pages_are_unavailable() {
 fn planner_rewrites_simple_max_aggregate_into_limit_index_subplan() {
     let catalog = catalog_with_indexed_items();
     let stmt = parse_select("select max(id) from items where id < 42").expect("parse");
-    let (query, _) =
-        analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+        .expect("analyze");
     let planned = super::planner(query, &catalog).expect("plan");
 
     assert_eq!(planned.subplans.len(), 1);
@@ -1321,8 +1342,8 @@ fn planner_rewrites_simple_max_aggregate_into_limit_index_subplan() {
 fn planner_rewrites_multiple_minmax_aggregates_into_multiple_subplans() {
     let catalog = catalog_with_indexed_items();
     let stmt = parse_select("select min(id), max(id) from items").expect("parse");
-    let (query, _) =
-        analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+        .expect("analyze");
     let planned = super::planner(query, &catalog).expect("plan");
 
     assert_eq!(planned.subplans.len(), 2);
@@ -1355,8 +1376,8 @@ fn planner_rewrites_multiple_minmax_aggregates_into_multiple_subplans() {
 fn explain_shows_initplan_for_rewritten_minmax_aggregate() {
     let catalog = catalog_with_indexed_items();
     let stmt = parse_select("select max(id) from items where id < 42").expect("parse");
-    let (query, _) =
-        analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+        .expect("analyze");
     let planned = super::planner(query, &catalog).expect("plan");
 
     let mut lines = Vec::new();
@@ -1381,8 +1402,8 @@ fn planner_keeps_nested_sublink_max_as_aggregate() {
         "select (select max((select i.id from items i where i.id = o.id))) from items o",
     )
     .expect("parse");
-    let (query, _) =
-        analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+        .expect("analyze");
     let planned = super::planner(query, &catalog).expect("plan");
 
     assert!(
@@ -1399,8 +1420,8 @@ fn planner_rewrites_correlated_min_with_index_subplan() {
     let stmt =
         parse_select("select o.id, (select min(id) from items where id > o.id) from items o")
             .expect("parse");
-    let (query, _) =
-        analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+        .expect("analyze");
     let planned = super::planner(query, &catalog).expect("plan");
 
     assert!(planned.subplans.iter().any(|subplan| {
@@ -1410,14 +1431,35 @@ fn planner_rewrites_correlated_min_with_index_subplan() {
 }
 
 #[test]
+fn planner_lowers_outer_aggregate_refs_in_correlated_subqueries() {
+    let catalog = catalog_with_people_and_pets();
+    let stmt = parse_select(
+        "select p.id from people p group by p.id having exists (select 1 from pets q where sum(p.id) = q.owner_id)",
+    )
+    .expect("parse");
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+        .expect("analyze");
+    let planned = super::planner(query, &catalog).expect("plan");
+
+    super::setrefs::validate_executable_plan_for_tests(&planned.plan_tree);
+    for subplan in &planned.subplans {
+        super::setrefs::validate_executable_plan_for_tests(subplan);
+    }
+
+    let debug = format!("{planned:#?}");
+    assert!(debug.contains("paramkind: Exec"), "{debug}");
+    assert!(!debug.contains("Aggref"), "{debug}");
+}
+
+#[test]
 fn planned_lockstep_project_set_keeps_both_visible_targets_as_sets() {
     let catalog = LiteralDefaultCatalog;
     let stmt = parse_select(
         "select generate_series(1, 2), unnest(ARRAY['a', 'b', 'c']::varchar[]) order by 1, 2",
     )
     .expect("parse");
-    let (query, _) =
-        analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+        .expect("analyze");
     let planned = super::planner(query, &catalog).expect("plan");
     assert!(matches!(planned.plan_tree, Plan::OrderBy { .. }));
 
