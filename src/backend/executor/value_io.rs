@@ -1674,6 +1674,7 @@ pub(crate) fn decode_value_with_toast(
                     | SqlTypeKind::RegRole
                     | SqlTypeKind::RegOperator
                     | SqlTypeKind::RegProcedure
+                    | SqlTypeKind::Xid
                     | SqlTypeKind::RegConfig
                     | SqlTypeKind::RegDictionary
             ) {
