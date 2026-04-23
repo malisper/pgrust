@@ -3633,6 +3633,32 @@ fn count_distinct_with_group_by() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
+fn sum_distinct_with_group_by() {
+    let base = temp_dir("sum_distinct_group");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select grp, sum(distinct val) from (values ('a', 1), ('a', 1), ('a', 2), ('b', 2), ('b', 2), ('b', 3)) t(grp, val) group by grp order by grp",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Text("a".into()), Value::Int64(3)],
+                    vec![Value::Text("b".into()), Value::Int64(5)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
 #[test]
 fn generate_series_basic() {
     let base = temp_dir("gen_series_basic");
