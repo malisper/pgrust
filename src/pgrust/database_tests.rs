@@ -8726,6 +8726,49 @@ fn alter_table_alter_column_set_statistics_rejects_values_below_minus_one() {
 }
 
 #[test]
+fn alter_statistics_updates_in_memory_statistics_target() {
+    let base = temp_dir("alter_statistics_target");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table ab1(a int4, b int4)").unwrap();
+    db.execute(1, "create statistics ab1_a_b_stats on a, b from ab1")
+        .unwrap();
+    db.execute(1, "alter statistics ab1_a_b_stats set statistics 0")
+        .unwrap();
+
+    let stats = db.statistics_objects.read();
+    let entry = stats
+        .values()
+        .find(|entry| entry.name.ends_with(".ab1_a_b_stats") || entry.name == "ab1_a_b_stats")
+        .unwrap();
+    assert_eq!(entry.statistics_target, 0);
+
+    drop(stats);
+    db.execute(1, "alter statistics ab1_a_b_stats set statistics -1")
+        .unwrap();
+    let stats = db.statistics_objects.read();
+    let entry = stats
+        .values()
+        .find(|entry| entry.name.ends_with(".ab1_a_b_stats") || entry.name == "ab1_a_b_stats")
+        .unwrap();
+    assert_eq!(entry.statistics_target, -1);
+}
+
+#[test]
+fn alter_statistics_if_exists_missing_pushes_notice() {
+    let base = temp_dir("alter_statistics_if_exists");
+    let db = Database::open(&base, 16).unwrap();
+
+    clear_backend_notices();
+    db.execute(1, "alter statistics if exists missing_stats set statistics 0")
+        .unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![r#"statistics object "missing_stats" does not exist, skipping"#.to_string()]
+    );
+}
+
+#[test]
 fn alter_table_add_column_serial_backfills_existing_rows_and_keeps_sequence_advancing() {
     let base = temp_dir("alter_table_add_column_serial");
     let db = Database::open(&base, 16).unwrap();

@@ -1769,6 +1769,20 @@ fn parse_create_statistics_statement() {
 }
 
 #[test]
+fn parse_alter_statistics_statement() {
+    let stmt =
+        parse_statement("alter statistics if exists public.tst set statistics 0").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterStatistics(AlterStatisticsStatement {
+            if_exists: true,
+            statistics_name: "public.tst".into(),
+            statistics_target: 0,
+        })
+    );
+}
+
+#[test]
 fn parse_comment_on_trigger_statement() {
     let stmt = parse_statement("comment on trigger trig1 on public.items is 'hello'").unwrap();
     assert_eq!(

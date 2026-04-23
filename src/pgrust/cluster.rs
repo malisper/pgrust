@@ -27,7 +27,8 @@ use crate::pgrust::auth::AuthState;
 use crate::pgrust::database::{
     AsyncNotifyRuntime, ConversionEntry, Database, DatabaseCreateGrant, DatabaseError,
     DatabaseOpenOptions, DatabaseStatsStore, DomainEntry, EnumTypeEntry, LargeObjectRuntime,
-    RangeTypeEntry, SequenceRuntime, SessionStatsState, TempBackendId, TempNamespace,
+    RangeTypeEntry, SequenceRuntime, SessionStatsState, StatisticsObjectEntry, TempBackendId,
+    TempNamespace,
 };
 use crate::{BufferPool, ClientId};
 
@@ -99,6 +100,7 @@ pub(crate) struct OpenDatabaseState {
     pub enum_types: Arc<RwLock<BTreeMap<String, EnumTypeEntry>>>,
     pub range_types: Arc<RwLock<BTreeMap<String, RangeTypeEntry>>>,
     pub conversions: Arc<RwLock<BTreeMap<String, ConversionEntry>>>,
+    pub statistics_objects: Arc<RwLock<BTreeMap<String, StatisticsObjectEntry>>>,
     pub sequences: Arc<SequenceRuntime>,
     pub advisory_locks: Arc<AdvisoryLockManager>,
     pub async_notify_runtime: Arc<AsyncNotifyRuntime>,
@@ -126,6 +128,7 @@ impl OpenDatabaseState {
             enum_types: Arc::new(RwLock::new(BTreeMap::new())),
             range_types: Arc::new(RwLock::new(BTreeMap::new())),
             conversions: Arc::new(RwLock::new(BTreeMap::new())),
+            statistics_objects: Arc::new(RwLock::new(BTreeMap::new())),
             sequences,
             advisory_locks: Arc::new(AdvisoryLockManager::new()),
             async_notify_runtime: Arc::new(AsyncNotifyRuntime::new()),
@@ -360,6 +363,7 @@ impl Cluster {
                 enum_types: Arc::new(RwLock::new(BTreeMap::new())),
                 range_types: Arc::new(RwLock::new(BTreeMap::new())),
                 conversions: Arc::new(RwLock::new(BTreeMap::new())),
+                statistics_objects: Arc::new(RwLock::new(BTreeMap::new())),
                 sequences: Arc::new(SequenceRuntime::new_ephemeral()),
                 advisory_locks: Arc::new(AdvisoryLockManager::new()),
                 next_statement_lock_scope_id: AtomicU64::new(1),
@@ -452,6 +456,7 @@ impl Cluster {
             enum_types: Arc::clone(&state.enum_types),
             range_types: Arc::clone(&state.range_types),
             conversions: Arc::clone(&state.conversions),
+            statistics_objects: Arc::clone(&state.statistics_objects),
             sequences: Arc::clone(&state.sequences),
             advisory_locks: Arc::clone(&state.advisory_locks),
             async_notify_runtime: Arc::clone(&state.async_notify_runtime),
