@@ -80,6 +80,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_drop_function_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_comment_on_function_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_create_operator_class_statement(&sql)? {
         return Ok(stmt);
     }
@@ -1920,6 +1923,17 @@ fn try_parse_drop_function_statement(sql: &str) -> Result<Option<Statement>, Par
     )))
 }
 
+fn try_parse_comment_on_function_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("comment on function ") {
+        return Ok(None);
+    }
+    Ok(Some(Statement::CommentOnFunction(
+        build_comment_on_function_statement(trimmed)?,
+    )))
+}
+
 fn try_parse_create_operator_class_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
@@ -3286,6 +3300,55 @@ fn build_comment_on_aggregate_statement(
         schema_name,
         aggregate_name,
         signature: parse_aggregate_signature_kind(&signature_sql)?,
+        comment,
+    })
+}
+
+fn build_comment_on_function_statement(sql: &str) -> Result<CommentOnFunctionStatement, ParseError> {
+    let Some(rest) = sql.get("comment on function".len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "COMMENT ON FUNCTION name(signature) IS ...",
+            actual: sql.into(),
+        });
+    };
+    let rest = rest.trim_start();
+    let ((schema_name, function_name), rest) = parse_schema_qualified_name(rest)?;
+    let (signature_sql, rest) = take_parenthesized_segment(rest.trim_start())?;
+    let rest = rest.trim_start();
+    if !keyword_at_start(rest, "is") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "IS",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "is").trim_start();
+    let (comment, rest) = if keyword_at_start(rest, "null") {
+        (None, consume_keyword(rest, "null"))
+    } else {
+        let len = scan_string_literal_token_len(rest).ok_or(ParseError::UnexpectedToken {
+            expected: "quoted string or NULL",
+            actual: rest.into(),
+        })?;
+        (Some(decode_string_literal(&rest[..len])?), &rest[len..])
+    };
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of COMMENT ON FUNCTION",
+            actual: rest.trim().into(),
+        });
+    }
+    let arg_types = if signature_sql.trim().is_empty() {
+        Vec::new()
+    } else {
+        split_top_level_items(&signature_sql, ',')?
+            .into_iter()
+            .map(|arg| arg.trim().to_string())
+            .collect::<Vec<_>>()
+    };
+    Ok(CommentOnFunctionStatement {
+        schema_name,
+        function_name,
+        arg_types,
         comment,
     })
 }
