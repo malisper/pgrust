@@ -21659,6 +21659,122 @@ fn create_trigger_updates_pg_trigger_and_relhastriggers() {
 }
 
 #[test]
+fn partitioned_table_row_triggers_clone_to_existing_new_and_attached_partitions() {
+    let dir = temp_dir("partitioned_trigger_clones");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create table part_trig (a int4, b int4) partition by list (a)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table part_trig1 partition of part_trig for values in (1) partition by list (b)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table part_trig11 partition of part_trig1 for values in (1)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function part_trig_notice() returns trigger language plpgsql as $$
+begin
+  raise notice 'hit % on %', TG_NAME, TG_TABLE_NAME;
+  return new;
+end;
+$$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger part_trig_ai after insert on part_trig for each row execute function part_trig_notice()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table part_trig2 partition of part_trig for values in (2)",
+    )
+    .unwrap();
+    db.execute(1, "create table part_trig3 (a int4, b int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table part_trig attach partition part_trig3 for values in (3)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, t.tgname, t.tgparentid <> 0
+               from pg_trigger t join pg_class c on c.oid = t.tgrelid
+              where t.tgname = 'part_trig_ai'
+              order by c.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("part_trig".into()),
+                Value::Text("part_trig_ai".into()),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("part_trig1".into()),
+                Value::Text("part_trig_ai".into()),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("part_trig11".into()),
+                Value::Text("part_trig_ai".into()),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("part_trig2".into()),
+                Value::Text("part_trig_ai".into()),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("part_trig3".into()),
+                Value::Text("part_trig_ai".into()),
+                Value::Bool(true),
+            ],
+        ]
+    );
+
+    db.execute(1, "insert into part_trig values (1, 1), (2, 2), (3, 3)")
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec![
+            String::from("hit part_trig_ai on part_trig11"),
+            String::from("hit part_trig_ai on part_trig2"),
+            String::from("hit part_trig_ai on part_trig3"),
+        ]
+    );
+
+    let err = db
+        .execute(1, "drop trigger part_trig_ai on part_trig1")
+        .unwrap_err();
+    assert!(format!("{err:?}").contains("cannot drop trigger part_trig_ai"));
+
+    db.execute(1, "drop trigger part_trig_ai on part_trig")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname from pg_trigger t join pg_class c on c.oid = t.tgrelid
+              where t.tgname = 'part_trig_ai'
+              order by c.relname",
+        ),
+        Vec::<Vec<Value>>::new()
+    );
+}
+
+#[test]
 fn information_schema_triggers_exposes_trigger_metadata() {
     let dir = temp_dir("info_schema_triggers");
     let db = Database::open(&dir, 64).unwrap();
