@@ -2568,25 +2568,38 @@ fn explain_verbose_lateral_aggregate_renders_pg_style_details() {
                 })
                 .collect::<Vec<_>>();
             assert!(rendered.iter().any(|line| line.as_str() == "Sort"));
-            assert!(rendered
-                .iter()
-                .any(|line| line.as_str() == "  Output: s1.s1, s2.s2, sum((s1.s1 + s2.s2))"));
-            assert!(rendered
-                .iter()
-                .any(|line| line.as_str() == "  Sort Key: s1.s1, s2.s2"));
-            assert!(rendered.iter().any(|line| line.as_str() == "  ->  Nested Loop"));
-            assert!(rendered
-                .iter()
-                .any(|line| line.as_str() == "        ->  HashAggregate"));
-            assert!(rendered
-                .iter()
-                .any(|line| line.as_str() == "              Group Key: s2.s2"));
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.as_str() == "  Output: s1.s1, s2.s2, sum((s1.s1 + s2.s2))")
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.as_str() == "  Sort Key: s1.s1, s2.s2")
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.as_str() == "  ->  Nested Loop")
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.as_str() == "        ->  HashAggregate")
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.as_str() == "              Group Key: s2.s2")
+            );
             assert!(rendered.iter().any(|line| {
                 line.as_str() == "              ->  Function Scan on pg_catalog.generate_series s2"
             }));
-            assert!(rendered
-                .iter()
-                .any(|line| line.as_str() == "                    Function Call: generate_series(1, 3)"));
+            assert!(
+                rendered.iter().any(|line| line.as_str()
+                    == "                    Function Call: generate_series(1, 3)")
+            );
         }
         other => panic!("expected query result, got {:?}", other),
     }
