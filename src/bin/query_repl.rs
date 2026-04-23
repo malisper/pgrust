@@ -555,6 +555,12 @@ fn run_statement(
                 stmt.relation_name, stmt.new_owner
             ))))
         }
+        Statement::AlterViewRename(stmt) => {
+            Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+                "ALTER VIEW RENAME in query_repl: {} -> {}",
+                stmt.table_name, stmt.new_table_name
+            ))))
+        }
         Statement::AlterSequence(stmt) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
             format!("ALTER SEQUENCE in query_repl: {}", stmt.sequence_name),
         ))),
