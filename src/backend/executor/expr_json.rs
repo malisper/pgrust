@@ -1,5 +1,5 @@
 use super::exec_expr::eval_expr;
-use super::expr_casts::cast_value_with_config;
+use super::expr_casts::{cast_text_value_with_config, cast_value_with_config};
 use super::node_types::*;
 use super::{ExecError, ExecutorContext};
 use crate::backend::executor::expr_datetime::render_json_datetime_value_text_with_config;
@@ -930,6 +930,7 @@ fn json_record_row_from_value(
                 json_record_field_to_value(
                     value,
                     column.sql_type,
+                    base_fields.and_then(|fields| fields.get(index)),
                     &JsonRecordPath::default().with_key(&column.name),
                     ctx,
                 )
@@ -946,6 +947,7 @@ fn json_record_row_from_value(
 fn json_record_field_to_value(
     value: &SerdeJsonValue,
     ty: SqlType,
+    base_value: Option<&Value>,
     path: &JsonRecordPath,
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
@@ -966,10 +968,18 @@ fn json_record_field_to_value(
             };
             match value {
                 SerdeJsonValue::Object(_) => {
+                    let nested_base = match base_value {
+                        Some(Value::Record(record))
+                            if record.fields.len() == descriptor.fields.len() =>
+                        {
+                            Value::Record(record.clone())
+                        }
+                        _ => Value::Null,
+                    };
                     let fields = json_record_row_from_value(
                         "json record expansion",
                         value,
-                        &Value::Null,
+                        &nested_base,
                         &record_columns_from_descriptor(&descriptor),
                         ctx,
                     )?;
@@ -999,12 +1009,8 @@ fn cast_json_scalar_value(
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
     let text = json_record_scalar_text(value)?;
-    cast_value_with_config(
-        Value::Text(CompactString::from_owned(text)),
-        ty,
-        &ctx.datetime_config,
-    )
-    .map_err(|err| json_record_error_with_hint(err, path.hint()))
+    cast_text_value_with_config(&text, ty, false, &ctx.datetime_config)
+        .map_err(|err| json_record_error_with_hint(err, path.hint()))
 }
 
 fn json_record_array_to_value(
@@ -1023,12 +1029,24 @@ fn json_record_array_to_value(
         SerdeJsonValue::Array(items) => {
             let mut saw_array = false;
             let mut saw_scalar = false;
+            let element_type = ty.element_type();
             let nested = items
                 .iter()
                 .enumerate()
                 .map(|(index, item)| {
                     let next_path = path.with_index(index);
                     let is_array = matches!(item, SerdeJsonValue::Array(_));
+                    if matches!(element_type.kind, SqlTypeKind::Json | SqlTypeKind::Jsonb)
+                        && !element_type.is_array
+                    {
+                        return json_record_field_to_value(
+                            item,
+                            element_type,
+                            None,
+                            &next_path,
+                            ctx,
+                        );
+                    }
                     if is_array {
                         if saw_scalar {
                             return Err(expected_json_array_error(&next_path, next_path.hint()));
@@ -1039,7 +1057,7 @@ fn json_record_array_to_value(
                     } else {
                         saw_scalar = true;
                     }
-                    json_record_array_nested_value(item, ty.element_type(), &next_path, ctx)
+                    json_record_array_nested_value(item, element_type, &next_path, ctx)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let array = ArrayValue::from_nested_values(nested, vec![1]).map_err(|details| {
@@ -1065,7 +1083,7 @@ fn json_record_array_nested_value(
     if matches!(value, SerdeJsonValue::Array(_)) {
         return json_record_array_to_value(value, SqlType::array_of(element_type), path, ctx);
     }
-    json_record_field_to_value(value, element_type, path, ctx)
+    json_record_field_to_value(value, element_type, None, path, ctx)
 }
 
 fn json_record_scalar_text(value: &SerdeJsonValue) -> Result<String, ExecError> {
@@ -1174,11 +1192,9 @@ fn parse_record_literal_to_value(
         .zip(fields)
         .map(|(field, raw)| match raw {
             None => Ok(Value::Null),
-            Some(raw) => cast_value_with_config(
-                Value::Text(CompactString::from_owned(raw)),
-                field.sql_type,
-                &ctx.datetime_config,
-            ),
+            Some(raw) => {
+                cast_text_value_with_config(&raw, field.sql_type, false, &ctx.datetime_config)
+            }
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Value::Record(RecordValue::from_descriptor(
