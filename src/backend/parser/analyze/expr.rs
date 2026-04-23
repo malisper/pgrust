@@ -250,10 +250,22 @@ fn bind_row_comparison_expr(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
-    let left_fields =
-        bind_row_expr_fields(left_items, scope, catalog, outer_scopes, grouped_outer, ctes)?;
-    let right_fields =
-        bind_row_expr_fields(right_items, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+    let left_fields = bind_row_expr_fields(
+        left_items,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    let right_fields = bind_row_expr_fields(
+        right_items,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
     if left_fields.len() != right_fields.len() {
         return Err(ParseError::DetailedError {
             message: "unequal number of entries in row expressions".into(),
@@ -301,10 +313,22 @@ fn bind_row_distinct_expr(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
-    let left_fields =
-        bind_row_expr_fields(left_items, scope, catalog, outer_scopes, grouped_outer, ctes)?;
-    let right_fields =
-        bind_row_expr_fields(right_items, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+    let left_fields = bind_row_expr_fields(
+        left_items,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    let right_fields = bind_row_expr_fields(
+        right_items,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
     if left_fields.len() != right_fields.len() {
         return Err(ParseError::DetailedError {
             message: "unequal number of entries in row expressions".into(),
