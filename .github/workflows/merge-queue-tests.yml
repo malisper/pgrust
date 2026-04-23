@@ -23,7 +23,6 @@ jobs:
     if: ${{ github.event_name != 'pull_request' }}
     runs-on:
       group: Default
-      labels: 32x
     steps:
       - name: Checkout
         uses: actions/checkout@v4
