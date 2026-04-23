@@ -173,18 +173,7 @@ impl RuntimeTriggers {
             if !self.when_passes(trigger, None, None, ctx)? {
                 continue;
             }
-            match self.execute_trigger(trigger, None, None, ctx)? {
-                TriggerFunctionResult::SkipRow | TriggerFunctionResult::NoValue => {}
-                TriggerFunctionResult::ReturnNew(_) | TriggerFunctionResult::ReturnOld(_) => {
-                    return Err(trigger_runtime_error(
-                        "statement triggers must return null",
-                        Some(format!(
-                            "trigger \"{}\" returned a row value",
-                            trigger.row.tgname
-                        )),
-                    ));
-                }
-            }
+            let _ = self.execute_trigger(trigger, None, None, ctx)?;
         }
         Ok(())
     }

@@ -16,7 +16,8 @@ use crate::include::nodes::parsenodes::{
     PartitionStrategy, PublicationObjectSpec, PublicationOption, PublicationSchemaName,
     RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum,
     RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint,
-    TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerTiming, ViewCheckOption,
+    TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerReferencingSpec, TriggerTiming,
+    ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -3574,6 +3575,7 @@ fn parse_create_trigger_statement_with_when_and_update_of() {
                     update_columns: vec!["name".into(), "note".into()],
                 },
             ],
+            referencing: Vec::new(),
             when_clause_sql: Some("new.name is not null".into()),
             function_schema_name: Some("public".into()),
             function_name: "audit_people".into(),
@@ -3599,14 +3601,47 @@ fn parse_drop_trigger_statement_on_table() {
 }
 
 #[test]
-fn parse_create_trigger_rejects_unsupported_truncate() {
+fn parse_create_trigger_statement_with_referencing_and_truncate() {
+    let stmt = parse_statement(
+        "create trigger audit_stmt after truncate on people referencing old table as old_rows execute function bad()",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateTrigger(CreateTriggerStatement {
+            replace_existing: false,
+            trigger_name: "audit_stmt".into(),
+            schema_name: None,
+            table_name: "people".into(),
+            timing: TriggerTiming::After,
+            level: TriggerLevel::Statement,
+            events: vec![TriggerEventSpec {
+                event: TriggerEvent::Truncate,
+                update_columns: Vec::new(),
+            }],
+            referencing: vec![TriggerReferencingSpec {
+                is_new: false,
+                is_table: true,
+                name: "old_rows".into(),
+            }],
+            when_clause_sql: None,
+            function_schema_name: None,
+            function_name: "bad".into(),
+            func_args: Vec::new(),
+        })
+    );
+}
+
+#[test]
+fn parse_create_trigger_rejects_duplicate_events() {
     let err = parse_statement(
-        "create trigger bad_truncate before truncate on people for each statement execute function bad()",
+        "create trigger bad_trigger before update or update of a on people execute function bad()",
     )
     .unwrap_err();
-    assert!(
-        matches!(err, ParseError::FeatureNotSupported(message) if message.contains("TRUNCATE triggers are not supported"))
-    );
+    assert!(matches!(
+        err,
+        ParseError::DetailedError { message, .. } if message == "duplicate trigger events specified"
+    ));
 }
 
 #[test]
