@@ -1,8 +1,9 @@
 use super::super::*;
 use crate::backend::parser::ParseError;
+use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::include::nodes::primnodes::ColumnDesc;
-use crate::pgrust::database::ddl::{is_system_column_name, relation_kind_name};
+use crate::pgrust::database::ddl::{is_system_column_name, map_catalog_error, relation_kind_name};
 
 impl Database {
     pub(crate) fn execute_create_statistics_stmt_with_search_path(
@@ -56,8 +57,159 @@ impl Database {
         }
         validate_statistics_kinds(&create_stmt.kinds)?;
         validate_statistics_targets(&relation.desc, &create_stmt.targets)?;
+        prune_stale_statistics_objects(self, client_id, Some((xid, cid)));
+        let (name, namespace_oid) = normalize_statistics_name_for_create(
+            self,
+            client_id,
+            Some((xid, cid)),
+            &create_stmt.statistics_name,
+            configured_search_path,
+        )?;
+        let mut statistics_objects = self.statistics_objects.write();
+        if statistics_objects.contains_key(&name) {
+            if create_stmt.if_not_exists {
+                push_notice(format!(
+                    "statistics object \"{name}\" already exists, skipping"
+                ));
+                return Ok(StatementResult::AffectedRows(0));
+            }
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "relation \"{}\" already exists",
+                    create_stmt.statistics_name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P07",
+            });
+        }
+        let oid = self
+            .catalog
+            .read()
+            .catalog_snapshot()
+            .map_err(map_catalog_error)?
+            .next_oid();
+        statistics_objects.insert(
+            name.clone(),
+            StatisticsObjectEntry {
+                oid,
+                name,
+                namespace_oid,
+                relation_name,
+                relation_oid: relation.relation_oid,
+                statistics_target: -1,
+                kinds: create_stmt.kinds.clone(),
+                targets: create_stmt.targets.clone(),
+            },
+        );
         Ok(StatementResult::AffectedRows(0))
     }
+}
+
+pub(super) fn normalize_statistics_name_for_create(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    statistics_name: &str,
+    configured_search_path: Option<&[String]>,
+) -> Result<(String, u32), ExecError> {
+    let (schema_name, base_name) = split_statistics_name(statistics_name);
+    let normalized_name = base_name.to_ascii_lowercase();
+    match schema_name.map(str::to_ascii_lowercase) {
+        Some(schema) if schema == "pg_temp" => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "permanent database object",
+            actual: "temporary statistics object".into(),
+        })),
+        Some(schema) => db
+            .visible_namespace_oid_by_name(client_id, txn_ctx, &schema)
+            .map(|namespace_oid| (format!("{schema}.{normalized_name}"), namespace_oid))
+            .ok_or_else(|| ExecError::DetailedError {
+                message: format!("schema \"{schema}\" does not exist"),
+                detail: None,
+                hint: None,
+                sqlstate: "3F000",
+            }),
+        None => {
+            let search_path = db.effective_search_path(client_id, configured_search_path);
+            for schema in search_path {
+                match schema.as_str() {
+                    "" | "$user" | "pg_temp" | "pg_catalog" => continue,
+                    _ => {
+                        if let Some(namespace_oid) =
+                            db.visible_namespace_oid_by_name(client_id, txn_ctx, &schema)
+                        {
+                            return Ok((format!("{schema}.{normalized_name}"), namespace_oid));
+                        }
+                    }
+                }
+            }
+            Err(ExecError::Parse(ParseError::NoSchemaSelectedForCreate))
+        }
+    }
+}
+
+pub(super) fn resolve_statistics_name_for_lookup(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    statistics_name: &str,
+    configured_search_path: Option<&[String]>,
+) -> Option<String> {
+    prune_stale_statistics_objects(db, client_id, txn_ctx);
+    let (schema_name, base_name) = split_statistics_name(statistics_name);
+    let normalized_name = base_name.to_ascii_lowercase();
+    if let Some(schema_name) = schema_name {
+        let schema_name = schema_name.to_ascii_lowercase();
+        return Some(format!("{schema_name}.{normalized_name}"));
+    }
+    for schema in db.effective_search_path(client_id, configured_search_path) {
+        match schema.as_str() {
+            "" | "$user" | "pg_temp" => continue,
+            _ => {
+                if db
+                    .visible_namespace_oid_by_name(client_id, txn_ctx, &schema)
+                    .is_some()
+                {
+                    let qualified = format!("{schema}.{normalized_name}");
+                    if db.statistics_objects.read().contains_key(&qualified) {
+                        return Some(qualified);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn prune_stale_statistics_objects(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+) {
+    let stale_names = {
+        let statistics_objects = db.statistics_objects.read();
+        statistics_objects
+            .values()
+            .filter(|entry| {
+                db.describe_relation_by_oid(client_id, txn_ctx, entry.relation_oid)
+                    .is_none()
+            })
+            .map(|entry| entry.name.clone())
+            .collect::<Vec<_>>()
+    };
+    if stale_names.is_empty() {
+        return;
+    }
+    let mut statistics_objects = db.statistics_objects.write();
+    for name in stale_names {
+        statistics_objects.remove(&name);
+    }
+}
+
+fn split_statistics_name(name: &str) -> (Option<&str>, &str) {
+    name.rsplit_once('.')
+        .map(|(schema, base)| (Some(schema), base))
+        .unwrap_or((None, name))
 }
 
 fn normalize_statistics_from_clause(from_clause: &str) -> Result<String, ExecError> {

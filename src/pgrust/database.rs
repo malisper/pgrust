@@ -200,6 +200,7 @@ pub struct Database {
     pub(crate) enum_types: Arc<RwLock<BTreeMap<String, EnumTypeEntry>>>,
     pub(crate) range_types: Arc<RwLock<BTreeMap<String, RangeTypeEntry>>>,
     pub(crate) conversions: Arc<RwLock<BTreeMap<String, ConversionEntry>>>,
+    pub(crate) statistics_objects: Arc<RwLock<BTreeMap<String, StatisticsObjectEntry>>>,
     pub(crate) sequences: Arc<SequenceRuntime>,
     pub(crate) advisory_locks: Arc<AdvisoryLockManager>,
     pub(crate) async_notify_runtime: Arc<AsyncNotifyRuntime>,
@@ -268,6 +269,18 @@ pub(crate) struct RangeTypeEntry {
     pub subtype_diff: Option<String>,
     pub collation: Option<String>,
     pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StatisticsObjectEntry {
+    pub oid: u32,
+    pub name: String,
+    pub namespace_oid: u32,
+    pub relation_name: String,
+    pub relation_oid: u32,
+    pub statistics_target: i16,
+    pub kinds: Vec<String>,
+    pub targets: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

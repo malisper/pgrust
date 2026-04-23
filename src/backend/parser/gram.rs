@@ -241,6 +241,10 @@ fn try_parse_statistics_statement(sql: &str) -> Result<Option<Statement>, ParseE
         return build_create_statistics_statement(trimmed)
             .map(|stmt| Some(Statement::CreateStatistics(stmt)));
     }
+    if lowered.starts_with("alter statistics ") {
+        return build_alter_statistics_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterStatistics(stmt)));
+    }
     Ok(None)
 }
 
@@ -799,6 +803,44 @@ fn build_create_statistics_statement(sql: &str) -> Result<CreateStatisticsStatem
         kinds,
         targets,
         from_clause: rest.trim().to_string(),
+    })
+}
+
+fn build_alter_statistics_statement(sql: &str) -> Result<AlterStatisticsStatement, ParseError> {
+    let mut rest = sql
+        .get("alter statistics".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let mut if_exists = false;
+    if let Some(next) = consume_keywords(rest, &["if", "exists"]) {
+        if_exists = true;
+        rest = next;
+    }
+    let (parts, next) = parse_qualified_identifier_parts(rest)?;
+    let statistics_name = match parts.as_slice() {
+        [name] => name.clone(),
+        [schema, name] => format!("{schema}.{name}"),
+        _ => return Err(ParseError::UnsupportedQualifiedName(parts.join("."))),
+    };
+    rest = next.trim_start();
+    let rest =
+        consume_keywords(rest, &["set", "statistics"]).ok_or(ParseError::UnexpectedToken {
+            expected: "SET STATISTICS signed_integer",
+            actual: rest.into(),
+        })?;
+    let (statistics_target, rest) = parse_signed_i64_token(rest.trim_start())?;
+    let statistics_target =
+        i32::try_from(statistics_target).map_err(|_| ParseError::InvalidInteger(sql.into()))?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER STATISTICS",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(AlterStatisticsStatement {
+        if_exists,
+        statistics_name,
+        statistics_target,
     })
 }
 
