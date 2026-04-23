@@ -612,7 +612,9 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::StatementTimestamp
             | BuiltinScalarFunction::ClockTimestamp
             | BuiltinScalarFunction::TimeOfDay => args.is_empty(),
-            BuiltinScalarFunction::CurrentDatabase => args.is_empty(),
+            BuiltinScalarFunction::CurrentDatabase | BuiltinScalarFunction::PgBackendPid => {
+                args.is_empty()
+            }
             BuiltinScalarFunction::PgPartitionRoot => args.len() == 1,
             BuiltinScalarFunction::DatePart | BuiltinScalarFunction::DateTrunc => args.len() == 2,
             BuiltinScalarFunction::IsFinite => args.len() == 1,
@@ -1327,6 +1329,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("random_normal", BuiltinScalarFunction::RandomNormal),
         ("drandom_normal", BuiltinScalarFunction::RandomNormal),
         ("current_database", BuiltinScalarFunction::CurrentDatabase),
+        ("pg_backend_pid", BuiltinScalarFunction::PgBackendPid),
         ("cashlarger", BuiltinScalarFunction::CashLarger),
         ("cashsmaller", BuiltinScalarFunction::CashSmaller),
         ("cash_words", BuiltinScalarFunction::CashWords),
@@ -2190,6 +2193,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::ClockTimestamp
             | BuiltinScalarFunction::TimeOfDay
             | BuiltinScalarFunction::CurrentDatabase
+            | BuiltinScalarFunction::PgBackendPid
             | BuiltinScalarFunction::PgPartitionRoot
             | BuiltinScalarFunction::NextVal
             | BuiltinScalarFunction::CurrVal
@@ -3061,6 +3065,10 @@ mod tests {
         assert_eq!(
             fixed_scalar_return_type(BuiltinScalarFunction::CurrentDatabase),
             Some(SqlType::new(SqlTypeKind::Name))
+        );
+        assert_eq!(
+            fixed_scalar_return_type(BuiltinScalarFunction::PgBackendPid),
+            Some(SqlType::new(SqlTypeKind::Int4))
         );
         assert_eq!(
             fixed_scalar_return_type(BuiltinScalarFunction::ToJsonb),
