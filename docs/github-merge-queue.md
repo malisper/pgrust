@@ -30,9 +30,9 @@ This script:
 - forces changes through pull requests
 - requires the `cargo-test` status check
 - enables a merge queue with:
-  - build concurrency `5`
+  - build concurrency `1`
   - minimum entries to merge `1`
-  - maximum entries to merge `5`
+  - maximum entries to merge `1`
   - wait time `0` minutes
 
 ## Runner prerequisite

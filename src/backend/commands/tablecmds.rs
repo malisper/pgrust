@@ -37,7 +37,7 @@ use crate::pl::plpgsql::TriggerOperation;
 
 use super::explain::{
     format_buffer_usage, format_explain_lines_with_costs, format_explain_plan_with_subplans,
-    push_explain_line,
+    format_verbose_explain_plan_with_subplans, push_explain_line,
 };
 use super::partition::route_partition_target;
 use super::trigger::RuntimeTriggers;
@@ -46,8 +46,8 @@ use crate::backend::executor::exec_expr::{compile_predicate_with_decoder, eval_e
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
 use crate::backend::executor::value_io::{coerce_assignment_value, encode_tuple_values};
 use crate::backend::executor::{
-    ExecError, ExecutorContext, Expr, StatementResult, ToastRelationRef, compare_order_values,
-    create_query_desc, executor_start,
+    ExecError, ExecutorContext, Expr, StatementResult, ToastRelationRef,
+    apply_jsonb_subscript_assignment, compare_order_values, create_query_desc, executor_start,
 };
 use crate::include::access::amapi::IndexUniqueCheck;
 use crate::include::access::htup::HeapTuple;
@@ -419,7 +419,13 @@ pub(crate) fn execute_explain(
             );
             format_explain_lines_with_costs(state.as_ref(), 1, false, costs, &mut lines);
         } else {
-            format_explain_plan_with_subplans(&plan_tree, &subplans, 0, costs, &mut lines);
+            if verbose {
+                format_verbose_explain_plan_with_subplans(
+                    &plan_tree, &subplans, 0, costs, &mut lines,
+                );
+            } else {
+                format_explain_plan_with_subplans(&plan_tree, &subplans, 0, costs, &mut lines);
+            }
         }
     }
 
@@ -1044,6 +1050,7 @@ pub(crate) fn rollback_inserted_row(
 pub(crate) fn write_updated_row(
     relation_name: &str,
     rel: crate::backend::storage::smgr::RelFileLocator,
+    _relation_oid: u32,
     toast: Option<ToastRelationRef>,
     toast_index: Option<&BoundIndexRelation>,
     desc: &RelationDesc,
@@ -1628,6 +1635,7 @@ fn apply_referential_action_to_rows(
                 let _ = write_updated_row(
                     &constraint.child_relation_name,
                     constraint.child_rel,
+                    constraint.child_relation_oid,
                     constraint.child_toast,
                     toast_index.as_ref(),
                     &constraint.child_desc,
@@ -2753,7 +2761,7 @@ pub(crate) fn materialize_insert_rows(
                 .expect("insert-select rewrite should return a single query");
             let query =
                 crate::backend::optimizer::fold_query_constants(query).map_err(ExecError::Parse)?;
-            let planned = planner(query, catalog);
+            let planned = planner(query, catalog).map_err(ExecError::Parse)?;
             let result: Result<Vec<Vec<Value>>, ExecError> = (|| {
                 let saved_subplans = std::mem::replace(&mut ctx.subplans, planned.subplans.clone());
                 let mut state = executor_start(planned.plan_tree.clone());
@@ -3039,11 +3047,43 @@ fn assign_typed_value(
         return assign_point_value(current, subscripts, replacement);
     }
 
+    if sql_type.kind == SqlTypeKind::Jsonb && !sql_type.is_array {
+        if !field_path.is_empty() {
+            return Err(ExecError::DetailedError {
+                message: "cannot assign to a named field of type jsonb".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42804",
+            });
+        }
+        return assign_jsonb_value(current, subscripts, replacement);
+    }
+
     if field_path.is_empty() {
         return assign_array_value(current, subscripts, replacement);
     }
 
     assign_array_value_with_fields(current, sql_type, subscripts, field_path, replacement, ctx)
+}
+
+fn assign_jsonb_value(
+    current: Value,
+    subscripts: &[ResolvedAssignmentSubscript],
+    replacement: Value,
+) -> Result<Value, ExecError> {
+    let mut path = Vec::with_capacity(subscripts.len());
+    for subscript in subscripts {
+        if subscript.is_slice {
+            return Err(ExecError::DetailedError {
+                message: "jsonb subscript does not support slices".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
+        path.push(subscript.lower.clone().unwrap_or(Value::Int64(1)));
+    }
+    apply_jsonb_subscript_assignment(&current, &path, &replacement)
 }
 
 fn assignment_record_descriptor(
@@ -3857,6 +3897,7 @@ pub(crate) fn execute_insert_rows(
                 desc,
                 TriggerOperation::Insert,
                 &[],
+                ctx.session_replication_role,
             )
         })
         .transpose()?;
@@ -3971,6 +4012,7 @@ pub fn execute_prepared_insert_row(
                 &prepared.desc,
                 TriggerOperation::Insert,
                 &[],
+                ctx.session_replication_role,
             )
         })
         .transpose()?;
@@ -4071,6 +4113,7 @@ pub fn execute_update_with_waiter(
                         &target.desc,
                         TriggerOperation::Update,
                         &modified_attnums,
+                        ctx.session_replication_role,
                     )
                 })
                 .transpose()?;
@@ -4143,6 +4186,7 @@ pub fn execute_update_with_waiter(
                     match write_updated_row(
                         &target.relation_name,
                         target.rel,
+                        target.relation_oid,
                         target.toast,
                         target.toast_index.as_ref(),
                         &target.desc,
@@ -4396,6 +4440,7 @@ fn execute_update_from_joined_input(
                         &target.desc,
                         TriggerOperation::Update,
                         &modified_attnums,
+                        ctx.session_replication_role,
                     )
                 })
                 .transpose()
@@ -4477,6 +4522,7 @@ fn execute_update_from_joined_input(
                 match write_updated_row(
                     &target.relation_name,
                     target.rel,
+                    target.relation_oid,
                     target.toast,
                     target.toast_index.as_ref(),
                     &target.desc,
@@ -4597,6 +4643,7 @@ pub fn execute_delete_with_waiter(
                         &target.desc,
                         TriggerOperation::Delete,
                         &[],
+                        ctx.session_replication_role,
                     )
                 })
                 .transpose()?;

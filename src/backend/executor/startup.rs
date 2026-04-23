@@ -4,9 +4,9 @@ use crate::backend::parser::SqlType;
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, CteScanState,
     FilterState, FunctionScanState, HashJoinState, HashState, IndexScanState, LimitState,
-    NestedLoopJoinState, NodeExecStats, OrderByState, ProjectSetState, ProjectionState,
-    RecursiveUnionState, RecursiveWorkTable, ResultState, SeqScanState, SetOpState,
-    SubqueryScanState, ValuesState, WindowAggState, WorkTableScanState,
+    LockRowsState, NestedLoopJoinState, NodeExecStats, OrderByState, ProjectSetState,
+    ProjectionState, RecursiveUnionState, RecursiveWorkTable, ResultState, SeqScanState,
+    SetOpState, SubqueryScanState, ValuesState, WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::parsenodes::SqlTypeKind;
 use crate::include::nodes::primnodes::{Expr, SetReturningCall};
@@ -219,7 +219,7 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
             plan_uses_outer_columns(input)
                 || items.iter().any(|item| expr_uses_outer_columns(&item.expr))
         }
-        Plan::Limit { input, .. } => plan_uses_outer_columns(input),
+        Plan::Limit { input, .. } | Plan::LockRows { input, .. } => plan_uses_outer_columns(input),
         Plan::Projection { input, targets, .. } => {
             plan_uses_outer_columns(input)
                 || targets
@@ -682,6 +682,17 @@ pub fn executor_start(plan: Plan) -> PlanState {
             offset,
             skipped: 0,
             returned: 0,
+            plan_info,
+            stats: NodeExecStats::default(),
+        }),
+        Plan::LockRows {
+            plan_info,
+            input,
+            row_marks,
+        } => Box::new(LockRowsState {
+            input: executor_start(*input),
+            row_marks,
+            current_bindings: Vec::new(),
             plan_info,
             stats: NodeExecStats::default(),
         }),

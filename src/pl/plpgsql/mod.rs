@@ -41,79 +41,96 @@ mod tests {
     use super::*;
     use crate::backend::executor::StatementResult;
 
+    fn run_plpgsql_test<F>(name: &str, f: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        std::thread::Builder::new()
+            .name(name.into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(f)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     #[test]
     fn execute_do_runs_core_control_flow() {
-        let stmt = DoStatement {
-            language: None,
-            code: r#"
-                declare
-                    total int4 := 0;
-                begin
-                    total := total + 1;
-                    if total > 0 then
-                        raise notice 'value %', total;
-                    elsif total < 0 then
-                        raise warning 'bad';
-                    else
-                        null;
-                    end if;
-                    for i in 1..3 loop
-                        total := total + i;
-                    end loop;
-                    if total = 7 then
-                        raise notice 'done %', total;
-                    else
-                        raise exception 'wrong total %', total;
-                    end if;
-                end
-            "#
-            .into(),
-        };
+        run_plpgsql_test("execute_do_runs_core_control_flow", || {
+            let stmt = DoStatement {
+                language: None,
+                code: r#"
+                    declare
+                        total int4 := 0;
+                    begin
+                        total := total + 1;
+                        if total > 0 then
+                            raise notice 'value %', total;
+                        elsif total < 0 then
+                            raise warning 'bad';
+                        else
+                            null;
+                        end if;
+                        for i in 1..3 loop
+                            total := total + i;
+                        end loop;
+                        if total = 7 then
+                            raise notice 'done %', total;
+                        else
+                            raise exception 'wrong total %', total;
+                        end if;
+                    end
+                "#
+                .into(),
+            };
 
-        let result = execute_do(&stmt).unwrap();
-        assert_eq!(result, StatementResult::AffectedRows(0));
-        assert_eq!(
-            take_notices(),
-            vec![
-                PlpgsqlNotice {
-                    level: RaiseLevel::Notice,
-                    message: "value 1".into(),
-                },
-                PlpgsqlNotice {
-                    level: RaiseLevel::Notice,
-                    message: "done 7".into(),
-                }
-            ]
-        );
+            let result = execute_do(&stmt).unwrap();
+            assert_eq!(result, StatementResult::AffectedRows(0));
+            assert_eq!(
+                take_notices(),
+                vec![
+                    PlpgsqlNotice {
+                        level: RaiseLevel::Notice,
+                        message: "value 1".into(),
+                    },
+                    PlpgsqlNotice {
+                        level: RaiseLevel::Notice,
+                        message: "done 7".into(),
+                    }
+                ]
+            );
+        });
     }
 
     #[test]
     fn execute_do_runs_elsif_branch() {
-        let stmt = DoStatement {
-            language: None,
-            code: r#"
-                begin
-                    if 1 = 0 then
-                        raise exception 'wrong if';
-                    elsif 2 = 2 then
-                        raise notice 'elsif';
-                    else
-                        raise exception 'wrong else';
-                    end if;
-                end
-            "#
-            .into(),
-        };
+        run_plpgsql_test("execute_do_runs_elsif_branch", || {
+            let stmt = DoStatement {
+                language: None,
+                code: r#"
+                    begin
+                        if 1 = 0 then
+                            raise exception 'wrong if';
+                        elsif 2 = 2 then
+                            raise notice 'elsif';
+                        else
+                            raise exception 'wrong else';
+                        end if;
+                    end
+                "#
+                .into(),
+            };
 
-        let result = execute_do(&stmt).unwrap();
-        assert_eq!(result, StatementResult::AffectedRows(0));
-        assert_eq!(
-            take_notices(),
-            vec![PlpgsqlNotice {
-                level: RaiseLevel::Notice,
-                message: "elsif".into(),
-            }]
-        );
+            let result = execute_do(&stmt).unwrap();
+            assert_eq!(result, StatementResult::AffectedRows(0));
+            assert_eq!(
+                take_notices(),
+                vec![PlpgsqlNotice {
+                    level: RaiseLevel::Notice,
+                    message: "elsif".into(),
+                }]
+            );
+        });
     }
 
     #[test]
@@ -131,44 +148,45 @@ mod tests {
 
     #[test]
     fn execute_do_raise_exception_surfaces_message() {
-        let stmt = DoStatement {
-            language: None,
-            code: "begin raise exception 'boom %', 42; end".into(),
-        };
-        let err = execute_do(&stmt).unwrap_err();
-        assert!(matches!(
-            err,
-            ExecError::RaiseException(message) if message == "boom 42"
-        ));
+        run_plpgsql_test("execute_do_raise_exception_surfaces_message", || {
+            let stmt = DoStatement {
+                language: None,
+                code: "begin raise exception 'boom %', 42; end".into(),
+            };
+            let err = execute_do(&stmt).unwrap_err();
+            assert!(matches!(
+                err,
+                ExecError::RaiseException(message) if message == "boom 42"
+            ));
+        });
     }
 
     #[test]
     fn execute_do_accepts_top_level_end_semicolon() {
-        let stmt = DoStatement {
-            language: None,
-            code: "begin raise notice 'done'; end;".into(),
-        };
+        run_plpgsql_test("execute_do_accepts_top_level_end_semicolon", || {
+            let stmt = DoStatement {
+                language: None,
+                code: "begin raise notice 'done'; end;".into(),
+            };
 
-        let result = execute_do(&stmt).unwrap();
-        assert_eq!(result, StatementResult::AffectedRows(0));
-        assert_eq!(
-            take_notices(),
-            vec![PlpgsqlNotice {
-                level: RaiseLevel::Notice,
-                message: "done".into(),
-            }]
-        );
+            let result = execute_do(&stmt).unwrap();
+            assert_eq!(result, StatementResult::AffectedRows(0));
+            assert_eq!(
+                take_notices(),
+                vec![PlpgsqlNotice {
+                    level: RaiseLevel::Notice,
+                    message: "done".into(),
+                }]
+            );
+        });
     }
 
     #[test]
     fn execute_do_runs_while_loop() {
-        std::thread::Builder::new()
-            .name("execute_do_runs_while_loop".into())
-            .stack_size(8 * 1024 * 1024)
-            .spawn(|| {
-                let stmt = DoStatement {
-                    language: None,
-                    code: r#"
+        run_plpgsql_test("execute_do_runs_while_loop", || {
+            let stmt = DoStatement {
+                language: None,
+                code: r#"
                         declare
                             o int;
                             a int[] := array[1,2,3,2,3,1,2];
@@ -181,32 +199,29 @@ mod tests {
                             end loop;
                         end
                     "#
-                    .into(),
-                };
+                .into(),
+            };
 
-                let result = execute_do(&stmt).unwrap();
-                assert_eq!(result, StatementResult::AffectedRows(0));
-                assert_eq!(
-                    take_notices(),
-                    vec![
-                        PlpgsqlNotice {
-                            level: RaiseLevel::Notice,
-                            message: "2".into(),
-                        },
-                        PlpgsqlNotice {
-                            level: RaiseLevel::Notice,
-                            message: "4".into(),
-                        },
-                        PlpgsqlNotice {
-                            level: RaiseLevel::Notice,
-                            message: "7".into(),
-                        }
-                    ]
-                );
-            })
-            .unwrap()
-            .join()
-            .unwrap();
+            let result = execute_do(&stmt).unwrap();
+            assert_eq!(result, StatementResult::AffectedRows(0));
+            assert_eq!(
+                take_notices(),
+                vec![
+                    PlpgsqlNotice {
+                        level: RaiseLevel::Notice,
+                        message: "2".into(),
+                    },
+                    PlpgsqlNotice {
+                        level: RaiseLevel::Notice,
+                        message: "4".into(),
+                    },
+                    PlpgsqlNotice {
+                        level: RaiseLevel::Notice,
+                        message: "7".into(),
+                    }
+                ]
+            );
+        });
     }
 
     #[test]

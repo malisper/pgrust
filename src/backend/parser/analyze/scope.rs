@@ -476,6 +476,20 @@ pub(super) fn resolve_relation_row_expr_with_outer(
     })
 }
 
+pub(super) fn relation_row_reference_level(
+    scope: &BoundScope,
+    outer_scopes: &[BoundScope],
+    name: &str,
+) -> Option<usize> {
+    if resolve_relation_row_expr_in_scope(scope, name).is_some() {
+        return Some(0);
+    }
+    outer_scopes
+        .iter()
+        .position(|outer_scope| resolve_relation_row_expr_in_scope(outer_scope, name).is_some())
+        .map(|depth| depth + 1)
+}
+
 fn resolve_relation_row_expr_in_scope(
     scope: &BoundScope,
     name: &str,
@@ -617,8 +631,16 @@ pub(super) fn bind_from_item_with_ctes(
             Ok((plan, scope))
         }
         FromItem::DerivedTable(select) => {
-            let (plan, _) =
-                analyze_select_query_with_outer(select, catalog, &[], None, ctes, expanded_views)?;
+            let visible_agg_scope = current_visible_aggregate_scope();
+            let (plan, _) = analyze_select_query_with_outer(
+                select,
+                catalog,
+                &[],
+                None,
+                visible_agg_scope.as_ref(),
+                ctes,
+                expanded_views,
+            )?;
             let bound = AnalyzedFrom::subquery(plan);
             let desc = synthetic_desc_from_analyzed_from(&bound);
             Ok((
@@ -628,11 +650,13 @@ pub(super) fn bind_from_item_with_ctes(
         }
         FromItem::Lateral(source) => match source.as_ref() {
             FromItem::DerivedTable(select) => {
+                let visible_agg_scope = current_visible_aggregate_scope();
                 let (plan, _) = analyze_select_query_with_outer(
                     select,
                     catalog,
                     outer_scopes,
                     grouped_outer.cloned(),
+                    visible_agg_scope.as_ref(),
                     ctes,
                     expanded_views,
                 )?;
