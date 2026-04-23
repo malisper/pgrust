@@ -842,10 +842,15 @@ impl CatalogStore {
         owner_oid: u32,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
-        let namespace_oid = self.allocate_next_oid(namespace_oid)?;
+        let temp_namespace =
+            namespace_name.starts_with("pg_temp_") || namespace_name.starts_with("pg_toast_temp_");
+        let namespace_oid = if temp_namespace && namespace_oid != 0 {
+            namespace_oid
+        } else {
+            self.allocate_next_oid(namespace_oid)?
+        };
         let kinds = [BootstrapCatalogKind::PgNamespace];
-        if !namespace_name.starts_with("pg_temp_") && !namespace_name.starts_with("pg_toast_temp_")
-        {
+        if !temp_namespace {
             self.invalidate_relcache_init_for_kinds(&kinds);
         }
         let rows = PhysicalCatalogRows {
