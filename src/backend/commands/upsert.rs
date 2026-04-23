@@ -11,12 +11,14 @@ use crate::backend::parser::{
 use crate::include::access::htup::HeapTuple;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::nodes::execnodes::TupleSlot;
+use crate::pl::plpgsql::TriggerOperation;
 
 use super::tablecmds::{
     WriteUpdatedRowResult, apply_assignment_target, build_index_insert_context,
     index_key_values_for_row, insert_index_entry_for_row, rollback_inserted_row,
     row_matches_index_predicate, slot_toast_context, write_insert_heap_row, write_updated_row,
 };
+use super::trigger::{RuntimeTriggers, TriggerTransitionCapture};
 
 enum EvaluatedConflictAction {
     Updated(Vec<Value>),
@@ -190,6 +192,8 @@ fn run_conflict_update(
     ctx: &mut ExecutorContext,
     xid: TransactionId,
     cid: CommandId,
+    triggers: Option<&RuntimeTriggers>,
+    transition_capture: Option<&mut TriggerTransitionCapture>,
 ) -> Result<ConflictActionResult, ExecError> {
     if conflict_tuple.header.xmin == xid && conflict_tuple.header.cid_or_xvac == cid {
         return Err(cardinality_violation());
@@ -197,7 +201,7 @@ fn run_conflict_update(
 
     let current_old_values =
         decode_tuple_values(stmt, desc, attr_descs, conflict_tid, conflict_tuple, ctx)?;
-    let new_values = match eval_conflict_update_values(
+    let mut new_values = match eval_conflict_update_values(
         &stmt.desc,
         assignments,
         predicate,
@@ -208,6 +212,14 @@ fn run_conflict_update(
         EvaluatedConflictAction::Updated(new_values) => new_values,
         EvaluatedConflictAction::Skipped => return Ok(ConflictActionResult::Skipped),
     };
+    if let Some(triggers) = triggers {
+        let Some(trigger_values) =
+            triggers.before_row_update(&current_old_values, new_values, ctx)?
+        else {
+            return Ok(ConflictActionResult::Skipped);
+        };
+        new_values = trigger_values;
+    }
 
     let write_result = write_updated_row(
         &stmt.relation_name,
@@ -229,7 +241,15 @@ fn run_conflict_update(
         None,
     )?;
     match write_result {
-        WriteUpdatedRowResult::Updated(_new_tid) => Ok(ConflictActionResult::Updated(new_values)),
+        WriteUpdatedRowResult::Updated(_new_tid) => {
+            if let Some(triggers) = triggers {
+                if let Some(capture) = transition_capture {
+                    triggers.capture_update_row(capture, &current_old_values, &new_values);
+                }
+                triggers.after_row_update(&current_old_values, &new_values, ctx)?;
+            }
+            Ok(ConflictActionResult::Updated(new_values))
+        }
         WriteUpdatedRowResult::TupleUpdated(_new_tid) => Ok(ConflictActionResult::Retry),
         WriteUpdatedRowResult::AlreadyModified => Ok(ConflictActionResult::Retry),
     }
@@ -426,6 +446,47 @@ pub(crate) fn execute_insert_on_conflict_rows(
                 && !arbiter_index_oids.contains(&index.relation_oid)
         })
         .collect::<Vec<_>>();
+    let (insert_triggers, update_triggers) = ctx
+        .catalog
+        .as_ref()
+        .map(|catalog| {
+            Ok::<_, ExecError>((
+                RuntimeTriggers::load(
+                    catalog,
+                    stmt.relation_oid,
+                    &stmt.relation_name,
+                    &stmt.desc,
+                    TriggerOperation::Insert,
+                    &[],
+                    ctx.session_replication_role,
+                )?,
+                RuntimeTriggers::load(
+                    catalog,
+                    stmt.relation_oid,
+                    &stmt.relation_name,
+                    &stmt.desc,
+                    TriggerOperation::Update,
+                    &[],
+                    ctx.session_replication_role,
+                )?,
+            ))
+        })
+        .transpose()?
+        .map_or((None, None), |(insert_triggers, update_triggers)| {
+            (Some(insert_triggers), Some(update_triggers))
+        });
+    if let Some(triggers) = &update_triggers {
+        triggers.before_statement(ctx)?;
+    }
+    if let Some(triggers) = &insert_triggers {
+        triggers.before_statement(ctx)?;
+    }
+    let mut insert_capture = insert_triggers
+        .as_ref()
+        .map(|triggers| triggers.new_transition_capture());
+    let mut update_capture = update_triggers
+        .as_ref()
+        .map(|triggers| triggers.new_transition_capture());
     let mut affected_rows = Vec::new();
 
     if let BoundOnConflictAction::Update {
@@ -446,9 +507,15 @@ pub(crate) fn execute_insert_on_conflict_rows(
     }
 
     for values in rows {
+        let Some(values) = (match &insert_triggers {
+            Some(triggers) => triggers.before_row_insert(values.clone(), ctx)?,
+            None => Some(values.clone()),
+        }) else {
+            continue;
+        };
         loop {
             ctx.check_for_interrupts()?;
-            if let Some(conflict) = probe_arbiter_conflict(stmt, &arbiter_indexes, values, ctx)? {
+            if let Some(conflict) = probe_arbiter_conflict(stmt, &arbiter_indexes, &values, ctx)? {
                 match &on_conflict.action {
                     BoundOnConflictAction::Nothing => break,
                     BoundOnConflictAction::Update {
@@ -458,7 +525,7 @@ pub(crate) fn execute_insert_on_conflict_rows(
                         stmt,
                         assignments,
                         predicate.as_ref(),
-                        values,
+                        &values,
                         conflict.tid,
                         conflict.tuple,
                         &desc,
@@ -466,6 +533,8 @@ pub(crate) fn execute_insert_on_conflict_rows(
                         ctx,
                         xid,
                         cid,
+                        update_triggers.as_ref(),
+                        update_capture.as_mut(),
                     )? {
                         ConflictActionResult::Updated(updated_values) => {
                             affected_rows.push(updated_values);
@@ -485,7 +554,7 @@ pub(crate) fn execute_insert_on_conflict_rows(
                 &stmt.desc,
                 &stmt.relation_constraints,
                 &stmt.rls_write_checks,
-                values,
+                &values,
                 ctx,
                 xid,
                 cid,
@@ -495,15 +564,16 @@ pub(crate) fn execute_insert_on_conflict_rows(
             for index in &arbiter_indexes {
                 if !row_matches_index_predicate(
                     index,
-                    values,
+                    &values,
                     Some(heap_tid),
                     stmt.relation_oid,
                     ctx,
                 )? {
                     continue;
                 }
-                match insert_index_entry_for_row(stmt.rel, &stmt.desc, index, values, heap_tid, ctx)
-                {
+                match insert_index_entry_for_row(
+                    stmt.rel, &stmt.desc, index, &values, heap_tid, ctx,
+                ) {
                     Ok(()) => {}
                     Err(ExecError::UniqueViolation {
                         constraint,
@@ -523,12 +593,35 @@ pub(crate) fn execute_insert_on_conflict_rows(
             }
 
             for index in &non_arbiter_indexes {
-                insert_index_entry_for_row(stmt.rel, &stmt.desc, index, values, heap_tid, ctx)?;
+                insert_index_entry_for_row(stmt.rel, &stmt.desc, index, &values, heap_tid, ctx)?;
             }
             let mut inserted_values = values.to_vec();
             Value::materialize_all(&mut inserted_values);
+            if let Some(triggers) = &insert_triggers {
+                if let Some(capture) = insert_capture.as_mut() {
+                    triggers.capture_insert_row(capture, &inserted_values);
+                }
+                triggers.after_row_insert(&inserted_values, ctx)?;
+            }
             affected_rows.push(inserted_values);
             break;
+        }
+    }
+
+    if let Some(triggers) = &update_triggers {
+        if let Some(capture) = update_capture.as_ref() {
+            triggers.after_transition_rows(capture, ctx)?;
+            triggers.after_statement(Some(capture), ctx)?;
+        } else {
+            triggers.after_statement(None, ctx)?;
+        }
+    }
+    if let Some(triggers) = &insert_triggers {
+        if let Some(capture) = insert_capture.as_ref() {
+            triggers.after_transition_rows(capture, ctx)?;
+            triggers.after_statement(Some(capture), ctx)?;
+        } else {
+            triggers.after_statement(None, ctx)?;
         }
     }
 
