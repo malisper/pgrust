@@ -22,7 +22,7 @@ jobs:
     name: cargo-test-run
     if: ${{ github.event_name != 'pull_request' }}
     runs-on:
-      labels: self-hosted
+      labels: 32x
     steps:
       - name: Checkout
         uses: actions/checkout@v4
