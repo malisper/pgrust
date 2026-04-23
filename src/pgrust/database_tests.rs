@@ -185,6 +185,7 @@ fn analyze_executor_context(
         large_objects: Some(db.large_objects.clone()),
         async_notify_runtime: Some(db.async_notify_runtime.clone()),
         advisory_locks: Arc::clone(&db.advisory_locks),
+        row_locks: Arc::clone(&db.row_locks),
         checkpoint_stats: db.checkpoint_stats_snapshot(),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         interrupts: db.interrupt_state(client_id),
@@ -22317,6 +22318,35 @@ fn setop_for_no_key_update_reports_postgres_compat_error() {
         Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(message)))
             if message == "FOR NO KEY UPDATE is not allowed with UNION/INTERSECT/EXCEPT" => {}
         other => panic!("expected set-op FOR NO KEY UPDATE rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn select_locking_family_executes_for_all_strengths() {
+    let dir = temp_dir("select_locking_family_executes");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table lock_items (id int4 not null primary key)")
+        .unwrap();
+    db.execute(1, "insert into lock_items (id) values (1)")
+        .unwrap();
+
+    for sql in [
+        "select id from lock_items where id = 1 for update",
+        "select id from lock_items where id = 1 for no key update",
+        "select id from lock_items where id = 1 for share",
+        "select id from lock_items where id = 1 for key share",
+    ] {
+        match db.execute(1, sql).unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Int32(1)]],
+                    "unexpected rows for {sql}"
+                );
+            }
+            other => panic!("expected query result for {sql}, got {other:?}"),
+        }
     }
 }
 

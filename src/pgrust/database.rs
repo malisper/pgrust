@@ -51,9 +51,9 @@ use crate::backend::parser::{
     normalize_create_table_as_name, normalize_create_table_name, normalize_create_view_name,
 };
 use crate::backend::storage::lmgr::{
-    AdvisoryLockKey, AdvisoryLockManager, AdvisoryLockSnapshotRow, TableLockManager, TableLockMode,
-    TableLockSnapshotRow, lock_relations_interruptible, lock_tables_interruptible,
-    unlock_relations,
+    AdvisoryLockKey, AdvisoryLockManager, AdvisoryLockSnapshotRow, RowLockManager,
+    TableLockManager, TableLockMode, TableLockSnapshotRow, lock_relations_interruptible,
+    lock_tables_interruptible, unlock_relations,
 };
 use crate::backend::storage::smgr::{RelFileLocator, StorageManager};
 pub use crate::backend::utils::activity::{DatabaseStatsStore, SessionStatsState};
@@ -203,6 +203,7 @@ pub struct Database {
     pub(crate) statistics_objects: Arc<RwLock<BTreeMap<String, StatisticsObjectEntry>>>,
     pub(crate) sequences: Arc<SequenceRuntime>,
     pub(crate) advisory_locks: Arc<AdvisoryLockManager>,
+    pub(crate) row_locks: Arc<RowLockManager>,
     pub(crate) async_notify_runtime: Arc<AsyncNotifyRuntime>,
     pub(crate) stats: Arc<RwLock<DatabaseStatsStore>>,
     pub(crate) large_objects: Arc<LargeObjectRuntime>,

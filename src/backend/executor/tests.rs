@@ -615,6 +615,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         advisory_locks: std::sync::Arc::new(
             crate::backend::storage::lmgr::AdvisoryLockManager::new(),
         ),
+        row_locks: std::sync::Arc::new(crate::backend::storage::lmgr::RowLockManager::new()),
         checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(
         ),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -676,6 +677,7 @@ fn run_plan(
         advisory_locks: std::sync::Arc::new(
             crate::backend::storage::lmgr::AdvisoryLockManager::new(),
         ),
+        row_locks: std::sync::Arc::new(crate::backend::storage::lmgr::RowLockManager::new()),
         checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(
         ),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -775,6 +777,7 @@ fn run_sql_with_catalog(
             advisory_locks: std::sync::Arc::new(
                 crate::backend::storage::lmgr::AdvisoryLockManager::new(),
             ),
+            row_locks: std::sync::Arc::new(crate::backend::storage::lmgr::RowLockManager::new()),
             checkpoint_stats:
                 crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -7505,6 +7508,7 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         advisory_locks: std::sync::Arc::new(
             crate::backend::storage::lmgr::AdvisoryLockManager::new(),
         ),
+        row_locks: std::sync::Arc::new(crate::backend::storage::lmgr::RowLockManager::new()),
         checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(
         ),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -17012,6 +17016,7 @@ fn large_object_metadata_tracks_create_and_unlink() {
             advisory_locks: std::sync::Arc::new(
                 crate::backend::storage::lmgr::AdvisoryLockManager::new(),
             ),
+            row_locks: std::sync::Arc::new(crate::backend::storage::lmgr::RowLockManager::new()),
             checkpoint_stats:
                 crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),

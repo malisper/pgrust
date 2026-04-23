@@ -66,6 +66,7 @@ fn path_relids(path: &Path) -> Vec<usize> {
         | Path::Projection { input, .. }
         | Path::OrderBy { input, .. }
         | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
         | Path::Aggregate { input, .. }
         | Path::WindowAgg { input, .. }
         | Path::ProjectSet { input, .. } => path_relids(input),
@@ -290,9 +291,10 @@ pub(super) fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) ->
                 }
             }
         }
-        Path::Filter { input, .. } | Path::OrderBy { input, .. } | Path::Limit { input, .. } => {
-            rewrite_expr_for_path(expr, input, layout)
-        }
+        Path::Filter { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. } => rewrite_expr_for_path(expr, input, layout),
         Path::NestedLoopJoin { left, right, .. } | Path::HashJoin { left, right, .. } => {
             let left_layout = left.semantic_output_vars();
             if left_layout.contains(&expr) {

@@ -421,6 +421,8 @@ pub struct Query {
     pub sort_clause: Vec<SortGroupClause>,
     pub limit_count: Option<usize>,
     pub limit_offset: usize,
+    pub locking_clause: Option<SelectLockingClause>,
+    pub row_marks: Vec<QueryRowMark>,
     pub project_set: Option<Vec<ProjectSetTarget>>,
     pub recursive_union: Option<Box<RecursiveUnionQuery>>,
     pub set_operation: Option<Box<SetOperationQuery>>,
@@ -444,6 +446,12 @@ impl Query {
             .map(|column| column.name)
             .collect()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryRowMark {
+    pub rtindex: usize,
+    pub strength: SelectLockingClause,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -858,6 +866,23 @@ impl SelectLockingClause {
             SelectLockingClause::ForUpdate => "FOR UPDATE",
             SelectLockingClause::ForKeyShare => "FOR KEY SHARE",
             SelectLockingClause::ForShare => "FOR SHARE",
+        }
+    }
+
+    pub fn strongest(self, other: SelectLockingClause) -> SelectLockingClause {
+        if self.rank() >= other.rank() {
+            self
+        } else {
+            other
+        }
+    }
+
+    fn rank(self) -> u8 {
+        match self {
+            SelectLockingClause::ForKeyShare => 0,
+            SelectLockingClause::ForShare => 1,
+            SelectLockingClause::ForNoKeyUpdate => 2,
+            SelectLockingClause::ForUpdate => 3,
         }
     }
 }

@@ -647,6 +647,8 @@ fn query_from_projection_with_qual(input: AnalyzedFrom, where_qual: Option<Expr>
         sort_clause: Vec::new(),
         limit_count: None,
         limit_offset: 0,
+        locking_clause: None,
+        row_marks: Vec::new(),
         project_set: None,
         recursive_union: None,
         set_operation: None,
@@ -809,7 +811,7 @@ pub fn plan_merge(
         source_present_index,
         when_clauses,
         input_plan: crate::backend::optimizer::fold_query_constants(query)
-            .map(|query| planner(query, catalog))?,
+            .map(|query| planner(query, catalog))??,
     })
 }
 
@@ -2072,7 +2074,7 @@ fn bind_update_from(
     )?;
     let query = query_from_projection_with_qual(projected, predicate.clone());
     let input_plan = crate::backend::optimizer::fold_query_constants(query)
-        .map(|query| planner(query, catalog))?;
+        .map(|query| planner(query, catalog))??;
 
     let targets = if stmt.only {
         vec![entry.relation_oid]
