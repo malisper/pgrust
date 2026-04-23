@@ -260,6 +260,86 @@ fn catalog_with_pets() -> Catalog {
     catalog
 }
 
+fn jsonb_record_test_rel(rel_number: u32) -> RelFileLocator {
+    RelFileLocator {
+        spc_oid: 0,
+        db_oid: 1,
+        rel_number,
+    }
+}
+
+fn jsonb_record_test_composite_type(rel_number: u32) -> crate::backend::parser::SqlType {
+    crate::backend::parser::SqlType::named_composite(
+        60_000u32.saturating_add(rel_number),
+        50_000u32.saturating_add(rel_number),
+    )
+}
+
+fn catalog_with_jsonb_record_test_types() -> Catalog {
+    let mut catalog = catalog();
+    catalog.insert(
+        "jsb_char2",
+        test_catalog_entry(
+            jsonb_record_test_rel(17_001),
+            RelationDesc {
+                columns: vec![crate::backend::catalog::catalog::column_desc(
+                    "a",
+                    crate::backend::parser::SqlType::with_char_len(
+                        crate::backend::parser::SqlTypeKind::Char,
+                        2,
+                    ),
+                    true,
+                )],
+            },
+        ),
+    );
+    catalog.insert(
+        "jsb_nested",
+        test_catalog_entry(
+            jsonb_record_test_rel(17_002),
+            RelationDesc {
+                columns: vec![
+                    crate::backend::catalog::catalog::column_desc(
+                        "a",
+                        crate::backend::parser::SqlType::new(
+                            crate::backend::parser::SqlTypeKind::Text,
+                        ),
+                        true,
+                    ),
+                    crate::backend::catalog::catalog::column_desc(
+                        "b",
+                        crate::backend::parser::SqlType::new(
+                            crate::backend::parser::SqlTypeKind::Int4,
+                        ),
+                        true,
+                    ),
+                    crate::backend::catalog::catalog::column_desc(
+                        "c",
+                        crate::backend::parser::SqlType::new(
+                            crate::backend::parser::SqlTypeKind::Text,
+                        ),
+                        true,
+                    ),
+                ],
+            },
+        ),
+    );
+    catalog.insert(
+        "jsb_outer",
+        test_catalog_entry(
+            jsonb_record_test_rel(17_003),
+            RelationDesc {
+                columns: vec![crate::backend::catalog::catalog::column_desc(
+                    "rec",
+                    jsonb_record_test_composite_type(17_002),
+                    true,
+                )],
+            },
+        ),
+    );
+    catalog
+}
+
 fn join_chain_catalog() -> Catalog {
     let mut catalog = Catalog::default();
     catalog.insert("t1", test_catalog_entry(t1_rel(), join_name_n_desc()));
@@ -9743,6 +9823,74 @@ fn jsonb_populate_record_valid_checks_conversion_errors() {
         vec![vec![Value::Bool(true), Value::Bool(false)]],
     );
 }
+
+#[test]
+fn jsonb_populate_record_valid_uses_null_composite_type() {
+    let base = temp_dir("jsonb_populate_record_valid_composite");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select jsonb_populate_record_valid(NULL::jsb_char2, '{\"a\": \"aaa\"}'), \
+                    jsonb_populate_record_valid(NULL::jsb_char2, '{\"a\": \"aa\"}')",
+            catalog_with_jsonb_record_test_types(),
+        )
+        .unwrap(),
+        vec![vec![Value::Bool(false), Value::Bool(true)]],
+    );
+}
+
+#[test]
+fn jsonb_populate_record_preserves_nested_record_base_fields() {
+    let base = temp_dir("jsonb_populate_record_nested_base");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql_with_catalog(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select rec from jsonb_populate_record(\
+                row(row('x',3,'old')::jsb_nested)::jsb_outer, \
+                '{\"rec\": {\"a\":\"abc\",\"c\":\"new\"}}') q",
+            catalog_with_jsonb_record_test_types(),
+        )
+        .unwrap(),
+        vec![vec![Value::Record(RecordValue::anonymous(vec![
+            ("a".into(), Value::Text("abc".into())),
+            ("b".into(), Value::Int32(3)),
+            ("c".into(), Value::Text("new".into())),
+        ]))]],
+    );
+}
+
+#[test]
+fn jsonb_to_record_allows_json_array_elements_inside_json_array_column() {
+    let base = temp_dir("jsonb_record_json_array_column");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select jsa from jsonb_to_record('{\"jsa\": [1, \"2\", null, [3], {\"k\":\"v\"}]}') \
+                as q(jsa json[])",
+        )
+        .unwrap(),
+        vec![vec![Value::PgArray(ArrayValue::from_1d(vec![
+            Value::Json("1".into()),
+            Value::Json("\"2\"".into()),
+            Value::Null,
+            Value::Json("[3]".into()),
+            Value::Json("{\"k\":\"v\"}".into()),
+        ]))]],
+    );
+}
+
 #[test]
 fn join_alias_hides_inner_relation_names() {
     let base = temp_dir("join_alias_hides_inner");
