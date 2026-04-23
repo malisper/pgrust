@@ -14,6 +14,14 @@
 
 The current codebase was recently refactored to separate parser, logical plan, and executor-runtime responsibilities more cleanly. Prefer extending those boundaries instead of reintroducing cross-layer dependencies.
 
+## Formatting
+
+Rust formatting is pinned: `rust-toolchain.toml` fixes the rustc/rustfmt version and `rustfmt.toml` fixes the style edition. CI fails any PR that is not formatted with that exact rustfmt.
+
+- After editing any `*.rs` file, run `cargo fmt` before considering the task done. Running from inside the repo uses the pinned toolchain automatically.
+- Do not reformat files you did not otherwise touch. If you notice unrelated drift, leave it — a separate fmt-only PR is the right cleanup path. Agents mixing stray reformatting into feature PRs is the exact churn this policy exists to prevent.
+- Do not bypass CI with `--no-verify` or by disabling the `cargo-fmt-check` job.
+
 ## PostgreSQL Reference Repo
 
 A sibling PostgreSQL source checkout is available at `~/postgres`.
