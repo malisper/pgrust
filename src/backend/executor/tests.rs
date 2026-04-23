@@ -13961,6 +13961,94 @@ fn jsonb_subscript_reads_match_basic_pg_cases() {
 }
 
 #[test]
+fn jsonb_subscript_assignment_updates_objects_arrays_and_nulls() {
+    let db = Database::open(temp_dir("jsonb_subscript_assignment"), 16).unwrap();
+    let mut session = Session::new(1);
+
+    db.execute(1, "create temp table t (id int4, test_json jsonb)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into t values (1, '{}'), (2, '{\"key\":\"value\"}'), (3, null)",
+    )
+    .unwrap();
+
+    db.execute(1, "update t set test_json['a'] = '1' where id = 1")
+        .unwrap();
+    db.execute(
+        1,
+        "update t set test_json['a'] = '[1, 2, 3]'::jsonb where id = 2",
+    )
+    .unwrap();
+    db.execute(1, "update t set test_json['a'] = '1' where id = 3")
+        .unwrap();
+
+    match session
+        .execute(&db, "select test_json from t order by id")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("{\"a\":1}").unwrap()
+                    )],
+                    vec![Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text(
+                            "{\"a\":[1,2,3],\"key\":\"value\"}"
+                        )
+                        .unwrap()
+                    )],
+                    vec![Value::Jsonb(
+                        crate::backend::executor::jsonb::parse_jsonb_text("{\"a\":1}").unwrap()
+                    )],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+
+    db.execute(1, "delete from t").unwrap();
+    db.execute(1, "insert into t values (1, '[0]')").unwrap();
+    db.execute(1, "update t set test_json[5] = '1'").unwrap();
+    db.execute(1, "update t set test_json[-4] = '1'").unwrap();
+
+    match session.execute(&db, "select test_json from t").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Jsonb(
+                    crate::backend::executor::jsonb::parse_jsonb_text("[0,null,1,null,null,1]")
+                        .unwrap()
+                )]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+
+    db.execute(1, "delete from t").unwrap();
+    db.execute(1, "insert into t values (1, '{}')").unwrap();
+    db.execute(1, "update t set test_json['a'][0]['b'][0]['c'] = '1'")
+        .unwrap();
+
+    match session.execute(&db, "select test_json from t").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Jsonb(
+                    crate::backend::executor::jsonb::parse_jsonb_text(
+                        "{\"a\":[{\"b\":[{\"c\":1}]}]}"
+                    )
+                    .unwrap()
+                )]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
 fn jsonb_path_query_works_in_select_list_and_from() {
     let base = temp_dir("jsonb_path_query_srf");
     let txns = TransactionManager::new_durable(&base).unwrap();
