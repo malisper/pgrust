@@ -1330,9 +1330,7 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
             )));
         }
         "regoperator" => {
-            return Ok(RawTypeName::Builtin(SqlType::new(
-                SqlTypeKind::RegOperator,
-            )));
+            return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegOperator)));
         }
         _ => {}
     }
@@ -1917,19 +1915,22 @@ fn try_parse_operator_statement(sql: &str) -> Result<Option<Statement>, ParseErr
         && !lowered.starts_with("create operator class ")
         && !lowered.starts_with("create operator family ")
     {
-        return build_create_operator_statement(trimmed).map(|stmt| Some(Statement::CreateOperator(stmt)));
+        return build_create_operator_statement(trimmed)
+            .map(|stmt| Some(Statement::CreateOperator(stmt)));
     }
     if lowered.starts_with("alter operator ")
         && !lowered.starts_with("alter operator class ")
         && !lowered.starts_with("alter operator family ")
     {
-        return build_alter_operator_statement(trimmed).map(|stmt| Some(Statement::AlterOperator(stmt)));
+        return build_alter_operator_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterOperator(stmt)));
     }
     if lowered.starts_with("drop operator ")
         && !lowered.starts_with("drop operator class ")
         && !lowered.starts_with("drop operator family ")
     {
-        return build_drop_operator_statement(trimmed).map(|stmt| Some(Statement::DropOperator(stmt)));
+        return build_drop_operator_statement(trimmed)
+            .map(|stmt| Some(Statement::DropOperator(stmt)));
     }
     Ok(None)
 }
@@ -4192,7 +4193,9 @@ fn build_create_operator_statement(sql: &str) -> Result<CreateOperatorStatement,
             "negator" => negator = Some(parse_operator_name_value(value)?),
             "restrict" => {
                 if keyword_at_start(value, "none")
-                    && consume_keyword(value.trim_start(), "none").trim().is_empty()
+                    && consume_keyword(value.trim_start(), "none")
+                        .trim()
+                        .is_empty()
                 {
                     restrict = None;
                 } else {
@@ -4208,7 +4211,9 @@ fn build_create_operator_statement(sql: &str) -> Result<CreateOperatorStatement,
             }
             "join" => {
                 if keyword_at_start(value, "none")
-                    && consume_keyword(value.trim_start(), "none").trim().is_empty()
+                    && consume_keyword(value.trim_start(), "none")
+                        .trim()
+                        .is_empty()
                 {
                     join = None;
                 } else {
@@ -4266,7 +4271,8 @@ fn build_alter_operator_statement(sql: &str) -> Result<AlterOperatorStatement, P
             actual: rest.into(),
         });
     }
-    let (options_sql, rest) = take_parenthesized_segment(consume_keyword(rest, "set").trim_start())?;
+    let (options_sql, rest) =
+        take_parenthesized_segment(consume_keyword(rest, "set").trim_start())?;
     if !rest.trim().is_empty() {
         return Err(ParseError::UnexpectedToken {
             expected: "end of ALTER OPERATOR",
@@ -4299,7 +4305,9 @@ fn build_alter_operator_statement(sql: &str) -> Result<AlterOperatorStatement, P
                     None => None,
                     Some(value)
                         if keyword_at_start(value, "none")
-                            && consume_keyword(value.trim_start(), "none").trim().is_empty() =>
+                            && consume_keyword(value.trim_start(), "none")
+                                .trim()
+                                .is_empty() =>
                     {
                         None
                     }
@@ -4325,7 +4333,9 @@ fn build_alter_operator_statement(sql: &str) -> Result<AlterOperatorStatement, P
                     None => None,
                     Some(value)
                         if keyword_at_start(value, "none")
-                            && consume_keyword(value.trim_start(), "none").trim().is_empty() =>
+                            && consume_keyword(value.trim_start(), "none")
+                                .trim()
+                                .is_empty() =>
                     {
                         None
                     }
@@ -4367,11 +4377,17 @@ fn build_alter_operator_statement(sql: &str) -> Result<AlterOperatorStatement, P
             },
             "merges" => AlterOperatorOption::Merges {
                 option_name,
-                enabled: value.map(parse_operator_bool_value).transpose()?.unwrap_or(true),
+                enabled: value
+                    .map(parse_operator_bool_value)
+                    .transpose()?
+                    .unwrap_or(true),
             },
             "hashes" => AlterOperatorOption::Hashes {
                 option_name,
-                enabled: value.map(parse_operator_bool_value).transpose()?.unwrap_or(true),
+                enabled: value
+                    .map(parse_operator_bool_value)
+                    .transpose()?
+                    .unwrap_or(true),
             },
             _ => AlterOperatorOption::Unrecognized {
                 option_name,
@@ -13433,7 +13449,8 @@ mod tests {
             })
         );
         assert_eq!(
-            parse_statement("drop operator if exists public.===(boolean, boolean) cascade").unwrap(),
+            parse_statement("drop operator if exists public.===(boolean, boolean) cascade")
+                .unwrap(),
             Statement::DropOperator(DropOperatorStatement {
                 if_exists: true,
                 schema_name: Some("public".to_string()),

@@ -3,7 +3,6 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::include::access::brin::BrinOptions;
 use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::bootstrap::bootstrap_catalog_rel;
 use crate::backend::catalog::catalog::{Catalog, CatalogEntry, column_desc};
@@ -11,6 +10,7 @@ use crate::backend::executor::RelationDesc;
 use crate::backend::parser::SqlType;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name, sql_type_oid};
+use crate::include::access::brin::BrinOptions;
 use crate::include::catalog::{
     ANYOID, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, PG_CATALOG_NAMESPACE_OID,
     PG_CONSTRAINT_RELATION_OID, PgPartitionedTableRow, bootstrap_catalog_kinds,

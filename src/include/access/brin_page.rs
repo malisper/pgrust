@@ -1,5 +1,5 @@
 use crate::backend::storage::page::bufpage::{
-    MAXALIGN, PageError, page_special, page_special_mut, SIZE_OF_PAGE_HEADER_DATA,
+    MAXALIGN, PageError, SIZE_OF_PAGE_HEADER_DATA, page_special, page_special_mut,
 };
 use crate::backend::storage::smgr::BLCKSZ;
 
@@ -41,9 +41,10 @@ impl BrinMetaPageData {
 pub const REVMAP_CONTENT_SIZE: usize = BLCKSZ - BRIN_PAGE_CONTENT_OFFSET - BRIN_SPECIAL_SIZE;
 pub const REVMAP_PAGE_MAXITEMS: usize = REVMAP_CONTENT_SIZE / REVMAP_ENTRY_SIZE;
 
-pub const BRIN_MAX_ITEM_SIZE: usize =
-    (BLCKSZ - ((SIZE_OF_PAGE_HEADER_DATA + 4 + (MAXALIGN - 1)) & !(MAXALIGN - 1)) - BRIN_SPECIAL_SIZE)
-        & !(MAXALIGN - 1);
+pub const BRIN_MAX_ITEM_SIZE: usize = (BLCKSZ
+    - ((SIZE_OF_PAGE_HEADER_DATA + 4 + (MAXALIGN - 1)) & !(MAXALIGN - 1))
+    - BRIN_SPECIAL_SIZE)
+    & !(MAXALIGN - 1);
 
 fn special_word(special: &[u8], word_index: usize) -> u16 {
     let offset = word_index * std::mem::size_of::<u16>();

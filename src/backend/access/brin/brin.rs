@@ -9,15 +9,10 @@ use crate::backend::access::index::buildkeys::{
 };
 use crate::backend::catalog::CatalogError;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
-use crate::backend::storage::page::bufpage::{
-    PageError, max_align, page_get_item, page_header,
-};
+use crate::backend::storage::page::bufpage::{PageError, max_align, page_get_item, page_header};
 use crate::backend::storage::smgr::{BLCKSZ, ForkNumber, RelFileLocator, StorageManager};
 use crate::backend::utils::misc::interrupts::{InterruptState, check_for_interrupts};
 use crate::backend::utils::time::snapmgr::Snapshot;
-use crate::include::access::brin_internal::{BrinDesc, BrinMemTuple, BrinTupleLocation};
-use crate::include::access::brin_page::{BRIN_PAGETYPE_REGULAR, brin_page_type};
-use crate::include::access::brin_revmap::normalize_range_start;
 use crate::include::access::amapi::{
     IndexAmRoutine, IndexBeginScanContext, IndexBuildContext, IndexBuildEmptyContext,
     IndexBuildResult, IndexBulkDeleteResult, IndexInsertContext, IndexVacuumContext,
@@ -25,11 +20,14 @@ use crate::include::access::amapi::{
 use crate::include::access::brin_internal::{
     BRIN_PROCNUM_ADDVALUE, BRIN_PROCNUM_CONSISTENT, BRIN_PROCNUM_UNION,
 };
+use crate::include::access::brin_internal::{BrinDesc, BrinMemTuple, BrinTupleLocation};
+use crate::include::access::brin_page::{BRIN_PAGETYPE_REGULAR, brin_page_type};
+use crate::include::access::brin_revmap::normalize_range_start;
+use crate::include::access::htup::HeapTuple;
+use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::relscan::{
     BrinIndexScanOpaque, IndexScanDesc, IndexScanOpaque, ScanDirection,
 };
-use crate::include::access::htup::HeapTuple;
-use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::access::tidbitmap::TidBitmap;
 use crate::include::nodes::datum::Value;
@@ -37,6 +35,10 @@ use crate::include::nodes::primnodes::RelationDesc;
 use crate::{BufferPool, ClientId, PinnedBuffer};
 
 use super::minmax::{BrinMinmaxStrategy, minmax_add_value, minmax_consistent, minmax_union};
+use super::pageops::{
+    brin_can_do_samepage_update, brin_page_get_freespace, brin_page_init,
+    brin_regular_page_add_item, page_index_tuple_delete_no_compact, page_index_tuple_overwrite,
+};
 use super::pageops::{brin_metapage_data, brin_metapage_init};
 use super::revmap::{
     BrinRevmap, brin_revmap_extend, brin_revmap_get_location, brin_revmap_get_tuple_bytes,
@@ -44,10 +46,6 @@ use super::revmap::{
 };
 use super::tuple::{
     brin_build_desc, brin_deform_tuple, brin_form_placeholder_tuple, brin_form_tuple,
-};
-use super::pageops::{
-    brin_can_do_samepage_update, brin_page_get_freespace, brin_page_init, brin_regular_page_add_item,
-    page_index_tuple_delete_no_compact, page_index_tuple_overwrite,
 };
 
 fn pin_brin_block<'a>(
@@ -145,7 +143,9 @@ fn brin_pages_per_range_from_meta(
         .brin_options
         .as_ref()
         .map(|options| options.pages_per_range)
-        .ok_or(CatalogError::Corrupt("BRIN index metadata missing brin_options"))?;
+        .ok_or(CatalogError::Corrupt(
+            "BRIN index metadata missing brin_options",
+        ))?;
     if pages_per_range == 0 {
         return Err(CatalogError::Corrupt(
             "BRIN index metadata has invalid pages_per_range",
@@ -234,7 +234,11 @@ fn union_memtuples(
             BRIN_PROCNUM_UNION,
             "union",
         )?;
-        minmax_union(union_proc, &mut left.columns[column_index], &right.columns[column_index])?;
+        minmax_union(
+            union_proc,
+            &mut left.columns[column_index],
+            &right.columns[column_index],
+        )?;
     }
     left.empty_range = false;
     Ok(())
@@ -279,7 +283,8 @@ fn scan_visible_heap_summaries(
             .deform(&attr_descs)
             .map_err(|err| CatalogError::Io(format!("brin heap deform failed: {err:?}")))?;
         let row_values = materialize_heap_row_values(heap_desc, &datums)?;
-        let key_values = project_index_key_values(index_desc, &index_meta.indkey, &row_values, &[])?;
+        let key_values =
+            project_index_key_values(index_desc, &index_meta.indkey, &row_values, &[])?;
         let summary = summaries
             .entry(range_start)
             .or_insert_with(|| BrinMemTuple::new(desc, range_start));
@@ -289,9 +294,7 @@ fn scan_visible_heap_summaries(
 }
 
 fn range_page_count(range_start: u32, pages_per_range: u32, heap_blocks: u32) -> u32 {
-    heap_blocks
-        .saturating_sub(range_start)
-        .min(pages_per_range)
+    heap_blocks.saturating_sub(range_start).min(pages_per_range)
 }
 
 fn store_regular_tuple(
@@ -308,7 +311,8 @@ fn store_regular_tuple(
         if let Err(PageError::NotInitialized) = page_header(&index_pages[block as usize]) {
             brin_page_init(&mut index_pages[block as usize], BRIN_PAGETYPE_REGULAR)?;
         }
-        if brin_page_type(&index_pages[block as usize]).map_err(page_error)? != BRIN_PAGETYPE_REGULAR
+        if brin_page_type(&index_pages[block as usize]).map_err(page_error)?
+            != BRIN_PAGETYPE_REGULAR
         {
             block += 1;
             continue;
@@ -377,7 +381,12 @@ fn summarize_unsummarized_ranges(
 
     for range_start in &target_ranges {
         let placeholder = brin_form_placeholder_tuple(&desc, *range_start)?;
-        upsert_summary_tuple(&mut index_pages, &mut revmap, *range_start, &placeholder.bytes)?;
+        upsert_summary_tuple(
+            &mut index_pages,
+            &mut revmap,
+            *range_start,
+            &placeholder.bytes,
+        )?;
     }
 
     let mut summaries = target_ranges
@@ -423,7 +432,9 @@ fn range_matches_scan(
         let column = tuple
             .columns
             .get(column_index)
-            .ok_or(CatalogError::Corrupt("BRIN scan key attribute out of range"))?;
+            .ok_or(CatalogError::Corrupt(
+                "BRIN scan key attribute out of range",
+            ))?;
         if column.all_nulls || matches!(key.argument, Value::Null) {
             return Ok(false);
         }
@@ -532,7 +543,9 @@ pub(crate) fn brinbuildempty(ctx: &IndexBuildEmptyContext) -> Result<(), Catalog
         .map_err(|err| CatalogError::Io(format!("brin ensure relation failed: {err:?}")))?;
     ctx.pool
         .with_storage_mut(|storage| {
-            storage.smgr.truncate(ctx.index_relation, ForkNumber::Main, 0)?;
+            storage
+                .smgr
+                .truncate(ctx.index_relation, ForkNumber::Main, 0)?;
             let mut metapage = [0u8; BLCKSZ];
             brin_metapage_init(
                 &mut metapage,
@@ -562,8 +575,7 @@ pub(crate) fn brininsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError>
     let desc = brin_build_desc(&ctx.index_desc);
     let mut index_pages = read_index_pages(&ctx.pool, ctx.client_id, ctx.index_relation)?;
     let mut revmap = brin_revmap_initialize(&index_pages)?;
-    let Some((_location, bytes)) =
-        brin_revmap_get_tuple_bytes(&index_pages, &revmap, range_start)?
+    let Some((_location, bytes)) = brin_revmap_get_tuple_bytes(&index_pages, &revmap, range_start)?
     else {
         return Ok(false);
     };
@@ -571,7 +583,13 @@ pub(crate) fn brininsert(ctx: &IndexInsertContext) -> Result<bool, CatalogError>
     if summary.placeholder {
         return Ok(false);
     }
-    if !add_values_to_summary(&ctx.index_meta, &ctx.index_desc, &desc, &mut summary, &ctx.values)? {
+    if !add_values_to_summary(
+        &ctx.index_meta,
+        &ctx.index_desc,
+        &desc,
+        &mut summary,
+        &ctx.values,
+    )? {
         return Ok(false);
     }
     let tuple = brin_form_tuple(&desc, &summary)?;
@@ -646,9 +664,9 @@ pub(crate) fn bringetbitmap(
     scan: &mut IndexScanDesc,
     bitmap: &mut TidBitmap,
 ) -> Result<i64, CatalogError> {
-    let heap_relation = scan
-        .heap_relation
-        .ok_or(CatalogError::Corrupt("BRIN bitmap scan missing heap relation"))?;
+    let heap_relation = scan.heap_relation.ok_or(CatalogError::Corrupt(
+        "BRIN bitmap scan missing heap relation",
+    ))?;
     let heap_blocks = relation_nblocks(&scan.pool, heap_relation)?;
     let index_pages = read_index_pages(&scan.pool, scan.client_id, scan.index_relation)?;
     let revmap = brin_revmap_initialize(&index_pages)?;
@@ -721,8 +739,8 @@ mod tests {
     use crate::backend::catalog::catalog::column_desc;
     use crate::backend::executor::value_io::encode_tuple_values;
     use crate::backend::storage::smgr::md::MdStorageManager;
-    use crate::backend::utils::misc::interrupts::InterruptState;
     use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
+    use crate::backend::utils::misc::interrupts::InterruptState;
     use crate::include::access::brin::BrinOptions;
     use crate::include::catalog::{
         BRIN_AM_OID, BRIN_MINMAX_ADD_VALUE_PROC_OID, BRIN_MINMAX_CONSISTENT_PROC_OID,
@@ -811,8 +829,16 @@ mod tests {
     fn heap_desc() -> RelationDesc {
         RelationDesc {
             columns: vec![
-                column_desc("a", crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4), false),
-                column_desc("pad", crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Text), false),
+                column_desc(
+                    "a",
+                    crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+                    false,
+                ),
+                column_desc(
+                    "pad",
+                    crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Text),
+                    false,
+                ),
             ],
         }
     }
@@ -890,7 +916,10 @@ mod tests {
         let meta = read_brin_metapage(&pool, 0, rel).unwrap();
         assert_eq!(meta.pages_per_range, 32);
         assert_eq!(meta.last_revmap_page, 0);
-        assert_eq!(meta.brin_magic, crate::include::access::brin_page::BRIN_META_MAGIC);
+        assert_eq!(
+            meta.brin_magic,
+            crate::include::access::brin_page::BRIN_META_MAGIC
+        );
         assert_eq!(
             meta.brin_version,
             crate::include::access::brin_page::BRIN_CURRENT_VERSION
@@ -987,11 +1016,20 @@ mod tests {
         assert!(result.index_tuples >= 3);
 
         let first = summary_for_range(&pool, index_rel, &meta, 0).unwrap();
-        assert_eq!(first.columns[0].values, vec![Value::Int32(10), Value::Int32(11)]);
+        assert_eq!(
+            first.columns[0].values,
+            vec![Value::Int32(10), Value::Int32(11)]
+        );
         let second = summary_for_range(&pool, index_rel, &meta, 1).unwrap();
-        assert_eq!(second.columns[0].values, vec![Value::Int32(100), Value::Int32(101)]);
+        assert_eq!(
+            second.columns[0].values,
+            vec![Value::Int32(100), Value::Int32(101)]
+        );
         let third = summary_for_range(&pool, index_rel, &meta, 2).unwrap();
-        assert_eq!(third.columns[0].values, vec![Value::Int32(1000), Value::Int32(1001)]);
+        assert_eq!(
+            third.columns[0].values,
+            vec![Value::Int32(1000), Value::Int32(1001)]
+        );
 
         let mut scan = brinbeginscan(&IndexBeginScanContext {
             pool: Arc::clone(&pool),
@@ -1077,7 +1115,10 @@ mod tests {
         .unwrap();
 
         let summary = summary_for_range(&pool, index_rel, &meta, 0).unwrap();
-        assert_eq!(summary.columns[0].values, vec![Value::Int32(10), Value::Int32(50)]);
+        assert_eq!(
+            summary.columns[0].values,
+            vec![Value::Int32(10), Value::Int32(50)]
+        );
     }
 
     #[test]
@@ -1158,6 +1199,9 @@ mod tests {
         let expected_ranges = u64::from(heap_blocks);
         assert_eq!(stats.num_index_tuples, expected_ranges);
         let summary = summary_for_range(&pool, index_rel, &meta, tail_range).unwrap();
-        assert_eq!(summary.columns[0].values, vec![Value::Int32(1000), Value::Int32(1000)]);
+        assert_eq!(
+            summary.columns[0].values,
+            vec![Value::Int32(1000), Value::Int32(1000)]
+        );
     }
 }

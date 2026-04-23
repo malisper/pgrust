@@ -22,7 +22,11 @@ impl SeededSqlHarness {
         let txns = TransactionManager::new_durable(&base).unwrap();
         crate::backend::catalog::store::sync_catalog_heaps_for_tests(&base, &catalog).unwrap();
         create_relation_forks(&base, &catalog);
-        Self { base, txns, catalog }
+        Self {
+            base,
+            txns,
+            catalog,
+        }
     }
 
     pub(crate) fn execute(
@@ -53,13 +57,11 @@ impl SeededSqlHarness {
                     crate::pgrust::database::LargeObjectRuntime::new_ephemeral(),
                 )),
                 async_notify_runtime: None,
-                advisory_locks: Arc::new(
-                    crate::backend::storage::lmgr::AdvisoryLockManager::new(),
-                ),
+                advisory_locks: Arc::new(crate::backend::storage::lmgr::AdvisoryLockManager::new()),
                 checkpoint_stats:
                     crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
-                datetime_config:
-                    crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+                datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(
+                ),
                 interrupts: Arc::new(
                     crate::backend::utils::misc::interrupts::InterruptState::new(),
                 ),
