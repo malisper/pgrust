@@ -167,19 +167,22 @@ fn parse_set_session_authorization_string_literal() {
 }
 
 #[test]
-fn publication_parser_rejects_milestone_one_unsupported_features() {
-    assert!(matches!(
-        parse_statement("create publication pub for table only widgets"),
-        Err(ParseError::FeatureNotSupported(feature)) if feature == "publication ONLY"
-    ));
-    assert!(matches!(
-        parse_statement("create publication pub for table widgets(id)"),
-        Err(ParseError::FeatureNotSupported(feature)) if feature == "publication column lists"
-    ));
-    assert!(matches!(
-        parse_statement("create publication pub for table widgets where (id > 0)"),
-        Err(ParseError::FeatureNotSupported(feature)) if feature == "publication row filters"
-    ));
+fn publication_parser_accepts_table_qualifiers_filters_and_columns() {
+    let stmt = parse_statement("create publication pub for table only widgets(id) where (id > 0)")
+        .unwrap();
+    match stmt {
+        Statement::CreatePublication(stmt) => {
+            assert!(matches!(
+                &stmt.target.objects[0],
+                PublicationObjectSpec::Table(table)
+                    if table.only
+                        && table.relation_name == "widgets"
+                        && table.column_names == vec!["id"]
+                        && table.where_clause.as_deref() == Some("id > 0")
+            ));
+        }
+        other => panic!("expected create publication, got {other:?}"),
+    }
 }
 
 #[test]

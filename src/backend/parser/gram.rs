@@ -694,7 +694,6 @@ fn build_create_publication_statement(sql: &str) -> Result<CreatePublicationStat
             actual: rest.trim().into(),
         });
     }
-    reject_unsupported_publication_features(&target)?;
     Ok(CreatePublicationStatement {
         publication_name,
         target,
@@ -739,18 +738,15 @@ fn build_alter_publication_statement(sql: &str) -> Result<AlterPublicationStatem
             (AlterPublicationAction::SetOptions(options), rest)
         } else {
             let (target, rest) = parse_publication_target_spec(rest)?;
-            reject_unsupported_publication_features(&target)?;
             (AlterPublicationAction::SetObjects(target), rest)
         }
     } else if keyword_at_start(rest, "add") {
         let rest = consume_keyword(rest, "add").trim_start();
         let (target, rest) = parse_publication_target_spec(rest)?;
-        reject_unsupported_publication_features(&target)?;
         (AlterPublicationAction::AddObjects(target), rest)
     } else if keyword_at_start(rest, "drop") {
         let rest = consume_keyword(rest, "drop").trim_start();
         let (target, rest) = parse_publication_target_spec(rest)?;
-        reject_unsupported_publication_features(&target)?;
         (AlterPublicationAction::DropObjects(target), rest)
     } else {
         return Err(ParseError::UnexpectedToken {
@@ -1363,30 +1359,6 @@ fn parse_publication_identifier_list(input: &str) -> Result<Vec<String>, ParseEr
             Ok(name)
         })
         .collect()
-}
-
-fn reject_unsupported_publication_features(
-    target: &PublicationTargetSpec,
-) -> Result<(), ParseError> {
-    for object in &target.objects {
-        let PublicationObjectSpec::Table(table) = object else {
-            continue;
-        };
-        if table.only {
-            return Err(ParseError::FeatureNotSupported("publication ONLY".into()));
-        }
-        if !table.column_names.is_empty() {
-            return Err(ParseError::FeatureNotSupported(
-                "publication column lists".into(),
-            ));
-        }
-        if table.where_clause.is_some() {
-            return Err(ParseError::FeatureNotSupported(
-                "publication row filters".into(),
-            ));
-        }
-    }
-    Ok(())
 }
 
 fn build_create_tablespace_statement(sql: &str) -> Result<CreateTablespaceStatement, ParseError> {
