@@ -12,6 +12,7 @@ use super::expr_money::{
     money_format_text, money_from_float, money_numeric_text, money_parse_text,
 };
 use super::expr_multirange::{multirange_from_range, parse_multirange_text};
+use super::expr_network::{parse_cidr_text, parse_inet_text};
 use super::expr_range::{parse_range_text, render_range_text};
 use super::node_types::*;
 use crate::backend::executor::jsonb::{
@@ -1680,7 +1681,9 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::Tid
                     | SqlTypeKind::Interval
                     | SqlTypeKind::RegConfig
-                    | SqlTypeKind::RegDictionary,
+                    | SqlTypeKind::RegDictionary
+                    | SqlTypeKind::Inet
+                    | SqlTypeKind::Cidr,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -1816,7 +1819,9 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::Tid
                     | SqlTypeKind::Interval
                     | SqlTypeKind::RegConfig
-                    | SqlTypeKind::RegDictionary,
+                    | SqlTypeKind::RegDictionary
+                    | SqlTypeKind::Inet
+                    | SqlTypeKind::Cidr,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -1913,7 +1918,9 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::Tid
                     | SqlTypeKind::Interval
                     | SqlTypeKind::RegConfig
-                    | SqlTypeKind::RegDictionary,
+                    | SqlTypeKind::RegDictionary
+                    | SqlTypeKind::Inet
+                    | SqlTypeKind::Cidr,
                 ..
             } => cast_text_value(if v { "true" } else { "false" }, ty, true),
             SqlType {
@@ -2293,6 +2300,30 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 right: Value::Null,
             }),
         },
+        Value::Inet(value) => match ty.kind {
+            SqlTypeKind::Inet => Ok(Value::Inet(value)),
+            SqlTypeKind::Cidr => parse_cidr_text(&value.render_cidr()).map(Value::Cidr),
+            SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar => {
+                Ok(Value::Text(CompactString::from_owned(value.render_inet())))
+            }
+            _ => Err(ExecError::TypeMismatch {
+                op: "::inet",
+                left: Value::Inet(value),
+                right: Value::Null,
+            }),
+        },
+        Value::Cidr(value) => match ty.kind {
+            SqlTypeKind::Cidr => Ok(Value::Cidr(value)),
+            SqlTypeKind::Inet => Ok(Value::Inet(value)),
+            SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar => {
+                Ok(Value::Text(CompactString::from_owned(value.render_cidr())))
+            }
+            _ => Err(ExecError::TypeMismatch {
+                op: "::cidr",
+                left: Value::Cidr(value),
+                right: Value::Null,
+            }),
+        },
         Value::Jsonb(bytes) => match ty.kind {
             SqlTypeKind::Jsonb => Ok(Value::Jsonb(bytes)),
             SqlTypeKind::Json => Ok(Value::Json(CompactString::from_owned(render_jsonb_bytes(
@@ -2406,7 +2437,9 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::Tid
                     | SqlTypeKind::Interval
                     | SqlTypeKind::RegConfig
-                    | SqlTypeKind::RegDictionary,
+                    | SqlTypeKind::RegDictionary
+                    | SqlTypeKind::Inet
+                    | SqlTypeKind::Cidr,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -2519,7 +2552,9 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::Tid
                     | SqlTypeKind::Interval
                     | SqlTypeKind::RegConfig
-                    | SqlTypeKind::RegDictionary,
+                    | SqlTypeKind::RegDictionary
+                    | SqlTypeKind::Inet
+                    | SqlTypeKind::Cidr,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -2775,6 +2810,8 @@ pub(super) fn cast_text_value_with_config(
             explicit,
         )?)),
         SqlTypeKind::Bytea => Ok(Value::Bytea(parse_bytea_text(text)?)),
+        SqlTypeKind::Inet => parse_inet_text(text).map(Value::Inet),
+        SqlTypeKind::Cidr => parse_cidr_text(text).map(Value::Cidr),
         SqlTypeKind::Json => {
             validate_json_text(text)?;
             Ok(Value::Json(CompactString::new(text)))
@@ -2991,6 +3028,7 @@ pub(super) fn cast_numeric_value(
             left: Value::Numeric(value),
             right: Value::Bytea(Vec::new()),
         }),
+        SqlTypeKind::Inet | SqlTypeKind::Cidr => cast_text_value(&value.render(), ty, explicit),
         SqlTypeKind::Range
         | SqlTypeKind::Int4Range
         | SqlTypeKind::Int8Range

@@ -4495,6 +4495,9 @@ impl Session {
                                 ScalarType::BitString => {
                                     cast_value(Value::Text(raw.clone().into()), column.sql_type)?
                                 }
+                                ScalarType::Inet | ScalarType::Cidr => {
+                                    cast_value(Value::Text(raw.clone().into()), column.sql_type)?
+                                }
                                 ScalarType::Float32 | ScalarType::Float64 => raw
                                     .parse::<f64>()
                                     .map(Value::Float64)

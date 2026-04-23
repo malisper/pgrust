@@ -13,6 +13,7 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::access::htup::TupleError;
 use crate::include::catalog::{TRIGGER_TYPE_OID, builtin_type_rows, range_type_ref_for_sql_type};
+use crate::include::nodes::datum::InetValue;
 use crate::pgrust::session::ByteaOutputFormat;
 use num_bigint::BigInt;
 use num_traits::One;
@@ -342,6 +343,8 @@ fn validate_binary_output_type(sql_type: SqlType) -> Result<(), ExecError> {
                 | SqlTypeKind::RegDictionary
                 | SqlTypeKind::Bool
                 | SqlTypeKind::Bytea
+                | SqlTypeKind::Inet
+                | SqlTypeKind::Cidr
                 | SqlTypeKind::Text
                 | SqlTypeKind::Varchar
                 | SqlTypeKind::Char
@@ -445,6 +448,8 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Bit => 1561,
             SqlTypeKind::VarBit => 1563,
             SqlTypeKind::Bytea => 1001,
+            SqlTypeKind::Inet => crate::include::catalog::INET_ARRAY_TYPE_OID as i32,
+            SqlTypeKind::Cidr => crate::include::catalog::CIDR_ARRAY_TYPE_OID as i32,
             SqlTypeKind::Float4 => 1021,
             SqlTypeKind::Float8 => 1022,
             SqlTypeKind::Money => 791,
@@ -544,6 +549,8 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Bit => (1560, -1, col.sql_type.typmod),
         SqlTypeKind::VarBit => (1562, -1, col.sql_type.typmod),
         SqlTypeKind::Bytea => (17, -1, -1),
+        SqlTypeKind::Inet => (crate::include::catalog::INET_TYPE_OID as i32, -1, -1),
+        SqlTypeKind::Cidr => (crate::include::catalog::CIDR_TYPE_OID as i32, -1, -1),
         SqlTypeKind::Float4 => (700, 4, -1),
         SqlTypeKind::Float8 => (701, 8, -1),
         SqlTypeKind::Money => (790, 8, -1),
@@ -726,6 +733,16 @@ pub(crate) fn send_typed_data_row(
             }
             Value::Bytea(v) => {
                 let rendered = format_bytea_text(v, float_format.bytea_output);
+                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
+                buf.extend_from_slice(rendered.as_bytes());
+            }
+            Value::Inet(v) => {
+                let rendered = v.render_inet();
+                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
+                buf.extend_from_slice(rendered.as_bytes());
+            }
+            Value::Cidr(v) => {
+                let rendered = v.render_cidr();
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }
@@ -920,6 +937,12 @@ fn encode_binary_data_row_value(value: &Value, sql_type: SqlType) -> Result<Vec<
         }
         Value::Bool(v) => Ok(vec![u8::from(*v)]),
         Value::Bytea(bytes) => Ok(bytes.clone()),
+        Value::Inet(value) if matches!(sql_type.kind, SqlTypeKind::Inet) => {
+            Ok(encode_binary_network_value(value, false))
+        }
+        Value::Cidr(value) if matches!(sql_type.kind, SqlTypeKind::Cidr) => {
+            Ok(encode_binary_network_value(value, true))
+        }
         Value::Text(text)
             if matches!(
                 sql_type.kind,
@@ -997,6 +1020,30 @@ fn encode_binary_data_row_value(value: &Value, sql_type: SqlType) -> Result<Vec<
             )),
         )),
     }
+}
+
+fn encode_binary_network_value(value: &InetValue, cidr: bool) -> Vec<u8> {
+    const PGSQL_AF_INET: u8 = 2;
+    const PGSQL_AF_INET6: u8 = 3;
+
+    let mut out = Vec::with_capacity(20);
+    match value.addr {
+        std::net::IpAddr::V4(addr) => {
+            out.push(PGSQL_AF_INET);
+            out.push(value.bits);
+            out.push(u8::from(cidr));
+            out.push(4);
+            out.extend_from_slice(&addr.octets());
+        }
+        std::net::IpAddr::V6(addr) => {
+            out.push(PGSQL_AF_INET6);
+            out.push(value.bits);
+            out.push(u8::from(cidr));
+            out.push(16);
+            out.extend_from_slice(&addr.octets());
+        }
+    }
+    out
 }
 
 fn encode_binary_record(

@@ -445,6 +445,8 @@ fn value_output_text(value: &Value) -> Result<String, ExecError> {
         Value::Jsonb(bytes) => render_jsonb_bytes(bytes)?,
         Value::Bit(bits) => render_bit_text(bits),
         Value::Bytea(bytes) => format_bytea_text(bytes, ByteaOutputFormat::Hex),
+        Value::Inet(v) => v.render_inet(),
+        Value::Cidr(v) => v.render_cidr(),
         Value::Point(_)
         | Value::Lseg(_)
         | Value::Path(_)

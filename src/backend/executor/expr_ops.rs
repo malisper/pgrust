@@ -94,6 +94,12 @@ pub(crate) fn compare_order_values(
         (Value::TimestampTz(a), Value::TimestampTz(b)) => Ok(a.cmp(b)),
         (Value::Bit(a), Value::Bit(b)) => Ok(compare_bit_strings(a, b)),
         (Value::Bytea(a), Value::Bytea(b)) => Ok(a.cmp(b)),
+        (Value::Inet(a), Value::Inet(b)) => {
+            Ok(crate::backend::executor::compare_network_values(a, b))
+        }
+        (Value::Cidr(a), Value::Cidr(b)) => {
+            Ok(crate::backend::executor::compare_network_values(a, b))
+        }
         (Value::Float64(a), Value::Float64(b)) => Ok(pg_float_cmp(*a, *b)),
         (Value::Money(a), Value::Money(b)) => Ok(money_cmp(*a, *b)),
         (a, b) if parsed_numeric_value(a).is_some() && parsed_numeric_value(b).is_some() => {
@@ -187,6 +193,8 @@ pub(crate) fn compare_values(
         (Value::Timestamp(l), Value::Timestamp(r)) => Ok(Value::Bool(l == r)),
         (Value::TimestampTz(l), Value::TimestampTz(r)) => Ok(Value::Bool(l == r)),
         (Value::Bytea(l), Value::Bytea(r)) => Ok(Value::Bool(l == r)),
+        (Value::Inet(l), Value::Inet(r)) => Ok(Value::Bool(l == r)),
+        (Value::Cidr(l), Value::Cidr(r)) => Ok(Value::Bool(l == r)),
         (Value::Bit(l), Value::Bit(r)) => Ok(Value::Bool(l == r)),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(pg_float_eq(*l, *r))),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
@@ -712,6 +720,16 @@ pub(crate) fn order_values(
             }))
         }
         (Value::Bytea(l), Value::Bytea(r)) => Ok(Value::Bool(compare_ord(l, r, op))),
+        (Value::Inet(l), Value::Inet(r)) | (Value::Cidr(l), Value::Cidr(r)) => {
+            let ordering = crate::backend::executor::compare_network_values(l, r);
+            Ok(Value::Bool(match op {
+                "<" => ordering == Ordering::Less,
+                "<=" => ordering != Ordering::Greater,
+                ">" => ordering == Ordering::Greater,
+                ">=" => ordering != Ordering::Less,
+                _ => unreachable!(),
+            }))
+        }
         (Value::Date(l), Value::Date(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::Time(l), Value::Time(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::TimeTz(l), Value::TimeTz(r)) => Ok(Value::Bool(compare_ord(

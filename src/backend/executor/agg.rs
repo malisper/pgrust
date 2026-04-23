@@ -1124,6 +1124,8 @@ fn json_object_agg_key(key: &Value) -> String {
         Value::Text(_) | Value::TextRef(_, _) => key.as_text().unwrap().to_string(),
         Value::Bit(v) => render_bit_text(v),
         Value::Bytea(v) => format_bytea_text(v, ByteaOutputFormat::Hex),
+        Value::Inet(v) => v.render_inet(),
+        Value::Cidr(v) => v.render_cidr(),
         Value::InternalChar(v) => crate::backend::executor::render_internal_char_text(*v),
         Value::Json(v) => v.to_string(),
         Value::Jsonb(v) => render_jsonb_bytes(v).unwrap_or_else(|_| "null".into()),
@@ -1194,6 +1196,8 @@ fn value_to_json_text(value: &Value) -> String {
         Value::Bytea(v) => {
             serde_json::to_string(&format_bytea_text(v, ByteaOutputFormat::Hex)).unwrap()
         }
+        Value::Inet(v) => serde_json::to_string(&v.render_inet()).unwrap(),
+        Value::Cidr(v) => serde_json::to_string(&v.render_cidr()).unwrap(),
         Value::InternalChar(v) => {
             serde_json::to_string(&crate::backend::executor::render_internal_char_text(*v)).unwrap()
         }

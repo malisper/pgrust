@@ -140,6 +140,8 @@ fn encode_array_element_payload(
             Ok(bytes)
         }
         Value::Bytea(v) => Ok(v),
+        Value::Inet(v) => Ok(crate::backend::executor::encode_network_bytes(&v, false)),
+        Value::Cidr(v) => Ok(crate::backend::executor::encode_network_bytes(&v, true)),
         Value::Bool(v) => Ok(vec![u8::from(v)]),
         Value::Numeric(text) => Ok(text.render().into_bytes()),
         Value::Json(text) => Ok(text.as_bytes().to_vec()),
@@ -560,6 +562,8 @@ fn array_element_layout(
         SqlTypeKind::Bit
         | SqlTypeKind::VarBit
         | SqlTypeKind::Bytea
+        | SqlTypeKind::Inet
+        | SqlTypeKind::Cidr
         | SqlTypeKind::Numeric
         | SqlTypeKind::Json
         | SqlTypeKind::Jsonb
@@ -763,6 +767,8 @@ fn infer_sql_type_from_value(value: &Value) -> Option<SqlType> {
         Value::Timestamp(_) => Some(SqlType::new(SqlTypeKind::Timestamp)),
         Value::TimestampTz(_) => Some(SqlType::new(SqlTypeKind::TimestampTz)),
         Value::Bytea(_) => Some(SqlType::new(SqlTypeKind::Bytea)),
+        Value::Inet(_) => Some(SqlType::new(SqlTypeKind::Inet)),
+        Value::Cidr(_) => Some(SqlType::new(SqlTypeKind::Cidr)),
         Value::Bit(_) => Some(SqlType::new(SqlTypeKind::VarBit)),
         Value::PgArray(array) => anyarray_element_type(array).ok().map(SqlType::array_of),
         Value::Array(_) => Some(SqlType::array_of(SqlType::new(SqlTypeKind::Text))),
@@ -997,6 +1003,8 @@ fn decode_array_element_value(
             )))
         }
         SqlTypeKind::Bytea => Ok(Value::Bytea(bytes.to_vec())),
+        SqlTypeKind::Inet => crate::backend::executor::parse_inet_bytes(bytes).map(Value::Inet),
+        SqlTypeKind::Cidr => crate::backend::executor::parse_cidr_bytes(bytes).map(Value::Cidr),
         SqlTypeKind::Point => {
             if bytes.len() != 16 {
                 return Err(ExecError::InvalidStorageValue {
@@ -1230,6 +1238,8 @@ fn format_array_values_nested(
                 out.push_str(&rendered);
                 out.push('"');
             }
+            Value::Inet(v) => push_array_text_element(&mut out, &v.render_inet()),
+            Value::Cidr(v) => push_array_text_element(&mut out, &v.render_cidr()),
             Value::Json(v) => {
                 out.push('"');
                 for ch in v.chars() {
