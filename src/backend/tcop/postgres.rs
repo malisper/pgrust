@@ -219,6 +219,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             return sql.find(op).map(|index| index + 1);
         }
         ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. }) => {
+            if let Some(position) = publication_where_error_position(sql, message, None) {
+                return Some(position);
+            }
             if let Some(position) = trigger_when_error_position(sql, message) {
                 return Some(position);
             }
@@ -275,12 +278,19 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return None;
             }
         }
-        ExecError::DetailedError { message, .. } => {
+        ExecError::DetailedError {
+            message, detail, ..
+        } => {
             if message.starts_with("invalid value for parameter \"default_toast_compression\"") {
                 return None;
             }
             if message.starts_with("invalid size: \"") {
                 return None;
+            }
+            if let Some(position) =
+                publication_where_error_position(sql, message, detail.as_deref())
+            {
+                return Some(position);
             }
             if let Some(position) = trigger_when_error_position(sql, message) {
                 return Some(position);
@@ -302,6 +312,46 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         _ => return None,
     };
     find_error_value_position(sql, value)
+}
+
+fn publication_where_error_position(
+    sql: &str,
+    message: &str,
+    detail: Option<&str>,
+) -> Option<usize> {
+    if message == "WHERE clause not allowed for schema" {
+        return find_case_insensitive_token_position(sql, "WHERE");
+    }
+    if message.starts_with("argument of PUBLICATION WHERE must be type boolean") {
+        return find_publication_where_expression_position(sql);
+    }
+    if message == "aggregate functions are not allowed in WHERE" {
+        return find_case_insensitive_token_position(sql, "AVG(")
+            .or_else(|| find_case_insensitive_token_position(sql, "WHERE"));
+    }
+    if message == "invalid publication WHERE expression" {
+        if detail == Some("System columns are not allowed.") {
+            return find_case_insensitive_token_position(sql, "ctid");
+        }
+        return find_case_insensitive_token_position(sql, "WHERE");
+    }
+    if message == "cannot use a WHERE clause when removing a table from a publication" {
+        return find_case_insensitive_token_position(sql, "WHERE");
+    }
+    None
+}
+
+fn find_publication_where_expression_position(sql: &str) -> Option<usize> {
+    let where_position = find_case_insensitive_token_position(sql, "WHERE")?;
+    let mut index = where_position - 1 + "WHERE".len();
+    let bytes = sql.as_bytes();
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    if index < bytes.len() && bytes[index] == b'(' {
+        index += 1;
+    }
+    Some(index + 1)
 }
 
 fn find_json_literal_position(sql: &str, raw_input: &str) -> Option<usize> {
