@@ -437,7 +437,12 @@ pub fn publication_namespace_depend_rows(
     rows
 }
 
-pub fn trigger_depend_rows(trigger_oid: u32, relation_oid: u32, proc_oid: u32) -> Vec<PgDependRow> {
+pub fn trigger_depend_rows(
+    trigger_oid: u32,
+    relation_oid: u32,
+    proc_oid: u32,
+    column_attnums: &[i16],
+) -> Vec<PgDependRow> {
     let mut rows = vec![
         PgDependRow {
             classid: PG_TRIGGER_RELATION_OID,
@@ -458,6 +463,23 @@ pub fn trigger_depend_rows(trigger_oid: u32, relation_oid: u32, proc_oid: u32) -
             deptype: DEPENDENCY_NORMAL,
         },
     ];
+    rows.extend(
+        column_attnums
+            .iter()
+            .copied()
+            .filter(|attnum| *attnum > 0)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|attnum| PgDependRow {
+                classid: PG_TRIGGER_RELATION_OID,
+                objid: trigger_oid,
+                objsubid: 0,
+                refclassid: PG_CLASS_RELATION_OID,
+                refobjid: relation_oid,
+                refobjsubid: i32::from(attnum),
+                deptype: DEPENDENCY_NORMAL,
+            }),
+    );
     sort_pg_depend_rows(&mut rows);
     rows
 }

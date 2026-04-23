@@ -174,6 +174,14 @@ impl DeferredForeignKeyTracker {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SessionReplicationRole {
+    #[default]
+    Origin,
+    Replica,
+    Local,
+}
+
 pub struct ExecutorContext {
     pub pool: std::sync::Arc<BufferPool<SmgrStorageBackend>>,
     pub txns: std::sync::Arc<parking_lot::RwLock<TransactionManager>>,
@@ -195,6 +203,7 @@ pub struct ExecutorContext {
     pub session_user_oid: u32,
     pub current_user_oid: u32,
     pub active_role_oid: Option<u32>,
+    pub session_replication_role: SessionReplicationRole,
     pub statement_lock_scope_id: Option<u64>,
     pub transaction_lock_scope_id: Option<u64>,
     pub next_command_id: CommandId,
@@ -213,6 +222,7 @@ pub struct ExecutorContext {
     pub cte_producers: HashMap<usize, Rc<RefCell<PlanState>>>,
     pub recursive_worktables: HashMap<usize, Rc<RefCell<RecursiveWorkTable>>>,
     pub deferred_foreign_keys: Option<DeferredForeignKeyTracker>,
+    pub trigger_depth: usize,
 }
 
 #[derive(Debug)]

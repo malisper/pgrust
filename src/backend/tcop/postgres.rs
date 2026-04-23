@@ -194,6 +194,11 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             return extract_syntax_error_token(actual)
                 .and_then(|token| sql.rfind(token).map(|index| index + 1));
         }
+        ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. })
+            if message == "duplicate trigger events specified at or near \"ON\"" =>
+        {
+            return find_last_case_insensitive_token_position(sql, "ON");
+        }
         ExecError::Parse(crate::backend::parser::ParseError::UngroupedColumn {
             token,
             clause,
@@ -214,6 +219,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             return sql.find(op).map(|index| index + 1);
         }
         ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. }) => {
+            if let Some(position) = trigger_when_error_position(sql, message) {
+                return Some(position);
+            }
             if message.starts_with("cannot subscript type ") {
                 return find_subscript_expression_position(sql);
             }
@@ -273,6 +281,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             }
             if message.starts_with("invalid size: \"") {
                 return None;
+            }
+            if let Some(position) = trigger_when_error_position(sql, message) {
+                return Some(position);
             }
             if let Some(target) = extract_subscripted_assignment_target(message) {
                 return find_subscripted_assignment_position(sql, target);
@@ -347,6 +358,26 @@ fn extract_quoted_error_value(message: &str) -> Option<&str> {
 
     let (_, rest) = message.rsplit_once(": \"")?;
     rest.strip_suffix('"')
+}
+
+fn trigger_when_error_position(sql: &str, message: &str) -> Option<usize> {
+    match message {
+        "INSERT trigger's WHEN condition cannot reference OLD values" => {
+            find_case_insensitive_token_position(sql, "OLD.")
+        }
+        "DELETE trigger's WHEN condition cannot reference NEW values" => {
+            find_case_insensitive_token_position(sql, "NEW.")
+        }
+        "statement trigger's WHEN condition cannot reference column values" => {
+            find_case_insensitive_token_position(sql, "OLD.")
+                .or_else(|| find_case_insensitive_token_position(sql, "NEW."))
+        }
+        "BEFORE trigger's WHEN condition cannot reference NEW system columns" => {
+            find_case_insensitive_token_position(sql, "NEW.tableoid")
+                .or_else(|| find_case_insensitive_token_position(sql, "NEW.ctid"))
+        }
+        _ => None,
+    }
 }
 
 fn extract_subscripted_assignment_target(message: &str) -> Option<&str> {
@@ -490,6 +521,13 @@ fn find_case_insensitive_token_position(sql: &str, token: &str) -> Option<usize>
     let token_lower = token.to_ascii_lowercase();
     sql.to_ascii_lowercase()
         .find(&token_lower)
+        .map(|index| index + 1)
+}
+
+fn find_last_case_insensitive_token_position(sql: &str, token: &str) -> Option<usize> {
+    let token_lower = token.to_ascii_lowercase();
+    sql.to_ascii_lowercase()
+        .rfind(&token_lower)
         .map(|index| index + 1)
 }
 
@@ -6648,6 +6686,43 @@ mod tests {
         };
 
         assert_eq!(exec_error_position(sql, &err), Some(8));
+    }
+
+    #[test]
+    fn exec_error_position_points_at_trigger_when_refs_for_detailed_errors() {
+        for (sql, message, token) in [
+            (
+                "create trigger t before insert on items for each row when (OLD.a <> NEW.a) execute function f()",
+                "INSERT trigger's WHEN condition cannot reference OLD values",
+                "OLD.",
+            ),
+            (
+                "create trigger t before delete on items for each row when (OLD.a <> NEW.a) execute function f()",
+                "DELETE trigger's WHEN condition cannot reference NEW values",
+                "NEW.",
+            ),
+            (
+                "create trigger t before update on items for each row when (NEW.tableoid <> 0) execute function f()",
+                "BEFORE trigger's WHEN condition cannot reference NEW system columns",
+                "NEW.tableoid",
+            ),
+            (
+                "create trigger t before update on items for each statement when (OLD.* IS DISTINCT FROM NEW.*) execute function f()",
+                "statement trigger's WHEN condition cannot reference column values",
+                "OLD.",
+            ),
+        ] {
+            let err = ExecError::DetailedError {
+                message: message.into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42601",
+            };
+            assert_eq!(
+                exec_error_position(sql, &err),
+                find_case_insensitive_token_position(sql, token)
+            );
+        }
     }
 
     #[test]

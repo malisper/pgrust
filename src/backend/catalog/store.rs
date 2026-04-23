@@ -276,6 +276,7 @@ mod tests {
             session_user_oid: BOOTSTRAP_SUPERUSER_OID,
             current_user_oid: BOOTSTRAP_SUPERUSER_OID,
             active_role_oid: None,
+            session_replication_role: Default::default(),
             statement_lock_scope_id: None,
             transaction_lock_scope_id: None,
             next_command_id: 0,
@@ -293,6 +294,7 @@ mod tests {
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
             deferred_foreign_keys: None,
+            trigger_depth: 0,
         };
         crate::backend::commands::tablecmds::execute_vacuum(
             crate::backend::parser::VacuumStatement {

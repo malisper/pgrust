@@ -486,6 +486,8 @@ fn run_statement(
         | Statement::CommentOnFunction(_)
         | Statement::CreateTrigger(_)
         | Statement::DropTrigger(_)
+        | Statement::AlterTableTriggerState(_)
+        | Statement::AlterTriggerRename(_)
         | Statement::CreateAggregate(_)
         | Statement::DropAggregate(_)
         | Statement::AlterTableSet(_)
@@ -702,6 +704,7 @@ fn run_statement(
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 active_role_oid: None,
+                session_replication_role: Default::default(),
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
@@ -718,6 +721,7 @@ fn run_statement(
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
                 deferred_foreign_keys: None,
+                trigger_depth: 0,
                 advisory_locks: Arc::new(
                     pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
                 ),
@@ -749,6 +753,7 @@ fn run_statement(
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 active_role_oid: None,
+                session_replication_role: Default::default(),
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
@@ -765,6 +770,7 @@ fn run_statement(
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
                 deferred_foreign_keys: None,
+                trigger_depth: 0,
                 advisory_locks: Arc::new(
                     pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
                 ),
@@ -796,6 +802,7 @@ fn run_statement(
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 active_role_oid: None,
+                session_replication_role: Default::default(),
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
@@ -812,6 +819,7 @@ fn run_statement(
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
                 deferred_foreign_keys: None,
+                trigger_depth: 0,
                 advisory_locks: Arc::new(
                     pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
                 ),
@@ -843,6 +851,7 @@ fn run_statement(
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 active_role_oid: None,
+                session_replication_role: Default::default(),
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
@@ -859,6 +868,7 @@ fn run_statement(
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
                 deferred_foreign_keys: None,
+                trigger_depth: 0,
                 advisory_locks: Arc::new(
                     pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
                 ),
@@ -978,6 +988,7 @@ fn run_statement(
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 active_role_oid: None,
+                session_replication_role: Default::default(),
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
@@ -994,6 +1005,7 @@ fn run_statement(
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
                 deferred_foreign_keys: None,
+                trigger_depth: 0,
                 advisory_locks: Arc::new(
                     pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
                 ),
@@ -1025,6 +1037,7 @@ fn run_statement(
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 active_role_oid: None,
+                session_replication_role: Default::default(),
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
@@ -1041,6 +1054,7 @@ fn run_statement(
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
                 deferred_foreign_keys: None,
+                trigger_depth: 0,
                 advisory_locks: Arc::new(
                     pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
                 ),
@@ -1075,6 +1089,7 @@ fn run_statement(
                     session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     active_role_oid: None,
+                    session_replication_role: Default::default(),
                     next_command_id: 0,
                     default_toast_compression:
                         pgrust::include::access::htup::AttributeCompression::Pglz,
@@ -1091,6 +1106,7 @@ fn run_statement(
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
                     deferred_foreign_keys: None,
+                    trigger_depth: 0,
                     advisory_locks: Arc::new(
                         pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
                     ),
@@ -1136,6 +1152,7 @@ fn run_statement(
                     session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     active_role_oid: None,
+                    session_replication_role: Default::default(),
                     next_command_id: 0,
                     default_toast_compression:
                         pgrust::include::access::htup::AttributeCompression::Pglz,
@@ -1152,6 +1169,7 @@ fn run_statement(
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
                     deferred_foreign_keys: None,
+                    trigger_depth: 0,
                     advisory_locks: Arc::new(
                         pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
                     ),
@@ -1197,6 +1215,7 @@ fn run_statement(
                     session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     active_role_oid: None,
+                    session_replication_role: Default::default(),
                     next_command_id: 0,
                     default_toast_compression:
                         pgrust::include::access::htup::AttributeCompression::Pglz,
@@ -1213,6 +1232,7 @@ fn run_statement(
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
                     deferred_foreign_keys: None,
+                    trigger_depth: 0,
                     advisory_locks: Arc::new(
                         pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
                     ),

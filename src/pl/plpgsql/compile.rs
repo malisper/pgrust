@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::Expr;
 use crate::backend::executor::RelationDesc;
+use crate::backend::parser::analyze::scope_for_relation;
 use crate::backend::parser::{
     BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, CatalogLookup, FromItem,
     ParseError, SelectStatement, SlotScopeColumn, SqlExpr, SqlType, SqlTypeKind, Statement,
@@ -16,7 +17,7 @@ use crate::backend::parser::{
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::{PgProcRow, RECORD_TYPE_OID};
 use crate::include::nodes::plannodes::PlannedStmt;
-use crate::include::nodes::primnodes::{QueryColumn, Var, user_attrno};
+use crate::include::nodes::primnodes::{QueryColumn, TargetEntry, Var, user_attrno};
 
 use super::ast::{
     AssignTarget, Block, Decl, ForQuerySource, ForTarget, RaiseLevel, ReturnQueryKind, Stmt,
@@ -207,11 +208,23 @@ pub(crate) enum CompiledStmt {
         plan: PlannedStmt,
         targets: Vec<CompiledSelectIntoTarget>,
     },
+    ExecInsertInto {
+        stmt: BoundInsertStatement,
+        targets: Vec<CompiledSelectIntoTarget>,
+    },
     ExecInsert {
         stmt: BoundInsertStatement,
     },
+    ExecUpdateInto {
+        stmt: BoundUpdateStatement,
+        targets: Vec<CompiledSelectIntoTarget>,
+    },
     ExecUpdate {
         stmt: BoundUpdateStatement,
+    },
+    ExecDeleteInto {
+        stmt: BoundDeleteStatement,
+        targets: Vec<CompiledSelectIntoTarget>,
     },
     ExecDelete {
         stmt: BoundDeleteStatement,
@@ -924,6 +937,13 @@ fn compile_exec_sql_stmt(
             .collect::<Result<Vec<_>, _>>()?;
         return compile_select_into_stmt(&select_sql, &targets, catalog, env);
     }
+    if let Some((exec_sql, target_names)) = split_dml_returning_into_targets(sql) {
+        let targets = target_names
+            .iter()
+            .map(|target| parse_select_into_assign_target(target))
+            .collect::<Result<Vec<_>, _>>()?;
+        return compile_exec_returning_into_stmt(&exec_sql, &targets, catalog, env);
+    }
 
     let rewritten_sql = rewrite_plpgsql_sql_text(sql, env)?;
     let stmt = parse_statement(&rewritten_sql)?;
@@ -954,61 +974,65 @@ fn compile_exec_sql_stmt(
 fn outer_scope_for_sql(env: &CompileEnv) -> crate::backend::parser::BoundScope {
     let columns = env.slot_columns();
     let relation_scopes = env.relation_slot_scopes();
-
-    let mut desc_columns = Vec::new();
-    let mut output_exprs = Vec::new();
-    let mut scope_columns = Vec::new();
-    let mut relations = Vec::new();
-
-    for column in columns {
-        desc_columns.push(column_desc(column.name.clone(), column.sql_type, true));
-        output_exprs.push(Expr::Var(Var {
-            varno: 1,
-            varattno: user_attrno(column.slot),
-            varlevelsup: 0,
-            vartype: column.sql_type,
-        }));
-        scope_columns.push(crate::backend::parser::analyze::ScopeColumn {
+    let desc = RelationDesc {
+        columns: columns
+            .iter()
+            .map(|column| column_desc(column.name.clone(), column.sql_type, true))
+            .chain(relation_scopes.iter().flat_map(|(_, columns)| {
+                columns
+                    .iter()
+                    .map(|column| column_desc(column.name.clone(), column.sql_type, true))
+            }))
+            .collect(),
+    };
+    let mut output_exprs = columns
+        .iter()
+        .map(|column| {
+            Expr::Var(Var {
+                varno: 1,
+                varattno: user_attrno(column.slot),
+                varlevelsup: 0,
+                vartype: column.sql_type,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut scope_columns = columns
+        .into_iter()
+        .map(|column| crate::backend::parser::analyze::ScopeColumn {
             output_name: column.name,
             hidden: column.hidden,
             qualified_only: false,
             relation_names: Vec::new(),
             hidden_invalid_relation_names: Vec::new(),
             hidden_missing_relation_names: Vec::new(),
-        });
-    }
-
+        })
+        .collect::<Vec<_>>();
+    let mut relations = Vec::new();
     for (relation_name, relation_columns) in relation_scopes {
-        relations.push(crate::backend::parser::analyze::ScopeRelation {
-            relation_names: vec![relation_name.clone()],
-            hidden_invalid_relation_names: Vec::new(),
-            hidden_missing_relation_names: Vec::new(),
-            system_varno: None,
-        });
+        let relation_desc = RelationDesc {
+            columns: relation_columns
+                .iter()
+                .map(|column| column_desc(column.name.clone(), column.sql_type, true))
+                .collect(),
+        };
+        let mut relation_scope = scope_for_relation(Some(&relation_name), &relation_desc);
+        for scope_column in &mut relation_scope.columns {
+            scope_column.qualified_only = true;
+        }
+        relations.extend(relation_scope.relations);
         for column in relation_columns {
-            desc_columns.push(column_desc(column.name.clone(), column.sql_type, true));
             output_exprs.push(Expr::Var(Var {
                 varno: 1,
                 varattno: user_attrno(column.slot),
                 varlevelsup: 0,
                 vartype: column.sql_type,
             }));
-            scope_columns.push(crate::backend::parser::analyze::ScopeColumn {
-                output_name: column.name,
-                hidden: column.hidden,
-                qualified_only: false,
-                relation_names: vec![relation_name.clone()],
-                hidden_invalid_relation_names: Vec::new(),
-                hidden_missing_relation_names: Vec::new(),
-            });
         }
+        scope_columns.extend(relation_scope.columns);
     }
-
     crate::backend::parser::BoundScope {
         output_exprs,
-        desc: RelationDesc {
-            columns: desc_columns,
-        },
+        desc,
         columns: scope_columns,
         relations,
     }
@@ -1094,6 +1118,33 @@ fn split_select_with_into_targets(sql: &str) -> Option<(Vec<String>, String)> {
         format!("{select_sql} {suffix}")
     };
     Some((targets, rewritten))
+}
+
+fn split_dml_returning_into_targets(sql: &str) -> Option<(String, Vec<String>)> {
+    let trimmed = sql.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    if !(lower.starts_with("insert ")
+        || lower.starts_with("update ")
+        || lower.starts_with("delete "))
+    {
+        return None;
+    }
+
+    let returning_idx = find_next_top_level_keyword(trimmed, &["returning"])?;
+    let after_returning = trimmed[returning_idx + "returning".len()..].trim_start();
+    let into_idx = find_next_top_level_keyword(after_returning, &["into"])?;
+    let returning_sql = after_returning[..into_idx].trim_end();
+    if returning_sql.is_empty() {
+        return None;
+    }
+    let targets_sql = after_returning[into_idx + "into".len()..].trim();
+    let targets = split_top_level_csv(targets_sql)?;
+    let rewritten = format!(
+        "{} {}",
+        trimmed[..returning_idx + "returning".len()].trim_end(),
+        returning_sql,
+    );
+    Some((rewritten, targets))
 }
 
 fn positional_parameter_var_name(index: usize) -> String {
@@ -1387,7 +1438,16 @@ fn dollar_quote_tag_at(sql: &str, idx: usize) -> Option<&str> {
 fn parse_select_into_assign_target(target: &str) -> Result<AssignTarget, ParseError> {
     let trimmed = target.trim();
     match parse_expr(trimmed)? {
-        SqlExpr::Column(name) => Ok(AssignTarget::Name(name)),
+        SqlExpr::Column(name) => {
+            if let Some((relation, field)) = name.rsplit_once('.') {
+                Ok(AssignTarget::Field {
+                    relation: relation.to_string(),
+                    field: field.to_string(),
+                })
+            } else {
+                Ok(AssignTarget::Name(name))
+            }
+        }
         SqlExpr::FieldSelect { expr, field } => match *expr {
             SqlExpr::Column(relation) => Ok(AssignTarget::Field { relation, field }),
             _ => Err(ParseError::UnexpectedToken {
@@ -1503,6 +1563,7 @@ fn compile_for_query_target(
         ForTarget::Single(target) => std::slice::from_ref(target),
         ForTarget::List(targets) => targets,
     };
+
     let mut targets = target_refs
         .iter()
         .map(|target| {
@@ -1537,6 +1598,94 @@ fn compile_for_query_target(
     }
 
     Ok(CompiledForQueryTarget { targets })
+}
+
+fn compile_exec_returning_into_stmt(
+    sql: &str,
+    target_refs: &[AssignTarget],
+    catalog: &dyn CatalogLookup,
+    env: &mut CompileEnv,
+) -> Result<CompiledStmt, ParseError> {
+    let stmt = parse_statement(sql)?;
+    let outer_scope = outer_scope_for_sql(env);
+    match stmt {
+        Statement::Insert(stmt) => {
+            let bound = bind_insert_with_outer_scopes(&stmt, catalog, &[outer_scope])?;
+            let targets = compile_dml_into_targets(
+                target_refs,
+                bound.returning.iter().map(target_entry_query_column).collect(),
+                env,
+            )?;
+            Ok(CompiledStmt::ExecInsertInto {
+                stmt: bound,
+                targets,
+            })
+        }
+        Statement::Update(stmt) => {
+            let bound = bind_update_with_outer_scopes(&stmt, catalog, &[outer_scope])?;
+            let targets = compile_dml_into_targets(
+                target_refs,
+                bound.returning.iter().map(target_entry_query_column).collect(),
+                env,
+            )?;
+            Ok(CompiledStmt::ExecUpdateInto {
+                stmt: bound,
+                targets,
+            })
+        }
+        Statement::Delete(stmt) => {
+            let bound = bind_delete_with_outer_scopes(&stmt, catalog, &[outer_scope])?;
+            let targets = compile_dml_into_targets(
+                target_refs,
+                bound.returning.iter().map(target_entry_query_column).collect(),
+                env,
+            )?;
+            Ok(CompiledStmt::ExecDeleteInto {
+                stmt: bound,
+                targets,
+            })
+        }
+        other => Err(ParseError::UnexpectedToken {
+            expected: "INSERT/UPDATE/DELETE ... RETURNING ... INTO",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
+fn compile_dml_into_targets(
+    target_refs: &[AssignTarget],
+    result_columns: Vec<QueryColumn>,
+    env: &mut CompileEnv,
+) -> Result<Vec<CompiledSelectIntoTarget>, ParseError> {
+    let mut targets = target_refs
+        .iter()
+        .map(|target| {
+            resolve_assign_target(target, env)
+                .map(|(slot, ty)| CompiledSelectIntoTarget { slot, ty })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if let [target] = targets.as_mut_slice()
+        && target.ty.kind == SqlTypeKind::Record
+    {
+        let descriptor = assign_anonymous_record_descriptor(
+            result_columns
+                .iter()
+                .map(|column| (column.name.clone(), column.sql_type))
+                .collect(),
+        );
+        let ty = descriptor.sql_type();
+        env.update_slot_type(target.slot, ty);
+        target.ty = ty;
+    }
+    Ok(targets)
+}
+
+fn target_entry_query_column(target: &TargetEntry) -> QueryColumn {
+    QueryColumn {
+        name: target.name.clone(),
+        sql_type: target.sql_type,
+        wire_type_oid: None,
+    }
 }
 
 fn compile_stmt_list(
@@ -2089,6 +2238,11 @@ fn seed_trigger_env(env: &mut CompileEnv, relation_desc: &RelationDesc) -> Compi
         SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
     );
     let tg_table_name_slot = env.define_var("tg_table_name", SqlType::new(SqlTypeKind::Text));
+    env.define_alias(
+        "tg_relname",
+        tg_table_name_slot,
+        SqlType::new(SqlTypeKind::Text),
+    );
     let tg_table_schema_slot = env.define_var("tg_table_schema", SqlType::new(SqlTypeKind::Text));
 
     CompiledTriggerBindings {
