@@ -4,7 +4,7 @@
 # Usage: scripts/run_regression.sh [--port PORT] [--skip-build] [--skip-server] [--timeout SECS] [--test TESTNAME] [--upstream-setup]
 #
 # By default, this script:
-#   1. Builds pgrust_server in release mode
+#   1. Builds pgrust_server in release mode, or dev mode for --test
 #   2. Starts it on a fresh data directory
 #   3. Runs each .sql regression test via psql with statement_timeout = '5s'
 #   4. Compares output against expected .out files
@@ -271,6 +271,17 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+SERVER_PROFILE=release
+SERVER_PROFILE_DIR=release
+BUILD_ENV=()
+BUILD_ARGS=(--release --bin pgrust_server)
+if [[ -n "$SINGLE_TEST" ]]; then
+    SERVER_PROFILE="dev, opt-level 0"
+    SERVER_PROFILE_DIR=debug
+    BUILD_ENV=(CARGO_PROFILE_DEV_OPT_LEVEL=0)
+    BUILD_ARGS=(--bin pgrust_server)
+fi
+
 make_temp_dir() {
     local prefix="$1"
     mktemp -d "${TMPDIR:-/tmp}/${prefix}.${WORKTREE_NAME}.XXXXXX"
@@ -392,15 +403,15 @@ fi
 
 # Build pgrust_server
 if [[ "$SKIP_BUILD" == false ]]; then
-    echo "Building pgrust_server (release)..."
-    (cd "$PGRUST_DIR" && cargo build --release --bin pgrust_server 2>&1) || {
+    echo "Building pgrust_server ($SERVER_PROFILE)..."
+    (cd "$PGRUST_DIR" && env "${BUILD_ENV[@]}" cargo build "${BUILD_ARGS[@]}" 2>&1) || {
         echo "ERROR: Build failed"
         exit 1
     }
 fi
 
 TARGET_DIR="$("$PGRUST_DIR/scripts/cargo_target_dir.sh")"
-SERVER_BIN="$TARGET_DIR/release/pgrust_server"
+SERVER_BIN="$TARGET_DIR/$SERVER_PROFILE_DIR/pgrust_server"
 if [[ ! -x "$SERVER_BIN" ]]; then
     echo "ERROR: $SERVER_BIN not found. Run without --skip-build."
     exit 1
