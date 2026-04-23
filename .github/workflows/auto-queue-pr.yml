@@ -24,49 +24,13 @@ jobs:
     if: ${{ !github.event.pull_request.draft && github.event.pull_request.base.ref == 'perf-optimization' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Enqueue the PR
+      # :HACK: Uses fine-grained PAT (MERGE_QUEUE_PAT) instead of github.token because
+      # GitHub silently drops the auto-add-to-queue mechanism when the bot user is the actor
+      # (recursion protection). Token expires 2026-06-22 — rotate before then or auto-merge breaks.
+      - name: Enable auto-merge for the PR
         env:
-          GH_TOKEN: ${{ github.token }}
-          REPO_OWNER: ${{ github.repository_owner }}
-          REPO_NAME: ${{ github.event.repository.name }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          PR_JSON="$(
-            gh api graphql \
-              -f query='query($owner:String!, $name:String!, $number:Int!) { repository(owner:$owner, name:$name) { pullRequest(number:$number) { id isDraft isInMergeQueue headRefOid baseRefName } } }' \
-              -F owner="$REPO_OWNER" \
-              -F name="$REPO_NAME" \
-              -F number="$PR_NUMBER"
-          )"
-          export PR_JSON HEAD_SHA
-          RESULT="$(
-            python3 - <<'PY'
-            import json
-            import os
-            import sys
-
-            pr = json.loads(os.environ["PR_JSON"])["data"]["repository"]["pullRequest"]
-            if pr is None:
-                sys.exit("pull request not found")
-            if pr["isDraft"] or pr["baseRefName"] != "perf-optimization":
-                print("SKIP")
-                raise SystemExit(0)
-            if pr["headRefOid"] != os.environ["HEAD_SHA"]:
-                print("stale workflow run for old head; skipping", file=sys.stderr)
-                print("SKIP")
-                raise SystemExit(0)
-            if pr["isInMergeQueue"]:
-                print("pull request is already queued; skipping", file=sys.stderr)
-                print("SKIP")
-                raise SystemExit(0)
-            print(pr["id"])
-            PY
-          )"
-          if [ "$RESULT" = "SKIP" ]; then
-            exit 0
-          fi
-          PR_ID="$RESULT"
-          gh api graphql \
-            -f query='mutation($id:ID!) { enqueuePullRequest(input:{pullRequestId:$id}) { mergeQueueEntry { id position } } }' \
-            -F id="$PR_ID"
+          gh pr merge "$PR_URL" --auto --merge --match-head-commit "$HEAD_SHA"
