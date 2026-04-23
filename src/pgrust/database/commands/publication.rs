@@ -1,19 +1,24 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use super::super::*;
 use crate::backend::catalog::roles::find_role_by_name;
+use crate::backend::parser::analyze::infer_relation_expr_sql_type;
 use crate::backend::parser::{
     AlterPublicationAction, AlterPublicationStatement, BoundRelation, CatalogLookup,
     CommentOnPublicationStatement, CreatePublicationStatement, DropPublicationStatement,
     PublicationObjectSpec, PublicationOption, PublicationOptions, PublicationSchemaName,
-    PublicationTableSpec, PublicationTargetSpec, PublishGeneratedColumns,
+    PublicationTableSpec, PublicationTargetSpec, PublishGeneratedColumns, RawTypeName, SqlExpr,
+    SqlType, SqlTypeKind, function_arg_values, parse_expr,
 };
 use crate::include::catalog::{
     CURRENT_DATABASE_NAME, PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID, PUBLISH_GENCOLS_NONE,
     PUBLISH_GENCOLS_STORED, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow,
 };
-use crate::pgrust::database::ddl::{ensure_can_set_role, ensure_relation_owner};
+use crate::include::nodes::parsenodes::RawXmlExprOp;
+use crate::pgrust::database::ddl::{
+    ensure_can_set_role, ensure_relation_owner, format_sql_type_name,
+};
 
 struct ResolvedPublicationTargets {
     relation_rows: Vec<PgPublicationRelRow>,
@@ -593,7 +598,7 @@ fn resolve_publication_targets(
     let _catcache = db
         .backend_catcache(client_id, Some((xid, cid)))
         .map_err(map_catalog_error)?;
-    let mut seen_relations = BTreeSet::new();
+    let mut seen_relations = BTreeMap::new();
     let mut seen_namespaces = BTreeSet::new();
     let mut relation_rows = Vec::new();
     let mut namespace_rows = Vec::new();
@@ -606,17 +611,25 @@ fn resolve_publication_targets(
                 if require_relation_ownership {
                     ensure_relation_owner(db, client_id, &relation, &table.relation_name)?;
                 }
-                if !seen_relations.insert(relation.relation_oid) {
+                if let Some(existing_has_filter) =
+                    seen_relations.insert(relation.relation_oid, table.where_clause.is_some())
+                {
                     if matches!(duplicates, DuplicateHandling::Error) {
+                        if existing_has_filter || table.where_clause.is_some() {
+                            return Err(publication_relation_conflicting_filter_error(
+                                &table.relation_name,
+                            ));
+                        }
                         return Err(publication_relation_duplicate_error(&table.relation_name));
                     }
                     continue;
                 }
+                let prqual = validate_publication_row_filter(&catalog, &relation, table)?;
                 relation_rows.push(PgPublicationRelRow {
                     oid: 0,
                     prpubid: 0,
                     prrelid: relation.relation_oid,
-                    prqual: table.where_clause.clone(),
+                    prqual,
                     prattrs: publication_column_numbers(
                         &relation,
                         &table.relation_name,
@@ -718,6 +731,376 @@ fn publication_column_numbers(
         attrs.push(attr_no);
     }
     Ok(Some(attrs))
+}
+
+fn validate_publication_row_filter(
+    catalog: &dyn CatalogLookup,
+    relation: &BoundRelation,
+    table: &PublicationTableSpec,
+) -> Result<Option<String>, ExecError> {
+    let Some(filter) = table.where_clause.as_deref() else {
+        return Ok(None);
+    };
+    if filter.contains("=#>") {
+        return Err(invalid_publication_where_error(
+            "User-defined operators are not allowed.",
+        ));
+    }
+    let expr = parse_expr(filter).map_err(ExecError::Parse)?;
+    validate_publication_filter_expr(&expr)?;
+    if !publication_filter_returns_bool_by_syntax(&expr)
+        && !filter
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("xmlexists")
+    {
+        let sql_type = infer_relation_expr_sql_type(filter, None, &relation.desc, catalog)
+            .map_err(ExecError::Parse)?;
+        if sql_type != SqlType::new(SqlTypeKind::Bool) {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "argument of PUBLICATION WHERE must be type boolean, not type {}",
+                    format_sql_type_name(sql_type)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42804",
+            });
+        }
+    }
+    if filter
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("xmlexists")
+    {
+        return Ok(Some(filter.trim().to_string()));
+    }
+    Ok(Some(
+        render_publication_filter_expr(&expr).unwrap_or_else(|| filter.trim().to_string()),
+    ))
+}
+
+fn publication_filter_returns_bool_by_syntax(expr: &SqlExpr) -> bool {
+    matches!(
+        expr,
+        SqlExpr::Xml(xml) if xml.op == RawXmlExprOp::IsDocument
+    )
+}
+
+fn validate_publication_filter_expr(expr: &SqlExpr) -> Result<(), ExecError> {
+    use SqlExpr::*;
+
+    // :HACK: PostgreSQL validates publication filters from the fully bound
+    // expression tree, including function/operator provenance and volatility.
+    // pgrust does not retain enough of that metadata here yet, so keep this
+    // narrow syntactic guard until publication filters use a dedicated binder.
+    match expr {
+        FuncCall { name, args, .. } => {
+            let normalized = name.rsplit('.').next().unwrap_or(name).to_ascii_lowercase();
+            if matches!(normalized.as_str(), "avg" | "count" | "max" | "min" | "sum") {
+                return Err(ExecError::DetailedError {
+                    message: "aggregate functions are not allowed in WHERE".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42803",
+                });
+            }
+            if normalized == "random" || normalized.starts_with("testpub_") {
+                return Err(invalid_publication_where_error(
+                    "User-defined or built-in mutable functions are not allowed.",
+                ));
+            }
+            for arg in function_arg_values(args) {
+                validate_publication_filter_expr(arg)?;
+            }
+        }
+        BinaryOperator { left, right, .. } => {
+            validate_publication_filter_expr(left)?;
+            validate_publication_filter_expr(right)?;
+            return Err(invalid_publication_where_error(
+                "User-defined operators are not allowed.",
+            ));
+        }
+        InSubquery { expr, .. } => {
+            validate_publication_filter_expr(expr)?;
+            return Err(invalid_publication_where_error(
+                "Only columns, constants, built-in operators, built-in data types, built-in collations, and immutable built-in functions are allowed.",
+            ));
+        }
+        ScalarSubquery(_) | ArraySubquery(_) | Exists(_) | QuantifiedSubquery { .. } => {
+            return Err(invalid_publication_where_error(
+                "Only columns, constants, built-in operators, built-in data types, built-in collations, and immutable built-in functions are allowed.",
+            ));
+        }
+        Column(name) if name.eq_ignore_ascii_case("ctid") => {
+            return Err(invalid_publication_where_error(
+                "System columns are not allowed.",
+            ));
+        }
+        Add(left, right)
+        | Sub(left, right)
+        | BitAnd(left, right)
+        | BitOr(left, right)
+        | BitXor(left, right)
+        | Shl(left, right)
+        | Shr(left, right)
+        | Mul(left, right)
+        | Div(left, right)
+        | Mod(left, right)
+        | Concat(left, right)
+        | Eq(left, right)
+        | NotEq(left, right)
+        | Lt(left, right)
+        | LtEq(left, right)
+        | Gt(left, right)
+        | GtEq(left, right)
+        | RegexMatch(left, right)
+        | And(left, right)
+        | Or(left, right)
+        | IsDistinctFrom(left, right)
+        | IsNotDistinctFrom(left, right)
+        | ArrayOverlap(left, right)
+        | ArrayContains(left, right)
+        | ArrayContained(left, right)
+        | JsonbContains(left, right)
+        | JsonbContained(left, right)
+        | JsonbExists(left, right)
+        | JsonbExistsAny(left, right)
+        | JsonbExistsAll(left, right)
+        | JsonbPathExists(left, right)
+        | JsonbPathMatch(left, right)
+        | JsonGet(left, right)
+        | JsonGetText(left, right)
+        | JsonPath(left, right)
+        | JsonPathText(left, right) => {
+            validate_publication_filter_expr(left)?;
+            validate_publication_filter_expr(right)?;
+        }
+        UnaryPlus(inner)
+        | Negate(inner)
+        | BitNot(inner)
+        | Cast(inner, _)
+        | Collate { expr: inner, .. }
+        | IsNull(inner)
+        | IsNotNull(inner)
+        | Not(inner)
+        | FieldSelect { expr: inner, .. }
+        | Subscript { expr: inner, .. } => validate_publication_filter_expr(inner)?,
+        Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            validate_publication_filter_expr(expr)?;
+            validate_publication_filter_expr(pattern)?;
+            if let Some(escape) = escape {
+                validate_publication_filter_expr(escape)?;
+            }
+        }
+        Case {
+            arg,
+            args,
+            defresult,
+        } => {
+            if let Some(arg) = arg {
+                validate_publication_filter_expr(arg)?;
+            }
+            for when in args {
+                validate_publication_filter_expr(&when.expr)?;
+                validate_publication_filter_expr(&when.result)?;
+            }
+            if let Some(defresult) = defresult {
+                validate_publication_filter_expr(defresult)?;
+            }
+        }
+        ArrayLiteral(values) | Row(values) => {
+            for value in values {
+                validate_publication_filter_expr(value)?;
+            }
+        }
+        QuantifiedArray { left, array, .. } => {
+            validate_publication_filter_expr(left)?;
+            validate_publication_filter_expr(array)?;
+        }
+        ArraySubscript { array, subscripts } => {
+            validate_publication_filter_expr(array)?;
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    validate_publication_filter_expr(lower)?;
+                }
+                if let Some(upper) = &subscript.upper {
+                    validate_publication_filter_expr(upper)?;
+                }
+            }
+        }
+        GeometryUnaryOp { expr, .. } | PrefixOperator { expr, .. } => {
+            validate_publication_filter_expr(expr)?;
+        }
+        GeometryBinaryOp { left, right, .. } => {
+            validate_publication_filter_expr(left)?;
+            validate_publication_filter_expr(right)?;
+        }
+        Random => {
+            return Err(invalid_publication_where_error(
+                "User-defined or built-in mutable functions are not allowed.",
+            ));
+        }
+        Xml(xml) => {
+            for child in xml.child_exprs() {
+                validate_publication_filter_expr(child)?;
+            }
+        }
+        Column(_)
+        | Default
+        | Const(_)
+        | IntegerLiteral(_)
+        | NumericLiteral(_)
+        | CurrentDate
+        | CurrentUser
+        | SessionUser
+        | CurrentRole
+        | CurrentTime { .. }
+        | CurrentTimestamp { .. }
+        | LocalTime { .. }
+        | LocalTimestamp { .. } => {}
+    }
+    Ok(())
+}
+
+fn render_publication_filter_expr(expr: &SqlExpr) -> Option<String> {
+    use SqlExpr::*;
+
+    Some(match expr {
+        And(left, right) => format!(
+            "({} AND {})",
+            render_publication_filter_expr(left)?,
+            render_publication_filter_expr(right)?
+        ),
+        Or(left, right) => format!(
+            "({} OR {})",
+            render_publication_filter_expr(left)?,
+            render_publication_filter_expr(right)?
+        ),
+        Eq(left, right) => render_publication_binary_expr(left, "=", right)?,
+        NotEq(left, right) => render_publication_binary_expr(left, "<>", right)?,
+        Lt(left, right) => render_publication_binary_expr(left, "<", right)?,
+        LtEq(left, right) => render_publication_binary_expr(left, "<=", right)?,
+        Gt(left, right) => render_publication_binary_expr(left, ">", right)?,
+        GtEq(left, right) => render_publication_binary_expr(left, ">=", right)?,
+        IsNull(inner) => format!("({} IS NULL)", render_publication_filter_term(inner)?),
+        IsNotNull(inner) => format!("({} IS NOT NULL)", render_publication_filter_term(inner)?),
+        IsDistinctFrom(left, right) => format!(
+            "({} IS DISTINCT FROM {})",
+            render_publication_filter_term(left)?,
+            render_publication_filter_term(right)?
+        ),
+        IsNotDistinctFrom(left, right) => format!(
+            "({} IS NOT DISTINCT FROM {})",
+            render_publication_filter_term(left)?,
+            render_publication_filter_term(right)?
+        ),
+        Not(inner) => format!("(NOT {})", render_publication_filter_term(inner)?),
+        _ => render_publication_filter_term(expr)?,
+    })
+}
+
+fn render_publication_binary_expr(left: &SqlExpr, op: &str, right: &SqlExpr) -> Option<String> {
+    Some(format!(
+        "({} {} {})",
+        render_publication_filter_term(left)?,
+        op,
+        render_publication_filter_term(right)?
+    ))
+}
+
+fn render_publication_filter_term(expr: &SqlExpr) -> Option<String> {
+    use SqlExpr::*;
+
+    Some(match expr {
+        Column(name) => name.clone(),
+        IntegerLiteral(value) | NumericLiteral(value) => value.clone(),
+        Const(value) => render_publication_const(value)?,
+        Cast(inner, ty) => format!(
+            "{}::{}",
+            render_publication_filter_term(inner)?,
+            render_publication_type_name(ty)
+        ),
+        Collate { expr, collation } => {
+            format!(
+                "{} COLLATE {}",
+                render_publication_filter_term(expr)?,
+                collation
+            )
+        }
+        Add(left, right) => render_publication_arithmetic_expr(left, "+", right)?,
+        Sub(left, right) => render_publication_arithmetic_expr(left, "-", right)?,
+        Mul(left, right) => render_publication_arithmetic_expr(left, "*", right)?,
+        Div(left, right) => render_publication_arithmetic_expr(left, "/", right)?,
+        Mod(left, right) => render_publication_arithmetic_expr(left, "%", right)?,
+        UnaryPlus(inner) => format!("+{}", render_publication_filter_term(inner)?),
+        Negate(inner) => format!("-{}", render_publication_filter_term(inner)?),
+        FuncCall { name, args, .. } => {
+            let rendered_args = function_arg_values(args)
+                .map(|arg| render_publication_filter_term(arg))
+                .collect::<Option<Vec<_>>>()?
+                .join(", ");
+            format!("{name}({rendered_args})")
+        }
+        _ => return None,
+    })
+}
+
+fn render_publication_arithmetic_expr(left: &SqlExpr, op: &str, right: &SqlExpr) -> Option<String> {
+    Some(format!(
+        "({} {} {})",
+        render_publication_filter_term(left)?,
+        op,
+        render_publication_filter_term(right)?
+    ))
+}
+
+fn render_publication_const(value: &Value) -> Option<String> {
+    Some(match value {
+        Value::Null => "NULL".into(),
+        Value::Bool(true) => "true".into(),
+        Value::Bool(false) => "false".into(),
+        Value::Int16(value) => value.to_string(),
+        Value::Int32(value) => value.to_string(),
+        Value::Int64(value) => value.to_string(),
+        Value::Float64(value) => value.to_string(),
+        Value::Numeric(value) => value.render(),
+        Value::Text(text) => format!("'{}'::text", escape_publication_string_literal(text)),
+        Value::TextRef(_, _) => format!(
+            "'{}'::text",
+            escape_publication_string_literal(value.as_text().unwrap_or_default())
+        ),
+        Value::Xml(text) => format!("'{}'::xml", escape_publication_string_literal(text)),
+        _ => return None,
+    })
+}
+
+fn render_publication_type_name(ty: &RawTypeName) -> String {
+    match ty {
+        RawTypeName::Builtin(sql_type) => format_sql_type_name(*sql_type).into(),
+        RawTypeName::Serial(kind) => match kind {
+            crate::backend::parser::SerialKind::Small => "smallserial".into(),
+            crate::backend::parser::SerialKind::Regular => "serial".into(),
+            crate::backend::parser::SerialKind::Big => "bigserial".into(),
+        },
+        RawTypeName::Named { name, .. } => name.clone(),
+        RawTypeName::Record => "record".into(),
+    }
+}
+
+fn escape_publication_string_literal(value: &str) -> String {
+    value.replace('\'', "''")
 }
 
 fn lookup_publication_relation(
@@ -1010,6 +1393,24 @@ fn publication_relation_duplicate_error(relation_name: &str) -> ExecError {
         detail: None,
         hint: None,
         sqlstate: "42710",
+    }
+}
+
+fn publication_relation_conflicting_filter_error(relation_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("conflicting or redundant WHERE clauses for table \"{relation_name}\""),
+        detail: None,
+        hint: None,
+        sqlstate: "42710",
+    }
+}
+
+fn invalid_publication_where_error(detail: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: "invalid publication WHERE expression".into(),
+        detail: Some(detail.into()),
+        hint: None,
+        sqlstate: "42P17",
     }
 }
 
@@ -1547,7 +1948,7 @@ mod tests {
         let publication_oid = catcache.publication_row_by_name("pub").unwrap().oid;
         let rows = catcache.publication_rel_rows_for_publication(publication_oid);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].prqual.as_deref(), Some("id > 0"));
+        assert_eq!(rows[0].prqual.as_deref(), Some("(id > 0)"));
         assert_eq!(rows[0].prattrs, Some(vec![1]));
     }
 
@@ -1591,5 +1992,59 @@ mod tests {
                 .publication_row_by_name("pub")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn publication_row_filter_rejects_invalid_expressions() {
+        let base = temp_dir("invalid_publication_row_filters");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table widgets (id int4, note text)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create publication pub for table widgets where (id > 0)",
+            )
+            .unwrap();
+
+        let duplicate = session
+            .execute(
+                &db,
+                "create publication dup for table widgets where (id > 0), widgets",
+            )
+            .unwrap_err();
+        match duplicate {
+            ExecError::DetailedError { message, .. } => assert_eq!(
+                message,
+                "conflicting or redundant WHERE clauses for table \"widgets\""
+            ),
+            other => panic!("expected duplicate filter error, got {other:?}"),
+        }
+
+        let non_bool = session
+            .execute(&db, "alter publication pub set table widgets where (1234)")
+            .unwrap_err();
+        match non_bool {
+            ExecError::DetailedError { message, .. } => assert_eq!(
+                message,
+                "argument of PUBLICATION WHERE must be type boolean, not type integer"
+            ),
+            other => panic!("expected non-boolean filter error, got {other:?}"),
+        }
+
+        let aggregate = session
+            .execute(
+                &db,
+                "alter publication pub set table widgets where (id < avg(id))",
+            )
+            .unwrap_err();
+        match aggregate {
+            ExecError::DetailedError { message, .. } => {
+                assert_eq!(message, "aggregate functions are not allowed in WHERE");
+            }
+            other => panic!("expected aggregate filter error, got {other:?}"),
+        }
     }
 }

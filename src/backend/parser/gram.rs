@@ -1274,11 +1274,12 @@ fn parse_publication_schema_object(
         ));
     }
     if keyword_at_start(trailing, "where") {
-        let after_where = consume_keyword(trailing, "where").trim_start();
-        let _ = take_parenthesized_segment(after_where)?;
-        return Err(ParseError::FeatureNotSupported(
-            "publication row filters".into(),
-        ));
+        return Err(ParseError::DetailedError {
+            message: "WHERE clause not allowed for schema".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
     }
     Ok((PublicationSchemaSpec { schema_name }, rest))
 }
