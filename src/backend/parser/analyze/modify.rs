@@ -1094,7 +1094,9 @@ fn rewrite_assignment_subscripts(
 fn map_auto_view_column_index(
     view_desc: &RelationDesc,
     updatable_column_map: &[Option<usize>],
-    non_updatable_column_reasons: &[Option<crate::backend::rewrite::NonUpdatableViewColumnReason>],
+    non_updatable_column_reasons: &[Option<
+        crate::backend::rewrite::NonUpdatableViewColumnReason,
+    >],
     column_index: usize,
 ) -> Result<usize, ViewDmlRewriteError> {
     updatable_column_map
@@ -1111,7 +1113,9 @@ fn map_auto_view_column_index(
                 .get(column_index)
                 .copied()
                 .flatten()
-                .unwrap_or(crate::backend::rewrite::NonUpdatableViewColumnReason::NotBaseRelationColumn);
+                .unwrap_or(
+                    crate::backend::rewrite::NonUpdatableViewColumnReason::NotBaseRelationColumn,
+                );
             ViewDmlRewriteError::NonUpdatableColumn {
                 column_name: column_name.to_string(),
                 reason,
