@@ -189,6 +189,7 @@ fn main() -> Result<(), ExecError> {
         stats,
         session_stats,
         snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID).unwrap(),
+        transaction_state: None,
         client_id: 11,
         session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,

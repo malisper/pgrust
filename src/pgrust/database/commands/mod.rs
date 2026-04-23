@@ -21,6 +21,7 @@ mod opclass;
 mod operator;
 mod owner;
 mod partition;
+mod partitioned_keys;
 mod policy;
 mod privilege;
 mod publication;

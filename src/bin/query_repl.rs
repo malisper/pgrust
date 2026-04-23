@@ -483,6 +483,7 @@ fn run_statement(
         | Statement::DropPublication(_)
         | Statement::CommentOnPublication(_)
         | Statement::CommentOnAggregate(_)
+        | Statement::CommentOnFunction(_)
         | Statement::CreateTrigger(_)
         | Statement::DropTrigger(_)
         | Statement::CreateAggregate(_)
@@ -696,6 +697,7 @@ fn run_statement(
                 stats: Arc::clone(&stats),
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
+                transaction_state: None,
                 client_id: 21,
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
@@ -741,6 +743,7 @@ fn run_statement(
                 stats: Arc::clone(&stats),
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
+                transaction_state: None,
                 client_id: 21,
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
@@ -786,6 +789,7 @@ fn run_statement(
                 stats: Arc::clone(&stats),
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
+                transaction_state: None,
                 client_id: 21,
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
@@ -831,6 +835,7 @@ fn run_statement(
                 stats: Arc::clone(&stats),
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
+                transaction_state: None,
                 client_id: 21,
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
@@ -964,6 +969,7 @@ fn run_statement(
                 stats: Arc::clone(&stats),
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
+                transaction_state: None,
                 client_id: 21,
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
@@ -1009,6 +1015,7 @@ fn run_statement(
                 stats: Arc::clone(&stats),
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
+                transaction_state: None,
                 client_id: 21,
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
@@ -1057,6 +1064,7 @@ fn run_statement(
                     stats: Arc::clone(&stats),
                     session_stats: Arc::clone(&session_stats),
                     snapshot: txns.read().snapshot(xid)?,
+                    transaction_state: None,
                     client_id: 21,
                     session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
@@ -1116,6 +1124,7 @@ fn run_statement(
                     stats: Arc::clone(&stats),
                     session_stats: Arc::clone(&session_stats),
                     snapshot: txns.read().snapshot(xid)?,
+                    transaction_state: None,
                     client_id: 21,
                     session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
@@ -1175,6 +1184,7 @@ fn run_statement(
                     stats: Arc::clone(&stats),
                     session_stats: Arc::clone(&session_stats),
                     snapshot: txns.read().snapshot(xid)?,
+                    transaction_state: None,
                     client_id: 21,
                     session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,

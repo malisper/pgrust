@@ -3085,6 +3085,321 @@ fn drop_table_drops_partitioned_roots_and_subpartitioned_children() {
 }
 
 #[test]
+fn partitioned_primary_keys_support_rename_flow_and_index_tree_metadata() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table part_attmp (a int primary key) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table part_attmp1 partition of part_attmp for values from (0) to (10)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter index part_attmp_pkey rename to part_attmp_pkey_renamed",
+        )
+        .unwrap();
+    session
+        .execute(&db, "alter table part_attmp rename to part_attmp_renamed")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relkind::text from pg_class where relname = 'part_attmp_pkey_renamed'",
+        ),
+        vec![vec![Value::Text("I".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select child.relname, parent.relname \
+               from pg_inherits i \
+               join pg_class child on child.oid = i.inhrelid \
+               join pg_class parent on parent.oid = i.inhparent \
+              where parent.relname = 'part_attmp_pkey_renamed'",
+        ),
+        vec![vec![
+            Value::Text("part_attmp1_pkey".into()),
+            Value::Text("part_attmp_pkey_renamed".into()),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relname from pg_class where relname = 'part_attmp_renamed'",
+        ),
+        vec![vec![Value::Text("part_attmp_renamed".into())]]
+    );
+}
+
+#[test]
+fn partitioned_key_coverage_checks_fire_for_root_partition_of_and_attach_partition() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    match session.execute(
+        &db,
+        "create table miss_root (a int, b int, primary key (a)) partition by range (b)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        })) if message
+            == "unique constraint on partitioned table must include all partitioning columns"
+            && detail
+                == "PRIMARY KEY constraint on table \"miss_root\" lacks column \"b\" which is part of the partition key."
+            && sqlstate == "0A000" => {}
+        other => panic!("expected root partition-key coverage error, got {other:?}"),
+    }
+
+    session
+        .execute(
+            &db,
+            "create table dup_parent (a int primary key) partition by range (a)",
+        )
+        .unwrap();
+    match session.execute(
+        &db,
+        "create table dup_parent_child partition of dup_parent (primary key (a)) for values from (0) to (10)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message,
+            sqlstate,
+            ..
+        })) if message == "multiple primary keys for table \"dup_parent_child\" are not allowed"
+            && sqlstate == "42P16" => {}
+        other => panic!("expected duplicate primary-key rejection, got {other:?}"),
+    }
+
+    session
+        .execute(
+            &db,
+            "create table sub_parent (a int, b int, primary key (a)) partition by range (a)",
+        )
+        .unwrap();
+    match session.execute(
+        &db,
+        "create table sub_parent_child partition of sub_parent for values from (0) to (10) partition by range (b)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        })) if message
+            == "unique constraint on partitioned table must include all partitioning columns"
+            && detail
+                == "PRIMARY KEY constraint on table \"sub_parent_child\" lacks column \"b\" which is part of the partition key."
+            && sqlstate == "0A000" => {}
+        other => panic!("expected PARTITION OF coverage error, got {other:?}"),
+    }
+
+    session
+        .execute(
+            &db,
+            "create table attach_parent_cov (a int, b int, primary key (a)) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table attach_child_cov (a int, b int) partition by range (b)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table attach_child_cov_1 partition of attach_child_cov for values from (minvalue) to (10)",
+        )
+        .unwrap();
+    match session.execute(
+        &db,
+        "alter table attach_parent_cov attach partition attach_child_cov for values from (0) to (10)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        })) if message
+            == "unique constraint on partitioned table must include all partitioning columns"
+            && detail
+                == "PRIMARY KEY constraint on table \"attach_child_cov\" lacks column \"b\" which is part of the partition key."
+            && sqlstate == "0A000" => {}
+        other => panic!("expected ATTACH PARTITION coverage error, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_add_primary_key_builds_or_attaches_partition_key_trees() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table addpk_empty (a int) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "alter table addpk_empty add primary key (a)")
+        .unwrap();
+
+    session
+        .execute(
+            &db,
+            "create table addpk_tree (a int) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table addpk_tree_1 partition of addpk_tree for values from (0) to (10)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "alter table addpk_tree add primary key (a)")
+        .unwrap();
+
+    session
+        .execute(
+            &db,
+            "create table addpk_attach (a int) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create table addpk_child (a int primary key)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table addpk_attach attach partition addpk_child for values from (0) to (10)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "alter table addpk_attach add primary key (a)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relname, relkind::text \
+               from pg_class \
+              where relname in ('addpk_empty_pkey', 'addpk_tree_pkey', 'addpk_attach_pkey') \
+              order by relname",
+        ),
+        vec![
+            vec![
+                Value::Text("addpk_attach_pkey".into()),
+                Value::Text("I".into()),
+            ],
+            vec![
+                Value::Text("addpk_empty_pkey".into()),
+                Value::Text("I".into()),
+            ],
+            vec![
+                Value::Text("addpk_tree_pkey".into()),
+                Value::Text("I".into()),
+            ],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select child.relname, parent.relname \
+               from pg_inherits i \
+               join pg_class child on child.oid = i.inhrelid \
+               join pg_class parent on parent.oid = i.inhparent \
+              where parent.relname in ('addpk_tree_pkey', 'addpk_attach_pkey') \
+              order by parent.relname, child.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("addpk_child_pkey".into()),
+                Value::Text("addpk_attach_pkey".into()),
+            ],
+            vec![
+                Value::Text("addpk_tree_1_pkey".into()),
+                Value::Text("addpk_tree_pkey".into()),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn attach_partition_creates_missing_keys_and_fk_to_partitioned_key_stays_rejected() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table attach_parent (a int primary key) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create table attach_child (a int)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table attach_parent attach partition attach_child for values from (0) to (10)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select child.relname, parent.relname \
+               from pg_inherits i \
+               join pg_class child on child.oid = i.inhrelid \
+               join pg_class parent on parent.oid = i.inhparent \
+              where parent.relname = 'attach_parent_pkey'",
+        ),
+        vec![vec![
+            Value::Text("attach_child_pkey".into()),
+            Value::Text("attach_parent_pkey".into()),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_constraint \
+              where conrelid = 'attach_parent'::regclass \
+                and contype::text = 'n'",
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    match session.execute(
+        &db,
+        "create table fk_to_partitioned_parent (a int references attach_parent(a))",
+    ) {
+        Err(ExecError::Parse(ParseError::FeatureNotSupported(message)))
+            if message == "REFERENCES to partitioned tables" => {}
+        other => panic!("expected FK-to-partitioned-table rejection, got {other:?}"),
+    }
+}
+
+#[test]
 fn drop_table_still_rejects_legacy_inheritance_parents() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
