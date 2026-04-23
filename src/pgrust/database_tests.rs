@@ -20790,6 +20790,161 @@ fn plpgsql_alias_record_select_into_and_update_work() {
 }
 
 #[test]
+fn plpgsql_static_query_for_loop_record_target_supports_field_access() {
+    let dir = temp_dir("plpgsql_query_loop_record_fields");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function last_pair() returns text language plpgsql as $$ declare rec record; begin for rec in values (1, 'a'), (2, 'b') loop null; end loop; return rec.column1::text || rec.column2; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select last_pair()"),
+        vec![vec![Value::Text("2b".into())]]
+    );
+}
+
+#[test]
+fn plpgsql_nested_static_query_for_loops_over_scalar_targets_work() {
+    let dir = temp_dir("plpgsql_nested_query_loops");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function nested_query_loops() returns int4 language plpgsql as $$ declare a int4; b int4; inner_v int4; total int4 := 0; begin for a, b in values (1, 10), (2, 20) loop for inner_v in values (100), (200) loop total := total + a + b + inner_v; end loop; end loop; return total; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select nested_query_loops()"),
+        vec![vec![Value::Int32(666)]]
+    );
+}
+
+#[test]
+fn plpgsql_dynamic_execute_query_for_loop_supports_explain_lines() {
+    let dir = temp_dir("plpgsql_dynamic_query_loop_explain");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function explain_line_count(text) returns int4 language plpgsql as $$ declare ln text; total int4 := 0; begin for ln in execute format('explain analyze %s', $1) loop total := total + 1; end loop; return total; end $$",
+    )
+    .unwrap();
+
+    let rows = query_rows(&db, 1, "select explain_line_count('select 1')");
+    match &rows[..] {
+        [row] => match &row[..] {
+            [Value::Int32(count)] => assert!(*count > 0),
+            other => panic!("expected single int4 result, got {other:?}"),
+        },
+        other => panic!("expected single row result, got {other:?}"),
+    }
+}
+
+#[test]
+fn plpgsql_dynamic_execute_query_for_loop_supports_using() {
+    let dir = temp_dir("plpgsql_dynamic_query_loop_using");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function dynamic_using_sum(text) returns int4 language plpgsql as $$ declare v int4; total int4 := 0; begin for v in execute $1 using 3, 4 loop total := total + v; end loop; return total; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select dynamic_using_sum('values ($1), ($2)')"),
+        vec![vec![Value::Int32(7)]]
+    );
+}
+
+#[test]
+fn plpgsql_query_for_loop_sets_found_false_when_empty() {
+    let dir = temp_dir("plpgsql_query_loop_found_false");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function query_loop_found_false() returns bool language plpgsql as $$ declare v int4; begin found := true; for v in select 1 where false loop null; end loop; return found; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select query_loop_found_false()"),
+        vec![vec![Value::Bool(false)]]
+    );
+}
+
+#[test]
+fn plpgsql_query_for_loop_sets_found_true_after_nonempty_loop() {
+    let dir = temp_dir("plpgsql_query_loop_found_true");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function query_loop_found_true() returns bool language plpgsql as $$ declare v int4; begin found := false; for v in values (1) loop found := false; end loop; return found; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select query_loop_found_true()"),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn plpgsql_query_for_loop_reports_row_shape_mismatch() {
+    let dir = temp_dir("plpgsql_query_loop_shape_mismatch");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function bad_query_loop_shape() returns int4 language plpgsql as $$ declare v int4; begin for v in values (1, 2) loop null; end loop; return 0; end $$",
+    )
+    .unwrap();
+
+    let err = db.execute(1, "select bad_query_loop_shape()").unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        } if message == "query returned an unexpected row shape"
+            && detail == "expected 1 column, got 2"
+            && sqlstate == "42804"
+    ));
+}
+
+#[test]
+fn plpgsql_dynamic_execute_query_for_loop_rejects_null_query_string() {
+    let dir = temp_dir("plpgsql_query_loop_null_execute");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function null_dynamic_loop() returns int4 language plpgsql as $$ declare v int4; q text := null; begin for v in execute q loop null; end loop; return 0; end $$",
+    )
+    .unwrap();
+
+    let err = db.execute(1, "select null_dynamic_loop()").unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            message,
+            detail: None,
+            sqlstate,
+            ..
+        } if message == "query string argument of EXECUTE is null"
+            && sqlstate == "22004"
+    ));
+}
+
+#[test]
 fn after_insert_triggers_fire_per_row_in_alphabetical_order() {
     let dir = temp_dir("after_insert_trigger_notices");
     let db = Database::open(&dir, 64).unwrap();
