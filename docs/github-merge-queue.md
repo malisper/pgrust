@@ -8,8 +8,8 @@ This repository now includes two GitHub Actions workflows:
 ## What they do
 
 - `merge-queue-tests.yml` runs on `pull_request` and `merge_group` for `perf-optimization`.
-- Library tests are split into 4 shards with `cargo nextest --partition`, so test execution runs in parallel.
-- Each shard writes a JUnit XML report.
+- Library tests run on a single 32-vCPU Ubuntu larger runner instead of being split across partitions.
+- That test run writes a JUnit XML report.
 - The `cargo-test` aggregation job downloads those reports, writes a timing summary into the Actions job summary, and becomes the single required check for branch protection.
 - `auto-queue-pr.yml` runs on `pull_request_target` and enables auto-merge immediately for non-draft PRs targeting `perf-optimization`. With a required merge queue enabled, GitHub will add the PR to the queue automatically once its requirements pass.
 
@@ -33,6 +33,11 @@ This script:
   - minimum entries to merge `1`
   - maximum entries to merge `5`
   - wait time `0` minutes
+
+## Runner prerequisite
+
+The workflow targets the GitHub larger-runner label `ubuntu-24.04-32core`.
+That runner must exist and be enabled for this repository in GitHub's runner settings, or the test job will stay queued without starting.
 
 ## Notes
 
