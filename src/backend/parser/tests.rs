@@ -6607,16 +6607,23 @@ fn parse_insert_update_delete() {
         )
     );
     assert!(
-        matches!(parse_statement("create schema tenant").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: Some(schema_name), auth_role: None, if_not_exists: false }) if schema_name == "tenant")
+        matches!(parse_statement("create schema tenant").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: Some(schema_name), auth_role: None, if_not_exists: false, elements }) if schema_name == "tenant" && elements.is_empty())
     );
     assert!(
-        matches!(parse_statement("create schema if not exists tenant").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: Some(schema_name), auth_role: None, if_not_exists: true }) if schema_name == "tenant")
+        matches!(parse_statement("create schema if not exists tenant").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: Some(schema_name), auth_role: None, if_not_exists: true, elements }) if schema_name == "tenant" && elements.is_empty())
     );
     assert!(
-        matches!(parse_statement("create schema authorization app_user").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: None, auth_role: Some(auth_role), if_not_exists: false }) if auth_role == "app_user")
+        matches!(parse_statement("create schema authorization app_user").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: None, auth_role: Some(auth_role), if_not_exists: false, elements }) if auth_role == "app_user" && elements.is_empty())
     );
     assert!(
-        matches!(parse_statement("create schema tenant authorization app_user").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: Some(schema_name), auth_role: Some(auth_role), if_not_exists: false }) if schema_name == "tenant" && auth_role == "app_user")
+        matches!(parse_statement("create schema tenant authorization app_user").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: Some(schema_name), auth_role: Some(auth_role), if_not_exists: false, elements }) if schema_name == "tenant" && auth_role == "app_user" && elements.is_empty())
+    );
+    assert!(
+        matches!(
+            parse_statement("create schema fkpart0 create table pkey (a int primary key) create table fk_part (a int)").unwrap(),
+            Statement::CreateSchema(CreateSchemaStatement { schema_name: Some(schema_name), elements, .. })
+                if schema_name == "fkpart0" && elements.len() == 2
+        )
     );
     assert!(
         matches!(parse_statement("drop view if exists item_names, recent_items").unwrap(), Statement::DropView(DropViewStatement { if_exists: true, view_names }) if view_names == vec!["item_names", "recent_items"])
