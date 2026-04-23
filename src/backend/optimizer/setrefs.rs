@@ -549,9 +549,7 @@ fn build_path_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
         Path::Filter { input, .. }
         | Path::OrderBy { input, .. }
         | Path::Limit { input, .. }
-        | Path::LockRows { input, .. } => {
-            build_path_tlist(root, input)
-        }
+        | Path::LockRows { input, .. } => build_path_tlist(root, input),
         Path::Aggregate {
             slot_id,
             group_by,
@@ -2048,12 +2046,9 @@ fn lower_sublink(
         .target_list
         .first()
         .map(|target| target.sql_type);
-    let (planned_stmt, next_param_id) = planner_with_param_base(
-        *sublink.subselect,
-        catalog,
-        ctx.next_param_id,
-    )
-    .expect("locking validation should complete before setrefs subplan lowering");
+    let (planned_stmt, next_param_id) =
+        planner_with_param_base(*sublink.subselect, catalog, ctx.next_param_id)
+            .expect("locking validation should complete before setrefs subplan lowering");
     ctx.next_param_id = next_param_id;
     let par_param = planned_stmt
         .ext_params
@@ -3464,9 +3459,7 @@ fn set_lock_rows_references(
                     .expect("row mark rtindex should resolve to an RTE");
                 match &rte.kind {
                     RangeTblEntryKind::Relation {
-                        rel,
-                        relation_oid,
-                        ..
+                        rel, relation_oid, ..
                     } => PlanRowMark {
                         rtindex: row_mark.rtindex,
                         relation_name: rte
@@ -4572,9 +4565,7 @@ fn expand_output_var(var: Var, path: &Path) -> Expr {
         Path::Filter { input, .. }
         | Path::OrderBy { input, .. }
         | Path::Limit { input, .. }
-        | Path::LockRows { input, .. } => {
-            expand_output_var(var, input)
-        }
+        | Path::LockRows { input, .. } => expand_output_var(var, input),
         Path::NestedLoopJoin { left, right, .. } | Path::HashJoin { left, right, .. } => {
             let expr = Expr::Var(var.clone());
             if left.output_vars().contains(&expr) {

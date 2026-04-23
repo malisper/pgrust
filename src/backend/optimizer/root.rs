@@ -1,6 +1,6 @@
+use crate::backend::parser::ParseError;
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::executor::execdesc::CommandType;
-use crate::backend::parser::ParseError;
 use crate::include::nodes::parsenodes::{
     JoinTreeNode, Query, QueryRowMark, RangeTblEntry, RangeTblEntryKind, SelectLockingClause,
 };
@@ -46,10 +46,7 @@ fn prepare_query_for_locking_with_inherited(
         .into_iter()
         .map(prepare_target_entry_for_locking)
         .collect::<Result<Vec<_>, _>>()?;
-    query.where_qual = query
-        .where_qual
-        .map(prepare_expr_for_locking)
-        .transpose()?;
+    query.where_qual = query.where_qual.map(prepare_expr_for_locking).transpose()?;
     query.group_by = query
         .group_by
         .into_iter()
@@ -85,9 +82,7 @@ fn prepare_query_for_locking_with_inherited(
         .transpose()?;
     query.recursive_union = query
         .recursive_union
-        .map(|recursive_union| {
-            prepare_recursive_union_for_locking(*recursive_union).map(Box::new)
-        })
+        .map(|recursive_union| prepare_recursive_union_for_locking(*recursive_union).map(Box::new))
         .transpose()?;
     query.set_operation = query
         .set_operation
@@ -194,8 +189,9 @@ fn collect_query_row_marks(
             };
             match rte.kind {
                 RangeTblEntryKind::Relation { .. } => {
-                    if let Some(existing) =
-                        row_marks.iter_mut().find(|row_mark| row_mark.rtindex == *rtindex)
+                    if let Some(existing) = row_marks
+                        .iter_mut()
+                        .find(|row_mark| row_mark.rtindex == *rtindex)
                     {
                         existing.strength = existing.strength.strongest(strength);
                     } else {
@@ -339,12 +335,12 @@ fn prepare_window_frame_for_locking(
     use crate::include::nodes::primnodes::WindowFrameBound;
 
     let prepare_bound = |bound| match bound {
-        WindowFrameBound::OffsetPreceding(expr) => {
-            Ok(WindowFrameBound::OffsetPreceding(prepare_expr_for_locking(expr)?))
-        }
-        WindowFrameBound::OffsetFollowing(expr) => {
-            Ok(WindowFrameBound::OffsetFollowing(prepare_expr_for_locking(expr)?))
-        }
+        WindowFrameBound::OffsetPreceding(expr) => Ok(WindowFrameBound::OffsetPreceding(
+            prepare_expr_for_locking(expr)?,
+        )),
+        WindowFrameBound::OffsetFollowing(expr) => Ok(WindowFrameBound::OffsetFollowing(
+            prepare_expr_for_locking(expr)?,
+        )),
         other => Ok(other),
     };
     Ok(crate::include::nodes::primnodes::WindowFrame {
@@ -637,36 +633,32 @@ fn prepare_expr_for_locking(expr: Expr) -> Result<Expr, ParseError> {
                 .collect::<Result<Vec<_>, _>>()?,
             ..*op
         })),
-        Expr::Bool(bool_expr) => {
-            Expr::Bool(Box::new(crate::include::nodes::primnodes::BoolExpr {
-                args: bool_expr
-                    .args
-                    .into_iter()
-                    .map(prepare_expr_for_locking)
-                    .collect::<Result<Vec<_>, _>>()?,
-                ..*bool_expr
-            }))
-        }
-        Expr::Case(case_expr) => {
-            Expr::Case(Box::new(crate::include::nodes::primnodes::CaseExpr {
-                arg: case_expr
-                    .arg
-                    .map(|arg| prepare_expr_for_locking(*arg).map(Box::new))
-                    .transpose()?,
-                args: case_expr
-                    .args
-                    .into_iter()
-                    .map(|arm| {
-                        Ok(crate::include::nodes::primnodes::CaseWhen {
-                            expr: prepare_expr_for_locking(arm.expr)?,
-                            result: prepare_expr_for_locking(arm.result)?,
-                        })
+        Expr::Bool(bool_expr) => Expr::Bool(Box::new(crate::include::nodes::primnodes::BoolExpr {
+            args: bool_expr
+                .args
+                .into_iter()
+                .map(prepare_expr_for_locking)
+                .collect::<Result<Vec<_>, _>>()?,
+            ..*bool_expr
+        })),
+        Expr::Case(case_expr) => Expr::Case(Box::new(crate::include::nodes::primnodes::CaseExpr {
+            arg: case_expr
+                .arg
+                .map(|arg| prepare_expr_for_locking(*arg).map(Box::new))
+                .transpose()?,
+            args: case_expr
+                .args
+                .into_iter()
+                .map(|arm| {
+                    Ok(crate::include::nodes::primnodes::CaseWhen {
+                        expr: prepare_expr_for_locking(arm.expr)?,
+                        result: prepare_expr_for_locking(arm.result)?,
                     })
-                    .collect::<Result<Vec<_>, _>>()?,
-                defresult: Box::new(prepare_expr_for_locking(*case_expr.defresult)?),
-                ..*case_expr
-            }))
-        }
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            defresult: Box::new(prepare_expr_for_locking(*case_expr.defresult)?),
+            ..*case_expr
+        })),
         Expr::Func(func) => Expr::Func(Box::new(crate::include::nodes::primnodes::FuncExpr {
             args: func
                 .args
@@ -686,8 +678,8 @@ fn prepare_expr_for_locking(expr: Expr) -> Result<Expr, ParseError> {
             )?),
             ..*sublink
         })),
-        Expr::SubPlan(subplan) => Expr::SubPlan(Box::new(
-            crate::include::nodes::primnodes::SubPlan {
+        Expr::SubPlan(subplan) => {
+            Expr::SubPlan(Box::new(crate::include::nodes::primnodes::SubPlan {
                 testexpr: subplan
                     .testexpr
                     .map(|expr| prepare_expr_for_locking(*expr).map(Box::new))
@@ -698,8 +690,8 @@ fn prepare_expr_for_locking(expr: Expr) -> Result<Expr, ParseError> {
                     .map(prepare_expr_for_locking)
                     .collect::<Result<Vec<_>, _>>()?,
                 ..*subplan
-            },
-        )),
+            }))
+        }
         Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(
             crate::include::nodes::primnodes::ScalarArrayOpExpr {
                 left: Box::new(prepare_expr_for_locking(*saop.left)?),

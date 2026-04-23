@@ -69,7 +69,8 @@ impl Drop for SelectGuard<'_> {
         if let Some(scope_id) = self.statement_lock_scope_id {
             self.advisory_locks
                 .unlock_all_statement(self.client_id, scope_id);
-            self.row_locks.unlock_all_statement(self.client_id, scope_id);
+            self.row_locks
+                .unlock_all_statement(self.client_id, scope_id);
         }
     }
 }
@@ -106,7 +107,8 @@ impl Drop for StatementLockScopeGuard {
         if let Some(scope_id) = self.scope_id {
             self.advisory_locks
                 .unlock_all_statement(self.client_id, scope_id);
-            self.row_locks.unlock_all_statement(self.client_id, scope_id);
+            self.row_locks
+                .unlock_all_statement(self.client_id, scope_id);
         }
     }
 }

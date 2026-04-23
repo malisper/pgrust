@@ -107,10 +107,10 @@ use crate::backend::parser::{
     ParseError, Statement, bind_delete, bind_insert, bind_update, parse_statement, pg_plan_query,
     pg_plan_values_query,
 };
+use crate::backend::storage::lmgr::TableLockError;
 use crate::backend::storage::lmgr::{
     AdvisoryLockManager, RowLockError, RowLockManager, RowLockMode, RowLockOwner, RowLockTag,
 };
-use crate::backend::storage::lmgr::TableLockError;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;

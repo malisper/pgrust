@@ -17,6 +17,7 @@ use crate::backend::executor::value_io::{decode_value_with_toast, missing_column
 use crate::backend::executor::window::execute_window_clause;
 use crate::backend::libpq::pqformat::FloatFormatOptions;
 use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::backend::storage::lmgr::RowLockMode;
 use crate::backend::storage::page::bufpage::{
     ItemIdFlags, page_get_item_id_unchecked, page_get_item_unchecked, page_get_max_offset_number,
 };
@@ -28,17 +29,16 @@ use crate::include::catalog::PG_LARGEOBJECT_METADATA_RELATION_OID;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, CteScanState,
-    FilterState, FunctionScanState, IndexScanState, LimitState, MaterializedRow,
-    LockRowsState, NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, PlanState,
-    ProjectSetState, ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SetOpState,
-    SlotKind, SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot, ValuesState,
-    WindowAggState, WorkTableScanState,
+    FilterState, FunctionScanState, IndexScanState, LimitState, LockRowsState, MaterializedRow,
+    NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, PlanState, ProjectSetState,
+    ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SetOpState, SlotKind,
+    SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot, ValuesState, WindowAggState,
+    WorkTableScanState,
 };
 use crate::include::nodes::primnodes::{
     BuiltinScalarFunction, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR, RelationDesc,
     ScalarFunctionImpl, Var, attrno_index,
 };
-use crate::backend::storage::lmgr::RowLockMode;
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashSet};
 use std::rc::Rc;
@@ -249,7 +249,10 @@ fn materialize_cte_row(
 
 fn row_lock_read_only_error(mode: RowLockMode) -> ExecError {
     ExecError::DetailedError {
-        message: format!("{} is not allowed in a read-only execution context", mode.pg_name()),
+        message: format!(
+            "{} is not allowed in a read-only execution context",
+            mode.pg_name()
+        ),
         detail: None,
         hint: None,
         sqlstate: "25006",

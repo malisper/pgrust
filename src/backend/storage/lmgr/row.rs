@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use parking_lot::{Condvar, Mutex};
 
+use crate::ClientId;
 use crate::backend::utils::activity::now_timestamptz;
 use crate::backend::utils::misc::interrupts::{
     InterruptReason, InterruptState, check_for_interrupts,
@@ -12,7 +13,6 @@ use crate::backend::utils::time::instant::Instant;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::nodes::datetime::TimestampTzADT;
 use crate::include::nodes::parsenodes::SelectLockingClause;
-use crate::ClientId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RowLockScope {
@@ -243,7 +243,11 @@ fn grant_row_lock(tag_state: &mut RowLockStateForTag, owner: RowLockOwner, mode:
 }
 
 fn remove_waiter(tag_state: &mut RowLockStateForTag, waiter_id: u64) {
-    if let Some(index) = tag_state.waiting.iter().position(|entry| entry.id == waiter_id) {
+    if let Some(index) = tag_state
+        .waiting
+        .iter()
+        .position(|entry| entry.id == waiter_id)
+    {
         tag_state.waiting.remove(index);
     }
 }
