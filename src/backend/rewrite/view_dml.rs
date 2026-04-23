@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use crate::backend::parser::{
     BoundRelation, CatalogLookup, ParseError, rewrite_local_vars_for_output_exprs,
 };
@@ -31,6 +29,25 @@ const RECURSIVE_DETAIL: &str =
     "Views that directly or indirectly reference themselves are not automatically updatable.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NonUpdatableViewColumnReason {
+    SystemColumn,
+    NotBaseRelationColumn,
+}
+
+impl NonUpdatableViewColumnReason {
+    pub(crate) fn detail(self) -> &'static str {
+        match self {
+            NonUpdatableViewColumnReason::SystemColumn => {
+                "View columns that refer to system columns are not updatable."
+            }
+            NonUpdatableViewColumnReason::NotBaseRelationColumn => {
+                "View columns that are not columns of their base relation are not updatable."
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ViewDmlEvent {
     Insert,
     Update,
@@ -54,6 +71,7 @@ pub(crate) struct ResolvedAutoViewTarget {
     pub(crate) visible_output_exprs: Vec<Expr>,
     pub(crate) combined_predicate: Option<Expr>,
     pub(crate) updatable_column_map: Vec<Option<usize>>,
+    pub(crate) non_updatable_column_reasons: Vec<Option<NonUpdatableViewColumnReason>>,
     pub(crate) all_view_predicates: Vec<ViewCheck>,
     pub(crate) view_check_options: Vec<ViewCheck>,
 }
@@ -70,6 +88,11 @@ pub(crate) enum ViewDmlRewriteError {
     NestedUserRuleMix(String),
     RecursiveView(String),
     DeferredFeature(String),
+    NonUpdatableColumn {
+        column_name: String,
+        reason: NonUpdatableViewColumnReason,
+    },
+    MultipleAssignments(String),
 }
 
 impl ViewDmlRewriteError {
@@ -79,6 +102,8 @@ impl ViewDmlRewriteError {
             | ViewDmlRewriteError::NestedUserRuleMix(detail)
             | ViewDmlRewriteError::DeferredFeature(detail) => detail.clone(),
             ViewDmlRewriteError::RecursiveView(_) => RECURSIVE_DETAIL.into(),
+            ViewDmlRewriteError::NonUpdatableColumn { reason, .. } => reason.detail().into(),
+            ViewDmlRewriteError::MultipleAssignments(_) => String::new(),
         }
     }
 }
@@ -145,6 +170,7 @@ pub(crate) fn resolve_auto_updatable_view_target(
             visible_output_exprs: analyzed.output_exprs,
             combined_predicate: query.where_qual.clone(),
             updatable_column_map: analyzed.updatable_column_map,
+            non_updatable_column_reasons: analyzed.non_updatable_column_reasons,
             all_view_predicates,
             view_check_options,
         });
@@ -170,6 +196,7 @@ pub(crate) fn resolve_auto_updatable_view_target(
         visible_output_exprs: nested_visible_output_exprs,
         combined_predicate: nested_combined_predicate,
         updatable_column_map: nested_updatable_column_map,
+        non_updatable_column_reasons: nested_non_updatable_column_reasons,
         all_view_predicates: nested_all_view_predicates,
         view_check_options: nested_view_check_options,
     } = nested;
@@ -204,13 +231,34 @@ pub(crate) fn resolve_auto_updatable_view_target(
                 &nested_visible_output_exprs,
             ),
         });
-    let updatable_column_map = analyzed
+    let mut updatable_column_map = Vec::with_capacity(analyzed.updatable_column_map.len());
+    let mut non_updatable_column_reasons =
+        Vec::with_capacity(analyzed.non_updatable_column_reasons.len());
+    for (column, reason) in analyzed
         .updatable_column_map
         .into_iter()
-        .map(|column| {
-            column.and_then(|index| nested_updatable_column_map.get(index).copied().flatten())
-        })
-        .collect();
+        .zip(analyzed.non_updatable_column_reasons.into_iter())
+    {
+        match column {
+            Some(index) => {
+                let nested_column = nested_updatable_column_map.get(index).copied().flatten();
+                let nested_reason = nested_non_updatable_column_reasons
+                    .get(index)
+                    .copied()
+                    .flatten();
+                updatable_column_map.push(nested_column);
+                non_updatable_column_reasons.push(if nested_column.is_some() {
+                    None
+                } else {
+                    nested_reason.or(reason)
+                });
+            }
+            None => {
+                updatable_column_map.push(None);
+                non_updatable_column_reasons.push(reason);
+            }
+        }
+    }
     let mut all_view_predicates = nested_all_view_predicates;
     if let Some(local_check) = local_view_check.clone() {
         all_view_predicates.push(local_check);
@@ -228,6 +276,7 @@ pub(crate) fn resolve_auto_updatable_view_target(
         visible_output_exprs: output_exprs,
         combined_predicate,
         updatable_column_map,
+        non_updatable_column_reasons,
         all_view_predicates,
         view_check_options,
     })
@@ -277,6 +326,7 @@ struct SimpleViewAnalysis {
     base_inh: bool,
     output_exprs: Vec<Expr>,
     updatable_column_map: Vec<Option<usize>>,
+    non_updatable_column_reasons: Vec<Option<NonUpdatableViewColumnReason>>,
 }
 
 fn analyze_simple_view_query(
@@ -331,27 +381,37 @@ fn analyze_simple_view_query(
         return Err(unsupported(TARGET_LIST_DETAIL));
     }
 
-    let mut seen_columns = BTreeSet::new();
     let mut output_exprs = Vec::with_capacity(query.target_list.len());
     let mut updatable_column_map = Vec::with_capacity(query.target_list.len());
+    let mut non_updatable_column_reasons = Vec::with_capacity(query.target_list.len());
     for target in &query.target_list {
-        if target.resjunk || expr_contains_sublink(&target.expr) {
-            return Err(unsupported(TARGET_LIST_DETAIL));
-        }
-        let Expr::Var(var) = &target.expr else {
-            return Err(unsupported(TARGET_LIST_DETAIL));
-        };
-        if var.varlevelsup != 0 || var.varno != *base_rtindex || is_system_attr(var.varattno) {
-            return Err(unsupported(TARGET_LIST_DETAIL));
-        }
-        let Some(column_index) = attrno_index(var.varattno) else {
-            return Err(unsupported(TARGET_LIST_DETAIL));
-        };
-        if !seen_columns.insert(column_index) {
+        if target.resjunk {
             return Err(unsupported(TARGET_LIST_DETAIL));
         }
         output_exprs.push(target.expr.clone());
-        updatable_column_map.push(Some(column_index));
+        match &target.expr {
+            Expr::Var(var) if var.varlevelsup == 0 && var.varno == *base_rtindex => {
+                if is_system_attr(var.varattno) {
+                    updatable_column_map.push(None);
+                    non_updatable_column_reasons
+                        .push(Some(NonUpdatableViewColumnReason::SystemColumn));
+                    continue;
+                }
+                let Some(column_index) = attrno_index(var.varattno) else {
+                    updatable_column_map.push(None);
+                    non_updatable_column_reasons
+                        .push(Some(NonUpdatableViewColumnReason::NotBaseRelationColumn));
+                    continue;
+                };
+                updatable_column_map.push(Some(column_index));
+                non_updatable_column_reasons.push(None);
+            }
+            _ => {
+                updatable_column_map.push(None);
+                non_updatable_column_reasons
+                    .push(Some(NonUpdatableViewColumnReason::NotBaseRelationColumn));
+            }
+        }
     }
 
     if query.where_qual.as_ref().is_some_and(expr_contains_sublink) {
@@ -365,6 +425,7 @@ fn analyze_simple_view_query(
         base_inh: base_rte.inh,
         output_exprs,
         updatable_column_map,
+        non_updatable_column_reasons,
     })
 }
 
