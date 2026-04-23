@@ -36,8 +36,14 @@ This script:
 
 ## Runner prerequisite
 
-The workflow targets the GitHub larger-runner label `ubuntu-24.04-32core`.
-That runner must exist and be enabled for this repository in GitHub's runner settings, or the test job will stay queued without starting.
+The workflow targets the enterprise runner group `large-runners-like-32x-paid`, which holds a 32-vCPU GitHub-hosted larger runner.
+The group must be shared with the `Pager-Free` organization and its repository access set to "All repositories", or the test job will stay queued without starting.
+Any other workflow in the org can opt-in to the same hardware with:
+
+```yaml
+runs-on:
+  group: large-runners-like-32x-paid
+```
 
 ## Notes
 
