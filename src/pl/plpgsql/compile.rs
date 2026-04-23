@@ -1613,7 +1613,11 @@ fn compile_exec_returning_into_stmt(
             let bound = bind_insert_with_outer_scopes(&stmt, catalog, &[outer_scope])?;
             let targets = compile_dml_into_targets(
                 target_refs,
-                bound.returning.iter().map(target_entry_query_column).collect(),
+                bound
+                    .returning
+                    .iter()
+                    .map(target_entry_query_column)
+                    .collect(),
                 env,
             )?;
             Ok(CompiledStmt::ExecInsertInto {
@@ -1625,7 +1629,11 @@ fn compile_exec_returning_into_stmt(
             let bound = bind_update_with_outer_scopes(&stmt, catalog, &[outer_scope])?;
             let targets = compile_dml_into_targets(
                 target_refs,
-                bound.returning.iter().map(target_entry_query_column).collect(),
+                bound
+                    .returning
+                    .iter()
+                    .map(target_entry_query_column)
+                    .collect(),
                 env,
             )?;
             Ok(CompiledStmt::ExecUpdateInto {
@@ -1637,7 +1645,11 @@ fn compile_exec_returning_into_stmt(
             let bound = bind_delete_with_outer_scopes(&stmt, catalog, &[outer_scope])?;
             let targets = compile_dml_into_targets(
                 target_refs,
-                bound.returning.iter().map(target_entry_query_column).collect(),
+                bound
+                    .returning
+                    .iter()
+                    .map(target_entry_query_column)
+                    .collect(),
                 env,
             )?;
             Ok(CompiledStmt::ExecDeleteInto {

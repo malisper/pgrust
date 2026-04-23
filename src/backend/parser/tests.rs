@@ -8,17 +8,18 @@ use crate::include::catalog::{
     RECORD_TYPE_OID, bootstrap_pg_proc_rows, sort_pg_rewrite_rows,
 };
 use crate::include::nodes::parsenodes::{
-    AggregateArgType, AggregateSignatureKind, AliasColumnDef, AliasColumnSpec, ColumnConstraint,
-    CommentOnAggregateStatement, CommentOnFunctionStatement, CompositeTypeAttributeDef,
+    AggregateArgType, AggregateSignatureKind, AliasColumnDef, AliasColumnSpec,
     AlterTableTriggerMode, AlterTableTriggerStateStatement, AlterTableTriggerTarget,
-    AlterTriggerRenameStatement, CreateAggregateStatement, CreateCompositeTypeStatement,
-    CreateTriggerStatement, CreateTypeStatement, DropAggregateStatement, DropTriggerStatement,
-    DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, IndexColumnDef, InsertSource,
-    InsertStatement, JoinTreeNode, PartitionStrategy, PublicationObjectSpec, PublicationOption,
-    PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey,
-    RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement,
-    SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel,
-    TriggerReferencingSpec, TriggerTiming, ViewCheckOption,
+    AlterTriggerRenameStatement, ColumnConstraint, CommentOnAggregateStatement,
+    CommentOnFunctionStatement, CompositeTypeAttributeDef, CreateAggregateStatement,
+    CreateCompositeTypeStatement, CreateTriggerStatement, CreateTypeStatement,
+    DropAggregateStatement, DropTriggerStatement, DropTypeStatement, ForeignKeyAction,
+    ForeignKeyMatchType, IndexColumnDef, InsertSource, InsertStatement, JoinTreeNode,
+    PartitionStrategy, PublicationObjectSpec, PublicationOption, PublicationSchemaName,
+    RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum,
+    RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint,
+    TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerReferencingSpec, TriggerTiming,
+    ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -3691,6 +3692,7 @@ fn parse_create_instead_of_trigger_statement() {
                     update_columns: Vec::new(),
                 },
             ],
+            referencing: Vec::new(),
             when_clause_sql: None,
             function_schema_name: Some("public".into()),
             function_name: "audit_people".into(),

@@ -7,13 +7,13 @@ use crate::ClientId;
 use crate::backend::access::transam::xact::{CommandId, TransactionId};
 use crate::backend::catalog::CatalogMutationEffect;
 use crate::backend::catalog::store::CatalogWriteContext;
-use crate::backend::commands::trigger::{RuntimeTriggers, relation_has_instead_row_trigger};
 use crate::backend::commands::tablecmds::{
     apply_base_delete_row, apply_base_update_row, execute_delete_with_waiter, execute_insert,
     execute_insert_values, execute_update_with_waiter, finalize_bound_delete_stmt,
     finalize_bound_insert_stmt, finalize_bound_update_stmt, materialize_delete_row_events,
     materialize_insert_rows, materialize_update_row_events,
 };
+use crate::backend::commands::trigger::{RuntimeTriggers, relation_has_instead_row_trigger};
 use crate::backend::executor::{
     ExecError, ExecutorContext, StatementResult, TupleSlot, Value, eval_expr,
 };
@@ -29,12 +29,12 @@ use crate::backend::rewrite::{ViewDmlEvent, ViewDmlRewriteError};
 use crate::backend::storage::lmgr::TableLockMode;
 use crate::include::catalog::PgRewriteRow;
 use crate::include::nodes::primnodes::{QueryColumn, RelationDesc, TargetEntry};
-use crate::pl::plpgsql::TriggerOperation;
 use crate::pgrust::database::TransactionWaiter;
 use crate::pgrust::database::ddl::map_catalog_error;
 use crate::pgrust::database::ddl::{ensure_relation_owner, lookup_rule_relation_for_ddl};
 use crate::pgrust::database::foreign_keys::TableLockRequest;
 use crate::pgrust::database::{AutoCommitGuard, Database};
+use crate::pl::plpgsql::TriggerOperation;
 
 impl Database {
     pub(crate) fn execute_create_rule_stmt_with_search_path(
@@ -511,7 +511,8 @@ pub(crate) fn execute_bound_insert_with_rules(
     if matches!(stmt.relkind, 'r' | 'p') && !has_user_rules {
         return execute_insert(stmt, catalog, ctx, xid, cid);
     }
-    if stmt.relkind == 'v' && !has_user_rules
+    if stmt.relkind == 'v'
+        && !has_user_rules
         && relation_has_instead_row_trigger(catalog, stmt.relation_oid, TriggerOperation::Insert)
     {
         return execute_view_insert_with_triggers(stmt, catalog, ctx);
@@ -648,7 +649,8 @@ pub(crate) fn execute_bound_update_with_rules(
         for target in &stmt.targets {
             let view_has_user_rules =
                 relation_has_user_rules_for_event(target.relation_oid, RuleEvent::Update, catalog);
-            if target.relkind == 'v' && !view_has_user_rules
+            if target.relkind == 'v'
+                && !view_has_user_rules
                 && relation_has_instead_row_trigger(
                     catalog,
                     target.relation_oid,
@@ -826,7 +828,8 @@ pub(crate) fn execute_bound_delete_with_rules(
         for target in &stmt.targets {
             let view_has_user_rules =
                 relation_has_user_rules_for_event(target.relation_oid, RuleEvent::Delete, catalog);
-            if target.relkind == 'v' && !view_has_user_rules
+            if target.relkind == 'v'
+                && !view_has_user_rules
                 && relation_has_instead_row_trigger(
                     catalog,
                     target.relation_oid,
