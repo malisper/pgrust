@@ -873,9 +873,9 @@ pub(crate) fn send_typed_data_row(
                 buf.extend_from_slice(rendered.as_bytes());
             }
             Value::Record(record) => {
-                let rendered = crate::backend::executor::value_io::format_record_text_with_config(
+                let rendered = crate::backend::executor::value_io::format_record_text_with_options(
                     record,
-                    &float_format.datetime_config,
+                    &float_format,
                 );
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
