@@ -54,7 +54,6 @@ pub enum ParseError {
         token: String,
         clause: UngroupedColumnClause,
     },
-    AggInWhere,
     SubqueryMustReturnOneColumn,
     UnknownConfigurationParameter(String),
     UnrecognizedParameter(String),
@@ -160,9 +159,6 @@ impl fmt::Display for ParseError {
                     f,
                     "column \"{display_name}\" must appear in the GROUP BY clause or be used in an aggregate function"
                 )
-            }
-            ParseError::AggInWhere => {
-                write!(f, "aggregate functions are not allowed in WHERE")
             }
             ParseError::SubqueryMustReturnOneColumn => {
                 write!(f, "subquery must return only one column")

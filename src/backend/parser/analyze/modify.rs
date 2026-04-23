@@ -1727,6 +1727,7 @@ pub(crate) fn bind_insert_with_outer_scopes(
                 catalog,
                 outer_scopes,
                 None,
+                None,
                 &local_ctes,
                 &[],
             )?;

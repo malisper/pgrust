@@ -1338,7 +1338,8 @@ fn analyze_join_using_creates_join_rte_alias_vars() {
     catalog.insert("pets", pets_entry());
 
     let stmt = parse_select("select id from people join pets using (id)").unwrap();
-    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[]).unwrap();
 
     assert_eq!(query.rtable.len(), 3);
     match &query.jointree {
@@ -1412,7 +1413,8 @@ fn rewrite_query_expands_view_relation_rtes() {
     sort_pg_rewrite_rows(&mut catalog.rewrites);
 
     let stmt = parse_select("select id from people_view").unwrap();
-    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[]).unwrap();
     assert!(matches!(
         query.rtable[0].kind,
         RangeTblEntryKind::Relation { relkind: 'v', .. }
@@ -1478,7 +1480,8 @@ fn rewrite_policy_subqueries_apply_nested_row_security() {
     let catalog = row_security_test_catalog(base, 71010);
 
     let stmt = parse_select("select id from outer_t").unwrap();
-    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[]).unwrap();
     let rewritten = crate::backend::rewrite::pg_rewrite_query(query, &catalog)
         .unwrap()
         .into_iter()
@@ -1533,7 +1536,8 @@ fn rewrite_policy_subqueries_reject_infinite_policy_recursion() {
     let catalog = row_security_test_catalog(base, 71011);
 
     let stmt = parse_select("select id from rtbl").unwrap();
-    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[]).unwrap();
     let err = crate::backend::rewrite::pg_rewrite_query(query, &catalog).unwrap_err();
     assert!(
         matches!(
@@ -4498,7 +4502,7 @@ fn parse_implicit_row_constructor_expression() {
 fn analyze_extract_keeps_extract_as_default_output_name() {
     let stmt = parse_select("select extract(week from date '2020-08-11')").unwrap();
     let (query, _) =
-        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[]).unwrap();
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
 
     assert_eq!(
         query_column_names_and_types(&query),
@@ -5427,7 +5431,7 @@ fn build_plan_coerces_unknown_string_literals_for_array_ops() {
 fn analyze_timestamptz_typed_string_literal_keeps_timestamp_tz_type() {
     let stmt = parse_select("select timestamptz '2024-01-02 03:04:05+00'").unwrap();
     let (query, _) =
-        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[]).unwrap();
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
     assert!(matches!(
         &query.target_list[0].expr,
         Expr::Cast(inner, ty)
@@ -5453,7 +5457,7 @@ fn analyze_interval_array_text_cast_keeps_outer_text_cast() {
     let stmt =
         parse_select("select '{0 second,1 hour 42 minutes 20 seconds}'::interval[]::text").unwrap();
     let (query, _) =
-        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[]).unwrap();
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
     assert!(matches!(
         &query.target_list[0].expr,
         Expr::Cast(inner, ty)
@@ -9366,7 +9370,7 @@ fn analyze_grouped_query_keeps_semantic_group_refs() {
     )
     .unwrap();
     let (query, _) =
-        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[]).unwrap();
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
 
     let name_var = Expr::Var(Var {
         varno: 1,
@@ -9448,7 +9452,18 @@ fn aggregate_in_where_rejected() {
     let stmt = parse_select("select name from people where count(*) > 1").unwrap();
     assert!(matches!(
         build_plan(&stmt, &catalog()),
-        Err(ParseError::AggInWhere)
+        Err(ParseError::DetailedError { message, sqlstate, .. })
+            if message == "aggregate functions are not allowed in WHERE" && sqlstate == "42803"
+    ));
+}
+
+#[test]
+fn nested_aggregate_calls_are_rejected() {
+    let stmt = parse_select("select sum(max(id)) from people").unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog()),
+        Err(ParseError::DetailedError { message, sqlstate, .. })
+            if message == "aggregate function calls cannot be nested" && sqlstate == "42803"
     ));
 }
 
@@ -9942,7 +9957,8 @@ fn analyze_json_each_uses_pg_proc_out_metadata_for_output_columns() {
     };
 
     let stmt = parse_select("select * from json_each('{\"a\":1}'::json)").unwrap();
-    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[]).unwrap();
 
     assert_eq!(
         query_column_names_and_types(&query),
@@ -9957,7 +9973,7 @@ fn analyze_json_each_uses_pg_proc_out_metadata_for_output_columns() {
 fn analyze_pg_locks_uses_expected_columns_and_types() {
     let stmt = parse_select("select * from pg_locks").unwrap();
     let (query, _) =
-        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[]).unwrap();
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
 
     assert_eq!(
         query_column_names_and_types(&query),
@@ -10011,7 +10027,7 @@ fn analyze_json_each_rejects_typed_column_definitions_for_out_parameters() {
     let stmt =
         parse_select("select * from json_each('{\"a\":1}'::json) as j(key text, value json)")
             .unwrap();
-    let err = analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[])
+    let err = analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[])
         .unwrap_err()
         .to_string();
 
@@ -10034,7 +10050,7 @@ fn analyze_record_returning_function_requires_column_definition_list() {
     };
 
     let stmt = parse_select("select * from json_each('{\"a\":1}'::json)").unwrap();
-    let err = analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[])
+    let err = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
         .unwrap_err()
         .to_string();
 
@@ -10058,7 +10074,8 @@ fn analyze_record_returning_function_accepts_column_definition_list() {
 
     let stmt =
         parse_select("select * from json_each('{\"a\":1}'::json) as j(a int4, b text)").unwrap();
-    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[]).unwrap();
 
     assert_eq!(
         query_column_names_and_types(&query),
@@ -10083,7 +10100,8 @@ fn analyze_named_composite_returning_function_uses_relation_rowtype() {
     };
 
     let stmt = parse_select("select * from json_each('{\"a\":1}'::json)").unwrap();
-    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[]).unwrap();
 
     assert_eq!(
         query_column_names_and_types(&query),
@@ -10111,7 +10129,7 @@ fn analyze_named_composite_returning_function_rejects_typed_column_definitions()
     let stmt =
         parse_select("select * from json_each('{\"a\":1}'::json) as j(key text, value json)")
             .unwrap();
-    let err = analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[])
+    let err = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
         .unwrap_err()
         .to_string();
 
@@ -10128,7 +10146,8 @@ fn analyze_json_populate_record_from_uses_named_composite_argument_rowtype() {
     )
     .unwrap();
     let (query, _) =
-        analyze_select_query_with_outer(&stmt, &catalog_with_jpop(), &[], None, &[], &[]).unwrap();
+        analyze_select_query_with_outer(&stmt, &catalog_with_jpop(), &[], None, None, &[], &[])
+            .unwrap();
 
     assert_eq!(
         query_column_names_and_types(&query),
@@ -10147,7 +10166,8 @@ fn analyze_json_populate_recordset_from_uses_named_composite_argument_rowtype() 
     )
     .unwrap();
     let (query, _) =
-        analyze_select_query_with_outer(&stmt, &catalog_with_jpop(), &[], None, &[], &[]).unwrap();
+        analyze_select_query_with_outer(&stmt, &catalog_with_jpop(), &[], None, None, &[], &[])
+            .unwrap();
 
     assert_eq!(
         query_column_names_and_types(&query),
@@ -10166,7 +10186,8 @@ fn analyze_jsonb_populate_record_from_uses_named_composite_argument_rowtype() {
     )
     .unwrap();
     let (query, _) =
-        analyze_select_query_with_outer(&stmt, &catalog_with_jpop(), &[], None, &[], &[]).unwrap();
+        analyze_select_query_with_outer(&stmt, &catalog_with_jpop(), &[], None, None, &[], &[])
+            .unwrap();
 
     assert_eq!(
         query_column_names_and_types(&query),
@@ -10185,7 +10206,7 @@ fn analyze_jsonb_to_record_from_uses_column_definition_list() {
     )
     .unwrap();
     let (query, _) =
-        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[]).unwrap();
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
 
     assert_eq!(
         query_column_names_and_types(&query),
@@ -10202,7 +10223,7 @@ fn analyze_jsonb_populate_recordset_rejects_mismatched_query_rowtype() {
         "select * from jsonb_populate_recordset(row(0::int), '[{\"a\":\"1\"}]') q (a text, b text)",
     )
     .unwrap();
-    let err = analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[])
+    let err = analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[])
         .unwrap_err()
         .to_string();
 
@@ -10212,7 +10233,7 @@ fn analyze_jsonb_populate_recordset_rejects_mismatched_query_rowtype() {
 #[test]
 fn analyze_scalar_srf_rejects_typed_column_definitions() {
     let stmt = parse_select("select * from generate_series(1, 3) as g(val int4)").unwrap();
-    let err = analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[])
+    let err = analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[])
         .unwrap_err()
         .to_string();
 
@@ -11052,6 +11073,16 @@ fn build_plan_treats_subqueries_as_aggregate_scope_boundaries() {
 }
 
 #[test]
+fn analyze_select_does_not_collect_child_local_aggregate_for_parent() {
+    let stmt =
+        parse_select("select name from people where exists (select count(*) from people p2)")
+            .unwrap();
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[])
+        .expect("analyze");
+    assert!(query.accumulators.is_empty());
+}
+
+#[test]
 fn build_plan_allows_grouped_outer_column_inside_subquery() {
     let mut catalog = catalog();
     catalog.insert("pets", pets_entry());
@@ -11073,6 +11104,69 @@ fn build_plan_rejects_ungrouped_outer_column_inside_subquery() {
     assert!(matches!(
         build_plan(&stmt, &catalog),
         Err(ParseError::UngroupedColumn { token, .. }) if token == "p.name" || token == "name"
+    ));
+}
+
+#[test]
+fn build_plan_allows_grouped_outer_aggregate_inside_subquery_where() {
+    let mut catalog = catalog();
+    catalog.insert("pets", pets_entry());
+    let stmt = parse_select(
+        "select p.id from people p group by p.id having exists (select 1 from pets q where sum(p.id) = q.owner_id)",
+    )
+    .unwrap();
+    assert!(build_plan(&stmt, &catalog).is_ok());
+}
+
+#[test]
+fn analyze_select_dedupes_semantically_equivalent_outer_aggregate_calls() {
+    let mut catalog = catalog();
+    catalog.insert("pets", pets_entry());
+    let stmt = parse_select(
+        "select p.note, sum(id) from people p group by p.note having exists (select 1 from pets q where sum(p.id) = q.owner_id)",
+    )
+    .unwrap();
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+        .expect("analyze");
+    assert_eq!(query.accumulators.len(), 1);
+}
+
+#[test]
+fn build_plan_allows_outer_aggregate_with_ungrouped_arg_inside_subquery_where() {
+    let catalog = catalog_with_pets();
+    let stmt = parse_select(
+        "select p.owner_id from pets p group by p.owner_id having exists (select 1 from pets q where sum(distinct p.id) = q.id)",
+    )
+    .unwrap();
+    assert!(analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[]).is_ok());
+    assert!(build_plan(&stmt, &catalog).is_ok());
+}
+
+#[test]
+fn analyze_select_collects_outer_owned_aggregate_from_subquery() {
+    let mut catalog = catalog();
+    catalog.insert("pets", pets_entry());
+    let stmt = parse_select(
+        "select p.id from people p group by p.id having exists (select 1 from pets q where sum(p.id) = q.owner_id)",
+    )
+    .unwrap();
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+        .expect("analyze");
+    assert_eq!(query.accumulators.len(), 1);
+}
+
+#[test]
+fn build_plan_rejects_mixed_local_and_outer_aggregate_in_subquery_where() {
+    let mut catalog = catalog();
+    catalog.insert("pets", pets_entry());
+    let stmt = parse_select(
+        "select p.id from people p group by p.id having exists (select 1 from pets q where sum(p.id + q.owner_id) = 1)",
+    )
+    .unwrap();
+    assert!(matches!(
+        build_plan(&stmt, &catalog),
+        Err(ParseError::DetailedError { message, sqlstate, .. })
+            if message == "aggregate functions are not allowed in WHERE" && sqlstate == "42803"
     ));
 }
 
@@ -11362,7 +11456,7 @@ fn analyze_simple_case_uses_case_test_expr() {
     let stmt =
         parse_select("select case id when 1 then 'one' else 'other' end from people").unwrap();
     let (query, _) =
-        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[]).unwrap();
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
 
     match &query.target_list[0].expr {
         Expr::Case(case_expr) => {
