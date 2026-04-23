@@ -4,21 +4,25 @@ use crate::backend::commands::tablecmds::{execute_delete, execute_insert, execut
 use crate::backend::executor::{
     ArrayDimension, ArrayValue, ExecError, ExecutorContext, Expr, RelationDesc, StatementResult,
     TupleSlot, Value, cast_value, compare_order_values, eval_expr, eval_plpgsql_expr,
-    execute_planned_stmt,
+    execute_planned_stmt, execute_readonly_statement,
 };
+use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{
-    CatalogLookup, ParseError, SqlType, SqlTypeKind, TriggerLevel, TriggerTiming,
+    CatalogLookup, ParseError, SqlType, SqlTypeKind, TriggerLevel, TriggerTiming, parse_statement,
 };
-use crate::backend::utils::record::assign_anonymous_record_descriptor;
+use crate::backend::utils::record::{
+    assign_anonymous_record_descriptor, lookup_anonymous_record_descriptor,
+};
 use crate::include::catalog::TEXT_TYPE_OID;
 use crate::include::nodes::datum::{RecordDescriptor, RecordValue};
 use crate::include::nodes::primnodes::QueryColumn;
+use crate::pgrust::session::ByteaOutputFormat;
 
 use super::ast::RaiseLevel;
 use super::compile::{
-    CompiledBlock, CompiledExpr, CompiledFunction, CompiledSelectIntoTarget, CompiledStmt,
-    FunctionReturnContract, QueryCompareOp, TriggerReturnedRow, compile_function_from_proc,
-    compile_trigger_function_from_proc,
+    CompiledBlock, CompiledExpr, CompiledForQuerySource, CompiledForQueryTarget, CompiledFunction,
+    CompiledSelectIntoTarget, CompiledStmt, FunctionReturnContract, QueryCompareOp,
+    TriggerReturnedRow, compile_function_from_proc, compile_trigger_function_from_proc,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +73,12 @@ struct FunctionState {
     rows: Vec<TupleSlot>,
     scalar_return: Option<Value>,
     trigger_return: Option<TriggerFunctionResult>,
+}
+
+#[derive(Debug)]
+struct FunctionQueryResult {
+    columns: Vec<QueryColumn>,
+    rows: Vec<Vec<Value>>,
 }
 
 thread_local! {
@@ -562,6 +572,7 @@ fn exec_do_stmt(stmt: &CompiledStmt, values: &mut [Value]) -> Result<(), ExecErr
         | CompiledStmt::ReturnTriggerRow { .. }
         | CompiledStmt::ReturnTriggerNull
         | CompiledStmt::ReturnTriggerNoValue
+        | CompiledStmt::ForQuery { .. }
         | CompiledStmt::ReturnQuery { .. }
         | CompiledStmt::Perform { .. }
         | CompiledStmt::SelectInto { .. }
@@ -691,6 +702,19 @@ fn exec_function_stmt(
             }
             Ok(FunctionControl::Continue)
         }
+        CompiledStmt::ForQuery {
+            target,
+            source,
+            body,
+        } => exec_function_for_query(
+            target,
+            source,
+            body,
+            compiled,
+            expected_record_shape,
+            state,
+            ctx,
+        ),
         CompiledStmt::Raise {
             level,
             message,
@@ -854,19 +878,8 @@ fn exec_function_return_query(
     state: &mut FunctionState,
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
-    ctx.expr_bindings.outer_tuple = Some(state.values.clone());
-    let result = execute_planned_stmt(plan.clone(), ctx);
-    ctx.expr_bindings.outer_tuple = None;
-
-    let StatementResult::Query { rows, .. } = result? else {
-        return Err(function_runtime_error(
-            "RETURN QUERY did not produce rows",
-            None,
-            "XX000",
-        ));
-    };
-
-    for row in rows {
+    let result = execute_function_query_result(plan, compiled, state, ctx)?;
+    for row in result.rows {
         state.rows.push(coerce_function_result_row(
             row,
             &compiled.return_contract,
@@ -882,8 +895,8 @@ fn exec_function_perform(
     state: &mut FunctionState,
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
-    let rows = execute_function_query_rows(plan, compiled, state, ctx)?;
-    state.values[compiled.found_slot] = Value::Bool(!rows.is_empty());
+    let result = execute_function_query_result(plan, compiled, state, ctx)?;
+    state.values[compiled.found_slot] = Value::Bool(!result.rows.is_empty());
     Ok(())
 }
 
@@ -894,47 +907,54 @@ fn exec_function_select_into(
     state: &mut FunctionState,
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
-    let rows = execute_function_query_rows(plan, compiled, state, ctx)?;
-    let Some(row) = rows.first() else {
-        for target in targets {
-            state.values[target.slot] = Value::Null;
-        }
+    let result = execute_function_query_result(plan, compiled, state, ctx)?;
+    if let Some(row) = result.rows.first() {
+        assign_query_row_to_targets(row, &result.columns, targets, state, ctx, false)?;
+        state.values[compiled.found_slot] = Value::Bool(true);
+    } else {
+        assign_null_to_targets(targets, state);
         state.values[compiled.found_slot] = Value::Bool(false);
-        return Ok(());
+    }
+    Ok(())
+}
+
+fn exec_function_for_query(
+    target: &CompiledForQueryTarget,
+    source: &CompiledForQuerySource,
+    body: &[CompiledStmt],
+    compiled: &CompiledFunction,
+    expected_record_shape: Option<&[QueryColumn]>,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<FunctionControl, ExecError> {
+    let result = match source {
+        CompiledForQuerySource::Static { plan } => {
+            execute_function_query_result(plan, compiled, state, ctx)?
+        }
+        CompiledForQuerySource::Dynamic {
+            sql_expr,
+            using_exprs,
+        } => execute_dynamic_for_query(sql_expr, using_exprs, compiled, state, ctx)?,
     };
 
-    match targets {
-        [CompiledSelectIntoTarget { slot, ty }]
-            if matches!(ty.kind, SqlTypeKind::Record | SqlTypeKind::Composite) =>
-        {
-            state.values[*slot] = Value::Record(RecordValue::from_descriptor(
-                anonymous_record_descriptor_for_columns(&plan.columns()),
-                row.clone(),
-            ));
-        }
-        [CompiledSelectIntoTarget { slot, ty }] => {
-            let value = row.first().cloned().unwrap_or(Value::Null);
-            state.values[*slot] = cast_value(value, *ty)?;
-        }
-        _ => {
-            if row.len() != targets.len() {
-                return Err(function_runtime_error(
-                    "query returned an unexpected row shape",
-                    Some(format!(
-                        "expected {} columns, got {}",
-                        targets.len(),
-                        row.len()
-                    )),
-                    "42804",
-                ));
-            }
-            for (target, value) in targets.iter().zip(row.iter()) {
-                state.values[target.slot] = cast_value(value.clone(), target.ty)?;
-            }
+    if result.rows.is_empty() {
+        assign_null_to_targets(&target.targets, state);
+        state.values[compiled.found_slot] = Value::Bool(false);
+        return Ok(FunctionControl::Continue);
+    }
+
+    for row in &result.rows {
+        assign_query_row_to_targets(row, &result.columns, &target.targets, state, ctx, true)?;
+        if matches!(
+            exec_function_stmt_list(body, compiled, expected_record_shape, state, ctx)?,
+            FunctionControl::Return
+        ) {
+            return Ok(FunctionControl::Return);
         }
     }
+
     state.values[compiled.found_slot] = Value::Bool(true);
-    Ok(())
+    Ok(FunctionControl::Continue)
 }
 
 fn exec_function_insert(
@@ -1003,23 +1023,170 @@ fn exec_function_delete(
     Ok(())
 }
 
-fn execute_function_query_rows(
+fn execute_function_query_result(
     plan: &crate::include::nodes::plannodes::PlannedStmt,
     compiled: &CompiledFunction,
     state: &mut FunctionState,
     ctx: &mut ExecutorContext,
-) -> Result<Vec<Vec<Value>>, ExecError> {
-    ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
-    let result = execute_planned_stmt(plan.clone(), ctx);
-    ctx.expr_bindings.outer_tuple = None;
-    let StatementResult::Query { rows, .. } = result? else {
-        return Err(function_runtime_error(
+) -> Result<FunctionQueryResult, ExecError> {
+    execute_function_query_with_bindings(compiled, state, ctx, true, |ctx| {
+        statement_result_to_query_result(
+            execute_planned_stmt(plan.clone(), ctx)?,
             "PL/pgSQL SQL statement did not produce rows",
+        )
+    })
+}
+
+fn execute_dynamic_for_query(
+    sql_expr: &CompiledExpr,
+    using_exprs: &[CompiledExpr],
+    compiled: &CompiledFunction,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<FunctionQueryResult, ExecError> {
+    let sql_value = eval_function_expr(sql_expr, &state.values, ctx)?;
+    if matches!(sql_value, Value::Null) {
+        return Err(function_runtime_error(
+            "query string argument of EXECUTE is null",
             None,
-            "XX000",
+            "22004",
         ));
+    }
+    let sql_text = cast_value(sql_value, SqlType::new(SqlTypeKind::Text))?;
+    let sql_text = sql_text.as_text().ok_or_else(|| {
+        function_runtime_error(
+            "EXECUTE query string did not evaluate to text",
+            None,
+            "42804",
+        )
+    })?;
+    let using_values = using_exprs
+        .iter()
+        .map(|expr| eval_function_expr(expr, &state.values, ctx))
+        .collect::<Result<Vec<_>, _>>()?;
+    let sql = if using_values.is_empty() {
+        sql_text.to_string()
+    } else {
+        // :HACK: The core SQL parser still does not expose a native runtime
+        // parameter path for PL/pgSQL EXECUTE ... USING, so substitute rendered
+        // SQL literals here until that lower layer exists.
+        substitute_dynamic_query_params(sql_text, &using_values, ctx)?
     };
-    Ok(rows)
+
+    let catalog = ctx.catalog.clone().ok_or_else(|| {
+        function_runtime_error(
+            "user-defined functions require executor catalog context",
+            None,
+            "0A000",
+        )
+    })?;
+
+    execute_function_query_with_bindings(compiled, state, ctx, false, |ctx| {
+        let stmt = parse_statement(&sql).map_err(ExecError::Parse)?;
+        statement_result_to_query_result(
+            execute_readonly_statement(stmt, &catalog, ctx)?,
+            "PL/pgSQL EXECUTE did not produce rows",
+        )
+    })
+}
+
+fn execute_function_query_with_bindings<T>(
+    compiled: &CompiledFunction,
+    state: &FunctionState,
+    ctx: &mut ExecutorContext,
+    bind_outer_tuple: bool,
+    f: impl FnOnce(&mut ExecutorContext) -> Result<T, ExecError>,
+) -> Result<T, ExecError> {
+    let saved_outer_tuple = ctx.expr_bindings.outer_tuple.clone();
+    let saved_exec_params = ctx.expr_bindings.exec_params.clone();
+    if bind_outer_tuple {
+        ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
+    }
+    let result = f(ctx);
+    ctx.expr_bindings.outer_tuple = saved_outer_tuple;
+    ctx.expr_bindings.exec_params = saved_exec_params;
+    result
+}
+
+fn statement_result_to_query_result(
+    result: StatementResult,
+    message: &str,
+) -> Result<FunctionQueryResult, ExecError> {
+    let StatementResult::Query { columns, rows, .. } = result else {
+        return Err(function_runtime_error(message, None, "XX000"));
+    };
+    Ok(FunctionQueryResult { columns, rows })
+}
+
+fn assign_query_row_to_targets(
+    row: &[Value],
+    columns: &[QueryColumn],
+    targets: &[CompiledSelectIntoTarget],
+    state: &mut FunctionState,
+    ctx: &ExecutorContext,
+    require_exact_single_scalar_width: bool,
+) -> Result<(), ExecError> {
+    match targets {
+        [CompiledSelectIntoTarget { slot, ty }]
+            if matches!(ty.kind, SqlTypeKind::Record | SqlTypeKind::Composite) =>
+        {
+            let descriptor = record_descriptor_for_query_target(*ty, columns, ctx)?;
+            if row.len() != descriptor.fields.len() {
+                return Err(function_runtime_error(
+                    "query returned an unexpected row shape",
+                    Some(format!(
+                        "expected {} columns, got {}",
+                        descriptor.fields.len(),
+                        row.len()
+                    )),
+                    "42804",
+                ));
+            }
+            let values = row
+                .iter()
+                .cloned()
+                .zip(descriptor.fields.iter())
+                .map(|(value, field)| cast_value(value, field.sql_type))
+                .collect::<Result<Vec<_>, _>>()?;
+            state.values[*slot] = Value::Record(RecordValue::from_descriptor(descriptor, values));
+            Ok(())
+        }
+        [CompiledSelectIntoTarget { slot, ty }] => {
+            if require_exact_single_scalar_width && row.len() != 1 {
+                return Err(function_runtime_error(
+                    "query returned an unexpected row shape",
+                    Some(format!("expected 1 column, got {}", row.len())),
+                    "42804",
+                ));
+            }
+            let value = row.first().cloned().unwrap_or(Value::Null);
+            state.values[*slot] = cast_value(value, *ty)?;
+            Ok(())
+        }
+        _ => {
+            if row.len() != targets.len() {
+                return Err(function_runtime_error(
+                    "query returned an unexpected row shape",
+                    Some(format!(
+                        "expected {} columns, got {}",
+                        targets.len(),
+                        row.len()
+                    )),
+                    "42804",
+                ));
+            }
+            for (target, value) in targets.iter().zip(row.iter()) {
+                state.values[target.slot] = cast_value(value.clone(), target.ty)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn assign_null_to_targets(targets: &[CompiledSelectIntoTarget], state: &mut FunctionState) {
+    for target in targets {
+        state.values[target.slot] = Value::Null;
+    }
 }
 
 fn function_outer_tuple(compiled: &CompiledFunction, state: &FunctionState) -> Vec<Value> {
@@ -1060,6 +1227,411 @@ fn anonymous_record_descriptor_for_columns(columns: &[QueryColumn]) -> RecordDes
             .collect(),
     )
 }
+
+fn record_descriptor_for_query_target(
+    target_ty: SqlType,
+    columns: &[QueryColumn],
+    ctx: &ExecutorContext,
+) -> Result<RecordDescriptor, ExecError> {
+    if target_ty.kind == SqlTypeKind::Composite && target_ty.typrelid != 0 {
+        let catalog = ctx.catalog.as_ref().ok_or_else(|| {
+            function_runtime_error(
+                "named composite assignment requires catalog context",
+                None,
+                "0A000",
+            )
+        })?;
+        let relation = catalog
+            .lookup_relation_by_oid(target_ty.typrelid)
+            .ok_or_else(|| {
+                function_runtime_error(
+                    &format!("unknown composite relation oid {}", target_ty.typrelid),
+                    None,
+                    "42704",
+                )
+            })?;
+        return Ok(RecordDescriptor::named(
+            target_ty.type_oid,
+            target_ty.typrelid,
+            target_ty.typmod,
+            relation
+                .desc
+                .columns
+                .into_iter()
+                .filter(|column| !column.dropped)
+                .map(|column| (column.name, column.sql_type))
+                .collect(),
+        ));
+    }
+
+    if target_ty.kind == SqlTypeKind::Record
+        && target_ty.typmod > 0
+        && let Some(descriptor) = lookup_anonymous_record_descriptor(target_ty.typmod)
+    {
+        return Ok(descriptor);
+    }
+
+    Ok(anonymous_record_descriptor_for_columns(columns))
+}
+
+fn substitute_dynamic_query_params(
+    sql: &str,
+    params: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<String, ExecError> {
+    let catalog = ctx.catalog.as_ref().ok_or_else(|| {
+        function_runtime_error(
+            "user-defined functions require executor catalog context",
+            None,
+            "0A000",
+        )
+    })?;
+    let bytes = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len());
+    let mut idx = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    while idx < bytes.len() {
+        let ch = bytes[idx] as char;
+        if in_single {
+            out.push(ch);
+            idx += 1;
+            if ch == '\'' {
+                if bytes.get(idx) == Some(&b'\'') {
+                    out.push('\'');
+                    idx += 1;
+                    continue;
+                }
+                in_single = false;
+            }
+            continue;
+        }
+        if in_double {
+            out.push(ch);
+            idx += 1;
+            if ch == '"' {
+                if bytes.get(idx) == Some(&b'"') {
+                    out.push('"');
+                    idx += 1;
+                    continue;
+                }
+                in_double = false;
+            }
+            continue;
+        }
+        if let Some(tag) = dollar_quote_tag_at(sql, idx) {
+            if let Some(close) = sql[idx + tag.len()..].find(tag) {
+                let end = idx + tag.len() + close + tag.len();
+                out.push_str(&sql[idx..end]);
+                idx = end;
+            } else {
+                out.push_str(&sql[idx..]);
+                break;
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' => {
+                in_single = true;
+                out.push(ch);
+                idx += 1;
+                continue;
+            }
+            '"' => {
+                in_double = true;
+                out.push(ch);
+                idx += 1;
+                continue;
+            }
+            '$' => {
+                let mut end = idx + 1;
+                while let Some(byte) = bytes.get(end) {
+                    if !byte.is_ascii_digit() {
+                        break;
+                    }
+                    end += 1;
+                }
+                if end > idx + 1 && (end == bytes.len() || !is_identifier_char(bytes[end] as char))
+                {
+                    let index = sql[idx + 1..end].parse::<usize>().map_err(|_| {
+                        function_runtime_error(
+                            "dynamic EXECUTE parameter reference is invalid",
+                            Some(sql[idx..end].to_string()),
+                            "42P02",
+                        )
+                    })?;
+                    let value = params.get(index.saturating_sub(1)).ok_or_else(|| {
+                        function_runtime_error(
+                            &format!("there is no parameter ${index}"),
+                            None,
+                            "42P02",
+                        )
+                    })?;
+                    out.push_str(&render_dynamic_query_param_sql(value, catalog, ctx)?);
+                    idx = end;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+
+        out.push(ch);
+        idx += 1;
+    }
+    Ok(out)
+}
+
+fn render_dynamic_query_param_sql(
+    value: &Value,
+    catalog: &dyn CatalogLookup,
+    ctx: &ExecutorContext,
+) -> Result<String, ExecError> {
+    let declared_type_oid = value.sql_type_hint().and_then(|ty| {
+        catalog
+            .type_oid_for_sql_type(ty)
+            .or((ty.type_oid != 0).then_some(ty.type_oid))
+    });
+    let base = render_dynamic_query_param_base_sql(value, declared_type_oid, catalog, ctx)?;
+    if let Some(type_oid) = declared_type_oid.filter(|oid| *oid != 0) {
+        return Ok(format!(
+            "({base})::{}",
+            render_dynamic_query_type_name(type_oid, catalog)?
+        ));
+    }
+    Ok(base)
+}
+
+fn render_dynamic_query_param_base_sql(
+    value: &Value,
+    declared_type_oid: Option<u32>,
+    catalog: &dyn CatalogLookup,
+    ctx: &ExecutorContext,
+) -> Result<String, ExecError> {
+    Ok(match value {
+        Value::Null => "null".into(),
+        Value::Int16(v) => v.to_string(),
+        Value::Int32(v) => v.to_string(),
+        Value::Int64(v) => v.to_string(),
+        Value::Money(v) => v.to_string(),
+        Value::Float64(v) => {
+            if v.is_finite() {
+                v.to_string()
+            } else {
+                quote_sql_string(&v.to_string())
+            }
+        }
+        Value::Bit(bits) => quote_sql_string(&crate::backend::executor::render_bit_text(bits)),
+        Value::Bool(v) => v.to_string(),
+        Value::Numeric(v) => v.render(),
+        Value::Text(text) => quote_sql_string(text),
+        Value::TextRef(_, _) => quote_sql_string(value.as_text().unwrap_or_default()),
+        Value::Json(text) => quote_sql_string(text),
+        Value::JsonPath(text) => quote_sql_string(text),
+        Value::Xml(text) => quote_sql_string(text),
+        Value::Bytea(bytes) => quote_sql_string(&format_bytea_text(bytes, ByteaOutputFormat::Hex)),
+        Value::InternalChar(byte) => {
+            quote_sql_string(&crate::backend::executor::render_internal_char_text(*byte))
+        }
+        Value::Date(_)
+        | Value::Time(_)
+        | Value::TimeTz(_)
+        | Value::Timestamp(_)
+        | Value::TimestampTz(_) => quote_sql_string(
+            &crate::backend::executor::render_datetime_value_text_with_config(
+                value,
+                &ctx.datetime_config,
+            )
+            .unwrap_or_default(),
+        ),
+        Value::TsVector(vector) => {
+            quote_sql_string(&crate::backend::executor::render_tsvector_text(vector))
+        }
+        Value::TsQuery(query) => {
+            quote_sql_string(&crate::backend::executor::render_tsquery_text(query))
+        }
+        Value::Jsonb(bytes) => quote_sql_string(
+            &crate::backend::executor::jsonb::render_jsonb_bytes(bytes).unwrap_or_default(),
+        ),
+        Value::Point(_)
+        | Value::Lseg(_)
+        | Value::Path(_)
+        | Value::Line(_)
+        | Value::Box(_)
+        | Value::Polygon(_)
+        | Value::Circle(_) => quote_sql_string(
+            &crate::backend::executor::render_geometry_text(value, Default::default())
+                .unwrap_or_default(),
+        ),
+        Value::Range(_) => quote_sql_string(
+            &crate::backend::executor::render_range_text(value).unwrap_or_default(),
+        ),
+        Value::Multirange(_) => quote_sql_string(
+            &crate::backend::executor::render_multirange_text(value).unwrap_or_default(),
+        ),
+        Value::Record(record) => {
+            let mut fields = Vec::with_capacity(record.fields.len());
+            for (field, field_value) in record.iter() {
+                let field_type_oid =
+                    catalog
+                        .type_oid_for_sql_type(field.sql_type)
+                        .or((field.sql_type.type_oid != 0).then_some(field.sql_type.type_oid));
+                fields.push(render_dynamic_query_param_sql_with_type(
+                    field_value,
+                    field_type_oid,
+                    catalog,
+                    ctx,
+                )?);
+            }
+            format!("ROW({})", fields.join(", "))
+        }
+        Value::Array(items) => {
+            let array = ArrayValue::from_1d(items.clone());
+            render_dynamic_query_array_sql(&array, declared_type_oid, catalog, ctx)?
+        }
+        Value::PgArray(array) => {
+            render_dynamic_query_array_sql(array, declared_type_oid, catalog, ctx)?
+        }
+    })
+}
+
+fn render_dynamic_query_param_sql_with_type(
+    value: &Value,
+    declared_type_oid: Option<u32>,
+    catalog: &dyn CatalogLookup,
+    ctx: &ExecutorContext,
+) -> Result<String, ExecError> {
+    let base = render_dynamic_query_param_base_sql(value, declared_type_oid, catalog, ctx)?;
+    if let Some(type_oid) = declared_type_oid.filter(|oid| *oid != 0) {
+        return Ok(format!(
+            "({base})::{}",
+            render_dynamic_query_type_name(type_oid, catalog)?
+        ));
+    }
+    Ok(base)
+}
+
+fn render_dynamic_query_array_sql(
+    array: &ArrayValue,
+    declared_type_oid: Option<u32>,
+    catalog: &dyn CatalogLookup,
+    ctx: &ExecutorContext,
+) -> Result<String, ExecError> {
+    if array.dimensions.is_empty() {
+        return Ok("ARRAY[]".into());
+    }
+    let element_type_oid = array.element_type_oid.or_else(|| {
+        declared_type_oid.and_then(|oid| catalog.type_by_oid(oid).map(|row| row.typelem))
+    });
+    let mut index = 0usize;
+    let body = render_dynamic_query_array_dimension_sql(
+        &array.dimensions,
+        &array.elements,
+        0,
+        &mut index,
+        element_type_oid,
+        catalog,
+        ctx,
+    )?;
+    Ok(format!("ARRAY{body}"))
+}
+
+fn render_dynamic_query_array_dimension_sql(
+    dimensions: &[ArrayDimension],
+    elements: &[Value],
+    depth: usize,
+    index: &mut usize,
+    element_type_oid: Option<u32>,
+    catalog: &dyn CatalogLookup,
+    ctx: &ExecutorContext,
+) -> Result<String, ExecError> {
+    let dim = dimensions
+        .get(depth)
+        .ok_or_else(|| ExecError::InvalidStorageValue {
+            column: "<bind>".into(),
+            details: "array dimension index out of bounds".into(),
+        })?;
+    let mut parts = Vec::with_capacity(dim.length);
+    for _ in 0..dim.length {
+        if depth + 1 == dimensions.len() {
+            let value = elements
+                .get(*index)
+                .ok_or_else(|| ExecError::InvalidStorageValue {
+                    column: "<bind>".into(),
+                    details: "array element index out of bounds".into(),
+                })?;
+            parts.push(render_dynamic_query_param_sql_with_type(
+                value,
+                element_type_oid,
+                catalog,
+                ctx,
+            )?);
+            *index += 1;
+        } else {
+            parts.push(render_dynamic_query_array_dimension_sql(
+                dimensions,
+                elements,
+                depth + 1,
+                index,
+                element_type_oid,
+                catalog,
+                ctx,
+            )?);
+        }
+    }
+    Ok(format!("[{}]", parts.join(", ")))
+}
+
+fn render_dynamic_query_type_name(
+    type_oid: u32,
+    catalog: &dyn CatalogLookup,
+) -> Result<String, ExecError> {
+    let row = catalog.type_by_oid(type_oid).ok_or_else(|| {
+        function_runtime_error(
+            &format!("type oid {type_oid} is not available"),
+            None,
+            "42704",
+        )
+    })?;
+    Ok(quote_identifier(&row.typname))
+}
+
+fn quote_identifier(ident: &str) -> String {
+    format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
+fn quote_sql_string(value: &str) -> String {
+    if value.contains('\\') {
+        let escaped = value.replace('\\', "\\\\").replace('\'', "''");
+        format!("E'{escaped}'")
+    } else {
+        format!("'{}'", value.replace('\'', "''"))
+    }
+}
+
+fn dollar_quote_tag_at(sql: &str, idx: usize) -> Option<&str> {
+    let bytes = sql.as_bytes();
+    if bytes.get(idx) != Some(&b'$') {
+        return None;
+    }
+    let mut end = idx + 1;
+    while let Some(byte) = bytes.get(end) {
+        let ch = *byte as char;
+        if ch == '$' {
+            return Some(&sql[idx..=end]);
+        }
+        if !is_identifier_char(ch) {
+            return None;
+        }
+        end += 1;
+    }
+    None
+}
+
+fn is_identifier_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
 fn current_output_row(
     compiled: &CompiledFunction,
     state: &FunctionState,
