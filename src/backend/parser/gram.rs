@@ -113,6 +113,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_create_tablespace_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_create_schema_statement(&sql, options)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_policy_statement(&sql)? {
         return Ok(stmt);
     }
@@ -261,6 +264,110 @@ fn try_parse_statistics_statement(sql: &str) -> Result<Option<Statement>, ParseE
             .map(|stmt| Some(Statement::AlterStatistics(stmt)));
     }
     Ok(None)
+}
+
+fn try_parse_create_schema_statement(
+    sql: &str,
+    options: ParseOptions,
+) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !keyword_at_start(trimmed, "create") {
+        return Ok(None);
+    }
+    let rest = consume_keyword(trimmed, "create").trim_start();
+    if !keyword_at_start(rest, "schema") {
+        return Ok(None);
+    }
+    let mut rest = consume_keyword(rest, "schema").trim_start();
+    let mut if_not_exists = false;
+    if let Some(next) = consume_keywords(rest, &["if", "not", "exists"]) {
+        if_not_exists = true;
+        rest = next.trim_start();
+    }
+
+    let mut schema_name = None;
+    let mut auth_role = None;
+    if keyword_at_start(rest, "authorization") {
+        rest = consume_keyword(rest, "authorization").trim_start();
+        let (role, next) = parse_sql_identifier(rest)?;
+        auth_role = Some(role);
+        rest = next.trim_start();
+    } else {
+        let (name, next) = parse_sql_identifier(rest)?;
+        schema_name = Some(name);
+        rest = next.trim_start();
+        if keyword_at_start(rest, "authorization") {
+            rest = consume_keyword(rest, "authorization").trim_start();
+            let (role, next) = parse_sql_identifier(rest)?;
+            auth_role = Some(role);
+            rest = next.trim_start();
+        }
+    }
+
+    if rest.is_empty() {
+        return Ok(Some(Statement::CreateSchema(CreateSchemaStatement {
+            schema_name,
+            auth_role,
+            if_not_exists,
+            elements: Vec::new(),
+        })));
+    }
+
+    let elements = split_create_schema_elements(rest)?
+        .into_iter()
+        .map(|element| {
+            let stmt = parse_statement_with_options_inner(element, options)?;
+            match stmt {
+                Statement::CreateTable(_) => Ok(Box::new(stmt)),
+                _ => Err(ParseError::FeatureNotSupported(
+                    "CREATE SCHEMA elements other than CREATE TABLE".into(),
+                )),
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(Some(Statement::CreateSchema(CreateSchemaStatement {
+        schema_name,
+        auth_role,
+        if_not_exists,
+        elements,
+    })))
+}
+
+fn split_create_schema_elements(input: &str) -> Result<Vec<String>, ParseError> {
+    let mut starts = Vec::new();
+    let mut offset = 0usize;
+    while offset < input.len() {
+        let Some(relative) = find_next_top_level_keyword(&input[offset..], &["create"]) else {
+            break;
+        };
+        let index = offset + relative;
+        let tail = &input[index..];
+        if consume_keyword(tail, "create")
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("table")
+        {
+            starts.push(index);
+        }
+        offset = index + "create".len();
+    }
+    if starts.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CREATE SCHEMA element",
+            actual: input.trim().into(),
+        });
+    }
+
+    let mut elements = Vec::new();
+    for (position, start) in starts.iter().enumerate() {
+        let end = starts.get(position + 1).copied().unwrap_or(input.len());
+        let element = input[*start..end].trim();
+        if !element.is_empty() {
+            elements.push(element.to_string());
+        }
+    }
+    Ok(elements)
 }
 
 #[derive(Debug)]
@@ -8585,6 +8692,7 @@ fn build_create_schema(pair: Pair<'_, Rule>) -> Result<CreateSchemaStatement, Pa
         schema_name,
         auth_role,
         if_not_exists,
+        elements: Vec::new(),
     })
 }
 

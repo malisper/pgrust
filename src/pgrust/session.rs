@@ -3642,13 +3642,17 @@ impl Session {
                 )
             }
             Statement::CreateSchema(ref create_stmt) => {
+                let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_create_schema_stmt_in_transaction_with_search_path(
                     client_id,
                     create_stmt,
                     xid,
                     cid,
+                    search_path.as_deref(),
                     &mut txn.catalog_effects,
+                    &mut txn.temp_effects,
+                    &mut txn.sequence_effects,
                 )
             }
             Statement::CreateSequence(ref create_stmt) => {
