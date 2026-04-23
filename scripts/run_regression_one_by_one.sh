@@ -9,10 +9,11 @@
 #     [--results-dir DIR] [--data-dir DIR] [--upstream-setup]
 #
 # This variant differs from scripts/run_regression.sh by:
-#   1. Splitting each .sql file into one-statement fragments
-#   2. Running them sequentially through \i in a single psql session
-#   3. Enabling \timing so every statement is timed
-#   4. Applying statement_timeout = '5s' for every psql session
+#   1. Building pgrust_server in release mode, or dev mode for --test
+#   2. Splitting each .sql file into one-statement fragments
+#   3. Running them sequentially through \i in a single psql session
+#   4. Enabling \timing so every statement is timed
+#   5. Applying statement_timeout = '5s' for every psql session
 
 set -euo pipefail
 
@@ -204,6 +205,17 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+SERVER_PROFILE=release
+SERVER_PROFILE_DIR=release
+BUILD_ENV=()
+BUILD_ARGS=(--release --bin pgrust_server)
+if [[ -n "$SINGLE_TEST" ]]; then
+    SERVER_PROFILE="dev, opt-level 0"
+    SERVER_PROFILE_DIR=debug
+    BUILD_ENV=(CARGO_PROFILE_DEV_OPT_LEVEL=0)
+    BUILD_ARGS=(--bin pgrust_server)
+fi
+
 make_temp_dir() {
     local prefix="$1"
     mktemp -d "${TMPDIR:-/tmp}/${prefix}.${WORKTREE_NAME}.XXXXXX"
@@ -360,14 +372,14 @@ restart_server() {
     return 0
 }
 
-echo "Building pgrust_server (release)..."
-(cd "$PGRUST_DIR" && cargo build --release --bin pgrust_server 2>&1) || {
+echo "Building pgrust_server ($SERVER_PROFILE)..."
+(cd "$PGRUST_DIR" && env "${BUILD_ENV[@]}" cargo build "${BUILD_ARGS[@]}" 2>&1) || {
     echo "ERROR: Build failed"
     exit 1
 }
 
 TARGET_DIR="$("$PGRUST_DIR/scripts/cargo_target_dir.sh")"
-SERVER_BIN="$TARGET_DIR/release/pgrust_server"
+SERVER_BIN="$TARGET_DIR/$SERVER_PROFILE_DIR/pgrust_server"
 if [[ ! -x "$SERVER_BIN" ]]; then
     echo "ERROR: $SERVER_BIN not found after build."
     exit 1
