@@ -323,6 +323,12 @@ impl Database {
                     rename_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterIndexAttachPartition(ref attach_stmt) => self
+                .execute_alter_index_attach_partition_stmt_with_search_path(
+                    client_id,
+                    attach_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterViewRename(ref rename_stmt) => self
                 .execute_alter_view_rename_stmt_with_search_path(
                     client_id,

@@ -182,7 +182,7 @@ impl Database {
                 catalog_effects,
             )?;
         }
-        let _ = self.reconcile_partitioned_parent_keys_for_attached_child_in_transaction(
+        let next_cid = self.reconcile_partitioned_parent_keys_for_attached_child_in_transaction(
             client_id,
             xid,
             cid.saturating_add(5),
@@ -191,10 +191,20 @@ impl Database {
             configured_search_path,
             catalog_effects,
         )?;
+        let next_cid = self
+            .reconcile_partitioned_parent_indexes_for_attached_child_in_transaction(
+                client_id,
+                xid,
+                next_cid,
+                parent.relation_oid,
+                updated_child.relation_oid,
+                configured_search_path,
+                catalog_effects,
+            )?;
         self.clone_parent_row_triggers_to_partition_in_transaction(
             client_id,
             xid,
-            cid.saturating_add(6),
+            next_cid,
             parent.relation_oid,
             updated_child.relation_oid,
             configured_search_path,

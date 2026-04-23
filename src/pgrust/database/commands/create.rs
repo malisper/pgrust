@@ -1632,10 +1632,20 @@ impl Database {
                             catalog_effects,
                         )?;
                         if let Some(parent_oid) = lowered.partition_parent_oid {
+                            let next_cid = self
+                                .reconcile_partitioned_parent_indexes_for_attached_child_in_transaction(
+                                    client_id,
+                                    xid,
+                                    constraint_cid_base.saturating_add(1),
+                                    parent_oid,
+                                    relation.relation_oid,
+                                    configured_search_path,
+                                    catalog_effects,
+                                )?;
                             self.clone_parent_row_triggers_to_partition_in_transaction(
                                 client_id,
                                 xid,
-                                constraint_cid_base.saturating_add(1),
+                                next_cid,
                                 parent_oid,
                                 relation.relation_oid,
                                 configured_search_path,
@@ -1765,10 +1775,20 @@ impl Database {
                     catalog_effects,
                 )?;
                 if let Some(parent_oid) = lowered.partition_parent_oid {
+                    let next_cid = self
+                        .reconcile_partitioned_parent_indexes_for_attached_child_in_transaction(
+                            client_id,
+                            xid,
+                            constraint_cid_base.saturating_add(1),
+                            parent_oid,
+                            relation.relation_oid,
+                            configured_search_path,
+                            catalog_effects,
+                        )?;
                     self.clone_parent_row_triggers_to_partition_in_transaction(
                         client_id,
                         xid,
-                        constraint_cid_base.saturating_add(1),
+                        next_cid,
                         parent_oid,
                         relation.relation_oid,
                         configured_search_path,
