@@ -321,7 +321,7 @@ echo "Building pgrust_server (release)..."
     exit 1
 }
 
-TARGET_DIR="${CARGO_TARGET_DIR:-$PGRUST_DIR/target}"
+TARGET_DIR="$("$PGRUST_DIR/scripts/cargo_target_dir.sh")"
 SERVER_BIN="$TARGET_DIR/release/pgrust_server"
 if [[ ! -x "$SERVER_BIN" ]]; then
     echo "ERROR: $SERVER_BIN not found after build."

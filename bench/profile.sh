@@ -5,6 +5,7 @@
 set -e
 
 cd "$(dirname "$0")/.."
+TARGET_DIR="$(./scripts/cargo_target_dir.sh)"
 
 ROWS=10000
 ITERATIONS=100
@@ -39,7 +40,7 @@ WRAPPER=$(mktemp /tmp/pgrust_profile_XXXXXX.sh)
 chmod +x "${WRAPPER}"
 cat > "${WRAPPER}" <<INNER
 #!/bin/bash
-exec ./target/release/full_scan_bench --dir /tmp/pgrust_flamegraph_bench --rows ${ROWS} --iterations ${ITERATIONS} --clients ${CLIENTS} --pool-size ${POOL_SIZE} $(if [[ -n "${QUERY}" ]]; then printf -- '--query "%s"' "${QUERY}"; fi)
+exec "${TARGET_DIR}/release/full_scan_bench" --dir /tmp/pgrust_flamegraph_bench --rows ${ROWS} --iterations ${ITERATIONS} --clients ${CLIENTS} --pool-size ${POOL_SIZE} $(if [[ -n "${QUERY}" ]]; then printf -- '--query "%s"' "${QUERY}"; fi)
 INNER
 
 sudo dtrace -x ustackframes=100 \
