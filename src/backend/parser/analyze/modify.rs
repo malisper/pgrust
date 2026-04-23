@@ -1094,6 +1094,7 @@ fn rewrite_assignment_subscripts(
 fn map_auto_view_column_index(
     view_desc: &RelationDesc,
     updatable_column_map: &[Option<usize>],
+    non_updatable_column_reasons: &[Option<crate::backend::rewrite::NonUpdatableViewColumnReason>],
     column_index: usize,
 ) -> Result<usize, ViewDmlRewriteError> {
     updatable_column_map
@@ -1106,11 +1107,34 @@ fn map_auto_view_column_index(
                 .get(column_index)
                 .map(|column| column.name.as_str())
                 .unwrap_or("<unknown>");
-            ViewDmlRewriteError::UnsupportedViewShape(format!(
-                "View column \"{}\" is not automatically updatable.",
-                column_name
-            ))
+            let reason = non_updatable_column_reasons
+                .get(column_index)
+                .copied()
+                .flatten()
+                .unwrap_or(crate::backend::rewrite::NonUpdatableViewColumnReason::NotBaseRelationColumn);
+            ViewDmlRewriteError::NonUpdatableColumn {
+                column_name: column_name.to_string(),
+                reason,
+            }
         })
+}
+
+fn reject_duplicate_auto_view_targets(
+    desc: &RelationDesc,
+    column_indexes: impl IntoIterator<Item = usize>,
+) -> Result<(), ViewDmlRewriteError> {
+    let mut seen = std::collections::BTreeSet::new();
+    for column_index in column_indexes {
+        if !seen.insert(column_index) {
+            let column_name = desc
+                .columns
+                .get(column_index)
+                .map(|column| column.name.clone())
+                .unwrap_or_else(|| "<unknown>".into());
+            return Err(ViewDmlRewriteError::MultipleAssignments(column_name));
+        }
+    }
+    Ok(())
 }
 
 fn rewrite_auto_view_returning_targets(
@@ -1160,6 +1184,7 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
                 column_index: map_auto_view_column_index(
                     &stmt.desc,
                     &resolved.updatable_column_map,
+                    &resolved.non_updatable_column_reasons,
                     target.column_index,
                 )?,
                 subscripts: rewrite_assignment_subscripts(
@@ -1171,6 +1196,10 @@ pub(crate) fn rewrite_bound_insert_auto_view_target(
             })
         })
         .collect::<Result<Vec<_>, ViewDmlRewriteError>>()?;
+    reject_duplicate_auto_view_targets(
+        &resolved.base_relation.desc,
+        target_columns.iter().map(|target| target.column_index),
+    )?;
 
     Ok(BoundInsertStatement {
         relation_name: relation_name.clone(),
@@ -1261,6 +1290,7 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
                 column_index: map_auto_view_column_index(
                     &target.desc,
                     &resolved.updatable_column_map,
+                    &resolved.non_updatable_column_reasons,
                     assignment.column_index,
                 )?,
                 subscripts: rewrite_assignment_subscripts(
@@ -1277,6 +1307,10 @@ pub(crate) fn rewrite_bound_update_auto_view_target(
             })
         })
         .collect::<Result<Vec<_>, ViewDmlRewriteError>>()?;
+    reject_duplicate_auto_view_targets(
+        &resolved.base_relation.desc,
+        assignments.iter().map(|assignment| assignment.column_index),
+    )?;
     let predicate = and_predicates(
         target.predicate.as_ref().map(|expr| {
             rewrite_local_vars_for_output_exprs(expr.clone(), 1, &resolved.visible_output_exprs)
@@ -1814,6 +1848,7 @@ fn bind_simple_update(
     let target_relation_name = update_target_relation_name(stmt);
     let explain_target_name = update_explain_target_name(stmt);
     let scope = scope_for_base_relation(&target_relation_name, &entry.desc);
+    let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, local_ctes)?;
     let predicate = stmt
         .where_clause
         .as_ref()
@@ -1861,14 +1896,18 @@ fn bind_simple_update(
                     &assignment.target.field_path,
                     catalog,
                 )?,
-                expr: bind_expr_with_outer_and_ctes(
-                    &assignment.expr,
-                    &scope,
-                    catalog,
-                    outer_scopes,
-                    None,
-                    local_ctes,
-                )?,
+                expr: if matches!(assignment.expr, SqlExpr::Default) {
+                    column_defaults[column_index].clone()
+                } else {
+                    bind_expr_with_outer_and_ctes(
+                        &assignment.expr,
+                        &scope,
+                        catalog,
+                        outer_scopes,
+                        None,
+                        local_ctes,
+                    )?
+                },
             })
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
@@ -1915,6 +1954,7 @@ fn bind_update_from(
     let target_relation_name = update_target_relation_name(stmt);
     let explain_target_name = update_explain_target_name(stmt);
     let target_scope = scope_for_base_relation(&target_relation_name, &entry.desc);
+    let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, local_ctes)?;
     let source_stmt = stmt.from.as_ref().expect("checked above");
     let (source_from, source_scope_raw) =
         bind_from_item_with_ctes(source_stmt, catalog, outer_scopes, None, local_ctes, &[])?;
@@ -2004,14 +2044,18 @@ fn bind_update_from(
                     &assignment.target.field_path,
                     catalog,
                 )?,
-                expr: bind_expr_with_outer_and_ctes(
-                    &assignment.expr,
-                    &eval_scope,
-                    catalog,
-                    outer_scopes,
-                    None,
-                    local_ctes,
-                )?,
+                expr: if matches!(assignment.expr, SqlExpr::Default) {
+                    column_defaults[column_index].clone()
+                } else {
+                    bind_expr_with_outer_and_ctes(
+                        &assignment.expr,
+                        &eval_scope,
+                        catalog,
+                        outer_scopes,
+                        None,
+                        local_ctes,
+                    )?
+                },
             })
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
