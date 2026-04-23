@@ -8589,17 +8589,11 @@ fn split_rule_action_list(list_sql: &str) -> Result<Vec<String>, ParseError> {
 }
 
 fn build_create_table_element(pair: Pair<'_, Rule>) -> Result<CreateTableElement, ParseError> {
-    let raw = pair.as_str().trim_start();
-    if raw.len() > 4
-        && raw[..4].eq_ignore_ascii_case("like")
-        && raw[4..].chars().next().is_some_and(char::is_whitespace)
-    {
-        return Err(ParseError::FeatureNotSupported(
-            "CREATE TABLE ... LIKE".into(),
-        ));
-    }
     let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
     match inner.as_rule() {
+        Rule::create_table_like_clause => Ok(CreateTableElement::Like(
+            build_create_table_like_clause(inner)?,
+        )),
         Rule::column_def => Ok(CreateTableElement::Column(build_column_def(inner)?)),
         Rule::table_constraint => Ok(CreateTableElement::Constraint(build_table_constraint(
             inner,
@@ -8609,6 +8603,58 @@ fn build_create_table_element(pair: Pair<'_, Rule>) -> Result<CreateTableElement
             actual: inner.as_str().to_string(),
         }),
     }
+}
+
+fn build_create_table_like_clause(
+    pair: Pair<'_, Rule>,
+) -> Result<CreateTableLikeClause, ParseError> {
+    let mut relation_name = None;
+    let mut options = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => relation_name = Some(build_identifier(part)),
+            Rule::create_table_like_option => {
+                let raw = part.as_str().trim().to_ascii_lowercase();
+                let including = raw.starts_with("including");
+                let option = if raw.ends_with("defaults") {
+                    if including {
+                        CreateTableLikeOption::IncludingDefaults
+                    } else {
+                        CreateTableLikeOption::ExcludingDefaults
+                    }
+                } else if raw.ends_with("constraints") {
+                    if including {
+                        CreateTableLikeOption::IncludingConstraints
+                    } else {
+                        CreateTableLikeOption::ExcludingConstraints
+                    }
+                } else if raw.ends_with("indexes") {
+                    if including {
+                        CreateTableLikeOption::IncludingIndexes
+                    } else {
+                        CreateTableLikeOption::ExcludingIndexes
+                    }
+                } else if raw.ends_with("all") {
+                    if including {
+                        CreateTableLikeOption::IncludingAll
+                    } else {
+                        CreateTableLikeOption::ExcludingAll
+                    }
+                } else {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "LIKE option",
+                        actual: part.as_str().into(),
+                    });
+                };
+                options.push(option);
+            }
+            _ => {}
+        }
+    }
+    Ok(CreateTableLikeClause {
+        relation_name: relation_name.ok_or(ParseError::UnexpectedEof)?,
+        options,
+    })
 }
 
 fn build_table_constraint(pair: Pair<'_, Rule>) -> Result<TableConstraint, ParseError> {
