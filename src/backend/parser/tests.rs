@@ -5685,7 +5685,8 @@ fn build_plan_tracks_order_by_collation_for_aliases_and_ordinals() {
         match plan {
             Plan::Projection { input, .. }
             | Plan::Filter { input, .. }
-            | Plan::Limit { input, .. } => order_by_items(input),
+            | Plan::Limit { input, .. }
+            | Plan::LockRows { input, .. } => order_by_items(input),
             Plan::OrderBy { items, .. } => items,
             other => panic!("expected ORDER BY plan node, got {other:?}"),
         }
@@ -7609,6 +7610,30 @@ fn parse_select_for_no_key_update_clause() {
 }
 
 #[test]
+fn parse_select_for_share_clause() {
+    match parse_statement("select * from people for share").unwrap() {
+        Statement::Select(SelectStatement {
+            from: Some(FromItem::Table { name, only: false }),
+            locking_clause: Some(SelectLockingClause::ForShare),
+            ..
+        }) => assert_eq!(name, "people"),
+        other => panic!("expected Select with FOR SHARE, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_select_for_key_share_clause() {
+    match parse_statement("select * from people for key share").unwrap() {
+        Statement::Select(SelectStatement {
+            from: Some(FromItem::Table { name, only: false }),
+            locking_clause: Some(SelectLockingClause::ForKeyShare),
+            ..
+        }) => assert_eq!(name, "people"),
+        other => panic!("expected Select with FOR KEY SHARE, got {:?}", other),
+    }
+}
+
+#[test]
 fn parse_with_recursive_cte_union_all() {
     match parse_statement(
         "with recursive t(n) as (values (1) union all select n + 1 from t) select * from t",
@@ -7843,6 +7868,7 @@ fn build_plan_for_recursive_mixed_cte_query() {
             | Plan::Filter { input, .. }
             | Plan::OrderBy { input, .. }
             | Plan::Limit { input, .. }
+            | Plan::LockRows { input, .. }
             | Plan::Projection { input, .. }
             | Plan::Aggregate { input, .. }
             | Plan::WindowAgg { input, .. }

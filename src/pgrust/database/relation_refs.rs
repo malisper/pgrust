@@ -370,7 +370,9 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                 }
             }
         }
-        Plan::Limit { input, .. } => collect_rels_from_plan(input, rels),
+        Plan::Limit { input, .. } | Plan::LockRows { input, .. } => {
+            collect_rels_from_plan(input, rels)
+        }
         Plan::Projection { input, targets, .. } => {
             collect_rels_from_plan(input, rels);
             for target in targets {

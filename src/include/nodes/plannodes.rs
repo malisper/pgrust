@@ -3,7 +3,7 @@ use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::executor::execdesc::CommandType;
-use crate::include::nodes::parsenodes::SetOperator;
+use crate::include::nodes::parsenodes::{SelectLockingClause, SetOperator};
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, JoinType, OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc,
     SetReturningCall, TargetEntry, ToastRelationRef, WindowClause,
@@ -49,6 +49,15 @@ impl PlanEstimate {
 pub struct ExecParamSource {
     pub paramid: usize,
     pub expr: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanRowMark {
+    pub rtindex: usize,
+    pub relation_name: String,
+    pub relation_oid: u32,
+    pub rel: RelFileLocator,
+    pub strength: SelectLockingClause,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +181,11 @@ pub enum Plan {
         limit: Option<usize>,
         offset: usize,
     },
+    LockRows {
+        plan_info: PlanEstimate,
+        input: Box<Plan>,
+        row_marks: Vec<PlanRowMark>,
+    },
     Projection {
         plan_info: PlanEstimate,
         input: Box<Plan>,
@@ -253,6 +267,7 @@ impl Plan {
             | Plan::Filter { plan_info, .. }
             | Plan::OrderBy { plan_info, .. }
             | Plan::Limit { plan_info, .. }
+            | Plan::LockRows { plan_info, .. }
             | Plan::Projection { plan_info, .. }
             | Plan::Aggregate { plan_info, .. }
             | Plan::WindowAgg { plan_info, .. }
@@ -281,6 +296,7 @@ impl Plan {
             | Plan::Filter { plan_info, .. }
             | Plan::OrderBy { plan_info, .. }
             | Plan::Limit { plan_info, .. }
+            | Plan::LockRows { plan_info, .. }
             | Plan::Projection { plan_info, .. }
             | Plan::Aggregate { plan_info, .. }
             | Plan::WindowAgg { plan_info, .. }
@@ -338,7 +354,8 @@ impl Plan {
             Plan::Hash { input, .. } => input.columns(),
             Plan::Filter { input, .. }
             | Plan::OrderBy { input, .. }
-            | Plan::Limit { input, .. } => input.columns(),
+            | Plan::Limit { input, .. }
+            | Plan::LockRows { input, .. } => input.columns(),
             Plan::Projection { targets, .. } => targets
                 .iter()
                 .map(|t| QueryColumn {

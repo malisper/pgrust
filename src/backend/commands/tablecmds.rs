@@ -1044,6 +1044,7 @@ pub(crate) fn rollback_inserted_row(
 pub(crate) fn write_updated_row(
     relation_name: &str,
     rel: crate::backend::storage::smgr::RelFileLocator,
+    _relation_oid: u32,
     toast: Option<ToastRelationRef>,
     toast_index: Option<&BoundIndexRelation>,
     desc: &RelationDesc,
@@ -1628,6 +1629,7 @@ fn apply_referential_action_to_rows(
                 let _ = write_updated_row(
                     &constraint.child_relation_name,
                     constraint.child_rel,
+                    constraint.child_relation_oid,
                     constraint.child_toast,
                     toast_index.as_ref(),
                     &constraint.child_desc,
@@ -2753,7 +2755,7 @@ pub(crate) fn materialize_insert_rows(
                 .expect("insert-select rewrite should return a single query");
             let query =
                 crate::backend::optimizer::fold_query_constants(query).map_err(ExecError::Parse)?;
-            let planned = planner(query, catalog);
+            let planned = planner(query, catalog).map_err(ExecError::Parse)?;
             let result: Result<Vec<Vec<Value>>, ExecError> = (|| {
                 let saved_subplans = std::mem::replace(&mut ctx.subplans, planned.subplans.clone());
                 let mut state = executor_start(planned.plan_tree.clone());
@@ -4143,6 +4145,7 @@ pub fn execute_update_with_waiter(
                     match write_updated_row(
                         &target.relation_name,
                         target.rel,
+                        target.relation_oid,
                         target.toast,
                         target.toast_index.as_ref(),
                         &target.desc,
@@ -4477,6 +4480,7 @@ fn execute_update_from_joined_input(
                 match write_updated_row(
                     &target.relation_name,
                     target.rel,
+                    target.relation_oid,
                     target.toast,
                     target.toast_index.as_ref(),
                     &target.desc,

@@ -153,6 +153,7 @@ impl Database {
         let stats_state = self.session_stats_state(client_id);
         stats_state.write().begin_top_level_xact();
         let advisory_locks = std::sync::Arc::clone(&self.advisory_locks);
+        let row_locks = std::sync::Arc::clone(&self.row_locks);
         let result = self.execute_statement_with_search_path_inner(
             client_id,
             stmt,
@@ -162,6 +163,7 @@ impl Database {
         );
         if let Some(scope_id) = statement_lock_scope_id {
             advisory_locks.unlock_all_statement(client_id, scope_id);
+            row_locks.unlock_all_statement(client_id, scope_id);
         }
         match &result {
             Ok(_) => stats_state.write().commit_top_level_xact(&self.stats),
@@ -605,6 +607,7 @@ impl Database {
                     large_objects: Some(self.large_objects.clone()),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
                     advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
+                    row_locks: std::sync::Arc::clone(&self.row_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
@@ -789,6 +792,7 @@ impl Database {
                     large_objects: Some(self.large_objects.clone()),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
                     advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
+                    row_locks: std::sync::Arc::clone(&self.row_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
@@ -893,6 +897,7 @@ impl Database {
                     large_objects: Some(self.large_objects.clone()),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
                     advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
+                    row_locks: std::sync::Arc::clone(&self.row_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
@@ -991,6 +996,7 @@ impl Database {
                     large_objects: Some(self.large_objects.clone()),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
                     advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
+                    row_locks: std::sync::Arc::clone(&self.row_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
@@ -1090,6 +1096,7 @@ impl Database {
                     large_objects: Some(self.large_objects.clone()),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
                     advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
+                    row_locks: std::sync::Arc::clone(&self.row_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
@@ -1423,6 +1430,7 @@ impl Database {
                     large_objects: Some(self.large_objects.clone()),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
                     advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
+                    row_locks: std::sync::Arc::clone(&self.row_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
                     interrupts: Arc::clone(&interrupts),
@@ -1555,6 +1563,7 @@ impl Database {
             large_objects: Some(self.large_objects.clone()),
             async_notify_runtime: Some(self.async_notify_runtime.clone()),
             advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
+            row_locks: std::sync::Arc::clone(&self.row_locks),
             checkpoint_stats: self.checkpoint_stats_snapshot(),
             datetime_config: datetime_config.clone(),
             interrupts,
@@ -1595,6 +1604,7 @@ impl Database {
             table_locks: &self.table_locks,
             client_id,
             advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
+            row_locks: std::sync::Arc::clone(&self.row_locks),
             statement_lock_scope_id,
             interrupt_guard: None,
         })
