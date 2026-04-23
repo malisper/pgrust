@@ -489,6 +489,7 @@ fn run_statement(
         | Statement::DropAggregate(_)
         | Statement::AlterTableSet(_)
         | Statement::CreateStatistics(_)
+        | Statement::AlterStatistics(_)
         | Statement::AlterTableAddColumn(_)
         | Statement::AlterTableAddConstraint(_)
         | Statement::AlterTableDropConstraint(_)
