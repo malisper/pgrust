@@ -47,6 +47,11 @@ jobs:
             exit 0
           fi
 
+          if printf '%s' "$output" | grep -q 'without `workflow` scope (enablePullRequestAutoMerge)'; then
+            echo "Auto-merge could not be enabled because this PR updates workflow files and the token lacks workflow scope."
+            exit 0
+          fi
+
           if printf '%s' "$output" | grep -q "is already queued to merge"; then
             echo "PR is already queued to merge."
             exit 0
