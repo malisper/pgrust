@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PGRUST_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+TARGET_DIR="$("$PGRUST_DIR/scripts/cargo_target_dir.sh")"
 
 MODE="sample"
 PROFILE_OUT=""
@@ -30,7 +31,7 @@ Options:
   --seconds N              sample duration in seconds (default: $SAMPLE_SECONDS)
   --ustackframes N         dtrace ustackframes setting (default: $USTACKFRAMES)
   --profile-hz N           dtrace profile frequency (default: $PROFILE_HZ)
-  --skip-build             Reuse the newest existing target/release lib test binary
+  --skip-build             Reuse the newest existing compiled lib test binary
   --dry-run                Print the resolved commands without running them
   -h, --help               Show this help
 
@@ -98,12 +99,13 @@ print(exe)
 
 discover_existing_test_bin() {
     TEST_BIN="$(
-        cd "$PGRUST_DIR" &&
+        cd "$PGRUST_DIR" && TARGET_DIR_ENV="$TARGET_DIR" \
             python3 -c '
+from os import environ
 from pathlib import Path
 import sys
 
-deps = Path("target/release/deps")
+deps = Path(environ["TARGET_DIR_ENV"]) / "release" / "deps"
 candidates = []
 for path in deps.glob("pgrust-*"):
     if not path.is_file():
@@ -211,7 +213,7 @@ esac
 
 if [[ "$SKIP_BUILD" == true ]]; then
     discover_existing_test_bin || {
-        echo "failed to find an existing target/release lib test binary; rerun without --skip-build" >&2
+        echo "failed to find an existing compiled lib test binary; rerun without --skip-build" >&2
         exit 1
     }
 else

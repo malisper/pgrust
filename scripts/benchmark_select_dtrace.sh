@@ -28,7 +28,7 @@ Options:
   --select-count N          Number of SELECT * statements to run (default: $SELECT_COUNT)
   --ustackframes N          dtrace ustackframes setting (default: $USTACKFRAMES)
   --profile-hz N            dtrace profile frequency (default: $PROFILE_HZ)
-  --skip-build              Do not rebuild target/release/pgrust_server
+  --skip-build              Do not rebuild the existing pgrust_server binary
 EOF
 }
 
@@ -74,7 +74,8 @@ if [[ "$SKIP_BUILD" == false ]]; then
     (cd "$PGRUST_DIR" && cargo build --release --bin pgrust_server >/dev/null)
 fi
 
-SERVER_BIN="$PGRUST_DIR/target/release/pgrust_server"
+TARGET_DIR="$("$PGRUST_DIR/scripts/cargo_target_dir.sh")"
+SERVER_BIN="$TARGET_DIR/release/pgrust_server"
 if [[ ! -x "$SERVER_BIN" ]]; then
     echo "missing server binary: $SERVER_BIN" >&2
     exit 1
