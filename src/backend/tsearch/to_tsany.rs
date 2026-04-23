@@ -27,6 +27,29 @@ pub(crate) fn to_tsvector_with_config_name(
     Ok(TsVector::new(lexemes))
 }
 
+pub(crate) fn tsvector_lexemes_with_config_name(
+    config_name: Option<&str>,
+    text: &str,
+    start_position: u16,
+) -> Result<(Vec<TsLexeme>, u16), String> {
+    let config = resolve_config(config_name)?;
+    let tokens = tokenize_document(text);
+    let next_position = start_position.saturating_add(tokens.len() as u16);
+    let lexemes = tokens
+        .into_iter()
+        .filter_map(|(token, position)| {
+            lexize_token_for_config(config, &token).map(|lexeme| TsLexeme {
+                text: lexeme.into(),
+                positions: vec![TsPosition {
+                    position: start_position.saturating_add(position.saturating_sub(1)),
+                    weight: None,
+                }],
+            })
+        })
+        .collect();
+    Ok((lexemes, next_position))
+}
+
 pub(crate) fn to_tsquery_with_config_name(
     config_name: Option<&str>,
     text: &str,

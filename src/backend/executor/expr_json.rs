@@ -6,7 +6,7 @@ use crate::backend::executor::expr_datetime::render_json_datetime_value_text_wit
 use crate::backend::executor::jsonb::{
     JsonbValue, decode_jsonb, encode_jsonb, jsonb_builder_key, jsonb_from_value, jsonb_get,
     jsonb_object_from_pairs, jsonb_path, jsonb_to_text_value, jsonb_to_value,
-    parse_json_text_input, parse_jsonb_text, render_jsonb_bytes,
+    parse_json_text_input, parse_jsonb_text, render_jsonb_bytes, render_temporal_jsonb_value,
 };
 use crate::backend::executor::jsonpath::{
     EvaluationContext as JsonPathEvaluationContext, canonicalize_jsonpath, evaluate_jsonpath,
@@ -16,7 +16,7 @@ use crate::backend::executor::render_bit_text;
 use crate::backend::executor::render_datetime_value_text;
 use crate::backend::executor::render_range_text;
 use crate::backend::libpq::pqformat::format_bytea_text;
-use crate::backend::parser::CatalogLookup;
+use crate::backend::parser::{CatalogLookup, ParseError};
 use crate::backend::utils::record::lookup_anonymous_record_descriptor;
 use crate::include::catalog::RECORD_TYPE_OID;
 use crate::include::nodes::datum::{ArrayValue, RecordDescriptor, RecordValue};
@@ -24,6 +24,7 @@ use crate::include::nodes::parsenodes::{SqlType, SqlTypeKind};
 use crate::include::nodes::primnodes::{
     BuiltinScalarFunction, Expr, JsonRecordFunction, QueryColumn, expr_sql_type_hint,
 };
+use crate::include::nodes::tsearch::{TsLexeme, TsVector};
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::session::ByteaOutputFormat;
 use serde_json::Value as SerdeJsonValue;
@@ -96,6 +97,220 @@ impl ParsedJsonValue {
                 JsonbValue::Object(_) => "object",
             },
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct JsonbTsVectorFlags {
+    key: bool,
+    string: bool,
+    numeric: bool,
+    boolean: bool,
+}
+
+impl JsonbTsVectorFlags {
+    fn strings_only() -> Self {
+        Self {
+            key: false,
+            string: true,
+            numeric: false,
+            boolean: false,
+        }
+    }
+
+    fn all() -> Self {
+        Self {
+            key: true,
+            string: true,
+            numeric: true,
+            boolean: true,
+        }
+    }
+
+    fn empty() -> Self {
+        Self {
+            key: false,
+            string: false,
+            numeric: false,
+            boolean: false,
+        }
+    }
+
+    fn enable(&mut self, flag: &str) -> Result<(), ExecError> {
+        match flag {
+            "all" => *self = Self::all(),
+            "key" => self.key = true,
+            "string" => self.string = true,
+            "numeric" => self.numeric = true,
+            "boolean" => self.boolean = true,
+            _ => {
+                return Err(ExecError::DetailedError {
+                    message: format!("wrong flag in flag array: \"{flag}\""),
+                    detail: None,
+                    hint: Some(jsonb_to_tsvector_flags_hint()),
+                    sqlstate: "22023",
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn jsonb_to_tsvector_value(
+    config_name: Option<&str>,
+    jsonb: &Value,
+    flags: Option<&Value>,
+) -> Result<Value, ExecError> {
+    let Value::Jsonb(bytes) = jsonb else {
+        return Err(ExecError::TypeMismatch {
+            op: "jsonb_to_tsvector",
+            left: jsonb.clone(),
+            right: Value::Null,
+        });
+    };
+    let flags = match flags {
+        Some(value) => parse_jsonb_to_tsvector_flags(value)?,
+        None => JsonbTsVectorFlags::strings_only(),
+    };
+    let jsonb = decode_jsonb(bytes)?;
+    let mut builder = JsonbTsVectorBuilder {
+        config_name,
+        flags,
+        next_position: 1,
+        lexemes: Vec::new(),
+    };
+    builder.add_value(&jsonb)?;
+    Ok(Value::TsVector(TsVector::new(builder.lexemes)))
+}
+
+fn parse_jsonb_to_tsvector_flags(value: &Value) -> Result<JsonbTsVectorFlags, ExecError> {
+    let parsed = ParsedJsonValue::from_value(value)?;
+    let json = match parsed {
+        ParsedJsonValue::Json(value) => value,
+        ParsedJsonValue::Jsonb(value) => value.to_serde(),
+    };
+    match json {
+        SerdeJsonValue::String(flag) => {
+            let mut flags = JsonbTsVectorFlags::empty();
+            flags.enable(&flag)?;
+            Ok(flags)
+        }
+        SerdeJsonValue::Array(items) => {
+            let mut flags = JsonbTsVectorFlags::empty();
+            for item in items {
+                let SerdeJsonValue::String(flag) = item else {
+                    return Err(ExecError::DetailedError {
+                        message: "flag array element is not a string".into(),
+                        detail: None,
+                        hint: Some(jsonb_to_tsvector_flags_hint()),
+                        sqlstate: "22023",
+                    });
+                };
+                flags.enable(&flag)?;
+            }
+            Ok(flags)
+        }
+        SerdeJsonValue::Null => Err(ExecError::DetailedError {
+            message: "flag array element is not a string".into(),
+            detail: None,
+            hint: Some(jsonb_to_tsvector_flags_hint()),
+            sqlstate: "22023",
+        }),
+        _ => Err(ExecError::DetailedError {
+            message: "wrong flag type, only arrays and scalars are allowed".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        }),
+    }
+}
+
+fn jsonb_to_tsvector_flags_hint() -> String {
+    "Possible values are: \"string\", \"numeric\", \"boolean\", \"key\", and \"all\".".into()
+}
+
+struct JsonbTsVectorBuilder<'a> {
+    config_name: Option<&'a str>,
+    flags: JsonbTsVectorFlags,
+    next_position: u16,
+    lexemes: Vec<TsLexeme>,
+}
+
+impl JsonbTsVectorBuilder<'_> {
+    fn add_value(&mut self, value: &JsonbValue) -> Result<(), ExecError> {
+        match value {
+            JsonbValue::Null => {}
+            JsonbValue::String(text) => {
+                if self.flags.string {
+                    self.add_part(text, true)?;
+                }
+            }
+            JsonbValue::Numeric(value) => {
+                if self.flags.numeric {
+                    self.add_part(&value.render(), true)?;
+                }
+            }
+            JsonbValue::Bool(value) => {
+                if self.flags.boolean {
+                    self.add_part(if *value { "true" } else { "false" }, true)?;
+                }
+            }
+            JsonbValue::Array(items) => {
+                for item in items {
+                    self.add_value(item)?;
+                }
+            }
+            JsonbValue::Object(items) => {
+                for (key, value) in items {
+                    self.add_object_item(key, value)?;
+                }
+            }
+            JsonbValue::Date(_)
+            | JsonbValue::Time(_)
+            | JsonbValue::TimeTz(_)
+            | JsonbValue::Timestamp(_)
+            | JsonbValue::TimestampTz(_) => {
+                if self.flags.string {
+                    self.add_part(&render_temporal_jsonb_value(value), true)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn add_object_item(&mut self, key: &str, value: &JsonbValue) -> Result<(), ExecError> {
+        let key_emitted = if self.flags.key {
+            self.add_part(key, false)?
+        } else {
+            false
+        };
+        if key_emitted {
+            self.next_position = self.next_position.saturating_add(1);
+        }
+        self.add_value(value)?;
+        Ok(())
+    }
+
+    fn add_part(&mut self, text: &str, add_gap: bool) -> Result<bool, ExecError> {
+        let (mut lexemes, next_position) =
+            crate::backend::tsearch::tsvector_lexemes_with_config_name(
+                self.config_name,
+                text,
+                self.next_position,
+            )
+            .map_err(|e| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "valid text search input",
+                    actual: format!("jsonb_to_tsvector: {e}"),
+                })
+            })?;
+        let emitted = !lexemes.is_empty();
+        self.lexemes.append(&mut lexemes);
+        self.next_position = next_position;
+        if add_gap && next_position != 1 {
+            self.next_position = self.next_position.saturating_add(1);
+        }
+        Ok(emitted)
     }
 }
 

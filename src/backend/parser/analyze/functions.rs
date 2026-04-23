@@ -581,10 +581,17 @@ pub(super) fn validate_scalar_function_arity(
         })
         .unwrap_or_else(|| match func {
             BuiltinScalarFunction::ToTsVector
+            | BuiltinScalarFunction::JsonbToTsVector
             | BuiltinScalarFunction::ToTsQuery
             | BuiltinScalarFunction::PlainToTsQuery
             | BuiltinScalarFunction::PhraseToTsQuery
-            | BuiltinScalarFunction::WebSearchToTsQuery => matches!(args.len(), 1 | 2),
+            | BuiltinScalarFunction::WebSearchToTsQuery => {
+                if matches!(func, BuiltinScalarFunction::JsonbToTsVector) {
+                    matches!(args.len(), 2 | 3)
+                } else {
+                    matches!(args.len(), 1 | 2)
+                }
+            }
             BuiltinScalarFunction::Int4Pl => args.len() == 2,
             BuiltinScalarFunction::Int8Inc => args.len() == 1,
             BuiltinScalarFunction::Int8IncAny => args.len() == 2,
@@ -1081,7 +1088,7 @@ pub(super) fn comparison_operator_exists(
 pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<SqlType> {
     match func {
         BuiltinScalarFunction::TsMatch => return Some(SqlType::new(SqlTypeKind::Bool)),
-        BuiltinScalarFunction::ToTsVector => {
+        BuiltinScalarFunction::ToTsVector | BuiltinScalarFunction::JsonbToTsVector => {
             return Some(SqlType::new(SqlTypeKind::TsVector));
         }
         BuiltinScalarFunction::ToTsQuery
@@ -1637,6 +1644,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("to_json", BuiltinScalarFunction::ToJson),
         ("to_jsonb", BuiltinScalarFunction::ToJsonb),
         ("to_tsvector", BuiltinScalarFunction::ToTsVector),
+        ("jsonb_to_tsvector", BuiltinScalarFunction::JsonbToTsVector),
         ("to_tsquery", BuiltinScalarFunction::ToTsQuery),
         ("plainto_tsquery", BuiltinScalarFunction::PlainToTsQuery),
         ("phraseto_tsquery", BuiltinScalarFunction::PhraseToTsQuery),

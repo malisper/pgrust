@@ -517,8 +517,54 @@ pub(super) fn bind_scalar_function_call(
                 .map(|(ty, arg)| coerce_bound_expr(arg, ty, SqlType::new(SqlTypeKind::Int4)))
                 .collect(),
         )),
-        BuiltinScalarFunction::ToTsVector
-        | BuiltinScalarFunction::ToTsQuery
+        BuiltinScalarFunction::ToTsVector => Ok(build_func(
+            false,
+            args.iter()
+                .enumerate()
+                .map(|(idx, arg)| {
+                    let ty = infer_sql_expr_type_with_ctes(
+                        arg,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    );
+                    let target = if idx == args.len().saturating_sub(1)
+                        && matches!(ty.kind, SqlTypeKind::Jsonb)
+                    {
+                        SqlType::new(SqlTypeKind::Jsonb)
+                    } else {
+                        SqlType::new(SqlTypeKind::Text)
+                    };
+                    coerce_bound_expr(bound_args[idx].clone(), ty, target)
+                })
+                .collect(),
+        )),
+        BuiltinScalarFunction::JsonbToTsVector => Ok(build_func(
+            false,
+            args.iter()
+                .enumerate()
+                .map(|(idx, arg)| {
+                    let ty = infer_sql_expr_type_with_ctes(
+                        arg,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    );
+                    let jsonb_arg = (args.len() == 2 && idx <= 1) || (args.len() == 3 && idx >= 1);
+                    let target = if jsonb_arg {
+                        SqlType::new(SqlTypeKind::Jsonb)
+                    } else {
+                        SqlType::new(SqlTypeKind::Text)
+                    };
+                    coerce_bound_expr(bound_args[idx].clone(), ty, target)
+                })
+                .collect(),
+        )),
+        BuiltinScalarFunction::ToTsQuery
         | BuiltinScalarFunction::PlainToTsQuery
         | BuiltinScalarFunction::PhraseToTsQuery
         | BuiltinScalarFunction::WebSearchToTsQuery

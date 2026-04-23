@@ -309,13 +309,6 @@ fn parse_quoted_ts_text_with_consumed(input: &str) -> Result<(String, usize), St
 }
 
 fn quote_ts_text(text: &str) -> String {
-    if !text.is_empty()
-        && text
-            .chars()
-            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
-    {
-        return text.to_string();
-    }
     format!("'{}'", text.replace('\'', "''"))
 }
 
@@ -613,7 +606,7 @@ mod tests {
     #[test]
     fn tsvector_round_trip() {
         let vector = TsVector::parse("'bar baz':2A foo:1,3").unwrap();
-        assert_eq!(vector.render(), "'bar baz':2A foo:1,3");
+        assert_eq!(vector.render(), "'bar baz':2A 'foo':1,3");
     }
 
     #[test]
