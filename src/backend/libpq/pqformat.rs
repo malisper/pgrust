@@ -205,6 +205,7 @@ pub(crate) fn send_query_result(
     tag: &str,
     float_format: FloatFormatOptions,
     role_names: Option<&HashMap<u32, String>>,
+    relation_names: Option<&HashMap<u32, String>>,
     proc_names: Option<&HashMap<u32, String>>,
 ) -> io::Result<()> {
     send_row_description(stream, columns)?;
@@ -218,6 +219,7 @@ pub(crate) fn send_query_result(
             &mut row_buf,
             float_format.clone(),
             role_names,
+            relation_names,
             proc_names,
         )?;
     }
@@ -604,6 +606,7 @@ pub(crate) fn send_typed_data_row(
     buf: &mut Vec<u8>,
     float_format: FloatFormatOptions,
     role_names: Option<&HashMap<u32, String>>,
+    relation_names: Option<&HashMap<u32, String>>,
     proc_names: Option<&HashMap<u32, String>>,
 ) -> io::Result<()> {
     buf.clear();
@@ -657,6 +660,24 @@ pub(crate) fn send_typed_data_row(
                         let written = itoa_buf.format(*v);
                         buf.extend_from_slice(written.as_bytes());
                     }
+                } else if matches!(sql_type.map(|ty| ty.kind), Some(SqlTypeKind::RegClass)) {
+                    if let Ok(relation_oid) = u32::try_from(*v) {
+                        if relation_oid == 0 {
+                            buf.extend_from_slice(b"-");
+                        } else if let Some(relation_name) =
+                            relation_names.and_then(|names| names.get(&relation_oid))
+                        {
+                            buf.extend_from_slice(relation_name.as_bytes());
+                        } else {
+                            let mut itoa_buf = itoa::Buffer::new();
+                            let written = itoa_buf.format(*v);
+                            buf.extend_from_slice(written.as_bytes());
+                        }
+                    } else {
+                        let mut itoa_buf = itoa::Buffer::new();
+                        let written = itoa_buf.format(*v);
+                        buf.extend_from_slice(written.as_bytes());
+                    }
                 } else if matches!(sql_type.map(|ty| ty.kind), Some(SqlTypeKind::RegProcedure)) {
                     if let Ok(proc_oid) = u32::try_from(*v) {
                         if proc_oid == 0 {
@@ -690,6 +711,24 @@ pub(crate) fn send_typed_data_row(
                     if let Ok(role_oid) = u32::try_from(*v) {
                         if let Some(role_name) = role_names.and_then(|names| names.get(&role_oid)) {
                             buf.extend_from_slice(role_name.as_bytes());
+                        } else {
+                            let mut itoa_buf = itoa::Buffer::new();
+                            let written = itoa_buf.format(*v);
+                            buf.extend_from_slice(written.as_bytes());
+                        }
+                    } else {
+                        let mut itoa_buf = itoa::Buffer::new();
+                        let written = itoa_buf.format(*v);
+                        buf.extend_from_slice(written.as_bytes());
+                    }
+                } else if matches!(sql_type.map(|ty| ty.kind), Some(SqlTypeKind::RegClass)) {
+                    if let Ok(relation_oid) = u32::try_from(*v) {
+                        if relation_oid == 0 {
+                            buf.extend_from_slice(b"-");
+                        } else if let Some(relation_name) =
+                            relation_names.and_then(|names| names.get(&relation_oid))
+                        {
+                            buf.extend_from_slice(relation_name.as_bytes());
                         } else {
                             let mut itoa_buf = itoa::Buffer::new();
                             let written = itoa_buf.format(*v);
@@ -1968,6 +2007,7 @@ mod tests {
             FloatFormatOptions::default(),
             Some(&role_names),
             None,
+            None,
         )
         .unwrap();
 
@@ -1995,6 +2035,7 @@ mod tests {
             &[],
             &mut row_buf,
             FloatFormatOptions::default(),
+            None,
             None,
             Some(&proc_names),
         )
@@ -2024,10 +2065,41 @@ mod tests {
             FloatFormatOptions::default(),
             None,
             None,
+            None,
         )
         .unwrap();
 
         assert!(out.windows(1).any(|window| window == b"-"));
+    }
+
+    #[test]
+    fn typed_data_row_renders_regclass_with_relation_name() {
+        let mut out = Vec::new();
+        let mut row_buf = Vec::new();
+        let mut relation_names = HashMap::new();
+        relation_names.insert(1259, "pg_class".to_string());
+
+        send_typed_data_row(
+            &mut out,
+            &[Value::Int64(1259)],
+            &[QueryColumn {
+                name: "relid".into(),
+                sql_type: SqlType::new(SqlTypeKind::RegClass),
+                wire_type_oid: None,
+            }],
+            &[],
+            &mut row_buf,
+            FloatFormatOptions::default(),
+            None,
+            Some(&relation_names),
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            out.windows("pg_class".len())
+                .any(|window| window == b"pg_class")
+        );
     }
 
     #[test]
@@ -2049,6 +2121,7 @@ mod tests {
             &[],
             &mut row_buf,
             FloatFormatOptions::default(),
+            None,
             None,
             None,
         )

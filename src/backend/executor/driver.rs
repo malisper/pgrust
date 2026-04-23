@@ -202,6 +202,7 @@ fn execute_statement_with_source(
         }
         Statement::AlterTableRename(_)
         | Statement::AlterIndexRename(_)
+        | Statement::AlterIndexAttachPartition(_)
         | Statement::AlterViewRename(_)
         | Statement::AlterIndexAlterColumnStatistics(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {

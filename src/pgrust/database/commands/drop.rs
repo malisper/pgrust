@@ -1003,18 +1003,162 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
-        self.execute_drop_relation_stmt_in_transaction_with_search_path(
+        let interrupts = self.interrupt_state(client_id);
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let mut requested_oids = BTreeSet::new();
+        let mut rels = Vec::new();
+        for index_name in &drop_stmt.index_names {
+            let Some(entry) = catalog.lookup_any_relation(index_name) else {
+                if drop_stmt.if_exists {
+                    continue;
+                }
+                return Err(ExecError::Parse(ParseError::TableDoesNotExist(
+                    index_name.clone(),
+                )));
+            };
+            if !matches!(entry.relkind, 'i' | 'I') {
+                return Err(ExecError::Parse(ParseError::WrongObjectType {
+                    name: index_name.clone(),
+                    expected: "index",
+                }));
+            }
+            if drop_stmt.concurrently && entry.relkind == 'I' && entry.relpersistence != 't' {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "cannot drop partitioned index \"{}\" concurrently",
+                        index_name
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "0A000",
+                });
+            }
+            ensure_relation_owner(self, client_id, &entry, index_name)?;
+            requested_oids.insert(entry.relation_oid);
+            rels.push(entry.rel);
+        }
+        lock_tables_interruptible(
+            &self.table_locks,
             client_id,
-            &drop_stmt.index_names,
-            drop_stmt.if_exists,
-            xid,
-            cid,
-            configured_search_path,
-            catalog_effects,
-            None,
-            'i',
-            "index",
-        )
+            &rels,
+            TableLockMode::AccessExclusive,
+            interrupts.as_ref(),
+        )?;
+
+        let result = (|| {
+            let mut drop_oids = Vec::new();
+            let mut seen = BTreeSet::new();
+            for index_name in &drop_stmt.index_names {
+                let Some(entry) = catalog.lookup_any_relation(index_name) else {
+                    continue;
+                };
+                if !matches!(entry.relkind, 'i' | 'I') {
+                    continue;
+                }
+                let parent_oids = catalog
+                    .inheritance_parents(entry.relation_oid)
+                    .into_iter()
+                    .map(|row| row.inhparent)
+                    .collect::<Vec<_>>();
+                if !parent_oids.is_empty()
+                    && !parent_oids
+                        .iter()
+                        .any(|parent_oid| requested_oids.contains(parent_oid))
+                {
+                    let parent_name = parent_oids
+                        .first()
+                        .and_then(|oid| catalog.class_row_by_oid(*oid))
+                        .map(|row| row.relname)
+                        .unwrap_or_else(|| parent_oids[0].to_string());
+                    return Err(ExecError::DetailedError {
+                        message: format!(
+                            "cannot drop index {} because index {} requires it",
+                            index_name, parent_name
+                        ),
+                        detail: None,
+                        hint: Some(format!("You can drop index {} instead.", parent_name)),
+                        sqlstate: "2BP01",
+                    });
+                }
+                if parent_oids
+                    .iter()
+                    .any(|parent_oid| requested_oids.contains(parent_oid))
+                {
+                    continue;
+                }
+                Self::collect_index_drop_oids(
+                    &catalog,
+                    entry.relation_oid,
+                    &mut seen,
+                    &mut drop_oids,
+                )?;
+            }
+
+            let mut dropped = 0usize;
+            let mut next_cid = cid;
+            for index_oid in drop_oids {
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid: next_cid,
+                    client_id,
+                    waiter: Some(self.txn_waiter.clone()),
+                    interrupts: Arc::clone(&interrupts),
+                };
+                let effect = self
+                    .catalog
+                    .write()
+                    .drop_relation_entry_by_oid_mvcc(index_oid, &ctx)
+                    .map_err(|err| match err {
+                        CatalogError::UnknownTable(_) => {
+                            ExecError::Parse(ParseError::TableDoesNotExist(index_oid.to_string()))
+                        }
+                        other => ExecError::Parse(ParseError::UnexpectedToken {
+                            expected: "droppable index",
+                            actual: format!("{other:?}"),
+                        }),
+                    })?
+                    .1;
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
+                catalog_effects.push(effect);
+                dropped += 1;
+                next_cid = next_cid.saturating_add(1);
+            }
+            Ok(StatementResult::AffectedRows(dropped))
+        })();
+
+        for rel in rels {
+            self.table_locks.unlock_table(rel, client_id);
+        }
+        result
+    }
+
+    fn collect_index_drop_oids(
+        catalog: &dyn crate::backend::parser::CatalogLookup,
+        index_oid: u32,
+        seen: &mut BTreeSet<u32>,
+        out: &mut Vec<u32>,
+    ) -> Result<(), ExecError> {
+        if !seen.insert(index_oid) {
+            return Ok(());
+        }
+        let mut children = catalog.inheritance_children(index_oid);
+        children.sort_by_key(|row| (row.inhseqno, row.inhrelid));
+        for child in children {
+            Self::collect_index_drop_oids(catalog, child.inhrelid, seen, out)?;
+        }
+        let relation = catalog.relation_by_oid(index_oid).ok_or_else(|| {
+            ExecError::Parse(ParseError::TableDoesNotExist(index_oid.to_string()))
+        })?;
+        if !matches!(relation.relkind, 'i' | 'I') {
+            return Err(ExecError::Parse(ParseError::WrongObjectType {
+                name: index_oid.to_string(),
+                expected: "index",
+            }));
+        }
+        out.push(index_oid);
+        Ok(())
     }
 
     pub(crate) fn execute_drop_schema_stmt_in_transaction_with_search_path(

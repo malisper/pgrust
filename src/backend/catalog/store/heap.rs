@@ -6002,7 +6002,7 @@ fn collect_relation_drop_oids_visible(
             continue;
         }
         if let Some(dependent) = relcache.get_by_oid(row.objid) {
-            if !matches!(dependent.relkind, 'r' | 'i' | 't' | 'S') {
+            if !matches!(dependent.relkind, 'r' | 'i' | 'I' | 't' | 'S') {
                 continue;
             }
             collect_relation_drop_oids_visible(
@@ -6060,7 +6060,7 @@ fn collect_relation_drop_oids(
             continue;
         }
         if let Some(dependent) = catalog.get_by_oid(row.objid) {
-            if !matches!(dependent.relkind, 'r' | 'i' | 't' | 'S') {
+            if !matches!(dependent.relkind, 'r' | 'i' | 'I' | 't' | 'S') {
                 continue;
             }
             collect_relation_drop_oids(catalog, depend_rows, dependent.relation_oid, seen, order);

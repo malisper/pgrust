@@ -504,6 +504,7 @@ fn run_statement(
         | Statement::AlterTableAlterColumnOptions(_)
         | Statement::AlterTableAlterColumnStatistics(_)
         | Statement::AlterIndexAlterColumnStatistics(_)
+        | Statement::AlterIndexAttachPartition(_)
         | Statement::AlterTableAlterColumnStorage(_)
         | Statement::AlterTableAlterColumnDefault(_)
         | Statement::AlterTableSetNotNull(_)
