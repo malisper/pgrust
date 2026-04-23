@@ -718,7 +718,7 @@ fn resolve_statistics_targets(
             message: "extended statistics require at least 2 columns".into(),
             detail: None,
             hint: None,
-            sqlstate: "42P17",
+            sqlstate: "42P16",
         });
     }
 
