@@ -303,30 +303,29 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
     }
 
     rows.attributes
-        .extend(
-            entry
-                .desc
-                .columns
-                .iter()
-                .enumerate()
-                .map(|(idx, column)| PgAttributeRow {
-                    attrelid: entry.relation_oid,
-                    attname: column.name.clone(),
-                    atttypid: catalog_sql_type_oid(catalog, column.sql_type),
-                    attlen: column.storage.attlen,
-                    attnum: idx.saturating_add(1) as i16,
-                    attnotnull: !column.storage.nullable,
-                    attisdropped: column.dropped,
-                    atttypmod: column.sql_type.typmod,
-                    attalign: column.storage.attalign,
-                    attstorage: column.storage.attstorage,
-                    attcompression: column.storage.attcompression,
-                    attstattarget: column.attstattarget,
-                    attinhcount: column.attinhcount,
-                    attislocal: column.attislocal,
-                    sql_type: column.sql_type,
-                }),
-        );
+        .extend(entry.desc.columns.iter().enumerate().map(|(idx, column)| {
+            PgAttributeRow {
+                attrelid: entry.relation_oid,
+                attname: column.name.clone(),
+                atttypid: catalog_sql_type_oid(catalog, column.sql_type),
+                attlen: column.storage.attlen,
+                attnum: idx.saturating_add(1) as i16,
+                attnotnull: !column.storage.nullable,
+                attisdropped: column.dropped,
+                atttypmod: column.sql_type.typmod,
+                attalign: column.storage.attalign,
+                attstorage: column.storage.attstorage,
+                attcompression: column.storage.attcompression,
+                attstattarget: column.attstattarget,
+                attinhcount: column.attinhcount,
+                attislocal: column.attislocal,
+                attgenerated: column
+                    .generated
+                    .map(|kind| kind.catalog_char())
+                    .unwrap_or('\0'),
+                sql_type: column.sql_type,
+            }
+        }));
 
     rows.attrdefs.extend(
         entry

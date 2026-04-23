@@ -749,6 +749,14 @@ pub(crate) fn pg_attribute_row_from_values(
         Value::Text(text) if text.is_empty() => '\0',
         other => expect_char(other, "attcompression")?,
     };
+    let attgenerated = values
+        .get(14)
+        .map(|value| match value {
+            Value::Text(text) if text.is_empty() => Ok('\0'),
+            other => expect_char(other, "attgenerated"),
+        })
+        .transpose()?
+        .unwrap_or('\0');
     Ok(PgAttributeRow {
         attrelid: expect_oid(&values[0])?,
         attname: expect_text(&values[1])?,
@@ -767,6 +775,7 @@ pub(crate) fn pg_attribute_row_from_values(
         attstattarget: expect_int16(&values[11])?,
         attinhcount: expect_int16(&values[12])?,
         attislocal: expect_bool(&values[13])?,
+        attgenerated,
         sql_type: SqlType::new(SqlTypeKind::Text),
     })
 }
@@ -1387,6 +1396,7 @@ fn pg_attribute_row_values(row: PgAttributeRow) -> Vec<Value> {
         Value::Int16(row.attstattarget),
         Value::Int16(row.attinhcount),
         Value::Bool(row.attislocal),
+        Value::InternalChar(row.attgenerated as u8),
     ]
 }
 
