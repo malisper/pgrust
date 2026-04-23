@@ -25,19 +25,31 @@ impl Database {
         &self,
         client_id: ClientId,
         stmt: &CreateSchemaStatement,
-        _configured_search_path: Option<&[String]>,
+        configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
+        let mut temp_effects = Vec::new();
+        let mut sequence_effects = Vec::new();
         let result = self.execute_create_schema_stmt_in_transaction_with_search_path(
             client_id,
             stmt,
             xid,
             0,
+            configured_search_path,
             &mut catalog_effects,
+            &mut temp_effects,
+            &mut sequence_effects,
         );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        let result = self.finish_txn(
+            client_id,
+            xid,
+            result,
+            &catalog_effects,
+            &temp_effects,
+            &sequence_effects,
+        );
         guard.disarm();
         result
     }
@@ -48,7 +60,10 @@ impl Database {
         stmt: &CreateSchemaStatement,
         xid: TransactionId,
         cid: CommandId,
+        configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
+        sequence_effects: &mut Vec<SequenceMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let auth = self.auth_state(client_id);
         let auth_catalog = self
@@ -89,6 +104,48 @@ impl Database {
             .map_err(map_catalog_error)?;
         self.apply_catalog_mutation_effect_immediate(&effect)?;
         catalog_effects.push(effect);
+        self.invalidate_backend_cache_state(client_id);
+
+        if !stmt.elements.is_empty() {
+            let mut schema_search_path = Vec::with_capacity(
+                configured_search_path.map_or(1, |path| path.len().saturating_add(1)),
+            );
+            schema_search_path.push(resolved.schema_name.clone());
+            if let Some(configured_search_path) = configured_search_path {
+                schema_search_path.extend(
+                    configured_search_path
+                        .iter()
+                        .filter(|schema| !schema.eq_ignore_ascii_case(&resolved.schema_name))
+                        .cloned(),
+                );
+            }
+            for (index, element) in stmt.elements.iter().enumerate() {
+                let element_cid = cid.saturating_add(1 + index as u32 * 10);
+                match element.as_ref() {
+                    Statement::CreateTable(create_stmt) => {
+                        let mut create_stmt = create_stmt.clone();
+                        if create_stmt.schema_name.is_none() {
+                            create_stmt.schema_name = Some(resolved.schema_name.clone());
+                        }
+                        self.execute_create_table_stmt_in_transaction_with_search_path(
+                            client_id,
+                            &create_stmt,
+                            xid,
+                            element_cid,
+                            Some(&schema_search_path),
+                            catalog_effects,
+                            temp_effects,
+                            sequence_effects,
+                        )?;
+                    }
+                    _ => {
+                        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                            "CREATE SCHEMA elements other than CREATE TABLE".into(),
+                        )));
+                    }
+                }
+            }
+        }
         Ok(StatementResult::AffectedRows(0))
     }
 }
