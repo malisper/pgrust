@@ -1,4 +1,5 @@
 use super::*;
+use super::tests_support::SeededSqlHarness;
 use crate::RelFileLocator;
 use crate::backend::access::heap::heapam::{heap_flush, heap_insert_mvcc, heap_update};
 use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
@@ -815,25 +816,23 @@ fn assert_query_rows(result: StatementResult, expected: Vec<Vec<Value>>) {
     }
 }
 
-fn seed_people_and_pets(base: &PathBuf, txns: &mut TransactionManager) {
-    let xid = txns.begin();
-    run_sql_with_catalog(
-            base,
-            txns,
+fn seed_people_and_pets(label: &str) -> SeededSqlHarness {
+    let mut harness = SeededSqlHarness::new(label, catalog_with_pets());
+    let xid = harness.txns.begin();
+    harness
+        .execute(
             xid,
             "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', 'b'), (3, 'carol', null)",
-            catalog_with_pets(),
         )
         .unwrap();
-    run_sql_with_catalog(
-            base,
-            txns,
+    harness
+        .execute(
             xid,
             "insert into pets (id, name, owner_id) values (10, 'mocha', 1), (11, 'pixel', 1), (12, 'otis', 2), (13, 'stray', null)",
-            catalog_with_pets(),
         )
         .unwrap();
-    txns.commit(xid).unwrap();
+    harness.txns.commit(xid).unwrap();
+    harness
 }
 
 #[test]
@@ -1219,9 +1218,7 @@ fn seqscan_skips_superseded_versions() {
 
 #[test]
 fn manual_hash_join_inner_returns_matching_rows() {
-    let base = temp_dir("manual_hash_join_inner");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    seed_people_and_pets(&base, &mut txns);
+    let harness = seed_people_and_pets("manual_hash_join_inner");
 
     let plan = Plan::Projection {
         plan_info: PlanEstimate::default(),
@@ -1242,7 +1239,7 @@ fn manual_hash_join_inner_returns_matching_rows() {
         ],
     };
 
-    let rows = run_plan(&base, &txns, plan).unwrap();
+    let rows = run_plan(&harness.base, &harness.txns, plan).unwrap();
     assert_eq!(
         rows,
         vec![
@@ -1264,9 +1261,7 @@ fn manual_hash_join_inner_returns_matching_rows() {
 
 #[test]
 fn manual_hash_join_left_emits_null_extended_rows() {
-    let base = temp_dir("manual_hash_join_left");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    seed_people_and_pets(&base, &mut txns);
+    let harness = seed_people_and_pets("manual_hash_join_left");
 
     let plan = Plan::Projection {
         plan_info: PlanEstimate::default(),
@@ -1287,7 +1282,7 @@ fn manual_hash_join_left_emits_null_extended_rows() {
         ],
     };
 
-    let rows = run_plan(&base, &txns, plan).unwrap();
+    let rows = run_plan(&harness.base, &harness.txns, plan).unwrap();
     assert_eq!(
         rows,
         vec![
@@ -1313,9 +1308,7 @@ fn manual_hash_join_left_emits_null_extended_rows() {
 
 #[test]
 fn manual_hash_join_right_emits_unmatched_inner_rows() {
-    let base = temp_dir("manual_hash_join_right");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    seed_people_and_pets(&base, &mut txns);
+    let harness = seed_people_and_pets("manual_hash_join_right");
 
     let plan = Plan::Projection {
         plan_info: PlanEstimate::default(),
@@ -1336,7 +1329,7 @@ fn manual_hash_join_right_emits_unmatched_inner_rows() {
         ],
     };
 
-    let rows = run_plan(&base, &txns, plan).unwrap();
+    let rows = run_plan(&harness.base, &harness.txns, plan).unwrap();
     assert_eq!(
         rows,
         vec![
@@ -1362,9 +1355,7 @@ fn manual_hash_join_right_emits_unmatched_inner_rows() {
 
 #[test]
 fn manual_hash_join_full_emits_unmatched_rows_from_both_sides() {
-    let base = temp_dir("manual_hash_join_full");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    seed_people_and_pets(&base, &mut txns);
+    let harness = seed_people_and_pets("manual_hash_join_full");
 
     let plan = Plan::Projection {
         plan_info: PlanEstimate::default(),
@@ -1385,7 +1376,7 @@ fn manual_hash_join_full_emits_unmatched_rows_from_both_sides() {
         ],
     };
 
-    let rows = run_plan(&base, &txns, plan).unwrap();
+    let rows = run_plan(&harness.base, &harness.txns, plan).unwrap();
     assert_eq!(
         rows,
         vec![
@@ -1468,9 +1459,7 @@ fn manual_hash_join_null_hash_keys_do_not_match_each_other() {
 
 #[test]
 fn manual_hash_join_join_qual_preserves_left_outer_fill() {
-    let base = temp_dir("manual_hash_join_join_qual");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    seed_people_and_pets(&base, &mut txns);
+    let harness = seed_people_and_pets("manual_hash_join_join_qual");
 
     let plan = Plan::Projection {
         plan_info: PlanEstimate::default(),
@@ -1498,7 +1487,7 @@ fn manual_hash_join_join_qual_preserves_left_outer_fill() {
         ],
     };
 
-    let rows = run_plan(&base, &txns, plan).unwrap();
+    let rows = run_plan(&harness.base, &harness.txns, plan).unwrap();
     assert_eq!(
         rows,
         vec![
@@ -1545,27 +1534,21 @@ fn manual_hash_join_rejects_non_hash_inner_plan() {
 
 #[test]
 fn insert_sql_inserts_row() {
-    let base = temp_dir("insert_sql");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let xid = txns.begin();
+    let mut harness = SeededSqlHarness::new("insert_sql", catalog());
+    let xid = harness.txns.begin();
     assert_eq!(
-        run_sql(
-            &base,
-            &txns,
-            xid,
-            "insert into people (id, name, note) values (1, 'alice', 'alpha')"
-        )
-        .unwrap(),
+        harness
+            .execute(
+                xid,
+                "insert into people (id, name, note) values (1, 'alice', 'alpha')",
+            )
+            .unwrap(),
         StatementResult::AffectedRows(1)
     );
-    txns.commit(xid).unwrap();
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select name, note from people",
-    )
-    .unwrap()
+    harness.txns.commit(xid).unwrap();
+    match harness
+        .execute(INVALID_TRANSACTION_ID, "select name, note from people")
+        .unwrap()
     {
         StatementResult::Query { rows, .. } => {
             println!("{rows:?}");
@@ -1861,27 +1844,21 @@ fn select_sql_explicit_alias_preserved_for_empty_result() {
 }
 #[test]
 fn insert_sql_inserts_multiple_rows() {
-    let base = temp_dir("insert_multi_sql");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let xid = txns.begin();
+    let mut harness = SeededSqlHarness::new("insert_multi_sql", catalog());
+    let xid = harness.txns.begin();
     assert_eq!(
-        run_sql(
-            &base,
-            &txns,
-            xid,
-            "insert into people (id, name, note) values (1, 'alice', 'alpha'), (2, 'bob', null)"
-        )
-        .unwrap(),
+        harness
+            .execute(
+                xid,
+                "insert into people (id, name, note) values (1, 'alice', 'alpha'), (2, 'bob', null)",
+            )
+            .unwrap(),
         StatementResult::AffectedRows(2)
     );
-    txns.commit(xid).unwrap();
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select id, name, note from people",
-    )
-    .unwrap()
+    harness.txns.commit(xid).unwrap();
+    match harness
+        .execute(INVALID_TRANSACTION_ID, "select id, name, note from people")
+        .unwrap()
     {
         StatementResult::Query { rows, .. } => {
             assert_eq!(
@@ -1902,64 +1879,51 @@ fn insert_sql_inserts_multiple_rows() {
 
 #[test]
 fn on_conflict_do_nothing_inserts_when_no_conflict() {
-    let base = temp_dir("upsert_insert_no_conflict");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let catalog = catalog_with_people_primary_key();
-    let xid = txns.begin();
+    let mut harness =
+        SeededSqlHarness::new("upsert_insert_no_conflict", catalog_with_people_primary_key());
+    let xid = harness.txns.begin();
     assert_eq!(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            xid,
-            "insert into people (id, name, note) values (1, 'alice', 'alpha') on conflict (id) do nothing",
-            catalog.clone(),
-        )
-        .unwrap(),
+        harness
+            .execute(
+                xid,
+                "insert into people (id, name, note) values (1, 'alice', 'alpha') on conflict (id) do nothing",
+            )
+            .unwrap(),
         StatementResult::AffectedRows(1)
     );
-    txns.commit(xid).unwrap();
+    harness.txns.commit(xid).unwrap();
 }
 
 #[test]
 fn on_conflict_targeted_do_nothing_skips_duplicate() {
-    let base = temp_dir("upsert_targeted_do_nothing");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let catalog = catalog_with_people_primary_key();
+    let mut harness =
+        SeededSqlHarness::new("upsert_targeted_do_nothing", catalog_with_people_primary_key());
 
-    let insert_xid = txns.begin();
-    run_sql_with_catalog(
-        &base,
-        &txns,
-        insert_xid,
-        "insert into people (id, name, note) values (1, 'alice', 'alpha')",
-        catalog.clone(),
-    )
-    .unwrap();
-    txns.commit(insert_xid).unwrap();
-
-    let upsert_xid = txns.begin();
-    assert_eq!(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            upsert_xid,
-            "insert into people (id, name, note) values (1, 'bob', 'beta') on conflict (id) do nothing",
-            catalog.clone(),
+    let insert_xid = harness.txns.begin();
+    harness
+        .execute(
+            insert_xid,
+            "insert into people (id, name, note) values (1, 'alice', 'alpha')",
         )
-        .unwrap(),
+        .unwrap();
+    harness.txns.commit(insert_xid).unwrap();
+
+    let upsert_xid = harness.txns.begin();
+    assert_eq!(
+        harness
+            .execute(
+                upsert_xid,
+                "insert into people (id, name, note) values (1, 'bob', 'beta') on conflict (id) do nothing",
+            )
+            .unwrap(),
         StatementResult::AffectedRows(0)
     );
-    txns.commit(upsert_xid).unwrap();
+    harness.txns.commit(upsert_xid).unwrap();
 
     assert_query_rows(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select id, name, note from people",
-            catalog,
-        )
-        .unwrap(),
+        harness
+            .execute(INVALID_TRANSACTION_ID, "select id, name, note from people")
+            .unwrap(),
         vec![vec![
             Value::Int32(1),
             Value::Text("alice".into()),
@@ -1970,120 +1934,99 @@ fn on_conflict_targeted_do_nothing_skips_duplicate() {
 
 #[test]
 fn on_conflict_targetless_do_nothing_skips_duplicate() {
-    let base = temp_dir("upsert_targetless_do_nothing");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let catalog = catalog_with_people_primary_key();
+    let mut harness =
+        SeededSqlHarness::new("upsert_targetless_do_nothing", catalog_with_people_primary_key());
 
-    let insert_xid = txns.begin();
-    run_sql_with_catalog(
-        &base,
-        &txns,
-        insert_xid,
-        "insert into people (id, name, note) values (1, 'alice', 'alpha')",
-        catalog.clone(),
-    )
-    .unwrap();
-    txns.commit(insert_xid).unwrap();
-
-    let upsert_xid = txns.begin();
-    assert_eq!(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            upsert_xid,
-            "insert into people (id, name, note) values (1, 'bob', 'beta') on conflict do nothing",
-            catalog,
+    let insert_xid = harness.txns.begin();
+    harness
+        .execute(
+            insert_xid,
+            "insert into people (id, name, note) values (1, 'alice', 'alpha')",
         )
-        .unwrap(),
+        .unwrap();
+    harness.txns.commit(insert_xid).unwrap();
+
+    let upsert_xid = harness.txns.begin();
+    assert_eq!(
+        harness
+            .execute(
+                upsert_xid,
+                "insert into people (id, name, note) values (1, 'bob', 'beta') on conflict do nothing",
+            )
+            .unwrap(),
         StatementResult::AffectedRows(0)
     );
-    txns.commit(upsert_xid).unwrap();
+    harness.txns.commit(upsert_xid).unwrap();
 }
 
 #[test]
 fn on_conflict_do_update_can_use_target_and_excluded_values() {
-    let base = temp_dir("upsert_do_update_target_and_excluded");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let catalog = catalog_with_people_primary_key();
+    let mut harness = SeededSqlHarness::new(
+        "upsert_do_update_target_and_excluded",
+        catalog_with_people_primary_key(),
+    );
 
-    let insert_xid = txns.begin();
-    run_sql_with_catalog(
-        &base,
-        &txns,
-        insert_xid,
-        "insert into people (id, name, note) values (1, 'alice', 'alpha')",
-        catalog.clone(),
-    )
-    .unwrap();
-    txns.commit(insert_xid).unwrap();
-
-    let upsert_xid = txns.begin();
-    assert_eq!(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            upsert_xid,
-            "insert into people (id, name, note) values (1, 'bob', 'beta') on conflict (id) do update set name = excluded.name, note = people.name",
-            catalog.clone(),
+    let insert_xid = harness.txns.begin();
+    harness
+        .execute(
+            insert_xid,
+            "insert into people (id, name, note) values (1, 'alice', 'alpha')",
         )
-        .unwrap(),
+        .unwrap();
+    harness.txns.commit(insert_xid).unwrap();
+
+    let upsert_xid = harness.txns.begin();
+    assert_eq!(
+        harness
+            .execute(
+                upsert_xid,
+                "insert into people (id, name, note) values (1, 'bob', 'beta') on conflict (id) do update set name = excluded.name, note = people.name",
+            )
+            .unwrap(),
         StatementResult::AffectedRows(1)
     );
-    txns.commit(upsert_xid).unwrap();
+    harness.txns.commit(upsert_xid).unwrap();
 
     assert_query_rows(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select name, note from people",
-            catalog,
-        )
-        .unwrap(),
+        harness
+            .execute(INVALID_TRANSACTION_ID, "select name, note from people")
+            .unwrap(),
         vec![vec![Value::Text("bob".into()), Value::Text("alice".into())]],
     );
 }
 
 #[test]
 fn on_conflict_do_update_where_false_skips_row() {
-    let base = temp_dir("upsert_do_update_where_false");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let catalog = catalog_with_people_primary_key();
+    let mut harness = SeededSqlHarness::new(
+        "upsert_do_update_where_false",
+        catalog_with_people_primary_key(),
+    );
 
-    let insert_xid = txns.begin();
-    run_sql_with_catalog(
-        &base,
-        &txns,
-        insert_xid,
-        "insert into people (id, name, note) values (1, 'alice', 'alpha')",
-        catalog.clone(),
-    )
-    .unwrap();
-    txns.commit(insert_xid).unwrap();
-
-    let upsert_xid = txns.begin();
-    assert_eq!(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            upsert_xid,
-            "insert into people (id, name, note) values (1, 'bob', 'beta') on conflict (id) do update set name = excluded.name where false",
-            catalog.clone(),
+    let insert_xid = harness.txns.begin();
+    harness
+        .execute(
+            insert_xid,
+            "insert into people (id, name, note) values (1, 'alice', 'alpha')",
         )
-        .unwrap(),
+        .unwrap();
+    harness.txns.commit(insert_xid).unwrap();
+
+    let upsert_xid = harness.txns.begin();
+    assert_eq!(
+        harness
+            .execute(
+                upsert_xid,
+                "insert into people (id, name, note) values (1, 'bob', 'beta') on conflict (id) do update set name = excluded.name where false",
+            )
+            .unwrap(),
         StatementResult::AffectedRows(0)
     );
-    txns.commit(upsert_xid).unwrap();
+    harness.txns.commit(upsert_xid).unwrap();
 
     assert_query_rows(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select name, note from people",
-            catalog,
-        )
-        .unwrap(),
+        harness
+            .execute(INVALID_TRANSACTION_ID, "select name, note from people")
+            .unwrap(),
         vec![vec![
             Value::Text("alice".into()),
             Value::Text("alpha".into()),
@@ -2093,18 +2036,15 @@ fn on_conflict_do_update_where_false_skips_row() {
 
 #[test]
 fn on_conflict_do_update_rejects_duplicate_input_rows() {
-    let base = temp_dir("upsert_duplicate_input_rows");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let catalog = catalog_with_people_primary_key();
-    let xid = txns.begin();
-    let err = run_sql_with_catalog(
-        &base,
-        &txns,
-        xid,
-        "insert into people (id, name) values (1, 'alice'), (1, 'bob') on conflict (id) do update set name = excluded.name",
-        catalog.clone(),
-    )
-    .unwrap_err();
+    let mut harness =
+        SeededSqlHarness::new("upsert_duplicate_input_rows", catalog_with_people_primary_key());
+    let xid = harness.txns.begin();
+    let err = harness
+        .execute(
+            xid,
+            "insert into people (id, name) values (1, 'alice'), (1, 'bob') on conflict (id) do update set name = excluded.name",
+        )
+        .unwrap_err();
     assert!(matches!(
         err,
         ExecError::CardinalityViolation { message, hint }
@@ -2112,63 +2052,50 @@ fn on_conflict_do_update_rejects_duplicate_input_rows() {
                 && hint.as_deref()
                     == Some("Ensure that no rows proposed for insertion within the same command have duplicate constrained values.")
     ));
-    txns.commit(xid).unwrap();
+    harness.txns.commit(xid).unwrap();
 
     assert_query_rows(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select count(*) from people",
-            catalog,
-        )
-        .unwrap(),
+        harness
+            .execute(INVALID_TRANSACTION_ID, "select count(*) from people")
+            .unwrap(),
         vec![vec![Value::Int64(0)]],
     );
 }
 
 #[test]
 fn on_conflict_do_update_duplicate_existing_conflicts_leave_row_unchanged() {
-    let base = temp_dir("upsert_duplicate_existing_conflicts");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let catalog = catalog_with_people_primary_key();
+    let mut harness = SeededSqlHarness::new(
+        "upsert_duplicate_existing_conflicts",
+        catalog_with_people_primary_key(),
+    );
 
-    let seed_xid = txns.begin();
-    run_sql_with_catalog(
-        &base,
-        &txns,
-        seed_xid,
-        "insert into people (id, name, note) values (1, 'alice', 'alpha')",
-        catalog.clone(),
-    )
-    .unwrap();
-    txns.commit(seed_xid).unwrap();
+    let seed_xid = harness.txns.begin();
+    harness
+        .execute(
+            seed_xid,
+            "insert into people (id, name, note) values (1, 'alice', 'alpha')",
+        )
+        .unwrap();
+    harness.txns.commit(seed_xid).unwrap();
 
-    let xid = txns.begin();
-    let err = run_sql_with_catalog(
-        &base,
-        &txns,
-        xid,
-        "insert into people (id, name) values (1, 'bob'), (1, 'carol') on conflict (id) do update set name = excluded.name",
-        catalog.clone(),
-    )
-    .unwrap_err();
+    let xid = harness.txns.begin();
+    let err = harness
+        .execute(
+            xid,
+            "insert into people (id, name) values (1, 'bob'), (1, 'carol') on conflict (id) do update set name = excluded.name",
+        )
+        .unwrap_err();
     assert!(matches!(
         err,
         ExecError::CardinalityViolation { message, .. }
             if message == "ON CONFLICT DO UPDATE command cannot affect row a second time"
     ));
-    txns.commit(xid).unwrap();
+    harness.txns.commit(xid).unwrap();
 
     assert_query_rows(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select id, name, note from people",
-            catalog,
-        )
-        .unwrap(),
+        harness
+            .execute(INVALID_TRANSACTION_ID, "select id, name, note from people")
+            .unwrap(),
         vec![vec![
             Value::Int32(1),
             Value::Text("alice".into()),
@@ -2179,44 +2106,36 @@ fn on_conflict_do_update_duplicate_existing_conflicts_leave_row_unchanged() {
 
 #[test]
 fn on_conflict_do_update_where_false_allows_duplicate_existing_conflicts() {
-    let base = temp_dir("upsert_duplicate_where_false_existing_conflicts");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let catalog = catalog_with_people_primary_key();
+    let mut harness = SeededSqlHarness::new(
+        "upsert_duplicate_where_false_existing_conflicts",
+        catalog_with_people_primary_key(),
+    );
 
-    let seed_xid = txns.begin();
-    run_sql_with_catalog(
-        &base,
-        &txns,
-        seed_xid,
-        "insert into people (id, name, note) values (1, 'alice', 'alpha')",
-        catalog.clone(),
-    )
-    .unwrap();
-    txns.commit(seed_xid).unwrap();
-
-    let xid = txns.begin();
-    assert_eq!(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            xid,
-            "insert into people (id, name) values (1, 'bob'), (1, 'carol') on conflict (id) do update set name = excluded.name where false",
-            catalog.clone(),
+    let seed_xid = harness.txns.begin();
+    harness
+        .execute(
+            seed_xid,
+            "insert into people (id, name, note) values (1, 'alice', 'alpha')",
         )
-        .unwrap(),
+        .unwrap();
+    harness.txns.commit(seed_xid).unwrap();
+
+    let xid = harness.txns.begin();
+    assert_eq!(
+        harness
+            .execute(
+                xid,
+                "insert into people (id, name) values (1, 'bob'), (1, 'carol') on conflict (id) do update set name = excluded.name where false",
+            )
+            .unwrap(),
         StatementResult::AffectedRows(0)
     );
-    txns.commit(xid).unwrap();
+    harness.txns.commit(xid).unwrap();
 
     assert_query_rows(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select id, name, note from people",
-            catalog,
-        )
-        .unwrap(),
+        harness
+            .execute(INVALID_TRANSACTION_ID, "select id, name, note from people")
+            .unwrap(),
         vec![vec![
             Value::Int32(1),
             Value::Text("alice".into()),
@@ -2227,44 +2146,39 @@ fn on_conflict_do_update_where_false_allows_duplicate_existing_conflicts() {
 
 #[test]
 fn on_conflict_do_update_allows_duplicate_input_after_arbiter_key_changes() {
-    let base = temp_dir("upsert_duplicate_after_arbiter_key_change");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let catalog = catalog_with_people_note_unique_index();
+    let mut harness = SeededSqlHarness::new(
+        "upsert_duplicate_after_arbiter_key_change",
+        catalog_with_people_note_unique_index(),
+    );
 
-    let seed_xid = txns.begin();
-    run_sql_with_catalog(
-        &base,
-        &txns,
-        seed_xid,
-        "insert into people (id, name, note) values (1, 'seed', 'key')",
-        catalog.clone(),
-    )
-    .unwrap();
-    txns.commit(seed_xid).unwrap();
-
-    let xid = txns.begin();
-    assert_eq!(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            xid,
-            "insert into people (id, name, note) values (2, 'newkey1', 'key'), (3, 'newkey2', 'key') on conflict (note) do update set name = excluded.name, note = excluded.name",
-            catalog.clone(),
+    let seed_xid = harness.txns.begin();
+    harness
+        .execute(
+            seed_xid,
+            "insert into people (id, name, note) values (1, 'seed', 'key')",
         )
-        .unwrap(),
+        .unwrap();
+    harness.txns.commit(seed_xid).unwrap();
+
+    let xid = harness.txns.begin();
+    assert_eq!(
+        harness
+            .execute(
+                xid,
+                "insert into people (id, name, note) values (2, 'newkey1', 'key'), (3, 'newkey2', 'key') on conflict (note) do update set name = excluded.name, note = excluded.name",
+            )
+            .unwrap(),
         StatementResult::AffectedRows(2)
     );
-    txns.commit(xid).unwrap();
+    harness.txns.commit(xid).unwrap();
 
     assert_query_rows(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select id, name, note from people order by id",
-            catalog,
-        )
-        .unwrap(),
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select id, name, note from people order by id",
+            )
+            .unwrap(),
         vec![
             vec![
                 Value::Int32(1),
@@ -2282,80 +2196,60 @@ fn on_conflict_do_update_allows_duplicate_input_after_arbiter_key_changes() {
 
 #[test]
 fn on_conflict_null_arbiter_keys_do_not_conflict() {
-    let base = temp_dir("upsert_null_arbiter_keys");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let catalog = catalog_with_people_note_unique_index();
+    let mut harness =
+        SeededSqlHarness::new("upsert_null_arbiter_keys", catalog_with_people_note_unique_index());
 
-    let first_xid = txns.begin();
-    run_sql_with_catalog(
-        &base,
-        &txns,
-        first_xid,
-        "insert into people (id, name, note) values (1, 'alice', null)",
-        catalog.clone(),
-    )
-    .unwrap();
-    txns.commit(first_xid).unwrap();
-
-    let second_xid = txns.begin();
-    assert_eq!(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            second_xid,
-            "insert into people (id, name, note) values (2, 'bob', null) on conflict (note) do nothing",
-            catalog.clone(),
+    let first_xid = harness.txns.begin();
+    harness
+        .execute(
+            first_xid,
+            "insert into people (id, name, note) values (1, 'alice', null)",
         )
-        .unwrap(),
+        .unwrap();
+    harness.txns.commit(first_xid).unwrap();
+
+    let second_xid = harness.txns.begin();
+    assert_eq!(
+        harness
+            .execute(
+                second_xid,
+                "insert into people (id, name, note) values (2, 'bob', null) on conflict (note) do nothing",
+            )
+            .unwrap(),
         StatementResult::AffectedRows(1)
     );
-    txns.commit(second_xid).unwrap();
+    harness.txns.commit(second_xid).unwrap();
 
     assert_query_rows(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select count(*) from people",
-            catalog,
-        )
-        .unwrap(),
+        harness
+            .execute(INVALID_TRANSACTION_ID, "select count(*) from people")
+            .unwrap(),
         vec![vec![Value::Int64(2)]],
     );
 }
 
 #[test]
 fn update_sql_updates_matching_rows() {
-    let base = temp_dir("update_sql");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let insert_xid = txns.begin();
-    run_sql(
-        &base,
-        &txns,
-        insert_xid,
-        "insert into people (id, name, note) values (1, 'alice', 'old')",
-    )
-    .unwrap();
-    txns.commit(insert_xid).unwrap();
-    let update_xid = txns.begin();
-    assert_eq!(
-        run_sql(
-            &base,
-            &txns,
-            update_xid,
-            "update people set note = 'new' where id = 1"
+    let mut harness = SeededSqlHarness::new("update_sql", catalog());
+    let insert_xid = harness.txns.begin();
+    harness
+        .execute(
+            insert_xid,
+            "insert into people (id, name, note) values (1, 'alice', 'old')",
         )
-        .unwrap(),
+        .unwrap();
+    harness.txns.commit(insert_xid).unwrap();
+    let update_xid = harness.txns.begin();
+    assert_eq!(
+        harness
+            .execute(update_xid, "update people set note = 'new' where id = 1")
+            .unwrap(),
         StatementResult::AffectedRows(1)
     );
-    txns.commit(update_xid).unwrap();
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select note from people where id = 1",
-    )
-    .unwrap()
+    harness.txns.commit(update_xid).unwrap();
+    match harness
+        .execute(INVALID_TRANSACTION_ID, "select note from people where id = 1")
+        .unwrap()
     {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Text("new".into())]]);
@@ -2365,43 +2259,32 @@ fn update_sql_updates_matching_rows() {
 }
 #[test]
 fn delete_sql_deletes_matching_rows() {
-    let base = temp_dir("delete_sql");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let insert_xid = txns.begin();
-    run_sql(
-        &base,
-        &txns,
-        insert_xid,
-        "insert into people (id, name, note) values (1, 'alice', null)",
-    )
-    .unwrap();
-    run_sql(
-        &base,
-        &txns,
-        insert_xid,
-        "insert into people (id, name, note) values (2, 'bob', 'keep')",
-    )
-    .unwrap();
-    txns.commit(insert_xid).unwrap();
-    let delete_xid = txns.begin();
-    assert_eq!(
-        run_sql(
-            &base,
-            &txns,
-            delete_xid,
-            "delete from people where note is null"
+    let mut harness = SeededSqlHarness::new("delete_sql", catalog());
+    let insert_xid = harness.txns.begin();
+    harness
+        .execute(
+            insert_xid,
+            "insert into people (id, name, note) values (1, 'alice', null)",
         )
-        .unwrap(),
+        .unwrap();
+    harness
+        .execute(
+            insert_xid,
+            "insert into people (id, name, note) values (2, 'bob', 'keep')",
+        )
+        .unwrap();
+    harness.txns.commit(insert_xid).unwrap();
+    let delete_xid = harness.txns.begin();
+    assert_eq!(
+        harness
+            .execute(delete_xid, "delete from people where note is null")
+            .unwrap(),
         StatementResult::AffectedRows(1)
     );
-    txns.commit(delete_xid).unwrap();
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select name from people",
-    )
-    .unwrap()
+    harness.txns.commit(delete_xid).unwrap();
+    match harness
+        .execute(INVALID_TRANSACTION_ID, "select name from people")
+        .unwrap()
     {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Text("bob".into())]]);
@@ -2411,18 +2294,21 @@ fn delete_sql_deletes_matching_rows() {
 }
 #[test]
 fn order_by_limit_offset_returns_expected_rows() {
-    let base = temp_dir("order_by_limit_offset");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let insert_xid = txns.begin();
-    run_sql(&base, &txns, insert_xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (3, 'carol', 'c'), (2, 'bob', null)").unwrap();
-    txns.commit(insert_xid).unwrap();
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select id, name from people order by id desc limit 2 offset 1",
-    )
-    .unwrap()
+    let mut harness = SeededSqlHarness::new("order_by_limit_offset", catalog());
+    let insert_xid = harness.txns.begin();
+    harness
+        .execute(
+            insert_xid,
+            "insert into people (id, name, note) values (1, 'alice', 'a'), (3, 'carol', 'c'), (2, 'bob', null)",
+        )
+        .unwrap();
+    harness.txns.commit(insert_xid).unwrap();
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select id, name from people order by id desc limit 2 offset 1",
+        )
+        .unwrap()
     {
         StatementResult::Query { rows, .. } => {
             assert_eq!(
@@ -2465,18 +2351,21 @@ fn explain_mentions_sort_and_limit_nodes() {
 }
 #[test]
 fn order_by_nulls_first_and_last_work() {
-    let base = temp_dir("order_by_nulls");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let insert_xid = txns.begin();
-    run_sql(&base, &txns, insert_xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', null), (3, 'carol', 'c')").unwrap();
-    txns.commit(insert_xid).unwrap();
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select id from people order by note asc nulls first",
-    )
-    .unwrap()
+    let mut harness = SeededSqlHarness::new("order_by_nulls", catalog());
+    let insert_xid = harness.txns.begin();
+    harness
+        .execute(
+            insert_xid,
+            "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', null), (3, 'carol', 'c')",
+        )
+        .unwrap();
+    harness.txns.commit(insert_xid).unwrap();
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select id from people order by note asc nulls first",
+        )
+        .unwrap()
     {
         StatementResult::Query { rows, .. } => {
             assert_eq!(
@@ -2490,13 +2379,12 @@ fn order_by_nulls_first_and_last_work() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select id from people order by note desc nulls last",
-    )
-    .unwrap()
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select id from people order by note desc nulls last",
+        )
+        .unwrap()
     {
         StatementResult::Query { rows, .. } => {
             assert_eq!(
@@ -2513,57 +2401,54 @@ fn order_by_nulls_first_and_last_work() {
 }
 #[test]
 fn null_predicates_work_in_where_clause() {
-    let base = temp_dir("null_predicates");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let insert_xid = txns.begin();
-    run_sql(&base, &txns, insert_xid, "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', null), (3, 'carol', 'c')").unwrap();
-    txns.commit(insert_xid).unwrap();
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select id from people where note is null",
-    )
-    .unwrap()
+    let mut harness = SeededSqlHarness::new("null_predicates", catalog());
+    let insert_xid = harness.txns.begin();
+    harness
+        .execute(
+            insert_xid,
+            "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', null), (3, 'carol', 'c')",
+        )
+        .unwrap();
+    harness.txns.commit(insert_xid).unwrap();
+    match harness
+        .execute(INVALID_TRANSACTION_ID, "select id from people where note is null")
+        .unwrap()
     {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Int32(2)]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select id from people where note is not null order by id",
-    )
-    .unwrap()
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select id from people where note is not null order by id",
+        )
+        .unwrap()
     {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(3)]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select id from people where note is distinct from null order by id",
-    )
-    .unwrap()
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select id from people where note is distinct from null order by id",
+        )
+        .unwrap()
     {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Int32(1)], vec![Value::Int32(3)]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select id from people where note is not distinct from null",
-    )
-    .unwrap()
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select id from people where note is not distinct from null",
+        )
+        .unwrap()
     {
         StatementResult::Query { rows, .. } => {
             assert_eq!(rows, vec![vec![Value::Int32(2)]]);
@@ -2762,24 +2647,21 @@ fn select_from_people_returns_zero_column_rows() {
 }
 #[test]
 fn explain_analyze_buffers_reports_runtime_and_buffers() {
-    let base = temp_dir("explain_analyze_sql");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let xid = txns.begin();
-    run_sql(
-        &base,
-        &txns,
-        xid,
-        "insert into people (id, name, note) values (1, 'alice', 'alpha')",
-    )
-    .unwrap();
-    txns.commit(xid).unwrap();
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "explain (analyze, buffers) select name from people",
-    )
-    .unwrap()
+    let mut harness = SeededSqlHarness::new("explain_analyze_sql", catalog());
+    let xid = harness.txns.begin();
+    harness
+        .execute(
+            xid,
+            "insert into people (id, name, note) values (1, 'alice', 'alpha')",
+        )
+        .unwrap();
+    harness.txns.commit(xid).unwrap();
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "explain (analyze, buffers) select name from people",
+        )
+        .unwrap()
     {
         StatementResult::Query { rows, .. } => {
             let rendered = rows
@@ -2799,24 +2681,21 @@ fn explain_analyze_buffers_reports_runtime_and_buffers() {
 
 #[test]
 fn explain_analyze_timing_off_still_reports_nonzero_actual_rows() {
-    let base = temp_dir("explain_analyze_timing_off_rows");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let xid = txns.begin();
-    run_sql(
-        &base,
-        &txns,
-        xid,
-        "insert into people (id, name, note) values (1, 'alice', 'alpha')",
-    )
-    .unwrap();
-    txns.commit(xid).unwrap();
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "explain (analyze, timing off) select name from people order by name",
-    )
-    .unwrap()
+    let mut harness = SeededSqlHarness::new("explain_analyze_timing_off_rows", catalog());
+    let xid = harness.txns.begin();
+    harness
+        .execute(
+            xid,
+            "insert into people (id, name, note) values (1, 'alice', 'alpha')",
+        )
+        .unwrap();
+    harness.txns.commit(xid).unwrap();
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "explain (analyze, timing off) select name from people order by name",
+        )
+        .unwrap()
     {
         StatementResult::Query { rows, .. } => {
             let rendered = rows
@@ -2845,27 +2724,24 @@ fn explain_analyze_timing_off_still_reports_nonzero_actual_rows() {
 
 #[test]
 fn explain_analyze_reports_single_loop_for_simple_scan_and_sort() {
-    let base = temp_dir("explain_analyze_simple_loops");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let xid = txns.begin();
-    run_sql(
-        &base,
-        &txns,
-        xid,
-        "insert into people (id, name, note) values
+    let mut harness = SeededSqlHarness::new("explain_analyze_simple_loops", catalog());
+    let xid = harness.txns.begin();
+    harness
+        .execute(
+            xid,
+            "insert into people (id, name, note) values
          (1, 'alice', 'alpha'),
          (2, 'bob', null),
          (3, 'carol', 'storage')",
-    )
-    .unwrap();
-    txns.commit(xid).unwrap();
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "explain (analyze, buffers) select name from people where id >= 1 order by name",
-    )
-    .unwrap()
+        )
+        .unwrap();
+    harness.txns.commit(xid).unwrap();
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "explain (analyze, buffers) select name from people where id >= 1 order by name",
+        )
+        .unwrap()
     {
         StatementResult::Query { rows, .. } => {
             let rendered = rows
@@ -7399,8 +7275,6 @@ fn bit_functions_and_operators_follow_postgres_rules() {
 
 #[test]
 fn insert_select_default_values_and_table_stmt_work() {
-    let base = temp_dir("bit_insert_defaults");
-    let txns = TransactionManager::new_durable(&base).unwrap();
     let mut catalog = Catalog::default();
     let mut desc = RelationDesc {
         columns: vec![
@@ -7436,47 +7310,35 @@ fn insert_select_default_values_and_table_stmt_work() {
         ),
     );
 
-    run_sql_with_catalog(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "insert into bit_defaults default values",
-        catalog.clone(),
-    )
-    .unwrap();
-    run_sql_with_catalog(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "insert into bit_defaults (b2) values (B'1')",
-        catalog.clone(),
-    )
-    .unwrap();
-    run_sql_with_catalog(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "insert into bit_defaults values (DEFAULT, B'11')",
-        catalog.clone(),
-    )
-    .unwrap();
-    run_sql_with_catalog(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "insert into bit_defaults select B'1111', B'1'",
-        catalog.clone(),
-    )
-    .unwrap();
-    assert_query_rows(
-        run_sql_with_catalog(
-            &base,
-            &txns,
+    let mut harness = SeededSqlHarness::new("bit_insert_defaults", catalog);
+    harness
+        .execute(
             INVALID_TRANSACTION_ID,
-            "table bit_defaults",
-            catalog,
+            "insert into bit_defaults default values",
         )
-        .unwrap(),
+        .unwrap();
+    harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "insert into bit_defaults (b2) values (B'1')",
+        )
+        .unwrap();
+    harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "insert into bit_defaults values (DEFAULT, B'11')",
+        )
+        .unwrap();
+    harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "insert into bit_defaults select B'1111', B'1'",
+        )
+        .unwrap();
+    assert_query_rows(
+        harness
+            .execute(INVALID_TRANSACTION_ID, "table bit_defaults")
+            .unwrap(),
         vec![
             vec![
                 Value::Bit(crate::include::nodes::datum::BitString::new(
@@ -7666,19 +7528,12 @@ fn md5_supports_text_and_bytea_vectors() {
 
 #[test]
 fn qualified_star_target_expands_relation_columns() {
-    let base = temp_dir("qualified_star_target");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    seed_people_and_pets(&base, &mut txns);
+    let mut harness = seed_people_and_pets("qualified_star_target");
 
     assert_query_rows(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select p.* from people p order by p.id",
-            catalog(),
-        )
-        .unwrap(),
+        harness
+            .execute(INVALID_TRANSACTION_ID, "select p.* from people p order by p.id")
+            .unwrap(),
         vec![
             vec![
                 Value::Int32(1),
@@ -9784,17 +9639,10 @@ fn join_alias_hides_inner_relation_names() {
 
 #[test]
 fn ambiguous_cross_join_column_reports_ambiguity() {
-    let base = temp_dir("ambiguous_cross_join_column");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    seed_people_and_pets(&base, &mut txns);
-    let err = run_sql_with_catalog(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select id from people cross join pets",
-        catalog_with_pets(),
-    )
-    .unwrap_err();
+    let mut harness = seed_people_and_pets("ambiguous_cross_join_column");
+    let err = harness
+        .execute(INVALID_TRANSACTION_ID, "select id from people cross join pets")
+        .unwrap_err();
     assert!(matches!(
         err,
         ExecError::Parse(ParseError::AmbiguousColumn(name)) if name == "id"
@@ -9836,33 +9684,25 @@ fn join_using_alias_preserves_base_table_visibility() {
 
 #[test]
 fn join_using_alias_hides_non_merged_columns() {
-    let base = temp_dir("join_using_alias_hides_non_merged");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    seed_people_and_pets(&base, &mut txns);
-    let err = run_sql_with_catalog(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select x.name from people join pets using (id) as x",
-        catalog_with_pets(),
-    )
-    .unwrap_err();
+    let mut harness = seed_people_and_pets("join_using_alias_hides_non_merged");
+    let err = harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select x.name from people join pets using (id) as x",
+        )
+        .unwrap_err();
     assert!(matches!(err, ExecError::Parse(ParseError::UnknownColumn(name)) if name == "x.name"));
 }
 
 #[test]
 fn parenthesized_join_alias_reports_invalid_from_clause_reference() {
-    let base = temp_dir("parenthesized_join_alias_invalid_ref");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    seed_people_and_pets(&base, &mut txns);
-    let err = run_sql_with_catalog(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select * from (people p join pets q on p.id = q.owner_id) j where p.id = 1",
-        catalog_with_pets(),
-    )
-    .unwrap_err();
+    let mut harness = seed_people_and_pets("parenthesized_join_alias_invalid_ref");
+    let err = harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select * from (people p join pets q on p.id = q.owner_id) j where p.id = 1",
+        )
+        .unwrap_err();
     assert!(matches!(
         err,
         ExecError::Parse(ParseError::InvalidFromClauseReference(name)) if name == "p"
@@ -9871,17 +9711,13 @@ fn parenthesized_join_alias_reports_invalid_from_clause_reference() {
 
 #[test]
 fn wrapped_join_alias_reports_missing_from_clause_entry() {
-    let base = temp_dir("wrapped_join_alias_missing_ref");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    seed_people_and_pets(&base, &mut txns);
-    let err = run_sql_with_catalog(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select * from (people join pets on people.id = pets.owner_id as x) xx where x.id = 1",
-        catalog_with_pets(),
-    )
-    .unwrap_err();
+    let mut harness = seed_people_and_pets("wrapped_join_alias_missing_ref");
+    let err = harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select * from (people join pets on people.id = pets.owner_id as x) xx where x.id = 1",
+        )
+        .unwrap_err();
     assert!(matches!(
         err,
         ExecError::Parse(ParseError::MissingFromClauseEntry(name)) if name == "x"
@@ -9890,17 +9726,13 @@ fn wrapped_join_alias_reports_missing_from_clause_entry() {
 
 #[test]
 fn join_alias_rejects_duplicate_table_name() {
-    let base = temp_dir("join_alias_duplicate_name");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    seed_people_and_pets(&base, &mut txns);
-    let err = run_sql_with_catalog(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select * from people a1 join pets a2 using (id) as a1",
-        catalog_with_pets(),
-    )
-    .unwrap_err();
+    let mut harness = seed_people_and_pets("join_alias_duplicate_name");
+    let err = harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select * from people a1 join pets a2 using (id) as a1",
+        )
+        .unwrap_err();
     assert!(matches!(
         err,
         ExecError::Parse(ParseError::DuplicateTableName(name)) if name == "a1"
@@ -10268,19 +10100,15 @@ fn sql_visible_coalesce_accepts_single_argument() {
 
 #[test]
 fn left_join_on_emits_null_extended_rows() {
-    let base = temp_dir("left_join_on");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    seed_people_and_pets(&base, &mut txns);
+    let mut harness = seed_people_and_pets("left_join_on");
 
     assert_query_rows(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select people.id, pets.id from people left join pets on people.id = pets.owner_id order by 1, 2",
-            catalog_with_pets(),
-        )
-        .unwrap(),
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select people.id, pets.id from people left join pets on people.id = pets.owner_id order by 1, 2",
+            )
+            .unwrap(),
         vec![
             vec![Value::Int32(1), Value::Int32(10)],
             vec![Value::Int32(1), Value::Int32(11)],
@@ -10292,19 +10120,15 @@ fn left_join_on_emits_null_extended_rows() {
 
 #[test]
 fn cross_join_limit_respects_order_by_after_reordering() {
-    let base = temp_dir("cross_join_row_order");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    seed_people_and_pets(&base, &mut txns);
+    let mut harness = seed_people_and_pets("cross_join_row_order");
 
     assert_query_rows(
-        run_sql_with_catalog(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select people.id, pets.id from people, pets order by pets.id, people.id limit 6",
-            catalog_with_pets(),
-        )
-        .unwrap(),
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select people.id, pets.id from people, pets order by pets.id, people.id limit 6",
+            )
+            .unwrap(),
         vec![
             vec![Value::Int32(1), Value::Int32(10)],
             vec![Value::Int32(2), Value::Int32(10)],
@@ -15854,18 +15678,14 @@ fn insert_sql_numeric_round_trips_through_storage() {
 
 #[test]
 fn scalar_subquery_target_list_returns_per_row_counts() {
-    let base = temp_dir("scalar_subquery_target_list");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    seed_people_and_pets(&base, &mut txns);
+    let mut harness = seed_people_and_pets("scalar_subquery_target_list");
     assert_query_rows(
-            run_sql_with_catalog(
-                &base,
-                &txns,
-                INVALID_TRANSACTION_ID,
-                "select p.name, (select count(*) from pets q where q.owner_id = p.id) from people p order by p.id",
-                catalog_with_pets(),
-            )
-            .unwrap(),
+            harness
+                .execute(
+                    INVALID_TRANSACTION_ID,
+                    "select p.name, (select count(*) from pets q where q.owner_id = p.id) from people p order by p.id",
+                )
+                .unwrap(),
             vec![
                 vec![Value::Text("alice".into()), Value::Int64(2)],
                 vec![Value::Text("bob".into()), Value::Int64(1)],
@@ -16181,116 +16001,92 @@ fn aggregate_subquery_can_reference_outer_visible_cte() {
 
 #[test]
 fn insert_values_can_reference_statement_ctes() {
-    let base = temp_dir("insert_values_ctes");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let xid = txns.begin();
-    run_sql(
-            &base,
-            &txns,
+    let mut harness = SeededSqlHarness::new("insert_values_ctes", catalog());
+    let xid = harness.txns.begin();
+    harness
+        .execute(
             xid,
             "with q(v) as (values (7)) insert into people (id, name, note) values ((select v from q), 'alice', 'a')",
         )
         .unwrap();
-    txns.commit(xid).unwrap();
+    harness.txns.commit(xid).unwrap();
 
     assert_query_rows(
-        run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select id, name from people",
-        )
-        .unwrap(),
+        harness
+            .execute(INVALID_TRANSACTION_ID, "select id, name from people")
+            .unwrap(),
         vec![vec![Value::Int32(7), Value::Text("alice".into())]],
     );
 }
 
 #[test]
 fn update_can_reference_statement_ctes() {
-    let base = temp_dir("update_ctes");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let xid = txns.begin();
-    run_sql(
-        &base,
-        &txns,
-        xid,
-        "insert into people (id, name, note) values (1, 'alice', 'old')",
-    )
-    .unwrap();
-    txns.commit(xid).unwrap();
+    let mut harness = SeededSqlHarness::new("update_ctes", catalog());
+    let xid = harness.txns.begin();
+    harness
+        .execute(
+            xid,
+            "insert into people (id, name, note) values (1, 'alice', 'old')",
+        )
+        .unwrap();
+    harness.txns.commit(xid).unwrap();
 
-    let xid = txns.begin();
-    run_sql(
-        &base,
-        &txns,
-        xid,
-        "with q(v) as (values ('new')) update people set note = (select v from q) where id = 1",
-    )
-    .unwrap();
-    txns.commit(xid).unwrap();
+    let xid = harness.txns.begin();
+    harness
+        .execute(
+            xid,
+            "with q(v) as (values ('new')) update people set note = (select v from q) where id = 1",
+        )
+        .unwrap();
+    harness.txns.commit(xid).unwrap();
 
     assert_query_rows(
-        run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select note from people",
-        )
-        .unwrap(),
+        harness
+            .execute(INVALID_TRANSACTION_ID, "select note from people")
+            .unwrap(),
         vec![vec![Value::Text("new".into())]],
     );
 }
 
 #[test]
 fn delete_can_reference_statement_ctes() {
-    let base = temp_dir("delete_ctes");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    let xid = txns.begin();
-    run_sql(
-        &base,
-        &txns,
-        xid,
-        "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', 'b')",
-    )
-    .unwrap();
-    txns.commit(xid).unwrap();
+    let mut harness = SeededSqlHarness::new("delete_ctes", catalog());
+    let xid = harness.txns.begin();
+    harness
+        .execute(
+            xid,
+            "insert into people (id, name, note) values (1, 'alice', 'a'), (2, 'bob', 'b')",
+        )
+        .unwrap();
+    harness.txns.commit(xid).unwrap();
 
-    let xid = txns.begin();
-    run_sql(
-        &base,
-        &txns,
-        xid,
-        "with q(v) as (values (2)) delete from people where id in (select v from q)",
-    )
-    .unwrap();
-    txns.commit(xid).unwrap();
+    let xid = harness.txns.begin();
+    harness
+        .execute(
+            xid,
+            "with q(v) as (values (2)) delete from people where id in (select v from q)",
+        )
+        .unwrap();
+    harness.txns.commit(xid).unwrap();
 
     assert_query_rows(
-        run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select id from people",
-        )
-        .unwrap(),
+        harness
+            .execute(INVALID_TRANSACTION_ID, "select id from people")
+            .unwrap(),
         vec![vec![Value::Int32(1)]],
     );
 }
 
 #[test]
 fn scalar_subquery_zero_rows_yields_null() {
-    let base = temp_dir("scalar_subquery_zero_rows");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    seed_people_and_pets(&base, &mut txns);
+    let mut harness = seed_people_and_pets("scalar_subquery_zero_rows");
     assert_query_rows(
-            run_sql_with_catalog(
-                &base,
-                &txns,
-                INVALID_TRANSACTION_ID,
-                "select p.name, (select q.name from pets q where q.owner_id = p.id and q.id = 999) from people p order by p.id",
-                catalog_with_pets(),
-            )
-            .unwrap(),
+            harness
+                .execute(
+                    INVALID_TRANSACTION_ID,
+                    "select p.name, (select q.name from pets q where q.owner_id = p.id and q.id = 999) from people p order by p.id",
+                )
+                .unwrap(),
             vec![
                 vec![Value::Text("alice".into()), Value::Null],
                 vec![Value::Text("bob".into()), Value::Null],
@@ -16301,17 +16097,13 @@ fn scalar_subquery_zero_rows_yields_null() {
 
 #[test]
 fn scalar_subquery_multiple_rows_errors() {
-    let base = temp_dir("scalar_subquery_multiple_rows");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    seed_people_and_pets(&base, &mut txns);
-    let err = run_sql_with_catalog(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "select (select q.name from pets q where q.owner_id = p.id) from people p where p.id = 1",
-        catalog_with_pets(),
-    )
-    .unwrap_err();
+    let mut harness = seed_people_and_pets("scalar_subquery_multiple_rows");
+    let err = harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select (select q.name from pets q where q.owner_id = p.id) from people p where p.id = 1",
+        )
+        .unwrap_err();
     assert!(
         format!("{err:?}")
             .contains("more than one row returned by a subquery used as an expression")
@@ -16320,29 +16112,23 @@ fn scalar_subquery_multiple_rows_errors() {
 
 #[test]
 fn exists_and_not_exists_are_correlated_per_row() {
-    let base = temp_dir("exists_correlated_per_row");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    seed_people_and_pets(&base, &mut txns);
+    let mut harness = seed_people_and_pets("exists_correlated_per_row");
     assert_query_rows(
-            run_sql_with_catalog(
-                &base,
-                &txns,
-                INVALID_TRANSACTION_ID,
-                "select p.id from people p where exists (select 1 from pets q where q.owner_id = p.id) order by p.id",
-                catalog_with_pets(),
-            )
-            .unwrap(),
+            harness
+                .execute(
+                    INVALID_TRANSACTION_ID,
+                    "select p.id from people p where exists (select 1 from pets q where q.owner_id = p.id) order by p.id",
+                )
+                .unwrap(),
             vec![vec![Value::Int32(1)], vec![Value::Int32(2)]],
         );
     assert_query_rows(
-            run_sql_with_catalog(
-                &base,
-                &txns,
-                INVALID_TRANSACTION_ID,
-                "select p.id from people p where not exists (select 1 from pets q where q.owner_id = p.id) order by p.id",
-                catalog_with_pets(),
-            )
-            .unwrap(),
+            harness
+                .execute(
+                    INVALID_TRANSACTION_ID,
+                    "select p.id from people p where not exists (select 1 from pets q where q.owner_id = p.id) order by p.id",
+                )
+                .unwrap(),
             vec![vec![Value::Int32(3)]],
         );
 }
@@ -16437,36 +16223,28 @@ fn any_and_all_subquery_propagate_nulls() {
 
 #[test]
 fn correlated_any_subquery_filters_rows() {
-    let base = temp_dir("correlated_any_subquery");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    seed_people_and_pets(&base, &mut txns);
+    let mut harness = seed_people_and_pets("correlated_any_subquery");
     assert_query_rows(
-            run_sql_with_catalog(
-                &base,
-                &txns,
-                INVALID_TRANSACTION_ID,
-                "select p.id from people p where p.id = any (select q.owner_id from pets q where q.owner_id is not null) order by p.id",
-                catalog_with_pets(),
-            )
-            .unwrap(),
+            harness
+                .execute(
+                    INVALID_TRANSACTION_ID,
+                    "select p.id from people p where p.id = any (select q.owner_id from pets q where q.owner_id is not null) order by p.id",
+                )
+                .unwrap(),
             vec![vec![Value::Int32(1)], vec![Value::Int32(2)]],
         );
 }
 
 #[test]
 fn grouped_query_having_can_use_correlated_exists() {
-    let base = temp_dir("grouped_having_correlated_exists");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    seed_people_and_pets(&base, &mut txns);
+    let mut harness = seed_people_and_pets("grouped_having_correlated_exists");
     assert_query_rows(
-            run_sql_with_catalog(
-                &base,
-                &txns,
-                INVALID_TRANSACTION_ID,
-                "select p.id, count(*) from people p group by p.id having exists (select 1 from pets q where q.owner_id = p.id) order by p.id",
-                catalog_with_pets(),
-            )
-            .unwrap(),
+            harness
+                .execute(
+                    INVALID_TRANSACTION_ID,
+                    "select p.id, count(*) from people p group by p.id having exists (select 1 from pets q where q.owner_id = p.id) order by p.id",
+                )
+                .unwrap(),
             vec![
                 vec![Value::Int32(1), Value::Int64(1)],
                 vec![Value::Int32(2), Value::Int64(1)],
@@ -16504,36 +16282,28 @@ fn degenerate_having_does_not_scan_where_clause() {
 
 #[test]
 fn nested_outer_correlation_uses_the_correct_row() {
-    let base = temp_dir("nested_outer_correlation");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    seed_people_and_pets(&base, &mut txns);
+    let mut harness = seed_people_and_pets("nested_outer_correlation");
     assert_query_rows(
-            run_sql_with_catalog(
-                &base,
-                &txns,
-                INVALID_TRANSACTION_ID,
-                "select p.id from people p where exists (select 1 from pets q where q.owner_id = p.id and exists (select 1 from people r where r.id = p.id and r.name = p.name)) order by p.id",
-                catalog_with_pets(),
-            )
-            .unwrap(),
+            harness
+                .execute(
+                    INVALID_TRANSACTION_ID,
+                    "select p.id from people p where exists (select 1 from pets q where q.owner_id = p.id and exists (select 1 from people r where r.id = p.id and r.name = p.name)) order by p.id",
+                )
+                .unwrap(),
             vec![vec![Value::Int32(1)], vec![Value::Int32(2)]],
         );
 }
 
 #[test]
 fn scalar_subquery_can_be_used_in_order_by() {
-    let base = temp_dir("scalar_subquery_order_by");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
-    seed_people_and_pets(&base, &mut txns);
+    let mut harness = seed_people_and_pets("scalar_subquery_order_by");
     assert_query_rows(
-            run_sql_with_catalog(
-                &base,
-                &txns,
-                INVALID_TRANSACTION_ID,
-                "select p.name from people p order by (select count(*) from pets q where q.owner_id = p.id) desc, p.id",
-                catalog_with_pets(),
-            )
-            .unwrap(),
+            harness
+                .execute(
+                    INVALID_TRANSACTION_ID,
+                    "select p.name from people p order by (select count(*) from pets q where q.owner_id = p.id) desc, p.id",
+                )
+                .unwrap(),
             vec![
                 vec![Value::Text("alice".into())],
                 vec![Value::Text("bob".into())],
