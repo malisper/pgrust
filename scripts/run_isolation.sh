@@ -253,7 +253,8 @@ read_schedule() {
 is_skipped() {
     local name="$1"
     local entry
-    for entry in "${SKIP_TESTS[@]}"; do
+    # Guarded expansion — `set -u` + bash 3 blows up on an empty array.
+    for entry in ${SKIP_TESTS[@]+"${SKIP_TESTS[@]}"}; do
         [[ "$entry" == "$name" ]] && return 0
     done
     return 1
