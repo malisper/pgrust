@@ -8,6 +8,7 @@ use crate::backend::access::transam::xact::{CommandId, INVALID_TRANSACTION_ID, T
 use crate::backend::catalog::store::CatalogMutationEffect;
 use crate::backend::commands::copyfrom::parse_text_array_literal;
 use crate::backend::commands::tablecmds::{execute_merge, execute_prepared_insert_row};
+use crate::backend::executor::expr_bool::parse_pg_bool_text;
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
     DeferredForeignKeyTracker, ExecError, ExecutorContext, ExecutorTransactionState,
@@ -739,8 +740,13 @@ impl Session {
         // until COPY is modeled as a real parsed/bound statement.
         if let Some((table_name, columns, file_path)) = parse_copy_from_file(sql) {
             let rows = read_copy_from_file(&file_path)?;
-            let inserted =
-                self.copy_from_rows_into_internal(db, &table_name, columns.as_deref(), &rows)?;
+            let inserted = self.copy_from_rows_into_internal(
+                db,
+                &table_name,
+                columns.as_deref(),
+                &rows,
+                "\\N",
+            )?;
             return Ok(StatementResult::AffectedRows(inserted));
         }
         let stmt = if self.standard_conforming_strings() {
@@ -3677,6 +3683,7 @@ impl Session {
                     cid,
                     search_path.as_deref(),
                     &mut txn.catalog_effects,
+                    &mut txn.temp_effects,
                 )
             }
             Statement::CreateRule(ref create_stmt) => {
@@ -4233,7 +4240,7 @@ impl Session {
         rows: &[Vec<String>],
     ) -> Result<usize, ExecError> {
         let _interrupt_guard = self.statement_interrupt_guard()?;
-        self.copy_from_rows_into_internal(db, table_name, None, rows)
+        self.copy_from_rows_into_internal(db, table_name, None, rows, "\\N")
     }
 
     pub fn copy_from_rows_into(
@@ -4244,7 +4251,19 @@ impl Session {
         rows: &[Vec<String>],
     ) -> Result<usize, ExecError> {
         let _interrupt_guard = self.statement_interrupt_guard()?;
-        self.copy_from_rows_into_internal(db, table_name, target_columns, rows)
+        self.copy_from_rows_into_internal(db, table_name, target_columns, rows, "\\N")
+    }
+
+    pub(crate) fn copy_from_rows_into_with_null_marker(
+        &mut self,
+        db: &Database,
+        table_name: &str,
+        target_columns: Option<&[String]>,
+        rows: &[Vec<String>],
+        null_marker: &str,
+    ) -> Result<usize, ExecError> {
+        let _interrupt_guard = self.statement_interrupt_guard()?;
+        self.copy_from_rows_into_internal(db, table_name, target_columns, rows, null_marker)
     }
 
     fn copy_from_rows_into_internal(
@@ -4253,6 +4272,7 @@ impl Session {
         table_name: &str,
         target_columns: Option<&[String]>,
         rows: &[Vec<String>],
+        null_marker: &str,
     ) -> Result<usize, ExecError> {
         stacker::grow(32 * 1024 * 1024, || {
             db.install_interrupt_state(self.client_id, self.interrupts());
@@ -4336,7 +4356,7 @@ impl Session {
                         let mut values = vec![Value::Null; desc.columns.len()];
                         for (raw, target_index) in row.iter().zip(target_indexes.iter().copied()) {
                             let column = &desc.columns[target_index];
-                            let value = if raw == "\\N" {
+                            let value = if raw == null_marker {
                                 Value::Null
                             } else {
                                 match column.ty {
@@ -4415,17 +4435,7 @@ impl Session {
                                         attlen: column.storage.attlen,
                                     });
                                 }
-                                ScalarType::Bool => match raw.as_str() {
-                                    "t" | "true" | "1" => Value::Bool(true),
-                                    "f" | "false" | "0" => Value::Bool(false),
-                                    _ => {
-                                        return Err(ExecError::TypeMismatch {
-                                            op: "copy assignment",
-                                            left: Value::Null,
-                                            right: Value::Text(raw.clone().into()),
-                                        });
-                                    }
-                                },
+                                ScalarType::Bool => Value::Bool(parse_pg_bool_text(raw)?),
                                 ScalarType::Array(_) => {
                                     parse_text_array_literal(raw, column.sql_type.element_type())?
                                 }
@@ -4523,6 +4533,7 @@ impl Session {
             &stmt.table_name,
             stmt.columns.as_deref(),
             &rows,
+            "\\N",
         )?;
         Ok(StatementResult::AffectedRows(count))
     }

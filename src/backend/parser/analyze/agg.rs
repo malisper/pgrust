@@ -68,6 +68,9 @@ fn builtin_aggregate_accepts_call(func: AggFunc, args: &SqlCallArgs) -> bool {
         | AggFunc::StddevSamp
         | AggFunc::BoolAnd
         | AggFunc::BoolOr
+        | AggFunc::BitAnd
+        | AggFunc::BitOr
+        | AggFunc::BitXor
         | AggFunc::Min
         | AggFunc::Max
         | AggFunc::ArrayAgg
@@ -678,6 +681,9 @@ pub(super) fn aggregate_sql_type(func: AggFunc, arg_type: Option<SqlType>) -> Sq
         | AggFunc::CovarSamp
         | AggFunc::Corr => SqlType::new(Float8),
         AggFunc::BoolAnd | AggFunc::BoolOr => SqlType::new(Bool),
+        AggFunc::BitAnd | AggFunc::BitOr | AggFunc::BitXor => {
+            arg_type.unwrap_or(SqlType::new(Int4))
+        }
         AggFunc::AnyValue => arg_type.unwrap_or(SqlType::new(Text)),
         AggFunc::ArrayAgg => arg_type
             .map(|ty| {

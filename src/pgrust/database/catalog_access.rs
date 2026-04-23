@@ -238,7 +238,7 @@ impl Database {
             txn_ctx,
             stmt.schema_name.as_deref(),
             &view_name,
-            TablePersistence::Permanent,
+            stmt.persistence,
             configured_search_path,
             false,
         )?;

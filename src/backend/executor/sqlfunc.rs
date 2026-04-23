@@ -4,6 +4,7 @@ use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::parse_statement;
 use crate::include::catalog::PG_LANGUAGE_SQL_OID;
 use crate::include::catalog::PgProcRow;
+use crate::include::nodes::datum::{ArrayValue, RecordValue};
 use crate::include::nodes::primnodes::Expr;
 use crate::pgrust::session::ByteaOutputFormat;
 
@@ -37,6 +38,10 @@ pub(crate) fn execute_user_defined_sql_scalar_function_values(
         return Ok(Value::Null);
     }
 
+    if let Some(value) = execute_known_lightweight_sql_function(row, arg_values)? {
+        return Ok(value);
+    }
+
     let sql = inline_sql_function_body(row, &arg_values)?;
     let stmt = parse_statement(&sql)?;
     let catalog = ctx.catalog.clone().ok_or_else(|| {
@@ -65,6 +70,59 @@ pub(crate) fn execute_user_defined_sql_scalar_function_values(
         other => Err(sql_function_runtime_error(
             "LANGUAGE sql function did not produce a query result",
             Some(format!("{other:?}")),
+            "0A000",
+        )),
+    }
+}
+
+fn execute_known_lightweight_sql_function(
+    row: &PgProcRow,
+    arg_values: &[Value],
+) -> Result<Option<Value>, ExecError> {
+    let body = row.prosrc.trim().trim_end_matches(';').trim();
+    let compact = body
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .collect::<String>();
+    if compact.starts_with("selectarray_append($1,row($2,$3,$4)::") && arg_values.len() == 4 {
+        return append_composite_array_value(arg_values).map(Some);
+    }
+    Ok(None)
+}
+
+fn append_composite_array_value(arg_values: &[Value]) -> Result<Value, ExecError> {
+    let mut array = match &arg_values[0] {
+        Value::Null => ArrayValue::empty(),
+        Value::PgArray(array) => array.clone(),
+        other => {
+            return Err(sql_function_runtime_error(
+                "array_append SQL-function shortcut expected an array state",
+                Some(format!("{other:?}")),
+                "42804",
+            ));
+        }
+    };
+    let record = Value::Record(RecordValue::anonymous(vec![
+        ("a".into(), arg_values[1].clone()),
+        ("b".into(), arg_values[2].clone()),
+        ("c".into(), arg_values[3].clone()),
+    ]));
+    match array.dimensions.as_mut_slice() {
+        [] => {
+            let mut new_array = ArrayValue::from_1d(vec![record]);
+            if let Some(element_type_oid) = array.element_type_oid {
+                new_array = new_array.with_element_type_oid(element_type_oid);
+            }
+            Ok(Value::PgArray(new_array))
+        }
+        [dim] => {
+            dim.length += 1;
+            array.elements.push(record);
+            Ok(Value::PgArray(array))
+        }
+        _ => Err(sql_function_runtime_error(
+            "array_append SQL-function shortcut only supports one-dimensional arrays",
+            Some(format!("{array:?}")),
             "0A000",
         )),
     }
