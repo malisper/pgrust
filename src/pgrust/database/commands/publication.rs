@@ -7,7 +7,7 @@ use crate::backend::parser::{
     AlterPublicationAction, AlterPublicationStatement, BoundRelation, CatalogLookup,
     CommentOnPublicationStatement, CreatePublicationStatement, DropPublicationStatement,
     PublicationObjectSpec, PublicationOption, PublicationOptions, PublicationSchemaName,
-    PublicationTargetSpec, PublishGeneratedColumns,
+    PublicationTableSpec, PublicationTargetSpec, PublishGeneratedColumns,
 };
 use crate::include::catalog::{
     CURRENT_DATABASE_NAME, PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID, PUBLISH_GENCOLS_NONE,
@@ -313,6 +313,7 @@ impl Database {
                         publication_membership_kind(target),
                     ));
                 }
+                reject_publication_drop_filters(target)?;
                 let resolved = resolve_publication_targets(
                     self,
                     client_id,
@@ -615,8 +616,12 @@ fn resolve_publication_targets(
                     oid: 0,
                     prpubid: 0,
                     prrelid: relation.relation_oid,
-                    prqual: None,
-                    prattrs: None,
+                    prqual: table.where_clause.clone(),
+                    prattrs: publication_column_numbers(
+                        &relation,
+                        &table.relation_name,
+                        &table.column_names,
+                    )?,
                 });
             }
             PublicationObjectSpec::Schema(schema) => {
@@ -647,6 +652,72 @@ fn resolve_publication_targets(
         relation_rows,
         namespace_rows,
     })
+}
+
+fn reject_publication_drop_filters(target: &PublicationTargetSpec) -> Result<(), ExecError> {
+    if target.objects.iter().any(|object| {
+        matches!(
+            object,
+            PublicationObjectSpec::Table(PublicationTableSpec {
+                where_clause: Some(_),
+                ..
+            })
+        )
+    }) {
+        return Err(ExecError::DetailedError {
+            message: "cannot use a WHERE clause when removing a table from a publication".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
+    }
+    Ok(())
+}
+
+fn publication_column_numbers(
+    relation: &BoundRelation,
+    relation_name: &str,
+    column_names: &[String],
+) -> Result<Option<Vec<i16>>, ExecError> {
+    if column_names.is_empty() {
+        return Ok(None);
+    }
+
+    let mut attrs = Vec::with_capacity(column_names.len());
+    for column_name in column_names {
+        let Some((idx, _)) = relation
+            .desc
+            .columns
+            .iter()
+            .enumerate()
+            .find(|(_, column)| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
+        else {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "column \"{column_name}\" of relation \"{relation_name}\" does not exist"
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42703",
+            });
+        };
+        let attr_no = i16::try_from(idx + 1).map_err(|_| ExecError::DetailedError {
+            message: format!("too many columns in relation \"{relation_name}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "54011",
+        })?;
+        if attrs.contains(&attr_no) {
+            return Err(ExecError::DetailedError {
+                message: format!("duplicate column \"{column_name}\" in publication column list"),
+                detail: None,
+                hint: None,
+                sqlstate: "42701",
+            });
+        }
+        attrs.push(attr_no);
+    }
+    Ok(Some(attrs))
 }
 
 fn lookup_publication_relation(
@@ -1455,5 +1526,70 @@ mod tests {
             other => panic!("expected query result, got {other:?}"),
         };
         assert_eq!(rows, vec![vec![Value::Text("pub_test".into())]]);
+    }
+
+    #[test]
+    fn create_publication_stores_table_filter_and_column_list() {
+        let base = temp_dir("table_filter_column_list");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table widgets (id int4, name text)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create publication pub for table only widgets(id) where (id > 0)",
+            )
+            .unwrap();
+
+        let catcache = db.backend_catcache(1, None).unwrap();
+        let publication_oid = catcache.publication_row_by_name("pub").unwrap().oid;
+        let rows = catcache.publication_rel_rows_for_publication(publication_oid);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].prqual.as_deref(), Some("id > 0"));
+        assert_eq!(rows[0].prattrs, Some(vec![1]));
+    }
+
+    #[test]
+    fn alter_publication_drop_rejects_where_clause_without_losing_publication() {
+        let base = temp_dir("drop_filter_keeps_publication");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(&db, "create table widgets (id int4)")
+            .unwrap();
+        session
+            .execute(
+                &db,
+                "create publication pub for table widgets where (id > 0)",
+            )
+            .unwrap();
+
+        let err = session
+            .execute(
+                &db,
+                "alter publication pub drop table widgets where (id > 0)",
+            )
+            .unwrap_err();
+        match err {
+            ExecError::DetailedError {
+                message, sqlstate, ..
+            } => {
+                assert_eq!(
+                    message,
+                    "cannot use a WHERE clause when removing a table from a publication"
+                );
+                assert_eq!(sqlstate, "42601");
+            }
+            other => panic!("expected detailed error, got {other:?}"),
+        }
+
+        assert!(
+            db.backend_catcache(1, None)
+                .unwrap()
+                .publication_row_by_name("pub")
+                .is_some()
+        );
     }
 }
