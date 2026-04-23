@@ -16,6 +16,7 @@ pub enum SyntheticSystemViewKind {
     InformationSchemaTables,
     InformationSchemaViews,
     InformationSchemaColumns,
+    InformationSchemaTriggers,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +104,7 @@ const PG_LOCKS_ALIASES: &[&str] = &["pg_locks", "pg_catalog.pg_locks"];
 const INFORMATION_SCHEMA_TABLES_ALIASES: &[&str] = &["information_schema.tables"];
 const INFORMATION_SCHEMA_VIEWS_ALIASES: &[&str] = &["information_schema.views"];
 const INFORMATION_SCHEMA_COLUMNS_ALIASES: &[&str] = &["information_schema.columns"];
+const INFORMATION_SCHEMA_TRIGGERS_ALIASES: &[&str] = &["information_schema.triggers"];
 
 const PG_VIEWS_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::text("schemaname"),
@@ -221,6 +223,19 @@ const PG_LOCKS_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::new("waitstart", SqlType::new(SqlTypeKind::TimestampTz)),
 ];
 
+const INFORMATION_SCHEMA_TRIGGERS_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("trigger_name"),
+    SyntheticSystemViewColumn::text("event_manipulation"),
+    SyntheticSystemViewColumn::text("event_object_schema"),
+    SyntheticSystemViewColumn::text("event_object_table"),
+    SyntheticSystemViewColumn::new("action_order", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::text("action_condition"),
+    SyntheticSystemViewColumn::text("action_orientation"),
+    SyntheticSystemViewColumn::text("action_timing"),
+    SyntheticSystemViewColumn::text("action_reference_old_table"),
+    SyntheticSystemViewColumn::text("action_reference_new_table"),
+];
+
 const PG_STAT_USER_TABLES_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::new("relid", SqlType::new(SqlTypeKind::Oid)),
     SyntheticSystemViewColumn::text("schemaname"),
@@ -325,7 +340,7 @@ const INFORMATION_SCHEMA_COLUMNS_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::text("is_updatable"),
 ];
 
-const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 13] = [
+const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 14] = [
     SyntheticSystemView {
         kind: SyntheticSystemViewKind::PgViews,
         canonical_name: "pg_catalog.pg_views",
@@ -415,6 +430,13 @@ const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 13] = [
         canonical_name: "information_schema.columns",
         aliases: INFORMATION_SCHEMA_COLUMNS_ALIASES,
         columns: INFORMATION_SCHEMA_COLUMNS_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::InformationSchemaTriggers,
+        canonical_name: "information_schema.triggers",
+        aliases: INFORMATION_SCHEMA_TRIGGERS_ALIASES,
+        columns: INFORMATION_SCHEMA_TRIGGERS_COLUMNS,
         view_definition_sql: "",
     },
 ];
