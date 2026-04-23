@@ -8233,6 +8233,35 @@ fn cte_filtered_self_join_aliases_keep_distinct_columns() {
 }
 
 #[test]
+fn cte_filtered_self_join_uses_filtered_side_as_outer_order() {
+    let base = temp_dir("cte_filtered_self_join_outer_order");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "with v(x) as (values (0::numeric), (1::numeric), (2::numeric)) select x1, x2 from v as v1(x1), v as v2(x2) where x2 != 0",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Numeric("0".into()), Value::Numeric("1".into())],
+                    vec![Value::Numeric("1".into()), Value::Numeric("1".into())],
+                    vec![Value::Numeric("2".into()), Value::Numeric("1".into())],
+                    vec![Value::Numeric("0".into()), Value::Numeric("2".into())],
+                    vec![Value::Numeric("1".into()), Value::Numeric("2".into())],
+                    vec![Value::Numeric("2".into()), Value::Numeric("2".into())],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn values_filtered_self_join_keeps_distinct_columns() {
     let base = temp_dir("values_filtered_self_join");
     let txns = TransactionManager::new_durable(&base).unwrap();
