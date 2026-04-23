@@ -1134,9 +1134,11 @@ fn eval_do_expr(expr: &CompiledExpr, values: &[Value]) -> Result<Value, ExecErro
             let mut slot = TupleSlot::virtual_row(values.to_vec());
             eval_plpgsql_expr(expr, &mut slot)
         }
-        CompiledExpr::QueryCompare { .. } => Err(ExecError::Parse(ParseError::FeatureNotSupported(
-            "query-style PL/pgSQL conditions are only supported inside CREATE FUNCTION".into(),
-        ))),
+        CompiledExpr::QueryCompare { .. } => {
+            Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "query-style PL/pgSQL conditions are only supported inside CREATE FUNCTION".into(),
+            )))
+        }
     }
 }
 

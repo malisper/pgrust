@@ -10,8 +10,8 @@ use crate::backend::parser::{
     ParseError, SelectStatement, SlotScopeColumn, SqlExpr, SqlType, SqlTypeKind, Statement,
     bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
     bind_scalar_expr_in_named_slot_scope, bind_update_with_outer_scopes, parse_expr,
-    parse_statement, parse_type_name,
-    pg_plan_query_with_outer_scopes, pg_plan_values_query_with_outer_scopes,
+    parse_statement, parse_type_name, pg_plan_query_with_outer_scopes,
+    pg_plan_values_query_with_outer_scopes,
 };
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::{PgProcRow, RECORD_TYPE_OID};
@@ -1283,7 +1283,10 @@ fn compile_condition_text(
         Ok(expr) => Ok(expr),
         Err(ParseError::UnexpectedToken { actual, .. }) if actual == "aggregate function" => {
             if let Some(condition) = parse_plpgsql_query_condition(sql) {
-                let query_sql = format!("select {} from {}", condition.left_expr, condition.from_clause);
+                let query_sql = format!(
+                    "select {} from {}",
+                    condition.left_expr, condition.from_clause
+                );
                 let select = normalize_plpgsql_select(
                     crate::backend::parser::parse_select(&query_sql)?,
                     env,
