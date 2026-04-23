@@ -1869,6 +1869,18 @@ fn float_value(value: &Value) -> f64 {
     }
 }
 
+fn typed_text_array_value(values: &[&str], element_type_oid: u32) -> Value {
+    Value::PgArray(
+        crate::include::nodes::datum::ArrayValue::from_1d(
+            values
+                .iter()
+                .map(|value| Value::Text((*value).into()))
+                .collect(),
+        )
+        .with_element_type_oid(element_type_oid),
+    )
+}
+
 fn relation_locator_for(db: &Database, client_id: u32, relname: &str) -> crate::RelFileLocator {
     crate::RelFileLocator {
         spc_oid: 0,
@@ -4472,7 +4484,10 @@ fn nested_views_and_pg_views_work() {
         query_rows(
             &db,
             1,
-            "select schemaname, viewname, viewowner, definition from pg_views order by viewname",
+            "select schemaname, viewname, viewowner, definition
+             from pg_views
+             where schemaname = 'public'
+             order by viewname",
         ),
         vec![
             vec![
@@ -4489,6 +4504,27 @@ fn nested_views_and_pg_views_work() {
             ],
         ]
     );
+}
+
+#[test]
+fn pg_views_includes_pg_policies_metadata() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let rows = query_rows(
+        &db,
+        1,
+        "select schemaname, viewname, viewowner, definition
+         from pg_views
+         where schemaname = 'pg_catalog' and viewname = 'pg_policies'",
+    );
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], Value::Text("pg_catalog".into()));
+    assert_eq!(rows[0][1], Value::Text("pg_policies".into()));
+    assert_eq!(rows[0][2], Value::Text("postgres".into()));
+    match &rows[0][3] {
+        Value::Text(definition) => assert!(definition.contains("FROM pg_catalog.pg_policy")),
+        other => panic!("expected pg_policies definition text, got {other:?}"),
+    }
 }
 
 #[test]
@@ -6411,6 +6447,59 @@ fn comment_on_aggregate_uses_pg_proc_description_rows() {
 }
 
 #[test]
+fn comment_on_function_uses_pg_proc_description_rows() {
+    let base = temp_dir("comment_on_function");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function add_one(x int4) returns int4 language plpgsql as $$ begin return x + 1; end $$",
+    )
+    .unwrap();
+
+    db.execute(1, "comment on function add_one(int4) is 'increments input'")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            &format!(
+                "select d.description \
+                 from pg_description d \
+                 join pg_proc p on p.oid = d.objoid \
+                 where p.proname = 'add_one' \
+                   and p.prokind = 'f' \
+                   and d.classoid = {} \
+                   and d.objsubid = 0",
+                PG_PROC_RELATION_OID
+            )
+        ),
+        vec![vec![Value::Text("increments input".into())]]
+    );
+
+    db.execute(1, "comment on function add_one(int4) is null")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            &format!(
+                "select count(*) \
+                 from pg_description d \
+                 join pg_proc p on p.oid = d.objoid \
+                 where p.proname = 'add_one' \
+                   and p.prokind = 'f' \
+                   and d.classoid = {} \
+                   and d.objsubid = 0",
+                PG_PROC_RELATION_OID
+            )
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
 fn drop_aggregate_removes_proc_and_aggregate_rows() {
     let base = temp_dir("drop_aggregate_rows");
     let db = Database::open(&base, 16).unwrap();
@@ -6680,6 +6769,97 @@ fn comment_on_missing_trigger_reports_table_name() {
             && sqlstate == "42704" => {}
         other => panic!("expected missing trigger error, got {:?}", other),
     }
+}
+
+#[test]
+fn create_trigger_reports_postgres_style_instead_of_table_error() {
+    let base = temp_dir("trigger_instead_of_table_error");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4)").unwrap();
+    db.execute(
+        1,
+        "create function items_trig() returns trigger language plpgsql as $$ begin return new; end $$",
+    )
+    .unwrap();
+
+    match db.execute(
+        1,
+        "create trigger items_instead instead of insert on items for each row execute function items_trig()",
+    ) {
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            sqlstate,
+            ..
+        }) if message == "\"items\" is a table"
+            && detail.as_deref() == Some("Tables cannot have INSTEAD OF triggers.")
+            && sqlstate == "42809" => {}
+        other => panic!("expected table/instead-of error, got {:?}", other),
+    }
+}
+
+#[test]
+fn create_trigger_reports_postgres_style_transition_table_errors() {
+    let base = temp_dir("trigger_transition_table_errors");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function items_trig() returns trigger language plpgsql as $$ begin return new; end $$",
+    )
+    .unwrap();
+
+    match db.execute(
+        1,
+        "create trigger items_multi after insert or update on items referencing new table as new_rows for each statement execute function items_trig()",
+    ) {
+        Err(ExecError::DetailedError { message, .. })
+            if message
+                == "transition tables cannot be specified for triggers with more than one event" => {}
+        other => panic!("expected transition-table multi-event error, got {:?}", other),
+    }
+
+    match db.execute(
+        1,
+        "create trigger items_rowref after insert on items referencing new row as new_row for each statement execute function items_trig()",
+    ) {
+        Err(ExecError::DetailedError {
+            message, hint, ..
+        }) if message == "ROW variable naming in the REFERENCING clause is not supported"
+            && hint.as_deref()
+                == Some("Use OLD TABLE or NEW TABLE for naming transition tables.") => {}
+        other => panic!("expected referencing row-name error, got {:?}", other),
+    }
+}
+
+#[test]
+fn statement_trigger_return_value_is_ignored() {
+    let dir = temp_dir("statement_trigger_return_value_ignored");
+    let db = Database::open(&dir, 16).unwrap();
+
+    db.execute(1, "create table items (id int4)").unwrap();
+    db.execute(
+        1,
+        "create function stmt_returns_new() returns trigger language plpgsql as $$ begin raise notice 'stmt fired'; return NEW; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger items_stmt before insert on items for each statement execute function stmt_returns_new()",
+    )
+    .unwrap();
+
+    clear_notices();
+    db.execute(1, "insert into items values (1)").unwrap();
+
+    assert_eq!(take_notice_messages(), vec![String::from("stmt fired")]);
+    assert_eq!(
+        query_rows(&db, 1, "select id from items"),
+        vec![vec![Value::Int32(1)]]
+    );
 }
 
 #[test]
@@ -7096,6 +7276,22 @@ fn assert_view_dml_error(
     }
 }
 
+fn assert_view_column_dml_error(err: ExecError, expected_message: &str, expected_detail: &str) {
+    match err {
+        ExecError::DetailedError {
+            sqlstate,
+            message,
+            detail: Some(detail),
+            hint: None,
+        } => {
+            assert_eq!(sqlstate, "55000");
+            assert_eq!(message, expected_message);
+            assert_eq!(detail, expected_detail);
+        }
+        other => panic!("expected column-level view DML error, got {other:?}"),
+    }
+}
+
 #[test]
 fn simple_view_auto_dml_routes_to_base_table() {
     let base = temp_dir("auto_simple_view_dml");
@@ -7481,12 +7677,11 @@ fn non_simple_views_reject_auto_dml() {
         "aggregate functions",
         "ON INSERT DO INSTEAD rule",
     );
-    assert_view_dml_error(
+    assert_view_column_dml_error(
         db.execute(1, "update computed_view set next_id = 5 where id = 1")
             .unwrap_err(),
-        "cannot update view \"computed_view\"",
-        "simple base table columns",
-        "ON UPDATE DO INSTEAD rule",
+        "cannot update column \"next_id\" of view \"computed_view\"",
+        "View columns that are not columns of their base relation are not updatable.",
     );
 }
 
@@ -7604,6 +7799,50 @@ fn auto_view_errors_preserve_postgres_distinct_with_and_hint_text() {
             );
         }
         other => panic!("expected WITH view DML error, got {other:?}"),
+    }
+}
+
+#[test]
+fn auto_view_errors_preserve_postgres_column_specific_text() {
+    let base = temp_dir("auto_view_column_messages");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null, name text)")
+        .unwrap();
+    db.execute(1, "insert into items values (1, 'alpha')")
+        .unwrap();
+    db.execute(
+        1,
+        "create view system_view as select ctid, id, name from items",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view duplicate_view as select id, name, id as duplicate_id from items",
+    )
+    .unwrap();
+
+    assert_view_column_dml_error(
+        db.execute(1, "insert into system_view values (null, 2, 'beta')")
+            .unwrap_err(),
+        "cannot insert into column \"ctid\" of view \"system_view\"",
+        "View columns that refer to system columns are not updatable.",
+    );
+
+    match db
+        .execute(1, "update duplicate_view set id = 2, duplicate_id = 3")
+        .unwrap_err()
+    {
+        ExecError::DetailedError {
+            sqlstate,
+            message,
+            detail: None,
+            hint: None,
+        } => {
+            assert_eq!(sqlstate, "42601");
+            assert_eq!(message, "multiple assignments to same column \"id\"");
+        }
+        other => panic!("expected duplicate-assignment error, got {other:?}"),
     }
 }
 
@@ -9269,6 +9508,76 @@ fn alter_table_rename_temp_table_rolls_back() {
 }
 
 #[test]
+fn alter_table_rename_moves_conflicting_array_type_names() {
+    let base = temp_dir("alter_table_rename_array_type_conflict");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table attmp_array (id int4)").unwrap();
+    db.execute(1, "create table attmp_array2 (id int4)")
+        .unwrap();
+    db.execute(1, "alter table attmp_array2 rename to _attmp_array")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select typname from pg_type where oid = 'attmp_array[]'::regtype",
+        ),
+        vec![vec![Value::Text("__attmp_array".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select typname from pg_type where oid = '_attmp_array[]'::regtype",
+        ),
+        vec![vec![Value::Text("__attmp_array_1".into())]]
+    );
+
+    db.execute(1, "drop table _attmp_array").unwrap();
+    db.execute(1, "drop table attmp_array").unwrap();
+}
+
+#[test]
+fn alter_table_rename_to_own_array_type_name_moves_self_array_type() {
+    let base = temp_dir("alter_table_rename_self_array_type");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table attmp_array (id int4)").unwrap();
+    db.execute(1, "alter table attmp_array rename to _attmp_array")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select typname from pg_type where oid = '_attmp_array[]'::regtype",
+        ),
+        vec![vec![Value::Text("__attmp_array".into())]]
+    );
+}
+
+#[test]
+fn alter_table_rename_rejects_non_array_type_name_conflicts() {
+    let base = temp_dir("alter_table_rename_type_conflict");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create type _items as enum ('one')").unwrap();
+    db.execute(1, "create table items (id int4)").unwrap();
+
+    match db.execute(1, "alter table items rename to _items") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "type \"_items\" already exists");
+            assert_eq!(sqlstate, "42710");
+        }
+        other => panic!("expected duplicate type error, got {other:?}"),
+    }
+}
+
+#[test]
 fn alter_table_rename_column_updates_lookup_and_rolls_back() {
     let base = temp_dir("alter_table_rename_column_txn");
     let db = Database::open(&base, 16).unwrap();
@@ -10592,6 +10901,51 @@ fn explain_inner_join_can_reorder_commutative_inputs() {
                 Value::Text("small3".into()),
             ],
         ]
+    );
+}
+
+#[test]
+fn explain_cte_self_join_pushes_single_rel_filter_below_join() {
+    let base = temp_dir("explain_cte_self_join_filter_pushdown");
+    let db = Database::open(&base, 16).unwrap();
+
+    let lines = explain_lines(
+        &db,
+        1,
+        "with v(x) as (values (0::numeric), (1::numeric), (2::numeric)) select x1, x2 from v as v1(x1), v as v2(x2) where x2 != 0",
+    );
+    let nested_loop_pos = lines
+        .iter()
+        .position(|line| line.starts_with("Nested Loop  (cost="))
+        .unwrap_or_else(|| panic!("expected nested loop explain output, got {lines:?}"));
+    let filtered_child_pos = lines
+        .iter()
+        .position(|line| line.starts_with("  Filter  (cost="))
+        .unwrap_or_else(|| panic!("expected filtered child node in explain output, got {lines:?}"));
+    let top_level_cte_pos = lines
+        .iter()
+        .position(|line| line.starts_with("  CTE Scan  (cost="))
+        .unwrap_or_else(|| panic!("expected unfiltered cte scan in explain output, got {lines:?}"));
+    let pushed_filter_pos = lines
+        .iter()
+        .position(|line| line.starts_with("    Filter: (x2 <>"))
+        .unwrap_or_else(|| {
+            panic!("expected pushed-down filter detail in explain output, got {lines:?}")
+        });
+
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.starts_with("  Filter: (x2 <>")),
+        "expected filter to be attached below the join, got {lines:?}"
+    );
+    assert!(
+        nested_loop_pos < filtered_child_pos && filtered_child_pos < top_level_cte_pos,
+        "expected filtered child to appear before the unfiltered side, got {lines:?}"
+    );
+    assert!(
+        filtered_child_pos < pushed_filter_pos && pushed_filter_pos < top_level_cte_pos,
+        "expected pushed-down filter to appear under the filtered input before the unfiltered side, got {lines:?}"
     );
 }
 
@@ -12254,6 +12608,30 @@ fn create_sequence_supports_functions_and_sequence_scans() {
         query_rows(&db, 1, "select nextval('seq')"),
         vec![vec![Value::Int64(11)]]
     );
+}
+
+#[test]
+fn alter_sequence_rename_moves_conflicting_array_type_names() {
+    let base = temp_dir("alter_sequence_rename_array_type_conflict");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create sequence seq_array").unwrap();
+    db.execute(1, "create sequence seq_array2").unwrap();
+    db.execute(1, "alter sequence seq_array2 rename to _seq_array")
+        .unwrap();
+
+    let catcache = db.catalog.read().catcache().unwrap();
+    let original_class = catcache.class_by_name("seq_array").unwrap();
+    let original_type = catcache.type_by_oid(original_class.reltype).unwrap();
+    let original_array_type = catcache.type_by_oid(original_type.typarray).unwrap();
+    assert_eq!(original_array_type.typname, "__seq_array");
+
+    let renamed_class = catcache.class_by_name("_seq_array").unwrap();
+    let renamed_type = catcache.type_by_oid(renamed_class.reltype).unwrap();
+    assert_eq!(renamed_type.typname, "_seq_array");
+    let renamed_array_type = catcache.type_by_oid(renamed_type.typarray).unwrap();
+    assert_eq!(renamed_array_type.typname, "__seq_array_1");
+    assert_ne!(original_array_type.oid, renamed_array_type.oid);
 }
 
 #[test]
@@ -17209,6 +17587,31 @@ fn create_function_uses_search_path_for_unqualified_creation() {
 }
 
 #[test]
+fn create_function_persists_explicit_cost() {
+    let base = temp_dir("search_path_function_cost");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create schema tenant_fn").unwrap();
+    session.execute(&db, "set search_path = tenant_fn").unwrap();
+    session
+        .execute(
+            &db,
+            "create or replace function add_one(x int4) returns int4 \
+             cost 0.0000001 language sql as $$ select x + 1 $$",
+        )
+        .unwrap();
+
+    let visible = db.backend_catcache(1, None).unwrap();
+    let proc = visible
+        .proc_rows_by_name("add_one")
+        .into_iter()
+        .find(|row| row.proname == "add_one")
+        .expect("function row");
+    assert!((proc.procost - 0.0000001).abs() < 1e-12);
+}
+
+#[test]
 fn drop_function_uses_search_path_and_signature() {
     let base = temp_dir("search_path_function_drop");
     let db = Database::open(&base, 16).unwrap();
@@ -20152,6 +20555,21 @@ fn create_alter_and_drop_policy_updates_pg_policy() {
         ),
         vec![vec![Value::Text("p1".into()), Value::Text("a > 0".into())]]
     );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select policyname, roles, qual, with_check
+             from pg_policies
+             where policyname = 'p1'",
+        ),
+        vec![vec![
+            Value::Text("p1".into()),
+            typed_text_array_value(&["app_role"], crate::include::catalog::NAME_TYPE_OID),
+            Value::Text("a > 0".into()),
+            Value::Null,
+        ]]
+    );
 
     session
         .execute(&db, "alter policy p1 on items rename to p2")
@@ -20175,6 +20593,21 @@ fn create_alter_and_drop_policy_updates_pg_policy() {
             Value::Text("a > 2".into()),
         ]]
     );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select policyname, roles, qual, with_check
+             from pg_policies
+             where policyname = 'p2'",
+        ),
+        vec![vec![
+            Value::Text("p2".into()),
+            typed_text_array_value(&["app_role"], crate::include::catalog::NAME_TYPE_OID),
+            Value::Text("a > 1".into()),
+            Value::Text("a > 2".into()),
+        ]]
+    );
 
     session.execute(&db, "drop policy p2 on items").unwrap();
     assert_eq!(
@@ -20185,6 +20618,84 @@ fn create_alter_and_drop_policy_updates_pg_policy() {
         ),
         vec![vec![Value::Int64(0)]]
     );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_policies where policyname = 'p2'"
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn pg_policies_exposes_public_and_named_role_policies() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role app_role nologin")
+        .unwrap();
+    session
+        .execute(&db, "create role report_role nologin")
+        .unwrap();
+    session
+        .execute(&db, "create table items (a int4, owner text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy p_named on items for select to report_role, app_role using (a > 0)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy p_public on items for insert to public with check (a > 1)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select schemaname, tablename, policyname, permissive, roles, cmd, qual, with_check
+             from pg_policies
+             order by policyname",
+        ),
+        vec![
+            vec![
+                Value::Text("public".into()),
+                Value::Text("items".into()),
+                Value::Text("p_named".into()),
+                Value::Text("PERMISSIVE".into()),
+                typed_text_array_value(
+                    &["app_role", "report_role"],
+                    crate::include::catalog::NAME_TYPE_OID,
+                ),
+                Value::Text("SELECT".into()),
+                Value::Text("a > 0".into()),
+                Value::Null,
+            ],
+            vec![
+                Value::Text("public".into()),
+                Value::Text("items".into()),
+                Value::Text("p_public".into()),
+                Value::Text("PERMISSIVE".into()),
+                typed_text_array_value(&["public"], crate::include::catalog::NAME_TYPE_OID),
+                Value::Text("INSERT".into()),
+                Value::Null,
+                Value::Text("a > 1".into()),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn pg_policies_query_succeeds_on_fresh_database() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+
+    assert!(query_rows(&db, 1, "select * from pg_policies").is_empty());
 }
 
 #[test]
@@ -20448,6 +20959,53 @@ fn pg_get_viewdef_returns_canonical_view_query() {
 }
 
 #[test]
+fn pg_get_acl_returns_relation_owner_acl() {
+    let dir = temp_dir("pg_get_acl");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create role app_reader login").unwrap();
+    db.execute(1, "create table acl_test(id int)").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_acl('pg_class'::regclass, 'acl_test'::regclass::oid, 0)"
+        ),
+        vec![vec![Value::Null]]
+    );
+    db.execute(1, "grant select on acl_test to app_reader")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select unnest(pg_get_acl('pg_class'::regclass, 'acl_test'::regclass::oid, 0))",
+        ),
+        vec![
+            vec![Value::Text("postgres=arwdDxtm/postgres".into())],
+            vec![Value::Text("app_reader=r/postgres".into())],
+        ]
+    );
+    db.execute(1, "revoke all privileges on acl_test from app_reader")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_acl('pg_class'::regclass, 'acl_test'::regclass::oid, 0)"
+        ),
+        vec![vec![Value::Null]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select pg_get_acl('pg_class'::regclass, 0, 0)"),
+        vec![vec![Value::Null]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select pg_get_acl(0, 0, 0)"),
+        vec![vec![Value::Null]]
+    );
+}
 fn current_database_function_matches_pg_database_name() {
     let dir = temp_dir("current_database_function");
     let db = Database::open(&dir, 64).unwrap();
@@ -20986,6 +21544,161 @@ fn plpgsql_alias_record_select_into_and_update_work() {
         ),
         vec![vec![Value::Text("WS.001.1a".into())]]
     );
+}
+
+#[test]
+fn plpgsql_static_query_for_loop_record_target_supports_field_access() {
+    let dir = temp_dir("plpgsql_query_loop_record_fields");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function last_pair() returns text language plpgsql as $$ declare rec record; begin for rec in values (1, 'a'), (2, 'b') loop null; end loop; return rec.column1::text || rec.column2; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select last_pair()"),
+        vec![vec![Value::Text("2b".into())]]
+    );
+}
+
+#[test]
+fn plpgsql_nested_static_query_for_loops_over_scalar_targets_work() {
+    let dir = temp_dir("plpgsql_nested_query_loops");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function nested_query_loops() returns int4 language plpgsql as $$ declare a int4; b int4; inner_v int4; total int4 := 0; begin for a, b in values (1, 10), (2, 20) loop for inner_v in values (100), (200) loop total := total + a + b + inner_v; end loop; end loop; return total; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select nested_query_loops()"),
+        vec![vec![Value::Int32(666)]]
+    );
+}
+
+#[test]
+fn plpgsql_dynamic_execute_query_for_loop_supports_explain_lines() {
+    let dir = temp_dir("plpgsql_dynamic_query_loop_explain");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function explain_line_count(text) returns int4 language plpgsql as $$ declare ln text; total int4 := 0; begin for ln in execute format('explain analyze %s', $1) loop total := total + 1; end loop; return total; end $$",
+    )
+    .unwrap();
+
+    let rows = query_rows(&db, 1, "select explain_line_count('select 1')");
+    match &rows[..] {
+        [row] => match &row[..] {
+            [Value::Int32(count)] => assert!(*count > 0),
+            other => panic!("expected single int4 result, got {other:?}"),
+        },
+        other => panic!("expected single row result, got {other:?}"),
+    }
+}
+
+#[test]
+fn plpgsql_dynamic_execute_query_for_loop_supports_using() {
+    let dir = temp_dir("plpgsql_dynamic_query_loop_using");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function dynamic_using_sum(text) returns int4 language plpgsql as $$ declare v int4; total int4 := 0; begin for v in execute $1 using 3, 4 loop total := total + v; end loop; return total; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select dynamic_using_sum('values ($1), ($2)')"),
+        vec![vec![Value::Int32(7)]]
+    );
+}
+
+#[test]
+fn plpgsql_query_for_loop_sets_found_false_when_empty() {
+    let dir = temp_dir("plpgsql_query_loop_found_false");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function query_loop_found_false() returns bool language plpgsql as $$ declare v int4; begin found := true; for v in select 1 where false loop null; end loop; return found; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select query_loop_found_false()"),
+        vec![vec![Value::Bool(false)]]
+    );
+}
+
+#[test]
+fn plpgsql_query_for_loop_sets_found_true_after_nonempty_loop() {
+    let dir = temp_dir("plpgsql_query_loop_found_true");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function query_loop_found_true() returns bool language plpgsql as $$ declare v int4; begin found := false; for v in values (1) loop found := false; end loop; return found; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select query_loop_found_true()"),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn plpgsql_query_for_loop_reports_row_shape_mismatch() {
+    let dir = temp_dir("plpgsql_query_loop_shape_mismatch");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function bad_query_loop_shape() returns int4 language plpgsql as $$ declare v int4; begin for v in values (1, 2) loop null; end loop; return 0; end $$",
+    )
+    .unwrap();
+
+    let err = db.execute(1, "select bad_query_loop_shape()").unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        } if message == "query returned an unexpected row shape"
+            && detail == "expected 1 column, got 2"
+            && sqlstate == "42804"
+    ));
+}
+
+#[test]
+fn plpgsql_dynamic_execute_query_for_loop_rejects_null_query_string() {
+    let dir = temp_dir("plpgsql_query_loop_null_execute");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function null_dynamic_loop() returns int4 language plpgsql as $$ declare v int4; q text := null; begin for v in execute q loop null; end loop; return 0; end $$",
+    )
+    .unwrap();
+
+    let err = db.execute(1, "select null_dynamic_loop()").unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            message,
+            detail: None,
+            sqlstate,
+            ..
+        } if message == "query string argument of EXECUTE is null"
+            && sqlstate == "22004"
+    ));
 }
 
 #[test]

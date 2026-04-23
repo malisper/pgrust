@@ -80,6 +80,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_drop_function_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_comment_on_function_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_create_operator_class_statement(&sql)? {
         return Ok(stmt);
     }
@@ -1920,6 +1923,17 @@ fn try_parse_drop_function_statement(sql: &str) -> Result<Option<Statement>, Par
     )))
 }
 
+fn try_parse_comment_on_function_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("comment on function ") {
+        return Ok(None);
+    }
+    Ok(Some(Statement::CommentOnFunction(
+        build_comment_on_function_statement(trimmed)?,
+    )))
+}
+
 fn try_parse_create_operator_class_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
@@ -2951,6 +2965,7 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
     let mut language = None;
     let mut body = None;
     let mut link_symbol = None;
+    let mut cost = None;
     let mut strict = false;
     let mut leakproof = false;
     let mut volatility = crate::backend::parser::FunctionVolatility::Volatile;
@@ -2979,6 +2994,18 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
             }
             let (parsed, next_rest) = parse_create_function_language(rest)?;
             language = Some(parsed);
+            rest = next_rest;
+            continue;
+        }
+        if keyword_at_start(rest, "cost") {
+            if cost.is_some() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "single COST clause",
+                    actual: rest.into(),
+                });
+            }
+            let (parsed, next_rest) = parse_create_function_cost(rest)?;
+            cost = Some(parsed);
             rest = next_rest;
             continue;
         }
@@ -3071,6 +3098,7 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
         schema_name,
         function_name,
         replace_existing,
+        cost,
         args,
         return_spec,
         strict,
@@ -3290,6 +3318,57 @@ fn build_comment_on_aggregate_statement(
     })
 }
 
+fn build_comment_on_function_statement(
+    sql: &str,
+) -> Result<CommentOnFunctionStatement, ParseError> {
+    let Some(rest) = sql.get("comment on function".len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "COMMENT ON FUNCTION name(signature) IS ...",
+            actual: sql.into(),
+        });
+    };
+    let rest = rest.trim_start();
+    let ((schema_name, function_name), rest) = parse_schema_qualified_name(rest)?;
+    let (signature_sql, rest) = take_parenthesized_segment(rest.trim_start())?;
+    let rest = rest.trim_start();
+    if !keyword_at_start(rest, "is") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "IS",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "is").trim_start();
+    let (comment, rest) = if keyword_at_start(rest, "null") {
+        (None, consume_keyword(rest, "null"))
+    } else {
+        let len = scan_string_literal_token_len(rest).ok_or(ParseError::UnexpectedToken {
+            expected: "quoted string or NULL",
+            actual: rest.into(),
+        })?;
+        (Some(decode_string_literal(&rest[..len])?), &rest[len..])
+    };
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of COMMENT ON FUNCTION",
+            actual: rest.trim().into(),
+        });
+    }
+    let arg_types = if signature_sql.trim().is_empty() {
+        Vec::new()
+    } else {
+        split_top_level_items(&signature_sql, ',')?
+            .into_iter()
+            .map(|arg| arg.trim().to_string())
+            .collect::<Vec<_>>()
+    };
+    Ok(CommentOnFunctionStatement {
+        schema_name,
+        function_name,
+        arg_types,
+        comment,
+    })
+}
+
 fn parse_create_aggregate_options(input: &str) -> Result<ParsedCreateAggregateOptions, ParseError> {
     let mut parsed = ParsedCreateAggregateOptions::default();
     for item in split_top_level_items(input, ',')? {
@@ -3464,12 +3543,17 @@ fn build_create_trigger_statement(sql: &str) -> Result<CreateTriggerStatement, P
     } else if keyword_at_start(rest, "after") {
         (TriggerTiming::After, consume_keyword(rest, "after"))
     } else if keyword_at_start(rest, "instead") {
-        return Err(ParseError::FeatureNotSupported(
-            "INSTEAD OF triggers are not supported".into(),
-        ));
+        let rest = consume_keyword(rest, "instead").trim_start();
+        if !keyword_at_start(rest, "of") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "OF",
+                actual: rest.into(),
+            });
+        }
+        (TriggerTiming::InsteadOf, consume_keyword(rest, "of"))
     } else {
         return Err(ParseError::UnexpectedToken {
-            expected: "BEFORE or AFTER",
+            expected: "BEFORE, AFTER, or INSTEAD OF",
             actual: rest.into(),
         });
     };
@@ -3485,6 +3569,7 @@ fn build_create_trigger_statement(sql: &str) -> Result<CreateTriggerStatement, P
     let ((schema_name, table_name), mut rest) = parse_schema_qualified_name(rest)?;
 
     let mut level = TriggerLevel::Statement;
+    let mut referencing = Vec::new();
     let mut when_clause_sql = None;
     loop {
         rest = rest.trim_start();
@@ -3523,9 +3608,10 @@ fn build_create_trigger_statement(sql: &str) -> Result<CreateTriggerStatement, P
             continue;
         }
         if keyword_at_start(rest, "referencing") {
-            return Err(ParseError::FeatureNotSupported(
-                "REFERENCING is not supported for triggers".into(),
-            ));
+            let (parsed, next_rest) = parse_trigger_referencing_clause(rest)?;
+            referencing = parsed;
+            rest = next_rest;
+            continue;
         }
         return Err(ParseError::FeatureNotSupported(format!(
             "unsupported CREATE TRIGGER clause: {}",
@@ -3561,6 +3647,7 @@ fn build_create_trigger_statement(sql: &str) -> Result<CreateTriggerStatement, P
         timing,
         level,
         events,
+        referencing,
         when_clause_sql,
         function_schema_name,
         function_name,
@@ -3571,15 +3658,37 @@ fn build_create_trigger_statement(sql: &str) -> Result<CreateTriggerStatement, P
 fn parse_trigger_events(input: &str) -> Result<Vec<TriggerEventSpec>, ParseError> {
     let mut rest = input.trim();
     let mut events = Vec::new();
+    let mut saw_insert = false;
+    let mut saw_update = false;
+    let mut saw_delete = false;
+    let mut saw_truncate = false;
     while !rest.is_empty() {
         if keyword_at_start(rest, "insert") {
             rest = consume_keyword(rest, "insert");
+            if saw_insert {
+                return Err(ParseError::DetailedError {
+                    message: "duplicate trigger events specified".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42601",
+                });
+            }
+            saw_insert = true;
             events.push(TriggerEventSpec {
                 event: TriggerEvent::Insert,
                 update_columns: Vec::new(),
             });
         } else if keyword_at_start(rest, "update") {
             rest = consume_keyword(rest, "update").trim_start();
+            if saw_update {
+                return Err(ParseError::DetailedError {
+                    message: "duplicate trigger events specified".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42601",
+                });
+            }
+            saw_update = true;
             let update_columns = if keyword_at_start(rest, "of") {
                 let rest_after_of = consume_keyword(rest, "of").trim_start();
                 let boundary = find_next_top_level_keyword(rest_after_of, &["or"])
@@ -3602,17 +3711,37 @@ fn parse_trigger_events(input: &str) -> Result<Vec<TriggerEventSpec>, ParseError
             });
         } else if keyword_at_start(rest, "delete") {
             rest = consume_keyword(rest, "delete");
+            if saw_delete {
+                return Err(ParseError::DetailedError {
+                    message: "duplicate trigger events specified".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42601",
+                });
+            }
+            saw_delete = true;
             events.push(TriggerEventSpec {
                 event: TriggerEvent::Delete,
                 update_columns: Vec::new(),
             });
         } else if keyword_at_start(rest, "truncate") {
-            return Err(ParseError::FeatureNotSupported(
-                "TRUNCATE triggers are not supported".into(),
-            ));
+            rest = consume_keyword(rest, "truncate");
+            if saw_truncate {
+                return Err(ParseError::DetailedError {
+                    message: "duplicate trigger events specified".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42601",
+                });
+            }
+            saw_truncate = true;
+            events.push(TriggerEventSpec {
+                event: TriggerEvent::Truncate,
+                update_columns: Vec::new(),
+            });
         } else {
             return Err(ParseError::UnexpectedToken {
-                expected: "INSERT, UPDATE, or DELETE",
+                expected: "INSERT, UPDATE, DELETE, or TRUNCATE",
                 actual: rest.into(),
             });
         }
@@ -3623,6 +3752,12 @@ fn parse_trigger_events(input: &str) -> Result<Vec<TriggerEventSpec>, ParseError
         }
         break;
     }
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "OR or ON",
+            actual: rest.trim().into(),
+        });
+    }
     if events.is_empty() {
         return Err(ParseError::UnexpectedToken {
             expected: "trigger event",
@@ -3630,6 +3765,55 @@ fn parse_trigger_events(input: &str) -> Result<Vec<TriggerEventSpec>, ParseError
         });
     }
     Ok(events)
+}
+
+fn parse_trigger_referencing_clause(
+    input: &str,
+) -> Result<(Vec<TriggerReferencingSpec>, &str), ParseError> {
+    let mut rest = consume_keyword(input.trim_start(), "referencing");
+    let mut specs = Vec::new();
+    loop {
+        rest = rest.trim_start();
+        let (is_new, next) = if keyword_at_start(rest, "new") {
+            (true, consume_keyword(rest, "new"))
+        } else if keyword_at_start(rest, "old") {
+            (false, consume_keyword(rest, "old"))
+        } else {
+            break;
+        };
+        let next = next.trim_start();
+        let (is_table, next) = if keyword_at_start(next, "table") {
+            (true, consume_keyword(next, "table"))
+        } else if keyword_at_start(next, "row") {
+            (false, consume_keyword(next, "row"))
+        } else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "TABLE or ROW",
+                actual: next.into(),
+            });
+        };
+        let next = next.trim_start();
+        if !keyword_at_start(next, "as") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "AS",
+                actual: next.into(),
+            });
+        }
+        let (name, next) = parse_sql_identifier(consume_keyword(next, "as").trim_start())?;
+        specs.push(TriggerReferencingSpec {
+            is_new,
+            is_table,
+            name,
+        });
+        rest = next;
+    }
+    if specs.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "OLD/NEW TABLE or ROW",
+            actual: rest.trim_start().into(),
+        });
+    }
+    Ok((specs, rest))
 }
 
 fn parse_trigger_function_args(input: &str) -> Result<Vec<String>, ParseError> {
@@ -4976,6 +5160,7 @@ fn parse_create_function_returns(
     let boundary = find_next_top_level_keyword(
         type_rest,
         &[
+            "cost",
             "language",
             "as",
             "strict",
@@ -5001,6 +5186,18 @@ fn parse_create_function_returns(
         },
         &type_rest[boundary..],
     ))
+}
+
+fn parse_create_function_cost(input: &str) -> Result<(String, &str), ParseError> {
+    let rest = consume_keyword(input.trim_start(), "cost").trim_start();
+    let (cost_sql, rest) = split_sql_identifier_token(rest)?;
+    let cost = cost_sql
+        .parse::<f64>()
+        .map_err(|_| ParseError::InvalidNumeric(cost_sql.to_string()))?;
+    if !cost.is_finite() {
+        return Err(ParseError::InvalidNumeric(cost_sql.to_string()));
+    }
+    Ok((cost_sql.to_string(), rest))
 }
 
 fn parse_create_function_table_columns(

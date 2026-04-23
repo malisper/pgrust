@@ -5,11 +5,13 @@ use crate::backend::access::heap::heapam::heap_update_with_waiter;
 use crate::backend::commands::tablecmds::{collect_matching_rows_heap, maintain_indexes_for_row};
 use crate::backend::executor::value_io::{coerce_assignment_value, tuple_from_values};
 use crate::backend::executor::{ExecutorContext, RelationDesc};
+use crate::backend::parser::{CatalogLookup, parse_type_name, resolve_raw_type_name};
 use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::{PG_CATALOG_NAMESPACE_OID, relkind_is_analyzable};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{
-    CommentOnAggregateStatement, CommentOnIndexStatement, MaintenanceTarget, VacuumStatement,
+    CommentOnAggregateStatement, CommentOnFunctionStatement, CommentOnIndexStatement,
+    MaintenanceTarget, VacuumStatement,
 };
 use crate::pgrust::database::ddl::{
     lookup_analyzable_relation_for_ddl, lookup_heap_relation_for_alter_table,
@@ -25,6 +27,100 @@ struct AddColumnTarget {
 
 fn relation_basename(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
+}
+
+fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {
+    if argtypes.trim().is_empty() {
+        return Some(Vec::new());
+    }
+    argtypes
+        .split_whitespace()
+        .map(|part| part.parse::<u32>().ok())
+        .collect()
+}
+
+fn ensure_function_owner(
+    db: &Database,
+    client_id: ClientId,
+    owner_oid: u32,
+    function_name: &str,
+    txn_ctx: CatalogTxnContext,
+) -> Result<(), ExecError> {
+    let auth = db.auth_state(client_id);
+    let auth_catalog = db
+        .auth_catalog(client_id, txn_ctx)
+        .map_err(map_catalog_error)?;
+    if auth.has_effective_membership(owner_oid, &auth_catalog) {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!("must be owner of function {function_name}"),
+        detail: None,
+        hint: None,
+        sqlstate: "42501",
+    })
+}
+
+fn resolve_exact_function_row(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: CatalogTxnContext,
+    configured_search_path: Option<&[String]>,
+    function_name: &str,
+    arg_types: &[String],
+) -> Result<crate::include::catalog::PgProcRow, ExecError> {
+    let catalog = db.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
+    let desired_arg_oids = arg_types
+        .iter()
+        .map(|arg| {
+            let raw_type = parse_type_name(arg)?;
+            let sql_type = resolve_raw_type_name(&raw_type, &catalog)?;
+            catalog
+                .type_oid_for_sql_type(sql_type)
+                .ok_or_else(|| ParseError::UnsupportedType(arg.clone()))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(ExecError::Parse)?;
+    let schema_oid = match function_name.rsplit_once('.') {
+        Some((schema_name, _)) => Some(
+            db.visible_namespace_oid_by_name(client_id, txn_ctx, schema_name)
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: format!("schema \"{schema_name}\" does not exist"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "3F000",
+                })?,
+        ),
+        None => None,
+    };
+    let base_name = function_name.rsplit('.').next().unwrap_or(function_name);
+    let signature = format!("{function_name}({})", arg_types.join(", "));
+    let matches = catalog
+        .proc_rows_by_name(base_name)
+        .into_iter()
+        .filter(|row| {
+            row.prokind == 'f'
+                && parse_proc_argtype_oids(&row.proargtypes) == Some(desired_arg_oids.clone())
+                && schema_oid
+                    .map(|schema_oid| row.pronamespace == schema_oid)
+                    .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [row] => Ok(row.clone()),
+        [] => Err(ExecError::DetailedError {
+            message: format!("function {signature} does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "42883",
+        }),
+        _ => Err(ExecError::DetailedError {
+            message: format!("function name \"{signature}\" is not unique"),
+            detail: None,
+            hint: Some("Specify the argument list to select the function unambiguously.".into()),
+            sqlstate: "42725",
+        }),
+    }
 }
 
 fn rewrite_heap_rows_for_added_serial_column(
@@ -345,6 +441,28 @@ impl Database {
         result
     }
 
+    pub(crate) fn execute_comment_on_function_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        comment_stmt: &CommentOnFunctionStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_comment_on_function_stmt_in_transaction_with_search_path(
+            client_id,
+            comment_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
     pub(crate) fn execute_comment_on_index_stmt_with_search_path(
         &self,
         client_id: ClientId,
@@ -432,6 +550,48 @@ impl Database {
                 });
             }
         };
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let effect = self
+            .catalog
+            .write()
+            .comment_proc_mvcc(proc_row.oid, comment_stmt.comment.as_deref(), &ctx)
+            .map_err(map_catalog_error)?;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    pub(crate) fn execute_comment_on_function_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        comment_stmt: &CommentOnFunctionStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let txn_ctx = Some((xid, cid));
+        let function_name = match &comment_stmt.schema_name {
+            Some(schema_name) => format!("{schema_name}.{}", comment_stmt.function_name),
+            None => comment_stmt.function_name.clone(),
+        };
+        let proc_row = resolve_exact_function_row(
+            self,
+            client_id,
+            txn_ctx,
+            configured_search_path,
+            &function_name,
+            &comment_stmt.arg_types,
+        )?;
+        ensure_function_owner(self, client_id, proc_row.proowner, &function_name, txn_ctx)?;
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),

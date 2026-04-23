@@ -4,5 +4,6 @@ pub mod lsyscache;
 pub mod plancache;
 pub mod relcache;
 pub mod syscache;
+pub mod system_view_registry;
 pub mod system_views;
 pub mod visible_catalog;

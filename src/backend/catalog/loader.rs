@@ -388,6 +388,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                 relation_oid: row.oid,
                 namespace_oid: row.relnamespace,
                 owner_oid: row.relowner,
+                relacl: row.relacl.clone(),
                 row_type_oid: row.reltype,
                 array_type_oid: type_rows_by_oid
                     .get(&row.reltype)

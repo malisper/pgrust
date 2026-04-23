@@ -20,7 +20,7 @@ mod util;
 use crate::backend::executor::Value;
 use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType};
 use crate::include::catalog::PgStatisticRow;
-use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntryKind};
+use crate::include::nodes::parsenodes::{JoinTreeNode, Query};
 use crate::include::nodes::pathnodes::{Path, PlannerInfo, RestrictInfo};
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{Expr, JoinType, OpExprKind};
@@ -153,17 +153,6 @@ fn is_pushable_base_clause(root: &PlannerInfo, relids: &[usize]) -> bool {
             .get(relids[0])
             .and_then(Option::as_ref)
             .is_some()
-        && root
-            .parse
-            .rtable
-            .get(relids[0].saturating_sub(1))
-            .is_some_and(|rte| {
-                // :HACK: Non-relation base RTEs still leak semantic identity through
-                // pushed-down filters for repeated VALUES/subquery/function shapes.
-                // Keep those quals above the join until base-slot identity is carried
-                // separately from Var equality.
-                matches!(rte.kind, RangeTblEntryKind::Relation { .. })
-            })
 }
 
 fn expr_relids(expr: &Expr) -> Vec<usize> {
@@ -171,6 +160,7 @@ fn expr_relids(expr: &Expr) -> Vec<usize> {
 }
 
 fn path_relids(path: &Path) -> Vec<usize> {
+    let slot_relid = |slot_id: usize| pathnodes::rte_slot_varno(slot_id).unwrap_or(slot_id);
     match path {
         Path::Result { .. } => Vec::new(),
         Path::Append { source_id, .. } => vec![*source_id],
@@ -190,7 +180,7 @@ fn path_relids(path: &Path) -> Vec<usize> {
         Path::Values { slot_id, .. }
         | Path::FunctionScan { slot_id, .. }
         | Path::CteScan { slot_id, .. }
-        | Path::WorkTableScan { slot_id, .. } => vec![*slot_id],
+        | Path::WorkTableScan { slot_id, .. } => vec![slot_relid(*slot_id)],
         Path::RecursiveUnion {
             anchor, recursive, ..
         } => relids_union(&path_relids(anchor), &path_relids(recursive)),

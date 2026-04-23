@@ -121,6 +121,7 @@ pub(super) fn normalize_rte_path(
     input: Path,
     catalog: &dyn CatalogLookup,
 ) -> Path {
+    let input_target = input.semantic_output_target();
     let names_match = input
         .columns()
         .iter()
@@ -143,16 +144,17 @@ pub(super) fn normalize_rte_path(
             })
             .collect(),
     );
-    if names_match && input.semantic_output_vars() == desired_layout.exprs {
+    let target = PathTarget::with_sortgrouprefs(
+        desired_layout.exprs.clone(),
+        input_target.sortgrouprefs.clone(),
+    );
+    if names_match
+        && input.semantic_output_vars() == desired_layout.exprs
+        && input.output_vars() == desired_layout.exprs
+    {
         input
     } else {
-        project_to_slot_layout(
-            rtindex,
-            desc,
-            input.clone(),
-            input.semantic_output_target(),
-            catalog,
-        )
+        project_to_slot_layout(rtindex, desc, input, target, catalog)
     }
 }
 
