@@ -346,6 +346,7 @@ pub enum Statement {
     CommentOnForeignDataWrapper(CommentOnForeignDataWrapperStatement),
     CommentOnPublication(CommentOnPublicationStatement),
     CommentOnAggregate(CommentOnAggregateStatement),
+    CommentOnFunction(CommentOnFunctionStatement),
     CreateDomain(CreateDomainStatement),
     CreateConversion(CreateConversionStatement),
     CreatePublication(CreatePublicationStatement),
@@ -2000,6 +2001,14 @@ pub struct CommentOnAggregateStatement {
     pub schema_name: Option<String>,
     pub aggregate_name: String,
     pub signature: AggregateSignatureKind,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnFunctionStatement {
+    pub schema_name: Option<String>,
+    pub function_name: String,
+    pub arg_types: Vec<String>,
     pub comment: Option<String>,
 }
 
