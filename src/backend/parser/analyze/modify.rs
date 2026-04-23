@@ -244,6 +244,18 @@ fn resolve_assignment_target_sql_type(
 ) -> Result<SqlType, ParseError> {
     let mut current = column_type;
     for subscript in subscripts {
+        if current.kind == SqlTypeKind::Jsonb && !current.is_array {
+            if subscript.is_slice {
+                return Err(ParseError::DetailedError {
+                    message: "jsonb subscript does not support slices".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "0A000",
+                });
+            }
+            current = SqlType::new(SqlTypeKind::Jsonb);
+            continue;
+        }
         if current.kind == SqlTypeKind::Point && !current.is_array {
             current = SqlType::new(SqlTypeKind::Float8);
             continue;

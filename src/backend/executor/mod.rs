@@ -71,6 +71,7 @@ pub use expr_datetime::{render_datetime_value_text, render_datetime_value_text_w
 pub(crate) use expr_geometry::eval_geometry_function;
 pub(crate) use expr_geometry::geometry_input_error_message;
 pub(crate) use expr_geometry::render_geometry_text;
+pub(crate) use expr_json::apply_jsonb_subscript_assignment;
 pub use expr_money::money_format_text;
 pub(crate) use expr_money::money_parse_text;
 pub use expr_multirange::render_multirange_text;
