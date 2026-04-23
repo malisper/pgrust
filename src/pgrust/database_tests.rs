@@ -18356,15 +18356,15 @@ fn pgbench_style_accounts_workload_completes() {
         )
         .unwrap();
 
-    for aid in 1..=5000 {
-        db.execute(
-                1,
-                &format!(
-                    "insert into pgbench_accounts (aid, bid, abalance, filler) values ({aid}, 1, 0, 'x')"
-                ),
-            )
-            .unwrap();
-    }
+    let values = (1..=5000)
+        .map(|aid| format!("({aid}, 1, 0, 'x')"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    db.execute(
+        1,
+        &format!("insert into pgbench_accounts (aid, bid, abalance, filler) values {values}"),
+    )
+    .unwrap();
 
     let num_threads = 10;
     let ops_per_thread = 10;
