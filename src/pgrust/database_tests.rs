@@ -8760,8 +8760,11 @@ fn alter_statistics_if_exists_missing_pushes_notice() {
     let db = Database::open(&base, 16).unwrap();
 
     clear_backend_notices();
-    db.execute(1, "alter statistics if exists missing_stats set statistics 0")
-        .unwrap();
+    db.execute(
+        1,
+        "alter statistics if exists missing_stats set statistics 0",
+    )
+    .unwrap();
     assert_eq!(
         take_backend_notice_messages(),
         vec![r#"statistics object "missing_stats" does not exist, skipping"#.to_string()]

@@ -1770,8 +1770,7 @@ fn parse_create_statistics_statement() {
 
 #[test]
 fn parse_alter_statistics_statement() {
-    let stmt =
-        parse_statement("alter statistics if exists public.tst set statistics 0").unwrap();
+    let stmt = parse_statement("alter statistics if exists public.tst set statistics 0").unwrap();
     assert_eq!(
         stmt,
         Statement::AlterStatistics(AlterStatisticsStatement {

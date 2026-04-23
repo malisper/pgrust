@@ -1649,7 +1649,9 @@ fn psql_describe_statistics_query(
             Value::Text(value) => value.as_str(),
             _ => "",
         };
-        left_schema.cmp(right_schema).then_with(|| left_name.cmp(right_name))
+        left_schema
+            .cmp(right_schema)
+            .then_with(|| left_name.cmp(right_name))
     });
     Some((
         vec![
@@ -1722,16 +1724,28 @@ fn execute_statistics_catalog_query(
     None
 }
 
-fn statistics_object_data_query(db: &Database, sql: &str) -> Option<(Vec<QueryColumn>, Vec<Vec<Value>>)> {
+fn statistics_object_data_query(
+    db: &Database,
+    sql: &str,
+) -> Option<(Vec<QueryColumn>, Vec<Vec<Value>>)> {
     let name = extract_single_quoted_literal_after(sql, "where s.stxname =")?;
     let rows = db
         .statistics_objects
         .read()
         .values()
-        .filter(|entry| split_qualified_statistics_name(&entry.name).1.eq_ignore_ascii_case(&name))
+        .filter(|entry| {
+            split_qualified_statistics_name(&entry.name)
+                .1
+                .eq_ignore_ascii_case(&name)
+        })
         .map(|entry| {
             vec![
-                Value::Text(split_qualified_statistics_name(&entry.name).1.to_string().into()),
+                Value::Text(
+                    split_qualified_statistics_name(&entry.name)
+                        .1
+                        .to_string()
+                        .into(),
+                ),
                 Value::Null,
                 Value::Null,
                 Value::Null,
@@ -1769,11 +1783,20 @@ fn statistics_catalog_empty_result(sql: &str) -> (Vec<QueryColumn>, Vec<Vec<Valu
 }
 
 fn split_qualified_statistics_name(name: &str) -> (&str, &str) {
-    name.rsplit_once('.').map(|(schema, base)| (schema, base)).unwrap_or(("public", name))
+    name.rsplit_once('.')
+        .map(|(schema, base)| (schema, base))
+        .unwrap_or(("public", name))
 }
 
-fn statistics_kind_enabled(entry: &crate::pgrust::database::StatisticsObjectEntry, kind: &str) -> bool {
-    entry.kinds.is_empty() || entry.kinds.iter().any(|value| value.eq_ignore_ascii_case(kind))
+fn statistics_kind_enabled(
+    entry: &crate::pgrust::database::StatisticsObjectEntry,
+    kind: &str,
+) -> bool {
+    entry.kinds.is_empty()
+        || entry
+            .kinds
+            .iter()
+            .any(|value| value.eq_ignore_ascii_case(kind))
 }
 
 fn extract_single_quoted_literal_after<'a>(sql: &'a str, needle: &str) -> Option<String> {
@@ -6477,7 +6500,8 @@ mod tests {
     fn psql_describe_statistics_query_returns_statistics_objects_for_relation() {
         let db = Database::open(temp_dir("describe_statistics_objects"), 16).unwrap();
         let session = Session::new(1);
-        db.execute(1, "create table widgets (a int4, b int4)").unwrap();
+        db.execute(1, "create table widgets (a int4, b int4)")
+            .unwrap();
         db.execute(1, "create statistics widgets_stats on a, b from widgets")
             .unwrap();
         db.execute(1, "alter statistics widgets_stats set statistics 0")
@@ -6516,7 +6540,8 @@ mod tests {
     fn statistics_catalog_query_returns_null_data_columns_for_known_object() {
         let db = Database::open(temp_dir("statistics_catalog_query"), 16).unwrap();
         let session = Session::new(1);
-        db.execute(1, "create table widgets (a int4, b int4)").unwrap();
+        db.execute(1, "create table widgets (a int4, b int4)")
+            .unwrap();
         db.execute(1, "create statistics widgets_stats on a, b from widgets")
             .unwrap();
 
