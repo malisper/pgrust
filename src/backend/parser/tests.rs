@@ -3025,6 +3025,20 @@ fn parse_alter_role_option_statement() {
 }
 
 #[test]
+fn parse_alter_user_password_statement() {
+    let stmt = parse_statement("alter user regress_priv_user2 password 'verysecret'").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterRole(AlterRoleStatement {
+            role_name: "regress_priv_user2".into(),
+            action: AlterRoleAction::Options(vec![RoleOption::Password(Some(
+                "verysecret".into(),
+            ))]),
+        })
+    );
+}
+
+#[test]
 fn parse_alter_schema_owner_statement() {
     let stmt = parse_statement("alter schema tenant owner to app_owner").unwrap();
     assert_eq!(
