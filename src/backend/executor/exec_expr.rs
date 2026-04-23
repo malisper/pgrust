@@ -2706,6 +2706,16 @@ fn cast_record_value_for_target(
     target: SqlType,
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
+    if matches!(
+        target.kind,
+        SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar
+    ) && !target.is_array
+    {
+        return Ok(Value::Text(
+            crate::backend::executor::value_io::format_record_text(&record).into(),
+        ));
+    }
+
     let descriptor = match target {
         SqlType {
             kind: SqlTypeKind::Composite,
