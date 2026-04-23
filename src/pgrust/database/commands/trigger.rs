@@ -81,6 +81,7 @@ impl Database {
 
         let tgattr = trigger_update_attnums(stmt, &relation.desc)?;
         let tgtype = trigger_type_bits(stmt);
+        let (tgoldtable, tgnewtable) = trigger_transition_table_names(stmt);
         let trigger_row = PgTriggerRow {
             oid: 0,
             tgrelid: relation.relation_oid,
@@ -99,8 +100,8 @@ impl Database {
             tgattr,
             tgargs: stmt.func_args.clone(),
             tgqual: stmt.when_clause_sql.clone(),
-            tgoldtable: None,
-            tgnewtable: None,
+            tgoldtable,
+            tgnewtable,
         };
 
         let existing = catalog
@@ -737,8 +738,8 @@ fn validate_trigger_stmt(
     relation_name: &str,
     catalog: &dyn CatalogLookup,
 ) -> Result<(), ExecError> {
+    validate_trigger_referencing_usage(stmt, relation, relation_name, catalog)?;
     validate_trigger_relation_kind(stmt, relation.relkind, relation_name)?;
-    validate_trigger_referencing_usage(stmt, relation.relkind, relation_name)?;
 
     for event in &stmt.events {
         if event.event == TriggerEvent::Update {
@@ -1011,8 +1012,9 @@ fn validate_view_trigger_stmt(
 
 fn validate_trigger_referencing_usage(
     stmt: &CreateTriggerStatement,
-    relkind: char,
+    relation: &crate::backend::parser::BoundRelation,
     relation_name: &str,
+    catalog: &dyn CatalogLookup,
 ) -> Result<(), ExecError> {
     if stmt.referencing.is_empty() {
         return Ok(());
@@ -1025,11 +1027,32 @@ fn validate_trigger_referencing_usage(
             sqlstate: "0A000",
         });
     }
-    if relkind == 'v' {
+    if relation.relkind == 'v' {
         return Err(wrong_object_type_error(
             relation_name,
             "view",
             "Triggers on views cannot have transition tables.",
+        ));
+    }
+    if stmt.level == TriggerLevel::Row && relation.relkind == 'p' {
+        return Err(wrong_object_type_error(
+            relation_name,
+            "partitioned table",
+            "ROW triggers with transition tables are not supported on partitioned tables.",
+        ));
+    }
+    if stmt.level == TriggerLevel::Row
+        && !catalog
+            .inheritance_parents(relation.relation_oid)
+            .is_empty()
+    {
+        if relation.relispartition {
+            return Err(feature_not_supported_error(
+                "ROW triggers with transition tables are not supported on partitions",
+            ));
+        }
+        return Err(feature_not_supported_error(
+            "ROW triggers with transition tables are not supported on inheritance children",
         ));
     }
     if stmt.timing != TriggerTiming::After {
@@ -1063,7 +1086,89 @@ fn validate_trigger_referencing_usage(
             "transition tables cannot be specified for triggers with column lists",
         ));
     }
+    let has_insert = stmt
+        .events
+        .iter()
+        .any(|event| event.event == TriggerEvent::Insert);
+    let has_update = stmt
+        .events
+        .iter()
+        .any(|event| event.event == TriggerEvent::Update);
+    let has_delete = stmt
+        .events
+        .iter()
+        .any(|event| event.event == TriggerEvent::Delete);
+    let mut old_name = None::<String>;
+    let mut new_name = None::<String>;
+    for spec in &stmt.referencing {
+        if spec.is_new {
+            if !(has_insert || has_update) {
+                return Err(ExecError::DetailedError {
+                    message: "NEW TABLE can only be specified for an INSERT or UPDATE trigger"
+                        .into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42P17",
+                });
+            }
+            if new_name.is_some() {
+                return Err(ExecError::DetailedError {
+                    message: "NEW TABLE cannot be specified multiple times".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42P17",
+                });
+            }
+            new_name = Some(spec.name.clone());
+        } else {
+            if !(has_delete || has_update) {
+                return Err(ExecError::DetailedError {
+                    message: "OLD TABLE can only be specified for a DELETE or UPDATE trigger"
+                        .into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42P17",
+                });
+            }
+            if old_name.is_some() {
+                return Err(ExecError::DetailedError {
+                    message: "OLD TABLE cannot be specified multiple times".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42P17",
+                });
+            }
+            old_name = Some(spec.name.clone());
+        }
+    }
+    if old_name
+        .as_ref()
+        .zip(new_name.as_ref())
+        .is_some_and(|(old, new)| old.eq_ignore_ascii_case(new))
+    {
+        return Err(ExecError::DetailedError {
+            message: "OLD TABLE name and NEW TABLE name cannot be the same".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42P17",
+        });
+    }
     Ok(())
+}
+
+fn trigger_transition_table_names(
+    stmt: &CreateTriggerStatement,
+) -> (Option<String>, Option<String>) {
+    let mut old_name = None;
+    let mut new_name = None;
+    for spec in &stmt.referencing {
+        if spec.is_new {
+            new_name = Some(spec.name.clone());
+        } else {
+            old_name = Some(spec.name.clone());
+        }
+    }
+    (old_name, new_name)
 }
 
 fn wrong_object_type_error(relation_name: &str, kind: &str, detail: &str) -> ExecError {

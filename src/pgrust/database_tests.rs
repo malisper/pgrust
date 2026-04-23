@@ -7168,21 +7168,51 @@ fn create_trigger_reports_postgres_style_transition_table_errors() {
 
     db.execute(1, "create table items (id int4, note text)")
         .unwrap();
+    db.execute(1, "create view item_view as select * from items")
+        .unwrap();
+    db.execute(
+        1,
+        "create table parent_part (id int4, note text) partition by range (id)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table child_part partition of parent_part for values from (0) to (10)",
+    )
+    .unwrap();
+    db.execute(1, "create table parent_inh (id int4, note text)")
+        .unwrap();
+    db.execute(1, "create table child_inh () inherits (parent_inh)")
+        .unwrap();
     db.execute(
         1,
         "create function items_trig() returns trigger language plpgsql as $$ begin return new; end $$",
     )
     .unwrap();
 
-    match db.execute(
-        1,
+    let assert_error = |sql: &str,
+                        expected_message: &str,
+                        expected_detail: Option<&str>,
+                        expected_sqlstate: &str| {
+        match db.execute(1, sql) {
+            Err(ExecError::DetailedError {
+                message,
+                detail,
+                sqlstate,
+                ..
+            }) if message == expected_message
+                && detail.as_deref() == expected_detail
+                && sqlstate == expected_sqlstate => {}
+            other => panic!("expected {expected_message:?} error, got {:?}", other),
+        }
+    };
+
+    assert_error(
         "create trigger items_multi after insert or update on items referencing new table as new_rows for each statement execute function items_trig()",
-    ) {
-        Err(ExecError::DetailedError { message, .. })
-            if message
-                == "transition tables cannot be specified for triggers with more than one event" => {}
-        other => panic!("expected transition-table multi-event error, got {:?}", other),
-    }
+        "transition tables cannot be specified for triggers with more than one event",
+        None,
+        "0A000",
+    );
 
     match db.execute(
         1,
@@ -7195,6 +7225,67 @@ fn create_trigger_reports_postgres_style_transition_table_errors() {
                 == Some("Use OLD TABLE or NEW TABLE for naming transition tables.") => {}
         other => panic!("expected referencing row-name error, got {:?}", other),
     }
+
+    assert_error(
+        "create trigger items_dup_new after insert on items referencing new table as new_rows new table as newer_rows for each statement execute function items_trig()",
+        "NEW TABLE cannot be specified multiple times",
+        None,
+        "42P17",
+    );
+    assert_error(
+        "create trigger items_bad_old after insert on items referencing old table as old_rows for each statement execute function items_trig()",
+        "OLD TABLE can only be specified for a DELETE or UPDATE trigger",
+        None,
+        "42P17",
+    );
+    assert_error(
+        "create trigger items_same after update on items referencing old table as rows new table as ROWS for each statement execute function items_trig()",
+        "OLD TABLE name and NEW TABLE name cannot be the same",
+        None,
+        "42P17",
+    );
+    assert_error(
+        "create trigger items_before before insert on items referencing new table as new_rows for each statement execute function items_trig()",
+        "transition table name can only be specified for an AFTER trigger",
+        None,
+        "42P17",
+    );
+    assert_error(
+        "create trigger items_col after update of note on items referencing new table as new_rows for each statement execute function items_trig()",
+        "transition tables cannot be specified for triggers with column lists",
+        None,
+        "0A000",
+    );
+    assert_error(
+        "create trigger items_trunc after truncate on items referencing old table as old_rows for each statement execute function items_trig()",
+        "TRUNCATE triggers with transition tables are not supported",
+        None,
+        "0A000",
+    );
+    assert_error(
+        "create trigger view_ref after insert on item_view referencing new table as new_rows for each statement execute function items_trig()",
+        "\"item_view\" is a view",
+        Some("Triggers on views cannot have transition tables."),
+        "42809",
+    );
+    assert_error(
+        "create trigger parent_part_ref after insert on parent_part referencing new table as new_rows for each row execute function items_trig()",
+        "\"parent_part\" is a partitioned table",
+        Some("ROW triggers with transition tables are not supported on partitioned tables."),
+        "42809",
+    );
+    assert_error(
+        "create trigger child_part_ref after insert on child_part referencing new table as new_rows for each row execute function items_trig()",
+        "ROW triggers with transition tables are not supported on partitions",
+        None,
+        "0A000",
+    );
+    assert_error(
+        "create trigger child_inh_ref after insert on child_inh referencing new table as new_rows for each row execute function items_trig()",
+        "ROW triggers with transition tables are not supported on inheritance children",
+        None,
+        "0A000",
+    );
 }
 
 #[test]
@@ -7222,6 +7313,155 @@ fn statement_trigger_return_value_is_ignored() {
         query_rows(&db, 1, "select id from items"),
         vec![vec![Value::Int32(1)]]
     );
+}
+
+#[test]
+fn transition_table_statement_triggers_can_read_statement_rows() {
+    let dir = temp_dir("transition_table_statement_rows");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(1, "create table new_rows (id int4, note text)")
+        .unwrap();
+    db.execute(1, "insert into new_rows values (100, 'catalog')")
+        .unwrap();
+    db.execute(
+        1,
+        "create function insert_transition_notice() returns trigger language plpgsql as $$
+         declare c int4; dyn int4 := 0; loop_id int4; sum_ids int4 := 0; expr_c int4;
+         begin
+           select count(*) into c from new_rows;
+           perform count(*) from new_rows;
+           for dyn in execute 'select count(*) from new_rows' loop
+             null;
+           end loop;
+           for loop_id in select id from new_rows loop
+             sum_ids := sum_ids + loop_id;
+           end loop;
+           expr_c := (select count(*) from new_rows);
+           raise notice 'insert:%:%:%:%', c, dyn, expr_c, sum_ids;
+           return null;
+         end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function update_transition_notice() returns trigger language plpgsql as $$
+         declare oc int4; nc int4; osum int4; nsum int4;
+         begin
+           select count(*), sum(id) into oc, osum from old_rows;
+           select count(*), sum(id) into nc, nsum from new_rows;
+           raise notice 'update:%:%:%:%', oc, nc, osum, nsum;
+           return null;
+         end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function delete_transition_notice() returns trigger language plpgsql as $$
+         declare oc int4; osum int4;
+         begin
+           select count(*), sum(id) into oc, osum from old_rows;
+           raise notice 'delete:%:%', oc, osum;
+           return null;
+         end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger items_insert_ref after insert on items referencing new table as new_rows for each statement execute function insert_transition_notice()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger items_update_ref after update on items referencing old table as old_rows new table as new_rows for each statement execute function update_transition_notice()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger items_delete_ref after delete on items referencing old table as old_rows for each statement execute function delete_transition_notice()",
+    )
+    .unwrap();
+
+    clear_notices();
+    db.execute(1, "insert into items values (1, 'a'), (2, 'b')")
+        .unwrap();
+    assert_eq!(take_notice_messages(), vec!["insert:2:2:2:3".to_string()]);
+
+    clear_notices();
+    db.execute(1, "update items set id = id + 10 where id <= 2")
+        .unwrap();
+    assert_eq!(take_notice_messages(), vec!["update:2:2:3:23".to_string()]);
+
+    clear_notices();
+    db.execute(1, "delete from items where id in (11, 12)")
+        .unwrap();
+    assert_eq!(take_notice_messages(), vec!["delete:2:23".to_string()]);
+}
+
+#[test]
+fn row_transition_table_triggers_see_full_statement_set() {
+    let dir = temp_dir("transition_table_row_trigger_rows");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function row_transition_notice() returns trigger language plpgsql as $$
+         declare c int4;
+         begin
+           select count(*) into c from new_rows;
+           raise notice 'row:%:%', NEW.id, c;
+           return NEW;
+         end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger items_row_ref after insert on items referencing new table as new_rows for each row execute function row_transition_notice()",
+    )
+    .unwrap();
+
+    clear_notices();
+    db.execute(1, "insert into items values (1, 'a'), (2, 'b')")
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec!["row:1:2".to_string(), "row:2:2".to_string()]
+    );
+}
+
+#[test]
+fn transition_tables_cannot_be_referenced_by_persistent_objects() {
+    let dir = temp_dir("transition_table_persistent_object");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table items (id int4)").unwrap();
+    db.execute(
+        1,
+        "create function make_bogus_matview() returns trigger language plpgsql as $$
+         begin
+           create materialized view transition_test_mv as select * from new_table;
+           return NEW;
+         end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger items_ref after insert on items referencing new table as new_table for each statement execute function make_bogus_matview()",
+    )
+    .unwrap();
+
+    match db.execute(1, "insert into items values (42)") {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) if message
+            == "transition table \"new_table\" cannot be referenced in a persistent object"
+            && sqlstate == "0A000" => {}
+        other => panic!("expected persistent transition-table reference error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -22527,6 +22767,67 @@ fn pg_get_triggerdef_defaults_to_unpretty_and_lowercase_old_new() {
             ),
             Value::Text(
                 "CREATE TRIGGER items_before BEFORE UPDATE OF note ON items FOR EACH ROW WHEN (old.note IS DISTINCT FROM new.note) EXECUTE FUNCTION items_before()".into(),
+            ),
+        ]]
+    );
+}
+
+#[test]
+fn trigger_transition_table_names_are_visible_in_catalog_helpers() {
+    let dir = temp_dir("trigger_transition_catalog_helpers");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function items_after() returns trigger language plpgsql as $$ begin return null; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger items_after after update on items referencing old table as old_rows new table as new_rows for each statement execute function items_after()",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select tgoldtable, tgnewtable from pg_trigger where tgname = 'items_after'",
+        ),
+        vec![vec![
+            Value::Text("old_rows".into()),
+            Value::Text("new_rows".into()),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select action_reference_old_table, action_reference_new_table
+             from information_schema.triggers
+             where trigger_name = 'items_after'",
+        ),
+        vec![vec![
+            Value::Text("old_rows".into()),
+            Value::Text("new_rows".into()),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_triggerdef(oid), pg_get_triggerdef(oid, true)
+             from pg_trigger
+             where tgname = 'items_after'",
+        ),
+        vec![vec![
+            Value::Text(
+                "CREATE TRIGGER items_after AFTER UPDATE ON public.items REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION items_after()".into(),
+            ),
+            Value::Text(
+                "CREATE TRIGGER items_after AFTER UPDATE ON items REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION items_after()".into(),
             ),
         ]]
     );

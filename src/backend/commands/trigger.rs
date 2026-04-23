@@ -12,7 +12,7 @@ use crate::include::catalog::{
     PUBLIC_NAMESPACE_OID, PgTriggerRow,
 };
 use crate::pl::plpgsql::{
-    TriggerCallContext, TriggerFunctionResult, TriggerOperation,
+    TriggerCallContext, TriggerFunctionResult, TriggerOperation, TriggerTransitionTable,
     execute_user_defined_trigger_function,
 };
 
@@ -50,6 +50,12 @@ struct LoadedTrigger {
     row: PgTriggerRow,
     when_expr: Option<Expr>,
     function: LoadedTriggerFunction,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TriggerTransitionCapture {
+    old_rows: Vec<Vec<Value>>,
+    new_rows: Vec<Vec<Value>>,
 }
 
 #[derive(Debug, Clone)]
@@ -101,11 +107,55 @@ impl RuntimeTriggers {
     }
 
     pub(crate) fn before_statement(&self, ctx: &mut ExecutorContext) -> Result<(), ExecError> {
-        self.fire_statement_triggers(true, ctx)
+        self.fire_statement_triggers(true, None, ctx)
     }
 
-    pub(crate) fn after_statement(&self, ctx: &mut ExecutorContext) -> Result<(), ExecError> {
-        self.fire_statement_triggers(false, ctx)
+    pub(crate) fn after_statement(
+        &self,
+        capture: Option<&TriggerTransitionCapture>,
+        ctx: &mut ExecutorContext,
+    ) -> Result<(), ExecError> {
+        self.fire_statement_triggers(false, capture, ctx)
+    }
+
+    pub(crate) fn new_transition_capture(&self) -> TriggerTransitionCapture {
+        TriggerTransitionCapture::default()
+    }
+
+    pub(crate) fn capture_insert_row(&self, capture: &mut TriggerTransitionCapture, row: &[Value]) {
+        if self
+            .triggers
+            .iter()
+            .any(|trigger| trigger.row.tgnewtable.is_some())
+        {
+            capture.new_rows.push(materialized_row(row));
+        }
+    }
+
+    pub(crate) fn capture_update_row(
+        &self,
+        capture: &mut TriggerTransitionCapture,
+        old_row: &[Value],
+        new_row: &[Value],
+    ) {
+        if self
+            .triggers
+            .iter()
+            .any(|trigger| trigger_uses_transition_tables(&trigger.row))
+        {
+            capture.old_rows.push(materialized_row(old_row));
+            capture.new_rows.push(materialized_row(new_row));
+        }
+    }
+
+    pub(crate) fn capture_delete_row(&self, capture: &mut TriggerTransitionCapture, row: &[Value]) {
+        if self
+            .triggers
+            .iter()
+            .any(|trigger| trigger.row.tgoldtable.is_some())
+        {
+            capture.old_rows.push(materialized_row(row));
+        }
     }
 
     pub(crate) fn has_instead_row_triggers(&self) -> bool {
@@ -125,7 +175,7 @@ impl RuntimeTriggers {
             if !self.when_passes(trigger, None, Some(&new_row), ctx)? {
                 continue;
             }
-            match self.execute_trigger(trigger, None, Some(&new_row), ctx)? {
+            match self.execute_trigger(trigger, None, Some(&new_row), None, ctx)? {
                 TriggerFunctionResult::SkipRow | TriggerFunctionResult::NoValue => return Ok(None),
                 TriggerFunctionResult::ReturnNew(values)
                 | TriggerFunctionResult::ReturnOld(values) => new_row = values,
@@ -139,7 +189,7 @@ impl RuntimeTriggers {
         new_row: &[Value],
         ctx: &mut ExecutorContext,
     ) -> Result<(), ExecError> {
-        self.fire_after_row(None, Some(new_row), ctx)
+        self.fire_after_row(None, Some(new_row), None, false, ctx)
     }
 
     pub(crate) fn instead_row_insert(
@@ -153,7 +203,7 @@ impl RuntimeTriggers {
             if !self.when_passes(trigger, None, Some(&new_row), ctx)? {
                 continue;
             }
-            match self.execute_trigger(trigger, None, Some(&new_row), ctx)? {
+            match self.execute_trigger(trigger, None, Some(&new_row), None, ctx)? {
                 TriggerFunctionResult::SkipRow | TriggerFunctionResult::NoValue => return Ok(None),
                 TriggerFunctionResult::ReturnNew(values)
                 | TriggerFunctionResult::ReturnOld(values) => new_row = values,
@@ -174,7 +224,7 @@ impl RuntimeTriggers {
             if !self.when_passes(trigger, Some(old_row), Some(&new_row), ctx)? {
                 continue;
             }
-            match self.execute_trigger(trigger, Some(old_row), Some(&new_row), ctx)? {
+            match self.execute_trigger(trigger, Some(old_row), Some(&new_row), None, ctx)? {
                 TriggerFunctionResult::SkipRow | TriggerFunctionResult::NoValue => return Ok(None),
                 TriggerFunctionResult::ReturnNew(values)
                 | TriggerFunctionResult::ReturnOld(values) => new_row = values,
@@ -189,7 +239,7 @@ impl RuntimeTriggers {
         new_row: &[Value],
         ctx: &mut ExecutorContext,
     ) -> Result<(), ExecError> {
-        self.fire_after_row(Some(old_row), Some(new_row), ctx)
+        self.fire_after_row(Some(old_row), Some(new_row), None, false, ctx)
     }
 
     pub(crate) fn instead_row_update(
@@ -204,7 +254,7 @@ impl RuntimeTriggers {
             if !self.when_passes(trigger, Some(old_row), Some(&new_row), ctx)? {
                 continue;
             }
-            match self.execute_trigger(trigger, Some(old_row), Some(&new_row), ctx)? {
+            match self.execute_trigger(trigger, Some(old_row), Some(&new_row), None, ctx)? {
                 TriggerFunctionResult::SkipRow | TriggerFunctionResult::NoValue => return Ok(None),
                 TriggerFunctionResult::ReturnNew(values)
                 | TriggerFunctionResult::ReturnOld(values) => new_row = values,
@@ -224,7 +274,7 @@ impl RuntimeTriggers {
             if !self.when_passes(trigger, Some(old_row), None, ctx)? {
                 continue;
             }
-            match self.execute_trigger(trigger, Some(old_row), None, ctx)? {
+            match self.execute_trigger(trigger, Some(old_row), None, None, ctx)? {
                 TriggerFunctionResult::SkipRow | TriggerFunctionResult::NoValue => {
                     return Ok(false);
                 }
@@ -239,7 +289,7 @@ impl RuntimeTriggers {
         old_row: &[Value],
         ctx: &mut ExecutorContext,
     ) -> Result<(), ExecError> {
-        self.fire_after_row(Some(old_row), None, ctx)
+        self.fire_after_row(Some(old_row), None, None, false, ctx)
     }
 
     pub(crate) fn instead_row_delete(
@@ -253,7 +303,7 @@ impl RuntimeTriggers {
             if !self.when_passes(trigger, Some(&old_row), None, ctx)? {
                 continue;
             }
-            match self.execute_trigger(trigger, Some(&old_row), None, ctx)? {
+            match self.execute_trigger(trigger, Some(&old_row), None, None, ctx)? {
                 TriggerFunctionResult::SkipRow | TriggerFunctionResult::NoValue => return Ok(None),
                 TriggerFunctionResult::ReturnNew(values)
                 | TriggerFunctionResult::ReturnOld(values) => old_row = values,
@@ -262,9 +312,35 @@ impl RuntimeTriggers {
         Ok(Some(old_row))
     }
 
+    pub(crate) fn after_transition_rows(
+        &self,
+        capture: &TriggerTransitionCapture,
+        ctx: &mut ExecutorContext,
+    ) -> Result<(), ExecError> {
+        match self.event {
+            TriggerOperation::Insert => {
+                for new_row in &capture.new_rows {
+                    self.fire_after_row(None, Some(new_row), Some(capture), true, ctx)?;
+                }
+            }
+            TriggerOperation::Update => {
+                for (old_row, new_row) in capture.old_rows.iter().zip(capture.new_rows.iter()) {
+                    self.fire_after_row(Some(old_row), Some(new_row), Some(capture), true, ctx)?;
+                }
+            }
+            TriggerOperation::Delete => {
+                for old_row in &capture.old_rows {
+                    self.fire_after_row(Some(old_row), None, Some(capture), true, ctx)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn fire_statement_triggers(
         &self,
         before: bool,
+        capture: Option<&TriggerTransitionCapture>,
         ctx: &mut ExecutorContext,
     ) -> Result<(), ExecError> {
         for trigger in self.triggers.iter().filter(|trigger| {
@@ -273,7 +349,7 @@ impl RuntimeTriggers {
             if !self.when_passes(trigger, None, None, ctx)? {
                 continue;
             }
-            let _ = self.execute_trigger(trigger, None, None, ctx)?;
+            let _ = self.execute_trigger(trigger, None, None, capture, ctx)?;
         }
         Ok(())
     }
@@ -282,17 +358,20 @@ impl RuntimeTriggers {
         &self,
         old_row: Option<&[Value]>,
         new_row: Option<&[Value]>,
+        capture: Option<&TriggerTransitionCapture>,
+        transition_only: bool,
         ctx: &mut ExecutorContext,
     ) -> Result<(), ExecError> {
         for trigger in self.triggers.iter().filter(|trigger| {
             !trigger_is_before(trigger.row.tgtype)
                 && !trigger_is_instead(trigger.row.tgtype)
                 && trigger_is_row(trigger.row.tgtype)
+                && trigger_uses_transition_tables(&trigger.row) == transition_only
         }) {
             if !self.when_passes(trigger, old_row, new_row, ctx)? {
                 continue;
             }
-            let _ = self.execute_trigger(trigger, old_row, new_row, ctx)?;
+            let _ = self.execute_trigger(trigger, old_row, new_row, capture, ctx)?;
         }
         Ok(())
     }
@@ -346,6 +425,7 @@ impl RuntimeTriggers {
         trigger: &LoadedTrigger,
         old_row: Option<&[Value]>,
         new_row: Option<&[Value]>,
+        capture: Option<&TriggerTransitionCapture>,
         ctx: &mut ExecutorContext,
     ) -> Result<TriggerFunctionResult, ExecError> {
         let call = TriggerCallContext {
@@ -364,6 +444,7 @@ impl RuntimeTriggers {
             op: self.event,
             new_row: new_row.map(|row| row.to_vec()),
             old_row: old_row.map(|row| row.to_vec()),
+            transition_tables: self.transition_tables_for_trigger(trigger, capture),
         };
         ctx.trigger_depth = ctx.trigger_depth.saturating_add(1);
         let result = match trigger.function {
@@ -377,6 +458,32 @@ impl RuntimeTriggers {
         ctx.trigger_depth = ctx.trigger_depth.saturating_sub(1);
         result
     }
+
+    fn transition_tables_for_trigger(
+        &self,
+        trigger: &LoadedTrigger,
+        capture: Option<&TriggerTransitionCapture>,
+    ) -> Vec<TriggerTransitionTable> {
+        let Some(capture) = capture else {
+            return Vec::new();
+        };
+        let mut tables = Vec::new();
+        if let Some(name) = trigger.row.tgoldtable.as_ref() {
+            tables.push(TriggerTransitionTable {
+                name: name.clone(),
+                desc: self.relation_desc.clone(),
+                rows: capture.old_rows.clone(),
+            });
+        }
+        if let Some(name) = trigger.row.tgnewtable.as_ref() {
+            tables.push(TriggerTransitionTable {
+                name: name.clone(),
+                desc: self.relation_desc.clone(),
+                rows: capture.new_rows.clone(),
+            });
+        }
+        tables
+    }
 }
 
 fn clone_or_null_row(row: Option<&[Value]>, width: usize) -> Vec<Value> {
@@ -384,6 +491,12 @@ fn clone_or_null_row(row: Option<&[Value]>, width: usize) -> Vec<Value> {
         Some(row) => row.to_vec(),
         None => vec![Value::Null; width],
     }
+}
+
+fn materialized_row(row: &[Value]) -> Vec<Value> {
+    let mut values = row.to_vec();
+    Value::materialize_all(&mut values);
+    values
 }
 
 fn load_trigger_function(
@@ -799,6 +912,10 @@ fn trigger_is_before(tgtype: i16) -> bool {
 
 fn trigger_is_instead(tgtype: i16) -> bool {
     (tgtype & TRIGGER_TYPE_INSTEAD) != 0
+}
+
+fn trigger_uses_transition_tables(row: &PgTriggerRow) -> bool {
+    row.tgoldtable.is_some() || row.tgnewtable.is_some()
 }
 
 fn trigger_timing(tgtype: i16) -> TriggerTiming {
