@@ -97,6 +97,7 @@ use crate::backend::parser::analyze::is_binary_coercible_type;
 use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp,
 };
+use crate::backend::rewrite::format_view_definition;
 use crate::backend::utils::misc::checkpoint::checkpoint_stats_value;
 use crate::backend::utils::misc::guc::normalize_guc_name;
 use crate::include::access::toast_compression::ToastCompressionId;
@@ -1308,6 +1309,41 @@ fn eval_pg_get_expr(values: &[Value]) -> Result<Value, ExecError> {
             actual: format!("PgGetExpr({} args)", values.len()),
         })),
     }
+}
+
+fn eval_pg_get_viewdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let catalog = executor_catalog(ctx)?;
+    let relation_oid = match values {
+        [Value::Null] | [Value::Null, _] | [_, Value::Null] => return Ok(Value::Null),
+        [value] | [value, _] => {
+            if let Some(text) = value.as_text() {
+                catalog
+                    .lookup_any_relation(text)
+                    .map(|entry| entry.relation_oid)
+                    .unwrap_or_default()
+            } else {
+                oid_arg_to_u32(value, "pg_get_viewdef")?
+            }
+        }
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "pg_get_viewdef(view [, pretty_or_wrap])",
+                actual: format!("PgGetViewDef({} args)", values.len()),
+            }));
+        }
+    };
+    if relation_oid == 0 {
+        return Ok(Value::Null);
+    }
+    let Some(relation) = catalog.lookup_relation_by_oid(relation_oid) else {
+        return Ok(Value::Null);
+    };
+    if relation.relkind != 'v' {
+        return Ok(Value::Null);
+    }
+    let definition =
+        format_view_definition(relation_oid, &relation.desc, catalog).map_err(ExecError::Parse)?;
+    Ok(Value::Text(definition.into()))
 }
 
 fn current_slot_raw_attr_bytes<'a>(
@@ -3879,6 +3915,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::ObjDescription => eval_obj_description(&values, ctx),
         BuiltinScalarFunction::PgDescribeObject => eval_pg_describe_object(&values, ctx),
         BuiltinScalarFunction::PgGetExpr => eval_pg_get_expr(&values),
+        BuiltinScalarFunction::PgGetViewDef => eval_pg_get_viewdef(&values, ctx),
         BuiltinScalarFunction::PgRelationIsPublishable => {
             eval_pg_relation_is_publishable(&values, ctx)
         }
