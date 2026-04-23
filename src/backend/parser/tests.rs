@@ -7393,6 +7393,20 @@ fn parse_hash_partition_syntax_remains_unsupported() {
 }
 
 #[test]
+fn parse_partition_of_with_using_clause_is_unsupported_without_panicking() {
+    match parse_statement(
+        "create table child partition of parent for values in ('c') using heap",
+    )
+    .unwrap()
+    {
+        Statement::Unsupported(stmt) => {
+            assert!(stmt.sql.to_ascii_lowercase().contains("using heap"));
+        }
+        other => panic!("expected Unsupported, got {:?}", other),
+    }
+}
+
+#[test]
 fn parse_select_from_only_table() {
     match parse_statement("select * from only parent").unwrap() {
         Statement::Select(SelectStatement {
