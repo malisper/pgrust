@@ -170,7 +170,6 @@ jobs:
               if result == "skipped" and job_name in allowed_skipped:
                   continue
               failed[job_name] = result
-
           if failed:
               print("The test workflow did not succeed:", file=sys.stderr)
               for job_name, result in failed.items():

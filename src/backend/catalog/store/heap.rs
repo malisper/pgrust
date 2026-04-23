@@ -3997,6 +3997,24 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn alter_relation_acl_mvcc(
+        &mut self,
+        relation_oid: u32,
+        relacl: Option<Vec<String>>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, _new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
+                entry.relacl = relacl;
+                Ok(((), vec![BootstrapCatalogKind::PgClass]))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok(effect)
+    }
+
     pub fn alter_relation_row_security_mvcc(
         &mut self,
         relation_oid: u32,
@@ -4546,6 +4564,7 @@ fn build_relation_entry(
         relation_oid,
         namespace_oid,
         owner_oid,
+        relacl: None,
         row_type_oid,
         array_type_oid,
         reltoastrelid: 0,
@@ -4650,6 +4669,7 @@ fn build_index_entry(
         relation_oid: control.next_oid,
         namespace_oid: table.namespace_oid,
         owner_oid: table.owner_oid,
+        relacl: None,
         row_type_oid: 0,
         array_type_oid: 0,
         reltoastrelid: 0,
@@ -5159,6 +5179,7 @@ fn class_row_for_relation_name(relation_name: &str, entry: &CatalogEntry) -> PgC
         relispartition: entry.relispartition,
         relfrozenxid: entry.relfrozenxid,
         relpartbound: entry.relpartbound.clone(),
+        relacl: entry.relacl.clone(),
     }
 }
 
@@ -5333,6 +5354,7 @@ fn catalog_entry_from_visible_relation(
         relation_oid: relation.relation_oid,
         namespace_oid: relation.namespace_oid,
         owner_oid: relation.owner_oid,
+        relacl: class_row.relacl.clone(),
         row_type_oid: relation.row_type_oid,
         array_type_oid: relation.array_type_oid,
         reltoastrelid: relation.reltoastrelid,
