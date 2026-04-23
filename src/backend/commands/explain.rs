@@ -10,8 +10,9 @@ use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::*;
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
-    attrno_index, AggAccum, Expr, INDEX_VAR, INNER_VAR, OUTER_VAR, OrderByEntry, ProjectSetTarget,
+    AggAccum, Expr, INDEX_VAR, INNER_VAR, OUTER_VAR, OrderByEntry, ProjectSetTarget,
     SetReturningCall, SubPlan, TargetEntry, WindowClause, WindowFrameBound, WindowFuncKind,
+    attrno_index,
 };
 use crate::include::storage::buf_internals::BufferUsageStats;
 
@@ -213,8 +214,12 @@ fn plan_node_label(
     rename_output: Option<&[String]>,
 ) -> String {
     match plan {
-        Plan::Aggregate { group_by, .. } if verbose && !group_by.is_empty() => "HashAggregate".into(),
-        Plan::FunctionScan { call, .. } if verbose => verbose_function_scan_label(call, rename_output),
+        Plan::Aggregate { group_by, .. } if verbose && !group_by.is_empty() => {
+            "HashAggregate".into()
+        }
+        Plan::FunctionScan { call, .. } if verbose => {
+            verbose_function_scan_label(call, rename_output)
+        }
         _ => state.node_label(),
     }
 }
@@ -255,7 +260,10 @@ fn format_verbose_plan_details(
                 "{prefix}Output: {}",
                 verbose_function_scan_outputs(call, rename_output).join(", ")
             ));
-            lines.push(format!("{prefix}Function Call: {}", render_set_returning_call(call)));
+            lines.push(format!(
+                "{prefix}Function Call: {}",
+                render_set_returning_call(call)
+            ));
         }
         Plan::Aggregate {
             group_by,
@@ -264,7 +272,8 @@ fn format_verbose_plan_details(
             ..
         } => {
             let input_names = verbose_plan_output_names_with_alias(input, outer_names, None);
-            let output = verbose_aggregate_outputs(group_by, accumulators, outer_names, &input_names);
+            let output =
+                verbose_aggregate_outputs(group_by, accumulators, outer_names, &input_names);
             lines.push(format!("{prefix}Output: {}", output.join(", ")));
             if !group_by.is_empty() {
                 lines.push(format!(
@@ -294,11 +303,13 @@ fn verbose_plan_output_names_with_alias(
             input,
             ..
         } => {
-            let input_names = verbose_plan_output_names_with_alias(input, outer_names, rename_output);
+            let input_names =
+                verbose_plan_output_names_with_alias(input, outer_names, rename_output);
             verbose_aggregate_outputs(group_by, accumulators, outer_names, &input_names)
         }
         Plan::NestedLoopJoin { left, right, .. } => {
-            let left_outputs = verbose_plan_output_names_with_alias(left, outer_names, rename_output);
+            let left_outputs =
+                verbose_plan_output_names_with_alias(left, outer_names, rename_output);
             let right_outputs =
                 verbose_plan_output_names_with_alias(right, Some(&left_outputs), rename_output);
             let mut combined = left_outputs;
@@ -331,7 +342,11 @@ fn verbose_function_scan_label(
     let alias = rename_output
         .and_then(|names| names.first())
         .cloned()
-        .or_else(|| call.output_columns().first().map(|column| column.name.clone()));
+        .or_else(|| {
+            call.output_columns()
+                .first()
+                .map(|column| column.name.clone())
+        });
     match alias {
         Some(column) => format!("Function Scan on pg_catalog.{name} {column}"),
         None => format!("Function Scan on pg_catalog.{name}"),
@@ -416,9 +431,7 @@ fn set_returning_call_name(call: &SetReturningCall) -> &'static str {
                 "jsonb_object_keys"
             }
             crate::include::nodes::primnodes::JsonTableFunction::JsonbEach => "jsonb_each",
-            crate::include::nodes::primnodes::JsonTableFunction::JsonbEachText => {
-                "jsonb_each_text"
-            }
+            crate::include::nodes::primnodes::JsonTableFunction::JsonbEachText => "jsonb_each_text",
             crate::include::nodes::primnodes::JsonTableFunction::JsonbArrayElements => {
                 "jsonb_array_elements"
             }
@@ -441,9 +454,7 @@ fn set_returning_call_name(call: &SetReturningCall) -> &'static str {
         SetReturningCall::PartitionTree { .. } => "pg_partition_tree",
         SetReturningCall::PartitionAncestors { .. } => "pg_partition_ancestors",
         SetReturningCall::TextSearchTableFunction { kind, .. } => match kind {
-            crate::include::nodes::primnodes::TextSearchTableFunction::TokenType => {
-                "ts_token_type"
-            }
+            crate::include::nodes::primnodes::TextSearchTableFunction::TokenType => "ts_token_type",
             crate::include::nodes::primnodes::TextSearchTableFunction::Parse => "ts_parse",
             crate::include::nodes::primnodes::TextSearchTableFunction::Debug => "ts_debug",
         },
@@ -456,7 +467,8 @@ fn render_verbose_order_by(
     outer_names: Option<&[String]>,
     input_names: &[String],
 ) -> String {
-    items.iter()
+    items
+        .iter()
         .map(|item| render_verbose_expr(&item.expr, outer_names, input_names, false))
         .collect::<Vec<_>>()
         .join(", ")
@@ -472,11 +484,19 @@ fn verbose_aggregate_outputs(
         .iter()
         .map(|expr| render_verbose_group_expr(expr, outer_names, input_names))
         .collect::<Vec<_>>();
-    outputs.extend(accumulators.iter().map(|accum| render_aggregate_call(accum, outer_names, input_names)));
+    outputs.extend(
+        accumulators
+            .iter()
+            .map(|accum| render_aggregate_call(accum, outer_names, input_names)),
+    );
     outputs
 }
 
-fn render_group_keys(group_by: &[Expr], outer_names: Option<&[String]>, input_names: &[String]) -> String {
+fn render_group_keys(
+    group_by: &[Expr],
+    outer_names: Option<&[String]>,
+    input_names: &[String],
+) -> String {
     group_by
         .iter()
         .map(|expr| render_verbose_group_expr(expr, outer_names, input_names))
@@ -557,11 +577,7 @@ fn render_aggregate_expr(
         }
         _ => render_verbose_expr(expr, outer_names, input_names, false),
     };
-    if wrap {
-        format!("({bare})")
-    } else {
-        bare
-    }
+    if wrap { format!("({bare})") } else { bare }
 }
 
 fn render_verbose_expr(
@@ -621,11 +637,7 @@ fn render_verbose_expr(
             None => render_explain_projection_expr_inner_with_qualifier(expr, None, input_names),
         },
     };
-    if wrap {
-        format!("({bare})")
-    } else {
-        bare
-    }
+    if wrap { format!("({bare})") } else { bare }
 }
 
 fn explain_passthrough_plan_child(plan: &Plan) -> Option<&Plan> {
