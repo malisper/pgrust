@@ -107,7 +107,6 @@ fn collapse_relation_acl_defaults(
         _ => Some(acl),
     }
 }
-
 fn single_object_name<'a>(
     object_names: &'a [String],
     statement_name: &'static str,
