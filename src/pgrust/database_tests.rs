@@ -17384,6 +17384,33 @@ fn select_into_creates_table_from_query() {
 }
 
 #[test]
+fn pg_column_compression_reports_large_inserted_value() {
+    let base = temp_dir("pg_column_compression_reports_large_inserted_value");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table cmdata (f1 text compression pglz)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into cmdata values (repeat('1234567890', 1000))",
+        )
+        .unwrap();
+
+    match session
+        .execute(&db, "select pg_column_compression(f1) from cmdata")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("pglz".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn create_table_as_autocommit_publishes_permanent_catalog_rows() {
     let base = temp_dir("autocommit_ctas_permanent");
     let db = Database::open(&base, 16).unwrap();
