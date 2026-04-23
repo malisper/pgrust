@@ -447,6 +447,8 @@ fn render_key_value(value: &Value) -> String {
         Value::Xml(v) => v.to_string(),
         Value::Json(v) => v.to_string(),
         Value::Bytea(v) => format!("{v:?}"),
+        Value::Inet(v) => v.render_inet(),
+        Value::Cidr(v) => v.render_cidr(),
         Value::Date(v) => format!("{v:?}"),
         Value::Time(v) => format!("{v:?}"),
         Value::TimeTz(v) => format!("{v:?}"),

@@ -2526,6 +2526,8 @@ pub enum SqlTypeKind {
     Bit,
     VarBit,
     Bytea,
+    Inet,
+    Cidr,
     Float4,
     Float8,
     Money,

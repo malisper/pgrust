@@ -13,6 +13,7 @@ use super::expr_geometry::{
     render_geometry_text,
 };
 use super::expr_multirange::render_multirange;
+use super::expr_network::{encode_network_bytes, parse_cidr_bytes, parse_inet_bytes};
 use super::expr_range::{decode_range_bytes, encode_range_bytes, render_range_text};
 use super::node_types::*;
 use crate::backend::catalog::catalog::column_desc;
@@ -69,6 +70,8 @@ const INTERNAL_VALUE_TAG_BOOL: u8 = 29;
 const INTERNAL_VALUE_TAG_ARRAY: u8 = 30;
 const INTERNAL_VALUE_TAG_RECORD: u8 = 31;
 const INTERNAL_VALUE_TAG_MULTIRANGE: u8 = 32;
+const INTERNAL_VALUE_TAG_INET: u8 = 34;
+const INTERNAL_VALUE_TAG_CIDR: u8 = 35;
 const COMPOSITE_DATUM_VERSION: u8 = 1;
 
 pub(crate) fn format_record_text(record: &crate::include::nodes::datum::RecordValue) -> String {
@@ -137,6 +140,8 @@ pub(crate) fn format_record_text_with_options(
                                 }
                                 rendered
                             }
+                            Value::Inet(v) => v.render_inet(),
+                            Value::Cidr(v) => v.render_cidr(),
                             Value::Bit(v) => v.render(),
                             Value::TsVector(v) => crate::backend::executor::render_tsvector_text(v),
                             Value::TsQuery(v) => crate::backend::executor::render_tsquery_text(v),
@@ -221,6 +226,8 @@ fn format_failing_row_value(value: &Value, datetime_config: &DateTimeConfig) -> 
             }
             rendered
         }
+        Value::Inet(v) => v.render_inet(),
+        Value::Cidr(v) => v.render_cidr(),
         Value::InternalChar(byte) => render_internal_char_text(*byte),
         Value::Date(_)
         | Value::Time(_)
@@ -310,6 +317,8 @@ fn sql_type_kind_tag(kind: SqlTypeKind) -> u8 {
         SqlTypeKind::Bit => 12,
         SqlTypeKind::VarBit => 13,
         SqlTypeKind::Bytea => 14,
+        SqlTypeKind::Inet => 67,
+        SqlTypeKind::Cidr => 68,
         SqlTypeKind::Float4 => 15,
         SqlTypeKind::Float8 => 16,
         SqlTypeKind::Money => 17,
@@ -415,6 +424,8 @@ fn sql_type_kind_from_tag(tag: u8) -> Result<SqlTypeKind, ExecError> {
         12 => SqlTypeKind::Bit,
         13 => SqlTypeKind::VarBit,
         14 => SqlTypeKind::Bytea,
+        67 => SqlTypeKind::Inet,
+        68 => SqlTypeKind::Cidr,
         15 => SqlTypeKind::Float4,
         16 => SqlTypeKind::Float8,
         17 => SqlTypeKind::Money,
@@ -767,6 +778,14 @@ fn encode_internal_value(value: &Value) -> Result<Vec<u8>, ExecError> {
             out.push(INTERNAL_VALUE_TAG_BYTEA);
             encode_internal_text(&v, &mut out);
         }
+        Value::Inet(v) => {
+            out.push(INTERNAL_VALUE_TAG_INET);
+            encode_internal_text(v.render_inet().as_bytes(), &mut out);
+        }
+        Value::Cidr(v) => {
+            out.push(INTERNAL_VALUE_TAG_CIDR);
+            encode_internal_text(v.render_cidr().as_bytes(), &mut out);
+        }
         Value::Point(v) => {
             out.push(INTERNAL_VALUE_TAG_POINT);
             out.extend_from_slice(&v.x.to_le_bytes());
@@ -1006,6 +1025,14 @@ fn decode_internal_value(bytes: &[u8]) -> Result<Value, ExecError> {
         INTERNAL_VALUE_TAG_BYTEA => {
             let mut offset = 0usize;
             Value::Bytea(decode_internal_text(rest, &mut offset)?.to_vec())
+        }
+        INTERNAL_VALUE_TAG_INET => {
+            let mut offset = 0usize;
+            Value::Inet(parse_inet_bytes(decode_internal_text(rest, &mut offset)?)?)
+        }
+        INTERNAL_VALUE_TAG_CIDR => {
+            let mut offset = 0usize;
+            Value::Cidr(parse_cidr_bytes(decode_internal_text(rest, &mut offset)?)?)
         }
         INTERNAL_VALUE_TAG_POINT => {
             if rest.len() != 16 {
@@ -1300,6 +1327,10 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
             Ok(TupleValue::Bytes(bytes))
         }
         (ScalarType::Bytea, Value::Bytea(v)) => Ok(TupleValue::Bytes(v)),
+        (ScalarType::Inet, Value::Inet(v)) => {
+            Ok(TupleValue::Bytes(encode_network_bytes(&v, false)))
+        }
+        (ScalarType::Cidr, Value::Cidr(v)) => Ok(TupleValue::Bytes(encode_network_bytes(&v, true))),
         (ScalarType::Float32, Value::Float64(v)) => {
             Ok(TupleValue::Bytes((v as f32).to_le_bytes().to_vec()))
         }
@@ -1531,6 +1562,8 @@ pub(crate) fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<
         Value::Xml(text) => cast_text_value(text.as_str(), target, false),
         Value::Jsonb(bytes) => cast_text_value(&render_jsonb_bytes(bytes)?, target, false),
         Value::Bytea(bytes) => cast_value(Value::Bytea(bytes.clone()), target),
+        Value::Inet(v) => cast_text_value(&v.render_inet(), target, false),
+        Value::Cidr(v) => cast_text_value(&v.render_cidr(), target, false),
         Value::TsVector(vector) => cast_text_value(
             &crate::backend::executor::render_tsvector_text(vector),
             target,
@@ -1775,6 +1808,26 @@ pub(crate) fn decode_value_with_toast(
                 });
             }
             Ok(Value::Bytea(bytes.to_vec()))
+        }
+        ScalarType::Inet => {
+            if column.storage.attlen != -1 && column.storage.attlen != -2 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            parse_inet_bytes(bytes).map(Value::Inet)
+        }
+        ScalarType::Cidr => {
+            if column.storage.attlen != -1 && column.storage.attlen != -2 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            parse_cidr_bytes(bytes).map(Value::Cidr)
         }
         ScalarType::Float32 => {
             if column.storage.attlen != 4 || bytes.len() != 4 {

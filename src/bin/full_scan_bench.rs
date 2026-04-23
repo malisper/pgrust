@@ -311,6 +311,8 @@ fn value_checksum(value: &Value) -> i64 {
         Value::TsQuery(v) => v.render().bytes().map(i64::from).sum(),
         Value::Bit(v) => v.render().bytes().map(i64::from).sum(),
         Value::Bytea(v) => v.iter().copied().map(i64::from).sum(),
+        Value::Inet(v) => v.render_inet().bytes().map(i64::from).sum(),
+        Value::Cidr(v) => v.render_cidr().bytes().map(i64::from).sum(),
         Value::Text(v) => v.bytes().map(i64::from).sum(),
         Value::TextRef(_, _) => value.as_text().unwrap().bytes().map(i64::from).sum(),
         Value::InternalChar(v) => i64::from(*v),

@@ -398,7 +398,10 @@ fn supports_comparison_operator(
     if !left.is_array
         && !right.is_array
         && left == right
-        && matches!(left.kind, SqlTypeKind::TsQuery | SqlTypeKind::TsVector)
+        && matches!(
+            left.kind,
+            SqlTypeKind::TsQuery | SqlTypeKind::TsVector | SqlTypeKind::Inet | SqlTypeKind::Cidr
+        )
         && matches!(op, "=" | "<>" | "<" | "<=" | ">" | ">=")
     {
         return true;
