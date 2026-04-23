@@ -2004,7 +2004,7 @@ pub enum GrantObjectPrivilege {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GrantObjectStatement {
     pub privilege: GrantObjectPrivilege,
-    pub object_name: String,
+    pub object_names: Vec<String>,
     pub grantee_names: Vec<String>,
     pub with_grant_option: bool,
 }
@@ -2012,7 +2012,7 @@ pub struct GrantObjectStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevokeObjectStatement {
     pub privilege: GrantObjectPrivilege,
-    pub object_name: String,
+    pub object_names: Vec<String>,
     pub grantee_names: Vec<String>,
     pub cascade: bool,
 }
