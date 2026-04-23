@@ -211,6 +211,7 @@ fn main() -> Result<(), ExecError> {
         advisory_locks: Arc::new(pgrust::backend::storage::lmgr::AdvisoryLockManager::new()),
         current_database_name: String::new(),
         statement_lock_scope_id: None,
+        transaction_lock_scope_id: None,
     };
 
     let stmt = parse_statement(&sql)?;

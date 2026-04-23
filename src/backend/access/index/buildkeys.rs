@@ -117,6 +117,7 @@ impl IndexBuildKeyProjector {
                 current_user_oid: expr_ctx.current_user_oid,
                 active_role_oid: None,
                 statement_lock_scope_id: expr_ctx.statement_lock_scope_id,
+                transaction_lock_scope_id: None,
                 next_command_id: ctx.snapshot.current_cid,
                 expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
                 case_test_values: Vec::new(),
