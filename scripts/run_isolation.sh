@@ -37,31 +37,10 @@
 
 set -euo pipefail
 
-# ---- gate ------------------------------------------------------------------
 # Flip to 0 once pg_locks and pg_isolation_test_session_is_blocked() are real.
+# The gate itself fires after argument parsing so that --help and invalid
+# flags still produce the right messages.
 ISOLATION_REQUIRES_PG_LOCKS=1
-
-if [[ "$ISOLATION_REQUIRES_PG_LOCKS" == "1" && -z "${PGRUST_ISOLATION_OVERRIDE:-}" ]]; then
-    cat >&2 <<EOF
-ERROR: isolation tests cannot run yet.
-
-The upstream isolationtester harness needs two things that pgrust does not
-yet implement:
-  1. pg_locks wait rows (granted=false entries while a session is blocked)
-  2. pg_catalog.pg_isolation_test_session_is_blocked(int, int[]) RETURNS bool
-
-Without these, isolationtester never sees blocked sessions and tests hang
-or produce nonsense output.
-
-Once both land in pgrust, edit this script and set:
-    ISOLATION_REQUIRES_PG_LOCKS=0
-
-To iterate on the harness itself (e.g. against real PostgreSQL), bypass
-the gate:
-    PGRUST_ISOLATION_OVERRIDE=1 scripts/run_isolation.sh ...
-EOF
-    exit 2
-fi
 
 # ---- paths + args ----------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -71,17 +50,25 @@ WORKTREE_NAME="$(basename "$PGRUST_DIR")"
 
 resolve_postgres_dir() {
     local candidate
+    # If the user explicitly set PGRUST_POSTGRES_DIR, treat it as authoritative:
+    # fail loudly rather than silently fall through to a default.
+    if [[ -n "${PGRUST_POSTGRES_DIR:-}" ]]; then
+        if [[ -d "$PGRUST_POSTGRES_DIR/src/test/isolation" ]]; then
+            (cd "$PGRUST_POSTGRES_DIR" && pwd)
+            return 0
+        fi
+        echo "ERROR: PGRUST_POSTGRES_DIR=$PGRUST_POSTGRES_DIR does not contain src/test/isolation" >&2
+        return 1
+    fi
     # The 2-levels-up candidate handles pgrust-worktrees/<name>/ checkouts,
     # where $REPO_ROOT is pgrust-worktrees/ rather than your-projects-parent/.
     for candidate in \
-        "${PGRUST_POSTGRES_DIR:-}" \
         "$REPO_ROOT/postgres" \
         "$PGRUST_DIR/../../postgres" \
         "$HOME/postgres" \
         "$HOME/src/postgres" \
         "$HOME/dev/postgres"
     do
-        [[ -z "$candidate" ]] && continue
         if [[ -d "$candidate/src/test/isolation" ]]; then
             (cd "$candidate" && pwd)
             return 0
@@ -136,6 +123,30 @@ done
 
 [[ -z "$SCHEDULE" ]] && SCHEDULE="$DEFAULT_SCHEDULE"
 
+# ---- gate ------------------------------------------------------------------
+# After arg parsing so --help and bad flags still work.
+if [[ "$ISOLATION_REQUIRES_PG_LOCKS" == "1" && -z "${PGRUST_ISOLATION_OVERRIDE:-}" ]]; then
+    cat >&2 <<EOF
+ERROR: isolation tests cannot run yet.
+
+The upstream isolationtester harness needs two things that pgrust does not
+yet implement:
+  1. pg_locks wait rows (granted=false entries while a session is blocked)
+  2. pg_catalog.pg_isolation_test_session_is_blocked(int, int[]) RETURNS bool
+
+Without these, isolationtester never sees blocked sessions and tests hang
+or produce nonsense output.
+
+Once both land in pgrust, edit this script and set:
+    ISOLATION_REQUIRES_PG_LOCKS=0
+
+To iterate on the harness itself (e.g. against real PostgreSQL), bypass
+the gate:
+    PGRUST_ISOLATION_OVERRIDE=1 scripts/run_isolation.sh ...
+EOF
+    exit 2
+fi
+
 make_temp_dir() {
     local prefix="$1"
     mktemp -d "${TMPDIR:-/tmp}/${prefix}.${WORKTREE_NAME}.XXXXXX"
@@ -155,14 +166,15 @@ if [[ ! -x "$ISOLATIONTESTER" ]]; then
     exit 1
 fi
 
-# macOS: isolationtester dynamically links @rpath/libpq.5.dylib. Point it at
-# the libpq we just built so we don't accidentally pick up a system mismatch.
+# isolationtester dynamically links @rpath/libpq.5.dylib. Stage the dynamic
+# loader path so only isolationtester invocations pick up the libpq we just
+# built — not psql, which uses its own (potentially different) libpq and
+# breaks our readiness probe if DYLD_LIBRARY_PATH is exported globally.
+ISOLATIONTESTER_LIBPQ_DIR="$POSTGRES_DIR/build/src/interfaces/libpq"
 if [[ "$(uname -s)" == "Darwin" ]]; then
-    LIBPQ_DIR="$POSTGRES_DIR/build/src/interfaces/libpq"
-    export DYLD_LIBRARY_PATH="$LIBPQ_DIR${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+    ISOLATIONTESTER_LIB_ENV="DYLD_LIBRARY_PATH=$ISOLATIONTESTER_LIBPQ_DIR${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
 else
-    LIBPQ_DIR="$POSTGRES_DIR/build/src/interfaces/libpq"
-    export LD_LIBRARY_PATH="$LIBPQ_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    ISOLATIONTESTER_LIB_ENV="LD_LIBRARY_PATH=$ISOLATIONTESTER_LIBPQ_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
 
 # ---- build pgrust_server ---------------------------------------------------
@@ -297,8 +309,11 @@ run_one() {
         return
     fi
 
-    local conninfo="host=127.0.0.1 port=$PORT user=$REGRESS_USER dbname=postgres"
-    if "$ISOLATIONTESTER" "$conninfo" < "$spec" > "$actual" 2>&1; then
+    # max_protocol_version=3.0 keeps libpq (built from PG master, 3.2+) speaking
+    # the older wire protocol that pgrust currently implements. Harmless against
+    # real PG; remove once pgrust supports v3.2+.
+    local conninfo="host=127.0.0.1 port=$PORT user=$REGRESS_USER dbname=postgres max_protocol_version=3.0"
+    if env "$ISOLATIONTESTER_LIB_ENV" "$ISOLATIONTESTER" "$conninfo" < "$spec" > "$actual" 2>&1; then
         if diff -u "$expected" "$actual" > "$diff_file" 2>&1; then
             printf '  %-45s PASS\n' "$name"
             rm -f "$diff_file"
