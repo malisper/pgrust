@@ -4,7 +4,7 @@ set -euo pipefail
 OWNER="${OWNER:-Pager-Free}"
 REPO="${REPO:-pgrust}"
 BRANCH="${BRANCH:-perf-optimization}"
-RULESET_NAME="${RULESET_NAME:-perf-optimization merge queue}"
+RULESET_NAME="${RULESET_NAME:-perf-optimization status checks}"
 REQUIRED_CHECK_CONTEXT="${REQUIRED_CHECK_CONTEXT:-cargo-test}"
 MERGE_METHOD="${MERGE_METHOD:-MERGE}"
 BUILD_CONCURRENCY="${BUILD_CONCURRENCY:-5}"
@@ -36,10 +36,21 @@ repo_id="$(
 )"
 
 ruleset_id="$(
-  RULESET_NAME="${RULESET_NAME}" gh api "${REPO_API}/rulesets" \
+  RULESET_NAME="${RULESET_NAME}" BRANCH_REF="refs/heads/${BRANCH}" gh api "${REPO_API}/rulesets" \
     -H "Accept: application/vnd.github+json" \
     -H "X-GitHub-Api-Version: ${API_VERSION}" \
-    --jq '.[] | select(.name == env.RULESET_NAME) | .id' \
+    --jq '
+      (
+        .[] | select(.name == env.RULESET_NAME) | .id
+      ),
+      (
+        .[]
+        | select(.target == "branch")
+        | select(any(.conditions.ref_name.include[]?; . == env.BRANCH_REF))
+        | select(any(.rules[]?; .type == "merge_queue"))
+        | .id
+      )
+    ' \
     | head -n1
 )"
 
@@ -73,10 +84,10 @@ cat >"${payload_file}" <<JSON
       "type": "required_status_checks",
       "parameters": {
         "do_not_enforce_on_create": true,
+        "strict_required_status_checks_policy": false,
         "required_status_checks": [
           {
-            "context": "${REQUIRED_CHECK_CONTEXT}",
-            "strict_required_status_checks_policy": false
+            "context": "${REQUIRED_CHECK_CONTEXT}"
           }
         ]
       }
