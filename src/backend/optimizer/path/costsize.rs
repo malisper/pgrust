@@ -371,6 +371,26 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     offset,
                 }
             }
+            Path::LockRows {
+                pathtarget,
+                input,
+                row_marks,
+                ..
+            } => {
+                let input = optimize_path(*input, catalog);
+                let input_info = input.plan_info();
+                Path::LockRows {
+                    plan_info: PlanEstimate::new(
+                        input_info.startup_cost.as_f64(),
+                        input_info.total_cost.as_f64(),
+                        input_info.plan_rows.as_f64(),
+                        input_info.plan_width,
+                    ),
+                    pathtarget,
+                    input: Box::new(input),
+                    row_marks,
+                }
+            }
             Path::Projection {
                 pathtarget,
                 input,
@@ -1806,7 +1826,9 @@ fn path_uses_immediate_outer_columns(path: &Path) -> bool {
                     .iter()
                     .any(|item| expr_uses_immediate_outer_columns(&item.expr))
         }
-        Path::Limit { input, .. } => path_uses_immediate_outer_columns(input),
+        Path::Limit { input, .. } | Path::LockRows { input, .. } => {
+            path_uses_immediate_outer_columns(input)
+        }
         Path::Aggregate {
             input,
             group_by,

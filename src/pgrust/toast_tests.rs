@@ -124,6 +124,7 @@ fn toast_executor_context(
         large_objects: Some(db.large_objects.clone()),
         async_notify_runtime: Some(db.async_notify_runtime.clone()),
         advisory_locks: std::sync::Arc::clone(&db.advisory_locks),
+        row_locks: std::sync::Arc::clone(&db.row_locks),
         checkpoint_stats: db.checkpoint_stats_snapshot(),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         interrupts: db.interrupt_state(client_id),
@@ -136,6 +137,7 @@ fn toast_executor_context(
         session_user_oid: db.auth_state(client_id).session_user_oid(),
         current_user_oid: db.auth_state(client_id).current_user_oid(),
         active_role_oid: db.auth_state(client_id).active_role_oid(),
+        session_replication_role: Default::default(),
         statement_lock_scope_id: None,
         transaction_lock_scope_id: None,
         next_command_id: cid,
@@ -153,6 +155,7 @@ fn toast_executor_context(
         cte_producers: std::collections::HashMap::new(),
         recursive_worktables: std::collections::HashMap::new(),
         deferred_foreign_keys: None,
+        trigger_depth: 0,
     }
 }
 

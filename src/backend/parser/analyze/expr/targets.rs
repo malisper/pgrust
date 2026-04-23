@@ -208,7 +208,7 @@ fn bind_plain_select_targets(
                 continue;
             }
             if let Some(relation) = name.strip_suffix(".*") {
-                entries.extend(expand_star_targets(scope, Some(relation))?);
+                entries.extend(expand_named_star_targets(scope, outer_scopes, relation)?);
                 continue;
             }
         }
@@ -254,6 +254,27 @@ fn bind_plain_select_targets(
         );
     }
     Ok(entries)
+}
+
+fn expand_named_star_targets(
+    scope: &BoundScope,
+    outer_scopes: &[BoundScope],
+    relation: &str,
+) -> Result<Vec<TargetEntry>, ParseError> {
+    match expand_star_targets(scope, Some(relation)) {
+        Ok(entries) => Ok(entries),
+        Err(ParseError::UnknownColumn(_)) => outer_scopes
+            .iter()
+            .find_map(
+                |outer_scope| match expand_star_targets(outer_scope, Some(relation)) {
+                    Ok(entries) => Some(Ok(entries)),
+                    Err(ParseError::UnknownColumn(_)) => None,
+                    Err(err) => Some(Err(err)),
+                },
+            )
+            .unwrap_or_else(|| Err(ParseError::UnknownColumn(format!("{relation}.*")))),
+        Err(err) => Err(err),
+    }
 }
 
 fn expand_record_expr_targets(

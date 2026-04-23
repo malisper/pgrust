@@ -29,6 +29,7 @@ pub(crate) fn analyze_select_query_with_outer(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<GroupedOuterScope>,
+    visible_agg_scope: Option<&VisibleAggregateScope>,
     outer_ctes: &[BoundCte],
     expanded_views: &[u32],
 ) -> Result<(Query, BoundScope), ParseError> {
@@ -37,6 +38,7 @@ pub(crate) fn analyze_select_query_with_outer(
         catalog,
         outer_scopes,
         grouped_outer,
+        visible_agg_scope,
         outer_ctes,
         expanded_views,
     )
@@ -357,6 +359,8 @@ pub(super) fn query_from_from_projection(input: AnalyzedFrom, targets: Vec<Targe
         sort_clause: Vec::new(),
         limit_count: None,
         limit_offset: 0,
+        locking_clause: None,
+        row_marks: Vec::new(),
         project_set: None,
         recursive_union: None,
         set_operation: None,

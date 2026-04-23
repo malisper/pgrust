@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::backend::access::transam::xact::Snapshot;
 use crate::backend::access::transam::xact::{TransactionId, TransactionManager};
 use crate::backend::catalog::CatalogError;
-use crate::backend::executor::RelationDesc;
+use crate::backend::executor::{RelationDesc, SessionReplicationRole};
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::lmgr::AdvisoryLockManager;
 use crate::backend::storage::smgr::RelFileLocator;
@@ -48,6 +48,7 @@ pub struct IndexBuildExprContext {
     pub current_user_oid: u32,
     pub current_xid: TransactionId,
     pub statement_lock_scope_id: Option<u64>,
+    pub session_replication_role: SessionReplicationRole,
     pub visible_catalog: Option<VisibleCatalog>,
 }
 

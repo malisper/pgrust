@@ -185,6 +185,7 @@ fn analyze_executor_context(
         large_objects: Some(db.large_objects.clone()),
         async_notify_runtime: Some(db.async_notify_runtime.clone()),
         advisory_locks: Arc::clone(&db.advisory_locks),
+        row_locks: Arc::clone(&db.row_locks),
         checkpoint_stats: db.checkpoint_stats_snapshot(),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         interrupts: db.interrupt_state(client_id),
@@ -197,6 +198,7 @@ fn analyze_executor_context(
         session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         active_role_oid: None,
+        session_replication_role: Default::default(),
         statement_lock_scope_id: None,
         transaction_lock_scope_id: None,
         next_command_id: cid,
@@ -214,6 +216,7 @@ fn analyze_executor_context(
         cte_producers: HashMap::new(),
         recursive_worktables: HashMap::new(),
         deferred_foreign_keys: None,
+        trigger_depth: 0,
     }
 }
 
@@ -3082,6 +3085,321 @@ fn drop_table_drops_partitioned_roots_and_subpartitioned_children() {
         )
         .is_empty()
     );
+}
+
+#[test]
+fn partitioned_primary_keys_support_rename_flow_and_index_tree_metadata() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table part_attmp (a int primary key) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table part_attmp1 partition of part_attmp for values from (0) to (10)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter index part_attmp_pkey rename to part_attmp_pkey_renamed",
+        )
+        .unwrap();
+    session
+        .execute(&db, "alter table part_attmp rename to part_attmp_renamed")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relkind::text from pg_class where relname = 'part_attmp_pkey_renamed'",
+        ),
+        vec![vec![Value::Text("I".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select child.relname, parent.relname \
+               from pg_inherits i \
+               join pg_class child on child.oid = i.inhrelid \
+               join pg_class parent on parent.oid = i.inhparent \
+              where parent.relname = 'part_attmp_pkey_renamed'",
+        ),
+        vec![vec![
+            Value::Text("part_attmp1_pkey".into()),
+            Value::Text("part_attmp_pkey_renamed".into()),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relname from pg_class where relname = 'part_attmp_renamed'",
+        ),
+        vec![vec![Value::Text("part_attmp_renamed".into())]]
+    );
+}
+
+#[test]
+fn partitioned_key_coverage_checks_fire_for_root_partition_of_and_attach_partition() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    match session.execute(
+        &db,
+        "create table miss_root (a int, b int, primary key (a)) partition by range (b)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        })) if message
+            == "unique constraint on partitioned table must include all partitioning columns"
+            && detail
+                == "PRIMARY KEY constraint on table \"miss_root\" lacks column \"b\" which is part of the partition key."
+            && sqlstate == "0A000" => {}
+        other => panic!("expected root partition-key coverage error, got {other:?}"),
+    }
+
+    session
+        .execute(
+            &db,
+            "create table dup_parent (a int primary key) partition by range (a)",
+        )
+        .unwrap();
+    match session.execute(
+        &db,
+        "create table dup_parent_child partition of dup_parent (primary key (a)) for values from (0) to (10)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message,
+            sqlstate,
+            ..
+        })) if message == "multiple primary keys for table \"dup_parent_child\" are not allowed"
+            && sqlstate == "42P16" => {}
+        other => panic!("expected duplicate primary-key rejection, got {other:?}"),
+    }
+
+    session
+        .execute(
+            &db,
+            "create table sub_parent (a int, b int, primary key (a)) partition by range (a)",
+        )
+        .unwrap();
+    match session.execute(
+        &db,
+        "create table sub_parent_child partition of sub_parent for values from (0) to (10) partition by range (b)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        })) if message
+            == "unique constraint on partitioned table must include all partitioning columns"
+            && detail
+                == "PRIMARY KEY constraint on table \"sub_parent_child\" lacks column \"b\" which is part of the partition key."
+            && sqlstate == "0A000" => {}
+        other => panic!("expected PARTITION OF coverage error, got {other:?}"),
+    }
+
+    session
+        .execute(
+            &db,
+            "create table attach_parent_cov (a int, b int, primary key (a)) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table attach_child_cov (a int, b int) partition by range (b)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table attach_child_cov_1 partition of attach_child_cov for values from (minvalue) to (10)",
+        )
+        .unwrap();
+    match session.execute(
+        &db,
+        "alter table attach_parent_cov attach partition attach_child_cov for values from (0) to (10)",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message,
+            detail: Some(detail),
+            sqlstate,
+            ..
+        })) if message
+            == "unique constraint on partitioned table must include all partitioning columns"
+            && detail
+                == "PRIMARY KEY constraint on table \"attach_child_cov\" lacks column \"b\" which is part of the partition key."
+            && sqlstate == "0A000" => {}
+        other => panic!("expected ATTACH PARTITION coverage error, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_add_primary_key_builds_or_attaches_partition_key_trees() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table addpk_empty (a int) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "alter table addpk_empty add primary key (a)")
+        .unwrap();
+
+    session
+        .execute(
+            &db,
+            "create table addpk_tree (a int) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table addpk_tree_1 partition of addpk_tree for values from (0) to (10)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "alter table addpk_tree add primary key (a)")
+        .unwrap();
+
+    session
+        .execute(
+            &db,
+            "create table addpk_attach (a int) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create table addpk_child (a int primary key)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table addpk_attach attach partition addpk_child for values from (0) to (10)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "alter table addpk_attach add primary key (a)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relname, relkind::text \
+               from pg_class \
+              where relname in ('addpk_empty_pkey', 'addpk_tree_pkey', 'addpk_attach_pkey') \
+              order by relname",
+        ),
+        vec![
+            vec![
+                Value::Text("addpk_attach_pkey".into()),
+                Value::Text("I".into()),
+            ],
+            vec![
+                Value::Text("addpk_empty_pkey".into()),
+                Value::Text("I".into()),
+            ],
+            vec![
+                Value::Text("addpk_tree_pkey".into()),
+                Value::Text("I".into()),
+            ],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select child.relname, parent.relname \
+               from pg_inherits i \
+               join pg_class child on child.oid = i.inhrelid \
+               join pg_class parent on parent.oid = i.inhparent \
+              where parent.relname in ('addpk_tree_pkey', 'addpk_attach_pkey') \
+              order by parent.relname, child.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("addpk_child_pkey".into()),
+                Value::Text("addpk_attach_pkey".into()),
+            ],
+            vec![
+                Value::Text("addpk_tree_1_pkey".into()),
+                Value::Text("addpk_tree_pkey".into()),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn attach_partition_creates_missing_keys_and_fk_to_partitioned_key_stays_rejected() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table attach_parent (a int primary key) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create table attach_child (a int)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table attach_parent attach partition attach_child for values from (0) to (10)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select child.relname, parent.relname \
+               from pg_inherits i \
+               join pg_class child on child.oid = i.inhrelid \
+               join pg_class parent on parent.oid = i.inhparent \
+              where parent.relname = 'attach_parent_pkey'",
+        ),
+        vec![vec![
+            Value::Text("attach_child_pkey".into()),
+            Value::Text("attach_parent_pkey".into()),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_constraint \
+              where conrelid = 'attach_parent'::regclass \
+                and contype::text = 'n'",
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    match session.execute(
+        &db,
+        "create table fk_to_partitioned_parent (a int references attach_parent(a))",
+    ) {
+        Err(ExecError::Parse(ParseError::FeatureNotSupported(message)))
+            if message == "REFERENCES to partitioned tables" => {}
+        other => panic!("expected FK-to-partitioned-table rejection, got {other:?}"),
+    }
 }
 
 #[test]
@@ -12734,18 +13052,18 @@ fn drop_sequence_restrict_and_cascade_respect_row_type_dependencies() {
 }
 
 #[test]
-fn unsupported_create_table_like_does_not_poison_catalog_after_sequence_drop() {
-    let base = temp_dir("unsupported_create_table_like_sequence");
+fn rejected_create_table_like_sequence_does_not_poison_catalog_after_sequence_drop() {
+    let base = temp_dir("rejected_create_table_like_sequence");
     let db = Database::open(&base, 64).unwrap();
 
     db.execute(1, "create table items (id int4)").unwrap();
     db.execute(1, "create sequence ctlseq1").unwrap();
     match db.execute(1, "create table ctlt10 (like ctlseq1)") {
         Err(ExecError::Parse(ParseError::FeatureNotSupported(feature))) => {
-            assert_eq!(feature, "CREATE TABLE ... LIKE")
+            assert_eq!(feature, "CREATE TABLE LIKE source relation kind S")
         }
         other => panic!(
-            "expected unsupported CREATE TABLE LIKE error, got {:?}",
+            "expected rejected CREATE TABLE LIKE sequence error, got {:?}",
             other
         ),
     }
@@ -17589,6 +17907,38 @@ fn search_path_keeps_temp_tables_ahead_of_public_even_when_omitted() {
 }
 
 #[test]
+fn create_table_after_temp_table_still_uses_public_by_default() {
+    let base = temp_dir("create_after_temp_uses_public");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table temp_marker (id int4 not null)")
+        .unwrap();
+    session
+        .execute(&db, "create table regular_after_temp (id int4 not null)")
+        .unwrap();
+
+    match session
+        .execute(
+            &db,
+            "select n.nspname, c.relpersistence \
+             from pg_class c join pg_namespace n on n.oid = c.relnamespace \
+             where c.relname = 'regular_after_temp'",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Text("public".into()), Value::Text("p".into())]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn create_table_errors_when_search_path_selects_no_creatable_schema() {
     let base = temp_dir("search_path_no_create_schema");
     let db = Database::open(&base, 16).unwrap();
@@ -21898,6 +22248,472 @@ fn update_triggers_honor_update_of_when_and_statement_firing() {
 }
 
 #[test]
+fn session_replication_role_replica_skips_origin_statement_triggers() {
+    let dir = temp_dir("session_replication_role_replica_triggers");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table trigtest (i int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function trigtest_notice() returns trigger language plpgsql as $$ begin raise notice 'stmt'; return null; end $$",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create trigger trigtest_stmt after insert on trigtest for each statement execute function trigtest_notice()",
+        )
+        .unwrap();
+
+    session
+        .execute(&db, "set session_replication_role = replica")
+        .unwrap();
+    clear_notices();
+    session
+        .execute(&db, "insert into trigtest default values")
+        .unwrap();
+
+    assert!(take_notice_messages().is_empty());
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from trigtest"),
+        vec![vec![Value::Int64(1)]]
+    );
+}
+
+#[test]
+fn pg_get_triggerdef_defaults_to_unpretty_and_lowercase_old_new() {
+    let dir = temp_dir("pg_get_triggerdef_trigger_old_new");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function items_before() returns trigger language plpgsql as $$ begin return new; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger items_before before update of note on items for each row when (OLD.note IS DISTINCT FROM NEW.note) execute function items_before()",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_triggerdef(oid), pg_get_triggerdef(oid, true) from pg_trigger where tgname = 'items_before'",
+        ),
+        vec![vec![
+            Value::Text(
+                "CREATE TRIGGER items_before BEFORE UPDATE OF note ON public.items FOR EACH ROW WHEN ((old.note IS DISTINCT FROM new.note)) EXECUTE FUNCTION items_before()".into(),
+            ),
+            Value::Text(
+                "CREATE TRIGGER items_before BEFORE UPDATE OF note ON items FOR EACH ROW WHEN (old.note IS DISTINCT FROM new.note) EXECUTE FUNCTION items_before()".into(),
+            ),
+        ]]
+    );
+}
+
+#[test]
+fn trigger_functions_can_use_new_old_and_tg_argv_inside_sql() {
+    let dir = temp_dir("trigger_function_new_old_tg_argv_sql");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(1, "create table audit (id int4, payload text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function capture_trigger_state() returns trigger language plpgsql as $$
+declare
+    argstr text;
+begin
+    argstr := '[';
+    for i in 0 .. TG_nargs - 1 loop
+        if i > 0 then
+            argstr := argstr || ', ';
+        end if;
+        argstr := argstr || TG_argv[i];
+    end loop;
+    argstr := argstr || ']';
+
+    if TG_OP = 'INSERT' then
+        insert into audit values (NEW.id, argstr);
+    else
+        insert into audit values (NEW.id, OLD.note || '->' || NEW.note);
+    end if;
+
+    return NEW;
+end;
+$$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger capture_trigger_state before insert or update on items for each row execute function capture_trigger_state('left', 'right')",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into items values (1, 'a')").unwrap();
+    db.execute(1, "update items set note = 'b' where id = 1")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, payload from audit order by payload"),
+        vec![
+            vec![Value::Int32(1), Value::Text("[left, right]".into())],
+            vec![Value::Int32(1), Value::Text("a->b".into())],
+        ]
+    );
+}
+
+#[test]
+fn view_instead_of_triggers_fire_statement_triggers_and_return_rows() {
+    let dir = temp_dir("view_instead_of_triggers");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table main_table (a int4, b int4)")
+        .unwrap();
+    db.execute(1, "create view main_view as select a, b from main_table")
+        .unwrap();
+    db.execute(
+        1,
+        "create function view_trigger() returns trigger language plpgsql as $$
+begin
+    raise notice '% % % % (%)', TG_TABLE_NAME, TG_WHEN, TG_OP, TG_LEVEL, TG_ARGV[0];
+    if TG_LEVEL = 'ROW' then
+        if TG_OP = 'INSERT' then
+            insert into main_table values (NEW.a, NEW.b);
+            return NEW;
+        end if;
+        if TG_OP = 'UPDATE' then
+            update main_table set a = NEW.a, b = NEW.b where a = OLD.a and b = OLD.b;
+            if not found then
+                return null;
+            end if;
+            return NEW;
+        end if;
+        if TG_OP = 'DELETE' then
+            delete from main_table where a = OLD.a and b = OLD.b;
+            if not found then
+                return null;
+            end if;
+            return OLD;
+        end if;
+    end if;
+    return null;
+end;
+$$",
+    )
+    .unwrap();
+    for sql in [
+        "create trigger instead_of_insert_trig instead of insert on main_view for each row execute function view_trigger('instead_of_ins')",
+        "create trigger instead_of_update_trig instead of update on main_view for each row execute function view_trigger('instead_of_upd')",
+        "create trigger instead_of_delete_trig instead of delete on main_view for each row execute function view_trigger('instead_of_del')",
+        "create trigger before_ins_stmt_trig before insert on main_view for each statement execute function view_trigger('before_view_ins_stmt')",
+        "create trigger before_upd_stmt_trig before update on main_view for each statement execute function view_trigger('before_view_upd_stmt')",
+        "create trigger before_del_stmt_trig before delete on main_view for each statement execute function view_trigger('before_view_del_stmt')",
+        "create trigger after_ins_stmt_trig after insert on main_view for each statement execute function view_trigger('after_view_ins_stmt')",
+        "create trigger after_upd_stmt_trig after update on main_view for each statement execute function view_trigger('after_view_upd_stmt')",
+        "create trigger after_del_stmt_trig after delete on main_view for each statement execute function view_trigger('after_view_del_stmt')",
+    ] {
+        db.execute(1, sql).unwrap();
+    }
+
+    clear_notices();
+    assert_eq!(
+        query_rows(&db, 1, "insert into main_view values (20, 30) returning *"),
+        vec![vec![Value::Int32(20), Value::Int32(30)]]
+    );
+    assert_eq!(
+        take_notice_messages(),
+        vec![
+            "main_view BEFORE INSERT STATEMENT (before_view_ins_stmt)".to_string(),
+            "main_view INSTEAD OF INSERT ROW (instead_of_ins)".to_string(),
+            "main_view AFTER INSERT STATEMENT (after_view_ins_stmt)".to_string(),
+        ]
+    );
+
+    clear_notices();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "update main_view set b = 31 where a = 20 returning *"
+        ),
+        vec![vec![Value::Int32(20), Value::Int32(31)]]
+    );
+    assert_eq!(
+        take_notice_messages(),
+        vec![
+            "main_view BEFORE UPDATE STATEMENT (before_view_upd_stmt)".to_string(),
+            "main_view INSTEAD OF UPDATE ROW (instead_of_upd)".to_string(),
+            "main_view AFTER UPDATE STATEMENT (after_view_upd_stmt)".to_string(),
+        ]
+    );
+
+    clear_notices();
+    assert_eq!(
+        query_rows(&db, 1, "delete from main_view where a = 20 returning *"),
+        vec![vec![Value::Int32(20), Value::Int32(31)]]
+    );
+    assert_eq!(
+        take_notice_messages(),
+        vec![
+            "main_view BEFORE DELETE STATEMENT (before_view_del_stmt)".to_string(),
+            "main_view INSTEAD OF DELETE ROW (instead_of_del)".to_string(),
+            "main_view AFTER DELETE STATEMENT (after_view_del_stmt)".to_string(),
+        ]
+    );
+    assert!(query_rows(&db, 1, "select * from main_table").is_empty());
+}
+
+#[test]
+fn rules_can_route_into_trigger_backed_views() {
+    let dir = temp_dir("rule_to_trigger_backed_view");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table city_table (city_id int4, city_name text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create view city_view as select city_id, city_name from city_table",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function city_insert() returns trigger language plpgsql as $$
+begin
+    insert into city_table values (NEW.city_id, NEW.city_name);
+    return NEW;
+end;
+$$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger city_insert_trig instead of insert on city_view for each row execute function city_insert()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view european_city_view as select * from city_view where city_id > 0",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function no_op_trig_fn() returns trigger language plpgsql as $$ begin return null; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger no_op_trig instead of insert on european_city_view for each row execute function no_op_trig_fn()",
+    )
+    .unwrap();
+
+    assert!(matches!(
+        db.execute(1, "insert into european_city_view values (1, 'noop')"),
+        Ok(StatementResult::AffectedRows(0))
+    ));
+    assert!(query_rows(&db, 1, "select * from city_table").is_empty());
+
+    db.execute(
+        1,
+        "create rule european_city_insert_rule as on insert to european_city_view do instead insert into city_view values (NEW.city_id, NEW.city_name) returning *",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "insert into european_city_view values (2, 'Cambridge') returning *",
+        ),
+        vec![vec![Value::Int32(2), Value::Text("Cambridge".into())]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select city_id, city_name from city_table"),
+        vec![vec![Value::Int32(2), Value::Text("Cambridge".into())]]
+    );
+}
+
+#[test]
+fn trigger_select_into_can_assign_new_record_fields() {
+    let dir = temp_dir("trigger_select_into_new_field");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create table country_table (country_name text, continent text)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into country_table values ('USA', 'North America')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table city_table (city_name text, country_name text, continent text)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view city_view as select city_name, country_name, continent from city_table",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function city_insert() returns trigger language plpgsql as $$
+begin
+    select continent into NEW.continent
+        from country_table
+        where country_name = NEW.country_name;
+    insert into city_table values (NEW.city_name, NEW.country_name, NEW.continent);
+    return NEW;
+end;
+$$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger city_insert_trig instead of insert on city_view for each row execute function city_insert()",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "insert into city_view values ('Washington DC', 'USA', null) returning *",
+        ),
+        vec![vec![
+            Value::Text("Washington DC".into()),
+            Value::Text("USA".into()),
+            Value::Text("North America".into()),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select city_name, country_name, continent from city_table"
+        ),
+        vec![vec![
+            Value::Text("Washington DC".into()),
+            Value::Text("USA".into()),
+            Value::Text("North America".into()),
+        ]]
+    );
+}
+
+#[test]
+fn rule_actions_can_return_new_star_from_outer_scope() {
+    let dir = temp_dir("rule_action_returning_new_star");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table city_table (city_id int4, city_name text)")
+        .unwrap();
+    db.execute(1, "insert into city_table values (1, 'Old Town')")
+        .unwrap();
+    db.execute(
+        1,
+        "create view city_view as select city_id, city_name from city_table",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function city_update() returns trigger language plpgsql as $$
+begin
+    update city_table set city_name = NEW.city_name where city_id = OLD.city_id;
+    if not found then
+        return null;
+    end if;
+    return NEW;
+end;
+$$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger city_update_trig instead of update on city_view for each row execute function city_update()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view european_city_view as select * from city_view",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create rule european_city_update_rule as on update to european_city_view do instead update city_view set city_name = NEW.city_name where city_id = OLD.city_id returning NEW.*",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "update european_city_view set city_name = 'New Town' where city_id = 1 returning *",
+        ),
+        vec![vec![Value::Int32(1), Value::Text("New Town".into()),]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select city_id, city_name from city_table"),
+        vec![vec![Value::Int32(1), Value::Text("New Town".into()),]]
+    );
+}
+
+#[test]
+fn trigger_insert_returning_into_can_assign_new_record_fields() {
+    let dir = temp_dir("trigger_insert_returning_into_new_field");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table city_table (city_id int4, city_name text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create view city_view as select city_id, city_name from city_table",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function city_insert() returns trigger language plpgsql as $$
+begin
+    insert into city_table values (7, NEW.city_name)
+        returning city_id into NEW.city_id;
+    return NEW;
+end;
+$$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger city_insert_trig instead of insert on city_view for each row execute function city_insert()",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "insert into city_view values (null, 'Tokyo') returning *",
+        ),
+        vec![vec![Value::Int32(7), Value::Text("Tokyo".into()),]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select city_id, city_name from city_table"),
+        vec![vec![Value::Int32(7), Value::Text("Tokyo".into()),]]
+    );
+}
+
+#[test]
 fn temp_trigger_function_is_resolved_from_temp_schema() {
     let dir = temp_dir("temp_trigger_function_search_path");
     let db = Database::open(&dir, 16).unwrap();
@@ -22317,6 +23133,35 @@ fn setop_for_no_key_update_reports_postgres_compat_error() {
         Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(message)))
             if message == "FOR NO KEY UPDATE is not allowed with UNION/INTERSECT/EXCEPT" => {}
         other => panic!("expected set-op FOR NO KEY UPDATE rejection, got {other:?}"),
+    }
+}
+
+#[test]
+fn select_locking_family_executes_for_all_strengths() {
+    let dir = temp_dir("select_locking_family_executes");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table lock_items (id int4 not null primary key)")
+        .unwrap();
+    db.execute(1, "insert into lock_items (id) values (1)")
+        .unwrap();
+
+    for sql in [
+        "select id from lock_items where id = 1 for update",
+        "select id from lock_items where id = 1 for no key update",
+        "select id from lock_items where id = 1 for share",
+        "select id from lock_items where id = 1 for key share",
+    ] {
+        match db.execute(1, sql).unwrap() {
+            StatementResult::Query { rows, .. } => {
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Int32(1)]],
+                    "unexpected rows for {sql}"
+                );
+            }
+            other => panic!("expected query result for {sql}, got {other:?}"),
+        }
     }
 }
 

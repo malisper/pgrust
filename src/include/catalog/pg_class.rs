@@ -78,7 +78,7 @@ pub fn pg_class_desc() -> RelationDesc {
 }
 
 pub const fn relkind_has_storage(relkind: char) -> bool {
-    !matches!(relkind, 'v' | 'c' | 'p')
+    !matches!(relkind, 'v' | 'c' | 'p' | 'I')
 }
 
 pub const fn relkind_is_analyzable(relkind: char) -> bool {
@@ -87,7 +87,7 @@ pub const fn relkind_is_analyzable(relkind: char) -> bool {
 
 pub const fn relam_for_relkind(relkind: char) -> u32 {
     match relkind {
-        'i' => BTREE_AM_OID,
+        'i' | 'I' => BTREE_AM_OID,
         _ if relkind_has_storage(relkind) => HEAP_TABLE_AM_OID,
         _ => 0,
     }

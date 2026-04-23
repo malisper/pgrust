@@ -490,6 +490,8 @@ pub enum BuiltinScalarFunction {
     PgDescribeObject,
     PgGetExpr,
     PgGetViewDef,
+    PgGetTriggerDef,
+    PgTriggerDepth,
     PgRelationIsPublishable,
     PgIndexAmHasProperty,
     PgIndexHasProperty,

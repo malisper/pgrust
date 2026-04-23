@@ -30,7 +30,7 @@ impl CollectedAggregate {
     }
 }
 
-fn aggregate_call_matches_catalog(
+pub(super) fn aggregate_call_matches_catalog(
     catalog: &dyn CatalogLookup,
     name: &str,
     args: &SqlCallArgs,

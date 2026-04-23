@@ -62,6 +62,7 @@ impl Path {
             | Self::Projection { plan_info, .. }
             | Self::OrderBy { plan_info, .. }
             | Self::Limit { plan_info, .. }
+            | Self::LockRows { plan_info, .. }
             | Self::Aggregate { plan_info, .. }
             | Self::WindowAgg { plan_info, .. }
             | Self::SubqueryScan { plan_info, .. }
@@ -108,7 +109,8 @@ impl Path {
                 .collect(),
             Self::Filter { input, .. }
             | Self::OrderBy { input, .. }
-            | Self::Limit { input, .. } => input.columns(),
+            | Self::Limit { input, .. }
+            | Self::LockRows { input, .. } => input.columns(),
             Self::Projection { targets, .. } => targets
                 .iter()
                 .map(|t| QueryColumn {
@@ -165,7 +167,8 @@ impl Path {
             Self::BitmapIndexScan { .. } => Vec::new(),
             Self::Filter { input, .. }
             | Self::OrderBy { input, .. }
-            | Self::Limit { input, .. } => input.output_vars(),
+            | Self::Limit { input, .. }
+            | Self::LockRows { input, .. } => input.output_vars(),
             Self::Projection {
                 slot_id, targets, ..
             } => targets
@@ -254,7 +257,8 @@ impl Path {
         match self {
             Self::Filter { input, .. }
             | Self::OrderBy { input, .. }
-            | Self::Limit { input, .. } => input.output_target(),
+            | Self::Limit { input, .. }
+            | Self::LockRows { input, .. } => input.output_target(),
             Self::Projection {
                 slot_id, targets, ..
             } => PathTarget::with_sortgrouprefs(
@@ -299,6 +303,7 @@ impl Path {
             | Self::Projection { pathtarget, .. }
             | Self::OrderBy { pathtarget, .. }
             | Self::Limit { pathtarget, .. }
+            | Self::LockRows { pathtarget, .. }
             | Self::Aggregate { pathtarget, .. }
             | Self::WindowAgg { pathtarget, .. }
             | Self::Values { pathtarget, .. }
@@ -329,7 +334,9 @@ impl Path {
             | Self::ProjectSet { .. } => Vec::new(),
             Self::IndexScan { pathkeys, .. } => pathkeys.clone(),
             Self::SubqueryScan { pathkeys, .. } => pathkeys.clone(),
-            Self::Filter { input, .. } | Self::Limit { input, .. } => input.pathkeys(),
+            Self::Filter { input, .. }
+            | Self::Limit { input, .. }
+            | Self::LockRows { input, .. } => input.pathkeys(),
             Self::Projection {
                 slot_id,
                 targets,

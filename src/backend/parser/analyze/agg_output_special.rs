@@ -502,6 +502,7 @@ fn build_grouped_subquery_plan(
     child_outer.push(input_scope.clone());
     child_outer.extend_from_slice(outer_scopes);
     let visible_ctes = current_grouped_agg_visible_ctes();
+    let child_visible_agg_scope = child_visible_aggregate_scope();
     let (query, _) = analyze_select_query_with_outer(
         select,
         catalog,
@@ -510,6 +511,7 @@ fn build_grouped_subquery_plan(
             scope: input_scope.clone(),
             group_by_exprs: group_by_exprs.to_vec(),
         }),
+        child_visible_agg_scope.as_ref(),
         &visible_ctes,
         &[],
     )?;
