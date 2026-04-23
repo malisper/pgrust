@@ -128,23 +128,39 @@ impl Database {
             waiter: None,
             interrupts: Arc::clone(&interrupts),
         };
-        let effect = {
+        let (created_trigger, mut effects) = {
             let mut catalog_store = self.catalog.write();
             if let Some(existing) = existing {
-                catalog_store
-                    .replace_trigger_mvcc(&existing, trigger_row, &ctx)
-                    .map_err(map_catalog_error)?
-                    .1
+                let (oid, effect) = catalog_store
+                    .replace_trigger_mvcc(&existing, trigger_row.clone(), &ctx)
+                    .map_err(map_catalog_error)?;
+                let mut row = trigger_row.clone();
+                row.oid = oid;
+                (row, vec![effect])
             } else {
-                catalog_store
-                    .create_trigger_mvcc(trigger_row, &ctx)
-                    .map_err(map_catalog_error)?
-                    .1
+                let (oid, effect) = catalog_store
+                    .create_trigger_mvcc(trigger_row.clone(), &ctx)
+                    .map_err(map_catalog_error)?;
+                let mut row = trigger_row.clone();
+                row.oid = oid;
+                (row, vec![effect])
             }
         };
-        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        if relation.relkind == 'p' && trigger_row_is_row(&created_trigger) {
+            let clone_effects = self.create_partition_trigger_clones_in_transaction(
+                client_id,
+                xid,
+                cid.saturating_add(1),
+                &created_trigger,
+                configured_search_path,
+            )?;
+            effects.extend(clone_effects);
+        }
+        for effect in &effects {
+            self.apply_catalog_mutation_effect_immediate(effect)?;
+        }
         self.plan_cache.invalidate_all();
-        catalog_effects.push(effect);
+        catalog_effects.extend(effects);
         Ok(StatementResult::AffectedRows(0))
     }
 
@@ -184,7 +200,7 @@ impl Database {
         let relation = lookup_trigger_relation_for_ddl(&catalog, &relation_name)?;
         ensure_relation_owner(self, client_id, &relation, &relation_name)?;
 
-        let Some(_existing) = catalog
+        let Some(existing) = catalog
             .trigger_rows_for_relation(relation.relation_oid)
             .into_iter()
             .find(|row| row.tgname.eq_ignore_ascii_case(&stmt.trigger_name))
@@ -202,6 +218,20 @@ impl Database {
                 sqlstate: "42704",
             });
         };
+        if existing.tgparentid != 0 {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "cannot drop trigger {} on table {} because trigger {} on a partitioned table requires it",
+                    stmt.trigger_name, relation_name, stmt.trigger_name
+                ),
+                detail: None,
+                hint: Some(format!(
+                    "You can drop trigger {} on the partitioned table instead.",
+                    stmt.trigger_name
+                )),
+                sqlstate: "2BP01",
+            });
+        }
 
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
@@ -212,15 +242,123 @@ impl Database {
             waiter: None,
             interrupts: self.interrupt_state(client_id),
         };
-        let (_removed, effect) = self
+        let mut effects = Vec::new();
+        let inherited = inherited_trigger_descendants(&catalog, existing.tgrelid, existing.oid);
+        {
+            let mut catalog_store = self.catalog.write();
+            for row in inherited.iter().rev() {
+                let (_removed, effect) = catalog_store
+                    .drop_trigger_mvcc(row.tgrelid, &row.tgname, &ctx)
+                    .map_err(map_catalog_error)?;
+                effects.push(effect);
+            }
+            let (_removed, effect) = catalog_store
+                .drop_trigger_mvcc(relation.relation_oid, &stmt.trigger_name, &ctx)
+                .map_err(map_catalog_error)?;
+            effects.push(effect);
+        }
+        for effect in &effects {
+            self.apply_catalog_mutation_effect_immediate(effect)?;
+        }
+        self.plan_cache.invalidate_all();
+        catalog_effects.extend(effects);
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    pub(crate) fn clone_parent_row_triggers_to_partition_in_transaction(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        parent_oid: u32,
+        child_oid: u32,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<(), ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let parent_triggers = catalog
+            .trigger_rows_for_relation(parent_oid)
+            .into_iter()
+            .filter(trigger_row_is_row)
+            .collect::<Vec<_>>();
+        let mut effects = Vec::new();
+        for parent_trigger in parent_triggers {
+            effects.extend(self.create_partition_trigger_clone_tree_in_transaction(
+                client_id,
+                xid,
+                cid.saturating_add(1),
+                &catalog,
+                &parent_trigger,
+                child_oid,
+            )?);
+        }
+        for effect in &effects {
+            self.apply_catalog_mutation_effect_immediate(effect)?;
+        }
+        catalog_effects.extend(effects);
+        Ok(())
+    }
+
+    fn create_partition_trigger_clones_in_transaction(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        parent_trigger: &PgTriggerRow,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<Vec<CatalogMutationEffect>, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let mut effects = Vec::new();
+        for child in direct_partition_child_oids(&catalog, parent_trigger.tgrelid) {
+            effects.extend(self.create_partition_trigger_clone_tree_in_transaction(
+                client_id,
+                xid,
+                cid,
+                &catalog,
+                parent_trigger,
+                child,
+            )?);
+        }
+        Ok(effects)
+    }
+
+    fn create_partition_trigger_clone_tree_in_transaction(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog: &dyn CatalogLookup,
+        parent_trigger: &PgTriggerRow,
+        child_oid: u32,
+    ) -> Result<Vec<CatalogMutationEffect>, ExecError> {
+        let mut child_trigger = cloned_partition_trigger_row(parent_trigger, child_oid);
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let (oid, effect) = self
             .catalog
             .write()
-            .drop_trigger_mvcc(relation.relation_oid, &stmt.trigger_name, &ctx)
+            .create_trigger_mvcc(child_trigger.clone(), &ctx)
             .map_err(map_catalog_error)?;
-        self.apply_catalog_mutation_effect_immediate(&effect)?;
-        self.plan_cache.invalidate_all();
-        catalog_effects.push(effect);
-        Ok(StatementResult::AffectedRows(0))
+        child_trigger.oid = oid;
+        let mut effects = vec![effect];
+        for grandchild_oid in direct_partition_child_oids(catalog, child_oid) {
+            effects.extend(self.create_partition_trigger_clone_tree_in_transaction(
+                client_id,
+                xid,
+                cid,
+                catalog,
+                &child_trigger,
+                grandchild_oid,
+            )?);
+        }
+        Ok(effects)
     }
 
     pub(crate) fn execute_comment_on_trigger_stmt_with_search_path(
@@ -664,6 +802,71 @@ fn validate_trigger_stmt(
         }
     }
     Ok(())
+}
+
+fn trigger_row_is_row(row: &PgTriggerRow) -> bool {
+    row.tgtype & TRIGGER_TYPE_ROW != 0
+}
+
+fn direct_partition_child_oids(catalog: &dyn CatalogLookup, parent_oid: u32) -> Vec<u32> {
+    let mut children = catalog
+        .inheritance_children(parent_oid)
+        .into_iter()
+        .filter_map(|row| {
+            catalog
+                .relation_by_oid(row.inhrelid)
+                .filter(|relation| relation.relispartition)
+                .map(|_| (row.inhseqno, row.inhrelid))
+        })
+        .collect::<Vec<_>>();
+    children.sort_unstable();
+    children.into_iter().map(|(_, oid)| oid).collect()
+}
+
+fn cloned_partition_trigger_row(parent: &PgTriggerRow, child_oid: u32) -> PgTriggerRow {
+    PgTriggerRow {
+        oid: 0,
+        tgrelid: child_oid,
+        tgparentid: parent.oid,
+        tgname: parent.tgname.clone(),
+        tgfoid: parent.tgfoid,
+        tgtype: parent.tgtype,
+        tgenabled: parent.tgenabled,
+        tgisinternal: parent.tgisinternal,
+        tgconstrrelid: parent.tgconstrrelid,
+        tgconstrindid: parent.tgconstrindid,
+        tgconstraint: parent.tgconstraint,
+        tgdeferrable: parent.tgdeferrable,
+        tginitdeferred: parent.tginitdeferred,
+        tgnargs: parent.tgnargs,
+        tgattr: parent.tgattr.clone(),
+        tgargs: parent.tgargs.clone(),
+        tgqual: parent.tgqual.clone(),
+        tgoldtable: parent.tgoldtable.clone(),
+        tgnewtable: parent.tgnewtable.clone(),
+    }
+}
+
+fn inherited_trigger_descendants(
+    catalog: &dyn CatalogLookup,
+    root_relation_oid: u32,
+    root_trigger_oid: u32,
+) -> Vec<PgTriggerRow> {
+    let mut descendants = Vec::new();
+    let mut pending = vec![root_trigger_oid];
+    let relation_oids = catalog.find_all_inheritors(root_relation_oid);
+    while let Some(parent_oid) = pending.pop() {
+        let children = relation_oids
+            .iter()
+            .flat_map(|relation_oid| catalog.trigger_rows_for_relation(*relation_oid))
+            .filter(|row| row.tgparentid == parent_oid)
+            .collect::<Vec<_>>();
+        for child in children {
+            pending.push(child.oid);
+            descendants.push(child);
+        }
+    }
+    descendants
 }
 
 fn trigger_update_attnums(

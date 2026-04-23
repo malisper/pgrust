@@ -191,6 +191,15 @@ impl Database {
             configured_search_path,
             catalog_effects,
         )?;
+        self.clone_parent_row_triggers_to_partition_in_transaction(
+            client_id,
+            xid,
+            cid.saturating_add(6),
+            parent.relation_oid,
+            updated_child.relation_oid,
+            configured_search_path,
+            catalog_effects,
+        )?;
         Ok(StatementResult::AffectedRows(0))
     }
 }
