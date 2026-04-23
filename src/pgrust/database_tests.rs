@@ -245,6 +245,16 @@ fn ephemeral_database_executes_basic_sql() {
 }
 
 #[test]
+fn pg_backend_pid_returns_session_client_id() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+
+    assert_eq!(
+        query_rows(&db, 41, "select pg_backend_pid()"),
+        vec![vec![Value::Int32(41)]]
+    );
+}
+
+#[test]
 fn create_temp_table_accepts_fixed_length_array_column_syntax() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
