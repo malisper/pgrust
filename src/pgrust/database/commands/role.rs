@@ -1663,6 +1663,37 @@ mod tests {
     }
 
     #[test]
+    fn alter_view_rename_requires_view_owner() {
+        let base = temp_dir("alter_view_rename_owner");
+        let db = Database::open(&base, 16).unwrap();
+        let mut superuser = Session::new(1);
+        superuser.execute(&db, "create role tenant").unwrap();
+        superuser.execute(&db, "create role other").unwrap();
+
+        let tenant_oid = role_oid(&db, "tenant");
+        let other_oid = role_oid(&db, "other");
+
+        let mut tenant = Session::new(2);
+        tenant.set_session_authorization_oid(tenant_oid);
+        tenant
+            .execute(&db, "create table tenant_table (id int4)")
+            .unwrap();
+        tenant
+            .execute(
+                &db,
+                "create view tenant_view as select id from tenant_table",
+            )
+            .unwrap();
+
+        let mut other = Session::new(3);
+        other.set_session_authorization_oid(other_oid);
+        let err = other
+            .execute(&db, "alter view tenant_view rename to tenant_view_new")
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("must be owner of view tenant_view"));
+    }
+
+    #[test]
     fn ownership_checks_reassign_owned_and_drop_role_follow_role_membership() {
         let base = temp_dir("reassign_owned");
         let db = Database::open(&base, 16).unwrap();

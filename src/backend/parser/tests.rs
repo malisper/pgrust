@@ -2672,6 +2672,20 @@ fn parse_alter_index_rename_statement() {
 }
 
 #[test]
+fn parse_alter_view_rename_statement() {
+    let stmt = parse_statement("alter view if exists items_view rename to items_view_new").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterViewRename(AlterTableRenameStatement {
+            if_exists: true,
+            only: false,
+            table_name: "items_view".into(),
+            new_table_name: "items_view_new".into(),
+        })
+    );
+}
+
+#[test]
 fn parse_alter_index_set_statistics_statement() {
     let stmt = parse_statement("alter index attmp_idx alter column 2 set statistics 1000").unwrap();
     assert_eq!(
