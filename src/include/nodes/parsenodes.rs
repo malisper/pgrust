@@ -1215,13 +1215,13 @@ impl CreateTableStatement {
     pub fn columns(&self) -> impl Iterator<Item = &ColumnDef> {
         self.elements.iter().filter_map(|element| match element {
             CreateTableElement::Column(column) => Some(column),
-            CreateTableElement::Constraint(_) => None,
+            CreateTableElement::Constraint(_) | CreateTableElement::Like(_) => None,
         })
     }
 
     pub fn constraints(&self) -> impl Iterator<Item = &TableConstraint> {
         self.elements.iter().filter_map(|element| match element {
-            CreateTableElement::Column(_) => None,
+            CreateTableElement::Column(_) | CreateTableElement::Like(_) => None,
             CreateTableElement::Constraint(constraint) => Some(constraint),
         })
     }
@@ -2306,6 +2306,25 @@ pub struct CreateDomainStatement {
 pub enum CreateTableElement {
     Column(ColumnDef),
     Constraint(TableConstraint),
+    Like(CreateTableLikeClause),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTableLikeClause {
+    pub relation_name: String,
+    pub options: Vec<CreateTableLikeOption>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateTableLikeOption {
+    IncludingDefaults,
+    IncludingConstraints,
+    IncludingIndexes,
+    IncludingAll,
+    ExcludingDefaults,
+    ExcludingConstraints,
+    ExcludingIndexes,
+    ExcludingAll,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
