@@ -105,16 +105,17 @@ fn format_explain_plan_with_subplans_ctx(
     }
 
     let state = executor_start(plan.clone());
-    push_explain_plan_line(
-        &plan_node_label(plan, state.as_ref(), verbose, rename_output),
-        plan.plan_info(),
-        indent,
-        show_costs,
-        lines,
-    );
     if verbose {
+        push_explain_plan_line(
+            &plan_node_label(plan, state.as_ref(), true, rename_output),
+            plan.plan_info(),
+            indent,
+            show_costs,
+            lines,
+        );
         format_verbose_plan_details(plan, indent, outer_names, rename_output, lines);
     } else {
+        push_explain_state_line(state.as_ref(), indent, false, show_costs, lines);
         state.explain_details(indent, false, show_costs, lines);
     }
 
