@@ -280,6 +280,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
         relispartition: entry.relispartition,
         relfrozenxid: entry.relfrozenxid,
         relpartbound: entry.relpartbound.clone(),
+        relacl: entry.relacl.clone(),
     });
 
     if entry.row_type_oid != 0 {
