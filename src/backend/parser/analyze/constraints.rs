@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlExpr, SqlType, SqlTypeKind, parse_expr};
-use crate::include::catalog::PgConstraintRow;
+use crate::backend::utils::cache::catcache::sql_type_oid;
+use crate::include::catalog::{PgConstraintRow, bootstrap_pg_cast_rows};
 use crate::include::nodes::parsenodes::{
     ColumnConstraint, ConstraintAttributes, CreateTableStatement, ForeignKeyAction,
     ForeignKeyMatchType, TableConstraint, TablePersistence,
@@ -1280,13 +1281,64 @@ fn resolve_pending_self_referenced_key(
             super::resolve_raw_type_name(&column_defs[index].ty, catalog)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    if child_types != parent_types {
+    if !foreign_key_types_compatible(child_types, &parent_types) {
         return Err(ParseError::FeatureNotSupported(
             "FOREIGN KEY with cross-type columns".into(),
         ));
     }
 
     Ok(referenced_columns)
+}
+
+fn foreign_key_types_compatible(child_types: &[SqlType], parent_types: &[SqlType]) -> bool {
+    child_types
+        .iter()
+        .zip(parent_types)
+        .all(|(&child, &parent)| foreign_key_type_compatible(child, parent))
+}
+
+fn foreign_key_type_compatible(child: SqlType, parent: SqlType) -> bool {
+    if child == parent {
+        return true;
+    }
+    if child.is_array || parent.is_array {
+        return false;
+    }
+    if foreign_key_integer_type(child) && foreign_key_integer_type(parent) {
+        return true;
+    }
+    if foreign_key_text_like_type(child) && foreign_key_text_like_type(parent) {
+        return true;
+    }
+    if foreign_key_integer_type(child) && foreign_key_float_type(parent) {
+        return true;
+    }
+
+    let child_oid = sql_type_oid(child);
+    let parent_oid = sql_type_oid(parent);
+    child_oid != 0
+        && parent_oid != 0
+        && bootstrap_pg_cast_rows().into_iter().any(|row| {
+            row.castsource == child_oid && row.casttarget == parent_oid && row.castcontext == 'i'
+        })
+}
+
+fn foreign_key_integer_type(ty: SqlType) -> bool {
+    matches!(
+        ty.kind,
+        SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8
+    )
+}
+
+fn foreign_key_float_type(ty: SqlType) -> bool {
+    matches!(ty.kind, SqlTypeKind::Float4 | SqlTypeKind::Float8)
+}
+
+fn foreign_key_text_like_type(ty: SqlType) -> bool {
+    matches!(
+        ty.kind,
+        SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar
+    )
 }
 
 fn resolve_referenced_key(
@@ -1375,7 +1427,7 @@ fn resolve_referenced_key(
                 .map(|index| relation.desc.columns[index].sql_type)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    if child_types != parent_types {
+    if !foreign_key_types_compatible(child_types, &parent_types) {
         return Err(ParseError::FeatureNotSupported(
             "FOREIGN KEY with cross-type columns".into(),
         ));

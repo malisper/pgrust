@@ -12709,6 +12709,59 @@ fn foreign_keys_on_update_set_default_rejects_missing_default_key() {
 }
 
 #[test]
+fn foreign_keys_accept_supported_cross_type_columns() {
+    let db = Database::open_ephemeral(16).unwrap();
+
+    db.execute(1, "create table int_parents (id int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table int_children (id int4 primary key, parent_id int8 references int_parents)",
+    )
+    .unwrap();
+    db.execute(1, "insert into int_parents values (1)").unwrap();
+    db.execute(1, "insert into int_children values (1, 1)")
+        .unwrap();
+    assert!(matches!(
+        db.execute(1, "insert into int_children values (2, 2)"),
+        Err(ExecError::ForeignKeyViolation { .. })
+    ));
+    assert!(matches!(
+        db.execute(1, "delete from int_parents where id = 1"),
+        Err(ExecError::ForeignKeyViolation { .. })
+    ));
+
+    db.execute(1, "create table numeric_parents (id numeric primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table numeric_children (id int4 primary key, parent_id int4 references numeric_parents)",
+    )
+    .unwrap();
+    db.execute(1, "insert into numeric_parents values (10)")
+        .unwrap();
+    db.execute(1, "insert into numeric_children values (1, 10)")
+        .unwrap();
+    assert!(matches!(
+        db.execute(1, "insert into numeric_children values (2, 11)"),
+        Err(ExecError::ForeignKeyViolation { .. })
+    ));
+}
+
+#[test]
+fn foreign_keys_reject_unsupported_cross_type_columns() {
+    let db = Database::open_ephemeral(16).unwrap();
+
+    db.execute(1, "create table int_parents (id int4 primary key)")
+        .unwrap();
+    assert!(matches!(
+        db.execute(1, "create table numeric_children (parent_id numeric references int_parents)"),
+        Err(ExecError::Parse(ParseError::FeatureNotSupported(feature)))
+            if feature == "FOREIGN KEY with cross-type columns"
+    ));
+}
+
+#[test]
 fn foreign_keys_set_default_rechecks_existing_default_reference() {
     let base = temp_dir("foreign_keys_set_default_recheck");
     let db = Database::open(&base, 16).unwrap();
