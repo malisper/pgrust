@@ -16378,6 +16378,55 @@ fn grouped_query_having_can_use_correlated_exists() {
 }
 
 #[test]
+fn grouped_query_having_can_use_outer_aggregate_inside_subquery_where() {
+    let mut harness = seed_people_and_pets("grouped_having_outer_aggregate_in_subquery_where");
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select p.id from people p group by p.id having exists (select 1 from pets q where sum(p.id) = q.owner_id) order by p.id",
+            )
+            .unwrap(),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]],
+    );
+}
+
+#[test]
+fn grouped_query_having_matches_outer_aggregate_when_subquery_qualifies_column() {
+    let mut harness = seed_people_and_pets("grouped_having_outer_aggregate_qualified_match");
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select p.note, sum(id) from people p group by p.note having exists (select 1 from pets q where sum(p.id) = q.owner_id) order by p.note",
+            )
+            .unwrap(),
+        vec![
+            vec![Value::Text("a".into()), Value::Int64(1)],
+            vec![Value::Text("b".into()), Value::Int64(2)],
+        ],
+    );
+}
+
+#[test]
+fn grouped_query_having_can_use_outer_aggregate_with_ungrouped_arg_inside_subquery_where() {
+    let mut harness =
+        seed_people_and_pets("grouped_having_outer_aggregate_with_ungrouped_arg_inside_subquery");
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select p.note from people p group by p.note having exists (select 1 from pets q where sum(distinct p.id) = q.owner_id) order by p.note",
+            )
+            .unwrap(),
+        vec![
+            vec![Value::Text("a".into())],
+            vec![Value::Text("b".into())],
+        ],
+    );
+}
+
+#[test]
 fn degenerate_having_does_not_scan_where_clause() {
     let base = temp_dir("degenerate_having_no_scan");
     let mut txns = TransactionManager::new_durable(&base).unwrap();
