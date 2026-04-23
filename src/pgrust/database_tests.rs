@@ -18197,6 +18197,33 @@ fn temp_slot_reuse_starts_from_clean_namespace_contents() {
 }
 
 #[test]
+fn temp_namespace_creation_does_not_poison_global_next_oid() {
+    let base = temp_dir("temp_namespace_next_oid");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::with_temp_backend_id(1, 7);
+
+    let initial_next_oid = db.catalog.read().catalog_snapshot().unwrap().next_oid;
+    assert!(initial_next_oid < Database::temp_namespace_oid(7));
+
+    session
+        .execute(&db, "create temp table temp_probe (id int4)")
+        .unwrap();
+
+    let catalog = db.catalog.read().catalog_snapshot().unwrap();
+    let temp_entry = db.temp_entry(1, "temp_probe").unwrap();
+    assert!(
+        catalog.next_oid < Database::temp_namespace_oid(7),
+        "next_oid jumped into reserved temp namespace range: {}",
+        catalog.next_oid
+    );
+    assert!(
+        temp_entry.relation_oid < Database::temp_namespace_oid(7),
+        "temp relation oid jumped into reserved temp namespace range: {}",
+        temp_entry.relation_oid
+    );
+}
+
+#[test]
 fn copy_from_rows_parses_extended_numeric_types() {
     let base = temp_dir("copy_from_rows_extended_numeric");
     let db = Database::open(&base, 16).unwrap();
