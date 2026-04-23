@@ -509,6 +509,7 @@ pub(super) fn bind_scalar_function_call(
             ))
         }
         BuiltinScalarFunction::IsFinite => Ok(build_func(false, bound_args)),
+        BuiltinScalarFunction::PgColumnSize => Ok(build_func(false, bound_args)),
         BuiltinScalarFunction::MakeDate => Ok(build_func(
             false,
             arg_types

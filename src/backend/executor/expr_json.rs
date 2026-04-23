@@ -586,6 +586,9 @@ pub(crate) fn eval_json_builtin_function(
                 render_json_object_function(values)?,
             ))),
             BuiltinScalarFunction::JsonStripNulls => {
+                if matches!(values.first(), None | Some(Value::Null)) {
+                    return Ok(Value::Null);
+                }
                 let strip_in_arrays =
                     parse_optional_bool_flag(values.get(1), false, "json_strip_nulls")?;
                 let json = ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))?;
@@ -750,6 +753,9 @@ pub(crate) fn eval_json_builtin_function(
                 &render_jsonb_object_function(values)?,
             ))),
             BuiltinScalarFunction::JsonbStripNulls => {
+                if matches!(values.first(), None | Some(Value::Null)) {
+                    return Ok(Value::Null);
+                }
                 let strip_in_arrays =
                     parse_optional_bool_flag(values.get(1), false, "jsonb_strip_nulls")?;
                 let json = parse_jsonb_target(
@@ -863,9 +869,18 @@ pub(crate) fn eval_json_builtin_function(
                             "delete_key" => delete_jsonb_path(&json, &path)?,
                             "return_target" => json,
                             "raise_exception" => {
-                                return Err(ExecError::RaiseException(
-                                    "JSON value must not be null".into(),
-                                ));
+                                return Err(ExecError::DetailedError {
+                                    message: "JSON value must not be null".into(),
+                                    detail: Some(
+                                        "Exception was raised because null_value_treatment is \"raise_exception\"."
+                                            .into(),
+                                    ),
+                                    hint: Some(
+                                        "To avoid, either change the null_value_treatment argument or ensure that an SQL NULL is not passed."
+                                            .into(),
+                                    ),
+                                    sqlstate: "22023",
+                                });
                             }
                             _ => unreachable!(),
                         };
@@ -2534,6 +2549,15 @@ fn set_jsonb_path(
     )
 }
 
+fn jsonb_insert_existing_key_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "cannot replace existing key".into(),
+        detail: None,
+        hint: Some("Try using the function jsonb_set to replace key value.".into()),
+        sqlstate: "22023",
+    }
+}
+
 fn set_jsonb_path_inner(
     target: &JsonbValue,
     path: &[Option<String>],
@@ -2549,11 +2573,8 @@ fn set_jsonb_path_inner(
             JsonbValue::Object(items) => {
                 let mut out = items.clone();
                 if let Some((_, value)) = out.iter_mut().find(|(key, _)| key == step) {
-                    if insert_after {
-                        return Err(ExecError::InvalidStorageValue {
-                            column: "jsonb".into(),
-                            details: "cannot replace existing key".into(),
-                        });
+                    if insert_mode {
+                        return Err(jsonb_insert_existing_key_error());
                     }
                     *value = replacement;
                 } else if create_missing {
