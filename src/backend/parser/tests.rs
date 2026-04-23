@@ -10002,7 +10002,7 @@ fn analyze_pg_locks_uses_expected_columns_and_types() {
 fn analyze_pg_policies_uses_expected_columns_and_types() {
     let stmt = parse_select("select * from pg_policies").unwrap();
     let (query, _) =
-        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[]).unwrap();
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
 
     assert_eq!(
         query_column_names_and_types(&query),

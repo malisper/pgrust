@@ -37,7 +37,7 @@ use crate::pl::plpgsql::TriggerOperation;
 
 use super::explain::{
     format_buffer_usage, format_explain_lines_with_costs, format_explain_plan_with_subplans,
-    push_explain_line,
+    format_verbose_explain_plan_with_subplans, push_explain_line,
 };
 use super::partition::route_partition_target;
 use super::trigger::RuntimeTriggers;
@@ -419,7 +419,13 @@ pub(crate) fn execute_explain(
             );
             format_explain_lines_with_costs(state.as_ref(), 1, false, costs, &mut lines);
         } else {
-            format_explain_plan_with_subplans(&plan_tree, &subplans, 0, costs, &mut lines);
+            if verbose {
+                format_verbose_explain_plan_with_subplans(
+                    &plan_tree, &subplans, 0, costs, &mut lines,
+                );
+            } else {
+                format_explain_plan_with_subplans(&plan_tree, &subplans, 0, costs, &mut lines);
+            }
         }
     }
 
