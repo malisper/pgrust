@@ -36,17 +36,25 @@ done
 
 resolve_postgres_dir() {
     local candidate
+    # If the user explicitly set PGRUST_POSTGRES_DIR, treat it as authoritative:
+    # fail loudly rather than silently fall through to a default.
+    if [[ -n "${PGRUST_POSTGRES_DIR:-}" ]]; then
+        if [[ -d "$PGRUST_POSTGRES_DIR/src/test/isolation" ]]; then
+            (cd "$PGRUST_POSTGRES_DIR" && pwd)
+            return 0
+        fi
+        echo "ERROR: PGRUST_POSTGRES_DIR=$PGRUST_POSTGRES_DIR does not contain src/test/isolation" >&2
+        return 1
+    fi
     # The 2-levels-up candidate handles pgrust-worktrees/<name>/ checkouts,
     # where $REPO_ROOT is pgrust-worktrees/ rather than pagerfreeglobal/.
     for candidate in \
-        "${PGRUST_POSTGRES_DIR:-}" \
         "$REPO_ROOT/postgres" \
         "$PGRUST_DIR/../../postgres" \
         "$HOME/postgres" \
         "$HOME/src/postgres" \
         "$HOME/dev/postgres"
     do
-        [[ -z "$candidate" ]] && continue
         if [[ -d "$candidate/src/test/isolation" ]]; then
             (cd "$candidate" && pwd)
             return 0
