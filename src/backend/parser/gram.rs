@@ -2965,6 +2965,7 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
     let mut language = None;
     let mut body = None;
     let mut link_symbol = None;
+    let mut cost = None;
     let mut strict = false;
     let mut leakproof = false;
     let mut volatility = crate::backend::parser::FunctionVolatility::Volatile;
@@ -2993,6 +2994,18 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
             }
             let (parsed, next_rest) = parse_create_function_language(rest)?;
             language = Some(parsed);
+            rest = next_rest;
+            continue;
+        }
+        if keyword_at_start(rest, "cost") {
+            if cost.is_some() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "single COST clause",
+                    actual: rest.into(),
+                });
+            }
+            let (parsed, next_rest) = parse_create_function_cost(rest)?;
+            cost = Some(parsed);
             rest = next_rest;
             continue;
         }
@@ -3085,6 +3098,7 @@ fn build_create_function_statement(sql: &str) -> Result<CreateFunctionStatement,
         schema_name,
         function_name,
         replace_existing,
+        cost,
         args,
         return_spec,
         strict,
@@ -5146,6 +5160,7 @@ fn parse_create_function_returns(
     let boundary = find_next_top_level_keyword(
         type_rest,
         &[
+            "cost",
             "language",
             "as",
             "strict",
@@ -5171,6 +5186,18 @@ fn parse_create_function_returns(
         },
         &type_rest[boundary..],
     ))
+}
+
+fn parse_create_function_cost(input: &str) -> Result<(String, &str), ParseError> {
+    let rest = consume_keyword(input.trim_start(), "cost").trim_start();
+    let (cost_sql, rest) = split_sql_identifier_token(rest)?;
+    let cost = cost_sql
+        .parse::<f64>()
+        .map_err(|_| ParseError::InvalidNumeric(cost_sql.to_string()))?;
+    if !cost.is_finite() {
+        return Err(ParseError::InvalidNumeric(cost_sql.to_string()));
+    }
+    Ok((cost_sql.to_string(), rest))
 }
 
 fn parse_create_function_table_columns(
