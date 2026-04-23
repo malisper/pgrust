@@ -1300,6 +1300,18 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             's',
         ),
         proc_row(
+            6605,
+            "pg_column_size",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[ANYOID]),
+            "pg_column_size",
+            1,
+            false,
+            false,
+            'f',
+            's',
+        ),
+        proc_row(
             2769,
             "pg_stat_get_checkpointer_num_timed",
             INT8_TYPE_OID,
@@ -3703,6 +3715,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_column_compression",
             BuiltinScalarFunction::PgColumnCompression,
         ),
+        ("pg_column_size", BuiltinScalarFunction::PgColumnSize),
         (
             "pg_stat_get_checkpointer_num_timed",
             BuiltinScalarFunction::PgStatGetCheckpointerNumTimed,
