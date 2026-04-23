@@ -24,9 +24,12 @@ jobs:
     if: ${{ !github.event.pull_request.draft && github.event.pull_request.base.ref == 'perf-optimization' }}
     runs-on: ubuntu-latest
     steps:
+      # :HACK: Uses fine-grained PAT (MERGE_QUEUE_PAT) instead of github.token because
+      # GitHub silently drops the auto-add-to-queue mechanism when the bot user is the actor
+      # (recursion protection). Token expires 2026-06-22 — rotate before then or auto-merge breaks.
       - name: Enable auto-merge for the PR
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.MERGE_QUEUE_PAT }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
