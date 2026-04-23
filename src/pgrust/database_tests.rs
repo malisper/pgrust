@@ -9472,6 +9472,76 @@ fn alter_table_rename_temp_table_rolls_back() {
 }
 
 #[test]
+fn alter_table_rename_moves_conflicting_array_type_names() {
+    let base = temp_dir("alter_table_rename_array_type_conflict");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table attmp_array (id int4)").unwrap();
+    db.execute(1, "create table attmp_array2 (id int4)")
+        .unwrap();
+    db.execute(1, "alter table attmp_array2 rename to _attmp_array")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select typname from pg_type where oid = 'attmp_array[]'::regtype",
+        ),
+        vec![vec![Value::Text("__attmp_array".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select typname from pg_type where oid = '_attmp_array[]'::regtype",
+        ),
+        vec![vec![Value::Text("__attmp_array_1".into())]]
+    );
+
+    db.execute(1, "drop table _attmp_array").unwrap();
+    db.execute(1, "drop table attmp_array").unwrap();
+}
+
+#[test]
+fn alter_table_rename_to_own_array_type_name_moves_self_array_type() {
+    let base = temp_dir("alter_table_rename_self_array_type");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table attmp_array (id int4)").unwrap();
+    db.execute(1, "alter table attmp_array rename to _attmp_array")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select typname from pg_type where oid = '_attmp_array[]'::regtype",
+        ),
+        vec![vec![Value::Text("__attmp_array".into())]]
+    );
+}
+
+#[test]
+fn alter_table_rename_rejects_non_array_type_name_conflicts() {
+    let base = temp_dir("alter_table_rename_type_conflict");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create type _items as enum ('one')").unwrap();
+    db.execute(1, "create table items (id int4)").unwrap();
+
+    match db.execute(1, "alter table items rename to _items") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "type \"_items\" already exists");
+            assert_eq!(sqlstate, "42710");
+        }
+        other => panic!("expected duplicate type error, got {other:?}"),
+    }
+}
+
+#[test]
 fn alter_table_rename_column_updates_lookup_and_rolls_back() {
     let base = temp_dir("alter_table_rename_column_txn");
     let db = Database::open(&base, 16).unwrap();
@@ -12502,6 +12572,30 @@ fn create_sequence_supports_functions_and_sequence_scans() {
         query_rows(&db, 1, "select nextval('seq')"),
         vec![vec![Value::Int64(11)]]
     );
+}
+
+#[test]
+fn alter_sequence_rename_moves_conflicting_array_type_names() {
+    let base = temp_dir("alter_sequence_rename_array_type_conflict");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create sequence seq_array").unwrap();
+    db.execute(1, "create sequence seq_array2").unwrap();
+    db.execute(1, "alter sequence seq_array2 rename to _seq_array")
+        .unwrap();
+
+    let catcache = db.catalog.read().catcache().unwrap();
+    let original_class = catcache.class_by_name("seq_array").unwrap();
+    let original_type = catcache.type_by_oid(original_class.reltype).unwrap();
+    let original_array_type = catcache.type_by_oid(original_type.typarray).unwrap();
+    assert_eq!(original_array_type.typname, "__seq_array");
+
+    let renamed_class = catcache.class_by_name("_seq_array").unwrap();
+    let renamed_type = catcache.type_by_oid(renamed_class.reltype).unwrap();
+    assert_eq!(renamed_type.typname, "_seq_array");
+    let renamed_array_type = catcache.type_by_oid(renamed_type.typarray).unwrap();
+    assert_eq!(renamed_array_type.typname, "__seq_array_1");
+    assert_ne!(original_array_type.oid, renamed_array_type.oid);
 }
 
 #[test]

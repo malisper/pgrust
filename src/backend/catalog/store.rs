@@ -1761,7 +1761,7 @@ mod tests {
 
         let (_pool, txns, ctx) = durable_write_context(&base);
         let _effect = store
-            .rename_relation_mvcc(created.relation_oid, "customers", &ctx)
+            .rename_relation_mvcc(created.relation_oid, "customers", &[], &ctx)
             .unwrap();
         txns.write().commit(ctx.xid).unwrap();
 
