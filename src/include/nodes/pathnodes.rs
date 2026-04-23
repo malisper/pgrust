@@ -3,7 +3,7 @@ use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::nodes::parsenodes::SetOperator;
-use crate::include::nodes::parsenodes::{Query, RangeTblEntry, RangeTblEntryKind};
+use crate::include::nodes::parsenodes::{Query, QueryRowMark, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::plannodes::PlanEstimate;
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, JoinType, OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc,
@@ -456,6 +456,12 @@ pub enum Path {
         input: Box<Path>,
         limit: Option<usize>,
         offset: usize,
+    },
+    LockRows {
+        plan_info: PlanEstimate,
+        pathtarget: PathTarget,
+        input: Box<Path>,
+        row_marks: Vec<QueryRowMark>,
     },
     Aggregate {
         plan_info: PlanEstimate,

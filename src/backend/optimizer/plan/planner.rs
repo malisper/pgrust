@@ -566,6 +566,31 @@ fn make_limit_rel(
     rel
 }
 
+fn make_lock_rows_rel(
+    input_rel: RelOptInfo,
+    row_marks: &[crate::include::nodes::parsenodes::QueryRowMark],
+    catalog: &dyn CatalogLookup,
+) -> RelOptInfo {
+    let mut rel = RelOptInfo::new(
+        input_rel.relids.clone(),
+        RelOptKind::UpperRel,
+        input_rel.reltarget.clone(),
+    );
+    for path in input_rel.pathlist {
+        rel.add_path(optimize_path(
+            Path::LockRows {
+                plan_info: PlanEstimate::default(),
+                pathtarget: path.semantic_output_target(),
+                input: Box::new(path),
+                row_marks: row_marks.to_vec(),
+            },
+            catalog,
+        ));
+    }
+    bestpath::set_cheapest(&mut rel);
+    rel
+}
+
 fn make_projection_rel(
     root: &mut PlannerInfo,
     input_rel: RelOptInfo,
@@ -698,6 +723,10 @@ pub(super) fn grouping_planner(
         projection_done = true;
     }
 
+    if !root.parse.row_marks.is_empty() {
+        current_rel = make_lock_rows_rel(current_rel, &root.parse.row_marks, catalog);
+    }
+
     if root.parse.limit_count.is_some() || root.parse.limit_offset != 0 {
         current_rel = make_limit_rel(
             root,
@@ -722,9 +751,9 @@ fn standard_planner_with_param_base(
     query: Query,
     catalog: &dyn CatalogLookup,
     next_param_id: usize,
-) -> (PlannedStmt, usize) {
+) -> Result<(PlannedStmt, usize), crate::backend::parser::ParseError> {
     let mut glob = PlannerGlobal::new();
-    let query = root::prepare_query_for_planning(query);
+    let query = root::prepare_query_for_planning(root::prepare_query_for_locking(query)?);
     let mut root = PlannerInfo::new(query);
     let command_type = root.parse.command_type;
     let scanjoin_rel = query_planner(&mut root, catalog);
@@ -738,7 +767,7 @@ fn standard_planner_with_param_base(
         });
     let (plan_tree, ext_params, next_param_id) =
         create_plan_with_param_base(&root, best_path, catalog, &mut glob.subplans, next_param_id);
-    (
+    Ok((
         PlannedStmt {
             command_type,
             depends_on_row_security: root.parse.depends_on_row_security,
@@ -747,14 +776,20 @@ fn standard_planner_with_param_base(
             ext_params,
         },
         next_param_id,
-    )
+    ))
 }
 
-fn standard_planner(query: Query, catalog: &dyn CatalogLookup) -> PlannedStmt {
-    standard_planner_with_param_base(query, catalog, 0).0
+fn standard_planner(
+    query: Query,
+    catalog: &dyn CatalogLookup,
+) -> Result<PlannedStmt, crate::backend::parser::ParseError> {
+    Ok(standard_planner_with_param_base(query, catalog, 0)?.0)
 }
 
-pub(crate) fn planner(query: Query, catalog: &dyn CatalogLookup) -> PlannedStmt {
+pub(crate) fn planner(
+    query: Query,
+    catalog: &dyn CatalogLookup,
+) -> Result<PlannedStmt, crate::backend::parser::ParseError> {
     standard_planner(query, catalog)
 }
 
@@ -762,6 +797,6 @@ pub(crate) fn planner_with_param_base(
     query: Query,
     catalog: &dyn CatalogLookup,
     next_param_id: usize,
-) -> (PlannedStmt, usize) {
+) -> Result<(PlannedStmt, usize), crate::backend::parser::ParseError> {
     standard_planner_with_param_base(query, catalog, next_param_id)
 }

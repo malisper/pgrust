@@ -1,6 +1,9 @@
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::executor::execdesc::CommandType;
-use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind};
+use crate::backend::parser::ParseError;
+use crate::include::nodes::parsenodes::{
+    JoinTreeNode, Query, QueryRowMark, RangeTblEntry, RangeTblEntryKind, SelectLockingClause,
+};
 use crate::include::nodes::pathnodes::{PathTarget, PlannerInfo, RelOptInfo};
 use crate::include::nodes::primnodes::{
     AggAccum, AggFunc, Aggref, Expr, ProjectSetTarget, SetReturningCall, SortGroupClause, SubLink,
@@ -12,6 +15,806 @@ use super::pathnodes::expr_sql_type;
 
 pub(super) fn prepare_query_for_planning(query: Query) -> Query {
     super::constfold::fold_query_constants_best_effort(rewrite_minmax_aggregate_query(query))
+}
+
+pub(super) fn prepare_query_for_locking(query: Query) -> Result<Query, ParseError> {
+    prepare_query_for_locking_with_inherited(query, None)
+}
+
+fn prepare_query_for_locking_with_inherited(
+    mut query: Query,
+    inherited_lock: Option<SelectLockingClause>,
+) -> Result<Query, ParseError> {
+    let effective_lock = match (query.locking_clause, inherited_lock) {
+        (Some(local), Some(inherited)) => Some(local.strongest(inherited)),
+        (Some(local), None) => Some(local),
+        (None, Some(inherited)) => Some(inherited),
+        (None, None) => None,
+    };
+
+    if let Some(strength) = effective_lock {
+        validate_select_locking(&query, strength)?;
+    }
+
+    query.rtable = query
+        .rtable
+        .into_iter()
+        .map(|rte| prepare_rte_for_locking(rte, effective_lock))
+        .collect::<Result<Vec<_>, _>>()?;
+    query.target_list = query
+        .target_list
+        .into_iter()
+        .map(prepare_target_entry_for_locking)
+        .collect::<Result<Vec<_>, _>>()?;
+    query.where_qual = query
+        .where_qual
+        .map(prepare_expr_for_locking)
+        .transpose()?;
+    query.group_by = query
+        .group_by
+        .into_iter()
+        .map(prepare_expr_for_locking)
+        .collect::<Result<Vec<_>, _>>()?;
+    query.accumulators = query
+        .accumulators
+        .into_iter()
+        .map(prepare_agg_accum_for_locking)
+        .collect::<Result<Vec<_>, _>>()?;
+    query.window_clauses = query
+        .window_clauses
+        .into_iter()
+        .map(prepare_window_clause_for_locking)
+        .collect::<Result<Vec<_>, _>>()?;
+    query.having_qual = query
+        .having_qual
+        .map(prepare_expr_for_locking)
+        .transpose()?;
+    query.sort_clause = query
+        .sort_clause
+        .into_iter()
+        .map(prepare_sort_clause_for_locking)
+        .collect::<Result<Vec<_>, _>>()?;
+    query.project_set = query
+        .project_set
+        .map(|targets| {
+            targets
+                .into_iter()
+                .map(prepare_project_set_target_for_locking)
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
+    query.recursive_union = query
+        .recursive_union
+        .map(|recursive_union| {
+            prepare_recursive_union_for_locking(*recursive_union).map(Box::new)
+        })
+        .transpose()?;
+    query.set_operation = query
+        .set_operation
+        .map(|set_operation| prepare_set_operation_for_locking(*set_operation).map(Box::new))
+        .transpose()?;
+
+    query.row_marks.clear();
+    if let Some(strength) = effective_lock {
+        let mut row_marks = Vec::new();
+        if let Some(jointree) = &query.jointree {
+            collect_query_row_marks(&query.rtable, jointree, strength, &mut row_marks);
+        }
+        row_marks.sort_by_key(|mark| mark.rtindex);
+        row_marks.dedup_by(|left, right| {
+            if left.rtindex == right.rtindex {
+                left.strength = left.strength.strongest(right.strength);
+                true
+            } else {
+                false
+            }
+        });
+        query.row_marks = row_marks;
+    }
+    query.locking_clause = None;
+    Ok(query)
+}
+
+fn validate_select_locking(query: &Query, strength: SelectLockingClause) -> Result<(), ParseError> {
+    if query.set_operation.is_some() {
+        return Err(ParseError::FeatureNotSupportedMessage(format!(
+            "{} is not allowed with UNION/INTERSECT/EXCEPT",
+            strength.sql()
+        )));
+    }
+    if !query.group_by.is_empty() {
+        return Err(ParseError::FeatureNotSupportedMessage(format!(
+            "{} is not allowed with GROUP BY clause",
+            strength.sql()
+        )));
+    }
+    if query.having_qual.is_some() {
+        return Err(ParseError::FeatureNotSupportedMessage(format!(
+            "{} is not allowed with HAVING clause",
+            strength.sql()
+        )));
+    }
+    if !query.accumulators.is_empty() {
+        return Err(ParseError::FeatureNotSupportedMessage(format!(
+            "{} is not allowed with aggregate functions",
+            strength.sql()
+        )));
+    }
+    if !query.window_clauses.is_empty() {
+        return Err(ParseError::FeatureNotSupportedMessage(format!(
+            "{} is not allowed with window functions",
+            strength.sql()
+        )));
+    }
+    if query.project_set.is_some() {
+        return Err(ParseError::FeatureNotSupportedMessage(format!(
+            "{} is not allowed with set-returning functions in the target list",
+            strength.sql()
+        )));
+    }
+    if query.recursive_union.is_some() {
+        return Err(ParseError::FeatureNotSupported(
+            "FOR UPDATE/SHARE in a recursive query is not implemented".into(),
+        ));
+    }
+    if jointree_contains_values(query.jointree.as_ref(), &query.rtable) {
+        return Err(ParseError::FeatureNotSupportedMessage(format!(
+            "{} cannot be applied to VALUES",
+            strength.sql()
+        )));
+    }
+    Ok(())
+}
+
+fn jointree_contains_values(jointree: Option<&JoinTreeNode>, rtable: &[RangeTblEntry]) -> bool {
+    let Some(jointree) = jointree else {
+        return false;
+    };
+    match jointree {
+        JoinTreeNode::RangeTblRef(rtindex) => rtable
+            .get(rtindex.saturating_sub(1))
+            .is_some_and(|rte| matches!(rte.kind, RangeTblEntryKind::Values { .. })),
+        JoinTreeNode::JoinExpr { left, right, .. } => {
+            jointree_contains_values(Some(left), rtable)
+                || jointree_contains_values(Some(right), rtable)
+        }
+    }
+}
+
+fn collect_query_row_marks(
+    rtable: &[RangeTblEntry],
+    jointree: &JoinTreeNode,
+    strength: SelectLockingClause,
+    row_marks: &mut Vec<QueryRowMark>,
+) {
+    match jointree {
+        JoinTreeNode::RangeTblRef(rtindex) => {
+            let Some(rte) = rtable.get(rtindex.saturating_sub(1)) else {
+                return;
+            };
+            match rte.kind {
+                RangeTblEntryKind::Relation { .. } => {
+                    if let Some(existing) =
+                        row_marks.iter_mut().find(|row_mark| row_mark.rtindex == *rtindex)
+                    {
+                        existing.strength = existing.strength.strongest(strength);
+                    } else {
+                        row_marks.push(QueryRowMark {
+                            rtindex: *rtindex,
+                            strength,
+                        });
+                    }
+                }
+                RangeTblEntryKind::Join { .. }
+                | RangeTblEntryKind::Values { .. }
+                | RangeTblEntryKind::Function { .. }
+                | RangeTblEntryKind::WorkTable { .. }
+                | RangeTblEntryKind::Cte { .. }
+                | RangeTblEntryKind::Subquery { .. }
+                | RangeTblEntryKind::Result => {}
+            }
+        }
+        JoinTreeNode::JoinExpr { left, right, .. } => {
+            collect_query_row_marks(rtable, left, strength, row_marks);
+            collect_query_row_marks(rtable, right, strength, row_marks);
+        }
+    }
+}
+
+fn prepare_rte_for_locking(
+    rte: RangeTblEntry,
+    inherited_lock: Option<SelectLockingClause>,
+) -> Result<RangeTblEntry, ParseError> {
+    Ok(RangeTblEntry {
+        security_quals: rte
+            .security_quals
+            .into_iter()
+            .map(prepare_expr_for_locking)
+            .collect::<Result<Vec<_>, _>>()?,
+        kind: match rte.kind {
+            RangeTblEntryKind::Subquery { query } => RangeTblEntryKind::Subquery {
+                query: Box::new(prepare_query_for_locking_with_inherited(
+                    *query,
+                    inherited_lock,
+                )?),
+            },
+            RangeTblEntryKind::Cte { cte_id, query } => RangeTblEntryKind::Cte {
+                cte_id,
+                query: Box::new(prepare_query_for_locking_with_inherited(*query, None)?),
+            },
+            RangeTblEntryKind::Values {
+                rows,
+                output_columns,
+            } => RangeTblEntryKind::Values {
+                rows: rows
+                    .into_iter()
+                    .map(|row| {
+                        row.into_iter()
+                            .map(prepare_expr_for_locking)
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                output_columns,
+            },
+            RangeTblEntryKind::Function { call } => RangeTblEntryKind::Function {
+                call: prepare_set_returning_call_for_locking(call)?,
+            },
+            other => other,
+        },
+        ..rte
+    })
+}
+
+fn prepare_target_entry_for_locking(target: TargetEntry) -> Result<TargetEntry, ParseError> {
+    Ok(TargetEntry {
+        expr: prepare_expr_for_locking(target.expr)?,
+        ..target
+    })
+}
+
+fn prepare_sort_clause_for_locking(item: SortGroupClause) -> Result<SortGroupClause, ParseError> {
+    Ok(SortGroupClause {
+        expr: prepare_expr_for_locking(item.expr)?,
+        ..item
+    })
+}
+
+fn prepare_agg_accum_for_locking(accum: AggAccum) -> Result<AggAccum, ParseError> {
+    Ok(AggAccum {
+        args: accum
+            .args
+            .into_iter()
+            .map(prepare_expr_for_locking)
+            .collect::<Result<Vec<_>, _>>()?,
+        order_by: accum
+            .order_by
+            .into_iter()
+            .map(|item| {
+                Ok(crate::include::nodes::primnodes::OrderByEntry {
+                    expr: prepare_expr_for_locking(item.expr)?,
+                    ..item
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        filter: accum.filter.map(prepare_expr_for_locking).transpose()?,
+        ..accum
+    })
+}
+
+fn prepare_window_clause_for_locking(
+    clause: crate::include::nodes::primnodes::WindowClause,
+) -> Result<crate::include::nodes::primnodes::WindowClause, ParseError> {
+    Ok(crate::include::nodes::primnodes::WindowClause {
+        spec: crate::include::nodes::primnodes::WindowSpec {
+            partition_by: clause
+                .spec
+                .partition_by
+                .into_iter()
+                .map(prepare_expr_for_locking)
+                .collect::<Result<Vec<_>, _>>()?,
+            order_by: clause
+                .spec
+                .order_by
+                .into_iter()
+                .map(|item| {
+                    Ok(crate::include::nodes::primnodes::OrderByEntry {
+                        expr: prepare_expr_for_locking(item.expr)?,
+                        ..item
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            frame: prepare_window_frame_for_locking(clause.spec.frame)?,
+        },
+        functions: clause
+            .functions
+            .into_iter()
+            .map(prepare_window_func_for_locking)
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn prepare_window_frame_for_locking(
+    frame: crate::include::nodes::primnodes::WindowFrame,
+) -> Result<crate::include::nodes::primnodes::WindowFrame, ParseError> {
+    use crate::include::nodes::primnodes::WindowFrameBound;
+
+    let prepare_bound = |bound| match bound {
+        WindowFrameBound::OffsetPreceding(expr) => {
+            Ok(WindowFrameBound::OffsetPreceding(prepare_expr_for_locking(expr)?))
+        }
+        WindowFrameBound::OffsetFollowing(expr) => {
+            Ok(WindowFrameBound::OffsetFollowing(prepare_expr_for_locking(expr)?))
+        }
+        other => Ok(other),
+    };
+    Ok(crate::include::nodes::primnodes::WindowFrame {
+        mode: frame.mode,
+        start_bound: prepare_bound(frame.start_bound)?,
+        end_bound: prepare_bound(frame.end_bound)?,
+    })
+}
+
+fn prepare_window_func_for_locking(
+    func: crate::include::nodes::primnodes::WindowFuncExpr,
+) -> Result<crate::include::nodes::primnodes::WindowFuncExpr, ParseError> {
+    use crate::include::nodes::primnodes::WindowFuncKind;
+
+    Ok(crate::include::nodes::primnodes::WindowFuncExpr {
+        kind: match func.kind {
+            WindowFuncKind::Aggregate(aggref) => WindowFuncKind::Aggregate(Aggref {
+                args: aggref
+                    .args
+                    .into_iter()
+                    .map(prepare_expr_for_locking)
+                    .collect::<Result<Vec<_>, _>>()?,
+                aggorder: aggref
+                    .aggorder
+                    .into_iter()
+                    .map(|item| {
+                        Ok(crate::include::nodes::primnodes::OrderByEntry {
+                            expr: prepare_expr_for_locking(item.expr)?,
+                            ..item
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                aggfilter: aggref.aggfilter.map(prepare_expr_for_locking).transpose()?,
+                ..aggref
+            }),
+            WindowFuncKind::Builtin(kind) => WindowFuncKind::Builtin(kind),
+        },
+        args: func
+            .args
+            .into_iter()
+            .map(prepare_expr_for_locking)
+            .collect::<Result<Vec<_>, _>>()?,
+        ..func
+    })
+}
+
+fn prepare_project_set_target_for_locking(
+    target: ProjectSetTarget,
+) -> Result<ProjectSetTarget, ParseError> {
+    Ok(match target {
+        ProjectSetTarget::Scalar(entry) => {
+            ProjectSetTarget::Scalar(prepare_target_entry_for_locking(entry)?)
+        }
+        ProjectSetTarget::Set {
+            name,
+            call,
+            sql_type,
+            column_index,
+        } => ProjectSetTarget::Set {
+            name,
+            call: prepare_set_returning_call_for_locking(call)?,
+            sql_type,
+            column_index,
+        },
+    })
+}
+
+fn prepare_set_returning_call_for_locking(
+    call: SetReturningCall,
+) -> Result<SetReturningCall, ParseError> {
+    Ok(match call {
+        SetReturningCall::GenerateSeries {
+            func_oid,
+            func_variadic,
+            start,
+            stop,
+            step,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::GenerateSeries {
+            func_oid,
+            func_variadic,
+            start: prepare_expr_for_locking(start)?,
+            stop: prepare_expr_for_locking(stop)?,
+            step: prepare_expr_for_locking(step)?,
+            output_columns,
+            with_ordinality,
+        },
+        SetReturningCall::PartitionTree {
+            func_oid,
+            func_variadic,
+            relid,
+            output_columns,
+        } => SetReturningCall::PartitionTree {
+            func_oid,
+            func_variadic,
+            relid: prepare_expr_for_locking(relid)?,
+            output_columns,
+        },
+        SetReturningCall::PartitionAncestors {
+            func_oid,
+            func_variadic,
+            relid,
+            output_columns,
+        } => SetReturningCall::PartitionAncestors {
+            func_oid,
+            func_variadic,
+            relid: prepare_expr_for_locking(relid)?,
+            output_columns,
+        },
+        SetReturningCall::Unnest {
+            func_oid,
+            func_variadic,
+            args,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::Unnest {
+            func_oid,
+            func_variadic,
+            args: args
+                .into_iter()
+                .map(prepare_expr_for_locking)
+                .collect::<Result<Vec<_>, _>>()?,
+            output_columns,
+            with_ordinality,
+        },
+        SetReturningCall::JsonTableFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::JsonTableFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args: args
+                .into_iter()
+                .map(prepare_expr_for_locking)
+                .collect::<Result<Vec<_>, _>>()?,
+            output_columns,
+            with_ordinality,
+        },
+        SetReturningCall::JsonRecordFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args,
+            output_columns,
+            record_type,
+            with_ordinality,
+        } => SetReturningCall::JsonRecordFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args: args
+                .into_iter()
+                .map(prepare_expr_for_locking)
+                .collect::<Result<Vec<_>, _>>()?,
+            output_columns,
+            record_type,
+            with_ordinality,
+        },
+        SetReturningCall::RegexTableFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::RegexTableFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args: args
+                .into_iter()
+                .map(prepare_expr_for_locking)
+                .collect::<Result<Vec<_>, _>>()?,
+            output_columns,
+            with_ordinality,
+        },
+        SetReturningCall::StringTableFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::StringTableFunction {
+            func_oid,
+            func_variadic,
+            kind,
+            args: args
+                .into_iter()
+                .map(prepare_expr_for_locking)
+                .collect::<Result<Vec<_>, _>>()?,
+            output_columns,
+            with_ordinality,
+        },
+        SetReturningCall::TextSearchTableFunction {
+            kind,
+            args,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::TextSearchTableFunction {
+            kind,
+            args: args
+                .into_iter()
+                .map(prepare_expr_for_locking)
+                .collect::<Result<Vec<_>, _>>()?,
+            output_columns,
+            with_ordinality,
+        },
+        SetReturningCall::UserDefined {
+            proc_oid,
+            func_variadic,
+            args,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::UserDefined {
+            proc_oid,
+            func_variadic,
+            args: args
+                .into_iter()
+                .map(prepare_expr_for_locking)
+                .collect::<Result<Vec<_>, _>>()?,
+            output_columns,
+            with_ordinality,
+        },
+    })
+}
+
+fn prepare_recursive_union_for_locking(
+    recursive_union: crate::include::nodes::parsenodes::RecursiveUnionQuery,
+) -> Result<crate::include::nodes::parsenodes::RecursiveUnionQuery, ParseError> {
+    Ok(crate::include::nodes::parsenodes::RecursiveUnionQuery {
+        output_desc: recursive_union.output_desc,
+        anchor: prepare_query_for_locking_with_inherited(recursive_union.anchor, None)?,
+        recursive: prepare_query_for_locking_with_inherited(recursive_union.recursive, None)?,
+        distinct: recursive_union.distinct,
+        recursive_references_worktable: recursive_union.recursive_references_worktable,
+        worktable_id: recursive_union.worktable_id,
+    })
+}
+
+fn prepare_set_operation_for_locking(
+    set_operation: crate::include::nodes::parsenodes::SetOperationQuery,
+) -> Result<crate::include::nodes::parsenodes::SetOperationQuery, ParseError> {
+    Ok(crate::include::nodes::parsenodes::SetOperationQuery {
+        output_desc: set_operation.output_desc,
+        op: set_operation.op,
+        inputs: set_operation
+            .inputs
+            .into_iter()
+            .map(|query| prepare_query_for_locking_with_inherited(query, None))
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn prepare_expr_for_locking(expr: Expr) -> Result<Expr, ParseError> {
+    Ok(match expr {
+        Expr::Aggref(aggref) => Expr::Aggref(Box::new(Aggref {
+            args: aggref
+                .args
+                .into_iter()
+                .map(prepare_expr_for_locking)
+                .collect::<Result<Vec<_>, _>>()?,
+            aggorder: aggref
+                .aggorder
+                .into_iter()
+                .map(|item| {
+                    Ok(crate::include::nodes::primnodes::OrderByEntry {
+                        expr: prepare_expr_for_locking(item.expr)?,
+                        ..item
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            aggfilter: aggref.aggfilter.map(prepare_expr_for_locking).transpose()?,
+            ..*aggref
+        })),
+        Expr::WindowFunc(window_func) => {
+            Expr::WindowFunc(Box::new(prepare_window_func_for_locking(*window_func)?))
+        }
+        Expr::Op(op) => Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {
+            args: op
+                .args
+                .into_iter()
+                .map(prepare_expr_for_locking)
+                .collect::<Result<Vec<_>, _>>()?,
+            ..*op
+        })),
+        Expr::Bool(bool_expr) => {
+            Expr::Bool(Box::new(crate::include::nodes::primnodes::BoolExpr {
+                args: bool_expr
+                    .args
+                    .into_iter()
+                    .map(prepare_expr_for_locking)
+                    .collect::<Result<Vec<_>, _>>()?,
+                ..*bool_expr
+            }))
+        }
+        Expr::Case(case_expr) => {
+            Expr::Case(Box::new(crate::include::nodes::primnodes::CaseExpr {
+                arg: case_expr
+                    .arg
+                    .map(|arg| prepare_expr_for_locking(*arg).map(Box::new))
+                    .transpose()?,
+                args: case_expr
+                    .args
+                    .into_iter()
+                    .map(|arm| {
+                        Ok(crate::include::nodes::primnodes::CaseWhen {
+                            expr: prepare_expr_for_locking(arm.expr)?,
+                            result: prepare_expr_for_locking(arm.result)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                defresult: Box::new(prepare_expr_for_locking(*case_expr.defresult)?),
+                ..*case_expr
+            }))
+        }
+        Expr::Func(func) => Expr::Func(Box::new(crate::include::nodes::primnodes::FuncExpr {
+            args: func
+                .args
+                .into_iter()
+                .map(prepare_expr_for_locking)
+                .collect::<Result<Vec<_>, _>>()?,
+            ..*func
+        })),
+        Expr::SubLink(sublink) => Expr::SubLink(Box::new(SubLink {
+            testexpr: sublink
+                .testexpr
+                .map(|expr| prepare_expr_for_locking(*expr).map(Box::new))
+                .transpose()?,
+            subselect: Box::new(prepare_query_for_locking_with_inherited(
+                *sublink.subselect,
+                None,
+            )?),
+            ..*sublink
+        })),
+        Expr::SubPlan(subplan) => Expr::SubPlan(Box::new(
+            crate::include::nodes::primnodes::SubPlan {
+                testexpr: subplan
+                    .testexpr
+                    .map(|expr| prepare_expr_for_locking(*expr).map(Box::new))
+                    .transpose()?,
+                args: subplan
+                    .args
+                    .into_iter()
+                    .map(prepare_expr_for_locking)
+                    .collect::<Result<Vec<_>, _>>()?,
+                ..*subplan
+            },
+        )),
+        Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(
+            crate::include::nodes::primnodes::ScalarArrayOpExpr {
+                left: Box::new(prepare_expr_for_locking(*saop.left)?),
+                right: Box::new(prepare_expr_for_locking(*saop.right)?),
+                ..*saop
+            },
+        )),
+        Expr::Xml(xml) => Expr::Xml(Box::new(crate::include::nodes::primnodes::XmlExpr {
+            named_args: xml
+                .named_args
+                .into_iter()
+                .map(prepare_expr_for_locking)
+                .collect::<Result<Vec<_>, _>>()?,
+            args: xml
+                .args
+                .into_iter()
+                .map(prepare_expr_for_locking)
+                .collect::<Result<Vec<_>, _>>()?,
+            ..*xml
+        })),
+        Expr::Cast(inner, ty) => Expr::Cast(Box::new(prepare_expr_for_locking(*inner)?), ty),
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => Expr::Collate {
+            expr: Box::new(prepare_expr_for_locking(*expr)?),
+            collation_oid,
+        },
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            case_insensitive,
+            negated,
+            collation_oid,
+        } => Expr::Like {
+            expr: Box::new(prepare_expr_for_locking(*expr)?),
+            pattern: Box::new(prepare_expr_for_locking(*pattern)?),
+            escape: escape
+                .map(|expr| prepare_expr_for_locking(*expr).map(Box::new))
+                .transpose()?,
+            case_insensitive,
+            negated,
+            collation_oid,
+        },
+        Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            negated,
+            collation_oid,
+        } => Expr::Similar {
+            expr: Box::new(prepare_expr_for_locking(*expr)?),
+            pattern: Box::new(prepare_expr_for_locking(*pattern)?),
+            escape: escape
+                .map(|expr| prepare_expr_for_locking(*expr).map(Box::new))
+                .transpose()?,
+            negated,
+            collation_oid,
+        },
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(prepare_expr_for_locking(*inner)?)),
+        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(prepare_expr_for_locking(*inner)?)),
+        Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
+            Box::new(prepare_expr_for_locking(*left)?),
+            Box::new(prepare_expr_for_locking(*right)?),
+        ),
+        Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
+            Box::new(prepare_expr_for_locking(*left)?),
+            Box::new(prepare_expr_for_locking(*right)?),
+        ),
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => Expr::ArrayLiteral {
+            elements: elements
+                .into_iter()
+                .map(prepare_expr_for_locking)
+                .collect::<Result<Vec<_>, _>>()?,
+            array_type,
+        },
+        Expr::Row { descriptor, fields } => Expr::Row {
+            descriptor,
+            fields: fields
+                .into_iter()
+                .map(|(name, expr)| Ok((name, prepare_expr_for_locking(expr)?)))
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        Expr::FieldSelect {
+            expr,
+            field,
+            field_type,
+        } => Expr::FieldSelect {
+            expr: Box::new(prepare_expr_for_locking(*expr)?),
+            field,
+            field_type,
+        },
+        Expr::Coalesce(left, right) => Expr::Coalesce(
+            Box::new(prepare_expr_for_locking(*left)?),
+            Box::new(prepare_expr_for_locking(*right)?),
+        ),
+        Expr::ArraySubscript { array, subscripts } => Expr::ArraySubscript {
+            array: Box::new(prepare_expr_for_locking(*array)?),
+            subscripts: subscripts
+                .into_iter()
+                .map(|subscript| {
+                    Ok(crate::include::nodes::primnodes::ExprArraySubscript {
+                        is_slice: subscript.is_slice,
+                        lower: subscript.lower.map(prepare_expr_for_locking).transpose()?,
+                        upper: subscript.upper.map(prepare_expr_for_locking).transpose()?,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        other => other,
+    })
 }
 
 impl PlannerInfo {
@@ -119,6 +922,8 @@ fn rewrite_minmax_aggregate_query(query: Query) -> Query {
         sort_clause: Vec::new(),
         limit_count: query.limit_count,
         limit_offset: query.limit_offset,
+        locking_clause: query.locking_clause,
+        row_marks: query.row_marks,
         project_set: None,
         recursive_union: None,
         set_operation: None,
@@ -181,6 +986,8 @@ fn build_minmax_sublink(query: &Query, accum: &AggAccum) -> Option<Expr> {
         sort_clause,
         limit_count: Some(1),
         limit_offset: 0,
+        locking_clause: None,
+        row_marks: Vec::new(),
         project_set: None,
         recursive_union: None,
         set_operation: None,

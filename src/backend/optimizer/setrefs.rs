@@ -6,9 +6,9 @@ use super::pathnodes::{
 use super::plan::append_planned_subquery;
 use super::{expand_join_rte_vars, flatten_join_alias_vars, planner_with_param_base};
 use crate::backend::parser::CatalogLookup;
-use crate::include::nodes::parsenodes::{Query, RangeTblEntryKind};
+use crate::include::nodes::parsenodes::{Query, QueryRowMark, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{Path, PlannerInfo, PlannerSubroot, RestrictInfo};
-use crate::include::nodes::plannodes::{ExecParamSource, Plan, PlanEstimate};
+use crate::include::nodes::plannodes::{ExecParamSource, Plan, PlanEstimate, PlanRowMark};
 use crate::include::nodes::primnodes::{
     AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, INNER_VAR, OUTER_VAR, OpExpr,
     OrderByEntry, Param, ParamKind, QueryColumn, ScalarArrayOpExpr, SubPlan, TargetEntry, Var,
@@ -546,7 +546,10 @@ fn build_path_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
             targets,
             ..
         } => build_projection_tlist(root, *slot_id, input, targets),
-        Path::Filter { input, .. } | Path::OrderBy { input, .. } | Path::Limit { input, .. } => {
+        Path::Filter { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. } => {
             build_path_tlist(root, input)
         }
         Path::Aggregate {
@@ -1134,6 +1137,7 @@ fn path_single_relid(path: &Path) -> Option<usize> {
         | Path::Projection { input, .. }
         | Path::OrderBy { input, .. }
         | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
         | Path::Aggregate { input, .. }
         | Path::ProjectSet { input, .. } => path_single_relid(input),
         _ => None,
@@ -2044,8 +2048,12 @@ fn lower_sublink(
         .target_list
         .first()
         .map(|target| target.sql_type);
-    let (planned_stmt, next_param_id) =
-        planner_with_param_base(*sublink.subselect, catalog, ctx.next_param_id);
+    let (planned_stmt, next_param_id) = planner_with_param_base(
+        *sublink.subselect,
+        catalog,
+        ctx.next_param_id,
+    )
+    .expect("locking validation should complete before setrefs subplan lowering");
     ctx.next_param_id = next_param_id;
     let par_param = planned_stmt
         .ext_params
@@ -2513,7 +2521,7 @@ fn validate_executable_plan(plan: &Plan) {
                 .for_each(|item| validate_executable_expr(&item.expr, "OrderBy", "items"));
             validate_executable_plan(input);
         }
-        Plan::Limit { input, .. } => validate_executable_plan(input),
+        Plan::Limit { input, .. } | Plan::LockRows { input, .. } => validate_executable_plan(input),
         Plan::Projection { input, targets, .. } => {
             targets
                 .iter()
@@ -2843,7 +2851,7 @@ fn validate_planner_path(path: &Path) {
             }
             validate_planner_path(input);
         }
-        Path::Limit { input, .. } => validate_planner_path(input),
+        Path::Limit { input, .. } | Path::LockRows { input, .. } => validate_planner_path(input),
         Path::Aggregate {
             input,
             group_by,
@@ -3434,6 +3442,48 @@ fn set_limit_references(
     }
 }
 
+fn set_lock_rows_references(
+    ctx: &mut SetRefsContext<'_>,
+    plan_info: PlanEstimate,
+    input: Box<Path>,
+    row_marks: Vec<QueryRowMark>,
+) -> Plan {
+    let root = ctx
+        .root
+        .expect("LockRows planning requires a planner root for row-mark metadata");
+    Plan::LockRows {
+        plan_info,
+        input: Box::new(set_plan_refs(ctx, *input)),
+        row_marks: row_marks
+            .into_iter()
+            .map(|row_mark| {
+                let rte = root
+                    .parse
+                    .rtable
+                    .get(row_mark.rtindex.saturating_sub(1))
+                    .expect("row mark rtindex should resolve to an RTE");
+                match &rte.kind {
+                    RangeTblEntryKind::Relation {
+                        rel,
+                        relation_oid,
+                        ..
+                    } => PlanRowMark {
+                        rtindex: row_mark.rtindex,
+                        relation_name: rte
+                            .alias
+                            .clone()
+                            .unwrap_or_else(|| format!("rt{}", row_mark.rtindex)),
+                        relation_oid: *relation_oid,
+                        rel: *rel,
+                        strength: row_mark.strength,
+                    },
+                    _ => panic!("row mark must reference a base relation"),
+                }
+            })
+            .collect(),
+    }
+}
+
 fn set_aggregate_references(
     ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
@@ -3953,6 +4003,12 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             offset,
             ..
         } => set_limit_references(ctx, plan_info, input, limit, offset),
+        Path::LockRows {
+            plan_info,
+            input,
+            row_marks,
+            ..
+        } => set_lock_rows_references(ctx, plan_info, input, row_marks),
         Path::Aggregate {
             plan_info,
             slot_id,
@@ -4513,7 +4569,10 @@ fn expand_output_var(var: Var, path: &Path) -> Expr {
             .map(|index| fully_expand_output_expr(targets[index].expr.clone(), input))
             .unwrap_or(Expr::Var(var)),
         Path::SubqueryScan { .. } => Expr::Var(var),
-        Path::Filter { input, .. } | Path::OrderBy { input, .. } | Path::Limit { input, .. } => {
+        Path::Filter { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. } => {
             expand_output_var(var, input)
         }
         Path::NestedLoopJoin { left, right, .. } | Path::HashJoin { left, right, .. } => {

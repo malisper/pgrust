@@ -344,6 +344,7 @@ impl Database {
             large_objects: Some(self.large_objects.clone()),
             async_notify_runtime: Some(self.async_notify_runtime.clone()),
             advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
+            row_locks: std::sync::Arc::clone(&self.row_locks),
             checkpoint_stats: self.checkpoint_stats_snapshot(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
             interrupts: std::sync::Arc::clone(&interrupts),

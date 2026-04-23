@@ -105,6 +105,7 @@ impl IndexBuildKeyProjector {
                 large_objects: expr_ctx.large_objects.clone(),
                 async_notify_runtime: None,
                 advisory_locks: expr_ctx.advisory_locks.clone(),
+                row_locks: std::sync::Arc::new(crate::backend::storage::lmgr::RowLockManager::new()),
                 checkpoint_stats: CheckpointStatsSnapshot::default(),
                 datetime_config: expr_ctx.datetime_config.clone(),
                 interrupts: ctx.interrupts.clone(),

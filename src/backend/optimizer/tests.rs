@@ -497,7 +497,7 @@ fn planned_stmt_for_sql(sql: &str) -> crate::include::nodes::plannodes::PlannedS
     let stmt = parse_select(sql).expect("parse");
     let (query, _) =
         analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
-    super::planner(query, &catalog)
+    super::planner(query, &catalog).expect("plan")
 }
 
 fn planned_stmt_for_values_sql(sql: &str) -> crate::include::nodes::plannodes::PlannedStmt {
@@ -505,7 +505,7 @@ fn planned_stmt_for_values_sql(sql: &str) -> crate::include::nodes::plannodes::P
     let stmt = parse_select(sql).expect("parse");
     let (query, _) =
         analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
-    super::planner(query, &catalog)
+    super::planner(query, &catalog).expect("plan")
 }
 
 fn catalog_with_indexed_items() -> Catalog {
@@ -553,6 +553,7 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
         | Plan::Aggregate { input, .. }
         | Plan::WindowAgg { input, .. }
         | Plan::ProjectSet { input, .. }
@@ -581,6 +582,7 @@ fn find_seq_scan(plan: &Plan) -> Option<&Plan> {
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
         | Plan::Aggregate { input, .. }
         | Plan::WindowAgg { input, .. }
         | Plan::ProjectSet { input, .. }
@@ -624,6 +626,7 @@ fn count_plan_nodes(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> us
         | Plan::Projection { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
         | Plan::Aggregate { input, .. }
         | Plan::WindowAgg { input, .. }
         | Plan::ProjectSet { input, .. }
@@ -773,7 +776,7 @@ fn planned_grouped_window_aggregate_uses_aggregate_output_slot() {
     ));
     assert!(matches!(func.args.as_slice(), [Expr::Aggref(_)]));
 
-    let planned = super::planner(query, &catalog);
+    let planned = super::planner(query, &catalog).expect("plan");
 
     assert!(plan_contains(&planned.plan_tree, |plan| match plan {
         Plan::WindowAgg { clause, .. } => {
@@ -802,7 +805,7 @@ fn planned_grouped_named_window_uses_named_spec() {
     let stmt = parse_select(sql).expect("parse");
     let (query, _) =
         analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
-    let planned = super::planner(query, &catalog);
+    let planned = super::planner(query, &catalog).expect("plan");
 
     assert!(plan_contains(&planned.plan_tree, |plan| match plan {
         Plan::WindowAgg { clause, .. } => {
@@ -1159,6 +1162,37 @@ fn planner_keeps_function_scan_filter_semantic_until_setrefs() {
 }
 
 #[test]
+fn planner_places_lock_rows_between_order_by_and_limit() {
+    let mut catalog = Catalog::default();
+    catalog
+        .create_table(
+            "items",
+            RelationDesc {
+                columns: vec![column_desc("id", int4(), false)],
+            },
+        )
+        .expect("create table");
+    let stmt = parse_select("select id from items order by id limit 1 for update").expect("parse");
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
+    let planned = super::planner(query, &catalog).expect("plan");
+
+    let Plan::Limit { input, .. } = &planned.plan_tree else {
+        panic!("expected limit at top, got {:?}", planned.plan_tree);
+    };
+    let Plan::LockRows { input, row_marks, .. } = input.as_ref() else {
+        panic!("expected lock rows below limit, got {:?}", input);
+    };
+    assert!(matches!(input.as_ref(), Plan::OrderBy { .. }));
+    assert_eq!(row_marks.len(), 1);
+    assert_eq!(row_marks[0].rtindex, 1);
+    assert_eq!(
+        row_marks[0].strength,
+        crate::include::nodes::parsenodes::SelectLockingClause::ForUpdate
+    );
+}
+
+#[test]
 fn planner_keeps_recursive_cte_filter_semantic_until_setrefs() {
     let planned = planned_stmt_for_sql(
         "with recursive t(n) as (values (1) union all select n + 1 from t where n < 3) \
@@ -1237,7 +1271,7 @@ fn planner_uses_metadata_fallback_when_live_pages_are_unavailable() {
     let stmt = parse_select("select * from items").expect("parse");
     let (query, _) =
         analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
-    let planned = super::planner(query, &catalog);
+    let planned = super::planner(query, &catalog).expect("plan");
 
     match find_seq_scan(&planned.plan_tree).expect("seq scan plan") {
         Plan::SeqScan { plan_info, .. } => assert_eq!(plan_info.plan_rows.as_f64(), 1000.0),
@@ -1251,7 +1285,7 @@ fn planner_rewrites_simple_max_aggregate_into_limit_index_subplan() {
     let stmt = parse_select("select max(id) from items where id < 42").expect("parse");
     let (query, _) =
         analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
-    let planned = super::planner(query, &catalog);
+    let planned = super::planner(query, &catalog).expect("plan");
 
     assert_eq!(planned.subplans.len(), 1);
     assert!(!plan_contains(&planned.plan_tree, |plan| matches!(
@@ -1286,7 +1320,7 @@ fn planner_rewrites_multiple_minmax_aggregates_into_multiple_subplans() {
     let stmt = parse_select("select min(id), max(id) from items").expect("parse");
     let (query, _) =
         analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
-    let planned = super::planner(query, &catalog);
+    let planned = super::planner(query, &catalog).expect("plan");
 
     assert_eq!(planned.subplans.len(), 2);
     assert!(planned.subplans.iter().all(|subplan| {
@@ -1320,7 +1354,7 @@ fn explain_shows_initplan_for_rewritten_minmax_aggregate() {
     let stmt = parse_select("select max(id) from items where id < 42").expect("parse");
     let (query, _) =
         analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
-    let planned = super::planner(query, &catalog);
+    let planned = super::planner(query, &catalog).expect("plan");
 
     let mut lines = Vec::new();
     crate::backend::commands::explain::format_explain_plan_with_subplans(
@@ -1346,7 +1380,7 @@ fn planner_keeps_nested_sublink_max_as_aggregate() {
     .expect("parse");
     let (query, _) =
         analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
-    let planned = super::planner(query, &catalog);
+    let planned = super::planner(query, &catalog).expect("plan");
 
     assert!(
         planned
@@ -1364,7 +1398,7 @@ fn planner_rewrites_correlated_min_with_index_subplan() {
             .expect("parse");
     let (query, _) =
         analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
-    let planned = super::planner(query, &catalog);
+    let planned = super::planner(query, &catalog).expect("plan");
 
     assert!(planned.subplans.iter().any(|subplan| {
         plan_contains(subplan, |plan| matches!(plan, Plan::Limit { .. }))
@@ -1381,7 +1415,7 @@ fn planned_lockstep_project_set_keeps_both_visible_targets_as_sets() {
     .expect("parse");
     let (query, _) =
         analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
-    let planned = super::planner(query, &catalog);
+    let planned = super::planner(query, &catalog).expect("plan");
     assert!(matches!(planned.plan_tree, Plan::OrderBy { .. }));
 
     fn find_project_set(plan: &Plan) -> Option<&Plan> {
@@ -1392,6 +1426,7 @@ fn planned_lockstep_project_set_keeps_both_visible_targets_as_sets() {
             | Plan::Projection { input, .. }
             | Plan::OrderBy { input, .. }
             | Plan::Limit { input, .. }
+            | Plan::LockRows { input, .. }
             | Plan::Aggregate { input, .. }
             | Plan::WindowAgg { input, .. }
             | Plan::BitmapHeapScan {

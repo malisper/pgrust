@@ -1739,6 +1739,8 @@ fn bind_ctes(
                         sort_clause: Vec::new(),
                         limit_count: None,
                         limit_offset: 0,
+                        locking_clause: None,
+                        row_marks: Vec::new(),
                         project_set: None,
                         recursive_union: None,
                         set_operation: None,
@@ -1805,6 +1807,8 @@ fn bind_ctes(
                         sort_clause: Vec::new(),
                         limit_count: None,
                         limit_offset: 0,
+                        locking_clause: None,
+                        row_marks: Vec::new(),
                         project_set: None,
                         recursive_union: Some(Box::new(RecursiveUnionQuery {
                             output_desc: desc.clone(),
@@ -2683,6 +2687,8 @@ fn bind_values_query_with_outer(
             sort_clause,
             limit_count: stmt.limit,
             limit_offset: stmt.offset.unwrap_or(0),
+            locking_clause: None,
+            row_marks: Vec::new(),
             project_set: None,
             recursive_union: None,
             set_operation: None,
@@ -2711,7 +2717,7 @@ fn build_values_plan_with_outer(
         .try_into()
         .expect("values rewrite should return a single query");
     Ok(crate::backend::optimizer::fold_query_constants(query)
-        .map(|query| planner(query, catalog))?)
+        .map(|query| planner(query, catalog))??)
 }
 
 fn bind_select_query_with_outer(
@@ -2722,15 +2728,6 @@ fn bind_select_query_with_outer(
     outer_ctes: &[BoundCte],
     expanded_views: &[u32],
 ) -> Result<(Query, BoundScope), ParseError> {
-    if let Some(locking_clause) = stmt.locking_clause {
-        if stmt.set_operation.is_some() {
-            return Err(ParseError::FeatureNotSupportedMessage(format!(
-                "{} is not allowed with UNION/INTERSECT/EXCEPT",
-                locking_clause.sql()
-            )));
-        }
-        return Err(ParseError::FeatureNotSupported(locking_clause.sql().into()));
-    }
     let local_ctes = bind_ctes(
         stmt.with_recursive,
         &stmt.with,
@@ -3194,6 +3191,8 @@ fn bind_select_query_with_outer(
                 sort_clause,
                 limit_count: stmt.limit,
                 limit_offset: stmt.offset.unwrap_or(0),
+                locking_clause: stmt.locking_clause,
+                row_marks: Vec::new(),
                 project_set: None,
                 recursive_union: None,
                 set_operation: None,
@@ -3261,6 +3260,8 @@ fn bind_select_query_with_outer(
                     sort_clause,
                     limit_count: stmt.limit,
                     limit_offset: stmt.offset.unwrap_or(0),
+                    locking_clause: stmt.locking_clause,
+                    row_marks: Vec::new(),
                     project_set: None,
                     recursive_union: None,
                     set_operation: None,
@@ -3311,6 +3312,8 @@ fn bind_select_query_with_outer(
                     sort_clause,
                     limit_count: stmt.limit,
                     limit_offset: stmt.offset.unwrap_or(0),
+                    locking_clause: stmt.locking_clause,
+                    row_marks: Vec::new(),
                     project_set: Some(project_targets),
                     recursive_union: None,
                     set_operation: None,
@@ -3362,6 +3365,8 @@ fn apply_select_distinct(query: Query, distinct: bool) -> Query {
         sort_clause: Vec::new(),
         limit_count: None,
         limit_offset: 0,
+        locking_clause: None,
+        row_marks: Vec::new(),
         project_set: None,
         recursive_union: None,
         set_operation: Some(Box::new(SetOperationQuery {
@@ -3514,6 +3519,8 @@ fn bind_set_operation_query_with_outer(
             sort_clause,
             limit_count: stmt.limit,
             limit_offset: stmt.offset.unwrap_or(0),
+            locking_clause: stmt.locking_clause,
+            row_marks: Vec::new(),
             project_set: None,
             recursive_union: None,
             set_operation: Some(Box::new(SetOperationQuery {
@@ -3546,5 +3553,5 @@ fn build_plan_with_outer(
         .try_into()
         .expect("select rewrite should return a single query");
     Ok(crate::backend::optimizer::fold_query_constants(query)
-        .map(|query| planner(query, catalog))?)
+        .map(|query| planner(query, catalog))??)
 }

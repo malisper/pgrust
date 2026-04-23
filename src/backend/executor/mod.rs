@@ -107,7 +107,9 @@ use crate::backend::parser::{
     ParseError, Statement, bind_delete, bind_insert, bind_update, parse_statement, pg_plan_query,
     pg_plan_values_query,
 };
-use crate::backend::storage::lmgr::AdvisoryLockManager;
+use crate::backend::storage::lmgr::{
+    AdvisoryLockManager, RowLockError, RowLockManager, RowLockMode, RowLockOwner, RowLockTag,
+};
 use crate::backend::storage::lmgr::TableLockError;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot;
@@ -180,6 +182,7 @@ pub struct ExecutorContext {
     pub large_objects: Option<std::sync::Arc<LargeObjectRuntime>>,
     pub async_notify_runtime: Option<std::sync::Arc<AsyncNotifyRuntime>>,
     pub advisory_locks: std::sync::Arc<AdvisoryLockManager>,
+    pub row_locks: std::sync::Arc<RowLockManager>,
     pub checkpoint_stats: CheckpointStatsSnapshot,
     pub datetime_config: DateTimeConfig,
     pub interrupts: std::sync::Arc<InterruptState>,
@@ -267,6 +270,39 @@ impl ExecutorContext {
             .snapshot_for_command(xid, CommandId::MAX)
             .map_err(|e| ExecError::Heap(HeapError::Mvcc(e)))?;
         Ok(xid)
+    }
+
+    pub fn row_lock_owner(&self) -> RowLockOwner {
+        if let Some(scope_id) = self.transaction_lock_scope_id {
+            RowLockOwner::transaction(self.client_id, scope_id)
+        } else if let Some(scope_id) = self.statement_lock_scope_id {
+            RowLockOwner::statement(self.client_id, scope_id)
+        } else {
+            RowLockOwner::session(self.client_id)
+        }
+    }
+
+    pub fn acquire_row_lock(
+        &self,
+        relation_oid: u32,
+        tid: crate::include::access::itemptr::ItemPointerData,
+        mode: RowLockMode,
+    ) -> Result<(), ExecError> {
+        match self.row_locks.lock_interruptible(
+            RowLockTag { relation_oid, tid },
+            mode,
+            self.row_lock_owner(),
+            self.interrupts.as_ref(),
+        ) {
+            Ok(()) => Ok(()),
+            Err(RowLockError::Interrupted(reason)) => Err(ExecError::Interrupted(reason)),
+            Err(RowLockError::DeadlockTimeout) => Err(ExecError::DetailedError {
+                message: "deadlock detected".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "40P01",
+            }),
+        }
     }
 }
 

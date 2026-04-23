@@ -69,6 +69,8 @@ fn simplify_query(query: Query) -> Result<Query, ParseError> {
             .collect::<Result<Vec<_>, _>>()?,
         limit_count: query.limit_count,
         limit_offset: query.limit_offset,
+        locking_clause: query.locking_clause,
+        row_marks: query.row_marks,
         project_set: query
             .project_set
             .map(|targets| {

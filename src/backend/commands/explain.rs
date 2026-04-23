@@ -202,6 +202,7 @@ fn direct_plan_children(plan: &Plan) -> Vec<&Plan> {
         Plan::Hash { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
         | Plan::Projection { input, .. }
         | Plan::Aggregate { input, .. }
         | Plan::WindowAgg { input, .. }
@@ -242,6 +243,7 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
         | Plan::BitmapIndexScan { .. }
         | Plan::BitmapHeapScan { .. }
         | Plan::Limit { .. }
+        | Plan::LockRows { .. }
         | Plan::SubqueryScan { .. }
         | Plan::CteScan { .. }
         | Plan::WorkTableScan { .. }

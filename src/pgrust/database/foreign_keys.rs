@@ -213,6 +213,7 @@ pub(crate) fn validate_deferred_foreign_key_constraints(
         large_objects: Some(db.large_objects.clone()),
         async_notify_runtime: Some(db.async_notify_runtime.clone()),
         advisory_locks: Arc::clone(&db.advisory_locks),
+        row_locks: Arc::clone(&db.row_locks),
         checkpoint_stats: db.checkpoint_stats_snapshot(),
         datetime_config: datetime_config.clone(),
         interrupts,
