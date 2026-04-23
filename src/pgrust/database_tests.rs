@@ -17587,6 +17587,31 @@ fn create_function_uses_search_path_for_unqualified_creation() {
 }
 
 #[test]
+fn create_function_persists_explicit_cost() {
+    let base = temp_dir("search_path_function_cost");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create schema tenant_fn").unwrap();
+    session.execute(&db, "set search_path = tenant_fn").unwrap();
+    session
+        .execute(
+            &db,
+            "create or replace function add_one(x int4) returns int4 \
+             cost 0.0000001 language sql as $$ select x + 1 $$",
+        )
+        .unwrap();
+
+    let visible = db.backend_catcache(1, None).unwrap();
+    let proc = visible
+        .proc_rows_by_name("add_one")
+        .into_iter()
+        .find(|row| row.proname == "add_one")
+        .expect("function row");
+    assert!((proc.procost - 0.0000001).abs() < 1e-12);
+}
+
+#[test]
 fn drop_function_uses_search_path_and_signature() {
     let base = temp_dir("search_path_function_drop");
     let db = Database::open(&base, 16).unwrap();
