@@ -9892,6 +9892,90 @@ fn jsonb_to_record_allows_json_array_elements_inside_json_array_column() {
 }
 
 #[test]
+fn to_tsvector_jsonb_indexes_string_values_only() {
+    let base = temp_dir("to_tsvector_jsonb_strings_only");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select to_tsvector('english', \
+                '{\"a\":\"aaa in bbb ddd ccc\",\"b\":123,\"c\":[\"eee fff\"]}'::jsonb)",
+        )
+        .unwrap(),
+        vec![vec![Value::TsVector(
+            crate::include::nodes::tsearch::TsVector::parse(
+                "'aaa':1 'bbb':3 'ccc':5 'ddd':4 'eee':7 'fff':8",
+            )
+            .unwrap(),
+        )]],
+    );
+}
+
+#[test]
+fn jsonb_to_tsvector_honors_filter_flags() {
+    let base = temp_dir("jsonb_to_tsvector_flags");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select \
+                jsonb_to_tsvector('english', '{\"a\":\"aaa in bbb\",\"b\":123,\"d\":true}'::jsonb, '\"all\"'), \
+                jsonb_to_tsvector('english', '{\"a\":\"aaa in bbb\",\"b\":123,\"d\":true}'::jsonb, '[\"string\",\"numeric\"]')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::TsVector(
+                crate::include::nodes::tsearch::TsVector::parse(
+                    "'123':8 'aaa':2 'b':6 'bbb':4 'd':10 'true':12",
+                )
+                .unwrap(),
+            ),
+            Value::TsVector(
+                crate::include::nodes::tsearch::TsVector::parse("'123':5 'aaa':1 'bbb':3")
+                    .unwrap(),
+            ),
+        ]],
+    );
+}
+
+#[test]
+fn jsonb_to_tsvector_rejects_invalid_flags() {
+    let base = temp_dir("jsonb_to_tsvector_invalid_flags");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_to_tsvector('{\"a\":\"aaa\"}'::jsonb, '\"\"')",
+    )
+    .unwrap_err();
+    assert_eq!(format_exec_error(&err), "wrong flag in flag array: \"\"");
+    assert_eq!(
+        crate::backend::libpq::pqformat::format_exec_error_hint(&err).as_deref(),
+        Some("Possible values are: \"string\", \"numeric\", \"boolean\", \"key\", and \"all\".")
+    );
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_to_tsvector('{\"a\":\"aaa\"}'::jsonb, '{}')",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "wrong flag type, only arrays and scalars are allowed"
+    );
+}
+
+#[test]
 fn join_alias_hides_inner_relation_names() {
     let base = temp_dir("join_alias_hides_inner");
     let mut txns = TransactionManager::new_durable(&base).unwrap();
