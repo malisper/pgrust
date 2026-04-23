@@ -98,6 +98,7 @@ pub enum CatalogError {
     Io(String),
     Corrupt(&'static str),
     TableAlreadyExists(String),
+    TypeAlreadyExists(String),
     UnknownTable(String),
     UnknownColumn(String),
     UnknownType(String),
