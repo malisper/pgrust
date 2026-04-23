@@ -3,7 +3,8 @@ use std::sync::Arc;
 use crate::backend::commands::tablecmds::{execute_delete, execute_insert, execute_update};
 use crate::backend::executor::{
     ArrayDimension, ArrayValue, ExecError, ExecutorContext, Expr, RelationDesc, StatementResult,
-    TupleSlot, Value, cast_value, eval_expr, eval_plpgsql_expr, execute_planned_stmt,
+    TupleSlot, Value, cast_value, compare_order_values, eval_expr, eval_plpgsql_expr,
+    execute_planned_stmt,
 };
 use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, TriggerLevel, TriggerTiming,
@@ -16,7 +17,7 @@ use crate::include::nodes::primnodes::QueryColumn;
 use super::ast::RaiseLevel;
 use super::compile::{
     CompiledBlock, CompiledExpr, CompiledFunction, CompiledSelectIntoTarget, CompiledStmt,
-    FunctionReturnContract, TriggerReturnedRow, compile_function_from_proc,
+    FunctionReturnContract, QueryCompareOp, TriggerReturnedRow, compile_function_from_proc,
     compile_trigger_function_from_proc,
 };
 
@@ -1128,8 +1129,15 @@ fn coerce_row_to_columns(row: Vec<Value>, columns: &[QueryColumn]) -> Result<Tup
 }
 
 fn eval_do_expr(expr: &CompiledExpr, values: &[Value]) -> Result<Value, ExecError> {
-    let mut slot = TupleSlot::virtual_row(values.to_vec());
-    eval_plpgsql_expr(&expr.expr, &mut slot)
+    match expr {
+        CompiledExpr::Scalar(expr) => {
+            let mut slot = TupleSlot::virtual_row(values.to_vec());
+            eval_plpgsql_expr(expr, &mut slot)
+        }
+        CompiledExpr::QueryCompare { .. } => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "query-style PL/pgSQL conditions are only supported inside CREATE FUNCTION".into(),
+        ))),
+    }
 }
 
 fn eval_function_expr(
@@ -1137,8 +1145,60 @@ fn eval_function_expr(
     values: &[Value],
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let mut slot = TupleSlot::virtual_row(values.to_vec());
-    eval_expr(&expr.expr, &mut slot, ctx)
+    match expr {
+        CompiledExpr::Scalar(expr) => {
+            let mut slot = TupleSlot::virtual_row(values.to_vec());
+            eval_expr(expr, &mut slot, ctx)
+        }
+        CompiledExpr::QueryCompare { plan, op, rhs } => {
+            ctx.expr_bindings.outer_tuple = Some(values.to_vec());
+            let result = execute_planned_stmt(plan.clone(), ctx);
+            ctx.expr_bindings.outer_tuple = None;
+            let StatementResult::Query { mut rows, .. } = result? else {
+                return Err(function_runtime_error(
+                    "condition query did not produce rows",
+                    None,
+                    "XX000",
+                ));
+            };
+            let Some(row) = rows.pop() else {
+                return Ok(Value::Null);
+            };
+            let left = row.first().cloned().unwrap_or(Value::Null);
+            let mut slot = TupleSlot::virtual_row(values.to_vec());
+            let right = eval_expr(rhs, &mut slot, ctx)?;
+            Ok(Value::Bool(eval_query_compare(*op, &left, &right)?))
+        }
+    }
+}
+
+fn eval_query_compare(op: QueryCompareOp, left: &Value, right: &Value) -> Result<bool, ExecError> {
+    Ok(match op {
+        QueryCompareOp::Eq => compare_order_values(left, right, None, None, false)?.is_eq(),
+        QueryCompareOp::NotEq => !compare_order_values(left, right, None, None, false)?.is_eq(),
+        QueryCompareOp::Lt => compare_order_values(left, right, None, None, false)?.is_lt(),
+        QueryCompareOp::LtEq => !compare_order_values(left, right, None, None, false)?.is_gt(),
+        QueryCompareOp::Gt => compare_order_values(left, right, None, None, false)?.is_gt(),
+        QueryCompareOp::GtEq => !compare_order_values(left, right, None, None, false)?.is_lt(),
+        QueryCompareOp::IsDistinctFrom => {
+            if matches!((left, right), (Value::Null, Value::Null)) {
+                false
+            } else if matches!(left, Value::Null) || matches!(right, Value::Null) {
+                true
+            } else {
+                !compare_order_values(left, right, None, None, false)?.is_eq()
+            }
+        }
+        QueryCompareOp::IsNotDistinctFrom => {
+            if matches!((left, right), (Value::Null, Value::Null)) {
+                true
+            } else if matches!(left, Value::Null) || matches!(right, Value::Null) {
+                false
+            } else {
+                compare_order_values(left, right, None, None, false)?.is_eq()
+            }
+        }
+    })
 }
 
 fn eval_plpgsql_condition(value: &Value) -> Result<bool, ExecError> {

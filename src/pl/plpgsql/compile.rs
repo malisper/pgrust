@@ -5,12 +5,12 @@ use std::collections::HashMap;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::Expr;
 use crate::backend::executor::RelationDesc;
-use crate::backend::parser::analyze::scope_for_relation;
 use crate::backend::parser::{
-    BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, CatalogLookup, ParseError,
-    SlotScopeColumn, SqlExpr, SqlType, SqlTypeKind, Statement, bind_delete_with_outer_scopes,
-    bind_insert_with_outer_scopes, bind_scalar_expr_in_named_slot_scope,
-    bind_update_with_outer_scopes, parse_expr, parse_statement, parse_type_name,
+    BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, CatalogLookup, FromItem,
+    ParseError, SelectStatement, SlotScopeColumn, SqlExpr, SqlType, SqlTypeKind, Statement,
+    bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
+    bind_scalar_expr_in_named_slot_scope, bind_update_with_outer_scopes, parse_expr,
+    parse_statement, parse_type_name,
     pg_plan_query_with_outer_scopes, pg_plan_values_query_with_outer_scopes,
 };
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
@@ -59,8 +59,25 @@ pub(crate) struct CompiledVar {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct CompiledExpr {
-    pub(crate) expr: Expr,
+pub(crate) enum CompiledExpr {
+    Scalar(Expr),
+    QueryCompare {
+        plan: PlannedStmt,
+        op: QueryCompareOp,
+        rhs: Expr,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QueryCompareOp {
+    Eq,
+    NotEq,
+    Lt,
+    LtEq,
+    Gt,
+    GtEq,
+    IsDistinctFrom,
+    IsNotDistinctFrom,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -626,7 +643,7 @@ fn compile_stmt(
                 .iter()
                 .map(|(condition, body)| {
                     Ok((
-                        compile_expr_text(condition, catalog, env)?,
+                        compile_condition_text(condition, catalog, env)?,
                         compile_stmt_list(body, catalog, env, return_contract)?,
                     ))
                 })
@@ -634,7 +651,7 @@ fn compile_stmt(
             else_branch: compile_stmt_list(else_branch, catalog, env, return_contract)?,
         },
         Stmt::While { condition, body } => CompiledStmt::While {
-            condition: compile_expr_text(condition, catalog, env)?,
+            condition: compile_condition_text(condition, catalog, env)?,
             body: compile_stmt_list(body, catalog, env, return_contract)?,
         },
         Stmt::ForInt {
@@ -893,37 +910,64 @@ fn compile_exec_sql_stmt(
 
 fn outer_scope_for_sql(env: &CompileEnv) -> crate::backend::parser::BoundScope {
     let columns = env.slot_columns();
-    let desc = RelationDesc {
-        columns: columns
-            .iter()
-            .map(|column| column_desc(column.name.clone(), column.sql_type, true))
-            .collect(),
-    };
-    crate::backend::parser::BoundScope {
-        output_exprs: columns
-            .iter()
-            .map(|column| {
-                Expr::Var(Var {
-                    varno: 1,
-                    varattno: user_attrno(column.slot),
-                    varlevelsup: 0,
-                    vartype: column.sql_type,
-                })
-            })
-            .collect(),
-        desc,
-        columns: columns
-            .into_iter()
-            .map(|column| crate::backend::parser::analyze::ScopeColumn {
+    let relation_scopes = env.relation_slot_scopes();
+
+    let mut desc_columns = Vec::new();
+    let mut output_exprs = Vec::new();
+    let mut scope_columns = Vec::new();
+    let mut relations = Vec::new();
+
+    for column in columns {
+        desc_columns.push(column_desc(column.name.clone(), column.sql_type, true));
+        output_exprs.push(Expr::Var(Var {
+            varno: 1,
+            varattno: user_attrno(column.slot),
+            varlevelsup: 0,
+            vartype: column.sql_type,
+        }));
+        scope_columns.push(crate::backend::parser::analyze::ScopeColumn {
+            output_name: column.name,
+            hidden: column.hidden,
+            qualified_only: false,
+            relation_names: Vec::new(),
+            hidden_invalid_relation_names: Vec::new(),
+            hidden_missing_relation_names: Vec::new(),
+        });
+    }
+
+    for (relation_name, relation_columns) in relation_scopes {
+        relations.push(crate::backend::parser::analyze::ScopeRelation {
+            relation_names: vec![relation_name.clone()],
+            hidden_invalid_relation_names: Vec::new(),
+            hidden_missing_relation_names: Vec::new(),
+            system_varno: None,
+        });
+        for column in relation_columns {
+            desc_columns.push(column_desc(column.name.clone(), column.sql_type, true));
+            output_exprs.push(Expr::Var(Var {
+                varno: 1,
+                varattno: user_attrno(column.slot),
+                varlevelsup: 0,
+                vartype: column.sql_type,
+            }));
+            scope_columns.push(crate::backend::parser::analyze::ScopeColumn {
                 output_name: column.name,
                 hidden: column.hidden,
                 qualified_only: false,
-                relation_names: Vec::new(),
+                relation_names: vec![relation_name.clone()],
                 hidden_invalid_relation_names: Vec::new(),
                 hidden_missing_relation_names: Vec::new(),
-            })
-            .collect(),
-        relations: Vec::new(),
+            });
+        }
+    }
+
+    crate::backend::parser::BoundScope {
+        output_exprs,
+        desc: RelationDesc {
+            columns: desc_columns,
+        },
+        columns: scope_columns,
+        relations,
     }
 }
 
@@ -1227,7 +1271,260 @@ fn compile_expr_text(
         catalog,
     )?;
     let _ = sql_type;
-    Ok(CompiledExpr { expr })
+    Ok(CompiledExpr::Scalar(expr))
+}
+
+fn compile_condition_text(
+    sql: &str,
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+) -> Result<CompiledExpr, ParseError> {
+    match compile_expr_text(sql, catalog, env) {
+        Ok(expr) => Ok(expr),
+        Err(ParseError::UnexpectedToken { actual, .. }) if actual == "aggregate function" => {
+            if let Some(condition) = parse_plpgsql_query_condition(sql) {
+                let query_sql = format!("select {} from {}", condition.left_expr, condition.from_clause);
+                let select = normalize_plpgsql_select(
+                    crate::backend::parser::parse_select(&query_sql)?,
+                    env,
+                );
+                let plan =
+                    pg_plan_query_with_outer_scopes(&select, catalog, &[outer_scope_for_sql(env)])?;
+                let rhs = match compile_expr_text(condition.right_expr, catalog, env)? {
+                    CompiledExpr::Scalar(expr) => expr,
+                    CompiledExpr::QueryCompare { .. } => {
+                        return Err(ParseError::FeatureNotSupported(
+                            "query-style PL/pgSQL conditions do not support query comparisons on both sides".into(),
+                        ))
+                    }
+                };
+                return Ok(CompiledExpr::QueryCompare {
+                    plan,
+                    op: condition.op,
+                    rhs,
+                });
+            }
+            Err(ParseError::UnexpectedToken {
+                expected: "non-aggregate expression",
+                actual,
+            })
+        }
+        Err(err) => Err(err),
+    }
+}
+
+struct ParsedQueryCondition<'a> {
+    left_expr: &'a str,
+    op: QueryCompareOp,
+    right_expr: &'a str,
+    from_clause: &'a str,
+}
+
+fn parse_plpgsql_query_condition(sql: &str) -> Option<ParsedQueryCondition<'_>> {
+    let from_idx = find_keyword_at_top_level(sql, "from")?;
+    let before_from = sql[..from_idx].trim();
+    let after_from = sql[from_idx + "from".len()..].trim();
+    if before_from.is_empty() || after_from.is_empty() {
+        return None;
+    }
+
+    let (left, op, right) = split_top_level_comparison(before_from)?;
+    if !looks_like_aggregate_expr(left) {
+        return None;
+    }
+
+    Some(ParsedQueryCondition {
+        left_expr: left,
+        op: query_compare_op(op)?,
+        right_expr: right,
+        from_clause: after_from,
+    })
+}
+
+fn rewrite_plpgsql_query_condition(sql: &str) -> Option<String> {
+    let parsed = parse_plpgsql_query_condition(sql)?;
+    Some(format!(
+        "(select {} from {}) {} {}",
+        parsed.left_expr,
+        parsed.from_clause,
+        render_query_compare_op(parsed.op),
+        parsed.right_expr
+    ))
+}
+
+fn query_compare_op(op: &str) -> Option<QueryCompareOp> {
+    Some(match op {
+        "=" => QueryCompareOp::Eq,
+        "<>" | "!=" => QueryCompareOp::NotEq,
+        "<" => QueryCompareOp::Lt,
+        "<=" => QueryCompareOp::LtEq,
+        ">" => QueryCompareOp::Gt,
+        ">=" => QueryCompareOp::GtEq,
+        "is distinct from" => QueryCompareOp::IsDistinctFrom,
+        "is not distinct from" => QueryCompareOp::IsNotDistinctFrom,
+        _ => return None,
+    })
+}
+
+fn render_query_compare_op(op: QueryCompareOp) -> &'static str {
+    match op {
+        QueryCompareOp::Eq => "=",
+        QueryCompareOp::NotEq => "!=",
+        QueryCompareOp::Lt => "<",
+        QueryCompareOp::LtEq => "<=",
+        QueryCompareOp::Gt => ">",
+        QueryCompareOp::GtEq => ">=",
+        QueryCompareOp::IsDistinctFrom => "is distinct from",
+        QueryCompareOp::IsNotDistinctFrom => "is not distinct from",
+    }
+}
+
+fn split_top_level_comparison(input: &str) -> Option<(&str, &'static str, &str)> {
+    const OPERATORS: [&str; 8] = [
+        " is not distinct from ",
+        " is distinct from ",
+        ">=",
+        "<=",
+        "<>",
+        "!=",
+        "=",
+        ">",
+    ];
+
+    for op in OPERATORS {
+        if let Some(idx) = find_top_level_token(input, op) {
+            let left = input[..idx].trim();
+            let right = input[idx + op.len()..].trim();
+            if !left.is_empty() && !right.is_empty() {
+                return Some((left, op.trim(), right));
+            }
+        }
+    }
+
+    if let Some(idx) = find_top_level_token(input, "<") {
+        let left = input[..idx].trim();
+        let right = input[idx + 1..].trim();
+        if !left.is_empty() && !right.is_empty() {
+            return Some((left, "<", right));
+        }
+    }
+
+    None
+}
+
+fn looks_like_aggregate_expr(expr: &str) -> bool {
+    let trimmed = expr.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    [
+        "count(",
+        "sum(",
+        "avg(",
+        "min(",
+        "max(",
+        "bool_and(",
+        "bool_or(",
+        "every(",
+        "array_agg(",
+        "string_agg(",
+        "json_agg(",
+        "jsonb_agg(",
+        "json_object_agg(",
+        "jsonb_object_agg(",
+        "xmlagg(",
+    ]
+    .iter()
+    .any(|prefix| lower.starts_with(prefix))
+}
+
+fn find_keyword_at_top_level(input: &str, keyword: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let keyword_len = keyword.len();
+
+    for (idx, ch) in input.char_indices() {
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            }
+            continue;
+        }
+        if in_double {
+            if ch == '"' {
+                in_double = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+
+        if depth != 0 {
+            continue;
+        }
+
+        let tail = &input[idx..];
+        if tail.len() < keyword_len {
+            continue;
+        }
+        if !tail[..keyword_len].eq_ignore_ascii_case(keyword) {
+            continue;
+        }
+        let prev_ok = idx == 0
+            || !input[..idx]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+        let next_ok = tail[keyword_len..]
+            .chars()
+            .next()
+            .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'));
+        if prev_ok && next_ok {
+            return Some(idx);
+        }
+    }
+
+    None
+}
+
+fn find_top_level_token(input: &str, token: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    for (idx, ch) in input.char_indices() {
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            }
+            continue;
+        }
+        if in_double {
+            if ch == '"' {
+                in_double = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+
+        if depth == 0 && input[idx..].starts_with(token) {
+            return Some(idx);
+        }
+    }
+
+    None
 }
 
 fn normalize_plpgsql_expr(expr: SqlExpr, env: &CompileEnv) -> SqlExpr {
@@ -1378,6 +1675,109 @@ fn normalize_plpgsql_expr(expr: SqlExpr, env: &CompileEnv) -> SqlExpr {
     }
 }
 
+fn normalize_plpgsql_select(mut stmt: SelectStatement, env: &CompileEnv) -> SelectStatement {
+    stmt.targets = stmt
+        .targets
+        .into_iter()
+        .map(|mut target| {
+            target.expr = normalize_plpgsql_expr(target.expr, env);
+            target
+        })
+        .collect();
+    stmt.where_clause = stmt
+        .where_clause
+        .map(|expr| normalize_plpgsql_expr(expr, env));
+    stmt.group_by = stmt
+        .group_by
+        .into_iter()
+        .map(|expr| normalize_plpgsql_expr(expr, env))
+        .collect();
+    stmt.having = stmt.having.map(|expr| normalize_plpgsql_expr(expr, env));
+    stmt.order_by = stmt
+        .order_by
+        .into_iter()
+        .map(|mut item| {
+            item.expr = normalize_plpgsql_expr(item.expr, env);
+            item
+        })
+        .collect();
+    stmt.from = stmt.from.map(|from| normalize_plpgsql_from_item(from, env));
+    if let Some(set_operation) = stmt.set_operation.as_mut() {
+        set_operation.inputs = set_operation
+            .inputs
+            .drain(..)
+            .map(|input| normalize_plpgsql_select(input, env))
+            .collect();
+    }
+    stmt
+}
+
+fn normalize_plpgsql_from_item(item: FromItem, env: &CompileEnv) -> FromItem {
+    match item {
+        FromItem::Values { rows } => FromItem::Values {
+            rows: rows
+                .into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|expr| normalize_plpgsql_expr(expr, env))
+                        .collect()
+                })
+                .collect(),
+        },
+        FromItem::FunctionCall {
+            name,
+            args,
+            func_variadic,
+            with_ordinality,
+        } => FromItem::FunctionCall {
+            name,
+            args: args
+                .into_iter()
+                .map(|mut arg| {
+                    arg.value = normalize_plpgsql_expr(arg.value, env);
+                    arg
+                })
+                .collect(),
+            func_variadic,
+            with_ordinality,
+        },
+        FromItem::Lateral(source) => {
+            FromItem::Lateral(Box::new(normalize_plpgsql_from_item(*source, env)))
+        }
+        FromItem::DerivedTable(select) => {
+            FromItem::DerivedTable(Box::new(normalize_plpgsql_select(*select, env)))
+        }
+        FromItem::Join {
+            left,
+            right,
+            kind,
+            constraint,
+        } => FromItem::Join {
+            left: Box::new(normalize_plpgsql_from_item(*left, env)),
+            right: Box::new(normalize_plpgsql_from_item(*right, env)),
+            kind,
+            constraint: match constraint {
+                crate::backend::parser::JoinConstraint::On(expr) => {
+                    crate::backend::parser::JoinConstraint::On(normalize_plpgsql_expr(expr, env))
+                }
+                other => other,
+            },
+        },
+        FromItem::Alias {
+            source,
+            alias,
+            column_aliases,
+            preserve_source_names,
+        } => FromItem::Alias {
+            source: Box::new(normalize_plpgsql_from_item(*source, env)),
+            alias,
+            column_aliases,
+            preserve_source_names,
+        },
+        other => other,
+    }
+}
+
 fn seed_trigger_env(env: &mut CompileEnv, relation_desc: &RelationDesc) -> CompiledTriggerBindings {
     let new_row = env.define_relation_scope("new", relation_desc);
     let old_row = env.define_relation_scope("old", relation_desc);
@@ -1456,4 +1856,33 @@ pub(crate) fn compile_decl_type(type_name: &str) -> Result<SqlType, ParseError> 
             Err(ParseError::UnsupportedType(name))
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rewrite_plpgsql_query_condition;
+
+    #[test]
+    fn rewrites_plpgsql_count_condition_with_from_clause() {
+        assert_eq!(
+            rewrite_plpgsql_query_condition("count(*) = 0 from Room where roomno = new.roomno"),
+            Some("(select count(*) from Room where roomno = new.roomno) = 0".into())
+        );
+    }
+
+    #[test]
+    fn rewrites_plpgsql_count_condition_with_greater_than() {
+        assert_eq!(
+            rewrite_plpgsql_query_condition("count(*) > 0 from Hub where name = old.hubname"),
+            Some("(select count(*) from Hub where name = old.hubname) > 0".into())
+        );
+    }
+
+    #[test]
+    fn ignores_normal_scalar_conditions() {
+        assert_eq!(
+            rewrite_plpgsql_query_condition("new.slotno < 1 or new.slotno > hubrec.nslots"),
+            None
+        );
+    }
 }
