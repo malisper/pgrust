@@ -19,8 +19,8 @@ use crate::include::access::htup::{AttributeCompression, AttributeStorage};
 use crate::include::catalog::{
     CONSTRAINT_FOREIGN, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_CATALOG_NAMESPACE_OID,
     PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TRIGGER_RELATION_OID,
-    PUBLIC_NAMESPACE_OID, builtin_range_name_for_sql_type, builtin_type_name_for_oid,
-    relkind_is_analyzable,
+    PG_TYPE_RELATION_OID, PUBLIC_NAMESPACE_OID, builtin_range_name_for_sql_type,
+    builtin_type_name_for_oid, relkind_is_analyzable,
 };
 use crate::include::nodes::primnodes::{Var, user_attrno};
 
