@@ -4085,6 +4085,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("poly_center", BuiltinScalarFunction::GeoPolyCenter),
         ("bound_box", BuiltinScalarFunction::GeoBoundBox),
         ("diagonal", BuiltinScalarFunction::GeoDiagonal),
+        ("path_length", BuiltinScalarFunction::GeoLength),
+        ("lseg_length", BuiltinScalarFunction::GeoLength),
         ("radius", BuiltinScalarFunction::GeoRadius),
         ("diameter", BuiltinScalarFunction::GeoDiameter),
         ("npoints", BuiltinScalarFunction::GeoNpoints),

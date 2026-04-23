@@ -2492,7 +2492,7 @@ pub(super) fn estimate_sql_type_width(sql_type: SqlType) -> usize {
         | SqlTypeKind::NumericRange
         | SqlTypeKind::DateRange
         | SqlTypeKind::TimestampRange
-        | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
+        | SqlTypeKind::TimestampTzRange => 32,
         SqlTypeKind::Multirange => 48,
     }
 }
