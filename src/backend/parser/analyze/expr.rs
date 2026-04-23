@@ -153,12 +153,217 @@ fn bind_row_expr_fields(
             }
             continue;
         }
+        if let SqlExpr::FieldSelect { expr, field } = item
+            && field == "*"
+        {
+            let bound_expr = bind_expr_with_outer_and_ctes(
+                expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?;
+            for (_, expr) in expand_bound_record_expr_fields(&bound_expr, catalog)? {
+                let field_name = format!("f{}", field_exprs.len() + 1);
+                field_exprs.push((field_name, expr));
+            }
+            continue;
+        }
         let expr =
             bind_expr_with_outer_and_ctes(item, scope, catalog, outer_scopes, grouped_outer, ctes)?;
         let field_name = format!("f{}", field_exprs.len() + 1);
         field_exprs.push((field_name, expr));
     }
     Ok(field_exprs)
+}
+
+fn expand_bound_record_expr_fields(
+    expr: &Expr,
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<(String, Expr)>, ParseError> {
+    if let Expr::Row { fields, .. } = expr {
+        return Ok(fields.clone());
+    }
+
+    let Some(sql_type) = expr_sql_type_hint(expr) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "record expression",
+            actual: "field expansion .*".into(),
+        });
+    };
+
+    let fields = if matches!(sql_type.kind, SqlTypeKind::Composite) && sql_type.typrelid != 0 {
+        let relation = catalog
+            .lookup_relation_by_oid(sql_type.typrelid)
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "named composite type",
+                actual: format!("type relation {} not found", sql_type.typrelid),
+            })?;
+        relation
+            .desc
+            .columns
+            .into_iter()
+            .filter(|column| !column.dropped)
+            .map(|column| (column.name, column.sql_type))
+            .collect::<Vec<_>>()
+    } else if matches!(sql_type.kind, SqlTypeKind::Record) && sql_type.typmod > 0 {
+        lookup_anonymous_record_descriptor(sql_type.typmod)
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "record expression",
+                actual: "field expansion .*".into(),
+            })?
+            .fields
+            .into_iter()
+            .map(|field| (field.name, field.sql_type))
+            .collect::<Vec<_>>()
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "record expression",
+            actual: "field expansion .*".into(),
+        });
+    };
+
+    Ok(fields
+        .into_iter()
+        .map(|(field, field_type)| {
+            (
+                field.clone(),
+                Expr::FieldSelect {
+                    expr: Box::new(expr.clone()),
+                    field,
+                    field_type,
+                },
+            )
+        })
+        .collect())
+}
+
+fn bind_row_comparison_expr(
+    op: &'static str,
+    make: OpExprKind,
+    left_items: &[SqlExpr],
+    right_items: &[SqlExpr],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let left_fields = bind_row_expr_fields(
+        left_items,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    let right_fields = bind_row_expr_fields(
+        right_items,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    if left_fields.len() != right_fields.len() {
+        return Err(ParseError::DetailedError {
+            message: "unequal number of entries in row expressions".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
+    }
+    if left_fields.is_empty() {
+        return Err(ParseError::FeatureNotSupported(
+            "cannot compare rows of zero length".into(),
+        ));
+    }
+
+    let mut parts = Vec::with_capacity(left_fields.len());
+    for ((_, left), (_, right)) in left_fields.into_iter().zip(right_fields) {
+        let left_type = expr_sql_type_hint(&left).unwrap_or(SqlType::new(SqlTypeKind::Text));
+        let right_type = expr_sql_type_hint(&right).unwrap_or(SqlType::new(SqlTypeKind::Text));
+        parts.push(bind_lowered_comparison_expr(
+            op, make, left, left_type, left_type, right, right_type, right_type, None, None,
+            catalog,
+        )?);
+    }
+
+    if parts.len() == 1 {
+        return Ok(parts.pop().expect("single row comparison part"));
+    }
+    Ok(Expr::bool_expr(
+        if make == OpExprKind::Eq {
+            BoolExprType::And
+        } else {
+            BoolExprType::Or
+        },
+        parts,
+    ))
+}
+
+fn bind_row_distinct_expr(
+    negated: bool,
+    left_items: &[SqlExpr],
+    right_items: &[SqlExpr],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let left_fields = bind_row_expr_fields(
+        left_items,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    let right_fields = bind_row_expr_fields(
+        right_items,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    if left_fields.len() != right_fields.len() {
+        return Err(ParseError::DetailedError {
+            message: "unequal number of entries in row expressions".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
+    }
+
+    let mut parts = left_fields
+        .into_iter()
+        .zip(right_fields)
+        .map(|((_, left), (_, right))| {
+            if negated {
+                Expr::IsNotDistinctFrom(Box::new(left), Box::new(right))
+            } else {
+                Expr::IsDistinctFrom(Box::new(left), Box::new(right))
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if parts.is_empty() {
+        return Ok(Expr::Const(Value::Bool(negated)));
+    }
+    if parts.len() == 1 {
+        return Ok(parts.pop().expect("single row distinct part"));
+    }
+    Ok(Expr::bool_expr(
+        if negated {
+            BoolExprType::And
+        } else {
+            BoolExprType::Or
+        },
+        parts,
+    ))
 }
 
 fn bind_named_composite_row_cast(
@@ -1292,7 +1497,21 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             bind_explicit_collation(bound_inner, inner_type, collation, catalog)?
         }
         SqlExpr::Eq(left, right) => {
-            if let Some(result) = bind_maybe_multirange_comparison(
+            if let (SqlExpr::Row(left_items), SqlExpr::Row(right_items)) =
+                (left.as_ref(), right.as_ref())
+            {
+                bind_row_comparison_expr(
+                    "=",
+                    OpExprKind::Eq,
+                    left_items,
+                    right_items,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            } else if let Some(result) = bind_maybe_multirange_comparison(
                 "=",
                 left,
                 right,
@@ -1340,7 +1559,21 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
         }
         SqlExpr::NotEq(left, right) => {
-            if let Some(result) = bind_maybe_multirange_comparison(
+            if let (SqlExpr::Row(left_items), SqlExpr::Row(right_items)) =
+                (left.as_ref(), right.as_ref())
+            {
+                bind_row_comparison_expr(
+                    "<>",
+                    OpExprKind::NotEq,
+                    left_items,
+                    right_items,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            } else if let Some(result) = bind_maybe_multirange_comparison(
                 "<>",
                 left,
                 right,
@@ -1853,42 +2086,76 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             grouped_outer,
             ctes,
         )?)),
-        SqlExpr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
-            Box::new(bind_expr_with_outer_and_ctes(
-                left,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-            Box::new(bind_expr_with_outer_and_ctes(
-                right,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-        ),
-        SqlExpr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
-            Box::new(bind_expr_with_outer_and_ctes(
-                left,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-            Box::new(bind_expr_with_outer_and_ctes(
-                right,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-        ),
+        SqlExpr::IsDistinctFrom(left, right) => {
+            if let (SqlExpr::Row(left_items), SqlExpr::Row(right_items)) =
+                (left.as_ref(), right.as_ref())
+            {
+                bind_row_distinct_expr(
+                    false,
+                    left_items,
+                    right_items,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            } else {
+                Expr::IsDistinctFrom(
+                    Box::new(bind_expr_with_outer_and_ctes(
+                        left,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?),
+                    Box::new(bind_expr_with_outer_and_ctes(
+                        right,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?),
+                )
+            }
+        }
+        SqlExpr::IsNotDistinctFrom(left, right) => {
+            if let (SqlExpr::Row(left_items), SqlExpr::Row(right_items)) =
+                (left.as_ref(), right.as_ref())
+            {
+                bind_row_distinct_expr(
+                    true,
+                    left_items,
+                    right_items,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            } else {
+                Expr::IsNotDistinctFrom(
+                    Box::new(bind_expr_with_outer_and_ctes(
+                        left,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?),
+                    Box::new(bind_expr_with_outer_and_ctes(
+                        right,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?),
+                )
+            }
+        }
         SqlExpr::ArrayLiteral(elements) => Expr::ArrayLiteral {
             elements: elements
                 .iter()
