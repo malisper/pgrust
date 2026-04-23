@@ -35,7 +35,7 @@ use super::expr_datetime::{
 use super::expr_geometry::eval_geometry_function;
 use super::expr_json::{
     eval_json_builtin_function, eval_json_get, eval_json_path, eval_json_record_builtin_function,
-    eval_jsonpath_operator,
+    eval_jsonpath_operator, jsonb_to_tsvector_value,
 };
 use super::expr_locks::eval_advisory_lock_builtin_function;
 use super::expr_math::{
@@ -2819,6 +2819,7 @@ fn eval_plpgsql_builtin_function(
     }
     match func {
         BuiltinScalarFunction::ToTsVector
+        | BuiltinScalarFunction::JsonbToTsVector
         | BuiltinScalarFunction::ToTsQuery
         | BuiltinScalarFunction::PlainToTsQuery
         | BuiltinScalarFunction::PhraseToTsQuery
@@ -3215,6 +3216,16 @@ fn eval_text_search_builtin_function(
 
     match func {
         BuiltinScalarFunction::ToTsVector => {
+            if let [Value::Jsonb(_)] = values {
+                return jsonb_to_tsvector_value(None, &values[0], None);
+            }
+            if let [_, Value::Jsonb(_)] = values {
+                return jsonb_to_tsvector_value(
+                    arg_text(values, 0, "to_tsvector")?.as_deref(),
+                    &values[1],
+                    None,
+                );
+            }
             let result = match values {
                 [Value::Null] | [_, Value::Null] | [Value::Null, _] => return Ok(Value::Null),
                 [_] => crate::backend::tsearch::to_tsvector_with_config_name(
@@ -3235,6 +3246,26 @@ fn eval_text_search_builtin_function(
                 .map(Value::TsVector)
                 .map_err(|e| parse_error("to_tsvector", e))
         }
+        BuiltinScalarFunction::JsonbToTsVector => match values {
+            [Value::Null, _]
+            | [_, Value::Null]
+            | [Value::Null, _, _]
+            | [_, Value::Null, _]
+            | [_, _, Value::Null] => {
+                return Ok(Value::Null);
+            }
+            [Value::Jsonb(_), _] => jsonb_to_tsvector_value(None, &values[0], values.get(1)),
+            [_, Value::Jsonb(_), _] => jsonb_to_tsvector_value(
+                arg_text(values, 0, "jsonb_to_tsvector")?.as_deref(),
+                &values[1],
+                values.get(2),
+            ),
+            _ => Err(ExecError::TypeMismatch {
+                op: "jsonb_to_tsvector",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            }),
+        },
         BuiltinScalarFunction::ToTsQuery => {
             let result = match values {
                 [Value::Null] | [_, Value::Null] | [Value::Null, _] => return Ok(Value::Null),
@@ -3710,6 +3741,7 @@ fn eval_builtin_function(
     }
     match func {
         BuiltinScalarFunction::ToTsVector
+        | BuiltinScalarFunction::JsonbToTsVector
         | BuiltinScalarFunction::ToTsQuery
         | BuiltinScalarFunction::PlainToTsQuery
         | BuiltinScalarFunction::PhraseToTsQuery

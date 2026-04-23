@@ -652,6 +652,7 @@ pub enum BuiltinScalarFunction {
     BoolOrStateFunc,
     TsMatch,
     ToTsVector,
+    JsonbToTsVector,
     ToTsQuery,
     PlainToTsQuery,
     PhraseToTsQuery,
