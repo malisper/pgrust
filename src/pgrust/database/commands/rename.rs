@@ -48,8 +48,12 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) =
-            lookup_relation_for_rename(&catalog, &rename_stmt.table_name, rename_stmt.if_exists, 'v')?
+        let Some(relation) = lookup_relation_for_rename(
+            &catalog,
+            &rename_stmt.table_name,
+            rename_stmt.if_exists,
+            'v',
+        )?
         else {
             push_relation_missing_notice(&rename_stmt.table_name);
             return Ok(StatementResult::AffectedRows(0));
@@ -88,8 +92,12 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) =
-            lookup_relation_for_rename(&catalog, &rename_stmt.table_name, rename_stmt.if_exists, 'v')?
+        let Some(relation) = lookup_relation_for_rename(
+            &catalog,
+            &rename_stmt.table_name,
+            rename_stmt.if_exists,
+            'v',
+        )?
         else {
             push_relation_missing_notice(&rename_stmt.table_name);
             return Ok(StatementResult::AffectedRows(0));
