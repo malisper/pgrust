@@ -12,6 +12,7 @@ This repository now includes two GitHub Actions workflows:
 - That test run writes a JUnit XML report.
 - The `cargo-test` aggregation job downloads those reports, writes a timing summary into the Actions job summary, and becomes the single required check for branch protection.
 - `auto-queue-pr.yml` runs on `pull_request_target` and enables auto-merge immediately for non-draft PRs targeting `perf-optimization`. With a required merge queue enabled, GitHub will add the PR to the queue automatically once its requirements pass.
+  - Uses the `MERGE_QUEUE_PAT` repo secret (a fine-grained PAT scoped to `pgrust` with Pull Requests: write) instead of `GITHUB_TOKEN`, because GitHub's bot-recursion protection silently drops the auto-add-to-queue mechanism when `github-actions[bot]` is the actor. Token expires **2026-06-22** — rotate before then or auto-merge will silently break.
 
 ## Apply the repository settings
 
