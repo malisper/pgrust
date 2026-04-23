@@ -1450,17 +1450,18 @@ impl Database {
                         let relation = if lowered.partition_parent_oid.is_some()
                             || lowered.partition_spec.is_some()
                         {
-                            let relation = self.replace_relation_partition_metadata_in_transaction(
-                                client_id,
-                                created.entry.relation_oid,
-                                lowered.partition_parent_oid.is_some(),
-                                relpartbound,
-                                partitioned_table,
-                                xid,
-                                table_cid.saturating_add(2),
-                                configured_search_path,
-                                catalog_effects,
-                            )?;
+                            let relation = self
+                                .replace_relation_partition_metadata_in_transaction(
+                                    client_id,
+                                    created.entry.relation_oid,
+                                    lowered.partition_parent_oid.is_some(),
+                                    relpartbound,
+                                    partitioned_table,
+                                    xid,
+                                    table_cid.saturating_add(2),
+                                    configured_search_path,
+                                    catalog_effects,
+                                )?;
                             if lowered
                                 .partition_bound
                                 .as_ref()
@@ -1568,57 +1569,56 @@ impl Database {
                     .partition_spec
                     .as_ref()
                     .map(|spec| pg_partitioned_table_row(created.entry.relation_oid, spec, 0));
-                let relation = if lowered.partition_parent_oid.is_some()
-                    || lowered.partition_spec.is_some()
-                {
-                    let relation = self.replace_relation_partition_metadata_in_transaction(
-                        client_id,
-                        created.entry.relation_oid,
-                        lowered.partition_parent_oid.is_some(),
-                        relpartbound,
-                        partitioned_table,
-                        xid,
-                        table_cid.saturating_add(2),
-                        configured_search_path,
-                        catalog_effects,
-                    )?;
-                    if lowered
-                        .partition_bound
-                        .as_ref()
-                        .is_some_and(PartitionBoundSpec::is_default)
-                        && let Some(parent_oid) = lowered.partition_parent_oid
-                    {
-                        self.update_partitioned_table_default_partition_in_transaction(
+                let relation =
+                    if lowered.partition_parent_oid.is_some() || lowered.partition_spec.is_some() {
+                        let relation = self.replace_relation_partition_metadata_in_transaction(
                             client_id,
-                            parent_oid,
                             created.entry.relation_oid,
+                            lowered.partition_parent_oid.is_some(),
+                            relpartbound,
+                            partitioned_table,
                             xid,
-                            table_cid.saturating_add(3),
+                            table_cid.saturating_add(2),
                             configured_search_path,
                             catalog_effects,
                         )?;
-                    }
-                    relation
-                } else {
-                    crate::backend::parser::BoundRelation {
-                        rel: created.entry.rel,
-                        relation_oid: created.entry.relation_oid,
-                        toast: created.toast.as_ref().map(|toast| {
-                            crate::include::nodes::primnodes::ToastRelationRef {
-                                rel: toast.toast_entry.rel,
-                                relation_oid: toast.toast_entry.relation_oid,
-                            }
-                        }),
-                        namespace_oid: created.entry.namespace_oid,
-                        owner_oid: created.entry.owner_oid,
-                        relpersistence: created.entry.relpersistence,
-                        relkind: created.entry.relkind,
-                        relispartition: created.entry.relispartition,
-                        relpartbound: created.entry.relpartbound.clone(),
-                        desc: created.entry.desc.clone(),
-                        partitioned_table: created.entry.partitioned_table.clone(),
-                    }
-                };
+                        if lowered
+                            .partition_bound
+                            .as_ref()
+                            .is_some_and(PartitionBoundSpec::is_default)
+                            && let Some(parent_oid) = lowered.partition_parent_oid
+                        {
+                            self.update_partitioned_table_default_partition_in_transaction(
+                                client_id,
+                                parent_oid,
+                                created.entry.relation_oid,
+                                xid,
+                                table_cid.saturating_add(3),
+                                configured_search_path,
+                                catalog_effects,
+                            )?;
+                        }
+                        relation
+                    } else {
+                        crate::backend::parser::BoundRelation {
+                            rel: created.entry.rel,
+                            relation_oid: created.entry.relation_oid,
+                            toast: created.toast.as_ref().map(|toast| {
+                                crate::include::nodes::primnodes::ToastRelationRef {
+                                    rel: toast.toast_entry.rel,
+                                    relation_oid: toast.toast_entry.relation_oid,
+                                }
+                            }),
+                            namespace_oid: created.entry.namespace_oid,
+                            owner_oid: created.entry.owner_oid,
+                            relpersistence: created.entry.relpersistence,
+                            relkind: created.entry.relkind,
+                            relispartition: created.entry.relispartition,
+                            relpartbound: created.entry.relpartbound.clone(),
+                            desc: created.entry.desc.clone(),
+                            partitioned_table: created.entry.partitioned_table.clone(),
+                        }
+                    };
                 let constraint_cid_base = table_cid
                     .saturating_add(u32::from(!lowered.parent_oids.is_empty()))
                     .saturating_add(u32::from(
@@ -1820,12 +1820,14 @@ impl Database {
             stats: Arc::clone(&self.stats),
             session_stats: self.session_stats_state(client_id),
             snapshot,
+            transaction_state: None,
             client_id,
             current_database_name: self.current_database_name(),
             session_user_oid: self.auth_state(client_id).session_user_oid(),
             current_user_oid: self.auth_state(client_id).current_user_oid(),
             active_role_oid: self.auth_state(client_id).active_role_oid(),
             statement_lock_scope_id: None,
+            transaction_lock_scope_id: None,
             next_command_id: cid,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
@@ -1974,12 +1976,14 @@ impl Database {
             stats: Arc::clone(&self.stats),
             session_stats: self.session_stats_state(client_id),
             snapshot,
+            transaction_state: None,
             client_id,
             current_database_name: self.current_database_name(),
             session_user_oid: self.auth_state(client_id).session_user_oid(),
             current_user_oid: self.auth_state(client_id).current_user_oid(),
             active_role_oid: self.auth_state(client_id).active_role_oid(),
             statement_lock_scope_id: None,
+            transaction_lock_scope_id: None,
             next_command_id: cid,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),

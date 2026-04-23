@@ -1,5 +1,7 @@
 use super::super::*;
-use crate::backend::executor::execute_planned_stmt;
+use crate::backend::executor::{
+    ExecutorTransactionState, SharedExecutorTransactionState, execute_planned_stmt,
+};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 
 impl Database {
@@ -597,12 +599,14 @@ impl Database {
                     stats: std::sync::Arc::clone(&self.stats),
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
+                    transaction_state: None,
                     client_id,
                     current_database_name: self.current_database_name(),
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
                     statement_lock_scope_id,
+                    transaction_lock_scope_id: None,
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -751,9 +755,14 @@ impl Database {
                     interrupts.as_ref(),
                 )?;
 
-                let xid = self.txns.write().begin();
-                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
-                let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
+                let snapshot = self.txns.read().snapshot(INVALID_TRANSACTION_ID)?;
+                let transaction_state: SharedExecutorTransactionState =
+                    Arc::new(parking_lot::Mutex::new(ExecutorTransactionState {
+                        xid: None,
+                        cid: 0,
+                    }));
+                let deferred_foreign_keys =
+                    crate::backend::executor::DeferredForeignKeyTracker::default();
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
@@ -768,12 +777,14 @@ impl Database {
                     stats: std::sync::Arc::clone(&self.stats),
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
+                    transaction_state: Some(Arc::clone(&transaction_state)),
                     client_id,
                     current_database_name: self.current_database_name(),
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
                     statement_lock_scope_id,
+                    transaction_lock_scope_id: None,
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -789,7 +800,7 @@ impl Database {
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
-                    deferred_foreign_keys: None,
+                    deferred_foreign_keys: Some(deferred_foreign_keys.clone()),
                 };
                 let result = match planned_select {
                     Some(planned_stmt) => execute_planned_stmt(planned_stmt, &mut ctx),
@@ -798,16 +809,39 @@ impl Database {
                 let pending_async_notifications =
                     std::mem::take(&mut ctx.pending_async_notifications);
                 drop(ctx);
-                let result = self.finish_txn_with_async_notifications(
-                    client_id,
-                    xid,
-                    result,
-                    &[],
-                    &[],
-                    &[],
-                    pending_async_notifications,
-                );
-                guard.disarm();
+                let xid = transaction_state.lock().xid;
+                let result = if let Some(xid) = xid {
+                    let validation_catalog =
+                        self.lazy_catalog_lookup(client_id, Some((xid, 1)), configured_search_path);
+                    let result = result.and_then(|result| {
+                        crate::pgrust::database::foreign_keys::validate_deferred_foreign_key_constraints(
+                            self,
+                            client_id,
+                            &validation_catalog,
+                            xid,
+                            1,
+                            Arc::clone(&interrupts),
+                            datetime_config,
+                            &deferred_foreign_keys,
+                        )?;
+                        Ok(result)
+                    });
+                    self.finish_txn_with_async_notifications(
+                        client_id,
+                        xid,
+                        result,
+                        &[],
+                        &[],
+                        &[],
+                        pending_async_notifications,
+                    )
+                } else {
+                    if result.is_ok() {
+                        self.async_notify_runtime
+                            .publish(client_id, &pending_async_notifications);
+                    }
+                    result
+                };
 
                 unlock_relations(&self.table_locks, client_id, &rels);
                 result
@@ -847,12 +881,14 @@ impl Database {
                     stats: std::sync::Arc::clone(&self.stats),
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
+                    transaction_state: None,
                     client_id,
                     current_database_name: self.current_database_name(),
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
                     statement_lock_scope_id,
+                    transaction_lock_scope_id: None,
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -943,12 +979,14 @@ impl Database {
                     stats: std::sync::Arc::clone(&self.stats),
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
+                    transaction_state: None,
                     client_id,
                     current_database_name: self.current_database_name(),
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
                     statement_lock_scope_id,
+                    transaction_lock_scope_id: None,
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -1040,12 +1078,14 @@ impl Database {
                     stats: std::sync::Arc::clone(&self.stats),
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
+                    transaction_state: None,
                     client_id,
                     current_database_name: self.current_database_name(),
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
                     statement_lock_scope_id,
+                    transaction_lock_scope_id: None,
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -1371,12 +1411,14 @@ impl Database {
                     stats: std::sync::Arc::clone(&self.stats),
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
+                    transaction_state: None,
                     client_id,
                     current_database_name: self.current_database_name(),
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
                     statement_lock_scope_id,
+                    transaction_lock_scope_id: None,
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -1429,6 +1471,7 @@ impl Database {
             txn_ctx,
             None,
             None,
+            None,
             &DateTimeConfig::default(),
         )
     }
@@ -1445,6 +1488,7 @@ impl Database {
             select_stmt,
             txn_ctx,
             None,
+            None,
             configured_search_path,
             &DateTimeConfig::default(),
         )
@@ -1456,6 +1500,7 @@ impl Database {
         select_stmt: &crate::backend::parser::SelectStatement,
         txn_ctx: Option<(TransactionId, CommandId)>,
         statement_lock_scope_id: Option<u64>,
+        transaction_lock_scope_id: Option<u64>,
         configured_search_path: Option<&[String]>,
         datetime_config: &DateTimeConfig,
     ) -> Result<SelectGuard<'_>, ExecError> {
@@ -1498,12 +1543,14 @@ impl Database {
             stats: std::sync::Arc::clone(&self.stats),
             session_stats: self.session_stats_state(client_id),
             snapshot,
+            transaction_state: None,
             client_id,
             current_database_name: self.current_database_name(),
             session_user_oid: self.auth_state(client_id).session_user_oid(),
             current_user_oid: self.auth_state(client_id).current_user_oid(),
             active_role_oid: self.auth_state(client_id).active_role_oid(),
             statement_lock_scope_id,
+            transaction_lock_scope_id,
             next_command_id: command_id,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),

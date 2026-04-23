@@ -6,8 +6,8 @@ use crate::backend::storage::page::bufpage::{
 use crate::backend::storage::smgr::BLCKSZ;
 use crate::include::access::brin_page::{
     BRIN_EVACUATE_PAGE, BRIN_MAX_ITEM_SIZE, BRIN_META_MAGIC, BRIN_PAGE_CONTENT_OFFSET,
-    BRIN_PAGETYPE_META, BrinMetaPageData, brin_page_flags,
-    brin_is_meta_page, brin_is_regular_page, set_brin_page_flags, set_brin_page_type,
+    BRIN_PAGETYPE_META, BrinMetaPageData, brin_is_meta_page, brin_is_regular_page, brin_page_flags,
+    set_brin_page_flags, set_brin_page_type,
 };
 
 fn write_page_lower(page: &mut [u8; BLCKSZ], lower: u16) {
@@ -20,7 +20,9 @@ fn write_page_upper(page: &mut [u8; BLCKSZ], upper: u16) {
 
 pub(crate) fn brin_metapage_data(page: &[u8; BLCKSZ]) -> Result<BrinMetaPageData, CatalogError> {
     if !brin_is_meta_page(page).map_err(page_error)? {
-        return Err(CatalogError::Corrupt("BRIN metapage has unexpected page type"));
+        return Err(CatalogError::Corrupt(
+            "BRIN metapage has unexpected page type",
+        ));
     }
     let bytes = page
         .get(BRIN_PAGE_CONTENT_OFFSET..BRIN_PAGE_CONTENT_OFFSET + BrinMetaPageData::SIZE)
@@ -38,17 +40,16 @@ pub(crate) fn brin_set_metapage_last_revmap_page(
     last_revmap_page: u32,
 ) -> Result<(), CatalogError> {
     if !brin_is_meta_page(page).map_err(page_error)? {
-        return Err(CatalogError::Corrupt("BRIN metapage has unexpected page type"));
+        return Err(CatalogError::Corrupt(
+            "BRIN metapage has unexpected page type",
+        ));
     }
     page[BRIN_PAGE_CONTENT_OFFSET + 12..BRIN_PAGE_CONTENT_OFFSET + 16]
         .copy_from_slice(&last_revmap_page.to_le_bytes());
     Ok(())
 }
 
-pub(crate) fn brin_page_init(
-    page: &mut [u8; BLCKSZ],
-    page_type: u16,
-) -> Result<(), CatalogError> {
+pub(crate) fn brin_page_init(page: &mut [u8; BLCKSZ], page_type: u16) -> Result<(), CatalogError> {
     page_init(page, crate::include::access::brin_page::BRIN_SPECIAL_SIZE);
     set_brin_page_flags(page, 0).map_err(page_error)?;
     set_brin_page_type(page, page_type).map_err(page_error)?;
@@ -126,7 +127,9 @@ pub(crate) fn page_index_tuple_delete_no_compact(
 
     let mut item_id = page_get_item_id(page, offnum).map_err(page_error)?;
     if !item_id.has_storage() {
-        return Err(CatalogError::Corrupt("BRIN page line pointer has no storage"));
+        return Err(CatalogError::Corrupt(
+            "BRIN page line pointer has no storage",
+        ));
     }
 
     let aligned_size = max_align(item_id.lp_len as usize);
@@ -140,14 +143,12 @@ pub(crate) fn page_index_tuple_delete_no_compact(
 
     if offnum < max_offset {
         item_id = ItemIdData::unused();
-        let idx =
-            max_align(crate::backend::storage::page::bufpage::SIZE_OF_PAGE_HEADER_DATA)
-                + (usize::from(offnum) - 1) * ITEM_ID_SIZE;
+        let idx = max_align(crate::backend::storage::page::bufpage::SIZE_OF_PAGE_HEADER_DATA)
+            + (usize::from(offnum) - 1) * ITEM_ID_SIZE;
         page[idx..idx + ITEM_ID_SIZE].copy_from_slice(&item_id.encode());
     } else {
-        let idx =
-            max_align(crate::backend::storage::page::bufpage::SIZE_OF_PAGE_HEADER_DATA)
-                + (usize::from(offnum) - 1) * ITEM_ID_SIZE;
+        let idx = max_align(crate::backend::storage::page::bufpage::SIZE_OF_PAGE_HEADER_DATA)
+            + (usize::from(offnum) - 1) * ITEM_ID_SIZE;
         page[idx..idx + ITEM_ID_SIZE].fill(0);
         write_page_lower(page, header.pd_lower.saturating_sub(ITEM_ID_SIZE as u16));
     }
@@ -167,9 +168,8 @@ pub(crate) fn page_index_tuple_delete_no_compact(
         let mut existing = page_get_item_id(page, index).map_err(page_error)?;
         if existing.has_storage() && usize::from(existing.lp_off) <= offset {
             existing.lp_off += aligned_size as u16;
-            let idx =
-                max_align(crate::backend::storage::page::bufpage::SIZE_OF_PAGE_HEADER_DATA)
-                    + (usize::from(index) - 1) * ITEM_ID_SIZE;
+            let idx = max_align(crate::backend::storage::page::bufpage::SIZE_OF_PAGE_HEADER_DATA)
+                + (usize::from(index) - 1) * ITEM_ID_SIZE;
             page[idx..idx + ITEM_ID_SIZE].copy_from_slice(&existing.encode());
         }
     }
@@ -190,7 +190,9 @@ pub(crate) fn page_index_tuple_overwrite(
 
     let mut item_id = page_get_item_id(page, offnum).map_err(page_error)?;
     if !item_id.has_storage() {
-        return Err(CatalogError::Corrupt("BRIN page line pointer has no storage"));
+        return Err(CatalogError::Corrupt(
+            "BRIN page line pointer has no storage",
+        ));
     }
 
     let offset = usize::from(item_id.lp_off);
@@ -210,9 +212,9 @@ pub(crate) fn page_index_tuple_overwrite(
     let size_diff = old_size as isize - new_size as isize;
     if size_diff != 0 {
         let upper = usize::from(header.pd_upper);
-        let target = upper.checked_add_signed(size_diff).ok_or_else(|| {
-            CatalogError::Corrupt("BRIN overwrite moved page upper out of range")
-        })?;
+        let target = upper
+            .checked_add_signed(size_diff)
+            .ok_or_else(|| CatalogError::Corrupt("BRIN overwrite moved page upper out of range"))?;
         page.copy_within(upper..offset, target);
         write_page_upper(
             page,
@@ -225,10 +227,9 @@ pub(crate) fn page_index_tuple_overwrite(
         for index in 1..=max_offset {
             let mut existing = page_get_item_id(page, index).map_err(page_error)?;
             if existing.has_storage() && usize::from(existing.lp_off) <= offset {
-                existing.lp_off = existing
-                    .lp_off
-                    .checked_add_signed(size_diff as i16)
-                    .ok_or(CatalogError::Corrupt("invalid BRIN tuple offset adjustment"))?;
+                existing.lp_off = existing.lp_off.checked_add_signed(size_diff as i16).ok_or(
+                    CatalogError::Corrupt("invalid BRIN tuple offset adjustment"),
+                )?;
                 let idx =
                     max_align(crate::backend::storage::page::bufpage::SIZE_OF_PAGE_HEADER_DATA)
                         + (usize::from(index) - 1) * ITEM_ID_SIZE;
@@ -242,9 +243,8 @@ pub(crate) fn page_index_tuple_overwrite(
         .ok_or(CatalogError::Corrupt("invalid BRIN overwrite tuple offset"))?;
     item_id.lp_off = new_offset;
     item_id.lp_len = new_tuple.len() as u16;
-    let idx =
-        max_align(crate::backend::storage::page::bufpage::SIZE_OF_PAGE_HEADER_DATA)
-            + (usize::from(offnum) - 1) * ITEM_ID_SIZE;
+    let idx = max_align(crate::backend::storage::page::bufpage::SIZE_OF_PAGE_HEADER_DATA)
+        + (usize::from(offnum) - 1) * ITEM_ID_SIZE;
     page[idx..idx + ITEM_ID_SIZE].copy_from_slice(&item_id.encode());
 
     let start = usize::from(item_id.lp_off);
@@ -252,9 +252,7 @@ pub(crate) fn page_index_tuple_overwrite(
     Ok(true)
 }
 
-pub(crate) fn brin_page_start_evacuating(
-    page: &mut [u8; BLCKSZ],
-) -> Result<bool, CatalogError> {
+pub(crate) fn brin_page_start_evacuating(page: &mut [u8; BLCKSZ]) -> Result<bool, CatalogError> {
     if let Err(PageError::NotInitialized) = page_header(page) {
         return Ok(false);
     }
@@ -281,7 +279,7 @@ mod tests {
         page_get_item, page_get_item_id, page_get_max_offset_number, page_header,
     };
     use crate::include::access::brin_page::{
-        BRIN_CURRENT_VERSION, BRIN_PAGETYPE_REVMAP, BRIN_PAGETYPE_REGULAR, brin_page_type,
+        BRIN_CURRENT_VERSION, BRIN_PAGETYPE_REGULAR, BRIN_PAGETYPE_REVMAP, brin_page_type,
         revmap_entry_offset,
     };
 
@@ -326,7 +324,10 @@ mod tests {
         page_index_tuple_delete_no_compact(&mut page, first).unwrap();
 
         assert_eq!(page_get_max_offset_number(&page).unwrap(), second);
-        assert_eq!(page_get_item_id(&page, first).unwrap().lp_flags, ItemIdFlags::Unused);
+        assert_eq!(
+            page_get_item_id(&page, first).unwrap().lp_flags,
+            ItemIdFlags::Unused
+        );
         assert_eq!(page_get_item(&page, second).unwrap(), b"bbbb");
     }
 

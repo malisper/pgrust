@@ -15,9 +15,8 @@ use crate::include::nodes::parsenodes::{
     ForeignKeyMatchType, IndexColumnDef, InsertSource, InsertStatement, JoinTreeNode,
     PartitionStrategy, PublicationObjectSpec, PublicationOption, PublicationSchemaName,
     RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum,
-    RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement, SqlCallArgs,
-    TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerTiming,
-    ViewCheckOption,
+    RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint,
+    TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerTiming, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 

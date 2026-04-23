@@ -185,7 +185,8 @@ impl Database {
                 self.finalize_committed_temp_effects(client_id, temp_effects);
                 self.finalize_committed_sequence_effects(sequence_effects)?;
                 self.apply_temp_on_commit(client_id)?;
-                self.advisory_locks.unlock_all_transaction(client_id, xid);
+                self.advisory_locks
+                    .unlock_all_transaction(client_id, u64::from(xid));
                 self.txn_waiter.notify();
                 Ok(r)
             }
@@ -200,7 +201,8 @@ impl Database {
                 self.finalize_aborted_catalog_effects(catalog_effects);
                 self.finalize_aborted_temp_effects(client_id, temp_effects);
                 self.finalize_aborted_sequence_effects(sequence_effects);
-                self.advisory_locks.unlock_all_transaction(client_id, xid);
+                self.advisory_locks
+                    .unlock_all_transaction(client_id, u64::from(xid));
                 self.txn_waiter.notify();
                 Err(e)
             }
