@@ -3124,7 +3124,7 @@ fn parse_grant_create_on_database_statement() {
         stmt,
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::CreateOnDatabase,
-            object_name: "regression".into(),
+            object_names: vec!["regression".into()],
             grantee_names: vec!["regress_role_admin".into()],
             with_grant_option: true,
         })
@@ -3138,7 +3138,21 @@ fn parse_grant_all_on_schema_statement() {
         stmt,
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::AllPrivilegesOnSchema,
-            object_name: "public".into(),
+            object_names: vec!["public".into()],
+            grantee_names: vec!["public".into()],
+            with_grant_option: false,
+        })
+    );
+}
+
+#[test]
+fn parse_grant_all_on_multiple_schemas_statement() {
+    let stmt = parse_statement("grant all on schema alt_nsp1, alt_nsp2 to public").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::AllPrivilegesOnSchema,
+            object_names: vec!["alt_nsp1".into(), "alt_nsp2".into()],
             grantee_names: vec!["public".into()],
             with_grant_option: false,
         })
@@ -3152,7 +3166,7 @@ fn parse_grant_select_on_table_statement() {
         stmt,
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::SelectOnTable,
-            object_name: "uaccount".into(),
+            object_names: vec!["uaccount".into()],
             grantee_names: vec!["public".into()],
             with_grant_option: false,
         })
@@ -3166,7 +3180,7 @@ fn parse_grant_all_on_table_statement() {
         stmt,
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
-            object_name: "uaccount".into(),
+            object_names: vec!["uaccount".into()],
             grantee_names: vec!["public".into()],
             with_grant_option: false,
         })
@@ -3180,7 +3194,7 @@ fn parse_grant_execute_on_function_statement() {
         stmt,
         Statement::GrantObject(GrantObjectStatement {
             privilege: GrantObjectPrivilege::ExecuteOnFunction,
-            object_name: "f_leak(text)".into(),
+            object_names: vec!["f_leak(text)".into()],
             grantee_names: vec!["public".into()],
             with_grant_option: false,
         })
@@ -3206,7 +3220,7 @@ fn parse_revoke_all_privileges_on_table_from_public_statement() {
         stmt,
         Statement::RevokeObject(RevokeObjectStatement {
             privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
-            object_name: "tenant_table".into(),
+            object_names: vec!["tenant_table".into()],
             grantee_names: vec!["public".into()],
             cascade: false,
         })
