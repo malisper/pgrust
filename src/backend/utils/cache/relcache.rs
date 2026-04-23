@@ -425,6 +425,10 @@ impl RelCache {
                     desc.attstattarget = attr.attstattarget;
                     desc.attinhcount = attr.attinhcount;
                     desc.attislocal = attr.attislocal;
+                    desc.generated =
+                        crate::include::nodes::parsenodes::ColumnGeneratedKind::from_catalog_char(
+                            attr.attgenerated,
+                        );
                     desc.dropped = attr.attisdropped;
                     if let Some(constraint) = not_null_constraints.get(&(class.oid, attr.attnum)) {
                         desc.not_null_constraint_oid = Some(constraint.oid);

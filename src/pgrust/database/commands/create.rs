@@ -2068,6 +2068,7 @@ impl Database {
                                         column.sql_type,
                                     ),
                                     default_expr: None,
+                                    generated: None,
                                     compression: None,
                                     constraints: vec![],
                                 },

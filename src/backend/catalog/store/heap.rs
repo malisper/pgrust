@@ -42,12 +42,12 @@ use crate::include::catalog::{
     PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_OPFAMILY_RELATION_OID,
     PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
     PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TRIGGER_RELATION_OID,
-    PG_TYPE_RELATION_OID, PUBLISH_GENCOLS_NONE, PgAggregateRow, PgAmopRow, PgAmprocRow,
-    PgAttrdefRow, PgAttributeRow, PgClassRow, PgConstraintRow, PgDatabaseRow, PgDependRow,
-    PgDescriptionRow, PgForeignDataWrapperRow, PgInheritsRow, PgNamespaceRow, PgOpclassRow,
-    PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow,
-    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticRow,
-    PgTablespaceRow, PgTypeRow, relkind_has_storage,
+    PG_TYPE_RELATION_OID, PgAggregateRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
+    PgClassRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow,
+    PgForeignDataWrapperRow, PgInheritsRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
+    PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow,
+    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow,
+    PgTypeRow, relkind_has_storage,
 };
 use crate::include::nodes::datum::Value;
 
@@ -3810,6 +3810,7 @@ impl CatalogStore {
                 column.not_null_primary_key_owned = false;
                 column.attrdef_oid = None;
                 column.default_expr = None;
+                column.generated = None;
                 column.missing_default_value = None;
                 Ok((
                     (),
@@ -3858,6 +3859,50 @@ impl CatalogStore {
                 Ok((
                     (),
                     vec![
+                        BootstrapCatalogKind::PgDepend,
+                        BootstrapCatalogKind::PgAttrdef,
+                    ],
+                ))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        effect_record_oid(&mut effect.type_oids, new_entry.row_type_oid);
+        Ok(effect)
+    }
+
+    pub fn alter_table_set_column_generation_mvcc(
+        &mut self,
+        relation_oid: u32,
+        column_name: &str,
+        default_expr: Option<String>,
+        generated: Option<crate::include::nodes::parsenodes::ColumnGeneratedKind>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, move |entry, control| {
+                if entry.relkind != 'r' {
+                    return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+                }
+                let column_index = relation_column_index_visible(&entry.desc, column_name)?;
+                let column = &mut entry.desc.columns[column_index];
+                column.default_expr = default_expr;
+                column.default_sequence_oid = None;
+                column.generated = generated;
+                if column.default_expr.is_some() {
+                    if column.attrdef_oid.is_none() {
+                        column.attrdef_oid = Some(control.next_oid);
+                        control.next_oid = control.next_oid.saturating_add(1);
+                    }
+                } else {
+                    column.attrdef_oid = None;
+                    column.missing_default_value = None;
+                }
+                Ok((
+                    (),
+                    vec![
+                        BootstrapCatalogKind::PgAttribute,
                         BootstrapCatalogKind::PgDepend,
                         BootstrapCatalogKind::PgAttrdef,
                     ],
@@ -5383,30 +5428,29 @@ fn rows_for_new_relation_entry(
         .extend(type_rows_for_relation_name(relation_name, entry));
 
     rows.attributes
-        .extend(
-            entry
-                .desc
-                .columns
-                .iter()
-                .enumerate()
-                .map(|(idx, column)| PgAttributeRow {
-                    attrelid: entry.relation_oid,
-                    attname: column.name.clone(),
-                    atttypid: resolved_sql_type_oid(catcache, entry, column.sql_type),
-                    attlen: column.storage.attlen,
-                    attnum: idx.saturating_add(1) as i16,
-                    attnotnull: !column.storage.nullable,
-                    attisdropped: column.dropped,
-                    atttypmod: column.sql_type.typmod,
-                    attalign: column.storage.attalign,
-                    attstorage: column.storage.attstorage,
-                    attcompression: column.storage.attcompression,
-                    attstattarget: column.attstattarget,
-                    attinhcount: column.attinhcount,
-                    attislocal: column.attislocal,
-                    sql_type: column.sql_type,
-                }),
-        );
+        .extend(entry.desc.columns.iter().enumerate().map(|(idx, column)| {
+            PgAttributeRow {
+                attrelid: entry.relation_oid,
+                attname: column.name.clone(),
+                atttypid: resolved_sql_type_oid(catcache, entry, column.sql_type),
+                attlen: column.storage.attlen,
+                attnum: idx.saturating_add(1) as i16,
+                attnotnull: !column.storage.nullable,
+                attisdropped: column.dropped,
+                atttypmod: column.sql_type.typmod,
+                attalign: column.storage.attalign,
+                attstorage: column.storage.attstorage,
+                attcompression: column.storage.attcompression,
+                attstattarget: column.attstattarget,
+                attinhcount: column.attinhcount,
+                attislocal: column.attislocal,
+                attgenerated: column
+                    .generated
+                    .map(|kind| kind.catalog_char())
+                    .unwrap_or('\0'),
+                sql_type: column.sql_type,
+            }
+        }));
     rows.attrdefs.extend(
         entry
             .desc

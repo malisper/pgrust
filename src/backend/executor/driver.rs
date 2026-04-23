@@ -171,6 +171,7 @@ fn execute_statement_with_source(
         | Statement::AlterTableAlterColumnStatistics(_)
         | Statement::AlterTableAlterColumnStorage(_)
         | Statement::AlterTableAlterColumnDefault(_)
+        | Statement::AlterTableAlterColumnExpression(_)
         // :HACK: ALTER TABLE ... SET (...) is accepted narrowly for numeric.sql and ignored
         // until table reloptions are modeled for real.
         | Statement::AlterTableSet(_)
@@ -497,6 +498,7 @@ pub fn execute_readonly_statement(
         | Statement::AlterTableAlterColumnCompression(_)
         | Statement::AlterTableAlterColumnStorage(_)
         | Statement::AlterTableAlterColumnDefault(_)
+        | Statement::AlterTableAlterColumnExpression(_)
         | Statement::AlterTableAttachPartition(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::AlterTableRename(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::Merge(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(

@@ -314,6 +314,7 @@ pub enum Statement {
     AlterTableRenameConstraint(AlterTableRenameConstraintStatement),
     AlterTableAlterColumnType(AlterTableAlterColumnTypeStatement),
     AlterTableAlterColumnDefault(AlterTableAlterColumnDefaultStatement),
+    AlterTableAlterColumnExpression(AlterTableAlterColumnExpressionStatement),
     AlterTableAlterColumnCompression(AlterTableAlterColumnCompressionStatement),
     AlterTableAlterColumnStorage(AlterTableAlterColumnStorageStatement),
     AlterTableAlterColumnOptions(AlterTableAlterColumnOptionsStatement),
@@ -1621,6 +1622,21 @@ pub struct AlterTableAlterColumnDefaultStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterColumnExpressionAction {
+    Set { expr: SqlExpr, expr_sql: String },
+    Drop { missing_ok: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableAlterColumnExpressionStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub column_name: String,
+    pub action: AlterColumnExpressionAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterTableAlterColumnCompressionStatement {
     pub if_exists: bool,
     pub only: bool,
@@ -2333,6 +2349,7 @@ pub struct ColumnDef {
     pub name: String,
     pub ty: RawTypeName,
     pub default_expr: Option<String>,
+    pub generated: Option<ColumnGeneratedDef>,
     pub compression: Option<crate::include::access::htup::AttributeCompression>,
     pub constraints: Vec<ColumnConstraint>,
 }
@@ -2357,6 +2374,35 @@ impl ColumnDef {
         self.constraints
             .iter()
             .any(|constraint| matches!(constraint, ColumnConstraint::Unique { .. }))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnGeneratedDef {
+    pub expr_sql: String,
+    pub kind: ColumnGeneratedKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ColumnGeneratedKind {
+    Virtual,
+    Stored,
+}
+
+impl ColumnGeneratedKind {
+    pub const fn catalog_char(self) -> char {
+        match self {
+            Self::Virtual => 'v',
+            Self::Stored => 's',
+        }
+    }
+
+    pub const fn from_catalog_char(value: char) -> Option<Self> {
+        match value {
+            'v' => Some(Self::Virtual),
+            's' => Some(Self::Stored),
+            _ => None,
+        }
     }
 }
 
