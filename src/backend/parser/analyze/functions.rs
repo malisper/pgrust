@@ -14,7 +14,6 @@ use std::sync::OnceLock;
 enum NamedArgDefault {
     Bool(bool),
     Float8(f64),
-    Int4(i32),
     Text(&'static str),
     JsonbEmptyObject,
 }
@@ -622,13 +621,6 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::DatePart | BuiltinScalarFunction::DateTrunc => args.len() == 2,
             BuiltinScalarFunction::IsFinite => args.len() == 1,
             BuiltinScalarFunction::MakeDate => args.len() == 3,
-            BuiltinScalarFunction::MakeInterval => args.len() <= 7,
-            BuiltinScalarFunction::JustifyHours
-            | BuiltinScalarFunction::JustifyDays
-            | BuiltinScalarFunction::JustifyInterval
-            | BuiltinScalarFunction::IntervalHash => args.len() == 1,
-            BuiltinScalarFunction::DateBin => args.len() == 3,
-            BuiltinScalarFunction::Timezone => args.len() == 2,
             BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
             BuiltinScalarFunction::PgMyTempSchema => args.is_empty(),
             BuiltinScalarFunction::PgRustInternalBinaryCoercible => args.len() == 2,
@@ -1108,15 +1100,6 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         BuiltinScalarFunction::CurrentSetting => {
             return Some(SqlType::new(SqlTypeKind::Text));
         }
-        BuiltinScalarFunction::MakeInterval
-        | BuiltinScalarFunction::JustifyHours
-        | BuiltinScalarFunction::JustifyDays
-        | BuiltinScalarFunction::JustifyInterval => {
-            return Some(SqlType::new(SqlTypeKind::Interval));
-        }
-        BuiltinScalarFunction::IntervalHash => {
-            return Some(SqlType::new(SqlTypeKind::Int4));
-        }
         _ => {}
     }
     scalar_fixed_return_types()
@@ -1245,7 +1228,6 @@ fn default_sql_expr(default: NamedArgDefault) -> SqlExpr {
     match default {
         NamedArgDefault::Bool(value) => SqlExpr::Const(Value::Bool(value)),
         NamedArgDefault::Float8(value) => SqlExpr::Const(Value::Float64(value)),
-        NamedArgDefault::Int4(value) => SqlExpr::Const(Value::Int32(value)),
         NamedArgDefault::Text(value) => SqlExpr::Const(Value::Text(value.into())),
         NamedArgDefault::JsonbEmptyObject => SqlExpr::Cast(
             Box::new(SqlExpr::Const(Value::Text("{}".into()))),
@@ -1262,19 +1244,6 @@ fn scalar_named_arg_signature(func: BuiltinScalarFunction) -> Option<NamedArgSig
             defaults: &[
                 Some(NamedArgDefault::Float8(0.0)),
                 Some(NamedArgDefault::Float8(1.0)),
-            ],
-        }),
-        BuiltinScalarFunction::MakeInterval => Some(NamedArgSignature {
-            params: &["years", "months", "weeks", "days", "hours", "mins", "secs"],
-            required: 0,
-            defaults: &[
-                Some(NamedArgDefault::Int4(0)),
-                Some(NamedArgDefault::Int4(0)),
-                Some(NamedArgDefault::Int4(0)),
-                Some(NamedArgDefault::Int4(0)),
-                Some(NamedArgDefault::Int4(0)),
-                Some(NamedArgDefault::Int4(0)),
-                Some(NamedArgDefault::Float8(0.0)),
             ],
         }),
         BuiltinScalarFunction::JsonbPathExists
@@ -1390,13 +1359,6 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("date_trunc", BuiltinScalarFunction::DateTrunc),
         ("isfinite", BuiltinScalarFunction::IsFinite),
         ("make_date", BuiltinScalarFunction::MakeDate),
-        ("make_interval", BuiltinScalarFunction::MakeInterval),
-        ("justify_hours", BuiltinScalarFunction::JustifyHours),
-        ("justify_days", BuiltinScalarFunction::JustifyDays),
-        ("justify_interval", BuiltinScalarFunction::JustifyInterval),
-        ("interval_hash", BuiltinScalarFunction::IntervalHash),
-        ("date_bin", BuiltinScalarFunction::DateBin),
-        ("timezone", BuiltinScalarFunction::Timezone),
         (
             "getdatabaseencoding",
             BuiltinScalarFunction::GetDatabaseEncoding,

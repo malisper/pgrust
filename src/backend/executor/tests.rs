@@ -4065,28 +4065,6 @@ fn select_isfinite_and_make_date_for_date() {
 }
 
 #[test]
-fn select_interval_helper_functions() {
-    let base = temp_dir("select_interval_helpers");
-    let txns = TransactionManager::new_durable(&base).unwrap();
-
-    assert_query_rows(
-        run_sql(
-            &base,
-            &txns,
-            INVALID_TRANSACTION_ID,
-            "select make_interval(years := 1, months := -1, weeks := 5, days := -7, hours := 25, mins := -180), justify_hours(interval '6 months 3 days 52 hours 3 minutes 2 seconds'), justify_days(interval '6 months 36 days 5 hours 4 minutes 3 seconds'), interval_hash(interval '30 days') = interval_hash(interval '1 month')",
-        )
-        .unwrap(),
-        vec![vec![
-            Value::Text("@ 11 mons 28 days 22 hours".into()),
-            Value::Text("@ 6 mons 5 days 4 hours 3 mins 2 secs".into()),
-            Value::Text("@ 7 mons 6 days 5 hours 4 mins 3 secs".into()),
-            Value::Bool(true),
-        ]],
-    );
-}
-
-#[test]
 fn pg_input_error_info_supports_oidvector_tokens() {
     let valid = expr_casts::soft_input_error_info(" 1 2  4 ", "oidvector").unwrap();
     assert!(valid.is_none());
@@ -4633,6 +4611,23 @@ fn interval_array_literals_preserve_interval_array_values() {
             ])
             .with_element_type_oid(crate::include::catalog::INTERVAL_TYPE_OID),
         )]],
+    );
+}
+
+#[test]
+fn interval_text_cast_canonicalizes_interval_value() {
+    let base = temp_dir("interval_text_cast");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select '1 day'::interval",
+        )
+        .unwrap(),
+        vec![vec![Value::Text("@ 1 day".into())]],
     );
 }
 

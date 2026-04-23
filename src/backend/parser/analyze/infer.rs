@@ -672,53 +672,6 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 },
                 Some(BuiltinScalarFunction::IsFinite) => SqlType::new(SqlTypeKind::Bool),
                 Some(BuiltinScalarFunction::MakeDate) => SqlType::new(SqlTypeKind::Date),
-                Some(BuiltinScalarFunction::MakeInterval)
-                | Some(BuiltinScalarFunction::JustifyHours)
-                | Some(BuiltinScalarFunction::JustifyDays)
-                | Some(BuiltinScalarFunction::JustifyInterval) => {
-                    SqlType::new(SqlTypeKind::Interval)
-                }
-                Some(BuiltinScalarFunction::IntervalHash) => SqlType::new(SqlTypeKind::Int4),
-                Some(BuiltinScalarFunction::DateBin) => match args.args().get(1).map(|arg| {
-                    infer_sql_expr_type_with_ctes(
-                        &arg.value,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    )
-                }) {
-                    Some(SqlType {
-                        kind: SqlTypeKind::TimestampTz,
-                        ..
-                    }) => SqlType::new(SqlTypeKind::TimestampTz),
-                    _ => SqlType::new(SqlTypeKind::Timestamp),
-                },
-                Some(BuiltinScalarFunction::Timezone) => match args.args().get(1).map(|arg| {
-                    infer_sql_expr_type_with_ctes(
-                        &arg.value,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    )
-                }) {
-                    Some(SqlType {
-                        kind: SqlTypeKind::Timestamp,
-                        ..
-                    }) => SqlType::new(SqlTypeKind::TimestampTz),
-                    Some(SqlType {
-                        kind: SqlTypeKind::TimestampTz,
-                        ..
-                    }) => SqlType::new(SqlTypeKind::Timestamp),
-                    Some(SqlType {
-                        kind: SqlTypeKind::Time | SqlTypeKind::TimeTz,
-                        ..
-                    }) => SqlType::new(SqlTypeKind::TimeTz),
-                    _ => SqlType::new(SqlTypeKind::TimestampTz),
-                },
                 Some(BuiltinScalarFunction::ToJson)
                 | Some(BuiltinScalarFunction::ArrayToJson)
                 | Some(BuiltinScalarFunction::JsonBuildArray)
