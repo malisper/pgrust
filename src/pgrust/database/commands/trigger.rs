@@ -53,9 +53,9 @@ impl Database {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let relation_name = format_trigger_relation_name(stmt);
-        let relation = catalog
-            .lookup_any_relation(&relation_name)
-            .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(relation_name.clone())))?;
+        let relation = catalog.lookup_any_relation(&relation_name).ok_or_else(|| {
+            ExecError::Parse(ParseError::TableDoesNotExist(relation_name.clone()))
+        })?;
         ensure_relation_owner(self, client_id, &relation, &relation_name)?;
 
         let trigger_name = stmt.trigger_name.to_ascii_lowercase();
@@ -67,7 +67,13 @@ impl Database {
             stmt,
             configured_search_path,
         )?;
-        validate_trigger_stmt(stmt, &relation_name, relation.relkind, &relation.desc, &catalog)?;
+        validate_trigger_stmt(
+            stmt,
+            &relation_name,
+            relation.relkind,
+            &relation.desc,
+            &catalog,
+        )?;
 
         let tgattr = trigger_update_attnums(stmt, &relation.desc)?;
         let tgtype = trigger_type_bits(stmt);
@@ -457,14 +463,22 @@ fn validate_trigger_stmt(
             "Views cannot have row-level BEFORE or AFTER triggers.",
         ));
     }
-    if relkind == 'v' && stmt.events.iter().any(|event| event.event == TriggerEvent::Truncate) {
+    if relkind == 'v'
+        && stmt
+            .events
+            .iter()
+            .any(|event| event.event == TriggerEvent::Truncate)
+    {
         return Err(wrong_object_type_error(
             relation_name,
             "view",
             "Views cannot have TRUNCATE triggers.",
         ));
     }
-    if stmt.events.iter().any(|event| event.event == TriggerEvent::Truncate)
+    if stmt
+        .events
+        .iter()
+        .any(|event| event.event == TriggerEvent::Truncate)
         && stmt.level == TriggerLevel::Row
     {
         return Err(ExecError::DetailedError {
@@ -520,7 +534,11 @@ fn validate_trigger_stmt(
                 sqlstate: "42P17",
             });
         }
-        if stmt.events.iter().any(|event| event.event == TriggerEvent::Truncate) {
+        if stmt
+            .events
+            .iter()
+            .any(|event| event.event == TriggerEvent::Truncate)
+        {
             return Err(feature_not_supported_error(
                 "TRUNCATE triggers with transition tables are not supported",
             ));
