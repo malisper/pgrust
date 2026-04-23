@@ -12,6 +12,7 @@ fn array_subscript_element_type(array_type: SqlType) -> SqlType {
     }
     match array_type.kind {
         SqlTypeKind::Jsonb => SqlType::new(SqlTypeKind::Jsonb),
+        SqlTypeKind::Point => SqlType::new(SqlTypeKind::Float8),
         SqlTypeKind::Int2Vector => SqlType::new(SqlTypeKind::Int2),
         SqlTypeKind::OidVector => SqlType::new(SqlTypeKind::Oid),
         _ => array_type.element_type(),
