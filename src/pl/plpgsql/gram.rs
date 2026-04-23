@@ -979,6 +979,40 @@ mod tests {
     }
 
     #[test]
+    fn parse_raise_accepts_dollar_quoted_message() {
+        let block = parse_block(
+            r#"
+            begin
+                raise exception $$Patchfield "%" does not exist$$, ps.pfname;
+                raise exception $q$system "%" does not exist$q$, new.sysname;
+            end
+            "#,
+        )
+        .unwrap();
+
+        let Stmt::Raise {
+            level,
+            message,
+            params,
+        } = &block.statements[0]
+        else {
+            panic!("expected first RAISE statement");
+        };
+        assert!(matches!(level, RaiseLevel::Exception));
+        assert_eq!(message, "Patchfield \"%\" does not exist");
+        assert_eq!(params, &vec!["ps.pfname".to_string()]);
+
+        let Stmt::Raise {
+            message, params, ..
+        } = &block.statements[1]
+        else {
+            panic!("expected second RAISE statement");
+        };
+        assert_eq!(message, "system \"%\" does not exist");
+        assert_eq!(params, &vec!["new.sysname".to_string()]);
+    }
+
+    #[test]
     fn parse_while_stmt() {
         let block = parse_block(
             "
