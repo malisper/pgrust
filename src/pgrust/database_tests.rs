@@ -6411,6 +6411,59 @@ fn comment_on_aggregate_uses_pg_proc_description_rows() {
 }
 
 #[test]
+fn comment_on_function_uses_pg_proc_description_rows() {
+    let base = temp_dir("comment_on_function");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function add_one(x int4) returns int4 language plpgsql as $$ begin return x + 1; end $$",
+    )
+    .unwrap();
+
+    db.execute(1, "comment on function add_one(int4) is 'increments input'")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            &format!(
+                "select d.description \
+                 from pg_description d \
+                 join pg_proc p on p.oid = d.objoid \
+                 where p.proname = 'add_one' \
+                   and p.prokind = 'f' \
+                   and d.classoid = {} \
+                   and d.objsubid = 0",
+                PG_PROC_RELATION_OID
+            )
+        ),
+        vec![vec![Value::Text("increments input".into())]]
+    );
+
+    db.execute(1, "comment on function add_one(int4) is null")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            &format!(
+                "select count(*) \
+                 from pg_description d \
+                 join pg_proc p on p.oid = d.objoid \
+                 where p.proname = 'add_one' \
+                   and p.prokind = 'f' \
+                   and d.classoid = {} \
+                   and d.objsubid = 0",
+                PG_PROC_RELATION_OID
+            )
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
 fn drop_aggregate_removes_proc_and_aggregate_rows() {
     let base = temp_dir("drop_aggregate_rows");
     let db = Database::open(&base, 16).unwrap();
