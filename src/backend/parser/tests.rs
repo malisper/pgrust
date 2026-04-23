@@ -8,16 +8,18 @@ use crate::include::catalog::{
     RECORD_TYPE_OID, bootstrap_pg_proc_rows, sort_pg_rewrite_rows,
 };
 use crate::include::nodes::parsenodes::{
-    AggregateArgType, AggregateSignatureKind, AliasColumnDef, AliasColumnSpec, ColumnConstraint,
-    CommentOnAggregateStatement, CommentOnFunctionStatement, CompositeTypeAttributeDef,
-    CreateAggregateStatement, CreateCompositeTypeStatement, CreateTriggerStatement,
-    CreateTypeStatement, DropAggregateStatement, DropTriggerStatement, DropTypeStatement,
-    ForeignKeyAction, ForeignKeyMatchType, IndexColumnDef, InsertSource, InsertStatement,
-    JoinTreeNode, PartitionStrategy, PublicationObjectSpec, PublicationOption,
-    PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey,
-    RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement,
-    SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel,
-    TriggerReferencingSpec, TriggerTiming, ViewCheckOption,
+    AggregateArgType, AggregateSignatureKind, AliasColumnDef, AliasColumnSpec,
+    AlterTableTriggerMode, AlterTableTriggerStateStatement, AlterTableTriggerTarget,
+    AlterTriggerRenameStatement, ColumnConstraint, CommentOnAggregateStatement,
+    CommentOnFunctionStatement, CompositeTypeAttributeDef, CreateAggregateStatement,
+    CreateCompositeTypeStatement, CreateTriggerStatement, CreateTypeStatement,
+    DropAggregateStatement, DropTriggerStatement, DropTypeStatement, ForeignKeyAction,
+    ForeignKeyMatchType, IndexColumnDef, InsertSource, InsertStatement, JoinTreeNode,
+    PartitionStrategy, PublicationObjectSpec, PublicationOption, PublicationSchemaName,
+    RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum,
+    RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint,
+    TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerReferencingSpec, TriggerTiming,
+    ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -3666,6 +3668,148 @@ fn parse_create_trigger_statement_with_when_and_update_of() {
 }
 
 #[test]
+fn parse_create_instead_of_trigger_statement() {
+    let stmt = parse_statement(
+        "create trigger audit_row instead of insert or update on public.people_view for each row execute function public.audit_people()",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateTrigger(CreateTriggerStatement {
+            replace_existing: false,
+            trigger_name: "audit_row".into(),
+            schema_name: Some("public".into()),
+            table_name: "people_view".into(),
+            timing: TriggerTiming::Instead,
+            level: TriggerLevel::Row,
+            events: vec![
+                TriggerEventSpec {
+                    event: TriggerEvent::Insert,
+                    update_columns: Vec::new(),
+                },
+                TriggerEventSpec {
+                    event: TriggerEvent::Update,
+                    update_columns: Vec::new(),
+                },
+            ],
+            referencing: Vec::new(),
+            when_clause_sql: None,
+            function_schema_name: Some("public".into()),
+            function_name: "audit_people".into(),
+            func_args: Vec::new(),
+        })
+    );
+}
+
+#[test]
+fn parse_alter_table_disable_trigger_user() {
+    let stmt = parse_statement("alter table only public.people disable trigger user").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableTriggerState(AlterTableTriggerStateStatement {
+            if_exists: false,
+            only: true,
+            table_name: "public.people".into(),
+            target: AlterTableTriggerTarget::User,
+            mode: AlterTableTriggerMode::Disable,
+        })
+    );
+}
+
+#[test]
+fn parse_alter_table_disable_trigger_all() {
+    let stmt = parse_statement("alter table people disable trigger all").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableTriggerState(AlterTableTriggerStateStatement {
+            if_exists: false,
+            only: false,
+            table_name: "people".into(),
+            target: AlterTableTriggerTarget::All,
+            mode: AlterTableTriggerMode::Disable,
+        })
+    );
+}
+
+#[test]
+fn parse_alter_table_enable_always_trigger_name() {
+    let stmt =
+        parse_statement("alter table if exists people enable always trigger audit_row").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableTriggerState(AlterTableTriggerStateStatement {
+            if_exists: true,
+            only: false,
+            table_name: "people".into(),
+            target: AlterTableTriggerTarget::Named("audit_row".into()),
+            mode: AlterTableTriggerMode::EnableAlways,
+        })
+    );
+}
+
+#[test]
+fn parse_alter_trigger_rename_statement() {
+    let stmt =
+        parse_statement("alter trigger audit_row on public.people rename to audit_row_v2").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTriggerRename(AlterTriggerRenameStatement {
+            trigger_name: "audit_row".into(),
+            schema_name: Some("public".into()),
+            table_name: "people".into(),
+            new_trigger_name: "audit_row_v2".into(),
+        })
+    );
+}
+
+#[test]
+fn parse_create_trigger_rejects_duplicate_events() {
+    let err = parse_statement(
+        "create trigger dup_evt before insert or insert on people execute function audit_people()",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::DetailedError { message, sqlstate, .. }
+            if message == "duplicate trigger events specified at or near \"ON\""
+                && sqlstate == "42601"
+    ));
+}
+
+#[test]
+fn parse_create_trigger_rejects_insert_of_column_list() {
+    let err = parse_statement(
+        "create trigger bad_insert before insert of name on people execute function audit_people()",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::UnexpectedToken { actual, .. }
+            if actual == "syntax error at or near \"OF\""
+    ));
+}
+
+#[test]
+fn parse_enable_replica_trigger_requires_name() {
+    let err = parse_statement("alter table people enable replica trigger all").unwrap_err();
+    assert!(
+        matches!(err, ParseError::UnexpectedToken { expected, .. } if expected == "trigger name")
+    );
+}
+
+#[test]
+fn parse_set_transaction_isolation_level_serializable() {
+    assert_eq!(
+        parse_statement("set transaction isolation level serializable").unwrap(),
+        Statement::Set(SetStatement {
+            name: "transaction_isolation".into(),
+            value: "serializable".into(),
+            is_local: true,
+        })
+    );
+}
+
+#[test]
 fn parse_drop_trigger_statement_on_table() {
     let stmt =
         parse_statement("drop trigger if exists audit_row on public.people cascade").unwrap();
@@ -3714,14 +3858,22 @@ fn parse_create_trigger_statement_with_referencing_and_truncate() {
 }
 
 #[test]
-fn parse_create_trigger_rejects_duplicate_events() {
-    let err = parse_statement(
-        "create trigger bad_trigger before update or update of a on people execute function bad()",
+fn parse_create_trigger_statement_with_truncate_event() {
+    let stmt = parse_statement(
+        "create trigger bad_truncate before truncate on people for each statement execute function bad()",
     )
-    .unwrap_err();
+    .unwrap();
     assert!(matches!(
-        err,
-        ParseError::DetailedError { message, .. } if message == "duplicate trigger events specified"
+        stmt,
+        Statement::CreateTrigger(CreateTriggerStatement {
+            timing: TriggerTiming::Before,
+            level: TriggerLevel::Statement,
+            events,
+            ..
+        }) if events == vec![TriggerEventSpec {
+            event: TriggerEvent::Truncate,
+            update_columns: Vec::new(),
+        }]
     ));
 }
 
@@ -5602,6 +5754,30 @@ fn build_plan_dispatches_jsonb_populate_record_as_builtin() {
                 if func.implementation
                     == crate::include::nodes::primnodes::ScalarFunctionImpl::Builtin(
                         crate::include::nodes::primnodes::BuiltinScalarFunction::JsonbPopulateRecord
+                    )
+        ),
+        "expr: {:#?}",
+        targets[0].expr
+    );
+}
+
+#[test]
+fn build_plan_binds_pg_trigger_depth_as_builtin() {
+    let plan = build_plan(
+        &parse_select("select pg_trigger_depth()").unwrap(),
+        &catalog(),
+    )
+    .unwrap();
+    let Plan::Projection { targets, .. } = plan else {
+        panic!("expected projection plan");
+    };
+    assert!(
+        matches!(
+            &targets[0].expr,
+            Expr::Func(func)
+                if func.implementation
+                    == crate::include::nodes::primnodes::ScalarFunctionImpl::Builtin(
+                        crate::include::nodes::primnodes::BuiltinScalarFunction::PgTriggerDepth
                     )
         ),
         "expr: {:#?}",

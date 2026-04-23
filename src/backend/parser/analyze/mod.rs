@@ -1416,7 +1416,7 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
             scope_columns.push(scope::ScopeColumn {
                 output_name: column.name.clone(),
                 hidden: column.hidden,
-                qualified_only: false,
+                qualified_only: true,
                 relation_names: vec![relation_name.clone()],
                 hidden_invalid_relation_names: Vec::new(),
                 hidden_missing_relation_names: Vec::new(),

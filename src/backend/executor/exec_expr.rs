@@ -2,6 +2,7 @@ use num_bigint::{BigInt, Sign};
 use num_traits::ToPrimitive;
 
 use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
+use crate::backend::utils::trigger::format_trigger_definition;
 use crate::include::nodes::primnodes::expr_sql_type_hint;
 use rand::{Rng, RngCore};
 
@@ -1387,6 +1388,36 @@ fn eval_pg_get_viewdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value,
     let definition =
         format_view_definition(relation_oid, &relation.desc, catalog).map_err(ExecError::Parse)?;
     Ok(Value::Text(definition.into()))
+}
+
+fn eval_pg_get_triggerdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let catalog = executor_catalog(ctx)?;
+    let (trigger_oid, pretty) = match values {
+        [Value::Null] | [Value::Null, _] | [_, Value::Null] => return Ok(Value::Null),
+        [trigger_oid] => (oid_arg_to_u32(trigger_oid, "pg_get_triggerdef")?, false),
+        [trigger_oid, pretty] => (
+            oid_arg_to_u32(trigger_oid, "pg_get_triggerdef")?,
+            matches!(pretty, Value::Bool(true)),
+        ),
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "pg_get_triggerdef(oid [, pretty])",
+                actual: format!("PgGetTriggerDef({} args)", values.len()),
+            }));
+        }
+    };
+    let Some(trigger_row) = catalog
+        .relcache()
+        .entries()
+        .flat_map(|(_, entry)| catalog.trigger_rows_for_relation(entry.relation_oid))
+        .find(|row| row.oid == trigger_oid)
+    else {
+        return Ok(Value::Null);
+    };
+    let Some(formatted) = format_trigger_definition(catalog, &trigger_row, pretty) else {
+        return Ok(Value::Null);
+    };
+    Ok(Value::Text(formatted.definition.into()))
 }
 
 fn current_slot_raw_attr_bytes<'a>(
@@ -3961,6 +3992,8 @@ fn eval_builtin_function(
         BuiltinScalarFunction::PgDescribeObject => eval_pg_describe_object(&values, ctx),
         BuiltinScalarFunction::PgGetExpr => eval_pg_get_expr(&values),
         BuiltinScalarFunction::PgGetViewDef => eval_pg_get_viewdef(&values, ctx),
+        BuiltinScalarFunction::PgGetTriggerDef => eval_pg_get_triggerdef(&values, ctx),
+        BuiltinScalarFunction::PgTriggerDepth => Ok(Value::Int32(ctx.trigger_depth as i32)),
         BuiltinScalarFunction::PgRelationIsPublishable => {
             eval_pg_relation_is_publishable(&values, ctx)
         }

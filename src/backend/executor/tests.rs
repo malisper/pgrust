@@ -635,6 +635,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         active_role_oid: None,
+        session_replication_role: Default::default(),
         statement_lock_scope_id: None,
         transaction_lock_scope_id: None,
         next_command_id: 0,
@@ -652,6 +653,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         cte_producers: std::collections::HashMap::new(),
         recursive_worktables: std::collections::HashMap::new(),
         deferred_foreign_keys: None,
+        trigger_depth: 0,
     }
 }
 
@@ -697,6 +699,7 @@ fn run_plan(
         session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         active_role_oid: None,
+        session_replication_role: Default::default(),
         statement_lock_scope_id: None,
         transaction_lock_scope_id: None,
         next_command_id: 0,
@@ -714,6 +717,7 @@ fn run_plan(
         cte_producers: std::collections::HashMap::new(),
         recursive_worktables: std::collections::HashMap::new(),
         deferred_foreign_keys: None,
+        trigger_depth: 0,
     };
 
     let names = state.column_names().to_vec();
@@ -797,6 +801,7 @@ fn run_sql_with_catalog(
             session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             active_role_oid: None,
+            session_replication_role: Default::default(),
             statement_lock_scope_id: None,
             transaction_lock_scope_id: None,
             next_command_id: 0,
@@ -814,6 +819,7 @@ fn run_sql_with_catalog(
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
             deferred_foreign_keys: None,
+            trigger_depth: 0,
         };
         execute_sql(&sql, &mut catalog, &mut ctx, xid)
     })
@@ -7528,6 +7534,7 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         active_role_oid: None,
+        session_replication_role: Default::default(),
         statement_lock_scope_id: None,
         transaction_lock_scope_id: None,
         next_command_id: 0,
@@ -7545,6 +7552,7 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         cte_producers: std::collections::HashMap::new(),
         recursive_worktables: std::collections::HashMap::new(),
         deferred_foreign_keys: None,
+        trigger_depth: 0,
     };
 
     let prepared = crate::backend::parser::bind_insert_prepared(
@@ -17036,6 +17044,7 @@ fn large_object_metadata_tracks_create_and_unlink() {
             session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             active_role_oid: None,
+            session_replication_role: Default::default(),
             statement_lock_scope_id: None,
             transaction_lock_scope_id: None,
             next_command_id: 0,
@@ -17053,6 +17062,7 @@ fn large_object_metadata_tracks_create_and_unlink() {
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
             deferred_foreign_keys: None,
+            trigger_depth: 0,
         };
         execute_sql(sql, &mut catalog, &mut ctx, INVALID_TRANSACTION_ID)
     };

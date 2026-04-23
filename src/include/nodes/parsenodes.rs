@@ -335,8 +335,10 @@ pub enum Statement {
     AlterTableInherit(AlterTableInheritStatement),
     AlterTableNoInherit(AlterTableNoInheritStatement),
     AlterTableAttachPartition(AlterTableAttachPartitionStatement),
+    AlterTableTriggerState(AlterTableTriggerStateStatement),
     AlterPublication(AlterPublicationStatement),
     AlterOperator(AlterOperatorStatement),
+    AlterTriggerRename(AlterTriggerRenameStatement),
     CommentOnTable(CommentOnTableStatement),
     CommentOnIndex(CommentOnIndexStatement),
     CommentOnConstraint(CommentOnConstraintStatement),
@@ -620,7 +622,7 @@ pub struct CreateAggregateStatement {
 pub enum TriggerTiming {
     Before,
     After,
-    InsteadOf,
+    Instead,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -629,7 +631,7 @@ pub enum TriggerLevel {
     Statement,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TriggerEvent {
     Insert,
     Update,
@@ -1738,6 +1740,38 @@ pub struct AlterTableAttachPartitionStatement {
     pub parent_table: String,
     pub partition_table: String,
     pub bound: RawPartitionBoundSpec,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterTableTriggerTarget {
+    Named(String),
+    All,
+    User,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlterTableTriggerMode {
+    Disable,
+    EnableOrigin,
+    EnableReplica,
+    EnableAlways,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableTriggerStateStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub target: AlterTableTriggerTarget,
+    pub mode: AlterTableTriggerMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTriggerRenameStatement {
+    pub trigger_name: String,
+    pub schema_name: Option<String>,
+    pub table_name: String,
+    pub new_trigger_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

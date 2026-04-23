@@ -1,12 +1,15 @@
 use crate::backend::executor::{
-    ExecError, ExecutorContext, Expr, RelationDesc, TupleSlot, Value, eval_expr,
+    ExecError, ExecutorContext, Expr, RelationDesc, SessionReplicationRole, TupleSlot, Value,
+    eval_expr,
 };
 use crate::backend::parser::{
-    SqlTypeKind, TriggerLevel, TriggerTiming, bind_scalar_expr_in_named_relation_scope, parse_expr,
+    CatalogLookup, RawWindowFrameBound, SqlCallArgs, SqlExpr, SqlType, SqlTypeKind, TriggerLevel,
+    TriggerTiming, bind_scalar_expr_in_named_relation_scope, parse_expr,
 };
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
-    PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID, PUBLIC_NAMESPACE_OID, PgTriggerRow,
+    PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID, PG_TOAST_NAMESPACE_OID,
+    PUBLIC_NAMESPACE_OID, PgTriggerRow,
 };
 use crate::pl::plpgsql::{
     TriggerCallContext, TriggerFunctionResult, TriggerOperation,
@@ -18,11 +21,35 @@ const TRIGGER_TYPE_BEFORE: i16 = 1 << 1;
 const TRIGGER_TYPE_INSERT: i16 = 1 << 2;
 const TRIGGER_TYPE_DELETE: i16 = 1 << 3;
 const TRIGGER_TYPE_UPDATE: i16 = 1 << 4;
+const TRIGGER_TYPE_TRUNCATE: i16 = 1 << 5;
+const TRIGGER_TYPE_INSTEAD: i16 = 1 << 6;
+
+const TRIGGER_DISABLED: char = 'D';
+const TRIGGER_ENABLED_ORIGIN: char = 'O';
+const TRIGGER_ENABLED_REPLICA: char = 'R';
+const TRIGGER_ENABLED_ALWAYS: char = 'A';
+
+const TRIGGER_NEW_TABLEOID_COLUMN: &str = "__trigger_new_tableoid";
+const TRIGGER_OLD_TABLEOID_COLUMN: &str = "__trigger_old_tableoid";
+const TRIGGER_NEW_CTID_COLUMN: &str = "__trigger_new_ctid";
+const TRIGGER_OLD_CTID_COLUMN: &str = "__trigger_old_ctid";
+
+#[derive(Debug, Clone, Copy)]
+enum BuiltinTriggerFunction {
+    SuppressRedundantUpdates,
+}
+
+#[derive(Debug, Clone)]
+enum LoadedTriggerFunction {
+    Plpgsql(u32),
+    Builtin(BuiltinTriggerFunction),
+}
 
 #[derive(Debug, Clone)]
 struct LoadedTrigger {
     row: PgTriggerRow,
     when_expr: Option<Expr>,
+    function: LoadedTriggerFunction,
 }
 
 #[derive(Debug, Clone)]
@@ -43,17 +70,23 @@ impl RuntimeTriggers {
         relation_desc: &RelationDesc,
         event: TriggerOperation,
         modified_attnums: &[i16],
+        session_replication_role: SessionReplicationRole,
     ) -> Result<Self, ExecError> {
         let (table_name, table_schema) =
             resolve_relation_names(catalog, relation_oid, relation_name);
         let mut triggers = catalog
             .trigger_rows_for_relation(relation_oid)
             .into_iter()
-            .filter(|row| row.tgenabled == 'O')
+            .filter(|row| trigger_is_enabled_for_session(row, session_replication_role))
             .filter(|row| trigger_matches_event(row, event, modified_attnums))
             .map(|row| {
+                let function = load_trigger_function(catalog, &row)?;
                 let when_expr = compile_when_expr(catalog, relation_desc, event, &row)?;
-                Ok(LoadedTrigger { row, when_expr })
+                Ok(LoadedTrigger {
+                    row,
+                    when_expr,
+                    function,
+                })
             })
             .collect::<Result<Vec<_>, ExecError>>()?;
         triggers.sort_by(|left, right| left.row.tgname.cmp(&right.row.tgname));
@@ -73,6 +106,12 @@ impl RuntimeTriggers {
 
     pub(crate) fn after_statement(&self, ctx: &mut ExecutorContext) -> Result<(), ExecError> {
         self.fire_statement_triggers(false, ctx)
+    }
+
+    pub(crate) fn has_instead_row_triggers(&self) -> bool {
+        self.triggers.iter().any(|trigger| {
+            trigger_is_instead(trigger.row.tgtype) && trigger_is_row(trigger.row.tgtype)
+        })
     }
 
     pub(crate) fn before_row_insert(
@@ -101,6 +140,26 @@ impl RuntimeTriggers {
         ctx: &mut ExecutorContext,
     ) -> Result<(), ExecError> {
         self.fire_after_row(None, Some(new_row), ctx)
+    }
+
+    pub(crate) fn instead_row_insert(
+        &self,
+        mut new_row: Vec<Value>,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<Vec<Value>>, ExecError> {
+        for trigger in self.triggers.iter().filter(|trigger| {
+            trigger_is_instead(trigger.row.tgtype) && trigger_is_row(trigger.row.tgtype)
+        }) {
+            if !self.when_passes(trigger, None, Some(&new_row), ctx)? {
+                continue;
+            }
+            match self.execute_trigger(trigger, None, Some(&new_row), ctx)? {
+                TriggerFunctionResult::SkipRow | TriggerFunctionResult::NoValue => return Ok(None),
+                TriggerFunctionResult::ReturnNew(values)
+                | TriggerFunctionResult::ReturnOld(values) => new_row = values,
+            }
+        }
+        Ok(Some(new_row))
     }
 
     pub(crate) fn before_row_update(
@@ -133,6 +192,27 @@ impl RuntimeTriggers {
         self.fire_after_row(Some(old_row), Some(new_row), ctx)
     }
 
+    pub(crate) fn instead_row_update(
+        &self,
+        old_row: &[Value],
+        mut new_row: Vec<Value>,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<Vec<Value>>, ExecError> {
+        for trigger in self.triggers.iter().filter(|trigger| {
+            trigger_is_instead(trigger.row.tgtype) && trigger_is_row(trigger.row.tgtype)
+        }) {
+            if !self.when_passes(trigger, Some(old_row), Some(&new_row), ctx)? {
+                continue;
+            }
+            match self.execute_trigger(trigger, Some(old_row), Some(&new_row), ctx)? {
+                TriggerFunctionResult::SkipRow | TriggerFunctionResult::NoValue => return Ok(None),
+                TriggerFunctionResult::ReturnNew(values)
+                | TriggerFunctionResult::ReturnOld(values) => new_row = values,
+            }
+        }
+        Ok(Some(new_row))
+    }
+
     pub(crate) fn before_row_delete(
         &self,
         old_row: &[Value],
@@ -162,6 +242,26 @@ impl RuntimeTriggers {
         self.fire_after_row(Some(old_row), None, ctx)
     }
 
+    pub(crate) fn instead_row_delete(
+        &self,
+        mut old_row: Vec<Value>,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<Vec<Value>>, ExecError> {
+        for trigger in self.triggers.iter().filter(|trigger| {
+            trigger_is_instead(trigger.row.tgtype) && trigger_is_row(trigger.row.tgtype)
+        }) {
+            if !self.when_passes(trigger, Some(&old_row), None, ctx)? {
+                continue;
+            }
+            match self.execute_trigger(trigger, Some(&old_row), None, ctx)? {
+                TriggerFunctionResult::SkipRow | TriggerFunctionResult::NoValue => return Ok(None),
+                TriggerFunctionResult::ReturnNew(values)
+                | TriggerFunctionResult::ReturnOld(values) => old_row = values,
+            }
+        }
+        Ok(Some(old_row))
+    }
+
     fn fire_statement_triggers(
         &self,
         before: bool,
@@ -185,7 +285,9 @@ impl RuntimeTriggers {
         ctx: &mut ExecutorContext,
     ) -> Result<(), ExecError> {
         for trigger in self.triggers.iter().filter(|trigger| {
-            !trigger_is_before(trigger.row.tgtype) && trigger_is_row(trigger.row.tgtype)
+            !trigger_is_before(trigger.row.tgtype)
+                && !trigger_is_instead(trigger.row.tgtype)
+                && trigger_is_row(trigger.row.tgtype)
         }) {
             if !self.when_passes(trigger, old_row, new_row, ctx)? {
                 continue;
@@ -206,6 +308,7 @@ impl RuntimeTriggers {
             return Ok(true);
         };
         let mut slot = TupleSlot::virtual_row(self.when_tuple_values(trigger, old_row, new_row));
+        slot.table_oid = Some(self.relation_oid);
         match eval_expr(expr, &mut slot, ctx)? {
             Value::Bool(true) => Ok(true),
             Value::Bool(false) | Value::Null => Ok(false),
@@ -222,19 +325,20 @@ impl RuntimeTriggers {
         if !trigger_is_row(trigger.row.tgtype) {
             return Vec::new();
         }
+        let mut values = trigger_when_local_values(self.relation_oid, self.event);
         match self.event {
             TriggerOperation::Insert => {
-                clone_or_null_row(new_row, self.relation_desc.columns.len())
+                values.extend(clone_or_null_row(new_row, self.relation_desc.columns.len()));
             }
             TriggerOperation::Update => {
-                let mut values = clone_or_null_row(new_row, self.relation_desc.columns.len());
+                values.extend(clone_or_null_row(new_row, self.relation_desc.columns.len()));
                 values.extend(clone_or_null_row(old_row, self.relation_desc.columns.len()));
-                values
             }
             TriggerOperation::Delete => {
-                clone_or_null_row(old_row, self.relation_desc.columns.len())
+                values.extend(clone_or_null_row(old_row, self.relation_desc.columns.len()));
             }
         }
+        values
     }
 
     fn execute_trigger(
@@ -244,31 +348,34 @@ impl RuntimeTriggers {
         new_row: Option<&[Value]>,
         ctx: &mut ExecutorContext,
     ) -> Result<TriggerFunctionResult, ExecError> {
-        execute_user_defined_trigger_function(
-            trigger.row.tgfoid,
-            &TriggerCallContext {
-                relation_desc: self.relation_desc.clone(),
-                relation_oid: self.relation_oid,
-                table_name: self.table_name.clone(),
-                table_schema: self.table_schema.clone(),
-                trigger_name: trigger.row.tgname.clone(),
-                trigger_args: trigger.row.tgargs.clone(),
-                timing: if trigger_is_before(trigger.row.tgtype) {
-                    TriggerTiming::Before
-                } else {
-                    TriggerTiming::After
-                },
-                level: if trigger_is_row(trigger.row.tgtype) {
-                    TriggerLevel::Row
-                } else {
-                    TriggerLevel::Statement
-                },
-                op: self.event,
-                new_row: new_row.map(|row| row.to_vec()),
-                old_row: old_row.map(|row| row.to_vec()),
+        let call = TriggerCallContext {
+            relation_desc: self.relation_desc.clone(),
+            relation_oid: self.relation_oid,
+            table_name: self.table_name.clone(),
+            table_schema: self.table_schema.clone(),
+            trigger_name: trigger.row.tgname.clone(),
+            trigger_args: trigger.row.tgargs.clone(),
+            timing: trigger_timing(trigger.row.tgtype),
+            level: if trigger_is_row(trigger.row.tgtype) {
+                TriggerLevel::Row
+            } else {
+                TriggerLevel::Statement
             },
-            ctx,
-        )
+            op: self.event,
+            new_row: new_row.map(|row| row.to_vec()),
+            old_row: old_row.map(|row| row.to_vec()),
+        };
+        ctx.trigger_depth = ctx.trigger_depth.saturating_add(1);
+        let result = match trigger.function {
+            LoadedTriggerFunction::Plpgsql(proc_oid) => {
+                execute_user_defined_trigger_function(proc_oid, &call, ctx)
+            }
+            LoadedTriggerFunction::Builtin(function) => {
+                execute_builtin_trigger_function(function, &call)
+            }
+        };
+        ctx.trigger_depth = ctx.trigger_depth.saturating_sub(1);
+        result
     }
 }
 
@@ -276,6 +383,66 @@ fn clone_or_null_row(row: Option<&[Value]>, width: usize) -> Vec<Value> {
     match row {
         Some(row) => row.to_vec(),
         None => vec![Value::Null; width],
+    }
+}
+
+fn load_trigger_function(
+    catalog: &VisibleCatalog,
+    row: &PgTriggerRow,
+) -> Result<LoadedTriggerFunction, ExecError> {
+    let proc_row = catalog.proc_row_by_oid(row.tgfoid).ok_or_else(|| {
+        trigger_runtime_error(
+            "trigger function does not exist",
+            Some(format!("missing pg_proc row for oid {}", row.tgfoid)),
+        )
+    })?;
+    if proc_row.prolang == PG_LANGUAGE_INTERNAL_OID {
+        return match proc_row.proname.as_str() {
+            "suppress_redundant_updates_trigger" => Ok(LoadedTriggerFunction::Builtin(
+                BuiltinTriggerFunction::SuppressRedundantUpdates,
+            )),
+            _ => Err(trigger_runtime_error(
+                "unsupported internal trigger function",
+                Some(proc_row.proname),
+            )),
+        };
+    }
+    Ok(LoadedTriggerFunction::Plpgsql(row.tgfoid))
+}
+
+fn execute_builtin_trigger_function(
+    function: BuiltinTriggerFunction,
+    call: &TriggerCallContext,
+) -> Result<TriggerFunctionResult, ExecError> {
+    match function {
+        BuiltinTriggerFunction::SuppressRedundantUpdates => {
+            if call.timing != TriggerTiming::Before
+                || call.level != TriggerLevel::Row
+                || call.op != TriggerOperation::Update
+            {
+                return Err(trigger_runtime_error(
+                    "suppress_redundant_updates_trigger must be fired BEFORE UPDATE FOR EACH ROW",
+                    None,
+                ));
+            }
+            let old_row = call.old_row.as_ref().ok_or_else(|| {
+                trigger_runtime_error(
+                    "suppress_redundant_updates_trigger requires OLD row data",
+                    None,
+                )
+            })?;
+            let new_row = call.new_row.as_ref().ok_or_else(|| {
+                trigger_runtime_error(
+                    "suppress_redundant_updates_trigger requires NEW row data",
+                    None,
+                )
+            })?;
+            if old_row == new_row {
+                Ok(TriggerFunctionResult::NoValue)
+            } else {
+                Ok(TriggerFunctionResult::ReturnNew(new_row.clone()))
+            }
+        }
     }
 }
 
@@ -288,7 +455,8 @@ fn compile_when_expr(
     let Some(sql) = row.tgqual.as_deref() else {
         return Ok(None);
     };
-    let parsed = parse_expr(sql).map_err(ExecError::Parse)?;
+    let mut parsed = parse_expr(sql).map_err(ExecError::Parse)?;
+    rewrite_trigger_system_column_refs(&mut parsed);
     let mut relation_scopes = Vec::new();
     if trigger_is_row(row.tgtype) {
         match event {
@@ -300,9 +468,14 @@ fn compile_when_expr(
             TriggerOperation::Delete => relation_scopes.push(("old", relation_desc)),
         }
     }
-    let (expr, sql_type) =
-        bind_scalar_expr_in_named_relation_scope(&parsed, &relation_scopes, &[], catalog)
-            .map_err(ExecError::Parse)?;
+    let local_columns = trigger_when_local_columns(event);
+    let (expr, sql_type) = bind_scalar_expr_in_named_relation_scope(
+        &parsed,
+        &relation_scopes,
+        &local_columns,
+        catalog,
+    )
+    .map_err(ExecError::Parse)?;
     if sql_type.kind != SqlTypeKind::Bool {
         return Err(trigger_runtime_error(
             "trigger WHEN condition must return type boolean",
@@ -348,6 +521,253 @@ fn namespace_name_for_oid(namespace_oid: u32) -> String {
     }
 }
 
+fn trigger_when_local_columns(event: TriggerOperation) -> Vec<(String, SqlType)> {
+    match event {
+        TriggerOperation::Insert => vec![
+            (
+                TRIGGER_NEW_TABLEOID_COLUMN.into(),
+                SqlType::new(SqlTypeKind::Oid),
+            ),
+            (
+                TRIGGER_NEW_CTID_COLUMN.into(),
+                SqlType::new(SqlTypeKind::Tid),
+            ),
+        ],
+        TriggerOperation::Update => vec![
+            (
+                TRIGGER_NEW_TABLEOID_COLUMN.into(),
+                SqlType::new(SqlTypeKind::Oid),
+            ),
+            (
+                TRIGGER_NEW_CTID_COLUMN.into(),
+                SqlType::new(SqlTypeKind::Tid),
+            ),
+            (
+                TRIGGER_OLD_TABLEOID_COLUMN.into(),
+                SqlType::new(SqlTypeKind::Oid),
+            ),
+            (
+                TRIGGER_OLD_CTID_COLUMN.into(),
+                SqlType::new(SqlTypeKind::Tid),
+            ),
+        ],
+        TriggerOperation::Delete => vec![
+            (
+                TRIGGER_OLD_TABLEOID_COLUMN.into(),
+                SqlType::new(SqlTypeKind::Oid),
+            ),
+            (
+                TRIGGER_OLD_CTID_COLUMN.into(),
+                SqlType::new(SqlTypeKind::Tid),
+            ),
+        ],
+    }
+}
+
+fn trigger_when_local_values(relation_oid: u32, event: TriggerOperation) -> Vec<Value> {
+    let tableoid = Value::Int64(i64::from(relation_oid));
+    match event {
+        TriggerOperation::Insert => vec![tableoid, Value::Null],
+        TriggerOperation::Update => vec![tableoid.clone(), Value::Null, tableoid, Value::Null],
+        TriggerOperation::Delete => vec![tableoid, Value::Null],
+    }
+}
+
+fn rewrite_trigger_system_column_refs(expr: &mut SqlExpr) {
+    match expr {
+        SqlExpr::Column(name) => {
+            let lowered = name.to_ascii_lowercase();
+            if lowered == "new.tableoid" {
+                *name = TRIGGER_NEW_TABLEOID_COLUMN.into();
+            } else if lowered == "old.tableoid" {
+                *name = TRIGGER_OLD_TABLEOID_COLUMN.into();
+            } else if lowered == "new.ctid" {
+                *name = TRIGGER_NEW_CTID_COLUMN.into();
+            } else if lowered == "old.ctid" {
+                *name = TRIGGER_OLD_CTID_COLUMN.into();
+            }
+        }
+        SqlExpr::Add(left, right)
+        | SqlExpr::Sub(left, right)
+        | SqlExpr::BitAnd(left, right)
+        | SqlExpr::BitOr(left, right)
+        | SqlExpr::BitXor(left, right)
+        | SqlExpr::Shl(left, right)
+        | SqlExpr::Shr(left, right)
+        | SqlExpr::Mul(left, right)
+        | SqlExpr::Div(left, right)
+        | SqlExpr::Mod(left, right)
+        | SqlExpr::Concat(left, right)
+        | SqlExpr::Eq(left, right)
+        | SqlExpr::NotEq(left, right)
+        | SqlExpr::Lt(left, right)
+        | SqlExpr::LtEq(left, right)
+        | SqlExpr::Gt(left, right)
+        | SqlExpr::GtEq(left, right)
+        | SqlExpr::RegexMatch(left, right)
+        | SqlExpr::And(left, right)
+        | SqlExpr::Or(left, right)
+        | SqlExpr::IsDistinctFrom(left, right)
+        | SqlExpr::IsNotDistinctFrom(left, right)
+        | SqlExpr::ArrayOverlap(left, right)
+        | SqlExpr::ArrayContains(left, right)
+        | SqlExpr::ArrayContained(left, right)
+        | SqlExpr::JsonbContains(left, right)
+        | SqlExpr::JsonbContained(left, right)
+        | SqlExpr::JsonbExists(left, right)
+        | SqlExpr::JsonbExistsAny(left, right)
+        | SqlExpr::JsonbExistsAll(left, right)
+        | SqlExpr::JsonbPathExists(left, right)
+        | SqlExpr::JsonbPathMatch(left, right)
+        | SqlExpr::JsonGet(left, right)
+        | SqlExpr::JsonGetText(left, right)
+        | SqlExpr::JsonPath(left, right)
+        | SqlExpr::JsonPathText(left, right) => {
+            rewrite_trigger_system_column_refs(left);
+            rewrite_trigger_system_column_refs(right);
+        }
+        SqlExpr::BinaryOperator { left, right, .. }
+        | SqlExpr::GeometryBinaryOp { left, right, .. } => {
+            rewrite_trigger_system_column_refs(left);
+            rewrite_trigger_system_column_refs(right);
+        }
+        SqlExpr::UnaryPlus(inner)
+        | SqlExpr::Negate(inner)
+        | SqlExpr::BitNot(inner)
+        | SqlExpr::GeometryUnaryOp { expr: inner, .. }
+        | SqlExpr::PrefixOperator { expr: inner, .. }
+        | SqlExpr::Cast(inner, _)
+        | SqlExpr::IsNull(inner)
+        | SqlExpr::IsNotNull(inner)
+        | SqlExpr::Not(inner)
+        | SqlExpr::FieldSelect { expr: inner, .. }
+        | SqlExpr::Subscript { expr: inner, .. }
+        | SqlExpr::Collate { expr: inner, .. } => rewrite_trigger_system_column_refs(inner),
+        SqlExpr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | SqlExpr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            rewrite_trigger_system_column_refs(expr);
+            rewrite_trigger_system_column_refs(pattern);
+            if let Some(escape) = escape {
+                rewrite_trigger_system_column_refs(escape);
+            }
+        }
+        SqlExpr::Case {
+            arg,
+            args,
+            defresult,
+        } => {
+            if let Some(arg) = arg {
+                rewrite_trigger_system_column_refs(arg);
+            }
+            for when in args {
+                rewrite_trigger_system_column_refs(&mut when.expr);
+                rewrite_trigger_system_column_refs(&mut when.result);
+            }
+            if let Some(defresult) = defresult {
+                rewrite_trigger_system_column_refs(defresult);
+            }
+        }
+        SqlExpr::ArrayLiteral(values) | SqlExpr::Row(values) => {
+            for value in values {
+                rewrite_trigger_system_column_refs(value);
+            }
+        }
+        SqlExpr::InSubquery { expr, .. } => rewrite_trigger_system_column_refs(expr),
+        SqlExpr::QuantifiedSubquery { left, .. } => rewrite_trigger_system_column_refs(left),
+        SqlExpr::QuantifiedArray { left, array, .. } => {
+            rewrite_trigger_system_column_refs(left);
+            rewrite_trigger_system_column_refs(array);
+        }
+        SqlExpr::ArraySubscript { array, subscripts } => {
+            rewrite_trigger_system_column_refs(array);
+            for subscript in subscripts {
+                if let Some(lower) = &mut subscript.lower {
+                    rewrite_trigger_system_column_refs(lower);
+                }
+                if let Some(upper) = &mut subscript.upper {
+                    rewrite_trigger_system_column_refs(upper);
+                }
+            }
+        }
+        SqlExpr::Xml(xml) => {
+            for arg in &mut xml.named_args {
+                rewrite_trigger_system_column_refs(arg);
+            }
+            for arg in &mut xml.args {
+                rewrite_trigger_system_column_refs(arg);
+            }
+        }
+        SqlExpr::FuncCall {
+            args,
+            order_by,
+            filter,
+            over,
+            ..
+        } => {
+            if let SqlCallArgs::Args(args) = args {
+                for arg in args {
+                    rewrite_trigger_system_column_refs(&mut arg.value);
+                }
+            }
+            for item in order_by {
+                rewrite_trigger_system_column_refs(&mut item.expr);
+            }
+            if let Some(filter) = filter {
+                rewrite_trigger_system_column_refs(filter);
+            }
+            if let Some(over) = over {
+                for expr in &mut over.partition_by {
+                    rewrite_trigger_system_column_refs(expr);
+                }
+                for item in &mut over.order_by {
+                    rewrite_trigger_system_column_refs(&mut item.expr);
+                }
+                if let Some(frame) = &mut over.frame {
+                    rewrite_trigger_window_bound(&mut frame.start_bound);
+                    rewrite_trigger_window_bound(&mut frame.end_bound);
+                }
+            }
+        }
+        SqlExpr::Const(_)
+        | SqlExpr::Default
+        | SqlExpr::IntegerLiteral(_)
+        | SqlExpr::NumericLiteral(_)
+        | SqlExpr::ScalarSubquery(_)
+        | SqlExpr::ArraySubquery(_)
+        | SqlExpr::Exists(_)
+        | SqlExpr::Random
+        | SqlExpr::CurrentDate
+        | SqlExpr::CurrentUser
+        | SqlExpr::SessionUser
+        | SqlExpr::CurrentRole
+        | SqlExpr::CurrentTime { .. }
+        | SqlExpr::CurrentTimestamp { .. }
+        | SqlExpr::LocalTime { .. }
+        | SqlExpr::LocalTimestamp { .. } => {}
+    }
+}
+
+fn rewrite_trigger_window_bound(bound: &mut RawWindowFrameBound) {
+    match bound {
+        RawWindowFrameBound::OffsetPreceding(expr) | RawWindowFrameBound::OffsetFollowing(expr) => {
+            rewrite_trigger_system_column_refs(expr);
+        }
+        RawWindowFrameBound::UnboundedPreceding
+        | RawWindowFrameBound::CurrentRow
+        | RawWindowFrameBound::UnboundedFollowing => {}
+    }
+}
+
 fn trigger_matches_event(
     row: &PgTriggerRow,
     event: TriggerOperation,
@@ -375,6 +795,48 @@ fn trigger_is_row(tgtype: i16) -> bool {
 
 fn trigger_is_before(tgtype: i16) -> bool {
     (tgtype & TRIGGER_TYPE_BEFORE) != 0
+}
+
+fn trigger_is_instead(tgtype: i16) -> bool {
+    (tgtype & TRIGGER_TYPE_INSTEAD) != 0
+}
+
+fn trigger_timing(tgtype: i16) -> TriggerTiming {
+    if trigger_is_instead(tgtype) {
+        TriggerTiming::Instead
+    } else if trigger_is_before(tgtype) {
+        TriggerTiming::Before
+    } else {
+        TriggerTiming::After
+    }
+}
+
+pub(crate) fn trigger_is_enabled_for_session(
+    row: &PgTriggerRow,
+    role: SessionReplicationRole,
+) -> bool {
+    match row.tgenabled {
+        TRIGGER_ENABLED_ALWAYS => true,
+        TRIGGER_ENABLED_REPLICA => role == SessionReplicationRole::Replica,
+        TRIGGER_ENABLED_ORIGIN => role != SessionReplicationRole::Replica,
+        TRIGGER_DISABLED => false,
+        _ => false,
+    }
+}
+
+pub(crate) fn relation_has_instead_row_trigger(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    event: TriggerOperation,
+) -> bool {
+    catalog
+        .trigger_rows_for_relation(relation_oid)
+        .into_iter()
+        .any(|row| {
+            trigger_is_instead(row.tgtype)
+                && trigger_is_row(row.tgtype)
+                && trigger_matches_event(&row, event, &[])
+        })
 }
 
 fn trigger_runtime_error(message: &str, detail: Option<String>) -> ExecError {

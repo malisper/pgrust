@@ -3859,6 +3859,7 @@ pub(crate) fn execute_insert_rows(
                 desc,
                 TriggerOperation::Insert,
                 &[],
+                ctx.session_replication_role,
             )
         })
         .transpose()?;
@@ -3973,6 +3974,7 @@ pub fn execute_prepared_insert_row(
                 &prepared.desc,
                 TriggerOperation::Insert,
                 &[],
+                ctx.session_replication_role,
             )
         })
         .transpose()?;
@@ -4073,6 +4075,7 @@ pub fn execute_update_with_waiter(
                         &target.desc,
                         TriggerOperation::Update,
                         &modified_attnums,
+                        ctx.session_replication_role,
                     )
                 })
                 .transpose()?;
@@ -4399,6 +4402,7 @@ fn execute_update_from_joined_input(
                         &target.desc,
                         TriggerOperation::Update,
                         &modified_attnums,
+                        ctx.session_replication_role,
                     )
                 })
                 .transpose()
@@ -4601,6 +4605,7 @@ pub fn execute_delete_with_waiter(
                         &target.desc,
                         TriggerOperation::Delete,
                         &[],
+                        ctx.session_replication_role,
                     )
                 })
                 .transpose()?;

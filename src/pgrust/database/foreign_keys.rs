@@ -226,6 +226,7 @@ pub(crate) fn validate_deferred_foreign_key_constraints(
         session_user_oid: db.auth_state(client_id).session_user_oid(),
         current_user_oid: db.auth_state(client_id).current_user_oid(),
         active_role_oid: db.auth_state(client_id).active_role_oid(),
+        session_replication_role: db.session_replication_role(client_id),
         statement_lock_scope_id: None,
         transaction_lock_scope_id: None,
         next_command_id: cid,
@@ -243,6 +244,7 @@ pub(crate) fn validate_deferred_foreign_key_constraints(
         cte_producers: std::collections::HashMap::new(),
         recursive_worktables: std::collections::HashMap::new(),
         deferred_foreign_keys: None,
+        trigger_depth: 0,
     };
 
     for constraint_oid in affected_constraint_oids {

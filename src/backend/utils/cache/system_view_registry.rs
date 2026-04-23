@@ -224,16 +224,23 @@ const PG_LOCKS_COLUMNS: &[SyntheticSystemViewColumn] = &[
 ];
 
 const INFORMATION_SCHEMA_TRIGGERS_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("trigger_catalog"),
+    SyntheticSystemViewColumn::text("trigger_schema"),
     SyntheticSystemViewColumn::text("trigger_name"),
     SyntheticSystemViewColumn::text("event_manipulation"),
+    SyntheticSystemViewColumn::text("event_object_catalog"),
     SyntheticSystemViewColumn::text("event_object_schema"),
     SyntheticSystemViewColumn::text("event_object_table"),
     SyntheticSystemViewColumn::new("action_order", SqlType::new(SqlTypeKind::Int4)),
     SyntheticSystemViewColumn::text("action_condition"),
+    SyntheticSystemViewColumn::text("action_statement"),
     SyntheticSystemViewColumn::text("action_orientation"),
     SyntheticSystemViewColumn::text("action_timing"),
     SyntheticSystemViewColumn::text("action_reference_old_table"),
     SyntheticSystemViewColumn::text("action_reference_new_table"),
+    SyntheticSystemViewColumn::text("action_reference_old_row"),
+    SyntheticSystemViewColumn::text("action_reference_new_row"),
+    SyntheticSystemViewColumn::new("created", SqlType::new(SqlTypeKind::Timestamp)),
 ];
 
 const PG_STAT_USER_TABLES_COLUMNS: &[SyntheticSystemViewColumn] = &[
