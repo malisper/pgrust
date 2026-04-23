@@ -1,6 +1,7 @@
 use super::super::*;
 use crate::backend::parser::ParseError;
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
+use crate::include::nodes::primnodes::ColumnDesc;
 use crate::pgrust::database::ddl::{is_system_column_name, relation_kind_name};
 
 impl Database {
@@ -84,7 +85,7 @@ fn validate_statistics_kinds(kinds: &[String]) -> Result<(), ExecError> {
                     message: format!("unrecognized statistics kind \"{other}\""),
                     detail: None,
                     hint: None,
-                    sqlstate: "22023",
+                    sqlstate: "42601",
                 });
             }
         }
@@ -107,58 +108,89 @@ fn validate_statistics_targets(
 
     let mut seen_columns = std::collections::BTreeSet::new();
     let mut seen_exprs = std::collections::BTreeSet::new();
+    let mut expression_count = 0usize;
     for target in targets {
         let trimmed = target.trim();
-        if let Some(column_name) = simple_statistics_column(trimmed) {
-            if is_system_column_name(column_name) {
-                return Err(ExecError::DetailedError {
-                    message: "statistics creation on system columns is not supported".into(),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "0A000",
-                });
+        match classify_statistics_target(trimmed)? {
+            StatisticsTarget::Column(column_name) => {
+                if is_system_column_name(column_name) {
+                    return Err(ExecError::DetailedError {
+                        message: "statistics creation on system columns is not supported".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "0A000",
+                    });
+                }
+                let column = desc
+                    .columns
+                    .iter()
+                    .find(|col| !col.dropped && col.name.eq_ignore_ascii_case(column_name))
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::UnknownColumn(column_name.to_string()))
+                    })?;
+                validate_statistics_column_type(column)?;
+                if !seen_columns.insert(column_name.to_ascii_lowercase()) {
+                    return Err(ExecError::DetailedError {
+                        message: "duplicate column name in statistics definition".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42701",
+                    });
+                }
             }
-            if !desc
-                .columns
-                .iter()
-                .any(|col| !col.dropped && col.name.eq_ignore_ascii_case(column_name))
-            {
-                return Err(ExecError::Parse(ParseError::UnknownColumn(
-                    column_name.to_string(),
-                )));
-            }
-            if !seen_columns.insert(column_name.to_ascii_lowercase()) {
-                return Err(ExecError::DetailedError {
-                    message: "duplicate column name in statistics definition".into(),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "42701",
-                });
-            }
-        } else {
-            let normalized = trimmed.to_ascii_lowercase();
-            if !seen_exprs.insert(normalized) {
-                return Err(ExecError::DetailedError {
-                    message: "duplicate expression in statistics definition".into(),
-                    detail: None,
-                    hint: None,
-                    sqlstate: "42701",
-                });
+            StatisticsTarget::Expression => {
+                expression_count += 1;
+                let normalized = trimmed.to_ascii_lowercase();
+                if !seen_exprs.insert(normalized) {
+                    return Err(ExecError::DetailedError {
+                        message: "duplicate expression in statistics definition".into(),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42701",
+                    });
+                }
             }
         }
+    }
+
+    if targets.len() < 2 && expression_count != 1 {
+        return Err(ExecError::DetailedError {
+            message: "extended statistics require at least 2 columns".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42P16",
+        });
     }
     Ok(())
 }
 
-fn simple_statistics_column(target: &str) -> Option<&str> {
+enum StatisticsTarget<'a> {
+    Column(&'a str),
+    Expression,
+}
+
+fn classify_statistics_target(target: &str) -> Result<StatisticsTarget<'_>, ExecError> {
     let trimmed = target.trim();
     let inner = if trimmed.starts_with('(') && trimmed.ends_with(')') {
-        trimmed[1..trimmed.len() - 1].trim()
+        let inner = trimmed[1..trimmed.len() - 1].trim();
+        if has_unparenthesized_character(inner, ',') {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "statistics expression",
+                actual: "syntax error at or near \",\"".into(),
+            }));
+        }
+        inner
     } else {
+        if let Some(token) = first_unparenthesized_statistics_operator(trimmed) {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "statistics expression",
+                actual: format!("syntax error at or near \"{token}\""),
+            }));
+        }
         trimmed
     };
     if inner.is_empty() {
-        return None;
+        return Ok(StatisticsTarget::Expression);
     }
     if inner
         .chars()
@@ -168,8 +200,76 @@ fn simple_statistics_column(target: &str) -> Option<&str> {
             .next()
             .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
     {
-        Some(inner)
+        Ok(StatisticsTarget::Column(inner))
     } else {
-        None
+        Ok(StatisticsTarget::Expression)
     }
+}
+
+fn first_unparenthesized_statistics_operator(target: &str) -> Option<&'static str> {
+    let mut paren_depth = 0usize;
+    let mut in_single_quote = false;
+    let mut prev = '\0';
+    for ch in target.chars() {
+        if ch == '\'' && prev != '\\' {
+            in_single_quote = !in_single_quote;
+        } else if !in_single_quote {
+            match ch {
+                '(' => paren_depth += 1,
+                ')' => paren_depth = paren_depth.saturating_sub(1),
+                '+' | '-' | '*' | '/' | ',' if paren_depth == 0 => {
+                    return Some(match ch {
+                        '+' => "+",
+                        '-' => "-",
+                        '*' => "*",
+                        '/' => "/",
+                        ',' => ",",
+                        _ => unreachable!(),
+                    });
+                }
+                _ => {}
+            }
+        }
+        prev = ch;
+    }
+    None
+}
+
+fn has_unparenthesized_character(target: &str, needle: char) -> bool {
+    let mut paren_depth = 0usize;
+    let mut in_single_quote = false;
+    let mut prev = '\0';
+    for ch in target.chars() {
+        if ch == '\'' && prev != '\\' {
+            in_single_quote = !in_single_quote;
+        } else if !in_single_quote {
+            match ch {
+                '(' => paren_depth += 1,
+                ')' => paren_depth = paren_depth.saturating_sub(1),
+                _ if ch == needle && paren_depth == 0 => return true,
+                _ => {}
+            }
+        }
+        prev = ch;
+    }
+    false
+}
+
+fn validate_statistics_column_type(column: &ColumnDesc) -> Result<(), ExecError> {
+    if matches!(
+        column.sql_type.kind,
+        crate::backend::parser::SqlTypeKind::Xid
+    ) {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "column \"{}\" cannot be used in statistics because its type {} has no default btree operator class",
+                column.name,
+                crate::pgrust::database::ddl::format_sql_type_name(column.sql_type.clone())
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    Ok(())
 }

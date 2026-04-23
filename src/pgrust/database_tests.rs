@@ -9753,6 +9753,91 @@ fn create_spgist_rejects_expression_indexes() {
 }
 
 #[test]
+fn create_statistics_rejects_single_column_with_postgres_message() {
+    let base = temp_dir("create_statistics_single_column");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table ext_stats_test (x text, y int, z int)")
+        .unwrap();
+
+    match db.execute(1, "create statistics tst on (y) from ext_stats_test") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "extended statistics require at least 2 columns");
+            assert_eq!(sqlstate, "42P16");
+        }
+        other => panic!(
+            "expected single-column CREATE STATISTICS rejection, got {:?}",
+            other
+        ),
+    }
+}
+
+#[test]
+fn create_statistics_rejects_unwrapped_expression_with_syntax_error() {
+    let base = temp_dir("create_statistics_unwrapped_expression");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table ext_stats_test (x text, y int, z int)")
+        .unwrap();
+
+    match db.execute(1, "create statistics tst on y + z from ext_stats_test") {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. })) => {
+            assert_eq!(actual, "syntax error at or near \"+\"");
+        }
+        other => panic!("expected CREATE STATISTICS syntax error, got {:?}", other),
+    }
+}
+
+#[test]
+fn create_statistics_rejects_tuple_expression_with_syntax_error() {
+    let base = temp_dir("create_statistics_tuple_expression");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table ext_stats_test (x text, y int, z int)")
+        .unwrap();
+
+    match db.execute(1, "create statistics tst on (x, y) from ext_stats_test") {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { actual, .. })) => {
+            assert_eq!(actual, "syntax error at or near \",\"");
+        }
+        other => panic!(
+            "expected CREATE STATISTICS tuple syntax error, got {:?}",
+            other
+        ),
+    }
+}
+
+#[test]
+fn create_statistics_rejects_xid_column_with_postgres_message() {
+    let base = temp_dir("create_statistics_xid_column");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table ext_stats_test1 (x int, y int, z int, w xid)",
+    )
+    .unwrap();
+
+    match db.execute(
+        1,
+        "create statistics tst (ndistinct) on w from ext_stats_test1",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(
+                message,
+                "column \"w\" cannot be used in statistics because its type xid has no default btree operator class"
+            );
+            assert_eq!(sqlstate, "0A000");
+        }
+        other => panic!("expected xid CREATE STATISTICS rejection, got {:?}", other),
+    }
+}
+
+#[test]
 fn create_spgist_box_index_supports_overlap_and_knn_order_by() {
     let base = temp_dir("spgist_box_overlap_knn");
     let db = Database::open(&base, 16).unwrap();
