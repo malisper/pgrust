@@ -46,8 +46,8 @@ use crate::backend::executor::exec_expr::{compile_predicate_with_decoder, eval_e
 use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
 use crate::backend::executor::value_io::{coerce_assignment_value, encode_tuple_values};
 use crate::backend::executor::{
-    ExecError, ExecutorContext, Expr, StatementResult, ToastRelationRef, compare_order_values,
-    create_query_desc, executor_start,
+    ExecError, ExecutorContext, Expr, StatementResult, ToastRelationRef,
+    apply_jsonb_subscript_assignment, compare_order_values, create_query_desc, executor_start,
 };
 use crate::include::access::amapi::IndexUniqueCheck;
 use crate::include::access::htup::HeapTuple;
@@ -3047,11 +3047,43 @@ fn assign_typed_value(
         return assign_point_value(current, subscripts, replacement);
     }
 
+    if sql_type.kind == SqlTypeKind::Jsonb && !sql_type.is_array {
+        if !field_path.is_empty() {
+            return Err(ExecError::DetailedError {
+                message: "cannot assign to a named field of type jsonb".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42804",
+            });
+        }
+        return assign_jsonb_value(current, subscripts, replacement);
+    }
+
     if field_path.is_empty() {
         return assign_array_value(current, subscripts, replacement);
     }
 
     assign_array_value_with_fields(current, sql_type, subscripts, field_path, replacement, ctx)
+}
+
+fn assign_jsonb_value(
+    current: Value,
+    subscripts: &[ResolvedAssignmentSubscript],
+    replacement: Value,
+) -> Result<Value, ExecError> {
+    let mut path = Vec::with_capacity(subscripts.len());
+    for subscript in subscripts {
+        if subscript.is_slice {
+            return Err(ExecError::DetailedError {
+                message: "jsonb subscript does not support slices".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
+        path.push(subscript.lower.clone().unwrap_or(Value::Int64(1)));
+    }
+    apply_jsonb_subscript_assignment(&current, &path, &replacement)
 }
 
 fn assignment_record_descriptor(
