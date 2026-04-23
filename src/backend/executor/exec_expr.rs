@@ -33,6 +33,11 @@ use super::expr_datetime::{
     render_datetime_value_text_with_config,
 };
 use super::expr_geometry::eval_geometry_function;
+use super::expr_interval::{
+    eval_date_bin_function, eval_interval_hash_function, eval_justify_days_function,
+    eval_justify_hours_function, eval_justify_interval_function, eval_make_interval_function,
+    eval_timezone_function,
+};
 use super::expr_json::{
     eval_json_builtin_function, eval_json_get, eval_json_path, eval_json_record_builtin_function,
     eval_jsonpath_operator,
@@ -3784,6 +3789,13 @@ fn eval_builtin_function(
         BuiltinScalarFunction::DateTrunc => eval_date_trunc_function(&values, &ctx.datetime_config),
         BuiltinScalarFunction::IsFinite => eval_isfinite_function(&values),
         BuiltinScalarFunction::MakeDate => eval_make_date_function(&values),
+        BuiltinScalarFunction::MakeInterval => eval_make_interval_function(&values),
+        BuiltinScalarFunction::JustifyHours => eval_justify_hours_function(&values),
+        BuiltinScalarFunction::JustifyDays => eval_justify_days_function(&values),
+        BuiltinScalarFunction::JustifyInterval => eval_justify_interval_function(&values),
+        BuiltinScalarFunction::IntervalHash => eval_interval_hash_function(&values),
+        BuiltinScalarFunction::DateBin => eval_date_bin_function(&values),
+        BuiltinScalarFunction::Timezone => eval_timezone_function(&values),
         BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),
         BuiltinScalarFunction::PgMyTempSchema => Ok(current_temp_namespace_name(ctx)
             .map(Value::Text)
