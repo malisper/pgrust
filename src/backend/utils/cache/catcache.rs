@@ -266,6 +266,7 @@ impl CatCache {
                 relispartition: entry.relispartition,
                 relfrozenxid: entry.relfrozenxid,
                 relpartbound: entry.relpartbound.clone(),
+                relacl: entry.relacl.clone(),
             };
             cache.classes_by_name.insert(
                 normalize_catalog_name(name).to_ascii_lowercase(),

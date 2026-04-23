@@ -20696,6 +20696,53 @@ fn pg_get_viewdef_returns_canonical_view_query() {
 }
 
 #[test]
+fn pg_get_acl_returns_relation_owner_acl() {
+    let dir = temp_dir("pg_get_acl");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create role app_reader login").unwrap();
+    db.execute(1, "create table acl_test(id int)").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_acl('pg_class'::regclass, 'acl_test'::regclass::oid, 0)"
+        ),
+        vec![vec![Value::Null]]
+    );
+    db.execute(1, "grant select on acl_test to app_reader")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select unnest(pg_get_acl('pg_class'::regclass, 'acl_test'::regclass::oid, 0))",
+        ),
+        vec![
+            vec![Value::Text("postgres=arwdDxtm/postgres".into())],
+            vec![Value::Text("app_reader=r/postgres".into())],
+        ]
+    );
+    db.execute(1, "revoke all privileges on acl_test from app_reader")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_acl('pg_class'::regclass, 'acl_test'::regclass::oid, 0)"
+        ),
+        vec![vec![Value::Null]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select pg_get_acl('pg_class'::regclass, 0, 0)"),
+        vec![vec![Value::Null]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select pg_get_acl(0, 0, 0)"),
+        vec![vec![Value::Null]]
+    );
+}
 fn current_database_function_matches_pg_database_name() {
     let dir = temp_dir("current_database_function");
     let db = Database::open(&dir, 64).unwrap();

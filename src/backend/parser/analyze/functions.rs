@@ -635,6 +635,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::NextVal | BuiltinScalarFunction::CurrVal => args.len() == 1,
             BuiltinScalarFunction::SetVal => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::PgGetSerialSequence => args.len() == 2,
+            BuiltinScalarFunction::PgGetAcl => args.len() == 3,
             BuiltinScalarFunction::PgGetUserById => args.len() == 1,
             BuiltinScalarFunction::ObjDescription => args.len() == 2,
             BuiltinScalarFunction::PgDescribeObject => args.len() == 3,
@@ -1734,6 +1735,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("regprocout", BuiltinScalarFunction::RegProcedureToText),
         ("regrole_to_text", BuiltinScalarFunction::RegRoleToText),
         ("regroleout", BuiltinScalarFunction::RegRoleToText),
+        ("pg_get_acl", BuiltinScalarFunction::PgGetAcl),
         ("pg_get_userbyid", BuiltinScalarFunction::PgGetUserById),
         (
             "pg_indexam_has_property",
@@ -2083,13 +2085,21 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
         }
         for func in [
             BuiltinScalarFunction::PgGetSerialSequence,
+            BuiltinScalarFunction::PgGetAcl,
             BuiltinScalarFunction::ObjDescription,
             BuiltinScalarFunction::PgDescribeObject,
             BuiltinScalarFunction::PgGetExpr,
             BuiltinScalarFunction::PgGetViewDef,
         ] {
             if by_func.iter().all(|(candidate, _)| *candidate != func) {
-                by_func.push((func, SqlType::new(SqlTypeKind::Text)));
+                by_func.push((
+                    func,
+                    if func == BuiltinScalarFunction::PgGetAcl {
+                        SqlType::array_of(SqlType::new(SqlTypeKind::Text))
+                    } else {
+                        SqlType::new(SqlTypeKind::Text)
+                    },
+                ));
             }
         }
         if by_func
@@ -2202,6 +2212,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::CurrVal
             | BuiltinScalarFunction::SetVal
             | BuiltinScalarFunction::PgGetSerialSequence
+            | BuiltinScalarFunction::PgGetAcl
             | BuiltinScalarFunction::PgGetUserById
             | BuiltinScalarFunction::ObjDescription
             | BuiltinScalarFunction::PgDescribeObject
