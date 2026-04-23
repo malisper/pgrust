@@ -23,7 +23,7 @@ mod scope;
 mod system_views;
 mod window;
 
-pub(crate) use self::scope::ScopeColumn;
+pub(crate) use self::scope::{ScopeColumn, ScopeRelation};
 
 use crate::RelFileLocator;
 use crate::backend::catalog::catalog::column_desc;
@@ -1439,9 +1439,11 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
         columns: scope_columns,
         relations,
     };
-    let empty_outer = Vec::new();
-    let bound = bind_expr_with_outer(expr, &scope, catalog, &empty_outer, None)?;
-    let sql_type = infer_sql_expr_type(expr, &scope, catalog, &empty_outer, None);
+    // PL/pgSQL scalar expressions can contain correlated subqueries that need
+    // to see the same named-slot scope as the enclosing expression.
+    let outer_scopes = vec![scope.clone()];
+    let bound = bind_expr_with_outer(expr, &scope, catalog, &outer_scopes, None)?;
+    let sql_type = infer_sql_expr_type(expr, &scope, catalog, &outer_scopes, None);
     Ok((bound, sql_type))
 }
 
