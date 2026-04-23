@@ -6,6 +6,7 @@ pub mod libpq;
 pub mod optimizer;
 pub mod parser;
 pub mod rewrite;
+pub mod statistics;
 pub mod storage;
 pub mod tcop;
 pub mod tsearch;

@@ -86,6 +86,10 @@ const PG_COLLATION_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_TABLESPACE_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_TABLESPACE_SPCNAME_INDEX_KEYS: [i16; 1] = [2];
 const PG_STATISTIC_RELID_ATTNUM_INH_INDEX_KEYS: [i16; 3] = [1, 2, 3];
+const PG_STATISTIC_EXT_RELID_INDEX_KEYS: [i16; 1] = [2];
+const PG_STATISTIC_EXT_OID_INDEX_KEYS: [i16; 1] = [1];
+const PG_STATISTIC_EXT_NAME_NSP_INDEX_KEYS: [i16; 2] = [3, 4];
+const PG_STATISTIC_EXT_DATA_STXOID_INH_INDEX_KEYS: [i16; 2] = [1, 2];
 
 const OID_OPCLASS_1: [u32; 1] = [OID_BTREE_OPCLASS_OID];
 const NAME_OPCLASS_1: [u32; 1] = [NAME_BTREE_OPCLASS_OID];
@@ -145,6 +149,7 @@ const OID_OID_OID_INT2_OPCLASS_4: [u32; 4] = [
     OID_BTREE_OPCLASS_OID,
     INT2_BTREE_OPCLASS_OID,
 ];
+const OID_BOOL_OPCLASS_2: [u32; 2] = [OID_BTREE_OPCLASS_OID, BOOL_BTREE_OPCLASS_OID];
 const OID_OID_OID_INT2_CHAR_OPCLASS_5: [u32; 5] = [
     OID_BTREE_OPCLASS_OID,
     OID_BTREE_OPCLASS_OID,
@@ -158,7 +163,7 @@ const OID_INT2_BOOL_OPCLASS_3: [u32; 3] = [
     BOOL_BTREE_OPCLASS_OID,
 ];
 
-pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 72] = [
+pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 76] = [
     CatalogIndexDescriptor {
         relation_oid: 2684,
         relation_name: "pg_namespace_nspname_index",
@@ -734,6 +739,38 @@ pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 72] = [
         unique: true,
         key_attnums: &PG_STATISTIC_RELID_ATTNUM_INH_INDEX_KEYS,
         opclass_oids: &OID_INT2_BOOL_OPCLASS_3,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 3379,
+        relation_name: "pg_statistic_ext_relid_index",
+        heap_kind: BootstrapCatalogKind::PgStatisticExt,
+        unique: false,
+        key_attnums: &PG_STATISTIC_EXT_RELID_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 3380,
+        relation_name: "pg_statistic_ext_oid_index",
+        heap_kind: BootstrapCatalogKind::PgStatisticExt,
+        unique: true,
+        key_attnums: &PG_STATISTIC_EXT_OID_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 3997,
+        relation_name: "pg_statistic_ext_name_index",
+        heap_kind: BootstrapCatalogKind::PgStatisticExt,
+        unique: true,
+        key_attnums: &PG_STATISTIC_EXT_NAME_NSP_INDEX_KEYS,
+        opclass_oids: &NAME_OID_OPCLASS_2,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 3433,
+        relation_name: "pg_statistic_ext_data_stxoid_inh_index",
+        heap_kind: BootstrapCatalogKind::PgStatisticExtData,
+        unique: true,
+        key_attnums: &PG_STATISTIC_EXT_DATA_STXOID_INH_INDEX_KEYS,
+        opclass_oids: &OID_BOOL_OPCLASS_2,
     },
 ];
 

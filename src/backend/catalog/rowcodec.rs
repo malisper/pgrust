@@ -6,16 +6,17 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::utils::cache::catcache::format_indkey;
 use crate::include::access::htup::{AttributeAlign, AttributeCompression, AttributeStorage};
 use crate::include::catalog::{
-    BootstrapCatalogKind, PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
-    PgAttributeRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
-    PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow,
-    PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
-    PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow,
-    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow,
-    PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
-    PgTypeRow, bootstrap_composite_type_rows, builtin_type_rows,
+    BootstrapCatalogKind, PG_STATISTIC_RELATION_OID, PG_STATISTIC_ROWTYPE_OID, PgAggregateRow,
+    PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgAuthIdRow, PgAuthMembersRow,
+    PgCastRow, PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow,
+    PgDescriptionRow, PgForeignDataWrapperRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
+    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow,
+    PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
+    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow,
+    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
+    bootstrap_composite_type_rows, builtin_type_rows,
 };
-use crate::include::nodes::datum::{ArrayValue, Value};
+use crate::include::nodes::datum::{ArrayValue, RecordValue, Value};
 
 pub(crate) fn catalog_row_values_for_kind(
     rows: &PhysicalCatalogRows,
@@ -227,6 +228,18 @@ pub(crate) fn catalog_row_values_for_kind(
             .iter()
             .cloned()
             .map(pg_statistic_row_values)
+            .collect(),
+        BootstrapCatalogKind::PgStatisticExt => rows
+            .statistics_ext
+            .iter()
+            .cloned()
+            .map(pg_statistic_ext_row_values)
+            .collect(),
+        BootstrapCatalogKind::PgStatisticExtData => rows
+            .statistics_ext_data
+            .iter()
+            .cloned()
+            .map(pg_statistic_ext_data_row_values)
             .collect(),
         BootstrapCatalogKind::PgOpclass => rows
             .opclasses
@@ -944,6 +957,36 @@ pub(crate) fn pg_statistic_row_from_values(
     })
 }
 
+pub(crate) fn pg_statistic_ext_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgStatisticExtRow, CatalogError> {
+    Ok(PgStatisticExtRow {
+        oid: expect_oid(&values[0])?,
+        stxrelid: expect_oid(&values[1])?,
+        stxname: expect_text(&values[2])?,
+        stxnamespace: expect_oid(&values[3])?,
+        stxowner: expect_oid(&values[4])?,
+        stxkeys: parse_indkey(&expect_text(&values[5])?),
+        stxstattarget: expect_nullable_int16(&values[6])?,
+        stxkind: nullable_char_array(&values[7])?
+            .ok_or(CatalogError::Corrupt("expected stxkind array"))?,
+        stxexprs: expect_nullable_text(&values[8])?,
+    })
+}
+
+pub(crate) fn pg_statistic_ext_data_row_from_values(
+    values: Vec<Value>,
+) -> Result<PgStatisticExtDataRow, CatalogError> {
+    Ok(PgStatisticExtDataRow {
+        stxoid: expect_oid(&values[0])?,
+        stxdinherit: expect_bool(&values[1])?,
+        stxdndistinct: expect_nullable_bytea(&values[2])?,
+        stxddependencies: expect_nullable_bytea(&values[3])?,
+        stxdmcv: expect_nullable_bytea(&values[4])?,
+        stxdexpr: nullable_pg_statistic_array(&values[5])?,
+    })
+}
+
 pub(crate) fn pg_rewrite_row_from_values(values: Vec<Value>) -> Result<PgRewriteRow, CatalogError> {
     Ok(PgRewriteRow {
         oid: expect_oid(&values[0])?,
@@ -1538,6 +1581,34 @@ fn pg_statistic_row_values(row: PgStatisticRow) -> Vec<Value> {
     ]
 }
 
+fn pg_statistic_ext_row_values(row: PgStatisticExtRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.oid as i32),
+        Value::Int32(row.stxrelid as i32),
+        Value::Text(row.stxname.into()),
+        Value::Int32(row.stxnamespace as i32),
+        Value::Int32(row.stxowner as i32),
+        Value::Text(format_indkey(&row.stxkeys).into()),
+        nullable_int16_value(row.stxstattarget),
+        Value::PgArray(
+            ArrayValue::from_1d(row.stxkind.into_iter().map(Value::InternalChar).collect())
+                .with_element_type_oid(crate::include::catalog::INTERNAL_CHAR_TYPE_OID),
+        ),
+        nullable_text_value(row.stxexprs),
+    ]
+}
+
+fn pg_statistic_ext_data_row_values(row: PgStatisticExtDataRow) -> Vec<Value> {
+    vec![
+        Value::Int32(row.stxoid as i32),
+        Value::Bool(row.stxdinherit),
+        nullable_bytea_value(row.stxdndistinct),
+        nullable_bytea_value(row.stxddependencies),
+        nullable_bytea_value(row.stxdmcv),
+        nullable_pg_statistic_array_value(row.stxdexpr),
+    ]
+}
+
 fn pg_attrdef_row_values(row: PgAttrdefRow) -> Vec<Value> {
     vec![
         Value::Int32(row.oid as i32),
@@ -1692,6 +1763,13 @@ fn expect_int16(value: &Value) -> Result<i16, CatalogError> {
     }
 }
 
+fn expect_nullable_int16(value: &Value) -> Result<Option<i16>, CatalogError> {
+    match value {
+        Value::Null => Ok(None),
+        other => expect_int16(other).map(Some),
+    }
+}
+
 fn expect_int32(value: &Value) -> Result<i32, CatalogError> {
     match value {
         Value::Int32(v) => Ok(*v),
@@ -1714,8 +1792,20 @@ fn expect_nullable_array(value: &Value) -> Result<Option<ArrayValue>, CatalogErr
     }
 }
 
+fn expect_nullable_bytea(value: &Value) -> Result<Option<Vec<u8>>, CatalogError> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Bytea(bytes) => Ok(Some(bytes.clone())),
+        _ => Err(CatalogError::Corrupt("expected nullable bytea value")),
+    }
+}
+
 fn nullable_array_value(value: Option<ArrayValue>) -> Value {
     value.map(Value::PgArray).unwrap_or(Value::Null)
+}
+
+fn nullable_bytea_value(value: Option<Vec<u8>>) -> Value {
+    value.map(Value::Bytea).unwrap_or(Value::Null)
 }
 
 fn nullable_oid_array(value: &Value) -> Result<Option<Vec<u32>>, CatalogError> {
@@ -1787,6 +1877,24 @@ fn nullable_text(value: &Value) -> Result<Option<String>, CatalogError> {
     }
 }
 
+fn nullable_pg_statistic_array(value: &Value) -> Result<Option<Vec<PgStatisticRow>>, CatalogError> {
+    let Some(array) = expect_nullable_array(value)? else {
+        return Ok(None);
+    };
+    array
+        .elements
+        .into_iter()
+        .map(|element| match element {
+            Value::Record(record) => {
+                let values = record.fields;
+                pg_statistic_row_from_values(values)
+            }
+            _ => Err(CatalogError::Corrupt("expected pg_statistic[] element")),
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
 fn oid_array_value(values: Vec<u32>) -> ArrayValue {
     ArrayValue::from_1d(
         values
@@ -1810,6 +1918,39 @@ fn text_array_value(values: Vec<String>) -> ArrayValue {
             .collect(),
     )
     .with_element_type_oid(crate::include::catalog::TEXT_TYPE_OID)
+}
+
+fn nullable_int16_value(value: Option<i16>) -> Value {
+    value.map(Value::Int16).unwrap_or(Value::Null)
+}
+
+fn nullable_pg_statistic_array_value(value: Option<Vec<PgStatisticRow>>) -> Value {
+    let Some(rows) = value else {
+        return Value::Null;
+    };
+    Value::PgArray(
+        ArrayValue::from_1d(
+            rows.into_iter()
+                .map(|row| Value::Record(pg_statistic_record_value(row)))
+                .collect(),
+        )
+        .with_element_type_oid(PG_STATISTIC_ROWTYPE_OID),
+    )
+}
+
+fn pg_statistic_record_value(row: PgStatisticRow) -> RecordValue {
+    let values = pg_statistic_row_values(row);
+    let desc = crate::include::catalog::pg_statistic_desc();
+    RecordValue::named(
+        PG_STATISTIC_ROWTYPE_OID,
+        PG_STATISTIC_RELATION_OID,
+        -1,
+        desc.columns
+            .into_iter()
+            .zip(values)
+            .map(|(column, value)| (column.name, value))
+            .collect(),
+    )
 }
 
 fn nullable_text_value(value: Option<String>) -> Value {

@@ -4,7 +4,6 @@ mod alter_column_options;
 mod alter_column_statistics;
 mod alter_column_storage;
 mod alter_column_type;
-mod alter_statistics;
 mod constraint;
 mod conversion;
 mod create;
