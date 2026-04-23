@@ -1194,8 +1194,8 @@ fn planner_places_lock_rows_between_order_by_and_limit() {
         )
         .expect("create table");
     let stmt = parse_select("select id from items order by id limit 1 for update").expect("parse");
-    let (query, _) =
-        analyze_select_query_with_outer(&stmt, &catalog, &[], None, &[], &[]).expect("analyze");
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+        .expect("analyze");
     let planned = super::planner(query, &catalog).expect("plan");
 
     let Plan::Limit { input, .. } = &planned.plan_tree else {
@@ -1439,7 +1439,7 @@ fn planner_lowers_outer_aggregate_refs_in_correlated_subqueries() {
     .expect("parse");
     let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
         .expect("analyze");
-    let planned = super::planner(query, &catalog);
+    let planned = super::planner(query, &catalog).expect("plan");
 
     super::setrefs::validate_executable_plan_for_tests(&planned.plan_tree);
     for subplan in &planned.subplans {
