@@ -9,7 +9,10 @@ use crate::include::nodes::pathnodes::{PathTarget, PlannerInfo, RelOptInfo};
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::Expr;
 
-pub(crate) fn planner(query: Query, catalog: &dyn CatalogLookup) -> PlannedStmt {
+pub(crate) fn planner(
+    query: Query,
+    catalog: &dyn CatalogLookup,
+) -> Result<PlannedStmt, crate::backend::parser::ParseError> {
     planner::planner(query, catalog)
 }
 
@@ -17,7 +20,7 @@ pub(crate) fn planner_with_param_base(
     query: Query,
     catalog: &dyn CatalogLookup,
     next_param_id: usize,
-) -> (PlannedStmt, usize) {
+) -> Result<(PlannedStmt, usize), crate::backend::parser::ParseError> {
     planner::planner_with_param_base(query, catalog, next_param_id)
 }
 

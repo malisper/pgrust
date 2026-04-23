@@ -15,7 +15,9 @@ use crate::backend::access::transam::{ControlFileState, ControlFileStore};
 use crate::backend::catalog::{CatalogError, CatalogStore};
 use crate::backend::executor::ExecError;
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
-use crate::backend::storage::lmgr::{AdvisoryLockManager, TableLockManager, TransactionWaiter};
+use crate::backend::storage::lmgr::{
+    AdvisoryLockManager, RowLockManager, TableLockManager, TransactionWaiter,
+};
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 use crate::backend::storage::sync::SyncQueue;
 use crate::backend::utils::cache::plancache::PlanCache;
@@ -103,6 +105,7 @@ pub(crate) struct OpenDatabaseState {
     pub statistics_objects: Arc<RwLock<BTreeMap<String, StatisticsObjectEntry>>>,
     pub sequences: Arc<SequenceRuntime>,
     pub advisory_locks: Arc<AdvisoryLockManager>,
+    pub row_locks: Arc<RowLockManager>,
     pub async_notify_runtime: Arc<AsyncNotifyRuntime>,
     pub next_statement_lock_scope_id: AtomicU64,
     pub stats: Arc<RwLock<DatabaseStatsStore>>,
@@ -131,6 +134,7 @@ impl OpenDatabaseState {
             statistics_objects: Arc::new(RwLock::new(BTreeMap::new())),
             sequences,
             advisory_locks: Arc::new(AdvisoryLockManager::new()),
+            row_locks: Arc::new(RowLockManager::new()),
             async_notify_runtime: Arc::new(AsyncNotifyRuntime::new()),
             next_statement_lock_scope_id: AtomicU64::new(1),
             stats: Arc::new(RwLock::new(DatabaseStatsStore::with_default_io_rows())),
@@ -366,6 +370,7 @@ impl Cluster {
                 statistics_objects: Arc::new(RwLock::new(BTreeMap::new())),
                 sequences: Arc::new(SequenceRuntime::new_ephemeral()),
                 advisory_locks: Arc::new(AdvisoryLockManager::new()),
+                row_locks: Arc::new(RowLockManager::new()),
                 next_statement_lock_scope_id: AtomicU64::new(1),
                 stats: Arc::new(RwLock::new(DatabaseStatsStore::with_default_io_rows())),
                 large_objects: Arc::new(LargeObjectRuntime::new_ephemeral()),
@@ -459,6 +464,7 @@ impl Cluster {
             statistics_objects: Arc::clone(&state.statistics_objects),
             sequences: Arc::clone(&state.sequences),
             advisory_locks: Arc::clone(&state.advisory_locks),
+            row_locks: Arc::clone(&state.row_locks),
             async_notify_runtime: Arc::clone(&state.async_notify_runtime),
             stats: Arc::clone(&state.stats),
             large_objects: Arc::clone(&state.large_objects),

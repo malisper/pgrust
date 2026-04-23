@@ -124,6 +124,7 @@ fn toast_executor_context(
         large_objects: Some(db.large_objects.clone()),
         async_notify_runtime: Some(db.async_notify_runtime.clone()),
         advisory_locks: std::sync::Arc::clone(&db.advisory_locks),
+        row_locks: std::sync::Arc::clone(&db.row_locks),
         checkpoint_stats: db.checkpoint_stats_snapshot(),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         interrupts: db.interrupt_state(client_id),

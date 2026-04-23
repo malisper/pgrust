@@ -173,6 +173,7 @@ fn path_relids(path: &Path) -> Vec<usize> {
         | Path::Projection { input, .. }
         | Path::OrderBy { input, .. }
         | Path::Limit { input, .. }
+        | Path::LockRows { input, .. }
         | Path::Aggregate { input, .. }
         | Path::WindowAgg { input, .. }
         | Path::ProjectSet { input, .. } => path_relids(input),
@@ -317,7 +318,10 @@ fn extract_hash_join_clauses(
     path::extract_hash_join_clauses(restrict_clauses, left_relids, right_relids)
 }
 
-pub(crate) fn planner(query: Query, catalog: &dyn CatalogLookup) -> PlannedStmt {
+pub(crate) fn planner(
+    query: Query,
+    catalog: &dyn CatalogLookup,
+) -> Result<PlannedStmt, crate::backend::parser::ParseError> {
     plan::planner(query, catalog)
 }
 
@@ -331,7 +335,7 @@ pub(crate) fn planner_with_param_base(
     query: Query,
     catalog: &dyn CatalogLookup,
     next_param_id: usize,
-) -> (PlannedStmt, usize) {
+) -> Result<(PlannedStmt, usize), crate::backend::parser::ParseError> {
     plan::planner_with_param_base(query, catalog, next_param_id)
 }
 

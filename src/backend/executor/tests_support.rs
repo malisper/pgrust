@@ -58,6 +58,7 @@ impl SeededSqlHarness {
                 )),
                 async_notify_runtime: None,
                 advisory_locks: Arc::new(crate::backend::storage::lmgr::AdvisoryLockManager::new()),
+                row_locks: Arc::new(crate::backend::storage::lmgr::RowLockManager::new()),
                 checkpoint_stats:
                     crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(

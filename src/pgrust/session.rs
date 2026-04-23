@@ -58,6 +58,7 @@ pub struct SelectGuard<'a> {
     pub(crate) table_locks: &'a TableLockManager,
     pub(crate) client_id: ClientId,
     pub(crate) advisory_locks: Arc<crate::backend::storage::lmgr::AdvisoryLockManager>,
+    pub(crate) row_locks: Arc<crate::backend::storage::lmgr::RowLockManager>,
     pub(crate) statement_lock_scope_id: Option<u64>,
     pub(crate) interrupt_guard: Option<StatementInterruptGuard>,
 }
@@ -68,12 +69,15 @@ impl Drop for SelectGuard<'_> {
         if let Some(scope_id) = self.statement_lock_scope_id {
             self.advisory_locks
                 .unlock_all_statement(self.client_id, scope_id);
+            self.row_locks
+                .unlock_all_statement(self.client_id, scope_id);
         }
     }
 }
 
 struct StatementLockScopeGuard {
     advisory_locks: Arc<crate::backend::storage::lmgr::AdvisoryLockManager>,
+    row_locks: Arc<crate::backend::storage::lmgr::RowLockManager>,
     client_id: ClientId,
     scope_id: Option<u64>,
 }
@@ -81,11 +85,13 @@ struct StatementLockScopeGuard {
 impl StatementLockScopeGuard {
     fn new(
         advisory_locks: Arc<crate::backend::storage::lmgr::AdvisoryLockManager>,
+        row_locks: Arc<crate::backend::storage::lmgr::RowLockManager>,
         client_id: ClientId,
         scope_id: Option<u64>,
     ) -> Self {
         Self {
             advisory_locks,
+            row_locks,
             client_id,
             scope_id,
         }
@@ -100,6 +106,8 @@ impl Drop for StatementLockScopeGuard {
     fn drop(&mut self) {
         if let Some(scope_id) = self.scope_id {
             self.advisory_locks
+                .unlock_all_statement(self.client_id, scope_id);
+            self.row_locks
                 .unlock_all_statement(self.client_id, scope_id);
         }
     }
@@ -403,6 +411,7 @@ impl Session {
             large_objects: Some(db.large_objects.clone()),
             async_notify_runtime: Some(db.async_notify_runtime.clone()),
             advisory_locks: Arc::clone(&db.advisory_locks),
+            row_locks: Arc::clone(&db.row_locks),
             checkpoint_stats: db.checkpoint_stats_snapshot(),
             datetime_config: self.datetime_config.clone(),
             interrupts: self.interrupts(),
@@ -627,6 +636,8 @@ impl Session {
                         .publish(self.client_id, &txn.pending_async_notifications);
                     db.advisory_locks
                         .unlock_all_transaction(self.client_id, txn.advisory_scope_id);
+                    db.row_locks
+                        .unlock_all_transaction(self.client_id, txn.advisory_scope_id);
                     self.stats_state.write().commit_top_level_xact(&db.stats);
                     Ok(r)
                 })()
@@ -660,6 +671,8 @@ impl Session {
         db.finalize_aborted_temp_effects(self.client_id, &txn.temp_effects);
         db.finalize_aborted_sequence_effects(&txn.sequence_effects);
         db.advisory_locks
+            .unlock_all_transaction(self.client_id, txn.advisory_scope_id);
+        db.row_locks
             .unlock_all_transaction(self.client_id, txn.advisory_scope_id);
         if self.auth != txn.auth_at_start {
             self.auth = txn.auth_at_start.clone();
@@ -707,6 +720,7 @@ impl Session {
         let _interrupt_guard = self.statement_interrupt_guard()?;
         let statement_lock_scope = StatementLockScopeGuard::new(
             Arc::clone(&db.advisory_locks),
+            Arc::clone(&db.row_locks),
             self.client_id,
             self.active_txn
                 .is_none()
@@ -2045,6 +2059,8 @@ impl Session {
             db.finalize_aborted_sequence_effects(&txn.sequence_effects);
             db.advisory_locks
                 .unlock_all_transaction(self.client_id, txn.advisory_scope_id);
+            db.row_locks
+                .unlock_all_transaction(self.client_id, txn.advisory_scope_id);
             for rel in txn.held_table_locks.keys().copied() {
                 db.table_locks.unlock_table(rel, self.client_id);
             }
@@ -2057,6 +2073,7 @@ impl Session {
         // backend-exit lock cleanup even if the session missed normal unwind.
         db.table_locks.unlock_all_for_client(self.client_id);
         db.advisory_locks.unlock_all_session(self.client_id);
+        db.row_locks.unlock_all_session(self.client_id);
     }
 
     fn lock_table_if_needed(

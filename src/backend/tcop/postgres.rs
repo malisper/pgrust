@@ -119,6 +119,7 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         ExecError::GenerateSeriesInvalidArg(_, _) => "22023",
         ExecError::StringDataRightTruncation { .. } => "22001",
         ExecError::CardinalityViolation { .. } => "21000",
+        ExecError::Heap(HeapError::DeadlockDetected) => "40P01",
         ExecError::Parse(_) => "42601",
         _ => "XX000",
     }

@@ -651,6 +651,7 @@ impl Database {
                 large_objects: Some(self.large_objects.clone()),
                 async_notify_runtime: Some(self.async_notify_runtime.clone()),
                 advisory_locks: Arc::clone(&self.advisory_locks),
+                row_locks: Arc::clone(&self.row_locks),
                 checkpoint_stats: CheckpointStatsSnapshot::default(),
                 datetime_config: DateTimeConfig::default(),
                 interrupts,

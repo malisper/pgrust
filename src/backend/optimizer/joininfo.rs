@@ -757,6 +757,8 @@ mod tests {
             project_set: None,
             recursive_union: None,
             set_operation: None,
+            locking_clause: None,
+            row_marks: Vec::new(),
         }
     }
 
