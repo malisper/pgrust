@@ -10,6 +10,20 @@ use crate::include::catalog::{
 };
 use std::collections::{BTreeSet, VecDeque};
 
+fn single_object_name<'a>(
+    object_names: &'a [String],
+    statement_name: &'static str,
+) -> Result<&'a str, ExecError> {
+    match object_names {
+        [object_name] => Ok(object_name.as_str()),
+        [] => Err(ExecError::Parse(ParseError::UnexpectedEof)),
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: statement_name,
+            actual: object_names.join(", "),
+        })),
+    }
+}
+
 fn parse_granted_function_signature(signature: &str) -> Result<(&str, Vec<&str>), ParseError> {
     let Some(open_paren) = signature.rfind('(') else {
         return Err(ParseError::UnexpectedToken {
@@ -120,38 +134,44 @@ impl Database {
                 self.execute_grant_database_create_stmt(client_id, stmt)
             }
             GrantObjectPrivilege::AllPrivilegesOnTable => {
+                let object_name = single_object_name(&stmt.object_names, "single table name")?;
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-                catalog.lookup_relation(&stmt.object_name).ok_or_else(|| {
-                    ExecError::Parse(ParseError::TableDoesNotExist(stmt.object_name.clone()))
+                catalog.lookup_relation(object_name).ok_or_else(|| {
+                    ExecError::Parse(ParseError::TableDoesNotExist(object_name.to_string()))
                 })?;
                 Ok(StatementResult::AffectedRows(0))
             }
             GrantObjectPrivilege::SelectOnTable => {
+                let object_name = single_object_name(&stmt.object_names, "single table name")?;
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-                catalog.lookup_relation(&stmt.object_name).ok_or_else(|| {
-                    ExecError::Parse(ParseError::TableDoesNotExist(stmt.object_name.clone()))
+                catalog.lookup_relation(object_name).ok_or_else(|| {
+                    ExecError::Parse(ParseError::TableDoesNotExist(object_name.to_string()))
                 })?;
                 Ok(StatementResult::AffectedRows(0))
             }
             GrantObjectPrivilege::AllPrivilegesOnSchema => {
-                self.backend_catcache(client_id, None)
-                    .map_err(map_catalog_error)?
-                    .namespace_by_name(&stmt.object_name)
-                    .ok_or_else(|| ExecError::DetailedError {
-                        message: format!("schema \"{}\" does not exist", stmt.object_name),
-                        detail: None,
-                        hint: None,
-                        sqlstate: "3F000",
+                let catcache = self.backend_catcache(client_id, None).map_err(map_catalog_error)?;
+                for object_name in &stmt.object_names {
+                    catcache.namespace_by_name(object_name).ok_or_else(|| {
+                        ExecError::DetailedError {
+                            message: format!("schema \"{}\" does not exist", object_name),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "3F000",
+                        }
                     })?;
+                }
                 Ok(StatementResult::AffectedRows(0))
             }
             GrantObjectPrivilege::ExecuteOnFunction => {
+                let object_name =
+                    single_object_name(&stmt.object_names, "single function signature")?;
                 ensure_function_signature_exists(
                     self,
                     client_id,
                     None,
                     configured_search_path,
-                    &stmt.object_name,
+                    object_name,
                 )?;
                 Ok(StatementResult::AffectedRows(0))
             }
@@ -169,38 +189,44 @@ impl Database {
                 self.execute_revoke_database_create_stmt(client_id, stmt)
             }
             GrantObjectPrivilege::AllPrivilegesOnTable => {
+                let object_name = single_object_name(&stmt.object_names, "single table name")?;
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-                catalog.lookup_relation(&stmt.object_name).ok_or_else(|| {
-                    ExecError::Parse(ParseError::TableDoesNotExist(stmt.object_name.clone()))
+                catalog.lookup_relation(object_name).ok_or_else(|| {
+                    ExecError::Parse(ParseError::TableDoesNotExist(object_name.to_string()))
                 })?;
                 Ok(StatementResult::AffectedRows(0))
             }
             GrantObjectPrivilege::SelectOnTable => {
+                let object_name = single_object_name(&stmt.object_names, "single table name")?;
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-                catalog.lookup_relation(&stmt.object_name).ok_or_else(|| {
-                    ExecError::Parse(ParseError::TableDoesNotExist(stmt.object_name.clone()))
+                catalog.lookup_relation(object_name).ok_or_else(|| {
+                    ExecError::Parse(ParseError::TableDoesNotExist(object_name.to_string()))
                 })?;
                 Ok(StatementResult::AffectedRows(0))
             }
             GrantObjectPrivilege::AllPrivilegesOnSchema => {
-                self.backend_catcache(client_id, None)
-                    .map_err(map_catalog_error)?
-                    .namespace_by_name(&stmt.object_name)
-                    .ok_or_else(|| ExecError::DetailedError {
-                        message: format!("schema \"{}\" does not exist", stmt.object_name),
-                        detail: None,
-                        hint: None,
-                        sqlstate: "3F000",
+                let catcache = self.backend_catcache(client_id, None).map_err(map_catalog_error)?;
+                for object_name in &stmt.object_names {
+                    catcache.namespace_by_name(object_name).ok_or_else(|| {
+                        ExecError::DetailedError {
+                            message: format!("schema \"{}\" does not exist", object_name),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "3F000",
+                        }
                     })?;
+                }
                 Ok(StatementResult::AffectedRows(0))
             }
             GrantObjectPrivilege::ExecuteOnFunction => {
+                let object_name =
+                    single_object_name(&stmt.object_names, "single function signature")?;
                 ensure_function_signature_exists(
                     self,
                     client_id,
                     None,
                     configured_search_path,
-                    &stmt.object_name,
+                    object_name,
                 )?;
                 Ok(StatementResult::AffectedRows(0))
             }
@@ -529,9 +555,10 @@ impl Database {
         client_id: ClientId,
         stmt: &GrantObjectStatement,
     ) -> Result<StatementResult, ExecError> {
-        if !execute_database_name_matches_current(&stmt.object_name) {
+        let object_name = single_object_name(&stmt.object_names, "single database name")?;
+        if !execute_database_name_matches_current(object_name) {
             return Err(ExecError::DetailedError {
-                message: format!("database \"{}\" does not exist", stmt.object_name),
+                message: format!("database \"{}\" does not exist", object_name),
                 detail: None,
                 hint: None,
                 sqlstate: "3D000",
@@ -584,9 +611,10 @@ impl Database {
         client_id: ClientId,
         stmt: &RevokeObjectStatement,
     ) -> Result<StatementResult, ExecError> {
-        if !execute_database_name_matches_current(&stmt.object_name) {
+        let object_name = single_object_name(&stmt.object_names, "single database name")?;
+        if !execute_database_name_matches_current(object_name) {
             return Err(ExecError::DetailedError {
-                message: format!("database \"{}\" does not exist", stmt.object_name),
+                message: format!("database \"{}\" does not exist", object_name),
                 detail: None,
                 hint: None,
                 sqlstate: "3D000",
