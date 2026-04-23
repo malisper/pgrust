@@ -1631,6 +1631,17 @@ impl Database {
                             configured_search_path,
                             catalog_effects,
                         )?;
+                        if let Some(parent_oid) = lowered.partition_parent_oid {
+                            self.clone_parent_row_triggers_to_partition_in_transaction(
+                                client_id,
+                                xid,
+                                constraint_cid_base.saturating_add(1),
+                                parent_oid,
+                                relation.relation_oid,
+                                configured_search_path,
+                                catalog_effects,
+                            )?;
+                        }
                         Ok(StatementResult::AffectedRows(0))
                     }
                 }
@@ -1753,6 +1764,17 @@ impl Database {
                     configured_search_path,
                     catalog_effects,
                 )?;
+                if let Some(parent_oid) = lowered.partition_parent_oid {
+                    self.clone_parent_row_triggers_to_partition_in_transaction(
+                        client_id,
+                        xid,
+                        constraint_cid_base.saturating_add(1),
+                        parent_oid,
+                        relation.relation_oid,
+                        configured_search_path,
+                        catalog_effects,
+                    )?;
+                }
                 Ok(StatementResult::AffectedRows(0))
             }
         }
