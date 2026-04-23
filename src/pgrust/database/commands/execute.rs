@@ -314,6 +314,12 @@ impl Database {
                     rename_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterViewRename(ref rename_stmt) => self
+                .execute_alter_view_rename_stmt_with_search_path(
+                    client_id,
+                    rename_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterIndexAlterColumnStatistics(ref alter_stmt) => self
                 .execute_alter_index_alter_column_statistics_stmt_with_search_path(
                     client_id,
