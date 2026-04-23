@@ -11242,6 +11242,61 @@ fn explain_shows_aggregate_node() {
 }
 
 #[test]
+fn explain_verbose_lateral_aggregate_renders_pg_style_details() {
+    let base = temp_dir("explain_verbose_lateral_agg");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "explain (verbose, costs off)
+         select s1, s2, sm
+         from generate_series(1, 3) s1,
+              lateral (
+                  select s2, sum(s1 + s2) sm
+                  from generate_series(1, 3) s2
+                  group by s2
+              ) ss
+         order by 1, 2",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.to_string(),
+                    other => panic!("expected text, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered.iter().any(|line| {
+                    line.trim()
+                        == "Output: generate_series.generate_series, sum((generate_series.generate_series + generate_series.generate_series))"
+                }),
+                "{}",
+                rendered.join("\n")
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.trim() == "Group Key: generate_series.generate_series"),
+                "{}",
+                rendered.join("\n")
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| { line.trim() == "Function Call: generate_series(1, 3)" }),
+                "{}",
+                rendered.join("\n")
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn window_builtin_functions_handle_peer_groups() {
     let base = temp_dir("window_builtin_peer_groups");
     let mut txns = TransactionManager::new_durable(&base).unwrap();
