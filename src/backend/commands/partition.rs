@@ -12,6 +12,7 @@ use crate::backend::parser::{
     partition_value_to_value, relation_partition_spec,
 };
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+use crate::include::catalog::BPCHAR_HASH_OPCLASS_OID;
 use crate::include::nodes::datum::Value;
 
 fn relation_name_for_oid(catalog: &dyn CatalogLookup, relation_oid: u32) -> String {
@@ -351,6 +352,196 @@ fn compare_range_bounds(
     Ok(Ordering::Equal)
 }
 
+const HASH_PARTITION_SEED: u64 = 0x7A5B_2236_7996_DCFD;
+const HASH_INITIAL_VALUE: u32 = 0x9e37_79b9 + 3_923_095;
+
+fn hash_mix(mut a: u32, mut b: u32, mut c: u32) -> (u32, u32, u32) {
+    a = a.wrapping_sub(c);
+    a ^= c.rotate_left(4);
+    c = c.wrapping_add(b);
+    b = b.wrapping_sub(a);
+    b ^= a.rotate_left(6);
+    a = a.wrapping_add(c);
+    c = c.wrapping_sub(b);
+    c ^= b.rotate_left(8);
+    b = b.wrapping_add(a);
+    a = a.wrapping_sub(c);
+    a ^= c.rotate_left(16);
+    c = c.wrapping_add(b);
+    b = b.wrapping_sub(a);
+    b ^= a.rotate_left(19);
+    a = a.wrapping_add(c);
+    c = c.wrapping_sub(b);
+    c ^= b.rotate_left(4);
+    b = b.wrapping_add(a);
+    (a, b, c)
+}
+
+fn hash_final(mut a: u32, mut b: u32, mut c: u32) -> (u32, u32, u32) {
+    c ^= b;
+    c = c.wrapping_sub(b.rotate_left(14));
+    a ^= c;
+    a = a.wrapping_sub(c.rotate_left(11));
+    b ^= a;
+    b = b.wrapping_sub(a.rotate_left(25));
+    c ^= b;
+    c = c.wrapping_sub(b.rotate_left(16));
+    a ^= c;
+    a = a.wrapping_sub(c.rotate_left(4));
+    b ^= a;
+    b = b.wrapping_sub(a.rotate_left(14));
+    c ^= b;
+    c = c.wrapping_sub(b.rotate_left(24));
+    (a, b, c)
+}
+
+fn hash_bytes_extended(bytes: &[u8], seed: u64) -> u64 {
+    let mut a = HASH_INITIAL_VALUE.wrapping_add(bytes.len() as u32);
+    let mut b = a;
+    let mut c = a;
+
+    if seed != 0 {
+        a = a.wrapping_add((seed >> 32) as u32);
+        b = b.wrapping_add(seed as u32);
+        (a, b, c) = hash_mix(a, b, c);
+    }
+
+    let mut chunks = bytes;
+    while chunks.len() >= 12 {
+        a = a.wrapping_add(u32::from_le_bytes(chunks[0..4].try_into().unwrap()));
+        b = b.wrapping_add(u32::from_le_bytes(chunks[4..8].try_into().unwrap()));
+        c = c.wrapping_add(u32::from_le_bytes(chunks[8..12].try_into().unwrap()));
+        (a, b, c) = hash_mix(a, b, c);
+        chunks = &chunks[12..];
+    }
+
+    if chunks.len() >= 11 {
+        c = c.wrapping_add((chunks[10] as u32) << 24);
+    }
+    if chunks.len() >= 10 {
+        c = c.wrapping_add((chunks[9] as u32) << 16);
+    }
+    if chunks.len() >= 9 {
+        c = c.wrapping_add((chunks[8] as u32) << 8);
+    }
+    if chunks.len() >= 8 {
+        b = b.wrapping_add((chunks[7] as u32) << 24);
+    }
+    if chunks.len() >= 7 {
+        b = b.wrapping_add((chunks[6] as u32) << 16);
+    }
+    if chunks.len() >= 6 {
+        b = b.wrapping_add((chunks[5] as u32) << 8);
+    }
+    if chunks.len() >= 5 {
+        b = b.wrapping_add(chunks[4] as u32);
+    }
+    if chunks.len() >= 4 {
+        a = a.wrapping_add((chunks[3] as u32) << 24);
+    }
+    if chunks.len() >= 3 {
+        a = a.wrapping_add((chunks[2] as u32) << 16);
+    }
+    if chunks.len() >= 2 {
+        a = a.wrapping_add((chunks[1] as u32) << 8);
+    }
+    if !chunks.is_empty() {
+        a = a.wrapping_add(chunks[0] as u32);
+    }
+
+    (_, b, c) = hash_final(a, b, c);
+    ((b as u64) << 32) | c as u64
+}
+
+fn hash_uint32_extended(value: u32, seed: u64) -> u64 {
+    let mut a = HASH_INITIAL_VALUE.wrapping_add(std::mem::size_of::<u32>() as u32);
+    let mut b = a;
+    let mut c = a;
+
+    if seed != 0 {
+        a = a.wrapping_add((seed >> 32) as u32);
+        b = b.wrapping_add(seed as u32);
+        (a, b, c) = hash_mix(a, b, c);
+    }
+
+    a = a.wrapping_add(value);
+    (_, b, c) = hash_final(a, b, c);
+    ((b as u64) << 32) | c as u64
+}
+
+fn hash_int8_extended(value: i64, seed: u64) -> u64 {
+    let mut lohalf = value as u32;
+    let hihalf = (value >> 32) as u32;
+    lohalf ^= if value >= 0 { hihalf } else { !hihalf };
+    hash_uint32_extended(lohalf, seed)
+}
+
+fn hash_combine64(mut left: u64, right: u64) -> u64 {
+    left ^= right
+        .wrapping_add(0x49a0_f4dd_15e5_a8e3)
+        .wrapping_add(left << 54)
+        .wrapping_add(left >> 7);
+    left
+}
+
+fn hash_partition_value(value: &Value, opclass: Option<u32>) -> Result<Option<u64>, ExecError> {
+    let hash = match value {
+        Value::Null => return Ok(None),
+        Value::Bool(value) => hash_uint32_extended(u32::from(*value), HASH_PARTITION_SEED),
+        Value::InternalChar(value) => {
+            hash_uint32_extended(i32::from(*value) as u32, HASH_PARTITION_SEED)
+        }
+        Value::Int16(value) => hash_uint32_extended(i32::from(*value) as u32, HASH_PARTITION_SEED),
+        Value::Int32(value) => hash_uint32_extended(*value as u32, HASH_PARTITION_SEED),
+        Value::Int64(value) => hash_int8_extended(*value, HASH_PARTITION_SEED),
+        Value::Date(value) => hash_uint32_extended(value.0 as u32, HASH_PARTITION_SEED),
+        Value::Time(value) => hash_int8_extended(value.0, HASH_PARTITION_SEED),
+        Value::Timestamp(value) => hash_int8_extended(value.0, HASH_PARTITION_SEED),
+        Value::TimestampTz(value) => hash_int8_extended(value.0, HASH_PARTITION_SEED),
+        Value::TimeTz(value) => {
+            let mut bytes = Vec::with_capacity(12);
+            bytes.extend_from_slice(&value.time.0.to_le_bytes());
+            bytes.extend_from_slice(&value.offset_seconds.to_le_bytes());
+            hash_bytes_extended(&bytes, HASH_PARTITION_SEED)
+        }
+        Value::Float64(value) if *value == 0.0 => HASH_PARTITION_SEED,
+        Value::Float64(value) if value.is_nan() => {
+            hash_bytes_extended(&f64::NAN.to_le_bytes(), HASH_PARTITION_SEED)
+        }
+        Value::Float64(value) => hash_bytes_extended(&value.to_le_bytes(), HASH_PARTITION_SEED),
+        Value::Numeric(value) => {
+            hash_bytes_extended(value.render().as_bytes(), HASH_PARTITION_SEED)
+        }
+        Value::Bytea(value) => hash_bytes_extended(value, HASH_PARTITION_SEED),
+        value if value.as_text().is_some() => {
+            let mut text = value.as_text().unwrap();
+            if opclass == Some(BPCHAR_HASH_OPCLASS_OID) {
+                text = text.trim_end_matches(' ');
+            }
+            hash_bytes_extended(text.as_bytes(), HASH_PARTITION_SEED)
+        }
+        other => {
+            return Err(ExecError::DetailedError {
+                message: format!("unsupported hash partition key value {other:?}"),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
+    };
+    Ok(Some(hash))
+}
+
+fn partition_hash_value(values: &[Value], opclasses: &[u32]) -> Result<u64, ExecError> {
+    let mut row_hash = 0_u64;
+    for (index, value) in values.iter().enumerate() {
+        if let Some(value_hash) = hash_partition_value(value, opclasses.get(index).copied())? {
+            row_hash = hash_combine64(row_hash, value_hash);
+        }
+    }
+    Ok(row_hash)
+}
+
 fn row_matches_explicit_bound(
     relation: &BoundRelation,
     spec: &LoweredPartitionSpec,
@@ -385,6 +576,13 @@ fn row_matches_explicit_bound(
                 compare_partition_key_to_bound(&keys, from, &spec.partcollation)? != Ordering::Less
                     && compare_partition_key_to_bound(&keys, to, &spec.partcollation)?
                         == Ordering::Less,
+            )
+        }
+        PartitionBoundSpec::Hash { modulus, remainder } => {
+            let keys = key_values(relation, spec, row)?;
+            Ok(
+                partition_hash_value(&keys, &spec.partclass)? % (*modulus as u64)
+                    == *remainder as u64,
             )
         }
     }
@@ -482,7 +680,44 @@ fn bounds_overlap(
                 && compare_range_bounds(right_to, left_from, &spec.partcollation)?
                     == Ordering::Greater,
         ),
+        (
+            PartitionBoundSpec::Hash {
+                modulus: left_modulus,
+                remainder: left_remainder,
+            },
+            PartitionBoundSpec::Hash {
+                modulus: right_modulus,
+                remainder: right_remainder,
+            },
+        ) => Ok(hash_bounds_overlap(
+            *left_modulus,
+            *left_remainder,
+            *right_modulus,
+            *right_remainder,
+        )),
         _ => Ok(false),
+    }
+}
+
+fn hash_moduli_compatible(left: i32, right: i32) -> bool {
+    let lower = left.min(right);
+    let higher = left.max(right);
+    higher % lower == 0
+}
+
+fn hash_bounds_overlap(
+    left_modulus: i32,
+    left_remainder: i32,
+    right_modulus: i32,
+    right_remainder: i32,
+) -> bool {
+    if !hash_moduli_compatible(left_modulus, right_modulus) {
+        return false;
+    }
+    if left_modulus <= right_modulus {
+        right_remainder % left_modulus == left_remainder
+    } else {
+        left_remainder % right_modulus == right_remainder
     }
 }
 
@@ -506,6 +741,34 @@ pub(crate) fn validate_new_partition_bound(
             hint: None,
             sqlstate: "42P17",
         });
+    }
+
+    if let PartitionBoundSpec::Hash {
+        modulus: new_modulus,
+        ..
+    } = bound
+    {
+        for child in direct_partition_children(catalog, parent.relation_oid)? {
+            if skip_child_oid.is_some_and(|oid| oid == child.relation_oid) {
+                continue;
+            }
+            let existing_bound = child_partition_bound(&child)?;
+            if let PartitionBoundSpec::Hash {
+                modulus: existing_modulus,
+                ..
+            } = existing_bound
+                && !hash_moduli_compatible(*new_modulus, existing_modulus)
+            {
+                return Err(ExecError::DetailedError {
+                    message:
+                        "every hash partition modulus must be a factor of the next larger modulus"
+                            .into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42P17",
+                });
+            }
+        }
     }
 
     for child in direct_partition_children(catalog, parent.relation_oid)? {

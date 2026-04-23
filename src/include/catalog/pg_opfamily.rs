@@ -2,8 +2,8 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, BRIN_AM_OID, BTREE_AM_OID, GIST_AM_OID, PG_CATALOG_NAMESPACE_OID,
-    SPGIST_AM_OID,
+    BOOTSTRAP_SUPERUSER_OID, BRIN_AM_OID, BTREE_AM_OID, GIST_AM_OID, HASH_AM_OID,
+    PG_CATALOG_NAMESPACE_OID, SPGIST_AM_OID,
 };
 
 pub const BTREE_INTEGER_FAMILY_OID: u32 = 1976;
@@ -38,6 +38,20 @@ pub const BRIN_DATETIME_MINMAX_FAMILY_OID: u32 = 76108;
 pub const BRIN_TIMETZ_MINMAX_FAMILY_OID: u32 = 76109;
 pub const BRIN_BIT_MINMAX_FAMILY_OID: u32 = 76110;
 pub const BRIN_VARBIT_MINMAX_FAMILY_OID: u32 = 76111;
+pub const HASH_BPCHAR_FAMILY_OID: u32 = 427;
+pub const HASH_CHAR_FAMILY_OID: u32 = 431;
+pub const HASH_DATE_FAMILY_OID: u32 = 435;
+pub const HASH_FLOAT_FAMILY_OID: u32 = 1971;
+pub const HASH_INTEGER_FAMILY_OID: u32 = 1977;
+pub const HASH_NUMERIC_FAMILY_OID: u32 = 1998;
+pub const HASH_OID_FAMILY_OID: u32 = 1990;
+pub const HASH_TEXT_FAMILY_OID: u32 = 1995;
+pub const HASH_TIME_FAMILY_OID: u32 = 1997;
+pub const HASH_TIMESTAMPTZ_FAMILY_OID: u32 = 1999;
+pub const HASH_TIMETZ_FAMILY_OID: u32 = 2001;
+pub const HASH_TIMESTAMP_FAMILY_OID: u32 = 2040;
+pub const HASH_BOOL_FAMILY_OID: u32 = 2222;
+pub const HASH_BYTEA_FAMILY_OID: u32 = 2223;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgOpfamilyRow {
@@ -214,6 +228,20 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
         brin_row(BRIN_TIMETZ_MINMAX_FAMILY_OID, "timetz_minmax_ops"),
         brin_row(BRIN_BIT_MINMAX_FAMILY_OID, "bit_minmax_ops"),
         brin_row(BRIN_VARBIT_MINMAX_FAMILY_OID, "varbit_minmax_ops"),
+        hash_row(HASH_BPCHAR_FAMILY_OID, "bpchar_ops"),
+        hash_row(HASH_CHAR_FAMILY_OID, "char_ops"),
+        hash_row(HASH_DATE_FAMILY_OID, "date_ops"),
+        hash_row(HASH_FLOAT_FAMILY_OID, "float_ops"),
+        hash_row(HASH_INTEGER_FAMILY_OID, "integer_ops"),
+        hash_row(HASH_NUMERIC_FAMILY_OID, "numeric_ops"),
+        hash_row(HASH_OID_FAMILY_OID, "oid_ops"),
+        hash_row(HASH_TEXT_FAMILY_OID, "text_ops"),
+        hash_row(HASH_TIME_FAMILY_OID, "time_ops"),
+        hash_row(HASH_TIMESTAMPTZ_FAMILY_OID, "timestamptz_ops"),
+        hash_row(HASH_TIMETZ_FAMILY_OID, "timetz_ops"),
+        hash_row(HASH_TIMESTAMP_FAMILY_OID, "timestamp_ops"),
+        hash_row(HASH_BOOL_FAMILY_OID, "bool_ops"),
+        hash_row(HASH_BYTEA_FAMILY_OID, "bytea_ops"),
     ]
 }
 
@@ -221,6 +249,16 @@ fn brin_row(oid: u32, name: &str) -> PgOpfamilyRow {
     PgOpfamilyRow {
         oid,
         opfmethod: BRIN_AM_OID,
+        opfname: name.into(),
+        opfnamespace: PG_CATALOG_NAMESPACE_OID,
+        opfowner: BOOTSTRAP_SUPERUSER_OID,
+    }
+}
+
+fn hash_row(oid: u32, name: &str) -> PgOpfamilyRow {
+    PgOpfamilyRow {
+        oid,
+        opfmethod: HASH_AM_OID,
         opfname: name.into(),
         opfnamespace: PG_CATALOG_NAMESPACE_OID,
         opfowner: BOOTSTRAP_SUPERUSER_OID,

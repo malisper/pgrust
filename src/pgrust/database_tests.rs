@@ -3088,6 +3088,70 @@ fn drop_table_drops_partitioned_roots_and_subpartitioned_children() {
 }
 
 #[test]
+fn hash_partitioned_tables_route_rows_and_validate_bounds() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table hp (a int4, payload text) partition by hash (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table hp0 partition of hp for values with (modulus 2, remainder 0)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table hp1 partition of hp for values with (modulus 2, remainder 1)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into hp values (1, 'one'), (2, 'two'), (3, 'three'), (null, 'nil')",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from hp"),
+        vec![vec![Value::Int64(4)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select partstrat::text from pg_partitioned_table where partrelid = 'hp'::regclass",
+        ),
+        vec![vec![Value::Text("h".into())]]
+    );
+
+    match session.execute(&db, "create table hp_default partition of hp default") {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) if message == "a hash-partitioned table may not have a default partition"
+            && sqlstate == "42P17" => {}
+        other => panic!("expected hash default partition rejection, got {other:?}"),
+    }
+
+    match session.execute(
+        &db,
+        "create table hp_bad partition of hp for values with (modulus 3, remainder 0)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message
+            == "every hash partition modulus must be a factor of the next larger modulus"
+            && sqlstate == "42P17" => {}
+        other => panic!("expected hash modulus factor rejection, got {other:?}"),
+    }
+}
+
+#[test]
 fn partitioned_primary_keys_support_rename_flow_and_index_tree_metadata() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
