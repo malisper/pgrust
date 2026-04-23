@@ -11250,6 +11250,61 @@ fn explain_shows_aggregate_node() {
 }
 
 #[test]
+fn explain_verbose_lateral_aggregate_renders_pg_style_details() {
+    let base = temp_dir("explain_verbose_lateral_agg");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "explain (verbose, costs off)
+         select s1, s2, sm
+         from generate_series(1, 3) s1,
+              lateral (
+                  select s2, sum(s1 + s2) sm
+                  from generate_series(1, 3) s2
+                  group by s2
+              ) ss
+         order by 1, 2",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.to_string(),
+                    other => panic!("expected text, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered.iter().any(|line| {
+                    line.trim()
+                        == "Output: generate_series.generate_series, sum((generate_series.generate_series + generate_series.generate_series))"
+                }),
+                "{}",
+                rendered.join("\n")
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.trim() == "Group Key: generate_series.generate_series"),
+                "{}",
+                rendered.join("\n")
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| { line.trim() == "Function Call: generate_series(1, 3)" }),
+                "{}",
+                rendered.join("\n")
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn window_builtin_functions_handle_peer_groups() {
     let base = temp_dir("window_builtin_peer_groups");
     let mut txns = TransactionManager::new_durable(&base).unwrap();
@@ -16383,6 +16438,55 @@ fn grouped_query_having_can_use_correlated_exists() {
                 vec![Value::Int32(2), Value::Int64(1)],
             ],
         );
+}
+
+#[test]
+fn grouped_query_having_can_use_outer_aggregate_inside_subquery_where() {
+    let mut harness = seed_people_and_pets("grouped_having_outer_aggregate_in_subquery_where");
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select p.id from people p group by p.id having exists (select 1 from pets q where sum(p.id) = q.owner_id) order by p.id",
+            )
+            .unwrap(),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]],
+    );
+}
+
+#[test]
+fn grouped_query_having_matches_outer_aggregate_when_subquery_qualifies_column() {
+    let mut harness = seed_people_and_pets("grouped_having_outer_aggregate_qualified_match");
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select p.note, sum(id) from people p group by p.note having exists (select 1 from pets q where sum(p.id) = q.owner_id) order by p.note",
+            )
+            .unwrap(),
+        vec![
+            vec![Value::Text("a".into()), Value::Int64(1)],
+            vec![Value::Text("b".into()), Value::Int64(2)],
+        ],
+    );
+}
+
+#[test]
+fn grouped_query_having_can_use_outer_aggregate_with_ungrouped_arg_inside_subquery_where() {
+    let mut harness =
+        seed_people_and_pets("grouped_having_outer_aggregate_with_ungrouped_arg_inside_subquery");
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select p.note from people p group by p.note having exists (select 1 from pets q where sum(distinct p.id) = q.owner_id) order by p.note",
+            )
+            .unwrap(),
+        vec![
+            vec![Value::Text("a".into())],
+            vec![Value::Text("b".into())],
+        ],
+    );
 }
 
 #[test]

@@ -103,7 +103,7 @@ pub(crate) fn load_view_return_query(
     let mut next_views = expanded_views.to_vec();
     next_views.push(relation_oid);
     let (query, _) =
-        analyze_select_query_with_outer(&select, catalog, &[], None, &[], &next_views)?;
+        analyze_select_query_with_outer(&select, catalog, &[], None, None, &[], &next_views)?;
     let display_name = view_display_name(relation_oid, alias);
     validate_view_shape(&query, relation_desc, &display_name)?;
     Ok(query)

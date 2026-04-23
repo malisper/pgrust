@@ -1398,11 +1398,9 @@ fn lower_direct_ref(expr: &Expr, mode: LowerMode<'_>) -> Option<Expr> {
     }
 }
 
-fn exec_param_for_outer_var(ctx: &mut SetRefsContext<'_>, var: Var) -> Expr {
-    let parent_expr = Expr::Var(Var {
-        varlevelsup: var.varlevelsup - 1,
-        ..var
-    });
+fn exec_param_for_outer_expr(ctx: &mut SetRefsContext<'_>, expr: Expr) -> Expr {
+    let parent_expr = decrement_outer_expr_levels(expr.clone());
+    let paramtype = expr_sql_type(&parent_expr);
     if let Some(existing) = ctx
         .ext_params
         .iter()
@@ -1411,7 +1409,7 @@ fn exec_param_for_outer_var(ctx: &mut SetRefsContext<'_>, var: Var) -> Expr {
         return Expr::Param(Param {
             paramkind: ParamKind::Exec,
             paramid: existing.paramid,
-            paramtype: var.vartype,
+            paramtype,
         });
     }
     let paramid = ctx.next_param_id;
@@ -1423,7 +1421,7 @@ fn exec_param_for_outer_var(ctx: &mut SetRefsContext<'_>, var: Var) -> Expr {
     Expr::Param(Param {
         paramkind: ParamKind::Exec,
         paramid,
-        paramtype: var.vartype,
+        paramtype,
     })
 }
 
@@ -1462,6 +1460,25 @@ fn inline_exec_params(expr: Expr, params: &[ExecParamSource], consumed: &mut Vec
                 .map(|arg| inline_exec_params(arg, params, consumed))
                 .collect(),
             ..*func
+        })),
+        Expr::Aggref(aggref) => Expr::Aggref(Box::new(Aggref {
+            args: aggref
+                .args
+                .into_iter()
+                .map(|arg| inline_exec_params(arg, params, consumed))
+                .collect(),
+            aggorder: aggref
+                .aggorder
+                .into_iter()
+                .map(|item| OrderByEntry {
+                    expr: inline_exec_params(item.expr, params, consumed),
+                    ..item
+                })
+                .collect(),
+            aggfilter: aggref
+                .aggfilter
+                .map(|expr| inline_exec_params(expr, params, consumed)),
+            ..*aggref
         })),
         Expr::WindowFunc(window_func) => Expr::WindowFunc(Box::new(WindowFuncExpr {
             kind: match window_func.kind {
@@ -1521,17 +1538,39 @@ fn inline_exec_params(expr: Expr, params: &[ExecParamSource], consumed: &mut Vec
     }
 }
 
-fn decrement_outer_var_levels(expr: Expr) -> Expr {
+fn decrement_outer_expr_levels(expr: Expr) -> Expr {
     match expr {
         Expr::Var(mut var) if var.varlevelsup > 0 => {
             var.varlevelsup -= 1;
             Expr::Var(var)
         }
+        Expr::Aggref(mut aggref) => {
+            if aggref.agglevelsup > 0 {
+                aggref.agglevelsup -= 1;
+            }
+            Expr::Aggref(Box::new(Aggref {
+                args: aggref
+                    .args
+                    .into_iter()
+                    .map(decrement_outer_expr_levels)
+                    .collect(),
+                aggorder: aggref
+                    .aggorder
+                    .into_iter()
+                    .map(|item| OrderByEntry {
+                        expr: decrement_outer_expr_levels(item.expr),
+                        ..item
+                    })
+                    .collect(),
+                aggfilter: aggref.aggfilter.map(decrement_outer_expr_levels),
+                ..*aggref
+            }))
+        }
         Expr::Op(op) => Expr::Op(Box::new(OpExpr {
             args: op
                 .args
                 .into_iter()
-                .map(decrement_outer_var_levels)
+                .map(decrement_outer_expr_levels)
                 .collect(),
             ..*op
         })),
@@ -1539,7 +1578,7 @@ fn decrement_outer_var_levels(expr: Expr) -> Expr {
             args: bool_expr
                 .args
                 .into_iter()
-                .map(decrement_outer_var_levels)
+                .map(decrement_outer_expr_levels)
                 .collect(),
             ..*bool_expr
         })),
@@ -1547,7 +1586,7 @@ fn decrement_outer_var_levels(expr: Expr) -> Expr {
             args: func
                 .args
                 .into_iter()
-                .map(decrement_outer_var_levels)
+                .map(decrement_outer_expr_levels)
                 .collect(),
             ..*func
         })),
@@ -1557,17 +1596,17 @@ fn decrement_outer_var_levels(expr: Expr) -> Expr {
                     args: aggref
                         .args
                         .into_iter()
-                        .map(decrement_outer_var_levels)
+                        .map(decrement_outer_expr_levels)
                         .collect(),
                     aggorder: aggref
                         .aggorder
                         .into_iter()
                         .map(|item| OrderByEntry {
-                            expr: decrement_outer_var_levels(item.expr),
+                            expr: decrement_outer_expr_levels(item.expr),
                             ..item
                         })
                         .collect(),
-                    aggfilter: aggref.aggfilter.map(decrement_outer_var_levels),
+                    aggfilter: aggref.aggfilter.map(decrement_outer_expr_levels),
                     ..aggref
                 }),
                 WindowFuncKind::Builtin(kind) => WindowFuncKind::Builtin(kind),
@@ -1575,29 +1614,29 @@ fn decrement_outer_var_levels(expr: Expr) -> Expr {
             args: window_func
                 .args
                 .into_iter()
-                .map(decrement_outer_var_levels)
+                .map(decrement_outer_expr_levels)
                 .collect(),
             ..*window_func
         })),
         Expr::ScalarArrayOp(saop) => Expr::ScalarArrayOp(Box::new(ScalarArrayOpExpr {
-            left: Box::new(decrement_outer_var_levels(*saop.left)),
-            right: Box::new(decrement_outer_var_levels(*saop.right)),
+            left: Box::new(decrement_outer_expr_levels(*saop.left)),
+            right: Box::new(decrement_outer_expr_levels(*saop.right)),
             ..*saop
         })),
-        Expr::Cast(inner, ty) => Expr::Cast(Box::new(decrement_outer_var_levels(*inner)), ty),
+        Expr::Cast(inner, ty) => Expr::Cast(Box::new(decrement_outer_expr_levels(*inner)), ty),
         Expr::Coalesce(left, right) => Expr::Coalesce(
-            Box::new(decrement_outer_var_levels(*left)),
-            Box::new(decrement_outer_var_levels(*right)),
+            Box::new(decrement_outer_expr_levels(*left)),
+            Box::new(decrement_outer_expr_levels(*right)),
         ),
-        Expr::IsNull(inner) => Expr::IsNull(Box::new(decrement_outer_var_levels(*inner))),
-        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(decrement_outer_var_levels(*inner))),
+        Expr::IsNull(inner) => Expr::IsNull(Box::new(decrement_outer_expr_levels(*inner))),
+        Expr::IsNotNull(inner) => Expr::IsNotNull(Box::new(decrement_outer_expr_levels(*inner))),
         Expr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
-            Box::new(decrement_outer_var_levels(*left)),
-            Box::new(decrement_outer_var_levels(*right)),
+            Box::new(decrement_outer_expr_levels(*left)),
+            Box::new(decrement_outer_expr_levels(*right)),
         ),
         Expr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
-            Box::new(decrement_outer_var_levels(*left)),
-            Box::new(decrement_outer_var_levels(*right)),
+            Box::new(decrement_outer_expr_levels(*left)),
+            Box::new(decrement_outer_expr_levels(*right)),
         ),
         other => other,
     }
@@ -2100,7 +2139,7 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
         return lowered;
     }
     match expr {
-        Expr::Var(var) if var.varlevelsup > 0 => exec_param_for_outer_var(ctx, var),
+        Expr::Var(var) if var.varlevelsup > 0 => exec_param_for_outer_expr(ctx, Expr::Var(var)),
         Expr::Var(var) if is_executor_special_varno(var.varno) => Expr::Var(var),
         Expr::Var(var) => {
             if is_system_attr(var.varattno) {
@@ -2123,6 +2162,9 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
             }
         }
         Expr::Param(param) => Expr::Param(param),
+        Expr::Aggref(aggref) if aggref.agglevelsup > 0 => {
+            exec_param_for_outer_expr(ctx, Expr::Aggref(aggref))
+        }
         Expr::Aggref(_) => {
             panic!("Aggref should be lowered before executable plan creation")
         }
@@ -3196,7 +3238,7 @@ fn set_nested_loop_join_references(
             for param in right_ctx.ext_params {
                 let mut param_consumed_parent_params = Vec::new();
                 let rebased_expr = inline_exec_params(
-                    decrement_outer_var_levels(param.expr),
+                    decrement_outer_expr_levels(param.expr),
                     &ctx.ext_params,
                     &mut param_consumed_parent_params,
                 );
