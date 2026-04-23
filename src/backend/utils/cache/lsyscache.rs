@@ -24,8 +24,8 @@ use crate::include::access::brin_page::{
 use crate::include::catalog::{
     PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow,
     PgCollationRow, PgConstraintRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
-    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticRow,
-    PgTriggerRow, PgTypeRow,
+    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticExtDataRow,
+    PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTypeRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::pgrust::database::{
@@ -818,6 +818,10 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         self.db.auth_state(self.client_id).current_user_oid()
     }
 
+    fn search_path(&self) -> Vec<String> {
+        self.search_path.clone()
+    }
+
     fn session_user_oid(&self) -> u32 {
         self.db.auth_state(self.client_id).session_user_oid()
     }
@@ -838,6 +842,10 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
 
     fn namespace_row_by_oid(&self, oid: u32) -> Option<PgNamespaceRow> {
         namespace_row_by_oid(self.db, self.client_id, self.txn_ctx, oid)
+    }
+
+    fn namespace_rows(&self) -> Vec<PgNamespaceRow> {
+        ensure_namespace_rows(self.db, self.client_id, self.txn_ctx)
     }
 
     fn row_security_enabled(&self) -> bool {
@@ -977,6 +985,18 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             .into_iter()
             .filter(|row| row.starelid == relation_oid)
             .collect()
+    }
+
+    fn statistic_ext_rows(&self) -> Vec<PgStatisticExtRow> {
+        backend_catcache(self.db, self.client_id, self.txn_ctx)
+            .map(|catcache| catcache.statistic_ext_rows())
+            .unwrap_or_default()
+    }
+
+    fn statistic_ext_data_rows(&self) -> Vec<PgStatisticExtDataRow> {
+        backend_catcache(self.db, self.client_id, self.txn_ctx)
+            .map(|catcache| catcache.statistic_ext_data_rows())
+            .unwrap_or_default()
     }
 
     fn pg_views_rows(&self) -> Vec<Vec<Value>> {
@@ -1176,9 +1196,10 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
                 relcache.insert(format!("{}.{}", temp_namespace.name, name), entry.entry);
             }
         }
-        Some(VisibleCatalog::new(
+        Some(VisibleCatalog::with_search_path(
             relcache.with_search_path(&self.search_path),
             Some(catcache),
+            self.search_path.clone(),
         ))
     }
 }

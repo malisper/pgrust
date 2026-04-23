@@ -1292,6 +1292,7 @@ fn execute_query_statement(
                 let role_names = role_name_map(&catalog);
                 let relation_names = relation_name_map(&catalog);
                 let proc_names = proc_name_map(&catalog);
+                let namespace_names = namespace_name_map(&catalog);
                 annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
                 let mut row_buf = Vec::new();
                 let mut row_count = 0usize;
@@ -1324,6 +1325,7 @@ fn execute_query_statement(
                                         Some(&role_names),
                                         Some(&relation_names),
                                         Some(&proc_names),
+                                        Some(&namespace_names),
                                     )?;
                                     row_count += 1;
                                 }
@@ -1373,6 +1375,7 @@ fn execute_query_statement(
             let role_names = role_name_map(&catalog);
             let relation_names = relation_name_map(&catalog);
             let proc_names = proc_name_map(&catalog);
+            let namespace_names = namespace_name_map(&catalog);
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
             flush_pending_backend_messages(stream, db, &state.session)?;
             send_query_result(
@@ -1388,6 +1391,7 @@ fn execute_query_statement(
                 Some(&role_names),
                 Some(&relation_names),
                 Some(&proc_names),
+                Some(&namespace_names),
             )?;
             Ok(QueryStatementFlow::Continue)
         }
@@ -1577,6 +1581,39 @@ fn proc_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
         })
 }
 
+fn relation_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
+    catalog
+        .materialize_visible_catalog()
+        .map(|visible| {
+            visible
+                .relcache()
+                .entries()
+                .map(|(name, entry)| {
+                    let relname = name
+                        .rsplit_once('.')
+                        .map(|(_, relname)| relname)
+                        .unwrap_or(name)
+                        .to_string();
+                    (entry.relation_oid, relname)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn namespace_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
+    catalog
+        .materialize_visible_catalog()
+        .map(|visible| {
+            visible
+                .namespace_rows()
+                .into_iter()
+                .map(|row| (row.oid, row.nspname))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn try_handle_psql_describe_query(
     stream: &mut impl Write,
     db: &Database,
@@ -1590,6 +1627,7 @@ fn try_handle_psql_describe_query(
     let role_names = role_name_map(&catalog);
     let relation_names = relation_name_map(&catalog);
     let proc_names = proc_name_map(&catalog);
+    let namespace_names = namespace_name_map(&catalog);
     send_query_result(
         stream,
         &columns,
@@ -1603,6 +1641,7 @@ fn try_handle_psql_describe_query(
         Some(&role_names),
         Some(&relation_names),
         Some(&proc_names),
+        Some(&namespace_names),
     )?;
     Ok(true)
 }
@@ -1680,12 +1719,6 @@ fn execute_psql_describe_query(
     }
     if lower.contains("from pg_catalog.pg_policy pol") && lower.contains("pol.polroles") {
         return Some((vec![QueryColumn::text("Policies")], Vec::new()));
-    }
-    if lower.contains("pg_catalog.pg_statistic_ext")
-        && lower.contains("stxrelid")
-        && lower.contains("stxname")
-    {
-        return psql_describe_statistics_query(db, session, sql);
     }
     if lower.contains("from pg_catalog.pg_class c, pg_catalog.pg_inherits i")
         && lower.contains("::pg_catalog.regclass")
@@ -1795,6 +1828,7 @@ fn try_handle_statistics_catalog_query(
     let role_names = role_name_map(&catalog);
     let relation_names = relation_name_map(&catalog);
     let proc_names = proc_name_map(&catalog);
+    let namespace_names = namespace_name_map(&catalog);
     send_query_result(
         stream,
         &columns,
@@ -1808,6 +1842,7 @@ fn try_handle_statistics_catalog_query(
         Some(&role_names),
         Some(&relation_names),
         Some(&proc_names),
+        Some(&namespace_names),
     )?;
     Ok(true)
 }
@@ -3626,6 +3661,7 @@ fn execute_portal(
             let role_names = role_name_map(&catalog);
             let relation_names = relation_name_map(&catalog);
             let proc_names = proc_name_map(&catalog);
+            let namespace_names = namespace_name_map(&catalog);
             if let Err(e) = validate_binary_result_formats(&rows, &columns, &portal.result_formats)
             {
                 send_queued_notices(stream)?;
@@ -3656,6 +3692,7 @@ fn execute_portal(
                     Some(&role_names),
                     Some(&relation_names),
                     Some(&proc_names),
+                    Some(&namespace_names),
                 )?;
             }
             send_command_complete(stream, &format!("SELECT {}", rows.len()))?;

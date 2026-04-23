@@ -115,11 +115,20 @@ impl Database {
             &relation.desc.columns[column_index].name,
             (column_index + 1) as i16,
         )?;
+        let mut next_cid = cid;
+        self.drop_statistics_for_column_in_transaction(
+            client_id,
+            relation.relation_oid,
+            (column_index + 1) as i16,
+            xid,
+            &mut next_cid,
+            catalog_effects,
+        )?;
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
             xid,
-            cid,
+            cid: next_cid,
             client_id,
             waiter: None,
             interrupts,

@@ -4,7 +4,8 @@ use super::{
     pg_database_desc, pg_depend_desc, pg_index_desc, pg_inherits_desc, pg_language_desc,
     pg_largeobject_metadata_desc, pg_namespace_desc, pg_opclass_desc, pg_operator_desc,
     pg_opfamily_desc, pg_proc_desc, pg_publication_desc, pg_publication_namespace_desc,
-    pg_publication_rel_desc, pg_rewrite_desc, pg_tablespace_desc, pg_type_desc,
+    pg_publication_rel_desc, pg_rewrite_desc, pg_statistic_desc, pg_statistic_ext_data_desc,
+    pg_statistic_ext_desc, pg_tablespace_desc, pg_type_desc,
 };
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
@@ -30,7 +31,8 @@ use crate::include::catalog::{
     PG_LARGEOBJECT_METADATA_RELATION_OID, PG_NAMESPACE_RELATION_OID, PG_NODE_TREE_TYPE_OID,
     PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_OPFAMILY_RELATION_OID,
     PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
-    PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TABLESPACE_RELATION_OID,
+    PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_STATISTIC_EXT_DATA_RELATION_OID,
+    PG_STATISTIC_EXT_RELATION_OID, PG_STATISTIC_RELATION_OID, PG_TABLESPACE_RELATION_OID,
     PG_TYPE_RELATION_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, REGCONFIG_ARRAY_TYPE_OID,
     REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID,
     TEXT_TYPE_OID, TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIME_ARRAY_TYPE_OID, TIME_TYPE_OID,
@@ -38,7 +40,7 @@ use crate::include::catalog::{
     TIMETZ_ARRAY_TYPE_OID, TIMETZ_TYPE_OID, TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID,
     TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID,
     VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, XID_ARRAY_TYPE_OID, XID_TYPE_OID, XML_ARRAY_TYPE_OID,
-    XML_TYPE_OID, builtin_type_rows, range_type_ref_for_sql_type,
+    XML_TYPE_OID, bootstrap_composite_type_rows, builtin_type_rows, range_type_ref_for_sql_type,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,6 +179,18 @@ pub fn bootstrap_pg_attribute_rows() -> Vec<PgAttributeRow> {
         &pg_rewrite_desc(),
     ));
     rows.extend(attribute_rows_for_desc(
+        PG_STATISTIC_RELATION_OID,
+        &pg_statistic_desc(),
+    ));
+    rows.extend(attribute_rows_for_desc(
+        PG_STATISTIC_EXT_RELATION_OID,
+        &pg_statistic_ext_desc(),
+    ));
+    rows.extend(attribute_rows_for_desc(
+        PG_STATISTIC_EXT_DATA_RELATION_OID,
+        &pg_statistic_ext_data_desc(),
+    ));
+    rows.extend(attribute_rows_for_desc(
         PG_PUBLICATION_RELATION_OID,
         &pg_publication_desc(),
     ));
@@ -224,6 +238,16 @@ fn attribute_rows_for_desc(relid: u32, desc: &RelationDesc) -> Vec<PgAttributeRo
 }
 
 fn sql_type_oid(sql_type: SqlType) -> u32 {
+    if !sql_type.is_array && sql_type.type_oid != 0 {
+        return sql_type.type_oid;
+    }
+    if let Some(row) = builtin_type_rows()
+        .into_iter()
+        .chain(bootstrap_composite_type_rows())
+        .find(|row| row.sql_type == sql_type)
+    {
+        return row.oid;
+    }
     if let Some(range_type) = range_type_ref_for_sql_type(sql_type) {
         if sql_type.is_array {
             if sql_type.type_oid != 0 && matches!(sql_type.kind, SqlTypeKind::Range) {
@@ -332,6 +356,8 @@ fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::RegType, true) => unreachable!("regtype arrays are unsupported"),
         (SqlTypeKind::RegRole, false) => crate::include::catalog::REGROLE_TYPE_OID,
         (SqlTypeKind::RegRole, true) => unreachable!("regrole arrays are unsupported"),
+        (SqlTypeKind::RegNamespace, false) => crate::include::catalog::REGNAMESPACE_TYPE_OID,
+        (SqlTypeKind::RegNamespace, true) => crate::include::catalog::REGNAMESPACE_ARRAY_TYPE_OID,
         (SqlTypeKind::RegOperator, false) => crate::include::catalog::REGOPERATOR_TYPE_OID,
         (SqlTypeKind::RegOperator, true) => crate::include::catalog::REGOPERATOR_ARRAY_TYPE_OID,
         (SqlTypeKind::RegProcedure, false) => crate::include::catalog::REGPROCEDURE_TYPE_OID,
@@ -443,6 +469,9 @@ mod tests {
             pg_index_desc().columns.len(),
             pg_inherits_desc().columns.len(),
             pg_rewrite_desc().columns.len(),
+            pg_statistic_desc().columns.len(),
+            pg_statistic_ext_desc().columns.len(),
+            pg_statistic_ext_data_desc().columns.len(),
             pg_opclass_desc().columns.len(),
             pg_opfamily_desc().columns.len(),
             pg_publication_desc().columns.len(),

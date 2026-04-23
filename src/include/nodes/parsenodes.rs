@@ -345,6 +345,7 @@ pub enum Statement {
     CommentOnConversion(CommentOnConversionStatement),
     CommentOnForeignDataWrapper(CommentOnForeignDataWrapperStatement),
     CommentOnPublication(CommentOnPublicationStatement),
+    CommentOnStatistics(CommentOnStatisticsStatement),
     CommentOnAggregate(CommentOnAggregateStatement),
     CommentOnFunction(CommentOnFunctionStatement),
     CreateDomain(CreateDomainStatement),
@@ -360,6 +361,7 @@ pub enum Statement {
     DropConversion(DropConversionStatement),
     DropDatabase(DropDatabaseStatement),
     DropPublication(DropPublicationStatement),
+    DropStatistics(DropStatisticsStatement),
     DropFunction(DropFunctionStatement),
     DropOperator(DropOperatorStatement),
     DropAggregate(DropAggregateStatement),
@@ -1406,7 +1408,7 @@ pub struct CreatePolicyStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateStatisticsStatement {
     pub if_not_exists: bool,
-    pub statistics_name: String,
+    pub statistics_name: Option<String>,
     pub kinds: Vec<String>,
     pub targets: Vec<String>,
     pub from_clause: String,
@@ -1416,7 +1418,26 @@ pub struct CreateStatisticsStatement {
 pub struct AlterStatisticsStatement {
     pub if_exists: bool,
     pub statistics_name: String,
-    pub statistics_target: i32,
+    pub action: AlterStatisticsAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterStatisticsAction {
+    Rename { new_name: String },
+    SetStatistics { target: i16 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropStatisticsStatement {
+    pub if_exists: bool,
+    pub statistics_names: Vec<String>,
+    pub cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnStatisticsStatement {
+    pub statistics_name: String,
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2536,6 +2557,7 @@ pub enum SqlTypeKind {
     RegClass,
     RegType,
     RegRole,
+    RegNamespace,
     RegOperator,
     RegProcedure,
     Tid,

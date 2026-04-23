@@ -674,17 +674,33 @@ impl Database {
             .into_iter()
             .filter(|row| row.pronamespace == schema_oid)
             .collect::<Vec<_>>();
-        let ctx = CatalogWriteContext {
-            pool: self.pool.clone(),
-            txns: self.txns.clone(),
-            xid,
-            cid,
+        let mut next_cid = cid;
+
+        self.drop_statistics_for_namespace_in_transaction(
             client_id,
-            waiter: Some(self.txn_waiter.clone()),
-            interrupts,
-        };
+            schema_oid,
+            xid,
+            &mut next_cid,
+            catalog_effects,
+        )?;
 
         for relation in relation_rows {
+            self.drop_statistics_for_relation_in_transaction(
+                client_id,
+                relation.oid,
+                xid,
+                &mut next_cid,
+                catalog_effects,
+            )?;
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: next_cid,
+                client_id,
+                waiter: Some(self.txn_waiter.clone()),
+                interrupts: Arc::clone(&interrupts),
+            };
             let drop_result = match relation.relkind {
                 'v' => self
                     .catalog
@@ -718,9 +734,19 @@ impl Database {
                 }
             }
             catalog_effects.push(effect);
+            next_cid = next_cid.saturating_add(1);
         }
 
         for proc_row in proc_rows {
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid: next_cid,
+                client_id,
+                waiter: Some(self.txn_waiter.clone()),
+                interrupts: Arc::clone(&interrupts),
+            };
             let effect = self
                 .catalog
                 .write()
@@ -728,6 +754,7 @@ impl Database {
                 .map(|(_, effect)| effect)
                 .map_err(map_catalog_error)?;
             catalog_effects.push(effect);
+            next_cid = next_cid.saturating_add(1);
         }
 
         Ok(())
@@ -899,6 +926,13 @@ impl Database {
                     .class_by_oid(*relation_oid)
                     .map(|row| (row.relkind, row.relpersistence))
                     .unwrap_or(('r', 'p'));
+                self.drop_statistics_for_relation_in_transaction(
+                    client_id,
+                    *relation_oid,
+                    xid,
+                    &mut next_cid,
+                    catalog_effects,
+                )?;
                 if relpersistence == 't' {
                     let temp_name = self
                         .temp_relation_name_for_oid(client_id, *relation_oid)
