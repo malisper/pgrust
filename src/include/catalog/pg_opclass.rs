@@ -14,7 +14,11 @@ use crate::include::catalog::{
     BTREE_OID_FAMILY_OID, BTREE_OIDVECTOR_FAMILY_OID, BTREE_TEXT_FAMILY_OID,
     BTREE_VARBIT_FAMILY_OID, BYTEA_TYPE_OID, DATE_TYPE_OID, DATEMULTIRANGE_TYPE_OID,
     FLOAT4_TYPE_OID, FLOAT8_TYPE_OID, GIST_AM_OID, GIST_BOX_FAMILY_OID, GIST_RANGE_FAMILY_OID,
-    INT2_TYPE_OID, INT4_TYPE_OID, INT4MULTIRANGE_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID,
+    HASH_AM_OID, HASH_BOOL_FAMILY_OID, HASH_BPCHAR_FAMILY_OID, HASH_BYTEA_FAMILY_OID,
+    HASH_CHAR_FAMILY_OID, HASH_DATE_FAMILY_OID, HASH_FLOAT_FAMILY_OID, HASH_INTEGER_FAMILY_OID,
+    HASH_NUMERIC_FAMILY_OID, HASH_OID_FAMILY_OID, HASH_TEXT_FAMILY_OID, HASH_TIME_FAMILY_OID,
+    HASH_TIMESTAMP_FAMILY_OID, HASH_TIMESTAMPTZ_FAMILY_OID, HASH_TIMETZ_FAMILY_OID, INT2_TYPE_OID,
+    INT4_TYPE_OID, INT4MULTIRANGE_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID,
     INT8MULTIRANGE_TYPE_OID, INTERNAL_CHAR_TYPE_OID, NAME_TYPE_OID, NUMERIC_TYPE_OID,
     NUMMULTIRANGE_TYPE_OID, OID_TYPE_OID, OIDVECTOR_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
     SPGIST_AM_OID, SPGIST_BOX_FAMILY_OID, TEXT_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_TYPE_OID,
@@ -62,6 +66,25 @@ pub const TIMESTAMPTZ_BRIN_MINMAX_OPCLASS_OID: u32 = 76133;
 pub const TIMETZ_BRIN_MINMAX_OPCLASS_OID: u32 = 76134;
 pub const BIT_BRIN_MINMAX_OPCLASS_OID: u32 = 76135;
 pub const VARBIT_BRIN_MINMAX_OPCLASS_OID: u32 = 76136;
+pub const BOOL_HASH_OPCLASS_OID: u32 = 76200;
+pub const INT2_HASH_OPCLASS_OID: u32 = 76201;
+pub const INT4_HASH_OPCLASS_OID: u32 = 76202;
+pub const INT8_HASH_OPCLASS_OID: u32 = 76203;
+pub const OID_HASH_OPCLASS_OID: u32 = 76204;
+pub const CHAR_HASH_OPCLASS_OID: u32 = 76205;
+pub const NAME_HASH_OPCLASS_OID: u32 = 76206;
+pub const TEXT_HASH_OPCLASS_OID: u32 = 76207;
+pub const VARCHAR_HASH_OPCLASS_OID: u32 = 76208;
+pub const BPCHAR_HASH_OPCLASS_OID: u32 = 76209;
+pub const FLOAT4_HASH_OPCLASS_OID: u32 = 76210;
+pub const FLOAT8_HASH_OPCLASS_OID: u32 = 76211;
+pub const NUMERIC_HASH_OPCLASS_OID: u32 = 76212;
+pub const TIMESTAMP_HASH_OPCLASS_OID: u32 = 76213;
+pub const TIMESTAMPTZ_HASH_OPCLASS_OID: u32 = 76214;
+pub const DATE_HASH_OPCLASS_OID: u32 = 76215;
+pub const TIME_HASH_OPCLASS_OID: u32 = 76216;
+pub const TIMETZ_HASH_OPCLASS_OID: u32 = 76217;
+pub const BYTEA_HASH_OPCLASS_OID: u32 = 76218;
 pub const INT4RANGE_GIST_OPCLASS_OID: u32 = RANGE_GIST_OPCLASS_OID;
 pub const INT8RANGE_GIST_OPCLASS_OID: u32 = RANGE_GIST_OPCLASS_OID;
 pub const NUMRANGE_GIST_OPCLASS_OID: u32 = RANGE_GIST_OPCLASS_OID;
@@ -358,6 +381,120 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             BRIN_VARBIT_MINMAX_FAMILY_OID,
             VARBIT_TYPE_OID,
         ),
+        hash_row(
+            BOOL_HASH_OPCLASS_OID,
+            "bool_ops",
+            HASH_BOOL_FAMILY_OID,
+            BOOL_TYPE_OID,
+        ),
+        hash_row(
+            INT2_HASH_OPCLASS_OID,
+            "int2_ops",
+            HASH_INTEGER_FAMILY_OID,
+            INT2_TYPE_OID,
+        ),
+        hash_row(
+            INT4_HASH_OPCLASS_OID,
+            "int4_ops",
+            HASH_INTEGER_FAMILY_OID,
+            INT4_TYPE_OID,
+        ),
+        hash_row(
+            INT8_HASH_OPCLASS_OID,
+            "int8_ops",
+            HASH_INTEGER_FAMILY_OID,
+            INT8_TYPE_OID,
+        ),
+        hash_row(
+            CHAR_HASH_OPCLASS_OID,
+            "char_ops",
+            HASH_CHAR_FAMILY_OID,
+            INTERNAL_CHAR_TYPE_OID,
+        ),
+        hash_row(
+            OID_HASH_OPCLASS_OID,
+            "oid_ops",
+            HASH_OID_FAMILY_OID,
+            OID_TYPE_OID,
+        ),
+        hash_row(
+            NAME_HASH_OPCLASS_OID,
+            "name_ops",
+            HASH_TEXT_FAMILY_OID,
+            NAME_TYPE_OID,
+        ),
+        hash_row(
+            TEXT_HASH_OPCLASS_OID,
+            "text_ops",
+            HASH_TEXT_FAMILY_OID,
+            TEXT_TYPE_OID,
+        ),
+        hash_row(
+            VARCHAR_HASH_OPCLASS_OID,
+            "varchar_ops",
+            HASH_TEXT_FAMILY_OID,
+            VARCHAR_TYPE_OID,
+        ),
+        hash_row(
+            BPCHAR_HASH_OPCLASS_OID,
+            "bpchar_ops",
+            HASH_BPCHAR_FAMILY_OID,
+            BPCHAR_TYPE_OID,
+        ),
+        hash_row(
+            FLOAT4_HASH_OPCLASS_OID,
+            "float4_ops",
+            HASH_FLOAT_FAMILY_OID,
+            FLOAT4_TYPE_OID,
+        ),
+        hash_row(
+            FLOAT8_HASH_OPCLASS_OID,
+            "float8_ops",
+            HASH_FLOAT_FAMILY_OID,
+            FLOAT8_TYPE_OID,
+        ),
+        hash_row(
+            NUMERIC_HASH_OPCLASS_OID,
+            "numeric_ops",
+            HASH_NUMERIC_FAMILY_OID,
+            NUMERIC_TYPE_OID,
+        ),
+        hash_row(
+            TIMESTAMP_HASH_OPCLASS_OID,
+            "timestamp_ops",
+            HASH_TIMESTAMP_FAMILY_OID,
+            TIMESTAMP_TYPE_OID,
+        ),
+        hash_row(
+            TIMESTAMPTZ_HASH_OPCLASS_OID,
+            "timestamptz_ops",
+            HASH_TIMESTAMPTZ_FAMILY_OID,
+            TIMESTAMPTZ_TYPE_OID,
+        ),
+        hash_row(
+            DATE_HASH_OPCLASS_OID,
+            "date_ops",
+            HASH_DATE_FAMILY_OID,
+            DATE_TYPE_OID,
+        ),
+        hash_row(
+            TIME_HASH_OPCLASS_OID,
+            "time_ops",
+            HASH_TIME_FAMILY_OID,
+            TIME_TYPE_OID,
+        ),
+        hash_row(
+            TIMETZ_HASH_OPCLASS_OID,
+            "timetz_ops",
+            HASH_TIMETZ_FAMILY_OID,
+            TIMETZ_TYPE_OID,
+        ),
+        hash_row(
+            BYTEA_HASH_OPCLASS_OID,
+            "bytea_ops",
+            HASH_BYTEA_FAMILY_OID,
+            BYTEA_TYPE_OID,
+        ),
     ]
 }
 
@@ -417,6 +554,20 @@ fn brin_row(oid: u32, opcname: &str, family: u32, input_type: u32) -> PgOpclassR
     }
 }
 
+fn hash_row(oid: u32, opcname: &str, family: u32, input_type: u32) -> PgOpclassRow {
+    PgOpclassRow {
+        oid,
+        opcmethod: HASH_AM_OID,
+        opcname: opcname.into(),
+        opcnamespace: PG_CATALOG_NAMESPACE_OID,
+        opcowner: BOOTSTRAP_SUPERUSER_OID,
+        opcfamily: family,
+        opcintype: input_type,
+        opcdefault: true,
+        opckeytype: 0,
+    }
+}
+
 pub fn default_btree_opclass_oid(type_oid: u32) -> Option<u32> {
     Some(match type_oid {
         BOOL_TYPE_OID => BOOL_BTREE_OPCLASS_OID,
@@ -443,6 +594,31 @@ pub fn default_btree_opclass_oid(type_oid: u32) -> Option<u32> {
         | TSTZMULTIRANGE_TYPE_OID
         | DATEMULTIRANGE_TYPE_OID
         | INT8MULTIRANGE_TYPE_OID => MULTIRANGE_BTREE_OPCLASS_OID,
+        _ => return None,
+    })
+}
+
+pub fn default_hash_opclass_oid(type_oid: u32) -> Option<u32> {
+    Some(match type_oid {
+        BOOL_TYPE_OID => BOOL_HASH_OPCLASS_OID,
+        INT2_TYPE_OID => INT2_HASH_OPCLASS_OID,
+        INT4_TYPE_OID => INT4_HASH_OPCLASS_OID,
+        INT8_TYPE_OID => INT8_HASH_OPCLASS_OID,
+        OID_TYPE_OID => OID_HASH_OPCLASS_OID,
+        INTERNAL_CHAR_TYPE_OID => CHAR_HASH_OPCLASS_OID,
+        NAME_TYPE_OID => NAME_HASH_OPCLASS_OID,
+        TEXT_TYPE_OID => TEXT_HASH_OPCLASS_OID,
+        VARCHAR_TYPE_OID => VARCHAR_HASH_OPCLASS_OID,
+        BPCHAR_TYPE_OID => BPCHAR_HASH_OPCLASS_OID,
+        FLOAT4_TYPE_OID => FLOAT4_HASH_OPCLASS_OID,
+        FLOAT8_TYPE_OID => FLOAT8_HASH_OPCLASS_OID,
+        NUMERIC_TYPE_OID => NUMERIC_HASH_OPCLASS_OID,
+        TIMESTAMP_TYPE_OID => TIMESTAMP_HASH_OPCLASS_OID,
+        TIMESTAMPTZ_TYPE_OID => TIMESTAMPTZ_HASH_OPCLASS_OID,
+        DATE_TYPE_OID => DATE_HASH_OPCLASS_OID,
+        TIME_TYPE_OID => TIME_HASH_OPCLASS_OID,
+        TIMETZ_TYPE_OID => TIMETZ_HASH_OPCLASS_OID,
+        BYTEA_TYPE_OID => BYTEA_HASH_OPCLASS_OID,
         _ => return None,
     })
 }

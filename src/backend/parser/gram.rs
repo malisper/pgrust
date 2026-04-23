@@ -542,6 +542,9 @@ fn parse_partition_spec_clause(
     } else if keyword_at_start(rest, "range") {
         rest = consume_keyword(rest, "range").trim_start();
         PartitionStrategy::Range
+    } else if keyword_at_start(rest, "hash") {
+        rest = consume_keyword(rest, "hash").trim_start();
+        PartitionStrategy::Hash
     } else {
         return Err(PartitionStatementParseError::Unsupported);
     };
@@ -613,7 +616,58 @@ fn parse_partition_bound_clause(
             rest,
         ));
     }
+    if keyword_at_start(rest, "with") {
+        rest = consume_keyword(rest, "with").trim_start();
+        let (options_sql, rest) = take_parenthesized_segment(rest)?;
+        let (modulus, remainder) = parse_hash_partition_bound_options(&options_sql)?;
+        return Ok((RawPartitionBoundSpec::Hash { modulus, remainder }, rest));
+    }
     Err(PartitionStatementParseError::Unsupported)
+}
+
+fn parse_hash_partition_bound_options(
+    input: &str,
+) -> Result<(i32, i32), PartitionStatementParseError> {
+    let mut modulus = None;
+    let mut remainder = None;
+    for item in split_top_level_items(input, ',')? {
+        let trimmed = item.trim();
+        let (keyword, rest) = parse_unqualified_identifier(trimmed, "hash partition bound option")?;
+        let rest = rest
+            .trim_start()
+            .strip_prefix('=')
+            .unwrap_or(rest)
+            .trim_start();
+        let (value, rest) = parse_signed_i64_token(rest)?;
+        if !rest.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "hash partition bound option",
+                actual: rest.trim().into(),
+            }
+            .into());
+        }
+        let value = i32::try_from(value).map_err(|_| ParseError::InvalidInteger(item.clone()))?;
+        if keyword.eq_ignore_ascii_case("modulus") {
+            modulus = Some(value);
+        } else if keyword.eq_ignore_ascii_case("remainder") {
+            remainder = Some(value);
+        } else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "MODULUS or REMAINDER",
+                actual: keyword,
+            }
+            .into());
+        }
+    }
+    let modulus = modulus.ok_or(ParseError::UnexpectedToken {
+        expected: "MODULUS option",
+        actual: input.into(),
+    })?;
+    let remainder = remainder.ok_or(ParseError::UnexpectedToken {
+        expected: "REMAINDER option",
+        actual: input.into(),
+    })?;
+    Ok((modulus, remainder))
 }
 
 fn parse_partition_range_datums(
