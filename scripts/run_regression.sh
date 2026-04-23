@@ -373,7 +373,8 @@ if [[ "$SKIP_BUILD" == false ]]; then
     }
 fi
 
-SERVER_BIN="$PGRUST_DIR/target/release/pgrust_server"
+TARGET_DIR="$("$PGRUST_DIR/scripts/cargo_target_dir.sh")"
+SERVER_BIN="$TARGET_DIR/release/pgrust_server"
 if [[ ! -x "$SERVER_BIN" ]]; then
     echo "ERROR: $SERVER_BIN not found. Run without --skip-build."
     exit 1
