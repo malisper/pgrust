@@ -23,6 +23,10 @@ pub fn lower_create_table_with_catalog(
     catalog: &dyn CatalogLookup,
     persistence: TablePersistence,
 ) -> Result<LoweredCreateTable, ParseError> {
+    let mut stmt_with_resolved_persistence = stmt.clone();
+    stmt_with_resolved_persistence.persistence = persistence;
+    let stmt = &stmt_with_resolved_persistence;
+
     if stmt.inherits.is_empty() && stmt.partition_of.is_none() {
         let mut lowered = lower_create_table(stmt, catalog)?;
         let partition = lower_partition_clause(stmt, &lowered.relation_desc, catalog, persistence)?;
