@@ -545,6 +545,7 @@ impl Database {
         let relation = lookup_sequence_relation_for_ddl(&catalog, &rename_stmt.table_name)?;
         ensure_relation_owner(self, client_id, &relation, &rename_stmt.table_name)?;
         let new_name = rename_stmt.new_table_name.to_ascii_lowercase();
+        let visible_type_rows = catalog.type_rows();
         if relation.relpersistence == 't' {
             let _ = self.rename_temp_relation_in_transaction(
                 client_id,
@@ -568,7 +569,7 @@ impl Database {
             let effect = self
                 .catalog
                 .write()
-                .rename_relation_mvcc(relation.relation_oid, &new_name, &ctx)
+                .rename_relation_mvcc(relation.relation_oid, &new_name, &visible_type_rows, &ctx)
                 .map_err(map_catalog_error)?;
             catalog_effects.push(effect);
         }

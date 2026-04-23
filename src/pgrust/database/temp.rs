@@ -582,10 +582,13 @@ impl Database {
             waiter: None,
             interrupts,
         };
+        let visible_type_rows = self
+            .lazy_catalog_lookup(client_id, Some((xid, cid)), None)
+            .type_rows();
         let effect = self
             .catalog
             .write()
-            .rename_relation_mvcc(relation_oid, &normalized_new, &ctx)
+            .rename_relation_mvcc(relation_oid, &normalized_new, &visible_type_rows, &ctx)
             .map_err(map_catalog_error)?;
         catalog_effects.push(effect);
 
