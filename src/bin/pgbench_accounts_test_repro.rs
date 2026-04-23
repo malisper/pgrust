@@ -240,18 +240,14 @@ fn load_accounts(db: &Database, args: &Args) -> Result<(), String> {
     )
     .map_err(|e| format!("create table failed: {e:?}"))?;
 
-    db.execute(1, "begin")
-        .map_err(|e| format!("begin failed: {e:?}"))?;
-    for aid in 1..=args.accounts {
-        db.execute(
-            1,
-            &format!(
-                "insert into pgbench_accounts (aid, bid, abalance, filler) values ({aid}, 1, 0, 'x')"
-            ),
-        )
-        .map_err(|e| format!("insert failed for aid {aid}: {e:?}"))?;
-    }
-    db.execute(1, "commit")
-        .map_err(|e| format!("commit failed: {e:?}"))?;
+    let values = (1..=args.accounts)
+        .map(|aid| format!("({aid}, 1, 0, 'x')"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    db.execute(
+        1,
+        &format!("insert into pgbench_accounts (aid, bid, abalance, filler) values {values}"),
+    )
+    .map_err(|e| format!("insert failed: {e:?}"))?;
     Ok(())
 }
