@@ -98,7 +98,7 @@ pub use value_io::format_array_value_text;
 
 use crate::backend::access::heap::heapam::HeapError;
 use crate::backend::access::transam::xact::{
-    CommandId, MvccError, Snapshot, TransactionId, TransactionManager,
+    CommandId, INVALID_TRANSACTION_ID, MvccError, Snapshot, TransactionId, TransactionManager,
 };
 use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::catalog::Catalog;
@@ -186,6 +186,7 @@ pub struct ExecutorContext {
     pub stats: std::sync::Arc<parking_lot::RwLock<DatabaseStatsStore>>,
     pub session_stats: std::sync::Arc<parking_lot::RwLock<SessionStatsState>>,
     pub snapshot: Snapshot,
+    pub transaction_state: Option<SharedExecutorTransactionState>,
     pub client_id: ClientId,
     pub current_database_name: String,
     pub session_user_oid: u32,
@@ -211,9 +212,61 @@ pub struct ExecutorContext {
     pub deferred_foreign_keys: Option<DeferredForeignKeyTracker>,
 }
 
+#[derive(Debug)]
+pub struct ExecutorTransactionState {
+    pub xid: Option<TransactionId>,
+    pub cid: CommandId,
+}
+
+pub type SharedExecutorTransactionState = Arc<parking_lot::Mutex<ExecutorTransactionState>>;
+
 impl ExecutorContext {
     pub fn check_for_interrupts(&self) -> Result<(), ExecError> {
         check_for_interrupts(&self.interrupts).map_err(ExecError::Interrupted)
+    }
+
+    pub fn transaction_xid(&self) -> Option<TransactionId> {
+        if self.snapshot.current_xid != INVALID_TRANSACTION_ID {
+            return Some(self.snapshot.current_xid);
+        }
+        self.transaction_state
+            .as_ref()
+            .and_then(|state| state.lock().xid)
+    }
+
+    pub fn ensure_write_xid(&mut self) -> Result<TransactionId, ExecError> {
+        if self.snapshot.current_xid != INVALID_TRANSACTION_ID {
+            return Ok(self.snapshot.current_xid);
+        }
+
+        let Some(transaction_state) = &self.transaction_state else {
+            return Err(ExecError::DetailedError {
+                message: "cannot execute heap write without a transaction id".into(),
+                detail: Some("executor context did not provide lazy transaction-id state".into()),
+                hint: None,
+                sqlstate: "XX000",
+            });
+        };
+
+        let mut state = transaction_state.lock();
+        let xid = match state.xid {
+            Some(xid) => xid,
+            None => {
+                let xid = self.txns.write().begin();
+                state.xid = Some(xid);
+                xid
+            }
+        };
+
+        self.snapshot = self
+            .txns
+            .read()
+            // :HACK: pgrust does not yet model PostgreSQL SPI command counters
+            // inside PL/pgSQL, so keep existing same-statement read-your-writes
+            // behavior after a lazy XID is assigned.
+            .snapshot_for_command(xid, CommandId::MAX)
+            .map_err(|e| ExecError::Heap(HeapError::Mvcc(e)))?;
+        Ok(xid)
     }
 }
 
