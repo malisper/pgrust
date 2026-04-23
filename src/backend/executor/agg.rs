@@ -3,6 +3,9 @@ use super::{compare_order_values, parse_numeric_text, render_datetime_value_text
 use crate::backend::executor::ExecError;
 use crate::backend::executor::exec_expr::{expect_float8_arg, float8_regr_accum_state};
 use crate::backend::executor::expr_agg_support::execute_scalar_function_value_call;
+use crate::backend::executor::expr_ops::{
+    bitwise_and_values, bitwise_or_values, bitwise_xor_values,
+};
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue, Value};
@@ -62,6 +65,10 @@ pub(crate) enum AccumState {
     BoolOr {
         seen_nonnull: bool,
         value: bool,
+    },
+    Bitwise {
+        value: Option<Value>,
+        transition: fn(Value, Value) -> Result<Value, ExecError>,
     },
     CountDistinct {
         seen: HashSet<Value>,
@@ -150,6 +157,18 @@ impl AccumState {
             (AggFunc::BoolOr, _) => AccumState::BoolOr {
                 seen_nonnull: false,
                 value: false,
+            },
+            (AggFunc::BitAnd, _) => AccumState::Bitwise {
+                value: None,
+                transition: bitwise_and_values,
+            },
+            (AggFunc::BitOr, _) => AccumState::Bitwise {
+                value: None,
+                transition: bitwise_or_values,
+            },
+            (AggFunc::BitXor, _) => AccumState::Bitwise {
+                value: None,
+                transition: bitwise_xor_values,
             },
             (AggFunc::Sum, _) => AccumState::Sum {
                 sum: None,
@@ -363,6 +382,19 @@ impl AccumState {
                         Value::Null => {}
                         _ => {}
                     }
+                }
+                Ok(())
+            },
+            (AggFunc::BitAnd | AggFunc::BitOr | AggFunc::BitXor, _, _) => |state, values| {
+                if let AccumState::Bitwise { value, transition } = state {
+                    let next = values.first().unwrap_or(&Value::Null);
+                    if matches!(next, Value::Null) {
+                        return Ok(());
+                    }
+                    *value = Some(match value.take() {
+                        Some(current) => transition(current, next.to_owned_value())?,
+                        None => next.to_owned_value(),
+                    });
                 }
                 Ok(())
             },
@@ -626,6 +658,7 @@ impl AccumState {
                     Value::Null
                 }
             }
+            AccumState::Bitwise { value, .. } => value.clone().unwrap_or(Value::Null),
             AccumState::Sum { sum, result_type } => match sum {
                 Some(NumericAccum::Int(v)) if matches!(result_type.kind, SqlTypeKind::Money) => {
                     Value::Money(*v)
@@ -971,6 +1004,9 @@ fn finalize_regr_stats(
         | AggFunc::VarSamp
         | AggFunc::StddevPop
         | AggFunc::StddevSamp
+        | AggFunc::BitAnd
+        | AggFunc::BitOr
+        | AggFunc::BitXor
         | AggFunc::Min
         | AggFunc::Max
         | AggFunc::StringAgg

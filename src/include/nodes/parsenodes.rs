@@ -606,6 +606,20 @@ pub struct CreateAggregateStatement {
     pub finalfunc_name: Option<String>,
     pub initcond: Option<String>,
     pub parallel: Option<FunctionParallel>,
+    pub transspace: i32,
+    pub combinefunc_name: Option<String>,
+    pub serialfunc_name: Option<String>,
+    pub deserialfunc_name: Option<String>,
+    pub finalfunc_extra: bool,
+    pub finalfunc_modify: char,
+    pub mstype: Option<RawTypeName>,
+    pub msfunc_name: Option<String>,
+    pub minvfunc_name: Option<String>,
+    pub mfinalfunc_name: Option<String>,
+    pub minitcond: Option<String>,
+    pub mtransspace: i32,
+    pub mfinalfunc_extra: bool,
+    pub mfinalfunc_modify: char,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1299,6 +1313,7 @@ pub struct CreateSequenceStatement {
 pub struct CreateViewStatement {
     pub schema_name: Option<String>,
     pub view_name: String,
+    pub persistence: TablePersistence,
     pub query: SelectStatement,
     pub query_sql: String,
     pub or_replace: bool,
@@ -1375,6 +1390,7 @@ pub struct AlterStatisticsStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateIndexStatement {
     pub unique: bool,
+    pub nulls_not_distinct: bool,
     pub if_not_exists: bool,
     pub index_name: String,
     pub table_name: String,

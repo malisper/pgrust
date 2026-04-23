@@ -217,6 +217,32 @@ build_ordered_test_files() {
     printf '%s\n' "${ordered_files[@]}"
 }
 
+add_aggregate_dependencies() {
+    local -a expanded_files=()
+    local saw_create_aggregate=false
+    local sql_file=""
+    local test_name=""
+    local create_aggregate_file="$SQL_DIR/create_aggregate.sql"
+
+    for sql_file in "${TEST_FILES[@]}"; do
+        test_name="$(basename "$sql_file" .sql)"
+        if [[ "$test_name" == "create_aggregate" ]]; then
+            saw_create_aggregate=true
+        fi
+        if [[ "$test_name" == "aggregates" && "$saw_create_aggregate" == false ]]; then
+            if [[ ! -f "$create_aggregate_file" ]]; then
+                echo "ERROR: aggregate dependency not found: $create_aggregate_file"
+                exit 1
+            fi
+            expanded_files+=("$create_aggregate_file")
+            saw_create_aggregate=true
+        fi
+        expanded_files+=("$sql_file")
+    done
+
+    TEST_FILES=("${expanded_files[@]}")
+}
+
 PORT=5433
 SKIP_BUILD=false
 SKIP_SERVER=false
@@ -496,6 +522,8 @@ else
         TEST_FILES=("${ordered_test_files[@]}")
     fi
 fi
+
+add_aggregate_dependencies
 
 TOTAL=0
 PASSED=0

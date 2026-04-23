@@ -307,6 +307,25 @@ fn resolve_aggregate_call(
     })
 }
 
+fn validate_distinct_aggregate_order_by(
+    arg_values: &[SqlExpr],
+    order_by: &[OrderByItem],
+    distinct: bool,
+) -> Result<(), ParseError> {
+    if !distinct {
+        return Ok(());
+    }
+    for item in order_by {
+        if !arg_values.iter().any(|arg| arg == &item.expr) {
+            return Err(ParseError::UnexpectedToken {
+                expected: "ORDER BY expressions in DISTINCT aggregate argument list",
+                actual: "ORDER BY expression must appear in argument list".into(),
+            });
+        }
+    }
+    Ok(())
+}
+
 pub trait CatalogLookup {
     fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation>;
 
@@ -1499,7 +1518,7 @@ pub fn normalize_create_view_name(stmt: &CreateViewStatement) -> Result<String, 
     normalize_create_table_name_parts(
         stmt.schema_name.as_deref(),
         &stmt.view_name,
-        TablePersistence::Permanent,
+        stmt.persistence,
         OnCommitAction::PreserveRows,
     )
     .map(|(name, _)| name)
@@ -2890,6 +2909,7 @@ fn bind_select_query_with_outer(
                         .iter()
                         .map(|arg| arg.value.clone())
                         .collect();
+                    validate_distinct_aggregate_order_by(&arg_values, &agg.order_by, agg.distinct)?;
                     if let Some(func) = resolve_builtin_aggregate(&agg.name) {
                         validate_aggregate_arity(func, &arg_values)?;
                     }
@@ -2912,20 +2932,6 @@ fn bind_select_query_with_outer(
                             expected: "supported aggregate",
                             actual: agg.name.clone(),
                         })?;
-                    if resolved.is_custom() {
-                        if agg.distinct {
-                            return Err(ParseError::FeatureNotSupported(format!(
-                                "DISTINCT on custom aggregate {}",
-                                agg.name
-                            )));
-                        }
-                        if !agg.order_by.is_empty() {
-                            return Err(ParseError::FeatureNotSupported(format!(
-                                "aggregate ORDER BY on custom aggregate {}",
-                                agg.name
-                            )));
-                        }
-                    }
                     let bound_args = arg_values
                         .iter()
                         .map(|e| {
