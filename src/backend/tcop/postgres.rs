@@ -282,6 +282,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if message.starts_with("invalid size: \"") {
                 return None;
             }
+            if message == "wrong flag in flag array: \"\"" {
+                return None;
+            }
             if let Some(position) = trigger_when_error_position(sql, message) {
                 return Some(position);
             }
@@ -6730,6 +6733,22 @@ mod tests {
         };
 
         assert_eq!(exec_error_position(sql, &err), Some(8));
+    }
+
+    #[test]
+    fn exec_error_position_omits_empty_jsonb_tsvector_flag() {
+        let sql = "select jsonb_to_tsvector('english', '{\"a\": \"aaa\"}'::jsonb, '\"\"');";
+        let err = ExecError::DetailedError {
+            message: "wrong flag in flag array: \"\"".into(),
+            detail: None,
+            hint: Some(
+                "Possible values are: \"string\", \"numeric\", \"boolean\", \"key\", and \"all\"."
+                    .into(),
+            ),
+            sqlstate: "22023",
+        };
+
+        assert_eq!(exec_error_position(sql, &err), None);
     }
 
     #[test]
