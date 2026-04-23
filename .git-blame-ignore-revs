@@ -1,0 +1,6 @@
+# Commits listed here are skipped by `git blame` when a user has configured
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+# GitHub honors this file automatically on blame views.
+
+# chore: pin rust toolchain and rustfmt config (repo-wide reformat)
+dc9d000d863eaa342aa48a431b2514c4171c2c9e
