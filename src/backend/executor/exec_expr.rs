@@ -103,10 +103,12 @@ use crate::backend::utils::misc::checkpoint::checkpoint_stats_value;
 use crate::backend::utils::misc::guc::normalize_guc_name;
 use crate::include::access::toast_compression::ToastCompressionId;
 use crate::include::catalog::{
-    BOX_SPGIST_OPCLASS_OID, BRIN_AM_OID, BTREE_AM_OID, CURRENT_DATABASE_OID, FLOAT8_TYPE_OID,
-    GIN_AM_OID, GIST_AM_OID, HASH_AM_OID, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID,
-    PG_DATABASE_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_TOAST_NAMESPACE_OID,
-    SPGIST_AM_OID, builtin_scalar_function_for_proc_oid,
+    BOX_SPGIST_OPCLASS_OID, BRIN_AM_OID, BTREE_AM_OID, CONSTRAINT_CHECK, CONSTRAINT_FOREIGN,
+    CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE, CURRENT_DATABASE_OID,
+    FLOAT8_TYPE_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID, PG_CATALOG_NAMESPACE_OID,
+    PG_CLASS_RELATION_OID, PG_DATABASE_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
+    PG_TOAST_NAMESPACE_OID, SPGIST_AM_OID, bootstrap_pg_am_rows,
+    builtin_scalar_function_for_proc_oid,
 };
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
 use crate::include::nodes::primnodes::{
@@ -1353,6 +1355,214 @@ fn eval_pg_get_expr(values: &[Value]) -> Result<Value, ExecError> {
             actual: format!("PgGetExpr({} args)", values.len()),
         })),
     }
+}
+
+fn eval_pg_get_constraintdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let constraint_oid = match values {
+        [Value::Null] | [Value::Null, _] | [_, Value::Null] => return Ok(Value::Null),
+        [constraint_oid] => oid_arg_to_u32(constraint_oid, "pg_get_constraintdef")?,
+        [constraint_oid, _pretty] => oid_arg_to_u32(constraint_oid, "pg_get_constraintdef")?,
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "pg_get_constraintdef(oid [, pretty])",
+                actual: format!("PgGetConstraintDef({} args)", values.len()),
+            }));
+        }
+    };
+    let catalog = executor_catalog(ctx)?;
+    let Some(row) = catalog
+        .constraint_rows()
+        .into_iter()
+        .find(|row| row.oid == constraint_oid)
+    else {
+        return Ok(Value::Null);
+    };
+    Ok(format_constraintdef_for_catalog(catalog, &row)
+        .map(|definition| Value::Text(definition.into()))
+        .unwrap_or(Value::Null))
+}
+
+fn format_constraintdef_for_catalog(
+    catalog: &dyn CatalogLookup,
+    row: &crate::include::catalog::PgConstraintRow,
+) -> Option<String> {
+    match row.contype {
+        CONSTRAINT_NOTNULL => Some("NOT NULL".into()),
+        CONSTRAINT_CHECK => row
+            .conbin
+            .as_deref()
+            .map(|expr_sql| format!("CHECK ({expr_sql})")),
+        CONSTRAINT_PRIMARY | CONSTRAINT_UNIQUE => {
+            format_index_backed_constraintdef_for_catalog(catalog, row)
+        }
+        CONSTRAINT_FOREIGN => format_foreign_key_constraintdef_for_catalog(catalog, row),
+        _ => None,
+    }
+}
+
+fn format_index_backed_constraintdef_for_catalog(
+    catalog: &dyn CatalogLookup,
+    row: &crate::include::catalog::PgConstraintRow,
+) -> Option<String> {
+    let relation = catalog.lookup_relation_by_oid(row.conrelid)?;
+    let index = catalog
+        .index_relations_for_heap(row.conrelid)
+        .into_iter()
+        .find(|index| index.relation_oid == row.conindid)?;
+    let mut columns = index_column_names_for_heap(&relation.desc, &index.index_meta.indkey)?;
+    if row.conperiod
+        && let Some(period_column) = columns.last_mut()
+    {
+        period_column.push_str(" WITHOUT OVERLAPS");
+    }
+    let prefix = if row.contype == CONSTRAINT_PRIMARY {
+        "PRIMARY KEY"
+    } else {
+        "UNIQUE"
+    };
+    Some(format!("{prefix} ({})", columns.join(", ")))
+}
+
+fn format_foreign_key_constraintdef_for_catalog(
+    catalog: &dyn CatalogLookup,
+    row: &crate::include::catalog::PgConstraintRow,
+) -> Option<String> {
+    let relation = catalog.lookup_relation_by_oid(row.conrelid)?;
+    let referenced_relation = catalog.lookup_relation_by_oid(row.confrelid)?;
+    let local_columns = index_column_names_for_heap(&relation.desc, row.conkey.as_ref()?)?;
+    let referenced_columns =
+        index_column_names_for_heap(&referenced_relation.desc, row.confkey.as_ref()?)?;
+    let referenced_name = catalog
+        .class_row_by_oid(row.confrelid)
+        .map(|class| class.relname)
+        .unwrap_or_else(|| row.confrelid.to_string());
+    let mut def = format!(
+        "FOREIGN KEY ({}) REFERENCES {}({})",
+        local_columns.join(", "),
+        referenced_name,
+        referenced_columns.join(", ")
+    );
+    if row.confdeltype == 'r' {
+        def.push_str(" ON DELETE RESTRICT");
+    }
+    if row.confupdtype == 'r' {
+        def.push_str(" ON UPDATE RESTRICT");
+    }
+    Some(def)
+}
+
+fn eval_pg_get_indexdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let (index_oid, column_no) = match values {
+        [Value::Null] | [Value::Null, _, _] | [_, Value::Null, _] | [_, _, Value::Null] => {
+            return Ok(Value::Null);
+        }
+        [index_oid] => (oid_arg_to_u32(index_oid, "pg_get_indexdef")?, 0),
+        [index_oid, column_no, _pretty] => (
+            oid_arg_to_u32(index_oid, "pg_get_indexdef")?,
+            int32_arg(column_no, "pg_get_indexdef")?,
+        ),
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "pg_get_indexdef(oid [, column_no, pretty])",
+                actual: format!("PgGetIndexDef({} args)", values.len()),
+            }));
+        }
+    };
+    let catalog = executor_catalog(ctx)?;
+    let Some((relation, index)) = index_relation_for_oid(catalog, index_oid) else {
+        return Ok(Value::Null);
+    };
+    if column_no > 0 {
+        let columns = index_column_names_for_heap(&relation.desc, &index.index_meta.indkey);
+        return Ok(columns
+            .and_then(|columns| columns.get((column_no as usize).saturating_sub(1)).cloned())
+            .map(|column| Value::Text(column.into()))
+            .unwrap_or(Value::Null));
+    }
+    Ok(Value::Text(
+        format_indexdef_for_catalog(catalog, &relation, &index).into(),
+    ))
+}
+
+fn index_relation_for_oid(
+    catalog: &dyn CatalogLookup,
+    index_oid: u32,
+) -> Option<(
+    crate::backend::parser::BoundRelation,
+    crate::backend::parser::BoundIndexRelation,
+)> {
+    catalog
+        .constraint_rows()
+        .into_iter()
+        .find(|row| row.conindid == index_oid)
+        .and_then(|row| {
+            let relation = catalog.lookup_relation_by_oid(row.conrelid)?;
+            let index = catalog
+                .index_relations_for_heap(row.conrelid)
+                .into_iter()
+                .find(|index| index.relation_oid == index_oid)?;
+            Some((relation, index))
+        })
+}
+
+fn format_indexdef_for_catalog(
+    catalog: &dyn CatalogLookup,
+    relation: &crate::backend::parser::BoundRelation,
+    index: &crate::backend::parser::BoundIndexRelation,
+) -> String {
+    let table_name = catalog
+        .class_row_by_oid(relation.relation_oid)
+        .map(|class| class.relname)
+        .unwrap_or_else(|| relation.relation_oid.to_string());
+    let amname = bootstrap_pg_am_rows()
+        .into_iter()
+        .find(|row| row.oid == index.index_meta.am_oid)
+        .map(|row| row.amname)
+        .unwrap_or_else(|| "btree".into());
+    let columns = index_column_names_for_heap(&relation.desc, &index.index_meta.indkey)
+        .unwrap_or_else(|| {
+            index
+                .desc
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect()
+        });
+    let unique = if index.index_meta.indisunique {
+        "UNIQUE "
+    } else {
+        ""
+    };
+    let mut definition = format!(
+        "CREATE {unique}INDEX {} ON {} USING {} ({})",
+        index.name,
+        table_name,
+        amname,
+        columns.join(", ")
+    );
+    if let Some(predicate) = index
+        .index_meta
+        .indpred
+        .as_deref()
+        .filter(|pred| !pred.is_empty())
+    {
+        definition.push_str(" WHERE (");
+        definition.push_str(predicate);
+        definition.push(')');
+    }
+    definition
+}
+
+fn index_column_names_for_heap(desc: &RelationDesc, attnums: &[i16]) -> Option<Vec<String>> {
+    attnums
+        .iter()
+        .map(|attnum| {
+            (*attnum > 0)
+                .then(|| desc.columns.get((*attnum as usize).saturating_sub(1)))
+                .flatten()
+                .map(|column| column.name.clone())
+        })
+        .collect()
 }
 
 fn eval_pg_get_viewdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
@@ -4003,6 +4213,8 @@ fn eval_builtin_function(
         BuiltinScalarFunction::ObjDescription => eval_obj_description(&values, ctx),
         BuiltinScalarFunction::PgDescribeObject => eval_pg_describe_object(&values, ctx),
         BuiltinScalarFunction::PgGetExpr => eval_pg_get_expr(&values),
+        BuiltinScalarFunction::PgGetConstraintDef => eval_pg_get_constraintdef(&values, ctx),
+        BuiltinScalarFunction::PgGetIndexDef => eval_pg_get_indexdef(&values, ctx),
         BuiltinScalarFunction::PgGetViewDef => eval_pg_get_viewdef(&values, ctx),
         BuiltinScalarFunction::PgGetTriggerDef => eval_pg_get_triggerdef(&values, ctx),
         BuiltinScalarFunction::PgTriggerDepth => Ok(Value::Int32(ctx.trigger_depth as i32)),

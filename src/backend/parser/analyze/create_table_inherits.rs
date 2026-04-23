@@ -162,15 +162,18 @@ fn inherited_table_constraints(
                     if !seen_keys.insert(key) {
                         continue;
                     }
+                    let without_overlaps = row.conperiod.then(|| columns.last().cloned()).flatten();
                     if row.contype == crate::include::catalog::CONSTRAINT_PRIMARY {
                         constraints.push(TableConstraint::PrimaryKey {
                             attributes: ConstraintAttributes::default(),
                             columns,
+                            without_overlaps,
                         });
                     } else {
                         constraints.push(TableConstraint::Unique {
                             attributes: ConstraintAttributes::default(),
                             columns,
+                            without_overlaps,
                         });
                     }
                 }

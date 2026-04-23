@@ -134,6 +134,7 @@ fn build_catalog_index_entry(
             indisunique: unique,
             indnullsnotdistinct: options.indnullsnotdistinct,
             indisprimary: primary,
+            indisexclusion: options.indisexclusion,
             indisvalid,
             indisready,
             indislive: true,
@@ -160,6 +161,7 @@ pub struct CatalogIndexMeta {
     pub indisunique: bool,
     pub indnullsnotdistinct: bool,
     pub indisprimary: bool,
+    pub indisexclusion: bool,
     pub indisvalid: bool,
     pub indisready: bool,
     pub indislive: bool,
@@ -178,6 +180,7 @@ pub struct CatalogIndexBuildOptions {
     pub indcollation: Vec<u32>,
     pub indoption: Vec<i16>,
     pub indnullsnotdistinct: bool,
+    pub indisexclusion: bool,
     pub brin_options: Option<BrinOptions>,
 }
 
@@ -776,6 +779,36 @@ impl Catalog {
         coninhcount: i16,
         connoinherit: bool,
     ) -> Result<PgConstraintRow, CatalogError> {
+        self.create_index_backed_constraint_with_inheritance_and_period(
+            relation_oid,
+            index_oid,
+            conname,
+            contype,
+            primary_key_owned_not_null_oids,
+            conparentid,
+            conislocal,
+            coninhcount,
+            connoinherit,
+            false,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_index_backed_constraint_with_inheritance_and_period(
+        &mut self,
+        relation_oid: u32,
+        index_oid: u32,
+        conname: impl Into<String>,
+        contype: char,
+        primary_key_owned_not_null_oids: &[u32],
+        conparentid: u32,
+        conislocal: bool,
+        coninhcount: i16,
+        connoinherit: bool,
+        conperiod: bool,
+        conexclop: Option<Vec<u32>>,
+    ) -> Result<PgConstraintRow, CatalogError> {
         let table = self
             .get_by_oid(relation_oid)
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
@@ -822,12 +855,12 @@ impl Catalog {
             conppeqop: None,
             conffeqop: None,
             confdelsetcols: None,
-            conexclop: None,
+            conexclop,
             conbin: None,
             conislocal,
             coninhcount,
             connoinherit,
-            conperiod: false,
+            conperiod,
         };
         self.next_oid = self.next_oid.saturating_add(1);
         self.constraints.push(row.clone());
@@ -1433,6 +1466,7 @@ impl Catalog {
             indcollation,
             indoption,
             indnullsnotdistinct: false,
+            indisexclusion: false,
             brin_options: None,
         })
     }

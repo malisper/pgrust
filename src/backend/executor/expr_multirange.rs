@@ -817,14 +817,17 @@ fn multirange_contains_multirange(left: &MultirangeValue, right: &MultirangeValu
         .all(|candidate| multirange_contains_range(left, candidate))
 }
 
-fn multirange_overlaps_range(multirange: &MultirangeValue, range: &RangeValue) -> bool {
+pub(crate) fn multirange_overlaps_range(multirange: &MultirangeValue, range: &RangeValue) -> bool {
     multirange
         .ranges
         .iter()
         .any(|candidate| range_overlap(candidate, range))
 }
 
-fn multirange_overlaps_multirange(left: &MultirangeValue, right: &MultirangeValue) -> bool {
+pub(crate) fn multirange_overlaps_multirange(
+    left: &MultirangeValue,
+    right: &MultirangeValue,
+) -> bool {
     left.ranges.iter().any(|left_range| {
         right
             .ranges

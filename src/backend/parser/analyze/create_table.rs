@@ -295,16 +295,19 @@ fn expand_like_clause(
                 continue;
             };
             let attributes = ConstraintAttributes::default();
+            let without_overlaps = row.conperiod.then(|| columns.last().cloned()).flatten();
             elements.push(CreateTableElement::Constraint(
                 if row.contype == CONSTRAINT_PRIMARY {
                     TableConstraint::PrimaryKey {
                         attributes,
                         columns,
+                        without_overlaps,
                     }
                 } else {
                     TableConstraint::Unique {
                         attributes,
                         columns,
+                        without_overlaps,
                     }
                 },
             ));

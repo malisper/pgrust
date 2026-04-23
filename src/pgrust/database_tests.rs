@@ -11513,6 +11513,370 @@ fn create_gist_range_index_with_explicit_opclass_uses_matching_type() {
 }
 
 #[test]
+fn without_overlaps_primary_key_records_catalog_metadata_and_enforces_overlaps() {
+    let base = temp_dir("without_overlaps_pk_enforcement");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table temporal_items (\
+             id int4, \
+             valid_at int4range, \
+             constraint temporal_items_pk primary key (id, valid_at without overlaps)\
+         )",
+    )
+    .unwrap();
+
+    let lookup = db.lazy_catalog_lookup(1, None, None);
+    let relation = lookup.lookup_any_relation("temporal_items").unwrap();
+    let constraint = lookup
+        .constraint_rows_for_relation(relation.relation_oid)
+        .into_iter()
+        .find(|row| row.conname == "temporal_items_pk")
+        .unwrap();
+    assert!(constraint.conperiod);
+    assert_eq!(constraint.conkey.as_deref(), Some(&[1, 2][..]));
+    assert_eq!(constraint.conexclop.as_ref().map(Vec::len), Some(2));
+    let index = lookup
+        .index_relations_for_heap(relation.relation_oid)
+        .into_iter()
+        .find(|index| index.relation_oid == constraint.conindid)
+        .unwrap();
+    assert!(index.index_meta.indisexclusion);
+    assert_eq!(
+        psql_index_definition(&db, 1, "temporal_items", "temporal_items_pk"),
+        "CREATE UNIQUE INDEX temporal_items_pk ON temporal_items USING gist (id, valid_at)"
+    );
+    drop(lookup);
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_constraintdef(oid) from pg_constraint where conname = 'temporal_items_pk'",
+        ),
+        vec![vec![Value::Text(
+            "PRIMARY KEY (id, valid_at WITHOUT OVERLAPS)".into()
+        )]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_indexdef(conindid, 0, true) from pg_constraint where conname = 'temporal_items_pk'",
+        ),
+        vec![vec![Value::Text(
+            "CREATE UNIQUE INDEX temporal_items_pk ON temporal_items USING gist (id, valid_at)"
+                .into()
+        )]]
+    );
+
+    db.execute(
+        1,
+        "insert into temporal_items values \
+         (1, '[1,5)'::int4range), \
+         (1, '[5,9)'::int4range), \
+         (2, '[3,7)'::int4range)",
+    )
+    .unwrap();
+
+    match db.execute(
+        1,
+        "insert into temporal_items values (1, '[4,6)'::int4range)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23P01");
+            assert_eq!(
+                message,
+                "conflicting key value violates exclusion constraint \"temporal_items_pk\""
+            );
+        }
+        other => panic!("expected temporal exclusion violation, got {other:?}"),
+    }
+
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from temporal_items"),
+        vec![vec![Value::Int64(3)]]
+    );
+}
+
+#[test]
+fn without_overlaps_unique_handles_nulls_empty_ranges_and_updates() {
+    let base = temp_dir("without_overlaps_unique_runtime");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table temporal_unique (\
+             id int4, \
+             marker int4, \
+             valid_at int4range, \
+             constraint temporal_unique_key unique (id, valid_at without overlaps)\
+         )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into temporal_unique values \
+         (1, 1, '[1,5)'::int4range), \
+         (1, 2, '[5,9)'::int4range), \
+         (null, 3, '[1,5)'::int4range), \
+         (null, 4, '[2,4)'::int4range), \
+         (2, 5, null), \
+         (2, 6, null)",
+    )
+    .unwrap();
+
+    match db.execute(
+        1,
+        "insert into temporal_unique values (null, 7, 'empty'::int4range)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23P01");
+            assert!(message.contains("empty WITHOUT OVERLAPS value"));
+        }
+        other => panic!("expected empty range violation, got {other:?}"),
+    }
+
+    match db.execute(
+        1,
+        "update temporal_unique set valid_at = '[2,6)'::int4range where marker = 2",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23P01");
+            assert_eq!(
+                message,
+                "conflicting key value violates exclusion constraint \"temporal_unique_key\""
+            );
+        }
+        other => panic!("expected temporal exclusion violation on update, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_add_without_overlaps_validates_existing_rows() {
+    let base = temp_dir("without_overlaps_alter_table");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table clean_periods (id int4, valid_at int4range)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into clean_periods values (1, '[1,5)'::int4range), (1, '[5,9)'::int4range)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table clean_periods add constraint clean_periods_key unique (id, valid_at without overlaps)",
+    )
+    .unwrap();
+
+    let lookup = db.lazy_catalog_lookup(1, None, None);
+    let relation = lookup.lookup_any_relation("clean_periods").unwrap();
+    let constraint = lookup
+        .constraint_rows_for_relation(relation.relation_oid)
+        .into_iter()
+        .find(|row| row.conname == "clean_periods_key")
+        .unwrap();
+    assert!(constraint.conperiod);
+    drop(lookup);
+
+    db.execute(
+        1,
+        "create table conflicting_periods (id int4, valid_at int4range)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into conflicting_periods values (1, '[1,5)'::int4range), (1, '[4,9)'::int4range)",
+    )
+    .unwrap();
+    match db.execute(
+        1,
+        "alter table conflicting_periods add constraint conflicting_periods_key unique (id, valid_at without overlaps)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23P01");
+            assert_eq!(
+                message,
+                "could not create exclusion constraint \"conflicting_periods_key\""
+            );
+        }
+        other => panic!("expected temporal validation failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn without_overlaps_on_conflict_do_nothing_uses_temporal_arbiters() {
+    let base = temp_dir("without_overlaps_on_conflict");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table temporal_conflict (\
+             id int4, \
+             valid_at int4range, \
+             constraint temporal_conflict_pk primary key (id, valid_at without overlaps)\
+         )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into temporal_conflict values (1, '[1,5)'::int4range)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        db.execute(
+            1,
+            "insert into temporal_conflict values (1, '[4,8)'::int4range) on conflict do nothing",
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(0)
+    );
+    assert_eq!(
+        db.execute(
+            1,
+            "insert into temporal_conflict values (1, '[4,8)'::int4range) \
+             on conflict on constraint temporal_conflict_pk do nothing",
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(0)
+    );
+
+    match db.execute(
+        1,
+        "insert into temporal_conflict values (1, '[4,8)'::int4range) \
+         on conflict (id, valid_at) do nothing",
+    ) {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual })) => {
+            assert_eq!(expected, "inferable unique btree index");
+            assert_eq!(
+                actual,
+                "there is no unique or exclusion constraint matching the ON CONFLICT specification"
+            );
+        }
+        other => panic!("expected arbiter inference rejection, got {other:?}"),
+    }
+
+    match db.execute(
+        1,
+        "insert into temporal_conflict values (1, '[4,8)'::int4range) \
+         on conflict on constraint temporal_conflict_pk do update set valid_at = excluded.valid_at",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) => {
+            assert_eq!(sqlstate, "0A000");
+            assert_eq!(
+                message,
+                "ON CONFLICT DO UPDATE not supported with exclusion constraints"
+            );
+        }
+        other => panic!("expected unsupported temporal DO UPDATE, got {other:?}"),
+    }
+}
+
+#[test]
+fn like_including_all_copies_without_overlaps_constraints() {
+    let base = temp_dir("without_overlaps_like_including_all");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table temporal_like_src (\
+             id int4, \
+             valid_at int4range, \
+             constraint temporal_like_src_pk primary key (id, valid_at without overlaps)\
+         )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table temporal_like_dst (like temporal_like_src including all)",
+    )
+    .unwrap();
+
+    let lookup = db.lazy_catalog_lookup(1, None, None);
+    let relation = lookup.lookup_any_relation("temporal_like_dst").unwrap();
+    let constraint = lookup
+        .constraint_rows_for_relation(relation.relation_oid)
+        .into_iter()
+        .find(|row| row.contype == crate::include::catalog::CONSTRAINT_PRIMARY)
+        .unwrap();
+    assert!(constraint.conperiod);
+    let index = lookup
+        .index_relations_for_heap(relation.relation_oid)
+        .into_iter()
+        .find(|index| index.relation_oid == constraint.conindid)
+        .unwrap();
+    assert!(index.index_meta.indisexclusion);
+}
+
+#[test]
+fn alter_table_add_without_overlaps_on_inherited_columns() {
+    let base = temp_dir("without_overlaps_inherited_alter");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table temporal_parent (id int4range, valid_at daterange)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table temporal_child () inherits (temporal_parent)",
+    )
+    .unwrap();
+    let lookup = db.lazy_catalog_lookup(1, None, None);
+    let relation = lookup.lookup_any_relation("temporal_child").unwrap();
+    assert_eq!(
+        relation
+            .desc
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["id", "valid_at"]
+    );
+    drop(lookup);
+
+    db.execute(
+        1,
+        "alter table temporal_child \
+         add constraint temporal_child_pk primary key (id, valid_at without overlaps)",
+    )
+    .unwrap();
+
+    let lookup = db.lazy_catalog_lookup(1, None, None);
+    let relation = lookup.lookup_any_relation("temporal_child").unwrap();
+    let constraint = lookup
+        .constraint_rows_for_relation(relation.relation_oid)
+        .into_iter()
+        .find(|row| row.conname == "temporal_child_pk")
+        .unwrap();
+    assert!(constraint.conperiod);
+    assert!(
+        relation
+            .desc
+            .columns
+            .iter()
+            .all(|column| !column.storage.nullable)
+    );
+}
+
+#[test]
 fn create_gist_expression_index_builds_and_tracks_expression_metadata() {
     let base = temp_dir("gist_expression_index_build");
     let db = Database::open(&base, 16).unwrap();

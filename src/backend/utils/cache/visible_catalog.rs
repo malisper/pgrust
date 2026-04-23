@@ -51,6 +51,24 @@ impl VisibleCatalog {
         derived_pg_constraint_rows(relation_oid, relname, entry.namespace_oid, &entry.desc)
     }
 
+    pub fn constraint_rows(&self) -> Vec<PgConstraintRow> {
+        if let Some(catcache) = &self.catcache {
+            return catcache.constraint_rows();
+        }
+        self.relcache
+            .entries()
+            .flat_map(|(name, entry)| {
+                let relname = name.rsplit('.').next().unwrap_or(name);
+                derived_pg_constraint_rows(
+                    entry.relation_oid,
+                    relname,
+                    entry.namespace_oid,
+                    &entry.desc,
+                )
+            })
+            .collect()
+    }
+
     pub fn trigger_rows_for_relation(&self, relation_oid: u32) -> Vec<PgTriggerRow> {
         self.catcache
             .as_ref()
@@ -197,6 +215,10 @@ impl CatalogLookup for VisibleCatalog {
 
     fn constraint_rows_for_relation(&self, relation_oid: u32) -> Vec<PgConstraintRow> {
         VisibleCatalog::constraint_rows_for_relation(self, relation_oid)
+    }
+
+    fn constraint_rows(&self) -> Vec<PgConstraintRow> {
+        VisibleCatalog::constraint_rows(self)
     }
 
     fn relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {

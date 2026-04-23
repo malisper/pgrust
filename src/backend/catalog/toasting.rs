@@ -241,6 +241,7 @@ pub fn new_relation_create_toast_table(
             indcollation: vec![0, 0],
             indoption: vec![0, 0],
             indnullsnotdistinct: false,
+            indisexclusion: false,
             brin_options: None,
         },
     )?;

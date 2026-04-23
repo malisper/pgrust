@@ -294,6 +294,7 @@ fn choose_index_path(
     for index in indexes.iter().filter(|index| {
         index.index_meta.indisvalid
             && index.index_meta.indisready
+            && !index.index_meta.indisexclusion
             && !index.index_meta.indkey.is_empty()
             && predicate_implies_index_predicate(filter, index.index_predicate.as_ref())
     }) {

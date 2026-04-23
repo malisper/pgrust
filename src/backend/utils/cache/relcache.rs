@@ -791,6 +791,7 @@ mod tests {
                     indcollation: vec![0],
                     indoption: vec![0],
                     indnullsnotdistinct: false,
+                    indisexclusion: false,
                     brin_options: None,
                 },
             )
@@ -839,6 +840,7 @@ mod tests {
                     indcollation: vec![0],
                     indoption: vec![0],
                     indnullsnotdistinct: true,
+                    indisexclusion: false,
                     brin_options: None,
                 },
             )

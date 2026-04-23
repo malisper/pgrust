@@ -69,7 +69,9 @@ pub use coerce::is_binary_coercible_type;
 use coerce::*;
 use collation::*;
 pub(crate) use constraints::*;
-pub(crate) use constraints::{BoundReferencedByForeignKey, BoundRelationConstraints};
+pub(crate) use constraints::{
+    BoundReferencedByForeignKey, BoundRelationConstraints, BoundTemporalConstraint,
+};
 pub use create_table::*;
 pub use create_table_inherits::*;
 pub(crate) use expr::bind_expr_with_outer_and_ctes;
