@@ -58,6 +58,24 @@ pub(super) fn lookup_heap_relation_for_alter_table(
     }
 }
 
+pub(super) fn lookup_table_or_partitioned_table_for_alter_table(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+    if_exists: bool,
+) -> Result<Option<BoundRelation>, ExecError> {
+    match catalog.lookup_any_relation(name) {
+        Some(entry) if matches!(entry.relkind, 'r' | 'p') => Ok(Some(entry)),
+        Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
+            name: name.to_string(),
+            expected: "table",
+        })),
+        None if if_exists => Ok(None),
+        None => Err(ExecError::Parse(ParseError::TableDoesNotExist(
+            name.to_string(),
+        ))),
+    }
+}
+
 pub(super) fn lookup_index_relation_for_alter_index(
     catalog: &dyn CatalogLookup,
     name: &str,
@@ -65,6 +83,24 @@ pub(super) fn lookup_index_relation_for_alter_index(
 ) -> Result<Option<BoundRelation>, ExecError> {
     match catalog.lookup_any_relation(name) {
         Some(entry) if entry.relkind == 'i' => Ok(Some(entry)),
+        Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
+            name: name.to_string(),
+            expected: "index",
+        })),
+        None if if_exists => Ok(None),
+        None => Err(ExecError::Parse(ParseError::TableDoesNotExist(
+            name.to_string(),
+        ))),
+    }
+}
+
+pub(super) fn lookup_index_or_partitioned_index_for_alter_index_rename(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+    if_exists: bool,
+) -> Result<Option<BoundRelation>, ExecError> {
+    match catalog.lookup_any_relation(name) {
+        Some(entry) if matches!(entry.relkind, 'i' | 'I') => Ok(Some(entry)),
         Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
             name: name.to_string(),
             expected: "index",
@@ -127,7 +163,7 @@ pub(super) fn relation_kind_name(relkind: char) -> &'static str {
         'p' => "partitioned table",
         'S' => "sequence",
         'v' => "view",
-        'i' => "index",
+        'i' | 'I' => "index",
         _ => "table",
     }
 }
@@ -143,12 +179,12 @@ pub(super) fn ensure_relation_owner(
     if auth.has_effective_membership(relation.owner_oid, &auth_catalog) {
         return Ok(());
     }
+    let owner_object_kind = match relation.relkind {
+        'p' => "table",
+        _ => relation_kind_name(relation.relkind),
+    };
     Err(ExecError::DetailedError {
-        message: format!(
-            "must be owner of {} {}",
-            relation_kind_name(relation.relkind),
-            display_name
-        ),
+        message: format!("must be owner of {} {}", owner_object_kind, display_name),
         detail: None,
         hint: None,
         sqlstate: "42501",

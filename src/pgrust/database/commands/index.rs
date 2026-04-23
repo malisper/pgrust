@@ -25,7 +25,7 @@ struct ResolvedIndexSupportMetadata {
 }
 
 impl Database {
-    fn relcache_index_meta_from_catalog(
+    pub(super) fn relcache_index_meta_from_catalog(
         &self,
         client_id: ClientId,
         txn_ctx: CatalogTxnContext,

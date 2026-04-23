@@ -119,7 +119,7 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_partition_statement(&sql, options)? {
         return Ok(stmt);
     }
-    if let Some(stmt) = try_parse_alter_table_add_unnamed_foreign_key_statement(&sql, options)? {
+    if let Some(stmt) = try_parse_alter_table_add_unnamed_constraint_statement(&sql, options)? {
         return Ok(stmt);
     }
     if let Some(stmt) = try_parse_index_statement(&sql)? {
@@ -146,26 +146,35 @@ fn parse_statement_with_options_inner(
     }
 }
 
-fn try_parse_alter_table_add_unnamed_foreign_key_statement(
+fn try_parse_alter_table_add_unnamed_constraint_statement(
     sql: &str,
     options: ParseOptions,
 ) -> Result<Option<Statement>, ParseError> {
     let trimmed = sql.trim().trim_end_matches(';').trim();
     let lowered = trimmed.to_ascii_lowercase();
-    let needle = " add foreign key";
-    if !lowered.starts_with("alter table ") || !lowered.contains(needle) {
+    if !lowered.starts_with("alter table ") {
         return Ok(None);
     }
-
-    let split = lowered.find(needle).expect("checked contains above");
-    let suffix = &lowered[split + needle.len()..];
-    if !suffix.is_empty() && !suffix.starts_with(' ') && !suffix.starts_with('(') {
+    let Some((split, constraint_offset)) = [
+        (" add primary key", " add ".len()),
+        (" add unique", " add ".len()),
+        (" add check", " add ".len()),
+        (" add not null", " add ".len()),
+        (" add foreign key", " add ".len()),
+    ]
+    .into_iter()
+    .find_map(|(needle, constraint_offset)| {
+        let split = lowered.find(needle)?;
+        let suffix = &lowered[split + needle.len()..];
+        (!matches!(suffix.chars().next(), Some(ch) if !ch.is_whitespace() && ch != '('))
+            .then_some((split, constraint_offset))
+    }) else {
         return Ok(None);
-    }
+    };
     let rewritten = format!(
-        "{} add constraint __pgrust_internal_unnamed_fk__ {}",
+        "{} add constraint __pgrust_internal_unnamed_constraint__ {}",
         &trimmed[..split],
-        &trimmed[split + " add ".len()..]
+        &trimmed[split + constraint_offset..]
     );
     let mut parsed = parse_statement_with_options_inner(rewritten, options)?;
     let Statement::AlterTableAddConstraint(ref mut stmt) = parsed else {
@@ -177,7 +186,7 @@ fn try_parse_alter_table_add_unnamed_foreign_key_statement(
         | TableConstraint::PrimaryKey { attributes, .. }
         | TableConstraint::Unique { attributes, .. }
         | TableConstraint::ForeignKey { attributes, .. }
-            if attributes.name.as_deref() == Some("__pgrust_internal_unnamed_fk__") =>
+            if attributes.name.as_deref() == Some("__pgrust_internal_unnamed_constraint__") =>
         {
             attributes.name = None;
         }
@@ -339,13 +348,13 @@ fn build_partition_create_table_statement(
     let Statement::CreateTable(mut create_stmt) = base_stmt else {
         return Err(PartitionStatementParseError::Unsupported);
     };
-    create_stmt.elements.clear();
     create_stmt.inherits.clear();
-    let (parent_name, partition_bound, partition_spec, rest) =
-        parse_partition_of_clause(partition_clause)?;
+    let (parent_name, elements, partition_bound, partition_spec, rest) =
+        parse_partition_of_clause(partition_clause, options)?;
     if !rest.trim().is_empty() {
         return Err(PartitionStatementParseError::Unsupported);
     }
+    create_stmt.elements = elements;
     create_stmt.partition_of = Some(parent_name);
     create_stmt.partition_bound = Some(partition_bound);
     create_stmt.partition_spec = partition_spec;
@@ -354,9 +363,11 @@ fn build_partition_create_table_statement(
 
 fn parse_partition_of_clause(
     input: &str,
+    options: ParseOptions,
 ) -> Result<
     (
         String,
+        Vec<CreateTableElement>,
         RawPartitionBoundSpec,
         Option<RawPartitionSpec>,
         &str,
@@ -367,9 +378,14 @@ fn parse_partition_of_clause(
     rest = consume_keyword(rest, "of").trim_start();
     let (parts, next) = parse_qualified_identifier_parts(rest)?;
     rest = next.trim_start();
-    if rest.starts_with('(') {
-        return Err(PartitionStatementParseError::Unsupported);
-    }
+    let elements = if rest.starts_with('(') {
+        let (elements_sql, next) =
+            take_parenthesized_segment(rest).map_err(PartitionStatementParseError::Parse)?;
+        rest = next.trim_start();
+        parse_partition_of_elements(&elements_sql, options)?
+    } else {
+        Vec::new()
+    };
     let (bound, next) = parse_partition_bound_clause(rest)?;
     rest = next.trim_start();
     let partition_spec = if rest.is_empty() {
@@ -379,7 +395,20 @@ fn parse_partition_of_clause(
         rest = next.trim_start();
         Some(partition_spec)
     };
-    Ok((parts.join("."), bound, partition_spec, rest))
+    Ok((parts.join("."), elements, bound, partition_spec, rest))
+}
+
+fn parse_partition_of_elements(
+    elements_sql: &str,
+    options: ParseOptions,
+) -> Result<Vec<CreateTableElement>, PartitionStatementParseError> {
+    let synthetic = format!("create table __pgrust_partition_of__ ({elements_sql})");
+    let stmt = parse_statement_with_options_inner(synthetic, options)
+        .map_err(PartitionStatementParseError::Parse)?;
+    let Statement::CreateTable(create_stmt) = stmt else {
+        return Err(PartitionStatementParseError::Unsupported);
+    };
+    Ok(create_stmt.elements)
 }
 
 fn parse_partition_spec_clause(

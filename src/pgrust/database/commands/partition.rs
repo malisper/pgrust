@@ -180,6 +180,15 @@ impl Database {
                 catalog_effects,
             )?;
         }
+        let _ = self.reconcile_partitioned_parent_keys_for_attached_child_in_transaction(
+            client_id,
+            xid,
+            cid.saturating_add(5),
+            parent.relation_oid,
+            updated_child.relation_oid,
+            configured_search_path,
+            catalog_effects,
+        )?;
         Ok(StatementResult::AffectedRows(0))
     }
 }

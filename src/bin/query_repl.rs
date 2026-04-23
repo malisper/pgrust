@@ -483,6 +483,7 @@ fn run_statement(
         | Statement::DropPublication(_)
         | Statement::CommentOnPublication(_)
         | Statement::CommentOnAggregate(_)
+        | Statement::CommentOnFunction(_)
         | Statement::CreateTrigger(_)
         | Statement::DropTrigger(_)
         | Statement::CreateAggregate(_)
