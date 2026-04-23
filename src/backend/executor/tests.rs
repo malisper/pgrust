@@ -7622,6 +7622,24 @@ fn qualified_star_target_expands_relation_columns() {
 }
 
 #[test]
+fn row_constructor_comparisons_expand_star_fields() {
+    let mut harness = seed_people_and_pets("row_constructor_star_comparisons");
+
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select row(p.*) = row(p.*), \
+                        row(p.*) is distinct from row(p.*), \
+                        row(p.*) is not distinct from row(p.*) \
+                 from people p where p.id = 3",
+            )
+            .unwrap(),
+        vec![vec![Value::Null, Value::Bool(false), Value::Bool(true)]],
+    );
+}
+
+#[test]
 fn comparison_operators_work_for_extended_numeric_types() {
     let base = temp_dir("extended_numeric_comparisons");
     let txns = TransactionManager::new_durable(&base).unwrap();
