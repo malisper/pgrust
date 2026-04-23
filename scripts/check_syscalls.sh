@@ -23,7 +23,9 @@
 
 set -euo pipefail
 
-BINARY="target/debug/wal_syscall_check"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+BINARY="$("$ROOT_DIR/scripts/cargo_target_dir.sh")/debug/wal_syscall_check"
 EXPECTED_DML_COMMITS=5   # INSERT×3, UPDATE×1, DELETE×1
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
@@ -37,7 +39,7 @@ FAILURES=0
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 header "Build"
-if ! cargo build --bin wal_syscall_check 2>&1; then
+if ! (cd "$ROOT_DIR" && cargo build --bin wal_syscall_check 2>&1); then
     echo "Build failed" >&2; exit 1
 fi
 pass "binary built: $BINARY"
