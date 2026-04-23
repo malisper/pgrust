@@ -7853,12 +7853,40 @@ fn parse_alter_table_attach_partition() {
 }
 
 #[test]
-fn parse_hash_partition_syntax_remains_unsupported() {
+fn parse_create_table_partition_by_hash() {
     match parse_statement("create table measurement (a int) partition by hash (a)").unwrap() {
-        Statement::Unsupported(stmt) => {
-            assert!(stmt.sql.to_ascii_lowercase().contains("partition by hash"));
+        Statement::CreateTable(ct) => {
+            assert_eq!(
+                ct.partition_spec,
+                Some(RawPartitionSpec {
+                    strategy: PartitionStrategy::Hash,
+                    keys: vec![RawPartitionKey::Column("a".into())],
+                })
+            );
         }
-        other => panic!("expected Unsupported, got {:?}", other),
+        other => panic!("expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_create_table_hash_partition_bound() {
+    match parse_statement(
+        "create table measurement_h0 partition of measurement \
+         for values with (modulus 4, remainder 0)",
+    )
+    .unwrap()
+    {
+        Statement::CreateTable(ct) => {
+            assert_eq!(ct.partition_of.as_deref(), Some("measurement"));
+            assert_eq!(
+                ct.partition_bound,
+                Some(RawPartitionBoundSpec::Hash {
+                    modulus: 4,
+                    remainder: 0,
+                })
+            );
+        }
+        other => panic!("expected CreateTable, got {:?}", other),
     }
 }
 

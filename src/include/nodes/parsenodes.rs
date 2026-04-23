@@ -1243,6 +1243,7 @@ impl CreateTableStatement {
 pub enum PartitionStrategy {
     List,
     Range,
+    Hash,
 }
 
 impl PartitionStrategy {
@@ -1250,6 +1251,7 @@ impl PartitionStrategy {
         match self {
             PartitionStrategy::List => 'l',
             PartitionStrategy::Range => 'r',
+            PartitionStrategy::Hash => 'h',
         }
     }
 }
@@ -1276,6 +1278,10 @@ pub enum RawPartitionBoundSpec {
         to: Vec<RawPartitionRangeDatum>,
         is_default: bool,
     },
+    Hash {
+        modulus: i32,
+        remainder: i32,
+    },
 }
 
 impl RawPartitionBoundSpec {
@@ -1283,6 +1289,7 @@ impl RawPartitionBoundSpec {
         match self {
             RawPartitionBoundSpec::List { is_default, .. }
             | RawPartitionBoundSpec::Range { is_default, .. } => *is_default,
+            RawPartitionBoundSpec::Hash { .. } => false,
         }
     }
 }

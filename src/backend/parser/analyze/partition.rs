@@ -8,7 +8,9 @@ use super::{
 };
 use crate::backend::executor::{Value, cast_value};
 use crate::backend::utils::cache::catcache::sql_type_oid;
-use crate::include::catalog::{PgPartitionedTableRow, default_btree_opclass_oid};
+use crate::include::catalog::{
+    PgPartitionedTableRow, default_btree_opclass_oid, default_hash_opclass_oid,
+};
 use crate::include::nodes::primnodes::Expr;
 use crate::include::nodes::primnodes::RelationDesc;
 
@@ -70,12 +72,17 @@ pub enum PartitionBoundSpec {
         to: Vec<PartitionRangeDatumValue>,
         is_default: bool,
     },
+    Hash {
+        modulus: i32,
+        remainder: i32,
+    },
 }
 
 impl PartitionBoundSpec {
     pub fn is_default(&self) -> bool {
         match self {
             Self::List { is_default, .. } | Self::Range { is_default, .. } => *is_default,
+            Self::Hash { .. } => false,
         }
     }
 }
@@ -210,8 +217,11 @@ pub(crate) fn relation_partition_spec(
     let strategy = match row.partstrat {
         'l' => PartitionStrategy::List,
         'r' => PartitionStrategy::Range,
+        'h' => PartitionStrategy::Hash,
         _ => {
-            return Err(ParseError::FeatureNotSupported("HASH partitioning".into()));
+            return Err(ParseError::InvalidTableDefinition(
+                "invalid partition strategy".into(),
+            ));
         }
     };
     let mut key_columns = Vec::with_capacity(row.partattrs.len());
@@ -404,12 +414,13 @@ fn lower_partition_spec(
             return Err(ParseError::UnknownColumn(name.clone()));
         };
         let type_oid = sql_type_oid(column.sql_type);
-        let opclass = default_btree_opclass_oid(type_oid).ok_or_else(|| {
-            ParseError::FeatureNotSupported(format!(
-                "partition key type {}",
-                sql_type_name(column.sql_type)
-            ))
-        })?;
+        let opclass =
+            default_opclass_for_partition_strategy(spec.strategy, type_oid).ok_or_else(|| {
+                ParseError::FeatureNotSupported(format!(
+                    "partition key type {}",
+                    sql_type_name(column.sql_type)
+                ))
+            })?;
         key_columns.push(column.name.clone());
         partattrs.push(index as i16 + 1);
         partclass.push(opclass);
@@ -471,13 +482,74 @@ fn lower_partition_bound(
                 is_default: *is_default,
             })
         }
-        (RawPartitionBoundSpec::List { .. }, PartitionStrategy::Range)
-        | (RawPartitionBoundSpec::Range { .. }, PartitionStrategy::List) => {
-            Err(ParseError::InvalidTableDefinition(
-                "partition bound does not match parent partition strategy".into(),
-            ))
+        (RawPartitionBoundSpec::Hash { modulus, remainder }, PartitionStrategy::Hash) => {
+            validate_hash_partition_bound(*modulus, *remainder)?;
+            Ok(PartitionBoundSpec::Hash {
+                modulus: *modulus,
+                remainder: *remainder,
+            })
         }
+        (
+            RawPartitionBoundSpec::List {
+                is_default: true, ..
+            },
+            PartitionStrategy::Hash,
+        )
+        | (
+            RawPartitionBoundSpec::Range {
+                is_default: true, ..
+            },
+            PartitionStrategy::Hash,
+        ) => Err(ParseError::DetailedError {
+            message: "a hash-partitioned table may not have a default partition".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42P17",
+        }),
+        (RawPartitionBoundSpec::List { .. }, _)
+        | (RawPartitionBoundSpec::Range { .. }, _)
+        | (RawPartitionBoundSpec::Hash { .. }, _) => Err(ParseError::InvalidTableDefinition(
+            "partition bound does not match parent partition strategy".into(),
+        )),
     }
+}
+
+fn default_opclass_for_partition_strategy(
+    strategy: PartitionStrategy,
+    type_oid: u32,
+) -> Option<u32> {
+    match strategy {
+        PartitionStrategy::List | PartitionStrategy::Range => default_btree_opclass_oid(type_oid),
+        PartitionStrategy::Hash => default_hash_opclass_oid(type_oid),
+    }
+}
+
+fn validate_hash_partition_bound(modulus: i32, remainder: i32) -> Result<(), ParseError> {
+    if modulus <= 0 {
+        return Err(ParseError::DetailedError {
+            message: "modulus for hash partition must be a positive integer".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42P17",
+        });
+    }
+    if remainder < 0 {
+        return Err(ParseError::DetailedError {
+            message: "remainder for hash partition must be a non-negative integer".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42P17",
+        });
+    }
+    if remainder >= modulus {
+        return Err(ParseError::DetailedError {
+            message: "remainder for hash partition must be less than modulus".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42P17",
+        });
+    }
+    Ok(())
 }
 
 fn lower_range_datums(
