@@ -6297,8 +6297,15 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("create temp table withoutoid() with (oids = false)").unwrap(), Statement::CreateTable(ct) if ct.persistence == TablePersistence::Temporary && ct.table_name == "withoutoid" && ct.columns().count() == 0)
     );
     assert!(matches!(
-        parse_statement("create table widgets (like source_table)"),
-        Err(ParseError::FeatureNotSupported(feature)) if feature == "CREATE TABLE ... LIKE"
+        parse_statement("create table widgets (like source_table including all)").unwrap(),
+        Statement::CreateTable(ct)
+            if ct.table_name == "widgets"
+                && matches!(
+                    ct.elements.as_slice(),
+                    [CreateTableElement::Like(CreateTableLikeClause { relation_name, options })]
+                        if relation_name == "source_table"
+                            && options == &[CreateTableLikeOption::IncludingAll]
+                )
     ));
     assert!(matches!(
         parse_statement("create table withoid() with (oids)"),
