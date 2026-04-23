@@ -46,6 +46,7 @@ stmt_keyword_start = _{
     | kw_perform
     | kw_raise
     | kw_return
+    | kw_exception
 }
 
 ident = { quoted_ident | bare_ident }
