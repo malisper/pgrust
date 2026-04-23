@@ -15,7 +15,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
-  TOTAL_SHARDS: "4"
+  TOTAL_SHARDS: "12"
 
 jobs:
   cargo-test-shard:
@@ -24,7 +24,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: ["1", "2", "3", "4"]
+        shard: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
