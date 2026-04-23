@@ -17905,6 +17905,38 @@ fn search_path_keeps_temp_tables_ahead_of_public_even_when_omitted() {
 }
 
 #[test]
+fn create_table_after_temp_table_still_uses_public_by_default() {
+    let base = temp_dir("create_after_temp_uses_public");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table temp_marker (id int4 not null)")
+        .unwrap();
+    session
+        .execute(&db, "create table regular_after_temp (id int4 not null)")
+        .unwrap();
+
+    match session
+        .execute(
+            &db,
+            "select n.nspname, c.relpersistence \
+             from pg_class c join pg_namespace n on n.oid = c.relnamespace \
+             where c.relname = 'regular_after_temp'",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Text("public".into()), Value::Text("p".into())]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn create_table_errors_when_search_path_selects_no_creatable_schema() {
     let base = temp_dir("search_path_no_create_schema");
     let db = Database::open(&base, 16).unwrap();
