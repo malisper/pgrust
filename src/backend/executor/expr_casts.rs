@@ -2727,7 +2727,7 @@ pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result
     cast_text_value_with_config(text, ty, explicit, &DateTimeConfig::default())
 }
 
-pub(super) fn cast_text_value_with_config(
+pub(crate) fn cast_text_value_with_config(
     text: &str,
     ty: SqlType,
     explicit: bool,
