@@ -39,6 +39,7 @@ use crate::include::nodes::primnodes::{
     ScalarFunctionImpl, Var, attrno_index,
 };
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 
 const EMPTY_SYSTEM_BINDINGS: [SystemVarBinding; 0] = [];
@@ -2665,6 +2666,11 @@ impl PlanNode for AggregateState {
                         groups.push(AggGroup {
                             key_values: self.key_buffer.clone(),
                             accum_states,
+                            distinct_inputs: self
+                                .accumulators
+                                .iter()
+                                .map(|accum| accum.distinct.then(HashSet::new))
+                                .collect(),
                             ordered_inputs: vec![Vec::new(); self.accumulators.len()],
                         });
                         groups.len() - 1
@@ -2684,6 +2690,11 @@ impl PlanNode for AggregateState {
                         .iter()
                         .map(|arg| eval_expr(arg, slot, ctx))
                         .collect::<Result<Vec<_>, _>>()?;
+                    if let Some(seen_inputs) = group.distinct_inputs[i].as_mut() {
+                        if !seen_inputs.insert(values.clone()) {
+                            continue;
+                        }
+                    }
                     if accum.order_by.is_empty() {
                         runtimes[i].transition(&mut group.accum_states[i], &values, ctx)?;
                     } else {
@@ -2709,6 +2720,11 @@ impl PlanNode for AggregateState {
                 groups.push(AggGroup {
                     key_values: Vec::new(),
                     accum_states,
+                    distinct_inputs: self
+                        .accumulators
+                        .iter()
+                        .map(|accum| accum.distinct.then(HashSet::new))
+                        .collect(),
                     ordered_inputs: vec![Vec::new(); self.accumulators.len()],
                 });
             }

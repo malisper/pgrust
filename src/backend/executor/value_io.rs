@@ -18,9 +18,7 @@ use super::node_types::*;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::expr_json::{canonicalize_jsonpath_text, validate_json_text};
 use crate::backend::executor::jsonb::{decode_jsonb, render_jsonb_bytes};
-use crate::backend::libpq::pqformat::{
-    FloatFormatOptions, format_float4_text, format_float8_text,
-};
+use crate::backend::libpq::pqformat::{FloatFormatOptions, format_float4_text, format_float8_text};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::record::register_anonymous_record_descriptor;
@@ -107,7 +105,9 @@ pub(crate) fn format_record_text_with_options(
             Value::PgArray(array) => {
                 format_array_value_text_with_config(array, &float_format.datetime_config)
             }
-            Value::Array(values) => format_array_text_with_config(values, &float_format.datetime_config),
+            Value::Array(values) => {
+                format_array_text_with_config(values, &float_format.datetime_config)
+            }
             Value::Range(_) => render_range_text(value).unwrap_or_default(),
             Value::InternalChar(byte) => render_internal_char_text(*byte),
             Value::Jsonb(bytes) => render_jsonb_bytes(bytes).unwrap_or_default(),
