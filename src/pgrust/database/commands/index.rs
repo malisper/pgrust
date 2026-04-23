@@ -657,6 +657,7 @@ impl Database {
                 stats: std::sync::Arc::clone(&self.stats),
                 session_stats: self.session_stats_state(client_id),
                 snapshot: self.txns.read().snapshot_for_command(xid, cid)?,
+                transaction_state: None,
                 client_id,
                 current_database_name: self.current_database_name(),
                 session_user_oid: self.auth_state(client_id).session_user_oid(),
