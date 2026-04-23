@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::Expr;
 use crate::backend::executor::RelationDesc;
-use crate::backend::parser::analyze::scope_for_relation;
 use crate::backend::parser::{
     BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, CatalogLookup, ParseError,
     SlotScopeColumn, SqlExpr, SqlType, SqlTypeKind, Statement, bind_delete_with_outer_scopes,
@@ -18,7 +17,10 @@ use crate::include::catalog::{PgProcRow, RECORD_TYPE_OID};
 use crate::include::nodes::plannodes::PlannedStmt;
 use crate::include::nodes::primnodes::{QueryColumn, Var, user_attrno};
 
-use super::ast::{AssignTarget, Block, Decl, RaiseLevel, ReturnQueryKind, Stmt, VarDecl};
+use super::ast::{
+    AssignTarget, Block, Decl, ForQuerySource, ForTarget, RaiseLevel, ReturnQueryKind, Stmt,
+    VarDecl,
+};
 use super::gram::parse_block;
 
 #[derive(Debug, Clone)]
@@ -67,6 +69,22 @@ pub(crate) struct CompiledExpr {
 pub(crate) struct CompiledSelectIntoTarget {
     pub(crate) slot: usize,
     pub(crate) ty: SqlType,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CompiledForQueryTarget {
+    pub(crate) targets: Vec<CompiledSelectIntoTarget>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum CompiledForQuerySource {
+    Static {
+        plan: PlannedStmt,
+    },
+    Dynamic {
+        sql_expr: CompiledExpr,
+        using_exprs: Vec<CompiledExpr>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -139,6 +157,11 @@ pub(crate) enum CompiledStmt {
         end_expr: CompiledExpr,
         body: Vec<CompiledStmt>,
     },
+    ForQuery {
+        target: CompiledForQueryTarget,
+        source: CompiledForQuerySource,
+        body: Vec<CompiledStmt>,
+    },
     Raise {
         level: RaiseLevel,
         message: String,
@@ -194,6 +217,7 @@ struct CompileEnv {
     vars: HashMap<String, ScopeVar>,
     relation_scopes: Vec<RelationScopeVar>,
     parameter_slots: Vec<ScopeVar>,
+    positional_parameter_names: Vec<String>,
     next_slot: usize,
 }
 
@@ -213,6 +237,10 @@ impl CompileEnv {
     fn define_parameter_var(&mut self, name: &str, ty: SqlType) -> usize {
         let slot = self.define_var(name, ty);
         self.parameter_slots.push(ScopeVar { slot, ty });
+        let positional_name = positional_parameter_var_name(self.parameter_slots.len());
+        self.vars
+            .insert(positional_name.clone(), ScopeVar { slot, ty });
+        self.positional_parameter_names.push(positional_name);
         slot
     }
 
@@ -240,6 +268,12 @@ impl CompileEnv {
 
     fn get_parameter(&self, index: usize) -> Option<&ScopeVar> {
         self.parameter_slots.get(index.saturating_sub(1))
+    }
+
+    fn positional_parameter_name(&self, index: usize) -> Option<&str> {
+        self.positional_parameter_names
+            .get(index.saturating_sub(1))
+            .map(String::as_str)
     }
 
     fn define_relation_scope(
@@ -654,6 +688,11 @@ fn compile_stmt(
                 body,
             }
         }
+        Stmt::ForQuery {
+            target,
+            source,
+            body,
+        } => compile_for_query_stmt(target, source, body, catalog, env, return_contract)?,
         Stmt::Raise {
             level,
             message,
@@ -811,7 +850,8 @@ fn compile_return_query_stmt(
         ));
     }
 
-    let planned = match parse_statement(sql)? {
+    let rewritten_sql = rewrite_plpgsql_sql_text(sql, env)?;
+    let planned = match parse_statement(&rewritten_sql)? {
         Statement::Select(stmt) => {
             pg_plan_query_with_outer_scopes(&stmt, catalog, &[outer_scope_for_sql(env)])?
         }
@@ -836,8 +876,9 @@ fn compile_perform_stmt(
     catalog: &dyn CatalogLookup,
     env: &CompileEnv,
 ) -> Result<CompiledStmt, ParseError> {
+    let rewritten_sql = rewrite_plpgsql_sql_text(sql, env)?;
     let planned = pg_plan_query_with_outer_scopes(
-        &crate::backend::parser::parse_select(&format!("select {sql}"))?,
+        &crate::backend::parser::parse_select(&format!("select {rewritten_sql}"))?,
         catalog,
         &[outer_scope_for_sql(env)],
     )?;
@@ -866,7 +907,8 @@ fn compile_exec_sql_stmt(
         return compile_select_into_stmt(&select_sql, &targets, catalog, env);
     }
 
-    let stmt = parse_statement(sql)?;
+    let rewritten_sql = rewrite_plpgsql_sql_text(sql, env)?;
+    let stmt = parse_statement(&rewritten_sql)?;
     let outer_scope = outer_scope_for_sql(env);
     match stmt {
         Statement::Select(stmt) => Ok(CompiledStmt::Perform {
@@ -1009,9 +1051,109 @@ fn split_select_with_into_targets(sql: &str) -> Option<(Vec<String>, String)> {
     Some((targets, rewritten))
 }
 
+fn positional_parameter_var_name(index: usize) -> String {
+    format!("__pgrust_plpgsql_param_{index}")
+}
+
+fn rewrite_plpgsql_sql_text(sql: &str, env: &CompileEnv) -> Result<String, ParseError> {
+    let bytes = sql.as_bytes();
+    let mut out = String::with_capacity(sql.len());
+    let mut idx = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    while idx < bytes.len() {
+        let ch = bytes[idx] as char;
+        if in_single {
+            out.push(ch);
+            idx += 1;
+            if ch == '\'' {
+                if bytes.get(idx) == Some(&b'\'') {
+                    out.push('\'');
+                    idx += 1;
+                    continue;
+                }
+                in_single = false;
+            }
+            continue;
+        }
+        if in_double {
+            out.push(ch);
+            idx += 1;
+            if ch == '"' {
+                if bytes.get(idx) == Some(&b'"') {
+                    out.push('"');
+                    idx += 1;
+                    continue;
+                }
+                in_double = false;
+            }
+            continue;
+        }
+        if let Some(tag) = dollar_quote_tag_at(sql, idx) {
+            if let Some(close) = sql[idx + tag.len()..].find(tag) {
+                let end = idx + tag.len() + close + tag.len();
+                out.push_str(&sql[idx..end]);
+                idx = end;
+            } else {
+                out.push_str(&sql[idx..]);
+                break;
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' => {
+                in_single = true;
+                out.push(ch);
+                idx += 1;
+                continue;
+            }
+            '"' => {
+                in_double = true;
+                out.push(ch);
+                idx += 1;
+                continue;
+            }
+            '$' => {
+                let mut end = idx + 1;
+                while let Some(byte) = bytes.get(end) {
+                    if !byte.is_ascii_digit() {
+                        break;
+                    }
+                    end += 1;
+                }
+                if end > idx + 1 && (end == bytes.len() || !is_identifier_char(bytes[end] as char))
+                {
+                    let index = sql[idx + 1..end].parse::<usize>().map_err(|_| {
+                        ParseError::UnexpectedToken {
+                            expected: "valid positional parameter reference",
+                            actual: sql[idx..end].to_string(),
+                        }
+                    })?;
+                    let name = env.positional_parameter_name(index).ok_or_else(|| {
+                        ParseError::UnexpectedToken {
+                            expected: "existing positional parameter reference",
+                            actual: sql[idx..end].to_string(),
+                        }
+                    })?;
+                    out.push_str(name);
+                    idx = end;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+
+        out.push(ch);
+        idx += 1;
+    }
+    Ok(out)
+}
+
 fn find_next_top_level_keyword(sql: &str, keywords: &[&str]) -> Option<usize> {
     let bytes = sql.as_bytes();
     let mut depth = 0usize;
+    let mut bracket_depth = 0usize;
     let mut in_single = false;
     let mut in_double = false;
     let mut idx = 0usize;
@@ -1039,6 +1181,14 @@ fn find_next_top_level_keyword(sql: &str, keywords: &[&str]) -> Option<usize> {
             idx += 1;
             continue;
         }
+        if let Some(tag) = dollar_quote_tag_at(sql, idx) {
+            if let Some(close) = sql[idx + tag.len()..].find(tag) {
+                idx += tag.len() + close + tag.len();
+                continue;
+            }
+            idx += tag.len();
+            continue;
+        }
 
         match ch {
             '\'' => {
@@ -1048,6 +1198,16 @@ fn find_next_top_level_keyword(sql: &str, keywords: &[&str]) -> Option<usize> {
             }
             '"' => {
                 in_double = true;
+                idx += 1;
+                continue;
+            }
+            '[' => {
+                bracket_depth += 1;
+                idx += 1;
+                continue;
+            }
+            ']' => {
+                bracket_depth = bracket_depth.saturating_sub(1);
                 idx += 1;
                 continue;
             }
@@ -1064,7 +1224,10 @@ fn find_next_top_level_keyword(sql: &str, keywords: &[&str]) -> Option<usize> {
             _ => {}
         }
 
-        if depth == 0 && keywords.iter().any(|keyword| keyword_at(sql, idx, keyword)) {
+        if depth == 0
+            && bracket_depth == 0
+            && keywords.iter().any(|keyword| keyword_at(sql, idx, keyword))
+        {
             return Some(idx);
         }
         idx += 1;
@@ -1090,6 +1253,7 @@ fn is_identifier_char(ch: char) -> bool {
 fn split_top_level_csv(input: &str) -> Option<Vec<String>> {
     let bytes = input.as_bytes();
     let mut depth = 0usize;
+    let mut bracket_depth = 0usize;
     let mut in_single = false;
     let mut in_double = false;
     let mut start = 0usize;
@@ -1119,13 +1283,23 @@ fn split_top_level_csv(input: &str) -> Option<Vec<String>> {
             idx += 1;
             continue;
         }
+        if let Some(tag) = dollar_quote_tag_at(input, idx) {
+            if let Some(close) = input[idx + tag.len()..].find(tag) {
+                idx += tag.len() + close + tag.len();
+                continue;
+            }
+            idx += tag.len();
+            continue;
+        }
 
         match ch {
             '\'' => in_single = true,
             '"' => in_double = true,
             '(' => depth += 1,
             ')' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            ',' if depth == 0 && bracket_depth == 0 => {
                 let part = input[start..idx].trim();
                 if part.is_empty() {
                     return None;
@@ -1144,6 +1318,25 @@ fn split_top_level_csv(input: &str) -> Option<Vec<String>> {
     }
     parts.push(tail.to_string());
     Some(parts)
+}
+
+fn dollar_quote_tag_at(sql: &str, idx: usize) -> Option<&str> {
+    let bytes = sql.as_bytes();
+    if bytes.get(idx) != Some(&b'$') {
+        return None;
+    }
+    let mut end = idx + 1;
+    while let Some(byte) = bytes.get(end) {
+        let ch = *byte as char;
+        if ch == '$' {
+            return Some(&sql[idx..=end]);
+        }
+        if !is_identifier_char(ch) {
+            return None;
+        }
+        end += 1;
+    }
+    None
 }
 
 fn parse_select_into_assign_target(target: &str) -> Result<AssignTarget, ParseError> {
@@ -1170,8 +1363,9 @@ fn compile_select_into_stmt(
     catalog: &dyn CatalogLookup,
     env: &mut CompileEnv,
 ) -> Result<CompiledStmt, ParseError> {
+    let rewritten_sql = rewrite_plpgsql_sql_text(select_sql, env)?;
     let planned = pg_plan_query_with_outer_scopes(
-        &crate::backend::parser::parse_select(select_sql)?,
+        &crate::backend::parser::parse_select(&rewritten_sql)?,
         catalog,
         &[outer_scope_for_sql(env)],
     )?;
@@ -1202,6 +1396,104 @@ fn compile_select_into_stmt(
     })
 }
 
+fn compile_for_query_stmt(
+    target: &ForTarget,
+    source: &ForQuerySource,
+    body: &[Stmt],
+    catalog: &dyn CatalogLookup,
+    env: &mut CompileEnv,
+    return_contract: Option<&FunctionReturnContract>,
+) -> Result<CompiledStmt, ParseError> {
+    let (target, source) = match source {
+        ForQuerySource::Static(sql) => {
+            let rewritten_sql = rewrite_plpgsql_sql_text(sql, env)?;
+            let stmt = parse_statement(&rewritten_sql)?;
+            let plan = match stmt {
+                Statement::Select(stmt) => {
+                    pg_plan_query_with_outer_scopes(&stmt, catalog, &[outer_scope_for_sql(env)])?
+                }
+                Statement::Values(stmt) => pg_plan_values_query_with_outer_scopes(
+                    &stmt,
+                    catalog,
+                    &[outer_scope_for_sql(env)],
+                )?,
+                other => {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "FOR ... IN query LOOP supports SELECT or VALUES; use EXECUTE for dynamic SQL",
+                        actual: format!("{other:?}"),
+                    });
+                }
+            };
+            let target = compile_for_query_target(target, env, Some(&plan))?;
+            (target, CompiledForQuerySource::Static { plan })
+        }
+        ForQuerySource::Execute {
+            sql_expr,
+            using_exprs,
+        } => (
+            compile_for_query_target(target, env, None)?,
+            CompiledForQuerySource::Dynamic {
+                sql_expr: compile_expr_text(sql_expr, catalog, env)?,
+                using_exprs: using_exprs
+                    .iter()
+                    .map(|expr| compile_expr_text(expr, catalog, env))
+                    .collect::<Result<Vec<_>, _>>()?,
+            },
+        ),
+    };
+    let body = compile_stmt_list(body, catalog, env, return_contract)?;
+    Ok(CompiledStmt::ForQuery {
+        target,
+        source,
+        body,
+    })
+}
+
+fn compile_for_query_target(
+    target: &ForTarget,
+    env: &mut CompileEnv,
+    static_plan: Option<&PlannedStmt>,
+) -> Result<CompiledForQueryTarget, ParseError> {
+    let target_refs: &[AssignTarget] = match target {
+        ForTarget::Single(target) => std::slice::from_ref(target),
+        ForTarget::List(targets) => targets,
+    };
+    let mut targets = target_refs
+        .iter()
+        .map(|target| {
+            resolve_assign_target(target, env)
+                .map(|(slot, ty)| CompiledSelectIntoTarget { slot, ty })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if targets.len() > 1
+        && targets
+            .iter()
+            .any(|target| matches!(target.ty.kind, SqlTypeKind::Record | SqlTypeKind::Composite))
+    {
+        return Err(ParseError::UnexpectedToken {
+            expected: "scalar loop variables for multi-target query FOR loop",
+            actual: format!("{target:?}"),
+        });
+    }
+
+    if let ([target], Some(plan)) = (targets.as_mut_slice(), static_plan)
+        && target.ty.kind == SqlTypeKind::Record
+    {
+        let descriptor = assign_anonymous_record_descriptor(
+            plan.columns()
+                .into_iter()
+                .map(|column| (column.name, column.sql_type))
+                .collect(),
+        );
+        let ty = descriptor.sql_type();
+        env.update_slot_type(target.slot, ty);
+        target.ty = ty;
+    }
+
+    Ok(CompiledForQueryTarget { targets })
+}
+
 fn compile_stmt_list(
     statements: &[Stmt],
     catalog: &dyn CatalogLookup,
@@ -1219,7 +1511,8 @@ fn compile_expr_text(
     catalog: &dyn CatalogLookup,
     env: &CompileEnv,
 ) -> Result<CompiledExpr, ParseError> {
-    let parsed = normalize_plpgsql_expr(parse_expr(sql)?, env);
+    let rewritten_sql = rewrite_plpgsql_sql_text(sql, env)?;
+    let parsed = normalize_plpgsql_expr(parse_expr(&rewritten_sql)?, env);
     let (expr, sql_type) = bind_scalar_expr_in_named_slot_scope(
         &parsed,
         &env.relation_slot_scopes(),
