@@ -516,6 +516,7 @@ fn verbose_plan_output_exprs(
         | Plan::Filter { input, .. }
         | Plan::OrderBy { input, .. }
         | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
         | Plan::SubqueryScan { input, .. } => verbose_plan_output_exprs(input, ctx, for_parent_ref),
         Plan::Projection { input, targets, .. } => {
             let input_names = verbose_plan_output_exprs(input, ctx, true);
