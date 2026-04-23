@@ -18,7 +18,9 @@ use super::node_types::*;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::expr_json::{canonicalize_jsonpath_text, validate_json_text};
 use crate::backend::executor::jsonb::{decode_jsonb, render_jsonb_bytes};
-use crate::backend::libpq::pqformat::FloatFormatOptions;
+use crate::backend::libpq::pqformat::{
+    FloatFormatOptions, format_float4_text, format_float8_text,
+};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::record::register_anonymous_record_descriptor;
@@ -72,15 +74,28 @@ const INTERNAL_VALUE_TAG_MULTIRANGE: u8 = 32;
 const COMPOSITE_DATUM_VERSION: u8 = 1;
 
 pub(crate) fn format_record_text(record: &crate::include::nodes::datum::RecordValue) -> String {
-    format_record_text_with_config(record, &DateTimeConfig::default())
+    format_record_text_with_options(record, &FloatFormatOptions::default())
 }
 
 pub(crate) fn format_record_text_with_config(
     record: &crate::include::nodes::datum::RecordValue,
     datetime_config: &DateTimeConfig,
 ) -> String {
+    format_record_text_with_options(
+        record,
+        &FloatFormatOptions {
+            datetime_config: datetime_config.clone(),
+            ..FloatFormatOptions::default()
+        },
+    )
+}
+
+pub(crate) fn format_record_text_with_options(
+    record: &crate::include::nodes::datum::RecordValue,
+    float_format: &FloatFormatOptions,
+) -> String {
     let mut out = String::from("(");
-    for (index, value) in record.fields.iter().enumerate() {
+    for (index, (field, value)) in record.iter().enumerate() {
         if index > 0 {
             out.push(',');
         }
@@ -88,9 +103,11 @@ pub(crate) fn format_record_text_with_config(
             continue;
         }
         let rendered = match value {
-            Value::Record(record) => format_record_text_with_config(record, datetime_config),
-            Value::PgArray(array) => format_array_value_text_with_config(array, datetime_config),
-            Value::Array(values) => format_array_text_with_config(values, datetime_config),
+            Value::Record(record) => format_record_text_with_options(record, float_format),
+            Value::PgArray(array) => {
+                format_array_value_text_with_config(array, &float_format.datetime_config)
+            }
+            Value::Array(values) => format_array_text_with_config(values, &float_format.datetime_config),
             Value::Range(_) => render_range_text(value).unwrap_or_default(),
             Value::InternalChar(byte) => render_internal_char_text(*byte),
             Value::Jsonb(bytes) => render_jsonb_bytes(bytes).unwrap_or_default(),
@@ -98,8 +115,8 @@ pub(crate) fn format_record_text_with_config(
                 if let Some(text) = other.as_text() {
                     text.to_string()
                 } else {
-                    render_datetime_value_text_with_config(other, datetime_config)
-                        .or_else(|| render_geometry_text(other, FloatFormatOptions::default()))
+                    render_datetime_value_text_with_config(other, &float_format.datetime_config)
+                        .or_else(|| render_geometry_text(other, float_format.clone()))
                         .unwrap_or_else(|| match other {
                             Value::Bool(true) => "t".to_string(),
                             Value::Bool(false) => "f".to_string(),
@@ -107,7 +124,11 @@ pub(crate) fn format_record_text_with_config(
                             Value::Int32(v) => v.to_string(),
                             Value::Int64(v) => v.to_string(),
                             Value::Money(v) => v.to_string(),
-                            Value::Float64(v) => v.to_string(),
+                            Value::Float64(v) => match field.sql_type.kind {
+                                SqlTypeKind::Float4 => format_float4_text(*v, float_format.clone()),
+                                SqlTypeKind::Float8 => format_float8_text(*v, float_format.clone()),
+                                _ => v.to_string(),
+                            },
                             Value::Numeric(v) => v.render(),
                             Value::Bytea(v) => {
                                 let mut rendered = String::from("\\\\x");
@@ -2360,6 +2381,34 @@ mod tests {
         assert_eq!(
             format_record_text_with_config(&record, &config),
             "(\"Mon Dec 31 15:30:56 2012\")"
+        );
+    }
+
+    #[test]
+    fn format_record_text_uses_float_field_type() {
+        let value =
+            crate::backend::executor::expr_casts::parse_pg_float("99.097", SqlTypeKind::Float4)
+                .expect("parse float4");
+        let record = RecordValue::from_descriptor(
+            crate::include::nodes::datum::RecordDescriptor::anonymous(
+                vec![
+                    ("a".into(), SqlType::new(SqlTypeKind::Int2)),
+                    ("b".into(), SqlType::new(SqlTypeKind::Float4)),
+                ],
+                -1,
+            ),
+            vec![Value::Int16(100), Value::Float64(value)],
+        );
+
+        assert_eq!(
+            format_record_text_with_options(
+                &record,
+                &FloatFormatOptions {
+                    extra_float_digits: 0,
+                    ..FloatFormatOptions::default()
+                }
+            ),
+            "(100,99.097)"
         );
     }
 

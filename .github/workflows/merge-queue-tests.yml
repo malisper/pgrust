@@ -21,6 +21,7 @@ env:
 jobs:
   cargo-test-shard:
     name: cargo-test-shard-${{ matrix.shard }}
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -64,10 +65,17 @@ jobs:
       - cargo-test-shard
     if: always()
     steps:
+      - name: Pass quickly on pull requests
+        if: ${{ github.event_name == 'pull_request' }}
+        run: |
+          echo "PR-time cargo-test is intentionally a no-op."
+
       - name: Checkout
+        if: ${{ github.event_name != 'pull_request' }}
         uses: actions/checkout@v4
 
       - name: Download JUnit timing reports
+        if: ${{ github.event_name != 'pull_request' }}
         uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -75,10 +83,12 @@ jobs:
           merge-multiple: false
 
       - name: Summarize test timings
+        if: ${{ github.event_name != 'pull_request' }}
         run: |
           python3 scripts/github/render_nextest_timings.py artifacts/*/*.xml >>"$GITHUB_STEP_SUMMARY"
 
       - name: Fail if any shard failed
+        if: ${{ github.event_name != 'pull_request' }}
         env:
           NEEDS_JSON: ${{ toJson(needs) }}
         run: |
