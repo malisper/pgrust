@@ -1255,20 +1255,41 @@ fn auto_view_prepare_error(
     event: ViewDmlEvent,
     err: ViewDmlRewriteError,
 ) -> ExecError {
-    if let ViewDmlRewriteError::DeferredFeature(detail) = err {
-        return ExecError::Parse(ParseError::FeatureNotSupported(detail));
-    }
-
-    ExecError::DetailedError {
-        message: format!("cannot {} view \"{}\"", event_verb(event), relation_name),
-        detail: Some(err.detail()),
-        hint: Some(format!(
-            "To enable {} the view, provide an INSTEAD OF {} trigger or an unconditional ON {} DO INSTEAD rule.",
-            event_gerund(event),
-            event_name(event),
-            event_name(event),
-        )),
-        sqlstate: "55000",
+    match err {
+        ViewDmlRewriteError::DeferredFeature(detail) => {
+            ExecError::Parse(ParseError::FeatureNotSupported(detail))
+        }
+        ViewDmlRewriteError::NonUpdatableColumn {
+            column_name,
+            reason,
+        } => ExecError::DetailedError {
+            message: format!(
+                "cannot {} column \"{}\" of view \"{}\"",
+                event_verb(event),
+                column_name,
+                relation_name
+            ),
+            detail: Some(reason.detail().into()),
+            hint: None,
+            sqlstate: "55000",
+        },
+        ViewDmlRewriteError::MultipleAssignments(column_name) => ExecError::DetailedError {
+            message: format!("multiple assignments to same column \"{}\"", column_name),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        },
+        other => ExecError::DetailedError {
+            message: format!("cannot {} view \"{}\"", event_verb(event), relation_name),
+            detail: Some(other.detail()),
+            hint: Some(format!(
+                "To enable {} the view, provide an INSTEAD OF {} trigger or an unconditional ON {} DO INSTEAD rule.",
+                event_gerund(event),
+                event_name(event),
+                event_name(event),
+            )),
+            sqlstate: "55000",
+        },
     }
 }
 
