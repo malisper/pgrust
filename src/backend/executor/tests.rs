@@ -6377,6 +6377,23 @@ fn publication_describe_builtins_run_via_normal_sql() {
 }
 
 #[test]
+fn pg_backend_pid_returns_executor_client_id() {
+    let base = temp_dir("pg_backend_pid_returns_executor_client_id");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select pg_backend_pid()",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(77)]],
+    );
+}
+
+#[test]
 fn index_property_builtins_report_am_and_index_capabilities() {
     let base = temp_dir("index_property_builtins");
     let txns = TransactionManager::new_durable(&base).unwrap();
