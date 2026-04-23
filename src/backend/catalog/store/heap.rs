@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::backend::catalog::catalog::{
     Catalog, CatalogEntry, CatalogError, CatalogIndexBuildOptions, CatalogIndexMeta,
@@ -46,7 +46,7 @@ use crate::include::catalog::{
     PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow, PgInheritsRow, PgNamespaceRow,
     PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow,
     PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticRow,
-    PgTablespaceRow, relkind_has_storage,
+    PgTablespaceRow, PgTypeRow, relkind_has_storage,
 };
 use crate::include::nodes::datum::Value;
 
@@ -3345,7 +3345,7 @@ impl CatalogStore {
 
         if new_constraint.conindid != 0 {
             let index_effect =
-                self.rename_relation_mvcc(new_constraint.conindid, &new_constraint_name, ctx)?;
+                self.rename_relation_mvcc(new_constraint.conindid, &new_constraint_name, &[], ctx)?;
             effect_record_catalog_kinds(&mut effect, &index_effect.touched_catalogs);
             for rel in index_effect.created_rels {
                 effect_record_rel(&mut effect.created_rels, rel);
@@ -3871,6 +3871,7 @@ impl CatalogStore {
         &mut self,
         relation_oid: u32,
         new_name: &str,
+        extra_visible_type_rows: &[PgTypeRow],
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (catcache, relcache) = visible_catalog_caches_for_ctx(self, ctx)?;
@@ -3890,16 +3891,44 @@ impl CatalogStore {
             ));
         }
         let entry = catalog_entry_from_visible_relation(&catcache, relation)?;
-        let old_rows = rows_for_existing_relation(&catcache, &entry)?;
-        let new_rows = rows_for_new_relation_entry(&catcache, new_name, &entry)?;
+        let mut old_rows = rows_for_existing_relation(&catcache, &entry)?;
+        let mut new_rows = rows_for_new_relation_entry(&catcache, new_name, &entry)?;
+        let mut modified_type_oids = Vec::new();
+        if entry.row_type_oid != 0 {
+            let mut visible_type_rows = catcache
+                .type_rows()
+                .into_iter()
+                .map(|row| (row.oid, row))
+                .collect::<BTreeMap<_, _>>();
+            for row in extra_visible_type_rows {
+                visible_type_rows.insert(row.oid, row.clone());
+            }
+            let mut old_type_rows = BTreeMap::new();
+            let mut new_type_rows = BTreeMap::new();
+            rename_visible_type_row(
+                entry.row_type_oid,
+                new_name,
+                entry.namespace_oid,
+                &mut visible_type_rows,
+                &mut old_type_rows,
+                &mut new_type_rows,
+            )?;
+            if !old_type_rows.is_empty() {
+                modified_type_oids.extend(new_type_rows.keys().copied());
+                old_rows.types = old_type_rows.into_values().collect();
+                new_rows.types = new_type_rows.into_values().collect();
+            }
+        }
         let control = self.control_state()?;
         self.persist_control_values(control.next_oid, control.next_rel_number)?;
 
-        let kinds = vec![
+        let mut kinds = vec![
             BootstrapCatalogKind::PgClass,
-            BootstrapCatalogKind::PgType,
             BootstrapCatalogKind::PgConstraint,
         ];
+        if !old_rows.types.is_empty() || !new_rows.types.is_empty() {
+            kinds.insert(1, BootstrapCatalogKind::PgType);
+        }
         delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &kinds)?;
         insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &kinds)?;
         self.control = control;
@@ -3908,7 +3937,9 @@ impl CatalogStore {
         effect_record_catalog_kinds(&mut effect, &kinds);
         effect_record_oid(&mut effect.relation_oids, relation_oid);
         effect_record_oid(&mut effect.namespace_oids, entry.namespace_oid);
-        effect_record_oid(&mut effect.type_oids, entry.row_type_oid);
+        for oid in modified_type_oids {
+            effect_record_oid(&mut effect.type_oids, oid);
+        }
         Ok(effect)
     }
 
@@ -5145,6 +5176,140 @@ fn rows_for_new_relation_entry(
     }
     sort_pg_depend_rows(&mut rows.depends);
     Ok(rows)
+}
+
+fn rename_visible_type_row(
+    type_oid: u32,
+    new_type_name: &str,
+    namespace_oid: u32,
+    visible_type_rows: &mut BTreeMap<u32, PgTypeRow>,
+    old_type_rows: &mut BTreeMap<u32, PgTypeRow>,
+    new_type_rows: &mut BTreeMap<u32, PgTypeRow>,
+) -> Result<(), CatalogError> {
+    let Some(current_row) = visible_type_rows.get(&type_oid).cloned() else {
+        return Err(CatalogError::UnknownType(type_oid.to_string()));
+    };
+    if current_row.typnamespace != namespace_oid {
+        return Err(CatalogError::Corrupt(
+            "type namespace mismatch during relation rename",
+        ));
+    }
+    if current_row.typname.eq_ignore_ascii_case(new_type_name) {
+        return Ok(());
+    }
+
+    let array_oid = current_row.typarray;
+    let mut moved_own_array_type = false;
+    while let Some(conflicting_type_oid) =
+        conflicting_type_oid_for_name(visible_type_rows, type_oid, new_type_name, namespace_oid)
+    {
+        if autogenerated_array_type(visible_type_rows, conflicting_type_oid) {
+            let moved_name =
+                available_array_type_name(visible_type_rows, new_type_name, namespace_oid);
+            if conflicting_type_oid == array_oid {
+                moved_own_array_type = true;
+            }
+            rename_visible_type_row(
+                conflicting_type_oid,
+                &moved_name,
+                namespace_oid,
+                visible_type_rows,
+                old_type_rows,
+                new_type_rows,
+            )?;
+        } else {
+            return Err(CatalogError::TypeAlreadyExists(
+                new_type_name.to_ascii_lowercase(),
+            ));
+        }
+    }
+
+    stage_visible_type_row_rename(
+        type_oid,
+        new_type_name,
+        visible_type_rows,
+        old_type_rows,
+        new_type_rows,
+    )?;
+
+    if array_oid != 0 && !moved_own_array_type {
+        let array_name = available_array_type_name(visible_type_rows, new_type_name, namespace_oid);
+        rename_visible_type_row(
+            array_oid,
+            &array_name,
+            namespace_oid,
+            visible_type_rows,
+            old_type_rows,
+            new_type_rows,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn conflicting_type_oid_for_name(
+    visible_type_rows: &BTreeMap<u32, PgTypeRow>,
+    type_oid: u32,
+    type_name: &str,
+    namespace_oid: u32,
+) -> Option<u32> {
+    visible_type_rows.values().find_map(|row| {
+        (row.oid != type_oid
+            && row.typnamespace == namespace_oid
+            && row.typname.eq_ignore_ascii_case(type_name))
+        .then_some(row.oid)
+    })
+}
+
+fn autogenerated_array_type(visible_type_rows: &BTreeMap<u32, PgTypeRow>, type_oid: u32) -> bool {
+    let Some(array_row) = visible_type_rows.get(&type_oid) else {
+        return false;
+    };
+    if array_row.typelem == 0 {
+        return false;
+    }
+    visible_type_rows
+        .get(&array_row.typelem)
+        .is_some_and(|element_row| element_row.typarray == array_row.oid)
+}
+
+fn available_array_type_name(
+    visible_type_rows: &BTreeMap<u32, PgTypeRow>,
+    base_type_name: &str,
+    namespace_oid: u32,
+) -> String {
+    let first_choice = format!("_{base_type_name}");
+    if conflicting_type_oid_for_name(visible_type_rows, 0, &first_choice, namespace_oid).is_none() {
+        return first_choice;
+    }
+    for suffix in 1.. {
+        let candidate = format!("_{base_type_name}_{suffix}");
+        if conflicting_type_oid_for_name(visible_type_rows, 0, &candidate, namespace_oid).is_none()
+        {
+            return candidate;
+        }
+    }
+    unreachable!("array type name search should always find a free name")
+}
+
+fn stage_visible_type_row_rename(
+    type_oid: u32,
+    new_type_name: &str,
+    visible_type_rows: &mut BTreeMap<u32, PgTypeRow>,
+    old_type_rows: &mut BTreeMap<u32, PgTypeRow>,
+    new_type_rows: &mut BTreeMap<u32, PgTypeRow>,
+) -> Result<(), CatalogError> {
+    let Some(current_row) = visible_type_rows.get(&type_oid).cloned() else {
+        return Err(CatalogError::UnknownType(type_oid.to_string()));
+    };
+    old_type_rows
+        .entry(type_oid)
+        .or_insert_with(|| current_row.clone());
+    let mut renamed_row = current_row;
+    renamed_row.typname = new_type_name.to_ascii_lowercase();
+    visible_type_rows.insert(type_oid, renamed_row.clone());
+    new_type_rows.insert(type_oid, renamed_row);
+    Ok(())
 }
 
 fn relation_object_name(relation_name: &str) -> &str {
