@@ -375,7 +375,14 @@ fn parse_partition_of_clause(
 fn parse_partition_spec_clause(
     input: &str,
 ) -> Result<(RawPartitionSpec, &str), PartitionStatementParseError> {
-    let mut rest = consume_keyword(input.trim_start(), "partition").trim_start();
+    let mut rest = input.trim_start();
+    if !keyword_at_start(rest, "partition") {
+        return Err(PartitionStatementParseError::Unsupported);
+    }
+    rest = consume_keyword(rest, "partition").trim_start();
+    if !keyword_at_start(rest, "by") {
+        return Err(PartitionStatementParseError::Unsupported);
+    }
     rest = consume_keyword(rest, "by").trim_start();
     let strategy = if keyword_at_start(rest, "list") {
         rest = consume_keyword(rest, "list").trim_start();
