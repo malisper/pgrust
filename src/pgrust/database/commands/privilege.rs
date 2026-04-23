@@ -150,7 +150,9 @@ impl Database {
                 Ok(StatementResult::AffectedRows(0))
             }
             GrantObjectPrivilege::AllPrivilegesOnSchema => {
-                let catcache = self.backend_catcache(client_id, None).map_err(map_catalog_error)?;
+                let catcache = self
+                    .backend_catcache(client_id, None)
+                    .map_err(map_catalog_error)?;
                 for object_name in &stmt.object_names {
                     catcache.namespace_by_name(object_name).ok_or_else(|| {
                         ExecError::DetailedError {
@@ -205,7 +207,9 @@ impl Database {
                 Ok(StatementResult::AffectedRows(0))
             }
             GrantObjectPrivilege::AllPrivilegesOnSchema => {
-                let catcache = self.backend_catcache(client_id, None).map_err(map_catalog_error)?;
+                let catcache = self
+                    .backend_catcache(client_id, None)
+                    .map_err(map_catalog_error)?;
                 for object_name in &stmt.object_names {
                     catcache.namespace_by_name(object_name).ok_or_else(|| {
                         ExecError::DetailedError {
