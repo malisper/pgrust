@@ -7096,11 +7096,7 @@ fn assert_view_dml_error(
     }
 }
 
-fn assert_view_column_dml_error(
-    err: ExecError,
-    expected_message: &str,
-    expected_detail: &str,
-) {
+fn assert_view_column_dml_error(err: ExecError, expected_message: &str, expected_detail: &str) {
     match err {
         ExecError::DetailedError {
             sqlstate,
