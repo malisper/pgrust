@@ -2018,7 +2018,7 @@ fn build_grant_database_create(sql: &str) -> Result<GrantObjectStatement, ParseE
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::CreateOnDatabase,
-        object_name: normalize_simple_identifier(object_name)?,
+        object_names: vec![normalize_simple_identifier(object_name)?],
         grantee_names,
         with_grant_option,
     })
@@ -2034,7 +2034,7 @@ fn build_grant_table_all_privileges(sql: &str) -> Result<GrantObjectStatement, P
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
-        object_name: normalize_simple_identifier(object_name)?,
+        object_names: vec![normalize_simple_identifier(object_name)?],
         grantee_names,
         with_grant_option,
     })
@@ -2050,7 +2050,7 @@ fn build_grant_table_all(sql: &str) -> Result<GrantObjectStatement, ParseError> 
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
-        object_name: normalize_simple_identifier(object_name)?,
+        object_names: vec![normalize_simple_identifier(object_name)?],
         grantee_names,
         with_grant_option,
     })
@@ -2066,7 +2066,7 @@ fn build_grant_table_select(sql: &str) -> Result<GrantObjectStatement, ParseErro
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::SelectOnTable,
-        object_name: normalize_simple_identifier(object_name)?,
+        object_names: vec![normalize_simple_identifier(object_name)?],
         grantee_names,
         with_grant_option,
     })
@@ -2078,11 +2078,11 @@ fn build_grant_schema_all(sql: &str) -> Result<GrantObjectStatement, ParseError>
         .get(prefix.len()..)
         .ok_or(ParseError::UnexpectedEof)?
         .trim_start();
-    let (object_name, rest) = split_once_keyword(rest, "to")?;
+    let (object_names, rest) = split_once_keyword(rest, "to")?;
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::AllPrivilegesOnSchema,
-        object_name: normalize_simple_identifier(object_name)?,
+        object_names: parse_identifier_list(object_names)?,
         grantee_names,
         with_grant_option,
     })
@@ -2098,7 +2098,7 @@ fn build_grant_function_execute(sql: &str) -> Result<GrantObjectStatement, Parse
     let (grantee_names, with_grant_option) = parse_grantees_with_optional_grant(rest)?;
     Ok(GrantObjectStatement {
         privilege: GrantObjectPrivilege::ExecuteOnFunction,
-        object_name: object_name.trim().to_ascii_lowercase(),
+        object_names: vec![object_name.trim().to_ascii_lowercase()],
         grantee_names,
         with_grant_option,
     })
@@ -2114,7 +2114,7 @@ fn build_revoke_database_create(sql: &str) -> Result<RevokeObjectStatement, Pars
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
         privilege: GrantObjectPrivilege::CreateOnDatabase,
-        object_name: normalize_simple_identifier(object_name)?,
+        object_names: vec![normalize_simple_identifier(object_name)?],
         grantee_names,
         cascade,
     })
@@ -2130,7 +2130,7 @@ fn build_revoke_table_all_privileges(sql: &str) -> Result<RevokeObjectStatement,
     let (grantee_names, cascade) = parse_revokee_list_with_optional_cascade(rest)?;
     Ok(RevokeObjectStatement {
         privilege: GrantObjectPrivilege::AllPrivilegesOnTable,
-        object_name: normalize_simple_identifier(object_name)?,
+        object_names: vec![normalize_simple_identifier(object_name)?],
         grantee_names,
         cascade,
     })
