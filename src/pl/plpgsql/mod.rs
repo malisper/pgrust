@@ -7,7 +7,7 @@ use crate::backend::executor::{ExecError, StatementResult};
 use crate::backend::parser::{Catalog, DoStatement, ParseError};
 
 pub use ast::*;
-pub use compile::CompiledFunction;
+pub use compile::{CompiledFunction, TriggerTransitionTable};
 pub use exec::{
     PlpgsqlNotice, TriggerCallContext, TriggerFunctionResult, TriggerOperation, clear_notices,
     take_notices,

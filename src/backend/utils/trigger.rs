@@ -47,6 +47,7 @@ pub(crate) fn format_trigger_definition(
     } else {
         "STATEMENT"
     };
+    let referencing_clause = format_referencing_clause(row);
     let action_statement = format_trigger_function_call(&proc_row.proname, &row.tgargs);
     let when_clause = row
         .tgqual
@@ -54,11 +55,12 @@ pub(crate) fn format_trigger_definition(
         .map(|when_sql| format_when_clause(when_sql, pretty))
         .unwrap_or_default();
     let definition = format!(
-        "CREATE TRIGGER {} {} {} ON {} FOR EACH {}{} EXECUTE FUNCTION {}",
+        "CREATE TRIGGER {} {} {} ON {}{} FOR EACH {}{} EXECUTE FUNCTION {}",
         row.tgname,
         action_timing,
         event_list,
         relation_name,
+        referencing_clause,
         action_orientation,
         when_clause,
         action_statement,
@@ -73,6 +75,21 @@ pub(crate) fn format_trigger_definition(
         action_reference_old_table: row.tgoldtable.clone(),
         action_reference_new_table: row.tgnewtable.clone(),
     })
+}
+
+fn format_referencing_clause(row: &PgTriggerRow) -> String {
+    let mut parts = Vec::new();
+    if let Some(name) = row.tgoldtable.as_deref() {
+        parts.push(format!("OLD TABLE AS {name}"));
+    }
+    if let Some(name) = row.tgnewtable.as_deref() {
+        parts.push(format!("NEW TABLE AS {name}"));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" REFERENCING {}", parts.join(" "))
+    }
 }
 
 fn trigger_event_manipulations(tgtype: i16) -> Vec<&'static str> {

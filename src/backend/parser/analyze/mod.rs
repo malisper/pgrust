@@ -104,7 +104,7 @@ pub(crate) use rules::{
 };
 pub use scope::BoundRelation;
 use scope::*;
-pub(crate) use scope::{BoundScope, scope_for_relation, shift_scope_rtindexes};
+pub(crate) use scope::{BoundCte, BoundScope, scope_for_relation, shift_scope_rtindexes};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
@@ -1393,12 +1393,15 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
     relation_scopes: &[(String, Vec<SlotScopeColumn>)],
     columns: &[SlotScopeColumn],
     catalog: &dyn CatalogLookup,
+    ctes: &[BoundCte],
 ) -> Result<(Expr, SqlType), ParseError> {
     if columns.is_empty() && relation_scopes.is_empty() {
         let empty_scope = scope::empty_scope();
         let empty_outer = Vec::new();
-        let bound = bind_expr_with_outer(expr, &empty_scope, catalog, &empty_outer, None)?;
-        let sql_type = infer_sql_expr_type(expr, &empty_scope, catalog, &empty_outer, None);
+        let bound =
+            bind_expr_with_outer_and_ctes(expr, &empty_scope, catalog, &empty_outer, None, ctes)?;
+        let sql_type =
+            infer_sql_expr_type_with_ctes(expr, &empty_scope, catalog, &empty_outer, None, ctes);
         return Ok((bound, sql_type));
     }
 
@@ -1463,8 +1466,8 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
     // PL/pgSQL scalar expressions can contain correlated subqueries that need
     // to see the same named-slot scope as the enclosing expression.
     let outer_scopes = vec![scope.clone()];
-    let bound = bind_expr_with_outer(expr, &scope, catalog, &outer_scopes, None)?;
-    let sql_type = infer_sql_expr_type(expr, &scope, catalog, &outer_scopes, None);
+    let bound = bind_expr_with_outer_and_ctes(expr, &scope, catalog, &outer_scopes, None, ctes)?;
+    let sql_type = infer_sql_expr_type_with_ctes(expr, &scope, catalog, &outer_scopes, None, ctes);
     Ok((bound, sql_type))
 }
 
@@ -2604,6 +2607,15 @@ pub(crate) fn pg_plan_query_with_outer_scopes(
     build_plan_with_outer(stmt, catalog, outer_scopes, None, &[], &[])
 }
 
+pub(crate) fn pg_plan_query_with_outer_scopes_and_ctes(
+    stmt: &SelectStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    outer_ctes: &[BoundCte],
+) -> Result<PlannedStmt, ParseError> {
+    build_plan_with_outer(stmt, catalog, outer_scopes, None, outer_ctes, &[])
+}
+
 pub fn build_plan(stmt: &SelectStatement, catalog: &dyn CatalogLookup) -> Result<Plan, ParseError> {
     Ok(pg_plan_query(stmt, catalog)?.plan_tree)
 }
@@ -2636,6 +2648,82 @@ pub(crate) fn pg_plan_values_query_with_outer_scopes(
     outer_scopes: &[BoundScope],
 ) -> Result<PlannedStmt, ParseError> {
     build_values_plan_with_outer(stmt, catalog, outer_scopes, None, &[], &[])
+}
+
+pub(crate) fn pg_plan_values_query_with_outer_scopes_and_ctes(
+    stmt: &ValuesStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    outer_ctes: &[BoundCte],
+) -> Result<PlannedStmt, ParseError> {
+    build_values_plan_with_outer(stmt, catalog, outer_scopes, None, outer_ctes, &[])
+}
+
+pub(crate) fn bound_cte_from_materialized_rows(
+    name: String,
+    desc: &RelationDesc,
+    rows: &[Vec<Value>],
+) -> BoundCte {
+    let cte_id = NEXT_CTE_ID.fetch_add(1, Ordering::Relaxed);
+    let visible_indexes = desc
+        .columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, column)| (!column.dropped).then_some(index))
+        .collect::<Vec<_>>();
+    let output_columns = visible_indexes
+        .iter()
+        .map(|index| {
+            let column = &desc.columns[*index];
+            QueryColumn {
+                name: column.name.clone(),
+                sql_type: column.sql_type,
+                wire_type_oid: None,
+            }
+        })
+        .collect::<Vec<_>>();
+    let values_rows = rows
+        .iter()
+        .map(|row| {
+            visible_indexes
+                .iter()
+                .map(|index| Expr::Const(row.get(*index).cloned().unwrap_or(Value::Null)))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let plan = AnalyzedFrom::values(values_rows, output_columns.clone());
+    BoundCte {
+        name,
+        cte_id,
+        plan: Query {
+            command_type: crate::include::executor::execdesc::CommandType::Select,
+            depends_on_row_security: false,
+            rtable: plan.rtable,
+            jointree: plan.jointree,
+            target_list: identity_target_list(&output_columns, &plan.output_exprs),
+            where_qual: None,
+            group_by: Vec::new(),
+            accumulators: Vec::new(),
+            window_clauses: Vec::new(),
+            having_qual: None,
+            sort_clause: Vec::new(),
+            limit_count: None,
+            limit_offset: 0,
+            locking_clause: None,
+            row_marks: Vec::new(),
+            project_set: None,
+            recursive_union: None,
+            set_operation: None,
+        },
+        desc: RelationDesc {
+            columns: output_columns
+                .into_iter()
+                .map(|column| column_desc(column.name, column.sql_type, true))
+                .collect(),
+        },
+        self_reference: false,
+        worktable_id: 0,
+    }
 }
 
 pub fn build_values_plan(
