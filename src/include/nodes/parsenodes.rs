@@ -346,6 +346,7 @@ pub enum Statement {
     CommentOnForeignDataWrapper(CommentOnForeignDataWrapperStatement),
     CommentOnPublication(CommentOnPublicationStatement),
     CommentOnAggregate(CommentOnAggregateStatement),
+    CommentOnFunction(CommentOnFunctionStatement),
     CreateDomain(CreateDomainStatement),
     CreateConversion(CreateConversionStatement),
     CreatePublication(CreatePublicationStatement),
@@ -609,6 +610,7 @@ pub struct CreateAggregateStatement {
 pub enum TriggerTiming {
     Before,
     After,
+    InsteadOf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -622,12 +624,20 @@ pub enum TriggerEvent {
     Insert,
     Update,
     Delete,
+    Truncate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TriggerEventSpec {
     pub event: TriggerEvent,
     pub update_columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerReferencingSpec {
+    pub is_new: bool,
+    pub is_table: bool,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -639,6 +649,7 @@ pub struct CreateTriggerStatement {
     pub timing: TriggerTiming,
     pub level: TriggerLevel,
     pub events: Vec<TriggerEventSpec>,
+    pub referencing: Vec<TriggerReferencingSpec>,
     pub when_clause_sql: Option<String>,
     pub function_schema_name: Option<String>,
     pub function_name: String,
@@ -1990,6 +2001,14 @@ pub struct CommentOnAggregateStatement {
     pub schema_name: Option<String>,
     pub aggregate_name: String,
     pub signature: AggregateSignatureKind,
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnFunctionStatement {
+    pub schema_name: Option<String>,
+    pub function_name: String,
+    pub arg_types: Vec<String>,
     pub comment: Option<String>,
 }
 

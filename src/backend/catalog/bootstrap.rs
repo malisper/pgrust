@@ -31,6 +31,7 @@ pub fn bootstrap_catalog_entry(kind: BootstrapCatalogKind) -> CatalogEntry {
         relation_oid: kind.relation_oid(),
         namespace_oid: bootstrap_namespace_oid(),
         owner_oid: BOOTSTRAP_SUPERUSER_OID,
+        relacl: None,
         row_type_oid: kind.row_type_oid(),
         array_type_oid: 0,
         reltoastrelid: 0,

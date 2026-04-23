@@ -137,6 +137,7 @@ fn test_catalog_entry(rel: RelFileLocator, desc: RelationDesc) -> CatalogEntry {
         relation_oid: 50_000u32.saturating_add(rel.rel_number),
         namespace_oid: crate::include::catalog::PUBLIC_NAMESPACE_OID,
         owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+        relacl: None,
         row_type_oid: 60_000u32.saturating_add(rel.rel_number),
         array_type_oid: 61_000u32.saturating_add(rel.rel_number),
         reltoastrelid: 0,
@@ -8224,6 +8225,35 @@ fn cte_filtered_self_join_aliases_keep_distinct_columns() {
                     vec![Value::Numeric("1".into()), Value::Numeric("1".into())],
                     vec![Value::Numeric("1".into()), Value::Numeric("2".into())],
                     vec![Value::Numeric("2".into()), Value::Numeric("1".into())],
+                    vec![Value::Numeric("2".into()), Value::Numeric("2".into())],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn cte_filtered_self_join_uses_filtered_side_as_outer_order() {
+    let base = temp_dir("cte_filtered_self_join_outer_order");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "with v(x) as (values (0::numeric), (1::numeric), (2::numeric)) select x1, x2 from v as v1(x1), v as v2(x2) where x2 != 0",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Numeric("0".into()), Value::Numeric("1".into())],
+                    vec![Value::Numeric("1".into()), Value::Numeric("1".into())],
+                    vec![Value::Numeric("2".into()), Value::Numeric("1".into())],
+                    vec![Value::Numeric("0".into()), Value::Numeric("2".into())],
+                    vec![Value::Numeric("1".into()), Value::Numeric("2".into())],
                     vec![Value::Numeric("2".into()), Value::Numeric("2".into())],
                 ]
             );

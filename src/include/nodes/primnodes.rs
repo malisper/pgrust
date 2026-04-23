@@ -478,6 +478,7 @@ pub enum BuiltinScalarFunction {
     CurrVal,
     SetVal,
     PgGetSerialSequence,
+    PgGetAcl,
     PgGetUserById,
     ObjDescription,
     PgDescribeObject,

@@ -56,6 +56,7 @@ pub fn system_catalog_index_entry_for_db(
         relation_oid: descriptor.relation_oid,
         namespace_oid: PG_CATALOG_NAMESPACE_OID,
         owner_oid: BOOTSTRAP_SUPERUSER_OID,
+        relacl: None,
         row_type_oid: 0,
         array_type_oid: 0,
         reltoastrelid: 0,

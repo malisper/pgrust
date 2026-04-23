@@ -4,8 +4,8 @@ use std::sync::Arc;
 use super::super::*;
 use crate::backend::parser::{
     CatalogLookup, CommentOnTriggerStatement, CreateTriggerStatement, DropTriggerStatement,
-    ParseError, SqlTypeKind, TriggerEvent, TriggerTiming, bind_scalar_expr_in_named_relation_scope,
-    parse_expr,
+    ParseError, SqlTypeKind, TriggerEvent, TriggerLevel, TriggerTiming,
+    bind_scalar_expr_in_named_relation_scope, parse_expr,
 };
 use crate::include::catalog::{PG_LANGUAGE_PLPGSQL_OID, PgTriggerRow};
 use crate::pgrust::database::ddl::{ensure_relation_owner, lookup_heap_relation_for_ddl};
@@ -15,6 +15,8 @@ const TRIGGER_TYPE_BEFORE: i16 = 1 << 1;
 const TRIGGER_TYPE_INSERT: i16 = 1 << 2;
 const TRIGGER_TYPE_DELETE: i16 = 1 << 3;
 const TRIGGER_TYPE_UPDATE: i16 = 1 << 4;
+const TRIGGER_TYPE_INSTEAD: i16 = 1 << 5;
+const TRIGGER_TYPE_TRUNCATE: i16 = 1 << 6;
 
 impl Database {
     pub(crate) fn execute_create_trigger_stmt_with_search_path(
@@ -51,7 +53,9 @@ impl Database {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let relation_name = format_trigger_relation_name(stmt);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &relation_name)?;
+        let relation = catalog.lookup_any_relation(&relation_name).ok_or_else(|| {
+            ExecError::Parse(ParseError::TableDoesNotExist(relation_name.clone()))
+        })?;
         ensure_relation_owner(self, client_id, &relation, &relation_name)?;
 
         let trigger_name = stmt.trigger_name.to_ascii_lowercase();
@@ -63,7 +67,13 @@ impl Database {
             stmt,
             configured_search_path,
         )?;
-        validate_trigger_stmt(stmt, &relation.desc, &catalog)?;
+        validate_trigger_stmt(
+            stmt,
+            &relation_name,
+            relation.relkind,
+            &relation.desc,
+            &catalog,
+        )?;
 
         let tgattr = trigger_update_attnums(stmt, &relation.desc)?;
         let tgtype = trigger_type_bits(stmt);
@@ -433,9 +443,121 @@ fn resolve_function_schema_oid(
 
 fn validate_trigger_stmt(
     stmt: &CreateTriggerStatement,
+    relation_name: &str,
+    relkind: char,
     desc: &crate::backend::executor::RelationDesc,
     catalog: &dyn CatalogLookup,
 ) -> Result<(), ExecError> {
+    if relkind == 'r' && stmt.timing == TriggerTiming::InsteadOf {
+        return Err(wrong_object_type_error(
+            relation_name,
+            "table",
+            "Tables cannot have INSTEAD OF triggers.",
+        ));
+    }
+    if relkind == 'v' && stmt.timing != TriggerTiming::InsteadOf && stmt.level == TriggerLevel::Row
+    {
+        return Err(wrong_object_type_error(
+            relation_name,
+            "view",
+            "Views cannot have row-level BEFORE or AFTER triggers.",
+        ));
+    }
+    if relkind == 'v'
+        && stmt
+            .events
+            .iter()
+            .any(|event| event.event == TriggerEvent::Truncate)
+    {
+        return Err(wrong_object_type_error(
+            relation_name,
+            "view",
+            "Views cannot have TRUNCATE triggers.",
+        ));
+    }
+    if stmt
+        .events
+        .iter()
+        .any(|event| event.event == TriggerEvent::Truncate)
+        && stmt.level == TriggerLevel::Row
+    {
+        return Err(ExecError::DetailedError {
+            message: "TRUNCATE FOR EACH ROW triggers are not supported".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    if stmt.timing == TriggerTiming::InsteadOf {
+        if stmt.level != TriggerLevel::Row {
+            return Err(feature_not_supported_error(
+                "INSTEAD OF triggers must be FOR EACH ROW",
+            ));
+        }
+        if stmt.when_clause_sql.is_some() {
+            return Err(feature_not_supported_error(
+                "INSTEAD OF triggers cannot have WHEN conditions",
+            ));
+        }
+        if stmt
+            .events
+            .iter()
+            .any(|event| !event.update_columns.is_empty())
+        {
+            return Err(feature_not_supported_error(
+                "INSTEAD OF triggers cannot have column lists",
+            ));
+        }
+    }
+    if !stmt.referencing.is_empty() {
+        if let Some(spec) = stmt.referencing.iter().find(|spec| !spec.is_table) {
+            let _ = spec;
+            return Err(ExecError::DetailedError {
+                message: "ROW variable naming in the REFERENCING clause is not supported".into(),
+                detail: None,
+                hint: Some("Use OLD TABLE or NEW TABLE for naming transition tables.".into()),
+                sqlstate: "0A000",
+            });
+        }
+        if relkind == 'v' {
+            return Err(wrong_object_type_error(
+                relation_name,
+                "view",
+                "Triggers on views cannot have transition tables.",
+            ));
+        }
+        if stmt.timing != TriggerTiming::After {
+            return Err(ExecError::DetailedError {
+                message: "transition table name can only be specified for an AFTER trigger".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42P17",
+            });
+        }
+        if stmt
+            .events
+            .iter()
+            .any(|event| event.event == TriggerEvent::Truncate)
+        {
+            return Err(feature_not_supported_error(
+                "TRUNCATE triggers with transition tables are not supported",
+            ));
+        }
+        if stmt.events.len() != 1 {
+            return Err(feature_not_supported_error(
+                "transition tables cannot be specified for triggers with more than one event",
+            ));
+        }
+        if stmt
+            .events
+            .iter()
+            .any(|event| !event.update_columns.is_empty())
+        {
+            return Err(feature_not_supported_error(
+                "transition tables cannot be specified for triggers with column lists",
+            ));
+        }
+    }
     for event in &stmt.events {
         if event.event == TriggerEvent::Update {
             let mut seen = BTreeSet::new();
@@ -473,6 +595,7 @@ fn validate_trigger_stmt(
                         relation_scopes.push(("old", desc));
                     }
                     TriggerEvent::Delete => relation_scopes.push(("old", desc)),
+                    TriggerEvent::Truncate => {}
                 }
             }
             let (_, when_type) =
@@ -521,15 +644,36 @@ fn trigger_type_bits(stmt: &CreateTriggerStatement) -> i16 {
     if stmt.level == crate::backend::parser::TriggerLevel::Row {
         bits |= TRIGGER_TYPE_ROW;
     }
-    if stmt.timing == TriggerTiming::Before {
-        bits |= TRIGGER_TYPE_BEFORE;
+    match stmt.timing {
+        TriggerTiming::Before => bits |= TRIGGER_TYPE_BEFORE,
+        TriggerTiming::After => {}
+        TriggerTiming::InsteadOf => bits |= TRIGGER_TYPE_INSTEAD,
     }
     for event in &stmt.events {
         bits |= match event.event {
             TriggerEvent::Insert => TRIGGER_TYPE_INSERT,
             TriggerEvent::Delete => TRIGGER_TYPE_DELETE,
             TriggerEvent::Update => TRIGGER_TYPE_UPDATE,
+            TriggerEvent::Truncate => TRIGGER_TYPE_TRUNCATE,
         };
     }
     bits
+}
+
+fn wrong_object_type_error(relation_name: &str, kind: &str, detail: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("\"{relation_name}\" is a {kind}"),
+        detail: Some(detail.into()),
+        hint: None,
+        sqlstate: "42809",
+    }
+}
+
+fn feature_not_supported_error(message: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: message.into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
 }

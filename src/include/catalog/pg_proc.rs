@@ -797,6 +797,18 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             's',
         ),
         proc_row(
+            6385,
+            "pg_get_acl",
+            TEXT_ARRAY_TYPE_OID,
+            &oid_argtypes(&[OID_TYPE_OID, OID_TYPE_OID, INT4_TYPE_OID]),
+            "pg_get_acl",
+            3,
+            false,
+            true,
+            'f',
+            's',
+        ),
+        proc_row(
             1215,
             "obj_description",
             TEXT_TYPE_OID,
@@ -3554,6 +3566,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_get_serial_sequence",
             BuiltinScalarFunction::PgGetSerialSequence,
         ),
+        ("pg_get_acl", BuiltinScalarFunction::PgGetAcl),
         ("pg_size_pretty", BuiltinScalarFunction::PgSizePretty),
         (
             "pg_size_pretty_numeric",
@@ -4119,6 +4132,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_input_error_sqlstate",
             BuiltinScalarFunction::PgInputErrorSqlState,
         ),
+        ("pg_get_acl", BuiltinScalarFunction::PgGetAcl),
         ("pg_get_userbyid", BuiltinScalarFunction::PgGetUserById),
         ("obj_description", BuiltinScalarFunction::ObjDescription),
         (

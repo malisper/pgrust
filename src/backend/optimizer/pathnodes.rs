@@ -15,9 +15,9 @@ use crate::include::nodes::primnodes::{
 use super::inherit::{append_translation, translate_append_rel_expr};
 use super::util::{IndexedPathTarget, simple_var_key, strip_binary_coercible_casts};
 
-// :HACK: Planner-generated slot Vars still share the same Var identity space as parse-time
-// rtindex Vars, so keep synthetic slots in a disjoint high range until slot identity is split
-// from relation identity more cleanly.
+// Keep planner-generated slots in disjoint high ranges so executor/planner identities never
+// collide with parse-time rtindex Vars. RTE-backed scan slots use a stable derived range while
+// synthesized slots use an allocator-backed range.
 const SYNTHETIC_SLOT_ID_BASE: usize = 1_000_000;
 const RTE_SLOT_ID_BASE: usize = 2_000_000;
 

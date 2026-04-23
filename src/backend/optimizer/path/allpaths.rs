@@ -18,7 +18,7 @@ use super::super::inherit::{
 };
 use super::super::joininfo;
 use super::super::optimize_path;
-use super::super::pathnodes::{next_synthetic_slot_id, slot_output_target};
+use super::super::pathnodes::{next_synthetic_slot_id, rte_slot_id, slot_output_target};
 use super::super::plan::grouping_planner;
 use super::super::util::{
     normalize_rte_path, pathkeys_to_order_items, project_to_slot_layout,
@@ -538,7 +538,7 @@ fn build_cte_scan_path(
     Path::CteScan {
         plan_info: cte_path.plan_info(),
         pathtarget: slot_output_target(rtindex, &output_columns, |column| column.sql_type),
-        slot_id: rtindex,
+        slot_id: rte_slot_id(rtindex),
         cte_id,
         subroot: PlannerSubroot::new(subroot),
         query: Box::new(query),
@@ -750,7 +750,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                     pathtarget: slot_output_target(rtindex, &output_columns, |column| {
                         column.sql_type
                     }),
-                    slot_id: rtindex,
+                    slot_id: rte_slot_id(rtindex),
                     rows,
                     output_columns,
                 },
@@ -777,7 +777,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                     pathtarget: slot_output_target(rtindex, call.output_columns(), |column| {
                         column.sql_type
                     }),
-                    slot_id: rtindex,
+                    slot_id: rte_slot_id(rtindex),
                     call,
                 },
                 catalog,
@@ -813,7 +813,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                             .collect::<Vec<_>>(),
                         |column| column.sql_type,
                     ),
-                    slot_id: rtindex,
+                    slot_id: rte_slot_id(rtindex),
                     worktable_id,
                     output_columns: rte
                         .desc

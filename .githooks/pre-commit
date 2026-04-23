@@ -1,0 +1,16 @@
+#!/bin/sh
+# Versioned project pre-commit hook. Activated automatically the first
+# time you run any cargo command in this clone (see build.rs at the repo
+# root, which sets core.hooksPath to .githooks).
+#
+# To bypass once: git commit --no-verify
+# To fix a rejection: run `cargo fmt`, re-stage, re-commit.
+
+set -eu
+
+if ! cargo fmt -- --check; then
+    echo
+    echo "ERROR: pre-commit: rustfmt found unformatted files." >&2
+    echo "Run 'cargo fmt' and stage the changes before committing." >&2
+    exit 1
+fi
