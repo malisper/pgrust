@@ -474,6 +474,8 @@ pub fn index_relation_oids_for_heap(
                 .into_iter()
                 .filter(|row| row.indrelid == relation_oid)
                 .map(|row| row.indexrelid)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
                 .collect()
         })
         .unwrap_or_default()

@@ -768,11 +768,15 @@ impl CatalogLookup for Catalog {
 
     fn index_relations_for_heap(&self, relation_oid: u32) -> Vec<BoundIndexRelation> {
         let relcache = RelCache::from_catalog(self);
+        let mut seen = BTreeSet::new();
         relcache
             .entries()
             .filter_map(|(name, entry)| {
                 let index_meta = entry.index.as_ref()?;
-                (index_meta.indrelid == relation_oid).then(|| BoundIndexRelation {
+                if index_meta.indrelid != relation_oid || !seen.insert(entry.relation_oid) {
+                    return None;
+                }
+                Some(BoundIndexRelation {
                     name: name.rsplit('.').next().unwrap_or(name).to_string(),
                     rel: entry.rel,
                     relation_oid: entry.relation_oid,
@@ -1068,10 +1072,14 @@ impl CatalogLookup for RelCache {
     }
 
     fn index_relations_for_heap(&self, relation_oid: u32) -> Vec<BoundIndexRelation> {
+        let mut seen = BTreeSet::new();
         self.entries()
             .filter_map(|(name, entry)| {
                 let index_meta = entry.index.as_ref()?;
-                (index_meta.indrelid == relation_oid).then(|| BoundIndexRelation {
+                if index_meta.indrelid != relation_oid || !seen.insert(entry.relation_oid) {
+                    return None;
+                }
+                Some(BoundIndexRelation {
                     name: name.rsplit('.').next().unwrap_or(name).to_string(),
                     rel: entry.rel,
                     relation_oid: entry.relation_oid,
