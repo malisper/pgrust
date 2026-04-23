@@ -445,4 +445,7 @@ pub enum StatementResult {
 }
 
 #[cfg(test)]
+mod tests_support;
+
+#[cfg(test)]
 mod tests;
