@@ -1,6 +1,9 @@
 use super::super::*;
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
-use crate::pgrust::database::ddl::{is_system_column_name, lookup_heap_relation_for_alter_table};
+use crate::pgrust::database::ddl::{
+    is_system_column_name, lookup_heap_relation_for_alter_table,
+    reject_column_with_trigger_dependencies,
+};
 
 impl Database {
     pub(crate) fn execute_alter_table_drop_column_stmt_with_search_path(
@@ -105,6 +108,12 @@ impl Database {
             &relation.desc.columns[column_index].name,
             (column_index + 1) as i16,
             "ALTER TABLE DROP COLUMN on column without foreign key dependencies",
+        )?;
+        reject_column_with_trigger_dependencies(
+            &catalog,
+            relation.relation_oid,
+            &relation.desc.columns[column_index].name,
+            (column_index + 1) as i16,
         )?;
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),

@@ -1564,7 +1564,7 @@ impl CatalogStore {
 
         let mut insert_rows = PhysicalCatalogRows {
             triggers: vec![row.clone()],
-            depends: trigger_depend_rows(row.oid, row.tgrelid, row.tgfoid),
+            depends: trigger_depend_rows(row.oid, row.tgrelid, row.tgfoid, &row.tgattr),
             ..PhysicalCatalogRows::default()
         };
         let mut kinds = vec![
@@ -1613,9 +1613,13 @@ impl CatalogStore {
             ));
         }
         row.oid = old_visible.oid;
-        let old_depends =
-            trigger_depend_rows(old_visible.oid, old_visible.tgrelid, old_visible.tgfoid);
-        let new_depends = trigger_depend_rows(row.oid, row.tgrelid, row.tgfoid);
+        let old_depends = trigger_depend_rows(
+            old_visible.oid,
+            old_visible.tgrelid,
+            old_visible.tgfoid,
+            &old_visible.tgattr,
+        );
+        let new_depends = trigger_depend_rows(row.oid, row.tgrelid, row.tgfoid, &row.tgattr);
 
         let old_class = catcache
             .class_by_oid(old_visible.tgrelid)
@@ -1718,7 +1722,12 @@ impl CatalogStore {
         ];
         let mut delete_rows = PhysicalCatalogRows {
             triggers: vec![old_trigger.clone()],
-            depends: trigger_depend_rows(old_trigger.oid, old_trigger.tgrelid, old_trigger.tgfoid),
+            depends: trigger_depend_rows(
+                old_trigger.oid,
+                old_trigger.tgrelid,
+                old_trigger.tgfoid,
+                &old_trigger.tgattr,
+            ),
             ..PhysicalCatalogRows::default()
         };
         if old_class.relhastriggers != has_remaining {

@@ -2137,8 +2137,12 @@ impl Catalog {
         self.next_oid = self.next_oid.max(row.oid.saturating_add(1));
         self.triggers.push(row.clone());
         crate::include::catalog::sort_pg_trigger_rows(&mut self.triggers);
-        self.depends
-            .extend(trigger_depend_rows(row.oid, row.tgrelid, row.tgfoid));
+        self.depends.extend(trigger_depend_rows(
+            row.oid,
+            row.tgrelid,
+            row.tgfoid,
+            &row.tgattr,
+        ));
         sort_pg_depend_rows(&mut self.depends);
         if !entry.relhastriggers {
             let mut new_entry = entry.clone();

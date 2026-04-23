@@ -4,6 +4,7 @@ use crate::backend::rewrite::{ViewDmlEvent, load_view_return_query, load_view_re
 use crate::backend::utils::cache::system_view_registry::{
     SyntheticSystemViewKind, synthetic_system_view,
 };
+use crate::backend::utils::trigger::format_trigger_definition;
 use crate::include::nodes::parsenodes::{JoinTreeNode, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{attrno_index, is_system_attr};
 
@@ -40,23 +41,20 @@ struct ViewMetadataRow {
 
 #[derive(Debug, Clone)]
 struct InformationSchemaTriggerRow {
+    trigger_schema: String,
     trigger_name: String,
     event_manipulation: &'static str,
     event_object_schema: String,
     event_object_table: String,
     action_order: i32,
     action_condition: Option<String>,
+    action_statement: String,
     action_orientation: &'static str,
     action_timing: &'static str,
     action_reference_old_table: Option<String>,
     action_reference_new_table: Option<String>,
 }
 
-const TRIGGER_TYPE_ROW: i16 = 1 << 0;
-const TRIGGER_TYPE_BEFORE: i16 = 1 << 1;
-const TRIGGER_TYPE_INSERT: i16 = 1 << 2;
-const TRIGGER_TYPE_DELETE: i16 = 1 << 3;
-const TRIGGER_TYPE_UPDATE: i16 = 1 << 4;
 fn build_values_view(
     name: &str,
     output_columns: Vec<QueryColumn>,
@@ -159,18 +157,93 @@ fn information_schema_column_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>
 }
 
 fn information_schema_trigger_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value>> {
-    build_information_schema_trigger_rows(catalog)
-        .into_iter()
+    let Some(visible) = catalog.materialize_visible_catalog() else {
+        return Vec::new();
+    };
+
+    let mut seen_relation_oids = std::collections::BTreeSet::new();
+    let mut rows = Vec::new();
+    for (name, entry) in visible.relcache().entries() {
+        if !seen_relation_oids.insert(entry.relation_oid) {
+            continue;
+        }
+        let (schema_name, table_name) = split_qualified_relation_name(name);
+        if schema_name.eq_ignore_ascii_case("pg_catalog")
+            || schema_name.eq_ignore_ascii_case(INFO_SCHEMA_NAME)
+        {
+            continue;
+        }
+        for trigger in catalog.trigger_rows_for_relation(entry.relation_oid) {
+            if trigger.tgisinternal {
+                continue;
+            }
+            let Some(formatted) = format_trigger_definition(catalog, &trigger, false) else {
+                continue;
+            };
+            for event_manipulation in formatted.event_manipulations {
+                rows.push(InformationSchemaTriggerRow {
+                    trigger_schema: schema_name.clone(),
+                    trigger_name: trigger.tgname.clone(),
+                    event_manipulation,
+                    event_object_schema: schema_name.clone(),
+                    event_object_table: table_name.clone(),
+                    action_order: 0,
+                    action_condition: formatted.action_condition.clone(),
+                    action_statement: formatted.action_statement.clone(),
+                    action_orientation: formatted.action_orientation,
+                    action_timing: formatted.action_timing,
+                    action_reference_old_table: formatted.action_reference_old_table.clone(),
+                    action_reference_new_table: formatted.action_reference_new_table.clone(),
+                });
+            }
+        }
+    }
+
+    rows.sort_by(|left, right| {
+        left.trigger_schema
+            .cmp(&right.trigger_schema)
+            .then_with(|| left.event_object_table.cmp(&right.event_object_table))
+            .then_with(|| left.event_manipulation.cmp(right.event_manipulation))
+            .then_with(|| left.action_orientation.cmp(right.action_orientation))
+            .then_with(|| left.action_timing.cmp(right.action_timing))
+            .then_with(|| left.trigger_name.cmp(&right.trigger_name))
+    });
+
+    let mut last_partition: Option<(String, String, &'static str, &'static str, &'static str)> =
+        None;
+    let mut next_order = 0_i32;
+    for row in &mut rows {
+        let partition = (
+            row.event_object_schema.clone(),
+            row.event_object_table.clone(),
+            row.event_manipulation,
+            row.action_orientation,
+            row.action_timing,
+        );
+        if last_partition.as_ref() != Some(&partition) {
+            next_order = 1;
+            last_partition = Some(partition);
+        } else {
+            next_order += 1;
+        }
+        row.action_order = next_order;
+    }
+
+    rows.into_iter()
         .map(|row| {
             vec![
+                Value::Text(REGRESSION_DATABASE_NAME.into()),
+                Value::Text(row.trigger_schema.clone().into()),
                 Value::Text(row.trigger_name.into()),
                 Value::Text(row.event_manipulation.into()),
+                Value::Text(REGRESSION_DATABASE_NAME.into()),
                 Value::Text(row.event_object_schema.into()),
                 Value::Text(row.event_object_table.into()),
                 Value::Int32(row.action_order),
                 row.action_condition
                     .map(|value| Value::Text(value.into()))
                     .unwrap_or(Value::Null),
+                Value::Text(row.action_statement.into()),
                 Value::Text(row.action_orientation.into()),
                 Value::Text(row.action_timing.into()),
                 row.action_reference_old_table
@@ -179,103 +252,12 @@ fn information_schema_trigger_rows(catalog: &dyn CatalogLookup) -> Vec<Vec<Value
                 row.action_reference_new_table
                     .map(|value| Value::Text(value.into()))
                     .unwrap_or(Value::Null),
+                Value::Null,
+                Value::Null,
+                Value::Null,
             ]
         })
         .collect()
-}
-
-fn build_information_schema_trigger_rows(
-    catalog: &dyn CatalogLookup,
-) -> Vec<InformationSchemaTriggerRow> {
-    let Some(visible) = catalog.materialize_visible_catalog() else {
-        return Vec::new();
-    };
-
-    let mut rows = Vec::new();
-    let mut seen_relation_oids = std::collections::BTreeSet::new();
-    for (name, entry) in visible.relcache().entries() {
-        if !seen_relation_oids.insert(entry.relation_oid) {
-            continue;
-        }
-        let (event_object_schema, event_object_table) = split_qualified_relation_name(name);
-        if event_object_schema.eq_ignore_ascii_case("pg_catalog")
-            || event_object_schema.eq_ignore_ascii_case(INFO_SCHEMA_NAME)
-        {
-            continue;
-        }
-
-        for trigger in catalog.trigger_rows_for_relation(entry.relation_oid) {
-            if trigger.tgisinternal {
-                continue;
-            }
-            for (event_bits, event_name) in [
-                (TRIGGER_TYPE_INSERT, "INSERT"),
-                (TRIGGER_TYPE_DELETE, "DELETE"),
-                (TRIGGER_TYPE_UPDATE, "UPDATE"),
-            ] {
-                if trigger.tgtype & event_bits == 0 {
-                    continue;
-                }
-                rows.push(InformationSchemaTriggerRow {
-                    trigger_name: trigger.tgname.clone(),
-                    event_manipulation: event_name,
-                    event_object_schema: event_object_schema.clone(),
-                    event_object_table: event_object_table.clone(),
-                    action_order: 0,
-                    action_condition: trigger_action_condition(trigger.tgqual.as_deref()),
-                    action_orientation: if trigger.tgtype & TRIGGER_TYPE_ROW != 0 {
-                        "ROW"
-                    } else {
-                        "STATEMENT"
-                    },
-                    action_timing: if trigger.tgtype & TRIGGER_TYPE_BEFORE != 0 {
-                        "BEFORE"
-                    } else {
-                        "AFTER"
-                    },
-                    action_reference_old_table: trigger.tgoldtable.clone(),
-                    action_reference_new_table: trigger.tgnewtable.clone(),
-                });
-            }
-        }
-    }
-
-    rows.sort_by(|left, right| {
-        left.event_object_schema
-            .cmp(&right.event_object_schema)
-            .then_with(|| left.event_object_table.cmp(&right.event_object_table))
-            .then_with(|| left.event_manipulation.cmp(right.event_manipulation))
-            .then_with(|| left.action_orientation.cmp(right.action_orientation))
-            .then_with(|| left.action_timing.cmp(right.action_timing))
-            .then_with(|| left.trigger_name.cmp(&right.trigger_name))
-    });
-
-    let mut next_action_order = std::collections::BTreeMap::new();
-    for row in &mut rows {
-        let partition_key = (
-            row.event_object_schema.clone(),
-            row.event_object_table.clone(),
-            row.event_manipulation,
-            row.action_orientation,
-            row.action_timing,
-        );
-        let next = next_action_order.entry(partition_key).or_insert(0);
-        *next += 1;
-        row.action_order = *next;
-    }
-
-    rows
-}
-
-fn trigger_action_condition(sql: Option<&str>) -> Option<String> {
-    let sql = sql?.trim();
-    if sql.is_empty() {
-        return None;
-    }
-    if sql.eq_ignore_ascii_case("true") || sql.eq_ignore_ascii_case("false") {
-        return Some(sql.to_string());
-    }
-    Some(format!("({sql})"))
 }
 
 fn information_schema_view_metadata(catalog: &dyn CatalogLookup) -> Vec<ViewMetadataRow> {

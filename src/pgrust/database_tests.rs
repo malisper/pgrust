@@ -198,6 +198,7 @@ fn analyze_executor_context(
         session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         active_role_oid: None,
+        session_replication_role: Default::default(),
         statement_lock_scope_id: None,
         transaction_lock_scope_id: None,
         next_command_id: cid,
@@ -215,6 +216,7 @@ fn analyze_executor_context(
         cte_producers: HashMap::new(),
         recursive_worktables: HashMap::new(),
         deferred_foreign_keys: None,
+        trigger_depth: 0,
     }
 }
 
@@ -22210,6 +22212,464 @@ fn update_triggers_honor_update_of_when_and_statement_firing() {
             "stmt:BEFORE:STATEMENT".to_string(),
             "stmt:AFTER:STATEMENT".to_string(),
         ]
+    );
+}
+
+#[test]
+fn session_replication_role_replica_skips_origin_statement_triggers() {
+    let dir = temp_dir("session_replication_role_replica_triggers");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table trigtest (i int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function trigtest_notice() returns trigger language plpgsql as $$ begin raise notice 'stmt'; return null; end $$",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create trigger trigtest_stmt after insert on trigtest for each statement execute function trigtest_notice()",
+        )
+        .unwrap();
+
+    session
+        .execute(&db, "set session_replication_role = replica")
+        .unwrap();
+    clear_notices();
+    session
+        .execute(&db, "insert into trigtest default values")
+        .unwrap();
+
+    assert!(take_notice_messages().is_empty());
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select count(*) from trigtest"),
+        vec![vec![Value::Int64(1)]]
+    );
+}
+
+#[test]
+fn pg_get_triggerdef_defaults_to_unpretty_and_lowercase_old_new() {
+    let dir = temp_dir("pg_get_triggerdef_trigger_old_new");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function items_before() returns trigger language plpgsql as $$ begin return new; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger items_before before update of note on items for each row when (OLD.note IS DISTINCT FROM NEW.note) execute function items_before()",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_triggerdef(oid), pg_get_triggerdef(oid, true) from pg_trigger where tgname = 'items_before'",
+        ),
+        vec![vec![
+            Value::Text(
+                "CREATE TRIGGER items_before BEFORE UPDATE OF note ON public.items FOR EACH ROW WHEN ((old.note IS DISTINCT FROM new.note)) EXECUTE FUNCTION items_before()".into(),
+            ),
+            Value::Text(
+                "CREATE TRIGGER items_before BEFORE UPDATE OF note ON items FOR EACH ROW WHEN (old.note IS DISTINCT FROM new.note) EXECUTE FUNCTION items_before()".into(),
+            ),
+        ]]
+    );
+}
+
+#[test]
+fn trigger_functions_can_use_new_old_and_tg_argv_inside_sql() {
+    let dir = temp_dir("trigger_function_new_old_tg_argv_sql");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(1, "create table audit (id int4, payload text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function capture_trigger_state() returns trigger language plpgsql as $$
+declare
+    argstr text;
+begin
+    argstr := '[';
+    for i in 0 .. TG_nargs - 1 loop
+        if i > 0 then
+            argstr := argstr || ', ';
+        end if;
+        argstr := argstr || TG_argv[i];
+    end loop;
+    argstr := argstr || ']';
+
+    if TG_OP = 'INSERT' then
+        insert into audit values (NEW.id, argstr);
+    else
+        insert into audit values (NEW.id, OLD.note || '->' || NEW.note);
+    end if;
+
+    return NEW;
+end;
+$$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger capture_trigger_state before insert or update on items for each row execute function capture_trigger_state('left', 'right')",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into items values (1, 'a')").unwrap();
+    db.execute(1, "update items set note = 'b' where id = 1")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, payload from audit order by payload"),
+        vec![
+            vec![Value::Int32(1), Value::Text("[left, right]".into())],
+            vec![Value::Int32(1), Value::Text("a->b".into())],
+        ]
+    );
+}
+
+#[test]
+fn view_instead_of_triggers_fire_statement_triggers_and_return_rows() {
+    let dir = temp_dir("view_instead_of_triggers");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table main_table (a int4, b int4)")
+        .unwrap();
+    db.execute(1, "create view main_view as select a, b from main_table")
+        .unwrap();
+    db.execute(
+        1,
+        "create function view_trigger() returns trigger language plpgsql as $$
+begin
+    raise notice '% % % % (%)', TG_TABLE_NAME, TG_WHEN, TG_OP, TG_LEVEL, TG_ARGV[0];
+    if TG_LEVEL = 'ROW' then
+        if TG_OP = 'INSERT' then
+            insert into main_table values (NEW.a, NEW.b);
+            return NEW;
+        end if;
+        if TG_OP = 'UPDATE' then
+            update main_table set a = NEW.a, b = NEW.b where a = OLD.a and b = OLD.b;
+            if not found then
+                return null;
+            end if;
+            return NEW;
+        end if;
+        if TG_OP = 'DELETE' then
+            delete from main_table where a = OLD.a and b = OLD.b;
+            if not found then
+                return null;
+            end if;
+            return OLD;
+        end if;
+    end if;
+    return null;
+end;
+$$",
+    )
+    .unwrap();
+    for sql in [
+        "create trigger instead_of_insert_trig instead of insert on main_view for each row execute function view_trigger('instead_of_ins')",
+        "create trigger instead_of_update_trig instead of update on main_view for each row execute function view_trigger('instead_of_upd')",
+        "create trigger instead_of_delete_trig instead of delete on main_view for each row execute function view_trigger('instead_of_del')",
+        "create trigger before_ins_stmt_trig before insert on main_view for each statement execute function view_trigger('before_view_ins_stmt')",
+        "create trigger before_upd_stmt_trig before update on main_view for each statement execute function view_trigger('before_view_upd_stmt')",
+        "create trigger before_del_stmt_trig before delete on main_view for each statement execute function view_trigger('before_view_del_stmt')",
+        "create trigger after_ins_stmt_trig after insert on main_view for each statement execute function view_trigger('after_view_ins_stmt')",
+        "create trigger after_upd_stmt_trig after update on main_view for each statement execute function view_trigger('after_view_upd_stmt')",
+        "create trigger after_del_stmt_trig after delete on main_view for each statement execute function view_trigger('after_view_del_stmt')",
+    ] {
+        db.execute(1, sql).unwrap();
+    }
+
+    clear_notices();
+    assert_eq!(
+        query_rows(&db, 1, "insert into main_view values (20, 30) returning *"),
+        vec![vec![Value::Int32(20), Value::Int32(30)]]
+    );
+    assert_eq!(
+        take_notice_messages(),
+        vec![
+            "main_view BEFORE INSERT STATEMENT (before_view_ins_stmt)".to_string(),
+            "main_view INSTEAD OF INSERT ROW (instead_of_ins)".to_string(),
+            "main_view AFTER INSERT STATEMENT (after_view_ins_stmt)".to_string(),
+        ]
+    );
+
+    clear_notices();
+    assert_eq!(
+        query_rows(&db, 1, "update main_view set b = 31 where a = 20 returning *"),
+        vec![vec![Value::Int32(20), Value::Int32(31)]]
+    );
+    assert_eq!(
+        take_notice_messages(),
+        vec![
+            "main_view BEFORE UPDATE STATEMENT (before_view_upd_stmt)".to_string(),
+            "main_view INSTEAD OF UPDATE ROW (instead_of_upd)".to_string(),
+            "main_view AFTER UPDATE STATEMENT (after_view_upd_stmt)".to_string(),
+        ]
+    );
+
+    clear_notices();
+    assert_eq!(
+        query_rows(&db, 1, "delete from main_view where a = 20 returning *"),
+        vec![vec![Value::Int32(20), Value::Int32(31)]]
+    );
+    assert_eq!(
+        take_notice_messages(),
+        vec![
+            "main_view BEFORE DELETE STATEMENT (before_view_del_stmt)".to_string(),
+            "main_view INSTEAD OF DELETE ROW (instead_of_del)".to_string(),
+            "main_view AFTER DELETE STATEMENT (after_view_del_stmt)".to_string(),
+        ]
+    );
+    assert!(query_rows(&db, 1, "select * from main_table").is_empty());
+}
+
+#[test]
+fn rules_can_route_into_trigger_backed_views() {
+    let dir = temp_dir("rule_to_trigger_backed_view");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table city_table (city_id int4, city_name text)")
+        .unwrap();
+    db.execute(1, "create view city_view as select city_id, city_name from city_table")
+        .unwrap();
+    db.execute(
+        1,
+        "create function city_insert() returns trigger language plpgsql as $$
+begin
+    insert into city_table values (NEW.city_id, NEW.city_name);
+    return NEW;
+end;
+$$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger city_insert_trig instead of insert on city_view for each row execute function city_insert()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view european_city_view as select * from city_view where city_id > 0",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function no_op_trig_fn() returns trigger language plpgsql as $$ begin return null; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger no_op_trig instead of insert on european_city_view for each row execute function no_op_trig_fn()",
+    )
+    .unwrap();
+
+    assert!(matches!(
+        db.execute(1, "insert into european_city_view values (1, 'noop')"),
+        Ok(StatementResult::AffectedRows(0))
+    ));
+    assert!(query_rows(&db, 1, "select * from city_table").is_empty());
+
+    db.execute(
+        1,
+        "create rule european_city_insert_rule as on insert to european_city_view do instead insert into city_view values (NEW.city_id, NEW.city_name) returning *",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "insert into european_city_view values (2, 'Cambridge') returning *",
+        ),
+        vec![vec![Value::Int32(2), Value::Text("Cambridge".into())]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select city_id, city_name from city_table"),
+        vec![vec![Value::Int32(2), Value::Text("Cambridge".into())]]
+    );
+}
+
+#[test]
+fn trigger_select_into_can_assign_new_record_fields() {
+    let dir = temp_dir("trigger_select_into_new_field");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create table country_table (country_name text, continent text)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into country_table values ('USA', 'North America')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table city_table (city_name text, country_name text, continent text)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view city_view as select city_name, country_name, continent from city_table",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function city_insert() returns trigger language plpgsql as $$
+begin
+    select continent into NEW.continent
+        from country_table
+        where country_name = NEW.country_name;
+    insert into city_table values (NEW.city_name, NEW.country_name, NEW.continent);
+    return NEW;
+end;
+$$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger city_insert_trig instead of insert on city_view for each row execute function city_insert()",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "insert into city_view values ('Washington DC', 'USA', null) returning *",
+        ),
+        vec![vec![
+            Value::Text("Washington DC".into()),
+            Value::Text("USA".into()),
+            Value::Text("North America".into()),
+        ]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select city_name, country_name, continent from city_table"),
+        vec![vec![
+            Value::Text("Washington DC".into()),
+            Value::Text("USA".into()),
+            Value::Text("North America".into()),
+        ]]
+    );
+}
+
+#[test]
+fn rule_actions_can_return_new_star_from_outer_scope() {
+    let dir = temp_dir("rule_action_returning_new_star");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table city_table (city_id int4, city_name text)")
+        .unwrap();
+    db.execute(1, "insert into city_table values (1, 'Old Town')")
+        .unwrap();
+    db.execute(1, "create view city_view as select city_id, city_name from city_table")
+        .unwrap();
+    db.execute(
+        1,
+        "create function city_update() returns trigger language plpgsql as $$
+begin
+    update city_table set city_name = NEW.city_name where city_id = OLD.city_id;
+    if not found then
+        return null;
+    end if;
+    return NEW;
+end;
+$$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger city_update_trig instead of update on city_view for each row execute function city_update()",
+    )
+    .unwrap();
+    db.execute(1, "create view european_city_view as select * from city_view")
+        .unwrap();
+    db.execute(
+        1,
+        "create rule european_city_update_rule as on update to european_city_view do instead update city_view set city_name = NEW.city_name where city_id = OLD.city_id returning NEW.*",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "update european_city_view set city_name = 'New Town' where city_id = 1 returning *",
+        ),
+        vec![vec![
+            Value::Int32(1),
+            Value::Text("New Town".into()),
+        ]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select city_id, city_name from city_table"),
+        vec![vec![
+            Value::Int32(1),
+            Value::Text("New Town".into()),
+        ]]
+    );
+}
+
+#[test]
+fn trigger_insert_returning_into_can_assign_new_record_fields() {
+    let dir = temp_dir("trigger_insert_returning_into_new_field");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table city_table (city_id int4, city_name text)")
+        .unwrap();
+    db.execute(1, "create view city_view as select city_id, city_name from city_table")
+        .unwrap();
+    db.execute(
+        1,
+        "create function city_insert() returns trigger language plpgsql as $$
+begin
+    insert into city_table values (7, NEW.city_name)
+        returning city_id into NEW.city_id;
+    return NEW;
+end;
+$$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger city_insert_trig instead of insert on city_view for each row execute function city_insert()",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "insert into city_view values (null, 'Tokyo') returning *",
+        ),
+        vec![vec![
+            Value::Int32(7),
+            Value::Text("Tokyo".into()),
+        ]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select city_id, city_name from city_table"),
+        vec![vec![
+            Value::Int32(7),
+            Value::Text("Tokyo".into()),
+        ]]
     );
 }
 

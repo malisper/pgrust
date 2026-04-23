@@ -191,7 +191,10 @@ fn execute_statement_with_source(
             expected: "PUBLICATION handled by database/session layer",
             actual: "PUBLICATION".into(),
         })),
-        Statement::CreateTrigger(_) | Statement::DropTrigger(_) => {
+        Statement::CreateTrigger(_)
+        | Statement::DropTrigger(_)
+        | Statement::AlterTableTriggerState(_)
+        | Statement::AlterTriggerRename(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "TRIGGER handled by database/session layer",
                 actual: "TRIGGER".into(),

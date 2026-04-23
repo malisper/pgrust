@@ -7,6 +7,7 @@ use crate::ClientId;
 use crate::backend::access::transam::xact::{CommandId, TransactionId};
 use crate::backend::catalog::CatalogMutationEffect;
 use crate::backend::catalog::store::CatalogWriteContext;
+use crate::backend::commands::trigger::{RuntimeTriggers, relation_has_instead_row_trigger};
 use crate::backend::commands::tablecmds::{
     apply_base_delete_row, apply_base_update_row, execute_delete_with_waiter, execute_insert,
     execute_insert_values, execute_update_with_waiter, finalize_bound_delete_stmt,
@@ -28,6 +29,7 @@ use crate::backend::rewrite::{ViewDmlEvent, ViewDmlRewriteError};
 use crate::backend::storage::lmgr::TableLockMode;
 use crate::include::catalog::PgRewriteRow;
 use crate::include::nodes::primnodes::{QueryColumn, RelationDesc, TargetEntry};
+use crate::pl::plpgsql::TriggerOperation;
 use crate::pgrust::database::TransactionWaiter;
 use crate::pgrust::database::ddl::map_catalog_error;
 use crate::pgrust::database::ddl::{ensure_relation_owner, lookup_rule_relation_for_ddl};
@@ -407,6 +409,12 @@ pub(crate) fn prepare_bound_insert_for_execution(
             extra_lock_requests: Vec::new(),
         });
     }
+    if relation_has_instead_row_trigger(catalog, stmt.relation_oid, TriggerOperation::Insert) {
+        return Ok(PreparedBoundStatement {
+            extra_lock_requests: vec![(stmt.rel, TableLockMode::RowExclusive)],
+            stmt,
+        });
+    }
 
     let view_name = stmt.relation_name.clone();
     let view_rel = stmt.rel;
@@ -439,6 +447,13 @@ pub(crate) fn prepare_bound_update_for_execution(
             extra_lock_requests: Vec::new(),
         });
     }
+    if relation_has_instead_row_trigger(catalog, view_target.relation_oid, TriggerOperation::Update)
+    {
+        return Ok(PreparedBoundStatement {
+            extra_lock_requests: vec![(view_target.rel, TableLockMode::RowExclusive)],
+            stmt,
+        });
+    }
 
     let view_name = view_target.relation_name.clone();
     let view_rel = view_target.rel;
@@ -466,6 +481,13 @@ pub(crate) fn prepare_bound_delete_for_execution(
             extra_lock_requests: Vec::new(),
         });
     }
+    if relation_has_instead_row_trigger(catalog, view_target.relation_oid, TriggerOperation::Delete)
+    {
+        return Ok(PreparedBoundStatement {
+            extra_lock_requests: vec![(view_target.rel, TableLockMode::RowExclusive)],
+            stmt,
+        });
+    }
 
     let view_name = view_target.relation_name.clone();
     let view_rel = view_target.rel;
@@ -484,15 +506,15 @@ pub(crate) fn execute_bound_insert_with_rules(
     xid: TransactionId,
     cid: CommandId,
 ) -> Result<StatementResult, ExecError> {
-    if matches!(stmt.relkind, 'r' | 'p')
-        && catalog
-            .rewrite_rows_for_relation(stmt.relation_oid)
-            .into_iter()
-            .all(|row| {
-                row.ev_type != rule_event_code(RuleEvent::Insert) || row.rulename == "_RETURN"
-            })
-    {
+    let has_user_rules =
+        relation_has_user_rules_for_event(stmt.relation_oid, RuleEvent::Insert, catalog);
+    if matches!(stmt.relkind, 'r' | 'p') && !has_user_rules {
         return execute_insert(stmt, catalog, ctx, xid, cid);
+    }
+    if stmt.relkind == 'v' && !has_user_rules
+        && relation_has_instead_row_trigger(catalog, stmt.relation_oid, TriggerOperation::Insert)
+    {
+        return execute_view_insert_with_triggers(stmt, catalog, ctx);
     }
 
     let stmt = finalize_bound_insert_stmt(stmt, catalog);
@@ -624,6 +646,21 @@ pub(crate) fn execute_bound_update_with_rules(
         let mut affected_rows = 0usize;
         let mut returned_rows = Vec::new();
         for target in &stmt.targets {
+            let view_has_user_rules =
+                relation_has_user_rules_for_event(target.relation_oid, RuleEvent::Update, catalog);
+            if target.relkind == 'v' && !view_has_user_rules
+                && relation_has_instead_row_trigger(
+                    catalog,
+                    target.relation_oid,
+                    TriggerOperation::Update,
+                )
+            {
+                let (target_affected_rows, mut target_returned_rows) =
+                    execute_view_update_with_triggers(target, &stmt.returning, catalog, ctx)?;
+                affected_rows += target_affected_rows;
+                returned_rows.append(&mut target_returned_rows);
+                continue;
+            }
             let rules = load_prepared_rules(
                 target.relation_oid,
                 RuleEvent::Update,
@@ -631,6 +668,12 @@ pub(crate) fn execute_bound_update_with_rules(
                 catalog,
             )?;
             if target.relkind == 'v' {
+                if !view_has_user_rules {
+                    return Err(missing_view_instead_trigger_error(
+                        &target.relation_name,
+                        ViewDmlEvent::Update,
+                    ));
+                }
                 for (old_values, new_values) in
                     materialize_view_update_events(target, catalog, ctx)?
                 {
@@ -781,6 +824,21 @@ pub(crate) fn execute_bound_delete_with_rules(
         let mut affected_rows = 0usize;
         let mut returned_rows = Vec::new();
         for target in &stmt.targets {
+            let view_has_user_rules =
+                relation_has_user_rules_for_event(target.relation_oid, RuleEvent::Delete, catalog);
+            if target.relkind == 'v' && !view_has_user_rules
+                && relation_has_instead_row_trigger(
+                    catalog,
+                    target.relation_oid,
+                    TriggerOperation::Delete,
+                )
+            {
+                let (target_affected_rows, mut target_returned_rows) =
+                    execute_view_delete_with_triggers(target, &stmt.returning, catalog, ctx)?;
+                affected_rows += target_affected_rows;
+                returned_rows.append(&mut target_returned_rows);
+                continue;
+            }
             let rules = load_prepared_rules(
                 target.relation_oid,
                 RuleEvent::Delete,
@@ -788,6 +846,12 @@ pub(crate) fn execute_bound_delete_with_rules(
                 catalog,
             )?;
             if target.relkind == 'v' {
+                if !view_has_user_rules {
+                    return Err(missing_view_instead_trigger_error(
+                        &target.relation_name,
+                        ViewDmlEvent::Delete,
+                    ));
+                }
                 for old_values in materialize_view_delete_events(target, catalog, ctx)? {
                     let outcome = execute_matching_rules(
                         &rules,
@@ -938,6 +1002,140 @@ fn execute_matching_rules(
         }
     }
     Ok(outcome)
+}
+
+fn execute_view_insert_with_triggers(
+    stmt: crate::backend::parser::BoundInsertStatement,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<StatementResult, ExecError> {
+    let stmt = finalize_bound_insert_stmt(stmt, catalog);
+    let saved_subplans = std::mem::replace(&mut ctx.subplans, stmt.subplans.clone());
+    let result = (|| {
+        let triggers = load_view_runtime_triggers(
+            &stmt.relation_name,
+            stmt.relation_oid,
+            &stmt.desc,
+            TriggerOperation::Insert,
+            &[],
+            ctx,
+        )?;
+        if !triggers.has_instead_row_triggers() {
+            return Err(missing_view_instead_trigger_error(
+                &stmt.relation_name,
+                ViewDmlEvent::Insert,
+            ));
+        }
+        triggers.before_statement(ctx)?;
+        let rows = materialize_insert_rows(&stmt, catalog, ctx)?;
+        let mut affected_rows = 0usize;
+        let mut returned_rows = Vec::new();
+        for row in rows {
+            let Some(returned_row) = triggers.instead_row_insert(row, ctx)? else {
+                continue;
+            };
+            if !stmt.returning.is_empty() {
+                returned_rows.push(project_statement_returning_row(
+                    &stmt.returning,
+                    &returned_row,
+                    ctx,
+                )?);
+            }
+            affected_rows += 1;
+        }
+        triggers.after_statement(ctx)?;
+        if stmt.returning.is_empty() {
+            Ok(StatementResult::AffectedRows(affected_rows))
+        } else {
+            Ok(build_statement_returning_result(
+                &stmt.returning,
+                returned_rows,
+            ))
+        }
+    })();
+    ctx.subplans = saved_subplans;
+    result
+}
+
+fn execute_view_update_with_triggers(
+    target: &crate::backend::parser::BoundUpdateTarget,
+    returning: &[TargetEntry],
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<(usize, Vec<Vec<Value>>), ExecError> {
+    let modified_attnums = modified_attnums_for_assignments(&target.assignments);
+    let triggers = load_view_runtime_triggers(
+        &target.relation_name,
+        target.relation_oid,
+        &target.desc,
+        TriggerOperation::Update,
+        &modified_attnums,
+        ctx,
+    )?;
+    if !triggers.has_instead_row_triggers() {
+        return Err(missing_view_instead_trigger_error(
+            &target.relation_name,
+            ViewDmlEvent::Update,
+        ));
+    }
+    triggers.before_statement(ctx)?;
+    let mut affected_rows = 0usize;
+    let mut returned_rows = Vec::new();
+    for (old_values, new_values) in materialize_view_update_events(target, catalog, ctx)? {
+        let Some(returned_row) = triggers.instead_row_update(&old_values, new_values, ctx)? else {
+            continue;
+        };
+        if !returning.is_empty() {
+            returned_rows.push(project_statement_returning_row(
+                returning,
+                &returned_row,
+                ctx,
+            )?);
+        }
+        affected_rows += 1;
+    }
+    triggers.after_statement(ctx)?;
+    Ok((affected_rows, returned_rows))
+}
+
+fn execute_view_delete_with_triggers(
+    target: &crate::backend::parser::BoundDeleteTarget,
+    returning: &[TargetEntry],
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<(usize, Vec<Vec<Value>>), ExecError> {
+    let triggers = load_view_runtime_triggers(
+        &target.relation_name,
+        target.relation_oid,
+        &target.desc,
+        TriggerOperation::Delete,
+        &[],
+        ctx,
+    )?;
+    if !triggers.has_instead_row_triggers() {
+        return Err(missing_view_instead_trigger_error(
+            &target.relation_name,
+            ViewDmlEvent::Delete,
+        ));
+    }
+    triggers.before_statement(ctx)?;
+    let mut affected_rows = 0usize;
+    let mut returned_rows = Vec::new();
+    for old_values in materialize_view_delete_events(target, catalog, ctx)? {
+        let Some(returned_row) = triggers.instead_row_delete(old_values, ctx)? else {
+            continue;
+        };
+        if !returning.is_empty() {
+            returned_rows.push(project_statement_returning_row(
+                returning,
+                &returned_row,
+                ctx,
+            )?);
+        }
+        affected_rows += 1;
+    }
+    triggers.after_statement(ctx)?;
+    Ok((affected_rows, returned_rows))
 }
 
 fn rule_action_has_returning(action: &crate::backend::parser::BoundRuleAction) -> bool {
@@ -1250,6 +1448,40 @@ fn relation_has_user_rules_for_event(
         .any(|row| row.rulename != "_RETURN" && row.ev_type == rule_event_code(event))
 }
 
+fn load_view_runtime_triggers(
+    relation_name: &str,
+    relation_oid: u32,
+    relation_desc: &RelationDesc,
+    event: TriggerOperation,
+    modified_attnums: &[i16],
+    ctx: &mut ExecutorContext,
+) -> Result<RuntimeTriggers, ExecError> {
+    let visible_catalog = ctx.catalog.as_ref().ok_or(ExecError::DetailedError {
+        message: "view trigger execution requires executor catalog context".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    })?;
+    RuntimeTriggers::load(
+        visible_catalog,
+        relation_oid,
+        relation_name,
+        relation_desc,
+        event,
+        modified_attnums,
+        ctx.session_replication_role,
+    )
+}
+
+fn modified_attnums_for_assignments(
+    assignments: &[crate::backend::parser::BoundAssignment],
+) -> Vec<i16> {
+    assignments
+        .iter()
+        .map(|assignment| (assignment.column_index + 1) as i16)
+        .collect()
+}
+
 fn auto_view_prepare_error(
     relation_name: &str,
     event: ViewDmlEvent,
@@ -1290,6 +1522,25 @@ fn auto_view_prepare_error(
             )),
             sqlstate: "55000",
         },
+    }
+}
+
+fn missing_view_instead_trigger_error(relation_name: &str, event: ViewDmlEvent) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("cannot {} view \"{}\"", event_verb(event), relation_name),
+        detail: Some(format!(
+            "View \"{}\" needs an enabled INSTEAD OF {} trigger or an unconditional ON {} DO INSTEAD rule.",
+            relation_name,
+            event_name(event),
+            event_name(event),
+        )),
+        hint: Some(format!(
+            "To enable {} the view, provide an INSTEAD OF {} trigger or an unconditional ON {} DO INSTEAD rule.",
+            event_gerund(event),
+            event_name(event),
+            event_name(event),
+        )),
+        sqlstate: "55000",
     }
 }
 

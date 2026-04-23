@@ -576,8 +576,11 @@ fn exec_do_stmt(stmt: &CompiledStmt, values: &mut [Value]) -> Result<(), ExecErr
         | CompiledStmt::ReturnQuery { .. }
         | CompiledStmt::Perform { .. }
         | CompiledStmt::SelectInto { .. }
+        | CompiledStmt::ExecInsertInto { .. }
         | CompiledStmt::ExecInsert { .. }
+        | CompiledStmt::ExecUpdateInto { .. }
         | CompiledStmt::ExecUpdate { .. }
+        | CompiledStmt::ExecDeleteInto { .. }
         | CompiledStmt::ExecDelete { .. } => {
             Err(ExecError::Parse(ParseError::FeatureNotSupported(
                 "statement is only supported inside CREATE FUNCTION".into(),
@@ -756,12 +759,24 @@ fn exec_function_stmt(
             exec_function_select_into(plan, targets, compiled, state, ctx)?;
             Ok(FunctionControl::Continue)
         }
+        CompiledStmt::ExecInsertInto { stmt, targets } => {
+            exec_function_insert_into(stmt, targets, compiled, state, ctx)?;
+            Ok(FunctionControl::Continue)
+        }
         CompiledStmt::ExecInsert { stmt } => {
             exec_function_insert(stmt, compiled, state, ctx)?;
             Ok(FunctionControl::Continue)
         }
+        CompiledStmt::ExecUpdateInto { stmt, targets } => {
+            exec_function_update_into(stmt, targets, compiled, state, ctx)?;
+            Ok(FunctionControl::Continue)
+        }
         CompiledStmt::ExecUpdate { stmt } => {
             exec_function_update(stmt, compiled, state, ctx)?;
+            Ok(FunctionControl::Continue)
+        }
+        CompiledStmt::ExecDeleteInto { stmt, targets } => {
+            exec_function_delete_into(stmt, targets, compiled, state, ctx)?;
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::ExecDelete { stmt } => {
@@ -908,13 +923,56 @@ fn exec_function_select_into(
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     let result = execute_function_query_result(plan, compiled, state, ctx)?;
-    if let Some(row) = result.rows.first() {
-        assign_query_row_to_targets(row, &result.columns, targets, state, ctx, false)?;
-        state.values[compiled.found_slot] = Value::Bool(true);
-    } else {
-        assign_null_to_targets(targets, state);
+    assign_query_rows_into_targets(&result.rows, &result.columns, targets, compiled, state)
+}
+
+fn assign_query_rows_into_targets(
+    rows: &[Vec<Value>],
+    columns: &[QueryColumn],
+    targets: &[CompiledSelectIntoTarget],
+    compiled: &CompiledFunction,
+    state: &mut FunctionState,
+) -> Result<(), ExecError> {
+    let Some(row) = rows.first() else {
+        for target in targets {
+            state.values[target.slot] = Value::Null;
+        }
         state.values[compiled.found_slot] = Value::Bool(false);
+        return Ok(());
+    };
+
+    match targets {
+        [CompiledSelectIntoTarget { slot, ty }]
+            if matches!(ty.kind, SqlTypeKind::Record | SqlTypeKind::Composite) =>
+        {
+            state.values[*slot] = Value::Record(RecordValue::from_descriptor(
+                anonymous_record_descriptor_for_columns(columns),
+                row.clone(),
+            ));
+        }
+        [CompiledSelectIntoTarget { slot, ty }] => {
+            let value = row.first().cloned().unwrap_or(Value::Null);
+            state.values[*slot] = cast_value(value, *ty)?;
+        }
+        _ => {
+            if row.len() != targets.len() {
+                return Err(function_runtime_error(
+                    "query returned an unexpected row shape",
+                    Some(format!(
+                        "expected {} columns, got {}",
+                        targets.len(),
+                        row.len()
+                    )),
+                    "42804",
+                ));
+            }
+            for (target, value) in targets.iter().zip(row.iter()) {
+                state.values[target.slot] = cast_value(value.clone(), target.ty)?;
+            }
+        }
     }
+
+    state.values[compiled.found_slot] = Value::Bool(true);
     Ok(())
 }
 
@@ -979,6 +1037,34 @@ fn exec_function_insert(
     Ok(())
 }
 
+fn exec_function_insert_into(
+    stmt: &crate::backend::parser::BoundInsertStatement,
+    targets: &[CompiledSelectIntoTarget],
+    compiled: &CompiledFunction,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let catalog = ctx.catalog.clone().ok_or_else(|| {
+        function_runtime_error(
+            "user-defined functions require executor catalog context",
+            None,
+            "0A000",
+        )
+    })?;
+    ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
+    let xid = ctx.ensure_write_xid()?;
+    let result = execute_insert(stmt.clone(), &catalog, ctx, xid, ctx.next_command_id);
+    ctx.expr_bindings.outer_tuple = None;
+    let StatementResult::Query { columns, rows, .. } = result? else {
+        return Err(function_runtime_error(
+            "INSERT RETURNING INTO did not produce rows",
+            None,
+            "XX000",
+        ));
+    };
+    assign_query_rows_into_targets(&rows, &columns, targets, compiled, state)
+}
+
 fn exec_function_update(
     stmt: &crate::backend::parser::BoundUpdateStatement,
     compiled: &CompiledFunction,
@@ -1001,6 +1087,34 @@ fn exec_function_update(
     Ok(())
 }
 
+fn exec_function_update_into(
+    stmt: &crate::backend::parser::BoundUpdateStatement,
+    targets: &[CompiledSelectIntoTarget],
+    compiled: &CompiledFunction,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let catalog = ctx.catalog.clone().ok_or_else(|| {
+        function_runtime_error(
+            "user-defined functions require executor catalog context",
+            None,
+            "0A000",
+        )
+    })?;
+    ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
+    let xid = ctx.ensure_write_xid()?;
+    let result = execute_update(stmt.clone(), &catalog, ctx, xid, ctx.next_command_id);
+    ctx.expr_bindings.outer_tuple = None;
+    let StatementResult::Query { columns, rows, .. } = result? else {
+        return Err(function_runtime_error(
+            "UPDATE RETURNING INTO did not produce rows",
+            None,
+            "XX000",
+        ));
+    };
+    assign_query_rows_into_targets(&rows, &columns, targets, compiled, state)
+}
+
 fn exec_function_delete(
     stmt: &crate::backend::parser::BoundDeleteStatement,
     compiled: &CompiledFunction,
@@ -1021,6 +1135,34 @@ fn exec_function_delete(
     let result = result?;
     state.values[compiled.found_slot] = Value::Bool(statement_result_changed_rows(&result));
     Ok(())
+}
+
+fn exec_function_delete_into(
+    stmt: &crate::backend::parser::BoundDeleteStatement,
+    targets: &[CompiledSelectIntoTarget],
+    compiled: &CompiledFunction,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let catalog = ctx.catalog.clone().ok_or_else(|| {
+        function_runtime_error(
+            "user-defined functions require executor catalog context",
+            None,
+            "0A000",
+        )
+    })?;
+    ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
+    let xid = ctx.ensure_write_xid()?;
+    let result = execute_delete(stmt.clone(), &catalog, ctx, xid);
+    ctx.expr_bindings.outer_tuple = None;
+    let StatementResult::Query { columns, rows, .. } = result? else {
+        return Err(function_runtime_error(
+            "DELETE RETURNING INTO did not produce rows",
+            None,
+            "XX000",
+        ));
+    };
+    assign_query_rows_into_targets(&rows, &columns, targets, compiled, state)
 }
 
 fn execute_function_query_result(
@@ -1870,12 +2012,7 @@ fn render_raise_value(value: &Value) -> String {
             format!("{{{}}}", elems.join(","))
         }
         Value::PgArray(array) => crate::backend::executor::value_io::format_array_value_text(array),
-        Value::Record(record) => crate::backend::executor::jsonb::jsonb_from_value(
-            &Value::Record(record.clone()),
-            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
-        )
-        .map(|value| value.to_serde().to_string())
-        .unwrap_or_default(),
+        Value::Record(record) => crate::backend::executor::value_io::format_record_text(record),
     }
 }
 
@@ -1912,7 +2049,7 @@ fn seed_trigger_state(
         match call.timing {
             TriggerTiming::Before => "BEFORE",
             TriggerTiming::After => "AFTER",
-            TriggerTiming::InsteadOf => "INSTEAD OF",
+            TriggerTiming::Instead => "INSTEAD OF",
         }
         .into(),
     );
