@@ -1412,6 +1412,7 @@ fn numeric_div_display_scale(lhs: &NumericValue, rhs: &NumericValue) -> u32 {
 pub(crate) struct AggGroup {
     pub(crate) key_values: Vec<Value>,
     pub(crate) accum_states: Vec<AccumState>,
+    pub(crate) distinct_inputs: Vec<Option<HashSet<Vec<Value>>>>,
     pub(crate) ordered_inputs: Vec<Vec<OrderedAggInput>>,
 }
 
