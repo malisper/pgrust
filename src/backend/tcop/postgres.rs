@@ -829,6 +829,7 @@ struct ConnectionState {
 struct CopyInState {
     table_name: String,
     columns: Option<Vec<String>>,
+    null_marker: String,
     pending: Vec<u8>,
 }
 
@@ -1204,10 +1205,11 @@ fn execute_query_statement(
         return Ok(QueryStatementFlow::Continue);
     }
 
-    if let Some((table_name, columns)) = parse_copy_from_stdin(&sql) {
+    if let Some((table_name, columns, null_marker)) = parse_copy_from_stdin(&sql) {
         state.copy_in = Some(CopyInState {
             table_name,
             columns,
+            null_marker,
             pending: Vec::new(),
         });
         send_copy_in_response(stream)?;
@@ -3200,11 +3202,13 @@ fn handle_copy_done(
     } else {
         format!("copy {} from stdin", copy.table_name)
     };
-    if let Err(e) =
-        state
-            .session
-            .copy_from_rows_into(db, &copy.table_name, copy.columns.as_deref(), &rows)
-    {
+    if let Err(e) = state.session.copy_from_rows_into_with_null_marker(
+        db,
+        &copy.table_name,
+        copy.columns.as_deref(),
+        &rows,
+        &copy.null_marker,
+    ) {
         send_exec_error(stream, &copy_sql, &e)?;
         send_ready_with_pending_messages(stream, db, &state.session)?;
         return Ok(());
@@ -3236,19 +3240,21 @@ fn handle_copy_fail(
     Ok(())
 }
 
-fn parse_copy_from_stdin(sql: &str) -> Option<(String, Option<Vec<String>>)> {
+fn parse_copy_from_stdin(sql: &str) -> Option<(String, Option<Vec<String>>, String)> {
     let lower = sql.to_ascii_lowercase();
     let prefix = "copy ";
-    let suffix = " from stdin";
-    if !lower.starts_with(prefix) || !lower.contains(suffix) {
+    let source = " from stdin";
+    if !lower.starts_with(prefix) || !lower.contains(source) {
         return None;
     }
-    let end = lower.find(suffix)?;
+    let end = lower.find(source)?;
     let target = sql[prefix.len()..end].trim();
     if target.is_empty() {
         return None;
     }
-    if let Some(open_paren) = target.find('(') {
+    let options = sql[end + source.len()..].trim();
+    let null_marker = parse_copy_null_marker(options)?;
+    let (table, columns) = if let Some(open_paren) = target.find('(') {
         let close_paren = target.rfind(')')?;
         if close_paren < open_paren {
             return None;
@@ -3263,10 +3269,48 @@ fn parse_copy_from_stdin(sql: &str) -> Option<(String, Option<Vec<String>>)> {
         if table.is_empty() || columns.is_empty() {
             return None;
         }
-        Some((table.to_string(), Some(columns)))
+        (table.to_string(), Some(columns))
     } else {
-        Some((target.to_string(), None))
+        (target.to_string(), None)
+    };
+    Some((table, columns, null_marker))
+}
+
+fn parse_copy_null_marker(options: &str) -> Option<String> {
+    let options = options.trim();
+    if options.is_empty() {
+        return Some("\\N".into());
     }
+    let lower = options.to_ascii_lowercase();
+    let rest = lower
+        .strip_prefix("null")
+        .and_then(|_| options.get(4..))?
+        .trim_start();
+    parse_single_quoted_copy_option(rest)
+}
+
+fn parse_single_quoted_copy_option(input: &str) -> Option<String> {
+    let mut chars = input.char_indices();
+    if chars.next()?.1 != '\'' {
+        return None;
+    }
+    let mut out = String::new();
+    let mut end = None;
+    let mut iter = input[1..].char_indices().peekable();
+    while let Some((idx, ch)) = iter.next() {
+        if ch == '\'' {
+            if matches!(iter.peek(), Some((_, '\''))) {
+                iter.next();
+                out.push('\'');
+                continue;
+            }
+            end = Some(idx + 2);
+            break;
+        }
+        out.push(ch);
+    }
+    let end = end?;
+    input[end..].trim().is_empty().then_some(out)
 }
 
 fn handle_parse(

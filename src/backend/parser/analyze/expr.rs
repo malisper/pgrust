@@ -653,6 +653,7 @@ fn bind_window_agg_call(
         });
     }
     let arg_values = args.iter().map(|arg| arg.value.clone()).collect::<Vec<_>>();
+    validate_distinct_aggregate_order_by(&arg_values, order_by, distinct)?;
     validate_aggregate_arity(func, &arg_values)?;
     let arg_types = arg_values
         .iter()

@@ -1,7 +1,7 @@
 use super::ExecError;
 use crate::include::nodes::datum::Value;
 
-pub(super) fn parse_pg_bool_text(raw: &str) -> Result<bool, ExecError> {
+pub(crate) fn parse_pg_bool_text(raw: &str) -> Result<bool, ExecError> {
     let trimmed = raw.trim_matches(|ch: char| ch.is_ascii_whitespace());
     if trimmed.is_empty() {
         return Err(ExecError::InvalidBooleanInput {
@@ -69,6 +69,32 @@ pub(super) fn eval_boolne(values: &[Value]) -> Result<Value, ExecError> {
         [Value::Bool(left), Value::Bool(right)] => Ok(Value::Bool(left != right)),
         [left, right] => Err(ExecError::TypeMismatch {
             op: "boolne",
+            left: left.clone(),
+            right: right.clone(),
+        }),
+        _ => unreachable!(),
+    }
+}
+
+pub(super) fn eval_booland_statefunc(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Bool(left), Value::Bool(right)] => Ok(Value::Bool(*left && *right)),
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [left, right] => Err(ExecError::TypeMismatch {
+            op: "booland_statefunc",
+            left: left.clone(),
+            right: right.clone(),
+        }),
+        _ => unreachable!(),
+    }
+}
+
+pub(super) fn eval_boolor_statefunc(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Bool(left), Value::Bool(right)] => Ok(Value::Bool(*left || *right)),
+        [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [left, right] => Err(ExecError::TypeMismatch {
+            op: "boolor_statefunc",
             left: left.clone(),
             right: right.clone(),
         }),

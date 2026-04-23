@@ -3282,6 +3282,20 @@ struct ParsedCreateAggregateOptions {
     initcond: Option<String>,
     parallel: Option<FunctionParallel>,
     basetype: Option<AggregateSignatureKind>,
+    transspace: i32,
+    combinefunc_name: Option<String>,
+    serialfunc_name: Option<String>,
+    deserialfunc_name: Option<String>,
+    finalfunc_extra: bool,
+    finalfunc_modify: char,
+    mstype: Option<RawTypeName>,
+    msfunc_name: Option<String>,
+    minvfunc_name: Option<String>,
+    mfinalfunc_name: Option<String>,
+    minitcond: Option<String>,
+    mtransspace: i32,
+    mfinalfunc_extra: bool,
+    mfinalfunc_modify: char,
 }
 
 fn build_create_aggregate_statement(sql: &str) -> Result<CreateAggregateStatement, ParseError> {
@@ -3357,6 +3371,20 @@ fn build_create_aggregate_statement(sql: &str) -> Result<CreateAggregateStatemen
         finalfunc_name: parsed_options.finalfunc_name,
         initcond: parsed_options.initcond,
         parallel: parsed_options.parallel,
+        transspace: parsed_options.transspace,
+        combinefunc_name: parsed_options.combinefunc_name,
+        serialfunc_name: parsed_options.serialfunc_name,
+        deserialfunc_name: parsed_options.deserialfunc_name,
+        finalfunc_extra: parsed_options.finalfunc_extra,
+        finalfunc_modify: parsed_options.finalfunc_modify,
+        mstype: parsed_options.mstype,
+        msfunc_name: parsed_options.msfunc_name,
+        minvfunc_name: parsed_options.minvfunc_name,
+        mfinalfunc_name: parsed_options.mfinalfunc_name,
+        minitcond: parsed_options.minitcond,
+        mtransspace: parsed_options.mtransspace,
+        mfinalfunc_extra: parsed_options.mfinalfunc_extra,
+        mfinalfunc_modify: parsed_options.mfinalfunc_modify,
     })
 }
 
@@ -3491,9 +3519,16 @@ fn build_comment_on_function_statement(
 }
 
 fn parse_create_aggregate_options(input: &str) -> Result<ParsedCreateAggregateOptions, ParseError> {
-    let mut parsed = ParsedCreateAggregateOptions::default();
+    let mut parsed = ParsedCreateAggregateOptions {
+        finalfunc_modify: 'r',
+        mfinalfunc_modify: 'r',
+        ..Default::default()
+    };
     for item in split_top_level_items(input, ',')? {
         let Some(eq_idx) = item.find('=') else {
+            if item.trim().eq_ignore_ascii_case("hypothetical") {
+                continue;
+            }
             return Err(ParseError::UnexpectedToken {
                 expected: "aggregate option assignment",
                 actual: item,
@@ -3508,13 +3543,21 @@ fn parse_create_aggregate_options(input: &str) -> Result<ParsedCreateAggregateOp
             "initcond" | "initcond1" => parsed.initcond = Some(parse_aggregate_option_text(value)?),
             "parallel" => parsed.parallel = Some(parse_aggregate_parallel(value)?),
             "basetype" => parsed.basetype = Some(parse_legacy_aggregate_basetype(value)?),
-            "sortop" | "hypothetical" | "finalfunc_extra" | "finalfunc_modify" | "sspace"
-            | "combinefunc" | "serialfunc" | "deserialfunc" | "minitcond" => {
-                return Err(ParseError::FeatureNotSupported(format!(
-                    "{key} aggregate option is not supported"
-                )));
-            }
-            _ if key.starts_with("ms") => {
+            "sspace" => parsed.transspace = parse_aggregate_i32(value)?,
+            "combinefunc" => parsed.combinefunc_name = Some(parse_aggregate_proc_name(value)?),
+            "serialfunc" => parsed.serialfunc_name = Some(parse_aggregate_proc_name(value)?),
+            "deserialfunc" => parsed.deserialfunc_name = Some(parse_aggregate_proc_name(value)?),
+            "finalfunc_extra" => parsed.finalfunc_extra = parse_aggregate_bool(value)?,
+            "finalfunc_modify" => parsed.finalfunc_modify = parse_aggregate_final_modify(value)?,
+            "mstype" => parsed.mstype = Some(parse_type_name(value)?),
+            "msfunc" => parsed.msfunc_name = Some(parse_aggregate_proc_name(value)?),
+            "minvfunc" => parsed.minvfunc_name = Some(parse_aggregate_proc_name(value)?),
+            "mfinalfunc" => parsed.mfinalfunc_name = Some(parse_aggregate_proc_name(value)?),
+            "minitcond" => parsed.minitcond = Some(parse_aggregate_option_text(value)?),
+            "msspace" => parsed.mtransspace = parse_aggregate_i32(value)?,
+            "mfinalfunc_extra" => parsed.mfinalfunc_extra = parse_aggregate_bool(value)?,
+            "mfinalfunc_modify" => parsed.mfinalfunc_modify = parse_aggregate_final_modify(value)?,
+            "sortop" | "hypothetical" => {
                 return Err(ParseError::FeatureNotSupported(format!(
                     "{key} aggregate option is not supported"
                 )));
@@ -3618,6 +3661,50 @@ fn parse_aggregate_option_text(input: &str) -> Result<String, ParseError> {
         return decode_string_literal(&trimmed[..len]);
     }
     Ok(trimmed.to_string())
+}
+
+fn parse_aggregate_i32(input: &str) -> Result<i32, ParseError> {
+    input
+        .trim()
+        .parse::<i32>()
+        .map_err(|_| ParseError::InvalidNumeric(input.trim().into()))
+}
+
+fn parse_aggregate_bool(input: &str) -> Result<bool, ParseError> {
+    let (value, rest) = parse_sql_identifier(input)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "boolean aggregate option",
+            actual: input.into(),
+        });
+    }
+    match value.as_str() {
+        "true" | "on" | "yes" | "1" => Ok(true),
+        "false" | "off" | "no" | "0" => Ok(false),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "boolean aggregate option",
+            actual: value,
+        }),
+    }
+}
+
+fn parse_aggregate_final_modify(input: &str) -> Result<char, ParseError> {
+    let (value, rest) = parse_sql_identifier(input)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "READ_ONLY, SHAREABLE, or READ_WRITE",
+            actual: input.into(),
+        });
+    }
+    match value.as_str() {
+        "read_only" => Ok('r'),
+        "shareable" => Ok('s'),
+        "read_write" => Ok('w'),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "READ_ONLY, SHAREABLE, or READ_WRITE",
+            actual: value,
+        }),
+    }
 }
 
 fn parse_aggregate_parallel(input: &str) -> Result<FunctionParallel, ParseError> {
@@ -5364,6 +5451,15 @@ fn parse_create_function_arg(input: &str) -> Result<CreateFunctionArg, ParseErro
         (FunctionArgMode::In, trimmed)
     };
     let rest = rest.trim_start();
+    if !rest.chars().any(char::is_whitespace)
+        && let Ok(ty) = parse_type_name(rest)
+    {
+        return Ok(CreateFunctionArg {
+            mode,
+            name: None,
+            ty,
+        });
+    }
     let (name, type_sql) = match parse_sql_identifier(rest) {
         Ok((name, rest)) if !rest.trim().is_empty() => (Some(name), rest.trim()),
         _ => (None, rest),
@@ -8520,6 +8616,7 @@ fn build_create_schema(pair: Pair<'_, Rule>) -> Result<CreateSchemaStatement, Pa
 
 fn build_create_view(pair: Pair<'_, Rule>) -> Result<CreateViewStatement, ParseError> {
     let mut relation_name = None;
+    let mut persistence = TablePersistence::Permanent;
     let mut query = None;
     let mut query_sql = None;
     let mut or_replace = false;
@@ -8527,6 +8624,7 @@ fn build_create_view(pair: Pair<'_, Rule>) -> Result<CreateViewStatement, ParseE
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::create_or_replace_clause => or_replace = true,
+            Rule::temp_clause => persistence = TablePersistence::Temporary,
             Rule::identifier if relation_name.is_none() => {
                 relation_name = Some(build_relation_name(part))
             }
@@ -8555,6 +8653,7 @@ fn build_create_view(pair: Pair<'_, Rule>) -> Result<CreateViewStatement, ParseE
     Ok(CreateViewStatement {
         schema_name,
         view_name,
+        persistence,
         query: query.ok_or(ParseError::UnexpectedEof)?,
         query_sql: query_sql.ok_or(ParseError::UnexpectedEof)?,
         or_replace,
@@ -9253,6 +9352,7 @@ fn set_column_constraint_name(constraint: &mut ColumnConstraint, name: String) {
 fn build_create_index(pair: Pair<'_, Rule>) -> Result<CreateIndexStatement, ParseError> {
     let raw = pair.as_str().to_ascii_lowercase();
     let unique = raw.starts_with("create unique index");
+    let mut nulls_not_distinct = false;
     let mut if_not_exists = false;
     let mut index_name = None;
     let mut table_name = None;
@@ -9301,6 +9401,7 @@ fn build_create_index(pair: Pair<'_, Rule>) -> Result<CreateIndexStatement, Pars
                     options.push(build_reloption(option)?);
                 }
             }
+            Rule::unique_nulls_not_distinct_clause => nulls_not_distinct = true,
             _ => {}
         }
     }
@@ -9315,6 +9416,7 @@ fn build_create_index(pair: Pair<'_, Rule>) -> Result<CreateIndexStatement, Pars
     }
     Ok(CreateIndexStatement {
         unique,
+        nulls_not_distinct,
         if_not_exists,
         index_name: index_name.unwrap_or_default(),
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,

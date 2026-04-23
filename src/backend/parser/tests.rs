@@ -1659,6 +1659,7 @@ fn parse_create_unique_index_statement() {
         stmt,
         Statement::CreateIndex(CreateIndexStatement {
             unique: true,
+            nulls_not_distinct: false,
             if_not_exists: false,
             index_name: "num_exp_add_idx".into(),
             table_name: "num_exp_add".into(),
@@ -1849,6 +1850,7 @@ fn parse_create_index_with_method_and_ordering() {
         stmt,
         Statement::CreateIndex(CreateIndexStatement {
             unique: false,
+            nulls_not_distinct: false,
             if_not_exists: false,
             index_name: "num_exp_add_idx".into(),
             table_name: "num_exp_add".into(),
@@ -1891,6 +1893,7 @@ fn parse_create_index_with_if_not_exists_and_opclass() {
         stmt,
         Statement::CreateIndex(CreateIndexStatement {
             unique: false,
+            nulls_not_distinct: false,
             if_not_exists: true,
             index_name: "onek_unique1".into(),
             table_name: "onek".into(),
@@ -1919,6 +1922,7 @@ fn parse_create_index_without_name() {
         stmt,
         Statement::CreateIndex(CreateIndexStatement {
             unique: false,
+            nulls_not_distinct: false,
             if_not_exists: false,
             index_name: String::new(),
             table_name: "tenk1".into(),
@@ -2009,6 +2013,7 @@ fn parse_create_index_with_expression_item() {
         stmt,
         Statement::CreateIndex(CreateIndexStatement {
             unique: false,
+            nulls_not_distinct: false,
             if_not_exists: false,
             index_name: "attmp_idx".into(),
             table_name: "attmp".into(),
@@ -2060,6 +2065,7 @@ fn parse_create_partial_index_statement_captures_predicate_sql() {
         stmt,
         Statement::CreateIndex(CreateIndexStatement {
             unique: false,
+            nulls_not_distinct: false,
             if_not_exists: false,
             index_name: "onek2_u1_prtl".into(),
             table_name: "onek2".into(),
@@ -4071,6 +4077,20 @@ fn parse_create_aggregate_statement_with_plain_signature() {
             finalfunc_name: Some("int8_avg".into()),
             initcond: Some("{0,0}".into()),
             parallel: Some(FunctionParallel::Safe),
+            transspace: 0,
+            combinefunc_name: None,
+            serialfunc_name: None,
+            deserialfunc_name: None,
+            finalfunc_extra: false,
+            finalfunc_modify: 'r',
+            mstype: None,
+            msfunc_name: None,
+            minvfunc_name: None,
+            mfinalfunc_name: None,
+            minitcond: None,
+            mtransspace: 0,
+            mfinalfunc_extra: false,
+            mfinalfunc_modify: 'r',
         })
     );
 }
@@ -4093,6 +4113,20 @@ fn parse_create_aggregate_statement_with_old_style_basetype() {
             finalfunc_name: None,
             initcond: Some("0".into()),
             parallel: None,
+            transspace: 0,
+            combinefunc_name: None,
+            serialfunc_name: None,
+            deserialfunc_name: None,
+            finalfunc_extra: false,
+            finalfunc_modify: 'r',
+            mstype: None,
+            msfunc_name: None,
+            minvfunc_name: None,
+            mfinalfunc_name: None,
+            minitcond: None,
+            mtransspace: 0,
+            mfinalfunc_extra: false,
+            mfinalfunc_modify: 'r',
         })
     );
 }
@@ -4115,6 +4149,20 @@ fn parse_create_or_replace_aggregate_star_signature() {
             finalfunc_name: None,
             initcond: Some("0".into()),
             parallel: None,
+            transspace: 0,
+            combinefunc_name: None,
+            serialfunc_name: None,
+            deserialfunc_name: None,
+            finalfunc_extra: false,
+            finalfunc_modify: 'r',
+            mstype: None,
+            msfunc_name: None,
+            minvfunc_name: None,
+            mfinalfunc_name: None,
+            minitcond: None,
+            mtransspace: 0,
+            mfinalfunc_extra: false,
+            mfinalfunc_modify: 'r',
         })
     );
 }
@@ -4167,14 +4215,16 @@ fn parse_create_aggregate_rejects_unsupported_forms() {
             if message.contains("VARIADIC aggregate signatures")
     ));
 
-    let err = parse_statement(
+    let stmt = parse_statement(
         "create aggregate badagg(int4) (sfunc = int4pl, stype = int4, combinefunc = int4pl)",
     )
-    .unwrap_err();
-    assert!(matches!(
-        err,
-        ParseError::FeatureNotSupported(message) if message.contains("combinefunc")
-    ));
+    .unwrap();
+    match stmt {
+        Statement::CreateAggregate(stmt) => {
+            assert_eq!(stmt.combinefunc_name.as_deref(), Some("int4pl"));
+        }
+        other => panic!("expected CREATE AGGREGATE, got {other:?}"),
+    }
 }
 
 #[test]

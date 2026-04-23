@@ -15,7 +15,7 @@ use super::expr_bit::{
     overlay as eval_bit_overlay, position as eval_bit_position, set_bit as eval_set_bit,
     substring as eval_bit_substring,
 };
-use super::expr_bool::{eval_booleq, eval_boolne};
+use super::expr_bool::{eval_booland_statefunc, eval_booleq, eval_boolne, eval_boolor_statefunc};
 use super::expr_casts::{
     cast_value, cast_value_with_config, cast_value_with_source_type_and_config,
     cast_value_with_source_type_catalog_and_config, soft_input_error_info_with_config,
@@ -3028,6 +3028,8 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::ArraySort => eval_array_sort_function(&values),
         BuiltinScalarFunction::BoolEq => eval_booleq(&values),
         BuiltinScalarFunction::BoolNe => eval_boolne(&values),
+        BuiltinScalarFunction::BoolAndStateFunc => eval_booland_statefunc(&values),
+        BuiltinScalarFunction::BoolOrStateFunc => eval_boolor_statefunc(&values),
         BuiltinScalarFunction::XmlComment => eval_xml_comment_function(&values, None),
         BuiltinScalarFunction::XmlIsWellFormed => eval_xml_is_well_formed_function(
             &values,
@@ -4054,6 +4056,8 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Lgamma => eval_unary_float_function("lgamma", &values, eval_lgamma),
         BuiltinScalarFunction::BoolEq => eval_booleq(&values),
         BuiltinScalarFunction::BoolNe => eval_boolne(&values),
+        BuiltinScalarFunction::BoolAndStateFunc => eval_booland_statefunc(&values),
+        BuiltinScalarFunction::BoolOrStateFunc => eval_boolor_statefunc(&values),
         BuiltinScalarFunction::XmlComment => eval_xml_comment_function(&values, Some(ctx)),
         BuiltinScalarFunction::XmlIsWellFormed => {
             eval_xml_is_well_formed_function(&values, ctx.datetime_config.xml.option, Some(ctx))
