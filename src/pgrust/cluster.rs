@@ -217,7 +217,10 @@ impl Cluster {
             }
         }
 
-        let wal = Arc::new(WalWriter::new(&wal_dir).map_err(DatabaseError::Wal)?);
+        let wal = Arc::new(
+            WalWriter::new_with_fsync(&wal_dir, checkpoint_config.fsync)
+                .map_err(DatabaseError::Wal)?,
+        );
         let sync_queue = Arc::new(SyncQueue::default());
         let pool = Arc::new(BufferPool::new_with_wal(
             SmgrStorageBackend::new(MdStorageManager::new_with_sync_queue(

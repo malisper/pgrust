@@ -14,6 +14,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_PROFILE_TEST_OPT_LEVEL: "3"
   RUST_BACKTRACE: "1"
   TOTAL_SHARDS: "12"
 
