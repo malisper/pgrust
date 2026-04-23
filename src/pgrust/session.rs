@@ -4,7 +4,9 @@ use std::mem;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::backend::access::transam::xact::TransactionId;
+use crate::backend::access::transam::xact::{
+    CommandId, INVALID_TRANSACTION_ID, TransactionId,
+};
 use crate::backend::catalog::store::CatalogMutationEffect;
 use crate::backend::commands::copyfrom::parse_text_array_literal;
 use crate::backend::commands::tablecmds::{execute_merge, execute_prepared_insert_row};
@@ -106,7 +108,8 @@ impl Drop for StatementLockScopeGuard {
 }
 
 struct ActiveTransaction {
-    xid: TransactionId,
+    xid: Option<TransactionId>,
+    advisory_scope_id: u64,
     failed: bool,
     auth_at_start: AuthState,
     held_table_locks: BTreeMap<RelFileLocator, TableLockMode>,
@@ -301,7 +304,7 @@ impl Session {
     pub(crate) fn catalog_txn_ctx(&self) -> Option<(TransactionId, u32)> {
         self.active_txn
             .as_ref()
-            .map(|txn| (txn.xid, txn.next_command_id))
+            .and_then(|txn| txn.xid.map(|xid| (xid, txn.next_command_id)))
     }
 
     pub fn session_user_oid(&self) -> u32 {
@@ -362,7 +365,7 @@ impl Session {
             self.client_id,
             self.active_txn
                 .as_ref()
-                .map(|txn| (txn.xid, txn.next_command_id)),
+                .and_then(|txn| txn.xid.map(|xid| (xid, txn.next_command_id))),
             search_path.as_deref(),
         )
     }
@@ -407,6 +410,7 @@ impl Session {
             current_user_oid: self.current_user_oid(),
             active_role_oid: self.active_role_oid(),
             statement_lock_scope_id,
+            transaction_lock_scope_id: self.active_advisory_scope_id(),
             next_command_id: cid,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             timed: false,
@@ -425,9 +429,10 @@ impl Session {
         }
     }
 
-    fn active_transaction_for_xid(&self, xid: TransactionId) -> ActiveTransaction {
+    fn active_transaction_without_xid(&self, db: &Database) -> ActiveTransaction {
         ActiveTransaction {
-            xid,
+            xid: None,
+            advisory_scope_id: db.allocate_statement_lock_scope_id(),
             failed: false,
             auth_at_start: self.auth.clone(),
             held_table_locks: BTreeMap::new(),
@@ -441,6 +446,53 @@ impl Session {
             async_listen_ops: Vec::new(),
             pending_async_notifications: Vec::new(),
         }
+    }
+
+    fn ensure_active_xid(&mut self, db: &Database) -> TransactionId {
+        let txn = self
+            .active_txn
+            .as_mut()
+            .expect("ensure_active_xid requires an active transaction");
+        if let Some(xid) = txn.xid {
+            return xid;
+        }
+        let xid = db.txns.write().begin();
+        txn.xid = Some(xid);
+        xid
+    }
+
+    fn active_txn_ctx_for_command(&self, cid: CommandId) -> Option<(TransactionId, CommandId)> {
+        self.active_txn
+            .as_ref()
+            .and_then(|txn| txn.xid.map(|xid| (xid, cid)))
+    }
+
+    fn active_advisory_scope_id(&self) -> Option<u64> {
+        self.active_txn.as_ref().map(|txn| txn.advisory_scope_id)
+    }
+
+    fn statement_requires_xid_in_transaction(stmt: &Statement) -> bool {
+        !matches!(
+            stmt,
+            Statement::Do(_)
+                | Statement::Show(_)
+                | Statement::Set(_)
+                | Statement::Reset(_)
+                | Statement::Checkpoint(_)
+                | Statement::Select(_)
+                | Statement::Values(_)
+                | Statement::Explain(_)
+                | Statement::Notify(_)
+                | Statement::Listen(_)
+                | Statement::Unlisten(_)
+                | Statement::SetSessionAuthorization(_)
+                | Statement::ResetSessionAuthorization(_)
+                | Statement::SetRole(_)
+                | Statement::ResetRole(_)
+                | Statement::Begin
+                | Statement::Commit
+                | Statement::Rollback
+        )
     }
 
     fn queue_txn_listener_op(&mut self, action: AsyncListenAction, channel: Option<String>) {
@@ -486,12 +538,19 @@ impl Session {
         if txn.deferred_foreign_keys.is_empty() {
             return Ok(());
         }
-        let catalog = self.catalog_lookup_for_command(db, txn.xid, txn.next_command_id);
+        let Some(xid) = txn.xid else {
+            debug_assert!(
+                false,
+                "deferred foreign keys require a transaction id before commit"
+            );
+            return Ok(());
+        };
+        let catalog = self.catalog_lookup_for_command(db, xid, txn.next_command_id);
         validate_deferred_foreign_key_constraints(
             db,
             self.client_id,
             &catalog,
-            txn.xid,
+            xid,
             txn.next_command_id,
             self.interrupts(),
             &self.datetime_config,
@@ -508,33 +567,40 @@ impl Session {
         let held_locks = txn.held_table_locks.keys().copied().collect::<Vec<_>>();
         let result = match result {
             Ok(r) => {
-                let _checkpoint_guard = db.checkpoint_commit_guard();
-                let result = (|| {
-                    db.pool.write_wal_commit(txn.xid).map_err(|e| {
-                        ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Storage(
-                            crate::backend::storage::smgr::SmgrError::Io(std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                e,
-                            )),
-                        ))
-                    })?;
-                    db.pool.flush_wal().map_err(|e| {
-                        ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Storage(
-                            crate::backend::storage::smgr::SmgrError::Io(std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                e,
-                            )),
-                        ))
-                    })?;
-                    db.txns.write().commit(txn.xid).map_err(|e| {
-                        ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(e))
-                    })?;
-                    // :HACK: See `Database::finish_txn()`: session commit also needs the
-                    // transaction status flushed so fresh durable snapshot readers observe
-                    // catalog changes immediately.
-                    db.txns.write().flush_clog().map_err(|e| {
-                        ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(e))
-                    })?;
+                (|| {
+                    if let Some(xid) = txn.xid {
+                        let _checkpoint_guard = db.checkpoint_commit_guard();
+                        db.pool.write_wal_commit(xid).map_err(|e| {
+                            ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Storage(
+                                crate::backend::storage::smgr::SmgrError::Io(std::io::Error::new(
+                                    std::io::ErrorKind::Other,
+                                    e,
+                                )),
+                            ))
+                        })?;
+                        db.pool.flush_wal().map_err(|e| {
+                            ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Storage(
+                                crate::backend::storage::smgr::SmgrError::Io(std::io::Error::new(
+                                    std::io::ErrorKind::Other,
+                                    e,
+                                )),
+                            ))
+                        })?;
+                        db.txns.write().commit(xid).map_err(|e| {
+                            ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(e))
+                        })?;
+                        // :HACK: See `Database::finish_txn()`: session commit also needs the
+                        // transaction status flushed so fresh durable snapshot readers observe
+                        // catalog changes immediately.
+                        db.txns.write().flush_clog().map_err(|e| {
+                            ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(e))
+                        })?;
+                        db.txn_waiter.notify();
+                    } else {
+                        debug_assert!(txn.catalog_effects.is_empty());
+                        debug_assert!(txn.temp_effects.is_empty());
+                        debug_assert!(txn.sequence_effects.is_empty());
+                    }
                     db.finalize_committed_catalog_effects(
                         self.client_id,
                         &txn.catalog_effects,
@@ -548,12 +614,10 @@ impl Session {
                     db.async_notify_runtime
                         .publish(self.client_id, &txn.pending_async_notifications);
                     db.advisory_locks
-                        .unlock_all_transaction(self.client_id, txn.xid);
+                        .unlock_all_transaction(self.client_id, txn.advisory_scope_id);
                     self.stats_state.write().commit_top_level_xact(&db.stats);
-                    db.txn_waiter.notify();
                     Ok(r)
-                })();
-                result
+                })()
             }
             Err(e) => {
                 self.abort_taken_transaction(db, &txn);
@@ -567,7 +631,14 @@ impl Session {
     }
 
     fn abort_taken_transaction(&mut self, db: &Database, txn: &ActiveTransaction) {
-        let _ = db.txns.write().abort(txn.xid);
+        if let Some(xid) = txn.xid {
+            let _ = db.txns.write().abort(xid);
+            db.txn_waiter.notify();
+        } else {
+            debug_assert!(txn.catalog_effects.is_empty());
+            debug_assert!(txn.temp_effects.is_empty());
+            debug_assert!(txn.sequence_effects.is_empty());
+        }
         db.finalize_aborted_local_catalog_invalidations(
             self.client_id,
             &txn.prior_cmd_catalog_invalidations,
@@ -577,8 +648,7 @@ impl Session {
         db.finalize_aborted_temp_effects(self.client_id, &txn.temp_effects);
         db.finalize_aborted_sequence_effects(&txn.sequence_effects);
         db.advisory_locks
-            .unlock_all_transaction(self.client_id, txn.xid);
-        db.txn_waiter.notify();
+            .unlock_all_transaction(self.client_id, txn.advisory_scope_id);
         if self.auth != txn.auth_at_start {
             self.auth = txn.auth_at_start.clone();
             db.install_auth_state(self.client_id, self.auth.clone());
@@ -671,6 +741,30 @@ impl Session {
                 },
             )?
         };
+
+        if self.active_txn.is_some()
+            && !matches!(
+                stmt,
+                Statement::Begin | Statement::Commit | Statement::Rollback
+            )
+        {
+            if self.transaction_failed() {
+                return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "ROLLBACK",
+                    actual: "current transaction is aborted, commands ignored until end of transaction block".into(),
+                }));
+            }
+            if matches!(stmt, Statement::Vacuum(_)) {
+                return Err(ExecError::Parse(ParseError::ActiveSqlTransaction("VACUUM")));
+            }
+            let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+            if result.is_err() {
+                if let Some(ref mut txn) = self.active_txn {
+                    txn.failed = true;
+                }
+            }
+            return result;
+        }
 
         match stmt {
             Statement::Do(ref do_stmt) => execute_do(do_stmt),
@@ -1776,8 +1870,7 @@ impl Session {
                         actual: "already in a transaction block".into(),
                     }));
                 }
-                let xid = db.txns.write().begin();
-                self.active_txn = Some(self.active_transaction_for_xid(xid));
+                self.active_txn = Some(self.active_transaction_without_xid(db));
                 self.stats_state.write().begin_top_level_xact();
                 Ok(StatementResult::AffectedRows(0))
             }
@@ -1878,7 +1971,14 @@ impl Session {
 
     pub(crate) fn cleanup_on_disconnect(&mut self, db: &Database) {
         if let Some(txn) = self.active_txn.take() {
-            let _ = db.txns.write().abort(txn.xid);
+            if let Some(xid) = txn.xid {
+                let _ = db.txns.write().abort(xid);
+                db.txn_waiter.notify();
+            } else {
+                debug_assert!(txn.catalog_effects.is_empty());
+                debug_assert!(txn.temp_effects.is_empty());
+                debug_assert!(txn.sequence_effects.is_empty());
+            }
             db.finalize_aborted_local_catalog_invalidations(
                 self.client_id,
                 &txn.prior_cmd_catalog_invalidations,
@@ -1888,8 +1988,7 @@ impl Session {
             db.finalize_aborted_temp_effects(self.client_id, &txn.temp_effects);
             db.finalize_aborted_sequence_effects(&txn.sequence_effects);
             db.advisory_locks
-                .unlock_all_transaction(self.client_id, txn.xid);
-            db.txn_waiter.notify();
+                .unlock_all_transaction(self.client_id, txn.advisory_scope_id);
             for rel in txn.held_table_locks.keys().copied() {
                 db.table_locks.unlock_table(rel, self.client_id);
             }
@@ -1958,13 +2057,15 @@ impl Session {
         db.install_auth_state(self.client_id, self.auth.clone());
         db.install_temp_backend_id(self.client_id, self.temp_backend_id);
         db.install_interrupt_state(self.client_id, self.interrupts());
-        let txn_ctx = if let Some(ref mut txn) = self.active_txn {
-            let xid = txn.xid;
+        let (txn_ctx, transaction_lock_scope_id) = if let Some(ref mut txn) = self.active_txn {
             let cid = txn.next_command_id;
             txn.next_command_id = txn.next_command_id.saturating_add(1);
-            Some((xid, cid))
+            (
+                txn.xid.map(|xid| (xid, cid)),
+                Some(txn.advisory_scope_id),
+            )
         } else {
-            None
+            (None, None)
         };
         let statement_lock_scope_id = txn_ctx
             .is_none()
@@ -1975,6 +2076,7 @@ impl Session {
             select_stmt,
             txn_ctx,
             statement_lock_scope_id,
+            transaction_lock_scope_id,
             search_path.as_deref(),
             &self.datetime_config,
         )?;
@@ -1993,12 +2095,19 @@ impl Session {
             .as_ref()
             .map(|txn| txn.catalog_effects.len())
             .unwrap_or(0);
-        let (xid, cid) = {
+        let cid = {
             let txn = self.active_txn.as_mut().unwrap();
-            let xid = txn.xid;
             let cid = txn.next_command_id;
             txn.next_command_id = txn.next_command_id.saturating_add(1);
-            (xid, cid)
+            cid
+        };
+        let xid = if Self::statement_requires_xid_in_transaction(&stmt) {
+            self.ensure_active_xid(db)
+        } else {
+            self.active_txn
+                .as_ref()
+                .and_then(|txn| txn.xid)
+                .unwrap_or(INVALID_TRANSACTION_ID)
         };
         let client_id = self.client_id;
 
@@ -3166,10 +3275,14 @@ impl Session {
                 result
             }
             Statement::Select(_) | Statement::Values(_) | Statement::Explain(_) => {
-                let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
                 let search_path = self.configured_search_path();
+                let txn_ctx = self.active_txn_ctx_for_command(cid);
+                let snapshot = match txn_ctx {
+                    Some((xid, cid)) => db.txns.read().snapshot_for_command(xid, cid)?,
+                    None => db.txns.read().snapshot_for_command(INVALID_TRANSACTION_ID, cid)?,
+                };
                 let catalog =
-                    db.lazy_catalog_lookup(client_id, Some((xid, cid)), search_path.as_deref());
+                    db.lazy_catalog_lookup(client_id, txn_ctx, search_path.as_deref());
                 let mut ctx =
                     self.executor_context_for_catalog(db, snapshot, cid, &catalog, None, None);
                 let result = execute_readonly_statement(stmt, &catalog, &mut ctx);
@@ -3952,13 +4065,19 @@ impl Session {
         params: &[Value],
     ) -> Result<(), ExecError> {
         stacker::grow(32 * 1024 * 1024, || {
+            if self.active_txn.is_none() {
+                return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "active transaction",
+                    actual: "no active transaction for prepared insert".into(),
+                }));
+            }
+            let xid = self.ensure_active_xid(db);
             let txn = self.active_txn.as_mut().ok_or_else(|| {
                 ExecError::Parse(ParseError::UnexpectedToken {
                     expected: "active transaction",
                     actual: "no active transaction for prepared insert".into(),
                 })
             })?;
-            let xid = txn.xid;
             let cid = txn.next_command_id;
             txn.next_command_id = txn.next_command_id.saturating_add(1);
             let _client_id = self.client_id;
@@ -4021,8 +4140,7 @@ impl Session {
         stacker::grow(32 * 1024 * 1024, || {
             db.install_interrupt_state(self.client_id, self.interrupts());
             let started_txn = if self.active_txn.is_none() {
-                let xid = db.txns.write().begin();
-                self.active_txn = Some(self.active_transaction_for_xid(xid));
+                self.active_txn = Some(self.active_transaction_without_xid(db));
                 self.stats_state.write().begin_top_level_xact();
                 true
             } else {
@@ -4030,12 +4148,12 @@ impl Session {
             };
 
             let result = (|| -> Result<usize, ExecError> {
-                let (xid, cid) = {
+                let xid = self.ensure_active_xid(db);
+                let cid = {
                     let txn = self.active_txn.as_mut().unwrap();
-                    let xid = txn.xid;
                     let cid = txn.next_command_id;
                     txn.next_command_id = txn.next_command_id.saturating_add(1);
-                    (xid, cid)
+                    cid
                 };
 
             let catalog = self.catalog_lookup_for_command(db, xid, cid);

@@ -603,6 +603,7 @@ impl Database {
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
                     statement_lock_scope_id,
+                    transaction_lock_scope_id: None,
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -751,9 +752,7 @@ impl Database {
                     interrupts.as_ref(),
                 )?;
 
-                let xid = self.txns.write().begin();
-                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
-                let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
+                let snapshot = self.txns.read().snapshot(INVALID_TRANSACTION_ID)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
@@ -774,6 +773,7 @@ impl Database {
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
                     statement_lock_scope_id,
+                    transaction_lock_scope_id: None,
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -798,16 +798,10 @@ impl Database {
                 let pending_async_notifications =
                     std::mem::take(&mut ctx.pending_async_notifications);
                 drop(ctx);
-                let result = self.finish_txn_with_async_notifications(
-                    client_id,
-                    xid,
-                    result,
-                    &[],
-                    &[],
-                    &[],
-                    pending_async_notifications,
-                );
-                guard.disarm();
+                if result.is_ok() {
+                    self.async_notify_runtime
+                        .publish(client_id, &pending_async_notifications);
+                }
 
                 unlock_relations(&self.table_locks, client_id, &rels);
                 result
@@ -853,6 +847,7 @@ impl Database {
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
                     statement_lock_scope_id,
+                    transaction_lock_scope_id: None,
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -949,6 +944,7 @@ impl Database {
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
                     statement_lock_scope_id,
+                    transaction_lock_scope_id: None,
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -1046,6 +1042,7 @@ impl Database {
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
                     statement_lock_scope_id,
+                    transaction_lock_scope_id: None,
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -1377,6 +1374,7 @@ impl Database {
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
                     statement_lock_scope_id,
+                    transaction_lock_scope_id: None,
                     next_command_id: 0,
                     default_toast_compression:
                         crate::include::access::htup::AttributeCompression::Pglz,
@@ -1429,6 +1427,7 @@ impl Database {
             txn_ctx,
             None,
             None,
+            None,
             &DateTimeConfig::default(),
         )
     }
@@ -1445,6 +1444,7 @@ impl Database {
             select_stmt,
             txn_ctx,
             None,
+            None,
             configured_search_path,
             &DateTimeConfig::default(),
         )
@@ -1456,6 +1456,7 @@ impl Database {
         select_stmt: &crate::backend::parser::SelectStatement,
         txn_ctx: Option<(TransactionId, CommandId)>,
         statement_lock_scope_id: Option<u64>,
+        transaction_lock_scope_id: Option<u64>,
         configured_search_path: Option<&[String]>,
         datetime_config: &DateTimeConfig,
     ) -> Result<SelectGuard<'_>, ExecError> {
@@ -1504,6 +1505,7 @@ impl Database {
             current_user_oid: self.auth_state(client_id).current_user_oid(),
             active_role_oid: self.auth_state(client_id).active_role_oid(),
             statement_lock_scope_id,
+            transaction_lock_scope_id,
             next_command_id: command_id,
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             expr_bindings: crate::backend::executor::ExprEvalBindings::default(),

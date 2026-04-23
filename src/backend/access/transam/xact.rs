@@ -348,6 +348,21 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_without_xid_hides_future_lazy_xid_insert() {
+        let mut txns = TransactionManager::default();
+        let snapshot = txns.snapshot(INVALID_TRANSACTION_ID).unwrap();
+
+        let writer = txns.begin();
+        txns.commit(writer).unwrap();
+
+        let mut tuple = HeapTuple::new_raw(1, b"row".to_vec());
+        tuple.header.xmin = writer;
+
+        assert!(writer >= snapshot.xmax);
+        assert!(!snapshot.tuple_visible(&txns, &tuple));
+    }
+
+    #[test]
     fn snapshot_hides_committed_delete() {
         let mut txns = TransactionManager::default();
         let inserter = txns.begin();

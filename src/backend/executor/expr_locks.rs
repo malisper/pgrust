@@ -86,10 +86,13 @@ fn advisory_owner(
     ) {
         return Ok(AdvisoryLockOwner::session(ctx.client_id));
     }
+    if let Some(scope_id) = ctx.transaction_lock_scope_id {
+        return Ok(AdvisoryLockOwner::transaction(ctx.client_id, scope_id));
+    }
     if ctx.snapshot.current_xid != INVALID_TRANSACTION_ID {
         return Ok(AdvisoryLockOwner::transaction(
             ctx.client_id,
-            ctx.snapshot.current_xid,
+            u64::from(ctx.snapshot.current_xid),
         ));
     }
     if let Some(scope_id) = ctx.statement_lock_scope_id {
