@@ -9615,19 +9615,30 @@ fn build_plan_rejects_positional_after_named_function_arg() {
 fn build_plan_for_unnest_uses_array_element_types() {
     let stmt = parse_select("select * from unnest(ARRAY['a']::varchar[], ARRAY[1, 2])").unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
-    match plan {
+    let output_columns = match plan {
         Plan::FunctionScan {
             call: crate::include::nodes::primnodes::SetReturningCall::Unnest { output_columns, .. },
             ..
-        } => {
-            assert_eq!(output_columns.len(), 2);
-            assert_eq!(
-                output_columns[0].sql_type,
-                SqlType::new(SqlTypeKind::Varchar)
-            );
-            assert_eq!(output_columns[1].sql_type, SqlType::new(SqlTypeKind::Int4));
-        }
+        } => output_columns,
+        Plan::Projection { input, .. } => match *input {
+            Plan::FunctionScan {
+                call:
+                    crate::include::nodes::primnodes::SetReturningCall::Unnest {
+                        output_columns, ..
+                    },
+                ..
+            } => output_columns,
+            other => panic!("expected unnest function scan, got {other:?}"),
+        },
         other => panic!("expected unnest plan, got {other:?}"),
+    };
+    {
+        assert_eq!(output_columns.len(), 2);
+        assert_eq!(
+            output_columns[0].sql_type,
+            SqlType::new(SqlTypeKind::Varchar)
+        );
+        assert_eq!(output_columns[1].sql_type, SqlType::new(SqlTypeKind::Int4));
     }
 }
 

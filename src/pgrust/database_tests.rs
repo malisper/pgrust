@@ -10708,6 +10708,51 @@ fn explain_inner_join_can_reorder_commutative_inputs() {
 }
 
 #[test]
+fn explain_cte_self_join_pushes_single_rel_filter_below_join() {
+    let base = temp_dir("explain_cte_self_join_filter_pushdown");
+    let db = Database::open(&base, 16).unwrap();
+
+    let lines = explain_lines(
+        &db,
+        1,
+        "with v(x) as (values (0::numeric), (1::numeric), (2::numeric)) select x1, x2 from v as v1(x1), v as v2(x2) where x2 != 0",
+    );
+    let nested_loop_pos = lines
+        .iter()
+        .position(|line| line.starts_with("Nested Loop  (cost="))
+        .unwrap_or_else(|| panic!("expected nested loop explain output, got {lines:?}"));
+    let filtered_child_pos = lines
+        .iter()
+        .position(|line| line.starts_with("  Filter  (cost="))
+        .unwrap_or_else(|| panic!("expected filtered child node in explain output, got {lines:?}"));
+    let top_level_cte_pos = lines
+        .iter()
+        .position(|line| line.starts_with("  CTE Scan  (cost="))
+        .unwrap_or_else(|| panic!("expected unfiltered cte scan in explain output, got {lines:?}"));
+    let pushed_filter_pos = lines
+        .iter()
+        .position(|line| line.starts_with("    Filter: (x2 <>"))
+        .unwrap_or_else(|| {
+            panic!("expected pushed-down filter detail in explain output, got {lines:?}")
+        });
+
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.starts_with("  Filter: (x2 <>")),
+        "expected filter to be attached below the join, got {lines:?}"
+    );
+    assert!(
+        nested_loop_pos < filtered_child_pos && filtered_child_pos < top_level_cte_pos,
+        "expected filtered child to appear before the unfiltered side, got {lines:?}"
+    );
+    assert!(
+        filtered_child_pos < pushed_filter_pos && pushed_filter_pos < top_level_cte_pos,
+        "expected pushed-down filter to appear under the filtered input before the unfiltered side, got {lines:?}"
+    );
+}
+
+#[test]
 fn explain_three_way_inner_join_can_build_smaller_join_first() {
     let base = temp_dir("explain_three_way_inner_join_reorder");
     let db = Database::open(&base, 16).unwrap();

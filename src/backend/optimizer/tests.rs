@@ -1,6 +1,7 @@
 use super::bestpath::{self, CostSelector};
 use crate::backend::catalog::Catalog;
 use crate::backend::catalog::catalog::column_desc;
+use crate::backend::optimizer::pathnodes::rte_slot_id;
 use crate::backend::optimizer::util;
 use crate::backend::parser::analyze::LiteralDefaultCatalog;
 use crate::backend::parser::{SqlType, SqlTypeKind};
@@ -389,10 +390,7 @@ fn normalize_rte_path_preserves_projection_sortgrouprefs() {
     let normalized = util::normalize_rte_path(1, &desc, ordered_projection, &catalog);
 
     assert_eq!(normalized.output_target().sortgrouprefs, vec![17, 0]);
-    assert_eq!(
-        normalized.pathkeys(),
-        vec![pathkey_with_ref(var(10, 1), 17)]
-    );
+    assert_eq!(normalized.pathkeys(), vec![pathkey_with_ref(var(1, 1), 17)]);
 }
 
 #[test]
@@ -430,6 +428,59 @@ fn normalize_rte_path_records_passthrough_input_positions() {
             assert_eq!(targets[1].input_resno, Some(1));
         }
         other => panic!("expected projection path, got {other:?}"),
+    }
+}
+
+#[test]
+fn normalize_rte_path_projects_internal_values_slots_to_rte_vars() {
+    let catalog = LiteralDefaultCatalog;
+    let desc = RelationDesc {
+        columns: vec![
+            column_desc("a", int4(), true),
+            column_desc("b", int4(), true),
+        ],
+    };
+    let normalized = util::normalize_rte_path(
+        1,
+        &desc,
+        Path::Values {
+            plan_info: PlanEstimate::new(1.0, 1.0, 1.0, 2),
+            pathtarget: PathTarget::with_sortgrouprefs(vec![var(1, 1), var(1, 2)], vec![17, 0]),
+            slot_id: rte_slot_id(1),
+            rows: vec![vec![
+                crate::include::nodes::primnodes::Expr::Const(Value::Int32(1)),
+                crate::include::nodes::primnodes::Expr::Const(Value::Int32(2)),
+            ]],
+            output_columns: values_output_columns(),
+        },
+        &catalog,
+    );
+
+    assert_eq!(
+        normalized.semantic_output_vars(),
+        vec![var(1, 1), var(1, 2)]
+    );
+    assert_eq!(normalized.output_target().sortgrouprefs, vec![17, 0]);
+
+    match normalized {
+        Path::Projection {
+            slot_id,
+            targets,
+            input,
+            ..
+        } => {
+            assert_eq!(slot_id, 1);
+            assert_eq!(targets[0].expr, var(1, 1));
+            assert_eq!(targets[1].expr, var(1, 2));
+            assert_eq!(targets[0].input_resno, Some(1));
+            assert_eq!(targets[1].input_resno, Some(2));
+            assert_eq!(targets[0].ressortgroupref, 17);
+            assert!(
+                matches!(*input, Path::Values { slot_id, .. } if slot_id == rte_slot_id(1)),
+                "expected boundary projection to wrap the internal values slot"
+            );
+        }
+        other => panic!("expected projection, got {other:?}"),
     }
 }
 
