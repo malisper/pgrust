@@ -26,9 +26,10 @@ use crate::include::catalog::{
     DEPENDENCY_INTERNAL, PG_CONSTRAINT_RELATION_OID, PUBLIC_NAMESPACE_OID, PgAuthIdRow,
     PgAuthMembersRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgInheritsRow,
     PgPartitionedTableRow, PgPolicyRow, PgPublicationNamespaceRow, PgPublicationRelRow,
-    PgPublicationRow, PgRewriteRow, PgTablespaceRow, PgTriggerRow, bootstrap_pg_auth_members_rows,
-    bootstrap_pg_authid_rows, bootstrap_pg_database_rows, bootstrap_pg_tablespace_rows,
-    builtin_range_name_for_sql_type, builtin_type_rows, relkind_has_storage, sort_pg_rewrite_rows,
+    PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgTablespaceRow,
+    PgTriggerRow, bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows,
+    bootstrap_pg_database_rows, bootstrap_pg_tablespace_rows, builtin_range_name_for_sql_type,
+    builtin_type_name_for_oid, builtin_type_rows, relkind_has_storage, sort_pg_rewrite_rows,
 };
 
 const DEFAULT_SPC_OID: u32 = 0;
@@ -236,6 +237,8 @@ pub struct Catalog {
     pub(crate) publications: Vec<PgPublicationRow>,
     pub(crate) publication_rels: Vec<PgPublicationRelRow>,
     pub(crate) publication_namespaces: Vec<PgPublicationNamespaceRow>,
+    pub(crate) statistics_ext: Vec<PgStatisticExtRow>,
+    pub(crate) statistics_ext_data: Vec<PgStatisticExtDataRow>,
     pub(crate) authids: Vec<PgAuthIdRow>,
     pub(crate) auth_members: Vec<PgAuthMembersRow>,
     pub(crate) databases: Vec<PgDatabaseRow>,
@@ -258,6 +261,8 @@ impl Default for Catalog {
             publications: Vec::new(),
             publication_rels: Vec::new(),
             publication_namespaces: Vec::new(),
+            statistics_ext: Vec::new(),
+            statistics_ext_data: Vec::new(),
             authids: bootstrap_pg_authid_rows(),
             auth_members: bootstrap_pg_auth_members_rows().into(),
             databases: bootstrap_pg_database_rows().into(),
@@ -457,6 +462,14 @@ impl Catalog {
 
     pub fn publication_namespace_rows(&self) -> &[PgPublicationNamespaceRow] {
         &self.publication_namespaces
+    }
+
+    pub fn statistic_ext_rows(&self) -> &[PgStatisticExtRow] {
+        &self.statistics_ext
+    }
+
+    pub fn statistic_ext_data_rows(&self) -> &[PgStatisticExtDataRow] {
+        &self.statistics_ext_data
     }
 
     pub fn next_oid(&self) -> u32 {
@@ -2368,13 +2381,19 @@ pub(crate) fn validate_builtin_type_rows(desc: &RelationDesc) -> Result<(), Cata
     Ok(())
 }
 
-fn format_sql_type_name(sql_type: SqlType) -> &'static str {
+fn format_sql_type_name(sql_type: SqlType) -> String {
+    if !sql_type.is_array
+        && sql_type.type_oid != 0
+        && let Some(name) = builtin_type_name_for_oid(sql_type.type_oid)
+    {
+        return name;
+    }
     if sql_type.is_array {
         if sql_type.element_type().is_range() {
-            return "unsupported array";
+            return "unsupported array".into();
         }
         if sql_type.element_type().is_multirange() {
-            return "unsupported array";
+            return "unsupported array".into();
         }
         return match sql_type.kind {
             SqlTypeKind::AnyElement
@@ -2407,6 +2426,7 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
             SqlTypeKind::RegClass => "_regclass",
             SqlTypeKind::RegType => "unsupported array",
             SqlTypeKind::RegRole => "unsupported array",
+            SqlTypeKind::RegNamespace => "_regnamespace",
             SqlTypeKind::RegOperator => "_regoperator",
             SqlTypeKind::RegProcedure => "_regprocedure",
             SqlTypeKind::Tid => "_tid",
@@ -2449,15 +2469,19 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
             | SqlTypeKind::TimestampRange
             | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
             SqlTypeKind::Multirange => unreachable!("multirange handled above"),
-        };
+        }
+        .into();
     }
 
     if sql_type.is_range() {
-        return builtin_range_name_for_sql_type(sql_type).unwrap_or("range");
+        return builtin_range_name_for_sql_type(sql_type)
+            .unwrap_or("range")
+            .into();
     }
     if sql_type.is_multirange() {
         return crate::include::catalog::builtin_multirange_name_for_sql_type(sql_type)
-            .unwrap_or("multirange");
+            .unwrap_or("multirange")
+            .into();
     }
 
     match sql_type.kind {
@@ -2492,6 +2516,7 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
         SqlTypeKind::RegClass => "regclass",
         SqlTypeKind::RegType => "regtype",
         SqlTypeKind::RegRole => "regrole",
+        SqlTypeKind::RegNamespace => "regnamespace",
         SqlTypeKind::RegOperator => "regoperator",
         SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::Tid => "tid",
@@ -2534,6 +2559,7 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
         | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
         SqlTypeKind::Multirange => unreachable!("multirange handled above"),
     }
+    .into()
 }
 
 #[cfg(test)]
