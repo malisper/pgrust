@@ -30,4 +30,26 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          gh pr merge "$PR_URL" --auto --merge --match-head-commit "$HEAD_SHA"
+          set +e
+          output="$(gh pr merge "$PR_URL" --auto --match-head-commit "$HEAD_SHA" 2>&1)"
+          status=$?
+          set -e
+
+          if [ "$status" -eq 0 ]; then
+            echo "$output"
+            exit 0
+          fi
+
+          echo "$output"
+
+          if printf '%s' "$output" | grep -q "Resource not accessible by personal access token (enablePullRequestAutoMerge)"; then
+            echo "Auto-merge could not be enabled with this workflow token; leaving the PR unchanged."
+            exit 0
+          fi
+
+          if printf '%s' "$output" | grep -q "is already queued to merge"; then
+            echo "PR is already queued to merge."
+            exit 0
+          fi
+
+          exit "$status"
