@@ -68,11 +68,16 @@ impl Database {
         let mut statistics_objects = self.statistics_objects.write();
         if statistics_objects.contains_key(&name) {
             if create_stmt.if_not_exists {
-                push_notice(format!("statistics object \"{name}\" already exists, skipping"));
+                push_notice(format!(
+                    "statistics object \"{name}\" already exists, skipping"
+                ));
                 return Ok(StatementResult::AffectedRows(0));
             }
             return Err(ExecError::DetailedError {
-                message: format!("relation \"{}\" already exists", create_stmt.statistics_name),
+                message: format!(
+                    "relation \"{}\" already exists",
+                    create_stmt.statistics_name
+                ),
                 detail: None,
                 hint: None,
                 sqlstate: "42P07",

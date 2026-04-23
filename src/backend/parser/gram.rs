@@ -820,10 +820,11 @@ fn build_alter_statistics_statement(sql: &str) -> Result<AlterStatisticsStatemen
         _ => return Err(ParseError::UnsupportedQualifiedName(parts.join("."))),
     };
     rest = next.trim_start();
-    let rest = consume_keywords(rest, &["set", "statistics"]).ok_or(ParseError::UnexpectedToken {
-        expected: "SET STATISTICS signed_integer",
-        actual: rest.into(),
-    })?;
+    let rest =
+        consume_keywords(rest, &["set", "statistics"]).ok_or(ParseError::UnexpectedToken {
+            expected: "SET STATISTICS signed_integer",
+            actual: rest.into(),
+        })?;
     let (statistics_target, rest) = parse_signed_i64_token(rest.trim_start())?;
     let statistics_target =
         i32::try_from(statistics_target).map_err(|_| ParseError::InvalidInteger(sql.into()))?;
