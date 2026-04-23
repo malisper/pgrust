@@ -485,7 +485,7 @@ impl RelCache {
                 relforcerowsecurity: class.relforcerowsecurity,
                 desc: RelationDesc { columns },
                 partitioned_table: catcache.partitioned_table_row(class.oid).cloned(),
-                index: class.relkind.eq(&'i').then(|| {
+                index: matches!(class.relkind, 'i' | 'I').then(|| {
                     let Some(index) = index_rows.iter().find(|row| row.indexrelid == class.oid)
                     else {
                         return IndexRelCacheEntry {

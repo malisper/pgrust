@@ -201,7 +201,7 @@ impl Database {
                     .filter(|row| {
                         row.relpersistence == 't'
                             && namespace_oids.contains(&row.relnamespace)
-                            && (include_indexes == (row.relkind == 'i'))
+                            && (include_indexes == matches!(row.relkind, 'i' | 'I'))
                     })
                     .map(|row| row.oid)
                     .collect::<Vec<_>>(),
