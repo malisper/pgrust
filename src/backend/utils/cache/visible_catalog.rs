@@ -15,7 +15,8 @@ use crate::include::catalog::{
     PgTriggerRow, PgTypeRow, bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows,
     bootstrap_pg_collation_rows, bootstrap_pg_database_rows, bootstrap_pg_language_rows,
     bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
-    bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows, synthetic_range_proc_rows_by_name,
+    bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
+    synthetic_range_proc_rows_by_name,
 };
 use crate::pgrust::database::DatabaseStatsStore;
 use std::collections::BTreeSet;

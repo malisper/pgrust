@@ -109,9 +109,9 @@ impl RuntimeTriggers {
     }
 
     pub(crate) fn has_instead_row_triggers(&self) -> bool {
-        self.triggers
-            .iter()
-            .any(|trigger| trigger_is_instead(trigger.row.tgtype) && trigger_is_row(trigger.row.tgtype))
+        self.triggers.iter().any(|trigger| {
+            trigger_is_instead(trigger.row.tgtype) && trigger_is_row(trigger.row.tgtype)
+        })
     }
 
     pub(crate) fn before_row_insert(
@@ -833,7 +833,9 @@ pub(crate) fn relation_has_instead_row_trigger(
         .trigger_rows_for_relation(relation_oid)
         .into_iter()
         .any(|row| {
-            trigger_is_instead(row.tgtype) && trigger_is_row(row.tgtype) && trigger_matches_event(&row, event, &[])
+            trigger_is_instead(row.tgtype)
+                && trigger_is_row(row.tgtype)
+                && trigger_matches_event(&row, event, &[])
         })
 }
 

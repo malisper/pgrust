@@ -22410,7 +22410,11 @@ $$",
 
     clear_notices();
     assert_eq!(
-        query_rows(&db, 1, "update main_view set b = 31 where a = 20 returning *"),
+        query_rows(
+            &db,
+            1,
+            "update main_view set b = 31 where a = 20 returning *"
+        ),
         vec![vec![Value::Int32(20), Value::Int32(31)]]
     );
     assert_eq!(
@@ -22445,8 +22449,11 @@ fn rules_can_route_into_trigger_backed_views() {
 
     db.execute(1, "create table city_table (city_id int4, city_name text)")
         .unwrap();
-    db.execute(1, "create view city_view as select city_id, city_name from city_table")
-        .unwrap();
+    db.execute(
+        1,
+        "create view city_view as select city_id, city_name from city_table",
+    )
+    .unwrap();
     db.execute(
         1,
         "create function city_insert() returns trigger language plpgsql as $$
@@ -22561,7 +22568,11 @@ $$",
         ]]
     );
     assert_eq!(
-        query_rows(&db, 1, "select city_name, country_name, continent from city_table"),
+        query_rows(
+            &db,
+            1,
+            "select city_name, country_name, continent from city_table"
+        ),
         vec![vec![
             Value::Text("Washington DC".into()),
             Value::Text("USA".into()),
@@ -22579,8 +22590,11 @@ fn rule_actions_can_return_new_star_from_outer_scope() {
         .unwrap();
     db.execute(1, "insert into city_table values (1, 'Old Town')")
         .unwrap();
-    db.execute(1, "create view city_view as select city_id, city_name from city_table")
-        .unwrap();
+    db.execute(
+        1,
+        "create view city_view as select city_id, city_name from city_table",
+    )
+    .unwrap();
     db.execute(
         1,
         "create function city_update() returns trigger language plpgsql as $$
@@ -22599,8 +22613,11 @@ $$",
         "create trigger city_update_trig instead of update on city_view for each row execute function city_update()",
     )
     .unwrap();
-    db.execute(1, "create view european_city_view as select * from city_view")
-        .unwrap();
+    db.execute(
+        1,
+        "create view european_city_view as select * from city_view",
+    )
+    .unwrap();
     db.execute(
         1,
         "create rule european_city_update_rule as on update to european_city_view do instead update city_view set city_name = NEW.city_name where city_id = OLD.city_id returning NEW.*",
@@ -22613,17 +22630,11 @@ $$",
             1,
             "update european_city_view set city_name = 'New Town' where city_id = 1 returning *",
         ),
-        vec![vec![
-            Value::Int32(1),
-            Value::Text("New Town".into()),
-        ]]
+        vec![vec![Value::Int32(1), Value::Text("New Town".into()),]]
     );
     assert_eq!(
         query_rows(&db, 1, "select city_id, city_name from city_table"),
-        vec![vec![
-            Value::Int32(1),
-            Value::Text("New Town".into()),
-        ]]
+        vec![vec![Value::Int32(1), Value::Text("New Town".into()),]]
     );
 }
 
@@ -22634,8 +22645,11 @@ fn trigger_insert_returning_into_can_assign_new_record_fields() {
 
     db.execute(1, "create table city_table (city_id int4, city_name text)")
         .unwrap();
-    db.execute(1, "create view city_view as select city_id, city_name from city_table")
-        .unwrap();
+    db.execute(
+        1,
+        "create view city_view as select city_id, city_name from city_table",
+    )
+    .unwrap();
     db.execute(
         1,
         "create function city_insert() returns trigger language plpgsql as $$
@@ -22659,17 +22673,11 @@ $$",
             1,
             "insert into city_view values (null, 'Tokyo') returning *",
         ),
-        vec![vec![
-            Value::Int32(7),
-            Value::Text("Tokyo".into()),
-        ]]
+        vec![vec![Value::Int32(7), Value::Text("Tokyo".into()),]]
     );
     assert_eq!(
         query_rows(&db, 1, "select city_id, city_name from city_table"),
-        vec![vec![
-            Value::Int32(7),
-            Value::Text("Tokyo".into()),
-        ]]
+        vec![vec![Value::Int32(7), Value::Text("Tokyo".into()),]]
     );
 }
 
