@@ -8,7 +8,7 @@ pub(crate) mod exec_tuples;
 mod expr_agg_support;
 mod expr_async;
 mod expr_bit;
-mod expr_bool;
+pub(crate) mod expr_bool;
 mod expr_casts;
 mod expr_compile;
 mod expr_date;

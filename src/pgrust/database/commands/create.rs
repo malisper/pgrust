@@ -11,8 +11,9 @@ use crate::backend::parser::{
     serialize_partition_bound,
 };
 use crate::include::catalog::{
-    ANYOID, BOOTSTRAP_SUPERUSER_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID,
-    PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID, PgAggregateRow, PgProcRow, RECORD_TYPE_OID,
+    ANYOID, BOOTSTRAP_SUPERUSER_OID, BYTEA_TYPE_OID, INTERNAL_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
+    PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID, PgAggregateRow,
+    PgProcRow, RECORD_TYPE_OID,
 };
 use crate::include::nodes::parsenodes::{ForeignKeyAction, ForeignKeyMatchType};
 use crate::include::nodes::primnodes::{QueryColumn, ToastRelationRef};
@@ -843,11 +844,6 @@ impl Database {
 
         for arg in &create_stmt.args {
             let sql_type = resolve_raw_type_name(&arg.ty, &catalog).map_err(ExecError::Parse)?;
-            if matches!(sql_type.kind, SqlTypeKind::Composite | SqlTypeKind::Record) {
-                return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                    "record and composite function arguments are not supported yet".into(),
-                )));
-            }
             let type_oid = catalog
                 .type_oid_for_sql_type(sql_type)
                 .or_else(|| matches!(sql_type.kind, SqlTypeKind::Record).then_some(RECORD_TYPE_OID))
@@ -889,7 +885,7 @@ impl Database {
                         "non-set RETURNS record is not supported yet".into(),
                     )));
                 }
-                if matches!(sql_type.kind, SqlTypeKind::Composite) && !setof {
+                if matches!(sql_type.kind, SqlTypeKind::Composite) && !sql_type.is_array && !setof {
                     return Err(ExecError::Parse(ParseError::FeatureNotSupported(
                         "non-set RETURNS named composite is not supported yet".into(),
                     )));
@@ -1133,6 +1129,99 @@ impl Database {
                 resolve_exact_proc_row(self, client_id, txn_ctx, &catalog, name, &[stype_oid], 'f')
             })
             .transpose()?;
+        if create_stmt.serialfunc_name.is_some() != create_stmt.deserialfunc_name.is_some() {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "both SERIALFUNC and DESERIALFUNC",
+                actual: aggregate_name.clone(),
+            }));
+        }
+        let combinefn_row = create_stmt
+            .combinefunc_name
+            .as_deref()
+            .map(|name| {
+                resolve_exact_proc_row(
+                    self,
+                    client_id,
+                    txn_ctx,
+                    &catalog,
+                    name,
+                    &[stype_oid, stype_oid],
+                    'f',
+                )
+            })
+            .transpose()?;
+        let serialfn_row = create_stmt
+            .serialfunc_name
+            .as_deref()
+            .map(|name| {
+                resolve_exact_proc_row(self, client_id, txn_ctx, &catalog, name, &[stype_oid], 'f')
+            })
+            .transpose()?;
+        let deserialfn_row = create_stmt
+            .deserialfunc_name
+            .as_deref()
+            .map(|name| {
+                resolve_exact_proc_row(
+                    self,
+                    client_id,
+                    txn_ctx,
+                    &catalog,
+                    name,
+                    &[BYTEA_TYPE_OID, INTERNAL_TYPE_OID],
+                    'f',
+                )
+            })
+            .transpose()?;
+        let mstype_oid = create_stmt
+            .mstype
+            .as_ref()
+            .map(|mtype| {
+                resolve_raw_type_name(mtype, &catalog)
+                    .map_err(ExecError::Parse)
+                    .and_then(|sql_type| {
+                        catalog.type_oid_for_sql_type(sql_type).ok_or_else(|| {
+                            ExecError::Parse(ParseError::UnsupportedType(format!("{sql_type:?}")))
+                        })
+                    })
+            })
+            .transpose()?;
+        let msfunc_row = create_stmt
+            .msfunc_name
+            .as_deref()
+            .map(|name| {
+                let mstype_oid = mstype_oid.unwrap_or(stype_oid);
+                let mut args = Vec::with_capacity(arg_oids.len() + 1);
+                args.push(mstype_oid);
+                args.extend(arg_oids.iter().copied());
+                resolve_exact_proc_row(self, client_id, txn_ctx, &catalog, name, &args, 'f')
+            })
+            .transpose()?;
+        let minvfunc_row = create_stmt
+            .minvfunc_name
+            .as_deref()
+            .map(|name| {
+                let mstype_oid = mstype_oid.unwrap_or(stype_oid);
+                let mut args = Vec::with_capacity(arg_oids.len() + 1);
+                args.push(mstype_oid);
+                args.extend(arg_oids.iter().copied());
+                resolve_exact_proc_row(self, client_id, txn_ctx, &catalog, name, &args, 'f')
+            })
+            .transpose()?;
+        let mfinalfn_row = create_stmt
+            .mfinalfunc_name
+            .as_deref()
+            .map(|name| {
+                resolve_exact_proc_row(
+                    self,
+                    client_id,
+                    txn_ctx,
+                    &catalog,
+                    name,
+                    &[mstype_oid.unwrap_or(stype_oid)],
+                    'f',
+                )
+            })
+            .transpose()?;
         let result_type_oid = finalfn_row
             .as_ref()
             .map(|row| row.prorettype)
@@ -1198,23 +1287,23 @@ impl Database {
             aggnumdirectargs: 0,
             aggtransfn: transfn_row.oid,
             aggfinalfn: finalfn_row.as_ref().map(|row| row.oid).unwrap_or(0),
-            aggcombinefn: 0,
-            aggserialfn: 0,
-            aggdeserialfn: 0,
-            aggmtransfn: 0,
-            aggminvtransfn: 0,
-            aggmfinalfn: 0,
-            aggfinalextra: false,
-            aggmfinalextra: false,
-            aggfinalmodify: 'r',
-            aggmfinalmodify: 'r',
+            aggcombinefn: combinefn_row.as_ref().map(|row| row.oid).unwrap_or(0),
+            aggserialfn: serialfn_row.as_ref().map(|row| row.oid).unwrap_or(0),
+            aggdeserialfn: deserialfn_row.as_ref().map(|row| row.oid).unwrap_or(0),
+            aggmtransfn: msfunc_row.as_ref().map(|row| row.oid).unwrap_or(0),
+            aggminvtransfn: minvfunc_row.as_ref().map(|row| row.oid).unwrap_or(0),
+            aggmfinalfn: mfinalfn_row.as_ref().map(|row| row.oid).unwrap_or(0),
+            aggfinalextra: create_stmt.finalfunc_extra,
+            aggmfinalextra: create_stmt.mfinalfunc_extra,
+            aggfinalmodify: create_stmt.finalfunc_modify,
+            aggmfinalmodify: create_stmt.mfinalfunc_modify,
             aggsortop: 0,
             aggtranstype: stype_oid,
-            aggtransspace: 0,
-            aggmtranstype: 0,
-            aggmtransspace: 0,
+            aggtransspace: create_stmt.transspace,
+            aggmtranstype: mstype_oid.unwrap_or(0),
+            aggmtransspace: create_stmt.mtransspace,
             agginitval: create_stmt.initcond.clone(),
-            aggminitval: None,
+            aggminitval: create_stmt.minitcond.clone(),
         };
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
@@ -1291,6 +1380,7 @@ impl Database {
         let xid = self.txns.write().begin();
         let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
         let mut catalog_effects = Vec::new();
+        let mut temp_effects = Vec::new();
         let result = self.execute_create_view_stmt_in_transaction_with_search_path(
             client_id,
             create_stmt,
@@ -1298,8 +1388,9 @@ impl Database {
             0,
             configured_search_path,
             &mut catalog_effects,
+            &mut temp_effects,
         );
-        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &temp_effects, &[]);
         guard.disarm();
         result
     }
@@ -1675,6 +1766,7 @@ impl Database {
         cid: CommandId,
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
+        temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let (view_name, namespace_oid) = self.normalize_create_view_stmt_with_search_path(
@@ -1736,19 +1828,37 @@ impl Database {
             catalog_effects.push(replace_effect);
             existing_relation.relation_oid
         } else {
-            let (entry, create_effect) = self
-                .catalog
-                .write()
-                .create_view_relation_mvcc(
-                    view_name.clone(),
-                    desc,
-                    namespace_oid,
-                    self.auth_state(client_id).current_user_oid(),
-                    &ctx,
-                )
-                .map_err(map_catalog_error)?;
-            catalog_effects.push(create_effect);
-            entry.relation_oid
+            match create_stmt.persistence {
+                TablePersistence::Permanent => {
+                    let (entry, create_effect) = self
+                        .catalog
+                        .write()
+                        .create_view_relation_mvcc(
+                            view_name.clone(),
+                            desc,
+                            namespace_oid,
+                            self.auth_state(client_id).current_user_oid(),
+                            &ctx,
+                        )
+                        .map_err(map_catalog_error)?;
+                    catalog_effects.push(create_effect);
+                    entry.relation_oid
+                }
+                TablePersistence::Temporary => {
+                    let created = self.create_temp_relation_with_relkind_in_transaction(
+                        client_id,
+                        view_name.clone(),
+                        desc,
+                        OnCommitAction::PreserveRows,
+                        xid,
+                        cid,
+                        'v',
+                        catalog_effects,
+                        temp_effects,
+                    )?;
+                    created.entry.relation_oid
+                }
+            }
         };
 
         let rule_drop_ctx = CatalogWriteContext {

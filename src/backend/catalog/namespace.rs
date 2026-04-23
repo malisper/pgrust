@@ -119,10 +119,6 @@ pub fn normalize_create_view_stmt_with_search_path(
     if stmt.schema_name.is_some() {
         return Ok(view_name);
     }
-    resolve_unqualified_create_persistence(
-        &view_name,
-        TablePersistence::Permanent,
-        configured_search_path,
-    )?;
+    resolve_unqualified_create_persistence(&view_name, stmt.persistence, configured_search_path)?;
     Ok(view_name)
 }

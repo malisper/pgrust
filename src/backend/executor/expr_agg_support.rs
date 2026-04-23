@@ -197,6 +197,16 @@ pub(crate) fn execute_builtin_scalar_function_value_call(
             }
             _ => malformed_aggregate_support_call("int8_avg"),
         },
+        BuiltinScalarFunction::BoolAndStateFunc => match arg_values {
+            [Value::Bool(left), Value::Bool(right)] => Ok(Value::Bool(*left && *right)),
+            [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+            _ => malformed_aggregate_support_call("booland_statefunc"),
+        },
+        BuiltinScalarFunction::BoolOrStateFunc => match arg_values {
+            [Value::Bool(left), Value::Bool(right)] => Ok(Value::Bool(*left || *right)),
+            [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+            _ => malformed_aggregate_support_call("boolor_statefunc"),
+        },
         other => Err(ExecError::DetailedError {
             message: format!(
                 "builtin function {:?} is not supported by aggregate value execution",

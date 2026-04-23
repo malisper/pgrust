@@ -779,6 +779,8 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::Atan2d
             | BuiltinScalarFunction::BoolEq
             | BuiltinScalarFunction::BoolNe
+            | BuiltinScalarFunction::BoolAndStateFunc
+            | BuiltinScalarFunction::BoolOrStateFunc
             | BuiltinScalarFunction::Div
             | BuiltinScalarFunction::Mod => args.len() == 2,
             BuiltinScalarFunction::Float8Accum | BuiltinScalarFunction::Float8Combine => {
@@ -1018,6 +1020,9 @@ pub(super) fn validate_aggregate_arity(func: AggFunc, args: &[SqlExpr]) -> Resul
             | AggFunc::StddevSamp
             | AggFunc::BoolAnd
             | AggFunc::BoolOr
+            | AggFunc::BitAnd
+            | AggFunc::BitOr
+            | AggFunc::BitXor
             | AggFunc::Min
             | AggFunc::Max
             | AggFunc::ArrayAgg
@@ -1881,6 +1886,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("width", BuiltinScalarFunction::GeoWidth),
         ("booleq", BuiltinScalarFunction::BoolEq),
         ("boolne", BuiltinScalarFunction::BoolNe),
+        ("booland_statefunc", BuiltinScalarFunction::BoolAndStateFunc),
+        ("boolor_statefunc", BuiltinScalarFunction::BoolOrStateFunc),
         (
             "bitcast_integer_to_float4",
             BuiltinScalarFunction::BitcastIntegerToFloat4,
@@ -2146,6 +2153,8 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
             BuiltinScalarFunction::PgIndexAmHasProperty,
             BuiltinScalarFunction::PgIndexHasProperty,
             BuiltinScalarFunction::PgIndexColumnHasProperty,
+            BuiltinScalarFunction::BoolAndStateFunc,
+            BuiltinScalarFunction::BoolOrStateFunc,
         ] {
             if by_func.iter().all(|(candidate, _)| *candidate != func) {
                 by_func.push((func, SqlType::new(SqlTypeKind::Bool)));
@@ -2342,6 +2351,8 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::Float8Send
             | BuiltinScalarFunction::BoolEq
             | BuiltinScalarFunction::BoolNe
+            | BuiltinScalarFunction::BoolAndStateFunc
+            | BuiltinScalarFunction::BoolOrStateFunc
             | BuiltinScalarFunction::BitcastIntegerToFloat4
             | BuiltinScalarFunction::BitcastBigintToFloat8
             | BuiltinScalarFunction::XmlComment
@@ -2524,6 +2535,9 @@ fn aggregate_func_for_proname(name: &str) -> Option<AggFunc> {
         "corr" => Some(AggFunc::Corr),
         "bool_and" | "every" => Some(AggFunc::BoolAnd),
         "bool_or" => Some(AggFunc::BoolOr),
+        "bit_and" => Some(AggFunc::BitAnd),
+        "bit_or" => Some(AggFunc::BitOr),
+        "bit_xor" => Some(AggFunc::BitXor),
         "min" => Some(AggFunc::Min),
         "max" => Some(AggFunc::Max),
         "string_agg" => Some(AggFunc::StringAgg),

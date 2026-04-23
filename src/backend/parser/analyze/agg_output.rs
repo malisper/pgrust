@@ -457,6 +457,7 @@ fn bind_grouped_window_agg_call(
         });
     }
     let arg_values = args.iter().map(|arg| arg.value.clone()).collect::<Vec<_>>();
+    validate_distinct_aggregate_order_by(&arg_values, order_by, distinct)?;
     validate_aggregate_arity(func, &arg_values)?;
     let arg_types = arg_values
         .iter()
@@ -1036,6 +1037,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
             }) {
                 let arg_values: Vec<SqlExpr> =
                     args.args().iter().map(|arg| arg.value.clone()).collect();
+                validate_distinct_aggregate_order_by(&arg_values, order_by, *distinct)?;
                 let arg_types = arg_values
                     .iter()
                     .map(|expr| {
@@ -1053,18 +1055,6 @@ pub(super) fn bind_agg_output_expr_in_clause(
                         expected: "supported aggregate",
                         actual: name.clone(),
                     })?;
-                if resolved.is_custom() {
-                    if *distinct {
-                        return Err(ParseError::FeatureNotSupported(format!(
-                            "DISTINCT on custom aggregate {name}"
-                        )));
-                    }
-                    if !order_by.is_empty() {
-                        return Err(ParseError::FeatureNotSupported(format!(
-                            "aggregate ORDER BY on custom aggregate {name}"
-                        )));
-                    }
-                }
                 let bound_args = arg_values
                     .iter()
                     .map(|arg| {

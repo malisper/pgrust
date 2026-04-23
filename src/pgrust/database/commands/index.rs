@@ -992,7 +992,7 @@ impl Database {
             create_stmt.predicate_sql.as_deref(),
             create_stmt.unique,
             false,
-            false,
+            create_stmt.nulls_not_distinct,
             xid,
             cid,
             access_method_oid,
