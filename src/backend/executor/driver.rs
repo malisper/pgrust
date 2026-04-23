@@ -198,10 +198,11 @@ fn execute_statement_with_source(
         }
         Statement::AlterTableRename(_)
         | Statement::AlterIndexRename(_)
+        | Statement::AlterViewRename(_)
         | Statement::AlterIndexAlterColumnStatistics(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "ALTER TABLE/INDEX handled by database/session layer",
-                actual: "ALTER TABLE/INDEX".into(),
+                expected: "ALTER TABLE/INDEX/VIEW handled by database/session layer",
+                actual: "ALTER TABLE/INDEX/VIEW".into(),
             }))
         }
         Statement::AlterTableOwner(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
