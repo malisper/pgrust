@@ -24,6 +24,7 @@ use crate::backend::parser::UngroupedColumnClause;
 use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
 use crate::backend::parser::{CatalogLookup, Statement};
 use crate::backend::parser::{SqlType, SqlTypeKind, parse_expr};
+use crate::backend::rewrite::format_view_definition;
 use crate::backend::utils::misc::guc_datetime::{DateTimeConfig, format_datestyle};
 use crate::backend::utils::misc::notices::{
     clear_notices as clear_backend_notices, take_notices as take_backend_notices,
@@ -2409,12 +2410,12 @@ fn psql_get_viewdef_query(
     sql: &str,
 ) -> Option<(Vec<QueryColumn>, Vec<Vec<Value>>)> {
     let oid = extract_quoted_oid_with_markers(sql, &["pg_get_viewdef('"])?;
-    let value = session
-        .catalog_lookup(db)
-        .rewrite_rows_for_relation(oid)
-        .into_iter()
-        .find(|row| row.rulename == "_RETURN")
-        .map(|row| Value::Text(row.ev_action.into()))
+    let catalog = session.catalog_lookup(db);
+    let value = catalog
+        .lookup_relation_by_oid(oid)
+        .filter(|relation| relation.relkind == 'v')
+        .and_then(|relation| format_view_definition(oid, &relation.desc, &catalog).ok())
+        .map(|definition| Value::Text(definition.into()))
         .unwrap_or(Value::Null);
     Some((vec![QueryColumn::text("pg_get_viewdef")], vec![vec![value]]))
 }
@@ -5931,7 +5932,7 @@ mod tests {
         let (_, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
         assert_eq!(
             rows,
-            vec![vec![Value::Text("select id from widgets".into())]]
+            vec![vec![Value::Text(" SELECT id\n   FROM widgets;".into())]]
         );
     }
 

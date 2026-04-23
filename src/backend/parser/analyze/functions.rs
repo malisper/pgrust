@@ -639,6 +639,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::ObjDescription => args.len() == 2,
             BuiltinScalarFunction::PgDescribeObject => args.len() == 3,
             BuiltinScalarFunction::PgGetExpr => matches!(args.len(), 2 | 3),
+            BuiltinScalarFunction::PgGetViewDef => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgRelationIsPublishable => args.len() == 1,
             BuiltinScalarFunction::PgIndexAmHasProperty => args.len() == 2,
             BuiltinScalarFunction::PgIndexHasProperty => args.len() == 2,
@@ -1405,6 +1406,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ),
         ("pg_get_expr", BuiltinScalarFunction::PgGetExpr),
         ("pg_get_expr_ext", BuiltinScalarFunction::PgGetExpr),
+        ("pg_get_viewdef", BuiltinScalarFunction::PgGetViewDef),
         (
             "pg_relation_is_publishable",
             BuiltinScalarFunction::PgRelationIsPublishable,
@@ -2084,6 +2086,7 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
             BuiltinScalarFunction::ObjDescription,
             BuiltinScalarFunction::PgDescribeObject,
             BuiltinScalarFunction::PgGetExpr,
+            BuiltinScalarFunction::PgGetViewDef,
         ] {
             if by_func.iter().all(|(candidate, _)| *candidate != func) {
                 by_func.push((func, SqlType::new(SqlTypeKind::Text)));
@@ -2203,6 +2206,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::ObjDescription
             | BuiltinScalarFunction::PgDescribeObject
             | BuiltinScalarFunction::PgGetExpr
+            | BuiltinScalarFunction::PgGetViewDef
             | BuiltinScalarFunction::PgRelationIsPublishable
             | BuiltinScalarFunction::PgIndexAmHasProperty
             | BuiltinScalarFunction::PgIndexHasProperty
