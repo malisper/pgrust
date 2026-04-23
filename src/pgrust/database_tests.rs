@@ -23318,6 +23318,37 @@ fn plpgsql_alias_record_select_into_and_update_work() {
 }
 
 #[test]
+fn after_insert_trigger_nested_sql_sees_inserted_row() {
+    let dir = temp_dir("after_insert_trigger_nested_sql_sees_row");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table slots (slotname text, backlink text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function require_slot(text) returns int4 language plpgsql as $$ declare rec record; begin select into rec * from slots where slotname = $1; if not found then raise exception '% missing', $1; end if; return 0; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function slots_after_insert() returns trigger language plpgsql as $$ declare dummy int4; begin dummy := require_slot(new.slotname); return new; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger slots_after_insert after insert on slots for each row execute function slots_after_insert()",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into slots values ('PS.base.b1', '')")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select slotname from slots"),
+        vec![vec![Value::Text("PS.base.b1".into())]]
+    );
+}
+
+#[test]
 fn plpgsql_static_query_for_loop_record_target_supports_field_access() {
     let dir = temp_dir("plpgsql_query_loop_record_fields");
     let db = Database::open(&dir, 64).unwrap();

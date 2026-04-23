@@ -362,18 +362,20 @@ impl RuntimeTriggers {
         transition_only: bool,
         ctx: &mut ExecutorContext,
     ) -> Result<(), ExecError> {
-        for trigger in self.triggers.iter().filter(|trigger| {
-            !trigger_is_before(trigger.row.tgtype)
-                && !trigger_is_instead(trigger.row.tgtype)
-                && trigger_is_row(trigger.row.tgtype)
-                && trigger_uses_transition_tables(&trigger.row) == transition_only
-        }) {
-            if !self.when_passes(trigger, old_row, new_row, ctx)? {
-                continue;
+        with_after_trigger_snapshot(ctx, |ctx| {
+            for trigger in self.triggers.iter().filter(|trigger| {
+                !trigger_is_before(trigger.row.tgtype)
+                    && !trigger_is_instead(trigger.row.tgtype)
+                    && trigger_is_row(trigger.row.tgtype)
+                    && trigger_uses_transition_tables(&trigger.row) == transition_only
+            }) {
+                if !self.when_passes(trigger, old_row, new_row, ctx)? {
+                    continue;
+                }
+                let _ = self.execute_trigger(trigger, old_row, new_row, capture, ctx)?;
             }
-            let _ = self.execute_trigger(trigger, old_row, new_row, capture, ctx)?;
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     fn when_passes(
@@ -484,6 +486,17 @@ impl RuntimeTriggers {
         }
         tables
     }
+}
+
+fn with_after_trigger_snapshot<T>(
+    ctx: &mut ExecutorContext,
+    f: impl FnOnce(&mut ExecutorContext) -> Result<T, ExecError>,
+) -> Result<T, ExecError> {
+    let saved_current_cid = ctx.snapshot.current_cid;
+    ctx.snapshot.current_cid = ctx.next_command_id.saturating_add(1);
+    let result = f(ctx);
+    ctx.snapshot.current_cid = saved_current_cid;
+    result
 }
 
 fn clone_or_null_row(row: Option<&[Value]>, width: usize) -> Vec<Value> {
