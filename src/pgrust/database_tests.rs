@@ -13050,18 +13050,18 @@ fn drop_sequence_restrict_and_cascade_respect_row_type_dependencies() {
 }
 
 #[test]
-fn unsupported_create_table_like_does_not_poison_catalog_after_sequence_drop() {
-    let base = temp_dir("unsupported_create_table_like_sequence");
+fn rejected_create_table_like_sequence_does_not_poison_catalog_after_sequence_drop() {
+    let base = temp_dir("rejected_create_table_like_sequence");
     let db = Database::open(&base, 64).unwrap();
 
     db.execute(1, "create table items (id int4)").unwrap();
     db.execute(1, "create sequence ctlseq1").unwrap();
     match db.execute(1, "create table ctlt10 (like ctlseq1)") {
         Err(ExecError::Parse(ParseError::FeatureNotSupported(feature))) => {
-            assert_eq!(feature, "CREATE TABLE ... LIKE")
+            assert_eq!(feature, "CREATE TABLE LIKE source relation kind S")
         }
         other => panic!(
-            "expected unsupported CREATE TABLE LIKE error, got {:?}",
+            "expected rejected CREATE TABLE LIKE sequence error, got {:?}",
             other
         ),
     }
