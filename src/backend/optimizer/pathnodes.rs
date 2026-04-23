@@ -334,7 +334,9 @@ impl Path {
             | Self::ProjectSet { .. } => Vec::new(),
             Self::IndexScan { pathkeys, .. } => pathkeys.clone(),
             Self::SubqueryScan { pathkeys, .. } => pathkeys.clone(),
-            Self::Filter { input, .. } | Self::Limit { input, .. } | Self::LockRows { input, .. } => input.pathkeys(),
+            Self::Filter { input, .. }
+            | Self::Limit { input, .. }
+            | Self::LockRows { input, .. } => input.pathkeys(),
             Self::Projection {
                 slot_id,
                 targets,

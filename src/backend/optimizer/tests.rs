@@ -1180,7 +1180,10 @@ fn planner_places_lock_rows_between_order_by_and_limit() {
     let Plan::Limit { input, .. } = &planned.plan_tree else {
         panic!("expected limit at top, got {:?}", planned.plan_tree);
     };
-    let Plan::LockRows { input, row_marks, .. } = input.as_ref() else {
+    let Plan::LockRows {
+        input, row_marks, ..
+    } = input.as_ref()
+    else {
         panic!("expected lock rows below limit, got {:?}", input);
     };
     assert!(matches!(input.as_ref(), Plan::OrderBy { .. }));

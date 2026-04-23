@@ -22339,7 +22339,11 @@ fn select_locking_family_executes_for_all_strengths() {
     ] {
         match db.execute(1, sql).unwrap() {
             StatementResult::Query { rows, .. } => {
-                assert_eq!(rows, vec![vec![Value::Int32(1)]], "unexpected rows for {sql}");
+                assert_eq!(
+                    rows,
+                    vec![vec![Value::Int32(1)]],
+                    "unexpected rows for {sql}"
+                );
             }
             other => panic!("expected query result for {sql}, got {other:?}"),
         }
