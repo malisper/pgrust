@@ -76,7 +76,8 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
         | ExecError::Parse(crate::backend::parser::ParseError::MissingFromClauseEntry(_)) => {
             "42P01"
         }
-        ExecError::Parse(crate::backend::parser::ParseError::UnknownColumn(_)) => "42703",
+        ExecError::Parse(crate::backend::parser::ParseError::UnknownColumn(_))
+        | ExecError::Parse(crate::backend::parser::ParseError::MissingKeyColumn(_)) => "42703",
         ExecError::Parse(crate::backend::parser::ParseError::AmbiguousColumn(_)) => "42702",
         ExecError::Parse(crate::backend::parser::ParseError::DuplicateTableName(_)) => "42712",
         ExecError::Parse(crate::backend::parser::ParseError::TableAlreadyExists(_)) => "42P07",
@@ -139,6 +140,7 @@ fn exec_error_detail(e: &ExecError) -> Option<&str> {
         ExecError::XmlInput { detail, .. } => detail.as_deref(),
         ExecError::DetailedError { detail, .. } => detail.as_deref(),
         ExecError::UniqueViolation { detail, .. } => detail.as_deref(),
+        ExecError::NotNullViolation { detail, .. } => detail.as_deref(),
         ExecError::Parse(crate::backend::parser::ParseError::DetailedError { detail, .. }) => {
             detail.as_deref()
         }
@@ -218,9 +220,15 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::Parse(crate::backend::parser::ParseError::UndefinedOperator { op, .. }) => {
             return sql.find(op).map(|index| index + 1);
         }
+        ExecError::Parse(crate::backend::parser::ParseError::MissingKeyColumn(_)) => {
+            return find_without_overlaps_constraint_position(sql);
+        }
         ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. }) => {
             if let Some(position) = publication_where_error_position(sql, message, None) {
                 return Some(position);
+            }
+            if message.starts_with("column \"") && message.contains("WITHOUT OVERLAPS") {
+                return find_without_overlaps_constraint_position(sql);
             }
             if let Some(position) = trigger_when_error_position(sql, message) {
                 return Some(position);
@@ -292,6 +300,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             {
                 return Some(position);
             }
+            if message.starts_with("column \"") && message.contains("WITHOUT OVERLAPS") {
+                return find_without_overlaps_constraint_position(sql);
+            }
             if let Some(position) = trigger_when_error_position(sql, message) {
                 return Some(position);
             }
@@ -352,6 +363,19 @@ fn find_publication_where_expression_position(sql: &str) -> Option<usize> {
         index += 1;
     }
     Some(index + 1)
+}
+
+fn find_without_overlaps_constraint_position(sql: &str) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let overlap_index = lower.find("without overlaps")?;
+    let prefix = &lower[..overlap_index];
+    if let Some(index) = prefix.rfind("constraint") {
+        return Some(index + 1);
+    }
+    if let Some(index) = prefix.rfind("primary key") {
+        return Some(index + 1);
+    }
+    prefix.rfind("unique").map(|index| index + 1)
 }
 
 fn find_json_literal_position(sql: &str, raw_input: &str) -> Option<usize> {
@@ -1700,9 +1724,69 @@ fn execute_psql_describe_query(
         } else {
             vec![QueryColumn::text("regclass")]
         };
-        return Some((columns, Vec::new()));
+        return Some((
+            columns,
+            psql_describe_inherits_query_rows(db, session, sql, lower.contains("c.relkind")),
+        ));
     }
     None
+}
+
+fn psql_describe_inherits_query_rows(
+    db: &Database,
+    session: &Session,
+    sql: &str,
+    include_relkind: bool,
+) -> Vec<Vec<Value>> {
+    let lower = sql.to_ascii_lowercase();
+    let txn_ctx = session.catalog_txn_ctx();
+    let search_path = session.configured_search_path();
+    let catalog = session.catalog_lookup(db);
+
+    let inherits = if lower.contains("i.inhrelid =") {
+        let Some(oid) = extract_single_quoted_literal_after(sql, "i.inhrelid =")
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            return Vec::new();
+        };
+        catalog.inheritance_parents(oid)
+    } else if lower.contains("i.inhparent =") {
+        let Some(oid) = extract_single_quoted_literal_after(sql, "i.inhparent =")
+            .and_then(|value| value.parse::<u32>().ok())
+        else {
+            return Vec::new();
+        };
+        catalog.inheritance_children(oid)
+    } else {
+        return Vec::new();
+    };
+
+    let mut inherits = inherits;
+    inherits.sort_by_key(|row| (row.inhseqno, row.inhrelid));
+    inherits
+        .into_iter()
+        .filter_map(|row| {
+            let oid = if lower.contains("i.inhrelid =") {
+                row.inhparent
+            } else {
+                row.inhrelid
+            };
+            let relation = db.describe_relation_by_oid(session.client_id, txn_ctx, oid)?;
+            let name = db
+                .relation_display_name(session.client_id, txn_ctx, search_path.as_deref(), oid)
+                .unwrap_or_else(|| oid.to_string());
+            if include_relkind {
+                Some(vec![
+                    Value::Text(name.into()),
+                    Value::InternalChar(relation.relkind as u8),
+                    Value::Bool(row.inhdetachpending),
+                    Value::Text(String::new().into()),
+                ])
+            } else {
+                Some(vec![Value::Text(name.into())])
+            }
+        })
+        .collect()
 }
 
 fn psql_describe_statistics_query(
@@ -2528,7 +2612,7 @@ fn index_backed_constraint_def(
     let index = db
         .describe_relation_by_oid(client_id, txn_ctx, row.conindid)?
         .index?;
-    let columns = index
+    let mut columns = index
         .indkey
         .iter()
         .map(|attnum| {
@@ -2543,6 +2627,11 @@ fn index_backed_constraint_def(
                 .map(|column| column.name.clone())
         })
         .collect::<Option<Vec<_>>>()?;
+    if row.conperiod
+        && let Some(period_column) = columns.last_mut()
+    {
+        period_column.push_str(" WITHOUT OVERLAPS");
+    }
     let prefix = if row.contype == crate::include::catalog::CONSTRAINT_PRIMARY {
         "PRIMARY KEY"
     } else {
@@ -5933,6 +6022,41 @@ mod tests {
     }
 
     #[test]
+    fn psql_describe_constraint_query_prints_without_overlaps() {
+        let db = Database::open(temp_dir("describe_constraints_without_overlaps"), 16).unwrap();
+        let session = Session::new(1);
+        db.execute(
+            1,
+            "create table temporal_widgets (\
+                id int4, \
+                valid_at int4range, \
+                constraint temporal_widgets_pk primary key (id, valid_at without overlaps)\
+             )",
+        )
+        .unwrap();
+        let entry = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("temporal_widgets")
+            .unwrap();
+
+        let sql = format!(
+            "select conname, conrelid::pg_catalog.regclass as ontable, \
+                 pg_catalog.pg_get_constraintdef(oid, true) as condef \
+                 from pg_catalog.pg_constraint c \
+                 where c.conrelid = '{}'",
+            entry.relation_oid
+        );
+        let (_, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
+        assert!(rows.iter().any(|row| {
+            row == &vec![
+                Value::Text("temporal_widgets_pk".into()),
+                Value::Text("temporal_widgets".into()),
+                Value::Text("PRIMARY KEY (id, valid_at WITHOUT OVERLAPS)".into()),
+            ]
+        }));
+    }
+
+    #[test]
     fn psql_describe_constraint_query_returns_check_rows() {
         let db = Database::open(temp_dir("describe_constraints_check"), 16).unwrap();
         let session = Session::new(1);
@@ -6219,6 +6343,51 @@ mod tests {
         assert_eq!(rows[1][0], Value::Text("widgets_code_key".into()));
         assert_eq!(rows[1][6], Value::Text("UNIQUE (code)".into()));
         assert!(matches!(&rows[1][5], Value::Text(text) if text.contains("USING btree (code)")));
+    }
+
+    #[test]
+    fn psql_describe_indexes_query_marks_without_overlaps_indexes() {
+        let db = Database::open(temp_dir("describe_indexes_without_overlaps"), 16).unwrap();
+        let session = Session::new(1);
+        db.execute(
+            1,
+            "create table temporal_widgets (\
+                id int4, \
+                valid_at int4range, \
+                constraint temporal_widgets_pk primary key (id, valid_at without overlaps)\
+             )",
+        )
+        .unwrap();
+        let entry = session
+            .catalog_lookup(&db)
+            .lookup_any_relation("temporal_widgets")
+            .unwrap();
+
+        let sql = format!(
+            "SELECT c2.relname, i.indisprimary, i.indisunique, \
+                 i.indisclustered, i.indisvalid, \
+                 pg_catalog.pg_get_indexdef(i.indexrelid, 0, true), \
+                 pg_catalog.pg_get_constraintdef(con.oid, true), \
+                 contype, condeferrable, condeferred, \
+                 i.indisreplident, c2.reltablespace, false AS conperiod \
+             FROM pg_catalog.pg_class c, pg_catalog.pg_class c2, pg_catalog.pg_index i \
+             LEFT JOIN pg_catalog.pg_constraint con \
+               ON (conrelid = i.indrelid AND conindid = i.indexrelid AND contype IN ('p', 'u', 'x')) \
+             WHERE c.oid = '{}' AND c.oid = i.indrelid AND i.indexrelid = c2.oid \
+             ORDER BY i.indisprimary DESC, c2.relname",
+            entry.relation_oid
+        );
+        let (_, rows) = execute_psql_describe_query(&db, &session, &sql).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0], Value::Text("temporal_widgets_pk".into()));
+        assert!(
+            matches!(&rows[0][5], Value::Text(text) if text.contains("USING gist (id, valid_at)"))
+        );
+        assert_eq!(
+            rows[0][6],
+            Value::Text("PRIMARY KEY (id, valid_at WITHOUT OVERLAPS)".into())
+        );
+        assert_eq!(rows[0][12], Value::Bool(true));
     }
 
     #[test]

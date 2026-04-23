@@ -19,7 +19,7 @@ mod expr_json;
 mod expr_locks;
 mod expr_math;
 mod expr_money;
-mod expr_multirange;
+pub(crate) mod expr_multirange;
 mod expr_network;
 mod expr_numeric;
 pub(crate) mod expr_ops;
@@ -345,6 +345,7 @@ pub enum ExecError {
         relation: String,
         column: String,
         constraint: String,
+        detail: Option<String>,
     },
     CheckViolation {
         relation: String,

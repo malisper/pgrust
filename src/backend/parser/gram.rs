@@ -9138,13 +9138,11 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
                 .into_inner()
                 .find(|part| part.as_rule() == Rule::primary_key_table_constraint_body)
                 .ok_or(ParseError::UnexpectedEof)?;
+            let (columns, without_overlaps) = build_key_column_list(body)?;
             Ok(TableConstraint::PrimaryKey {
                 attributes,
-                columns: body
-                    .into_inner()
-                    .find(|part| part.as_rule() == Rule::ident_list)
-                    .map(|part| part.into_inner().map(build_identifier).collect())
-                    .unwrap_or_default(),
+                columns,
+                without_overlaps,
             })
         }
         Rule::unique_table_constraint => {
@@ -9158,13 +9156,11 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
                 .any(|part| part.as_rule() == Rule::unique_nulls_not_distinct_clause);
             let mut attributes = attributes;
             attributes.nulls_not_distinct = nulls_not_distinct;
+            let (columns, without_overlaps) = build_key_column_list(body)?;
             Ok(TableConstraint::Unique {
                 attributes,
-                columns: body
-                    .into_inner()
-                    .find(|part| part.as_rule() == Rule::ident_list)
-                    .map(|part| part.into_inner().map(build_identifier).collect())
-                    .unwrap_or_default(),
+                columns,
+                without_overlaps,
             })
         }
         Rule::check_table_constraint => {
@@ -9227,6 +9223,41 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
             actual: pair.as_str().to_string(),
         }),
     }
+}
+
+fn build_key_column_list(
+    pair: Pair<'_, Rule>,
+) -> Result<(Vec<String>, Option<String>), ParseError> {
+    let mut columns = Vec::new();
+    let mut without_overlaps = None;
+    for key_column_list in pair
+        .into_inner()
+        .filter(|part| part.as_rule() == Rule::key_column_list)
+    {
+        for key_column in key_column_list
+            .into_inner()
+            .filter(|part| part.as_rule() == Rule::key_column)
+        {
+            let mut column = None;
+            let mut has_without_overlaps = false;
+            for part in key_column.into_inner() {
+                match part.as_rule() {
+                    Rule::identifier => column = Some(build_identifier(part)),
+                    Rule::without_overlaps_clause => has_without_overlaps = true,
+                    _ => {}
+                }
+            }
+            let column = column.ok_or(ParseError::UnexpectedEof)?;
+            if has_without_overlaps && without_overlaps.replace(column.clone()).is_some() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "one WITHOUT OVERLAPS column",
+                    actual: "multiple WITHOUT OVERLAPS columns".into(),
+                });
+            }
+            columns.push(column);
+        }
+    }
+    Ok((columns, without_overlaps))
 }
 
 fn set_enforced_attribute(enforced: &mut Option<bool>, value: bool) -> Result<(), ParseError> {

@@ -203,6 +203,53 @@ pub(crate) fn format_unique_key_detail(columns: &[ColumnDesc], values: &[Value])
     format!("Key ({names})=({body}) already exists.")
 }
 
+pub(crate) fn format_exclusion_key_detail(
+    columns: &[ColumnDesc],
+    proposed: &[Value],
+    existing: &[Value],
+) -> String {
+    format_exclusion_key_detail_with_existing_label(columns, proposed, existing, true)
+}
+
+pub(crate) fn format_exclusion_create_key_detail(
+    columns: &[ColumnDesc],
+    proposed: &[Value],
+    existing: &[Value],
+) -> String {
+    format_exclusion_key_detail_with_existing_label(columns, proposed, existing, false)
+}
+
+fn format_exclusion_key_detail_with_existing_label(
+    columns: &[ColumnDesc],
+    proposed: &[Value],
+    existing: &[Value],
+    existing_label: bool,
+) -> String {
+    let datetime_config = DateTimeConfig::default();
+    let names = columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let proposed = proposed
+        .iter()
+        .take(columns.len())
+        .map(|value| format_failing_row_value(value, &datetime_config))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let existing = existing
+        .iter()
+        .take(columns.len())
+        .map(|value| format_failing_row_value(value, &datetime_config))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if existing_label {
+        format!("Key ({names})=({proposed}) conflicts with existing key ({names})=({existing}).")
+    } else {
+        format!("Key ({names})=({proposed}) conflicts with key ({names})=({existing}).")
+    }
+}
+
 fn format_failing_row_value(value: &Value, datetime_config: &DateTimeConfig) -> String {
     match value {
         Value::Null => "null".to_string(),

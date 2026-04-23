@@ -737,6 +737,7 @@ fn catalog_with_people_id_index() -> Catalog {
                 indisunique: false,
                 indnullsnotdistinct: false,
                 indisprimary: false,
+                indisexclusion: false,
                 indisvalid: true,
                 indisready: true,
                 indislive: true,
@@ -797,6 +798,7 @@ fn catalog_with_people_primary_key_opclass(opclass_oid: u32) -> Catalog {
                 indisunique: true,
                 indnullsnotdistinct: false,
                 indisprimary: true,
+                indisexclusion: false,
                 indisvalid: true,
                 indisready: true,
                 indislive: true,
@@ -886,6 +888,7 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
                 indisunique: true,
                 indnullsnotdistinct: false,
                 indisprimary: false,
+                indisexclusion: false,
                 indisvalid: true,
                 indisready: true,
                 indislive: true,
@@ -943,6 +946,7 @@ fn catalog_with_people_ctid_partial_unique_index() -> Catalog {
                 indisunique: true,
                 indnullsnotdistinct: false,
                 indisprimary: false,
+                indisexclusion: false,
                 indisvalid: true,
                 indisready: true,
                 indislive: true,
@@ -1000,6 +1004,7 @@ fn catalog_with_people_expression_unique_index() -> Catalog {
                 indisunique: true,
                 indnullsnotdistinct: false,
                 indisprimary: false,
+                indisexclusion: false,
                 indisvalid: true,
                 indisready: true,
                 indislive: true,
@@ -1057,6 +1062,7 @@ fn catalog_with_people_name_c_collation_index() -> Catalog {
                 indisunique: true,
                 indnullsnotdistinct: false,
                 indisprimary: false,
+                indisexclusion: false,
                 indisvalid: true,
                 indisready: true,
                 indislive: true,
@@ -1122,6 +1128,7 @@ fn catalog_with_text_parent_primary_key() -> Catalog {
                 indisunique: true,
                 indnullsnotdistinct: false,
                 indisprimary: true,
+                indisexclusion: false,
                 indisvalid: true,
                 indisready: true,
                 indislive: true,
@@ -3146,6 +3153,23 @@ fn parse_alter_role_rename_statement() {
             constraint: TableConstraint::PrimaryKey {
                 attributes: attrs(),
                 columns: vec!["id".into()],
+                without_overlaps: None,
+            },
+        })
+    );
+
+    let stmt = parse_statement("alter table items add primary key (id, valid_at without overlaps)")
+        .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAddConstraint(AlterTableAddConstraintStatement {
+            if_exists: false,
+            only: false,
+            table_name: "items".into(),
+            constraint: TableConstraint::PrimaryKey {
+                attributes: attrs(),
+                columns: vec!["id".into(), "valid_at".into()],
+                without_overlaps: Some("valid_at".into()),
             },
         })
     );
@@ -3160,6 +3184,7 @@ fn parse_alter_role_rename_statement() {
             constraint: TableConstraint::Unique {
                 attributes: attrs(),
                 columns: vec!["note".into()],
+                without_overlaps: None,
             },
         })
     );
@@ -8447,10 +8472,12 @@ fn parse_create_table_primary_key_and_unique_constraints() {
             TableConstraint::PrimaryKey {
                 attributes: attrs(),
                 columns: vec!["id".into(), "note".into()],
+                without_overlaps: None,
             },
             TableConstraint::Unique {
                 attributes: attrs(),
                 columns: vec!["note".into(), "id".into()],
+                without_overlaps: None,
             },
         ]
     );
@@ -8469,7 +8496,34 @@ fn parse_create_table_primary_key_and_unique_constraints() {
                 ..attrs()
             },
             columns: vec!["id".into()],
+            without_overlaps: None,
         }]
+    );
+
+    let stmt = parse_statement(
+        "create table items (id int4, valid_at int4range, constraint temporal_pk primary key (id, valid_at without overlaps), unique (id, valid_at without overlaps))",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    assert_eq!(
+        ct.constraints().cloned().collect::<Vec<_>>(),
+        vec![
+            TableConstraint::PrimaryKey {
+                attributes: ConstraintAttributes {
+                    name: Some("temporal_pk".into()),
+                    ..attrs()
+                },
+                columns: vec!["id".into(), "valid_at".into()],
+                without_overlaps: Some("valid_at".into()),
+            },
+            TableConstraint::Unique {
+                attributes: attrs(),
+                columns: vec!["id".into(), "valid_at".into()],
+                without_overlaps: Some("valid_at".into()),
+            },
+        ]
     );
 
     let stmt = parse_statement("create table items (id int4 unique nulls not distinct, note text)")

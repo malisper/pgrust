@@ -26,6 +26,7 @@ pub enum ParseError {
     InvalidNumeric(String),
     UnknownTable(String),
     UnknownColumn(String),
+    MissingKeyColumn(String),
     AmbiguousColumn(String),
     InvalidFromClauseReference(String),
     MissingFromClauseEntry(String),
@@ -110,6 +111,9 @@ impl fmt::Display for ParseError {
                 } else {
                     write!(f, "column \"{name}\" does not exist")
                 }
+            }
+            ParseError::MissingKeyColumn(name) => {
+                write!(f, "column \"{name}\" named in key does not exist")
             }
             ParseError::AmbiguousColumn(name) => {
                 write!(f, "column reference \"{name}\" is ambiguous")
@@ -2483,10 +2487,12 @@ pub enum TableConstraint {
     PrimaryKey {
         attributes: ConstraintAttributes,
         columns: Vec<String>,
+        without_overlaps: Option<String>,
     },
     Unique {
         attributes: ConstraintAttributes,
         columns: Vec<String>,
+        without_overlaps: Option<String>,
     },
     ForeignKey {
         attributes: ConstraintAttributes,

@@ -330,14 +330,23 @@ impl Database {
                     .cloned()
                     .map(crate::backend::parser::IndexColumnDef::from)
                     .collect::<Vec<_>>();
-                let build_options = self.resolve_simple_index_build_options(
-                    client_id,
-                    Some((xid, action_cid)),
-                    "btree",
-                    relation,
-                    &index_columns,
-                    &[],
-                )?;
+                let build_options = if action.without_overlaps.is_some() {
+                    self.resolve_temporal_index_build_options(
+                        client_id,
+                        Some((xid, action_cid)),
+                        relation,
+                        &index_columns,
+                    )?
+                } else {
+                    self.resolve_simple_index_build_options(
+                        client_id,
+                        Some((xid, action_cid)),
+                        "btree",
+                        relation,
+                        &index_columns,
+                        &[],
+                    )?
+                };
                 let index_entry = self.build_simple_index_in_transaction(
                     client_id,
                     relation,
@@ -381,10 +390,20 @@ impl Database {
                 } else {
                     Vec::new()
                 };
+                let conexclop = if action.without_overlaps.is_some() {
+                    Some(self.temporal_constraint_operator_oids_for_relation(
+                        relation.relation_oid,
+                        &action.columns,
+                        action.without_overlaps.as_deref(),
+                        &catalog,
+                    )?)
+                } else {
+                    None
+                };
                 let constraint_effect = self
                     .catalog
                     .write()
-                    .create_index_backed_constraint_mvcc(
+                    .create_index_backed_constraint_mvcc_with_period(
                         relation.relation_oid,
                         index_entry.relation_oid,
                         constraint_name,
@@ -394,6 +413,8 @@ impl Database {
                             crate::include::catalog::CONSTRAINT_UNIQUE
                         },
                         &primary_key_owned_not_null_oids,
+                        action.without_overlaps.is_some(),
+                        conexclop,
                         &constraint_ctx,
                     )
                     .map_err(map_catalog_error)?;
