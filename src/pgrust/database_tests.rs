@@ -20371,10 +20371,15 @@ fn pg_get_acl_returns_relation_owner_acl() {
     db.execute(1, "create table acl_test(id int)").unwrap();
 
     assert_eq!(
-        query_rows(&db, 1, "select pg_get_acl('pg_class'::regclass, 'acl_test'::regclass::oid, 0)"),
+        query_rows(
+            &db,
+            1,
+            "select pg_get_acl('pg_class'::regclass, 'acl_test'::regclass::oid, 0)"
+        ),
         vec![vec![Value::Null]]
     );
-    db.execute(1, "grant select on acl_test to app_reader").unwrap();
+    db.execute(1, "grant select on acl_test to app_reader")
+        .unwrap();
     assert_eq!(
         query_rows(
             &db,
@@ -20389,14 +20394,21 @@ fn pg_get_acl_returns_relation_owner_acl() {
     db.execute(1, "revoke all privileges on acl_test from app_reader")
         .unwrap();
     assert_eq!(
-        query_rows(&db, 1, "select pg_get_acl('pg_class'::regclass, 'acl_test'::regclass::oid, 0)"),
+        query_rows(
+            &db,
+            1,
+            "select pg_get_acl('pg_class'::regclass, 'acl_test'::regclass::oid, 0)"
+        ),
         vec![vec![Value::Null]]
     );
     assert_eq!(
         query_rows(&db, 1, "select pg_get_acl('pg_class'::regclass, 0, 0)"),
         vec![vec![Value::Null]]
     );
-    assert_eq!(query_rows(&db, 1, "select pg_get_acl(0, 0, 0)"), vec![vec![Value::Null]]);
+    assert_eq!(
+        query_rows(&db, 1, "select pg_get_acl(0, 0, 0)"),
+        vec![vec![Value::Null]]
+    );
 }
 
 #[test]
