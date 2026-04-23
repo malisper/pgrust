@@ -795,6 +795,18 @@ fn lower_projection_expr_by_input_target(
             )),
             ty,
         ),
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => Expr::Collate {
+            expr: Box::new(lower_projection_expr_by_input_target(
+                root,
+                *expr,
+                input,
+                input_tlist,
+            )),
+            collation_oid,
+        },
         Expr::Like {
             expr,
             pattern,
@@ -1029,7 +1041,9 @@ fn expr_contains_local_semantic_var(expr: &Expr) -> bool {
             expr_contains_local_semantic_var(&saop.left)
                 || expr_contains_local_semantic_var(&saop.right)
         }
-        Expr::Cast(inner, _) => expr_contains_local_semantic_var(inner),
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            expr_contains_local_semantic_var(inner)
+        }
         Expr::Like {
             expr,
             pattern,
@@ -1220,6 +1234,13 @@ fn rewrite_expr_for_append_rel(
         Expr::Cast(inner, ty) => {
             Expr::Cast(Box::new(rewrite_expr_for_append_rel(*inner, info)), ty)
         }
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => Expr::Collate {
+            expr: Box::new(rewrite_expr_for_append_rel(*expr, info)),
+            collation_oid,
+        },
         Expr::Like {
             expr,
             pattern,
@@ -2119,6 +2140,13 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
             ..*saop
         })),
         Expr::Cast(inner, ty) => Expr::Cast(Box::new(lower_expr(ctx, *inner, mode)), ty),
+        Expr::Collate {
+            expr,
+            collation_oid,
+        } => Expr::Collate {
+            expr: Box::new(lower_expr(ctx, *expr, mode)),
+            collation_oid,
+        },
         Expr::Like {
             expr,
             pattern,
