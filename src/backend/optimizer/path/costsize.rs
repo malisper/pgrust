@@ -5,17 +5,16 @@ use crate::RelFileLocator;
 use crate::backend::executor::{Value, cast_value, compare_order_values};
 use crate::backend::parser::analyze::predicate_implies_index_predicate;
 use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType, SqlTypeKind};
-use crate::include::access::brin::BRIN_DEFAULT_PAGES_PER_RANGE;
-use crate::include::access::brin_page::REVMAP_PAGE_MAXITEMS;
 use crate::backend::storage::page::bufpage::{ITEM_ID_SIZE, MAXALIGN, SIZE_OF_PAGE_HEADER_DATA};
 use crate::backend::storage::smgr::BLCKSZ;
 use crate::backend::utils::cache::catcache::sql_type_oid;
+use crate::include::access::brin::BRIN_DEFAULT_PAGES_PER_RANGE;
+use crate::include::access::brin_page::REVMAP_PAGE_MAXITEMS;
 use crate::include::access::htup::SIZEOF_HEAP_TUPLE_HEADER;
 use crate::include::catalog::{
     BRIN_AM_OID, BTREE_AM_OID, GIST_AM_OID, PgStatisticRow, SPGIST_AM_OID,
-    bootstrap_pg_operator_rows,
-    builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
-    relkind_has_storage,
+    bootstrap_pg_operator_rows, builtin_scalar_function_for_proc_oid,
+    proc_oid_for_builtin_scalar_function, relkind_has_storage,
 };
 use crate::include::nodes::datum::ArrayValue;
 use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, PlannerInfo, RestrictInfo};
@@ -1157,7 +1156,9 @@ fn estimate_brin_bitmap_candidate(
     let recheck_expr = and_exprs(recheck_qual.clone());
     let rows = recheck_expr
         .as_ref()
-        .map(|expr| clamp_rows(stats.reltuples * clause_selectivity(expr, Some(stats), stats.reltuples)))
+        .map(|expr| {
+            clamp_rows(stats.reltuples * clause_selectivity(expr, Some(stats), stats.reltuples))
+        })
         .unwrap_or_else(|| clamp_rows(stats.reltuples * index_selectivity));
     let heap_pages = (estimated_ranges * pages_per_range).min(stats.relpages.max(1.0));
     let recheck_cost = recheck_expr
@@ -1765,9 +1766,7 @@ fn path_uses_immediate_outer_columns(path: &Path) -> bool {
             ..
         } => {
             path_uses_immediate_outer_columns(bitmapqual)
-                || recheck_qual
-                    .iter()
-                    .any(expr_uses_immediate_outer_columns)
+                || recheck_qual.iter().any(expr_uses_immediate_outer_columns)
         }
         Path::Append { children, .. } | Path::SetOp { children, .. } => {
             children.iter().any(path_uses_immediate_outer_columns)
@@ -2662,8 +2661,7 @@ fn qual_strategy(
             .index_meta
             .amop_strategy_for_operator(&index.desc, index_pos, oid, value_type_oid(&qual.argument))
             .or_else(|| {
-                (index.index_meta.am_oid == BTREE_AM_OID
-                    || index.index_meta.am_oid == BRIN_AM_OID)
+                (index.index_meta.am_oid == BTREE_AM_OID || index.index_meta.am_oid == BRIN_AM_OID)
                     .then(|| btree_builtin_strategy(kind))
                     .flatten()
             }),

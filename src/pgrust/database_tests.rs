@@ -9572,7 +9572,9 @@ fn create_brin_index_explain_uses_bitmap_scan_and_recheck() {
     let relfilenode = relfilenode_for(&db, 1, "items_a_brin");
     let lines = explain_lines(&db, 1, "select a from items where a >= 200 and a < 210");
     assert!(
-        lines.iter().any(|line| line.contains("Bitmap Heap Scan on items")),
+        lines
+            .iter()
+            .any(|line| line.contains("Bitmap Heap Scan on items")),
         "expected Bitmap Heap Scan in EXPLAIN, got {lines:?}"
     );
     assert!(
@@ -9582,20 +9584,24 @@ fn create_brin_index_explain_uses_bitmap_scan_and_recheck() {
         "expected Bitmap Index Scan on items_a_brin, got {lines:?}"
     );
     assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("Index Cond:") && line.contains("a >= 200") && line.contains("a < 210")),
+        lines.iter().any(|line| line.contains("Index Cond:")
+            && line.contains("a >= 200")
+            && line.contains("a < 210")),
         "expected BRIN Index Cond in EXPLAIN, got {lines:?}"
     );
     assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("Recheck Cond:") && line.contains("a >= 200") && line.contains("a < 210")),
+        lines.iter().any(|line| line.contains("Recheck Cond:")
+            && line.contains("a >= 200")
+            && line.contains("a < 210")),
         "expected BRIN Recheck Cond in EXPLAIN, got {lines:?}"
     );
 
     assert_eq!(
-        query_rows(&db, 1, "select a from items where a >= 200 and a < 210 order by a"),
+        query_rows(
+            &db,
+            1,
+            "select a from items where a >= 200 and a < 210 order by a"
+        ),
         (200..210)
             .map(|value| vec![Value::Int32(value)])
             .collect::<Vec<_>>()
@@ -9608,7 +9614,8 @@ fn reopen_brin_index_preserves_pages_per_range_in_catalog() {
 
     {
         let db = Database::open(&base, 16).unwrap();
-        db.execute(1, "create table items (a int4 not null)").unwrap();
+        db.execute(1, "create table items (a int4 not null)")
+            .unwrap();
         db.execute(
             1,
             "create index items_a_brin on items using brin (a) with (pages_per_range = 32)",
@@ -10364,7 +10371,8 @@ fn unique_expression_index_rejects_duplicate_expression_value() {
     db.execute(1, "insert into items values ('Alpha')").unwrap();
 
     match db.execute(1, "insert into items values ('alpha')") {
-        Err(ExecError::UniqueViolation { constraint, .. }) if constraint == "items_name_lower_key" => {}
+        Err(ExecError::UniqueViolation { constraint, .. })
+            if constraint == "items_name_lower_key" => {}
         other => panic!("expected unique expression violation, got {other:?}"),
     }
 }
@@ -13904,7 +13912,8 @@ fn create_temp_table_constraints_are_supported_with_postgres_persistence_rules()
     }
 
     match db.execute(1, "insert into department values (2, 0, 'A')") {
-        Err(ExecError::UniqueViolation { constraint, .. }) if constraint == "department_name_key" => {}
+        Err(ExecError::UniqueViolation { constraint, .. })
+            if constraint == "department_name_key" => {}
         other => panic!("expected temp unique violation, got {other:?}"),
     }
 
@@ -18991,10 +19000,7 @@ fn standalone_selects_do_not_allocate_xids() {
     let before = db.txns.read().next_xid();
 
     for _ in 0..5 {
-        assert_eq!(
-            query_rows(&db, 1, "select 1"),
-            vec![vec![Value::Int32(1)]]
-        );
+        assert_eq!(query_rows(&db, 1, "select 1"), vec![vec![Value::Int32(1)]]);
     }
 
     assert_eq!(db.txns.read().next_xid(), before);

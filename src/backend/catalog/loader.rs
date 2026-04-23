@@ -47,10 +47,9 @@ use crate::include::access::brin_page::{
 use crate::include::catalog::{
     BRIN_AM_OID, BootstrapCatalogKind, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
     PgAttributeRow, PgClassRow, PgCollationRow, PgConstraintRow, PgIndexRow, PgNamespaceRow,
-    PgOpclassRow, PgOpfamilyRow, PgTypeRow, bootstrap_catalog_kinds,
-    bootstrap_pg_aggregate_rows, bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows,
-    bootstrap_pg_database_rows, bootstrap_pg_tablespace_rows, bootstrap_relation_desc,
-    system_catalog_index_by_oid,
+    PgOpclassRow, PgOpfamilyRow, PgTypeRow, bootstrap_catalog_kinds, bootstrap_pg_aggregate_rows,
+    bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows, bootstrap_pg_database_rows,
+    bootstrap_pg_tablespace_rows, bootstrap_relation_desc, system_catalog_index_by_oid,
 };
 use crate::include::nodes::datum::Value;
 

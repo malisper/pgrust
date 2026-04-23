@@ -1333,8 +1333,10 @@ fn bind_select_list_srf_call(
                         with_ordinality: false,
                     })
                 } else if let Some(resolved) = resolved.as_ref() {
-                    if let Some(srf_impl @ (ResolvedSrfImpl::PartitionTree | ResolvedSrfImpl::PartitionAncestors)) =
-                        resolved.srf_impl
+                    if let Some(
+                        srf_impl @ (ResolvedSrfImpl::PartitionTree
+                        | ResolvedSrfImpl::PartitionAncestors),
+                    ) = resolved.srf_impl
                     {
                         let bound_args = bind_user_defined_srf_args(
                             &args,

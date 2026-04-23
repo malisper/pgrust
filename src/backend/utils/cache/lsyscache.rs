@@ -866,9 +866,8 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         if !brin_is_meta_page(&page).ok()? {
             return None;
         }
-        let bytes = page.get(
-            BRIN_PAGE_CONTENT_OFFSET..BRIN_PAGE_CONTENT_OFFSET + BrinMetaPageData::SIZE,
-        )?;
+        let bytes =
+            page.get(BRIN_PAGE_CONTENT_OFFSET..BRIN_PAGE_CONTENT_OFFSET + BrinMetaPageData::SIZE)?;
         let meta = BrinMetaPageData {
             brin_magic: u32::from_le_bytes(bytes[0..4].try_into().ok()?),
             brin_version: u32::from_le_bytes(bytes[4..8].try_into().ok()?),

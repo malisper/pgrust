@@ -4,9 +4,7 @@ use std::mem;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::backend::access::transam::xact::{
-    CommandId, INVALID_TRANSACTION_ID, TransactionId,
-};
+use crate::backend::access::transam::xact::{CommandId, INVALID_TRANSACTION_ID, TransactionId};
 use crate::backend::catalog::store::CatalogMutationEffect;
 use crate::backend::commands::copyfrom::parse_text_array_literal;
 use crate::backend::commands::tablecmds::{execute_merge, execute_prepared_insert_row};
@@ -571,29 +569,35 @@ impl Session {
                     if let Some(xid) = txn.xid {
                         let _checkpoint_guard = db.checkpoint_commit_guard();
                         db.pool.write_wal_commit(xid).map_err(|e| {
-                            ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Storage(
-                                crate::backend::storage::smgr::SmgrError::Io(std::io::Error::new(
-                                    std::io::ErrorKind::Other,
-                                    e,
-                                )),
-                            ))
+                            ExecError::Heap(
+                                crate::backend::access::heap::heapam::HeapError::Storage(
+                                    crate::backend::storage::smgr::SmgrError::Io(
+                                        std::io::Error::new(std::io::ErrorKind::Other, e),
+                                    ),
+                                ),
+                            )
                         })?;
                         db.pool.flush_wal().map_err(|e| {
-                            ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Storage(
-                                crate::backend::storage::smgr::SmgrError::Io(std::io::Error::new(
-                                    std::io::ErrorKind::Other,
-                                    e,
-                                )),
-                            ))
+                            ExecError::Heap(
+                                crate::backend::access::heap::heapam::HeapError::Storage(
+                                    crate::backend::storage::smgr::SmgrError::Io(
+                                        std::io::Error::new(std::io::ErrorKind::Other, e),
+                                    ),
+                                ),
+                            )
                         })?;
                         db.txns.write().commit(xid).map_err(|e| {
-                            ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(e))
+                            ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(
+                                e,
+                            ))
                         })?;
                         // :HACK: See `Database::finish_txn()`: session commit also needs the
                         // transaction status flushed so fresh durable snapshot readers observe
                         // catalog changes immediately.
                         db.txns.write().flush_clog().map_err(|e| {
-                            ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(e))
+                            ExecError::Heap(crate::backend::access::heap::heapam::HeapError::Mvcc(
+                                e,
+                            ))
                         })?;
                         db.txn_waiter.notify();
                     } else {
@@ -2060,10 +2064,7 @@ impl Session {
         let (txn_ctx, transaction_lock_scope_id) = if let Some(ref mut txn) = self.active_txn {
             let cid = txn.next_command_id;
             txn.next_command_id = txn.next_command_id.saturating_add(1);
-            (
-                txn.xid.map(|xid| (xid, cid)),
-                Some(txn.advisory_scope_id),
-            )
+            (txn.xid.map(|xid| (xid, cid)), Some(txn.advisory_scope_id))
         } else {
             (None, None)
         };
@@ -3279,10 +3280,12 @@ impl Session {
                 let txn_ctx = self.active_txn_ctx_for_command(cid);
                 let snapshot = match txn_ctx {
                     Some((xid, cid)) => db.txns.read().snapshot_for_command(xid, cid)?,
-                    None => db.txns.read().snapshot_for_command(INVALID_TRANSACTION_ID, cid)?,
+                    None => db
+                        .txns
+                        .read()
+                        .snapshot_for_command(INVALID_TRANSACTION_ID, cid)?,
                 };
-                let catalog =
-                    db.lazy_catalog_lookup(client_id, txn_ctx, search_path.as_deref());
+                let catalog = db.lazy_catalog_lookup(client_id, txn_ctx, search_path.as_deref());
                 let mut ctx =
                     self.executor_context_for_catalog(db, snapshot, cid, &catalog, None, None);
                 let result = execute_readonly_statement(stmt, &catalog, &mut ctx);
@@ -4156,71 +4159,73 @@ impl Session {
                     cid
                 };
 
-            let catalog = self.catalog_lookup_for_command(db, xid, cid);
-            let (relation_oid, rel, toast, toast_index, desc, indexes) = {
-                let entry = catalog.lookup_any_relation(table_name).ok_or_else(|| {
-                    ExecError::Parse(ParseError::UnknownTable(table_name.to_string()))
-                })?;
-                if relation_has_row_security(entry.relation_oid, &catalog) {
-                    return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
-                        "COPY FROM is not yet supported on tables with row-level security".into(),
-                    )));
-                }
-                let toast_index = entry.toast.and_then(|toast| {
-                    catalog
-                        .index_relations_for_heap(toast.relation_oid)
-                        .into_iter()
-                        .next()
-                });
-                (
-                    entry.relation_oid,
-                    entry.rel,
-                    entry.toast,
-                    toast_index,
-                    entry.desc.clone(),
-                    catalog.index_relations_for_heap(entry.relation_oid),
-                )
-            };
-            let target_indexes = if let Some(columns) = target_columns {
-                let mut indexes = Vec::with_capacity(columns.len());
-                for name in columns {
-                    let Some(index) = desc.columns.iter().position(|column| column.name == *name)
-                    else {
-                        return Err(ExecError::Parse(ParseError::UnknownColumn(name.clone())));
-                    };
-                    indexes.push(index);
-                }
-                indexes
-            } else {
-                (0..desc.columns.len()).collect()
-            };
-
-            let relation_constraints = crate::backend::parser::bind_relation_constraints(
-                None,
-                relation_oid,
-                &desc,
-                &catalog,
-            )?;
-            let lock_requests = relation_foreign_key_lock_requests(rel, &relation_constraints);
-            self.lock_table_requests_if_needed(db, &lock_requests)?;
-
-            let parsed_rows = rows
-                .iter()
-                .map(|row| {
-                    if row.len() != target_indexes.len() {
-                        return Err(ExecError::Parse(ParseError::InvalidInsertTargetCount {
-                            expected: target_indexes.len(),
-                            actual: row.len(),
-                        }));
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let (relation_oid, rel, toast, toast_index, desc, indexes) = {
+                    let entry = catalog.lookup_any_relation(table_name).ok_or_else(|| {
+                        ExecError::Parse(ParseError::UnknownTable(table_name.to_string()))
+                    })?;
+                    if relation_has_row_security(entry.relation_oid, &catalog) {
+                        return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+                            "COPY FROM is not yet supported on tables with row-level security"
+                                .into(),
+                        )));
                     }
+                    let toast_index = entry.toast.and_then(|toast| {
+                        catalog
+                            .index_relations_for_heap(toast.relation_oid)
+                            .into_iter()
+                            .next()
+                    });
+                    (
+                        entry.relation_oid,
+                        entry.rel,
+                        entry.toast,
+                        toast_index,
+                        entry.desc.clone(),
+                        catalog.index_relations_for_heap(entry.relation_oid),
+                    )
+                };
+                let target_indexes = if let Some(columns) = target_columns {
+                    let mut indexes = Vec::with_capacity(columns.len());
+                    for name in columns {
+                        let Some(index) =
+                            desc.columns.iter().position(|column| column.name == *name)
+                        else {
+                            return Err(ExecError::Parse(ParseError::UnknownColumn(name.clone())));
+                        };
+                        indexes.push(index);
+                    }
+                    indexes
+                } else {
+                    (0..desc.columns.len()).collect()
+                };
 
-                    let mut values = vec![Value::Null; desc.columns.len()];
-                    for (raw, target_index) in row.iter().zip(target_indexes.iter().copied()) {
-                        let column = &desc.columns[target_index];
-                        let value = if raw == "\\N" {
-                            Value::Null
-                        } else {
-                            match column.ty {
+                let relation_constraints = crate::backend::parser::bind_relation_constraints(
+                    None,
+                    relation_oid,
+                    &desc,
+                    &catalog,
+                )?;
+                let lock_requests = relation_foreign_key_lock_requests(rel, &relation_constraints);
+                self.lock_table_requests_if_needed(db, &lock_requests)?;
+
+                let parsed_rows = rows
+                    .iter()
+                    .map(|row| {
+                        if row.len() != target_indexes.len() {
+                            return Err(ExecError::Parse(ParseError::InvalidInsertTargetCount {
+                                expected: target_indexes.len(),
+                                actual: row.len(),
+                            }));
+                        }
+
+                        let mut values = vec![Value::Null; desc.columns.len()];
+                        for (raw, target_index) in row.iter().zip(target_indexes.iter().copied()) {
+                            let column = &desc.columns[target_index];
+                            let value = if raw == "\\N" {
+                                Value::Null
+                            } else {
+                                match column.ty {
                                 ScalarType::Int16 => {
                                     raw.parse::<i16>().map(Value::Int16).map_err(|_| {
                                         ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
@@ -4311,48 +4316,48 @@ impl Session {
                                     parse_text_array_literal(raw, column.sql_type.element_type())?
                                 }
                             }
-                        };
-                        values[target_index] = value;
-                    }
+                            };
+                            values[target_index] = value;
+                        }
 
-                    Ok(values)
-                })
-                .collect::<Result<Vec<_>, ExecError>>()?;
+                        Ok(values)
+                    })
+                    .collect::<Result<Vec<_>, ExecError>>()?;
 
-            let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
-            let catalog = self.catalog_lookup_for_command(db, xid, cid);
-            let interrupts = self.interrupts();
-            let deferred_foreign_keys = self
-                .active_txn
-                .as_ref()
-                .unwrap()
-                .deferred_foreign_keys
-                .clone();
-            let mut ctx = self.executor_context_for_catalog(
-                db,
-                snapshot,
-                cid,
-                &catalog,
-                Some(deferred_foreign_keys),
-                None,
-            );
-            ctx.interrupts = interrupts;
-            let result = crate::backend::commands::tablecmds::execute_insert_values(
-                table_name,
-                relation_oid,
-                rel,
-                toast,
-                toast_index.as_ref(),
-                &desc,
-                &relation_constraints,
-                &[],
-                &indexes,
-                &parsed_rows,
-                &mut ctx,
-                xid,
-                cid,
-            );
-            self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
+                let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let interrupts = self.interrupts();
+                let deferred_foreign_keys = self
+                    .active_txn
+                    .as_ref()
+                    .unwrap()
+                    .deferred_foreign_keys
+                    .clone();
+                let mut ctx = self.executor_context_for_catalog(
+                    db,
+                    snapshot,
+                    cid,
+                    &catalog,
+                    Some(deferred_foreign_keys),
+                    None,
+                );
+                ctx.interrupts = interrupts;
+                let result = crate::backend::commands::tablecmds::execute_insert_values(
+                    table_name,
+                    relation_oid,
+                    rel,
+                    toast,
+                    toast_index.as_ref(),
+                    &desc,
+                    &relation_constraints,
+                    &[],
+                    &indexes,
+                    &parsed_rows,
+                    &mut ctx,
+                    xid,
+                    cid,
+                );
+                self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
                 result
             })();
 
@@ -4366,7 +4371,9 @@ impl Session {
                     .map(|result| match result {
                         StatementResult::AffectedRows(rows) => rows as usize,
                         other => {
-                            panic!("expected COPY finalization to return affected rows, got {other:?}")
+                            panic!(
+                                "expected COPY finalization to return affected rows, got {other:?}"
+                            )
                         }
                     })
             } else {

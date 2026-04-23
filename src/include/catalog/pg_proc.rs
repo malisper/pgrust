@@ -4,16 +4,15 @@ use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
     ANYARRAYOID, ANYOID, BIT_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID, BOX_TYPE_OID,
     BPCHAR_TYPE_OID, BYTEA_TYPE_OID, CIRCLE_TYPE_OID, DATE_TYPE_OID, DATERANGE_TYPE_OID,
-    FDW_HANDLER_TYPE_OID, FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INT2_TYPE_OID, INT4_TYPE_OID,
-    INT4MULTIRANGE_TYPE_OID, INT4RANGE_TYPE_OID, INT8_ARRAY_TYPE_OID, INT8_TYPE_OID,
-    INT8RANGE_TYPE_OID, JSON_TYPE_OID, JSONB_TYPE_OID, JSONPATH_TYPE_OID, LINE_TYPE_OID,
-    LSEG_TYPE_OID, MONEY_TYPE_OID, NAME_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID,
-    OID_TYPE_OID, PATH_TYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID,
-    PG_NODE_TREE_TYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, RECORD_TYPE_OID, REGCLASS_TYPE_OID,
-    TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TSQUERY_TYPE_OID,
-    TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID, FLOAT4_TYPE_OID,
-    INTERNAL_CHAR_TYPE_OID, TIME_TYPE_OID, TIMETZ_TYPE_OID,
-    aggregate_func_for_dynamic_range_proc_oid,
+    FDW_HANDLER_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INT2_TYPE_OID,
+    INT4_TYPE_OID, INT4MULTIRANGE_TYPE_OID, INT4RANGE_TYPE_OID, INT8_ARRAY_TYPE_OID, INT8_TYPE_OID,
+    INT8RANGE_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSON_TYPE_OID, JSONB_TYPE_OID, JSONPATH_TYPE_OID,
+    LINE_TYPE_OID, LSEG_TYPE_OID, MONEY_TYPE_OID, NAME_TYPE_OID, NUMERIC_TYPE_OID,
+    NUMRANGE_TYPE_OID, OID_TYPE_OID, PATH_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
+    PG_LANGUAGE_INTERNAL_OID, PG_NODE_TREE_TYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID,
+    RECORD_TYPE_OID, REGCLASS_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIME_TYPE_OID,
+    TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TIMETZ_TYPE_OID, TSQUERY_TYPE_OID, TSRANGE_TYPE_OID,
+    TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID, aggregate_func_for_dynamic_range_proc_oid,
 };
 use crate::include::nodes::primnodes::{AggFunc, BuiltinScalarFunction, BuiltinWindowFunction};
 use std::sync::OnceLock;
@@ -4032,7 +4031,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ),
         ("pg_get_userbyid", BuiltinScalarFunction::PgGetUserById),
         ("obj_description", BuiltinScalarFunction::ObjDescription),
-        ("pg_describe_object", BuiltinScalarFunction::PgDescribeObject),
+        (
+            "pg_describe_object",
+            BuiltinScalarFunction::PgDescribeObject,
+        ),
         ("pg_notify", BuiltinScalarFunction::PgNotify),
         (
             "pg_notification_queue_usage",
@@ -5084,43 +5086,32 @@ fn brin_scalar_comparison_proc_rows() -> Vec<PgProcRow> {
         (
             FLOAT4_TYPE_OID,
             [
-                "float4eq",
-                "float4ne",
-                "float4lt",
-                "float4le",
-                "float4gt",
-                "float4ge",
+                "float4eq", "float4ne", "float4lt", "float4le", "float4gt", "float4ge",
             ],
         ),
         (
             FLOAT8_TYPE_OID,
             [
-                "float8eq",
-                "float8ne",
-                "float8lt",
-                "float8le",
-                "float8gt",
-                "float8ge",
+                "float8eq", "float8ne", "float8lt", "float8le", "float8gt", "float8ge",
             ],
         ),
         (
             BPCHAR_TYPE_OID,
             [
-                "bpchareq",
-                "bpcharne",
-                "bpcharlt",
-                "bpcharle",
-                "bpchargt",
-                "bpcharge",
+                "bpchareq", "bpcharne", "bpcharlt", "bpcharle", "bpchargt", "bpcharge",
             ],
         ),
         (
             DATE_TYPE_OID,
-            ["date_eq", "date_ne", "date_lt", "date_le", "date_gt", "date_ge"],
+            [
+                "date_eq", "date_ne", "date_lt", "date_le", "date_gt", "date_ge",
+            ],
         ),
         (
             TIME_TYPE_OID,
-            ["time_eq", "time_ne", "time_lt", "time_le", "time_gt", "time_ge"],
+            [
+                "time_eq", "time_ne", "time_lt", "time_le", "time_gt", "time_ge",
+            ],
         ),
         (
             TIMETZ_TYPE_OID,
