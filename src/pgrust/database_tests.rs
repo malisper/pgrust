@@ -9274,7 +9274,8 @@ fn alter_table_rename_moves_conflicting_array_type_names() {
     let db = Database::open(&base, 16).unwrap();
 
     db.execute(1, "create table attmp_array (id int4)").unwrap();
-    db.execute(1, "create table attmp_array2 (id int4)").unwrap();
+    db.execute(1, "create table attmp_array2 (id int4)")
+        .unwrap();
     db.execute(1, "alter table attmp_array2 rename to _attmp_array")
         .unwrap();
 
