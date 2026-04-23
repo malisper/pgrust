@@ -67,6 +67,7 @@ jobs:
     name: cargo-test-run
     needs:
       - changes
+      - cargo-fmt-check
     if: ${{ github.event_name != 'pull_request' && needs.changes.outputs.code == 'true' }}
     runs-on:
       group: large-runners-like-32x-paid
