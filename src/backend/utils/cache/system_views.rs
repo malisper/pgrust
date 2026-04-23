@@ -2,10 +2,13 @@ use std::collections::BTreeMap;
 
 use crate::backend::executor::Value;
 use crate::backend::rewrite::format_stored_rule_definition;
+use crate::backend::utils::cache::system_view_registry::synthetic_system_views;
 use crate::include::catalog::{
-    PG_LANGUAGE_INTERNAL_OID, PgAttributeRow, PgAuthIdRow, PgClassRow, PgIndexRow, PgNamespaceRow,
-    PgProcRow, PgRewriteRow, PgStatisticRow,
+    BOOTSTRAP_SUPERUSER_OID, NAME_TYPE_OID, PG_LANGUAGE_INTERNAL_OID, PgAttributeRow, PgAuthIdRow,
+    PgClassRow, PgIndexRow, PgNamespaceRow, PgPolicyRow, PgProcRow, PgRewriteRow, PgStatisticRow,
+    PolicyCommand,
 };
+use crate::include::nodes::datum::ArrayValue;
 use crate::pgrust::database::DatabaseStatsStore;
 
 const STATISTIC_KIND_MCV: i16 = 1;
@@ -63,8 +66,40 @@ pub fn build_pg_views_rows(
             ))
         })
         .collect::<Vec<_>>();
+    append_synthetic_pg_catalog_view_rows(&mut rows, &role_names);
     rows.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
     rows.into_iter().map(|(_, _, row)| row).collect()
+}
+
+fn append_synthetic_pg_catalog_view_rows(
+    rows: &mut Vec<(String, String, Vec<Value>)>,
+    role_names: &BTreeMap<u32, String>,
+) {
+    let view_owner = role_names
+        .get(&BOOTSTRAP_SUPERUSER_OID)
+        .cloned()
+        .unwrap_or_else(|| "unknown".into());
+    rows.extend(
+        synthetic_system_views()
+            .iter()
+            .filter(|view| {
+                view.has_metadata_definition() && view.canonical_name.starts_with("pg_catalog.")
+            })
+            .map(|view| {
+                let schemaname = "pg_catalog".to_string();
+                let viewname = view.unqualified_name().to_string();
+                (
+                    schemaname.clone(),
+                    viewname.clone(),
+                    vec![
+                        Value::Text(schemaname.into()),
+                        Value::Text(viewname.into()),
+                        Value::Text(view_owner.clone().into()),
+                        Value::Text(view.view_definition_sql.to_string().into()),
+                    ],
+                )
+            }),
+    );
 }
 
 pub fn build_pg_rules_rows(
@@ -112,6 +147,112 @@ pub fn build_pg_rules_rows(
             .then_with(|| left.2.cmp(&right.2))
     });
     rows.into_iter().map(|(_, _, _, row)| row).collect()
+}
+
+pub fn build_pg_policies_rows(
+    namespaces: Vec<PgNamespaceRow>,
+    authids: Vec<PgAuthIdRow>,
+    classes: Vec<PgClassRow>,
+    policies: Vec<PgPolicyRow>,
+) -> Vec<Vec<Value>> {
+    let namespace_names = namespaces
+        .into_iter()
+        .map(|row| (row.oid, row.nspname))
+        .collect::<BTreeMap<_, _>>();
+    let role_names = authids
+        .into_iter()
+        .map(|row| (row.oid, row.rolname))
+        .collect::<BTreeMap<_, _>>();
+    let classes_by_oid = classes
+        .into_iter()
+        .map(|row| (row.oid, row))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut rows = policies
+        .into_iter()
+        .filter_map(|policy| {
+            let class = classes_by_oid.get(&policy.polrelid)?;
+            let schemaname = namespace_names
+                .get(&class.relnamespace)
+                .cloned()
+                .unwrap_or_else(|| "public".to_string());
+            Some((
+                schemaname.clone(),
+                class.relname.clone(),
+                policy.polname.clone(),
+                vec![
+                    Value::Text(schemaname.into()),
+                    Value::Text(class.relname.clone().into()),
+                    Value::Text(policy.polname.clone().into()),
+                    Value::Text(
+                        if policy.polpermissive {
+                            "PERMISSIVE"
+                        } else {
+                            "RESTRICTIVE"
+                        }
+                        .into(),
+                    ),
+                    Value::PgArray(
+                        ArrayValue::from_1d(
+                            policy_role_names(&policy.polroles, &role_names)
+                                .into_iter()
+                                .map(|role_name| Value::Text(role_name.into()))
+                                .collect(),
+                        )
+                        .with_element_type_oid(NAME_TYPE_OID),
+                    ),
+                    Value::Text(policy_command_name(policy.polcmd).into()),
+                    optional_text_value(policy.polqual),
+                    optional_text_value(policy.polwithcheck),
+                ],
+            ))
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    rows.into_iter().map(|(_, _, _, row)| row).collect()
+}
+
+fn policy_role_names(role_oids: &[u32], role_names: &BTreeMap<u32, String>) -> Vec<String> {
+    // :HACK: pgrust currently allows PUBLIC to coexist with specific role OIDs,
+    // while PostgreSQL normally normalizes that state away. We surface both
+    // names here so callers can still inspect the underlying catalog state.
+    let mut resolved = role_oids
+        .iter()
+        .map(|role_oid| {
+            if *role_oid == 0 {
+                "public".to_string()
+            } else {
+                role_names
+                    .get(role_oid)
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_string())
+            }
+        })
+        .collect::<Vec<_>>();
+    resolved.sort();
+    resolved.dedup();
+    resolved
+}
+
+fn policy_command_name(command: PolicyCommand) -> &'static str {
+    match command {
+        PolicyCommand::All => "ALL",
+        PolicyCommand::Select => "SELECT",
+        PolicyCommand::Insert => "INSERT",
+        PolicyCommand::Update => "UPDATE",
+        PolicyCommand::Delete => "DELETE",
+    }
+}
+
+fn optional_text_value(value: Option<String>) -> Value {
+    value
+        .map(|value| Value::Text(value.into()))
+        .unwrap_or(Value::Null)
 }
 
 pub fn build_pg_stats_rows(

@@ -1126,6 +1126,12 @@ pub(super) fn map_catalog_error(err: CatalogError) -> ExecError {
         CatalogError::TableAlreadyExists(name) => {
             ExecError::Parse(ParseError::TableAlreadyExists(name))
         }
+        CatalogError::TypeAlreadyExists(name) => ExecError::DetailedError {
+            message: format!("type \"{name}\" already exists"),
+            detail: None,
+            hint: None,
+            sqlstate: "42710",
+        },
         CatalogError::UnknownTable(name) => ExecError::Parse(ParseError::TableDoesNotExist(name)),
         CatalogError::UnknownColumn(name) => ExecError::Parse(ParseError::UnknownColumn(name)),
         CatalogError::UnknownType(name) => ExecError::Parse(ParseError::UnsupportedType(name)),

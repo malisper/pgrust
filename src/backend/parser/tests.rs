@@ -9,14 +9,15 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::parsenodes::{
     AggregateArgType, AggregateSignatureKind, AliasColumnDef, AliasColumnSpec, ColumnConstraint,
-    CommentOnAggregateStatement, CompositeTypeAttributeDef, CreateAggregateStatement,
-    CreateCompositeTypeStatement, CreateTriggerStatement, CreateTypeStatement,
-    DropAggregateStatement, DropTriggerStatement, DropTypeStatement, ForeignKeyAction,
-    ForeignKeyMatchType, IndexColumnDef, InsertSource, InsertStatement, JoinTreeNode,
-    PartitionStrategy, PublicationObjectSpec, PublicationOption, PublicationSchemaName,
-    RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum,
-    RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint,
-    TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerTiming, ViewCheckOption,
+    CommentOnAggregateStatement, CommentOnFunctionStatement, CompositeTypeAttributeDef,
+    CreateAggregateStatement, CreateCompositeTypeStatement, CreateTriggerStatement,
+    CreateTypeStatement, DropAggregateStatement, DropTriggerStatement, DropTypeStatement,
+    ForeignKeyAction, ForeignKeyMatchType, IndexColumnDef, InsertSource, InsertStatement,
+    JoinTreeNode, PartitionStrategy, PublicationObjectSpec, PublicationOption,
+    PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey,
+    RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement,
+    SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel,
+    TriggerReferencingSpec, TriggerTiming, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -454,6 +455,7 @@ fn test_catalog_entry(rel_number: u32, desc: RelationDesc) -> CatalogEntry {
         relation_oid: 50_000u32.saturating_add(rel_number),
         namespace_oid: 11,
         owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+        relacl: None,
         row_type_oid: 60_000u32.saturating_add(rel_number),
         array_type_oid: 61_000u32.saturating_add(rel_number),
         reltoastrelid: 0,
@@ -512,6 +514,7 @@ fn people_view_entry() -> CatalogEntry {
         relation_oid: 50020,
         namespace_oid: 11,
         owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+        relacl: None,
         row_type_oid: 60020,
         array_type_oid: 60021,
         reltoastrelid: 0,
@@ -702,6 +705,7 @@ fn catalog_with_people_id_index() -> Catalog {
             relation_oid: 50010,
             namespace_oid: 11,
             owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+            relacl: None,
             row_type_oid: 60010,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -761,6 +765,7 @@ fn catalog_with_people_primary_key_opclass(opclass_oid: u32) -> Catalog {
             relation_oid: 50011,
             namespace_oid: 11,
             owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+            relacl: None,
             row_type_oid: 60011,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -849,6 +854,7 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
             relation_oid: 50013,
             namespace_oid: 11,
             owner_oid: BOOTSTRAP_SUPERUSER_OID,
+            relacl: None,
             row_type_oid: 60013,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -905,6 +911,7 @@ fn catalog_with_people_ctid_partial_unique_index() -> Catalog {
             relation_oid: 50015,
             namespace_oid: 11,
             owner_oid: BOOTSTRAP_SUPERUSER_OID,
+            relacl: None,
             row_type_oid: 60015,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -961,6 +968,7 @@ fn catalog_with_people_expression_unique_index() -> Catalog {
             relation_oid: 50014,
             namespace_oid: 11,
             owner_oid: BOOTSTRAP_SUPERUSER_OID,
+            relacl: None,
             row_type_oid: 60014,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -1017,6 +1025,7 @@ fn catalog_with_people_name_c_collation_index() -> Catalog {
             relation_oid: 50015,
             namespace_oid: 11,
             owner_oid: BOOTSTRAP_SUPERUSER_OID,
+            relacl: None,
             row_type_oid: 60015,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -1081,6 +1090,7 @@ fn catalog_with_text_parent_primary_key() -> Catalog {
             relation_oid: 50031,
             namespace_oid: 11,
             owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+            relacl: None,
             row_type_oid: 60031,
             array_type_oid: 0,
             reltoastrelid: 0,
@@ -1718,6 +1728,35 @@ fn parse_comment_on_index_null_statement() {
         stmt,
         Statement::CommentOnIndex(CommentOnIndexStatement {
             index_name: "items_idx".into(),
+            comment: None,
+        })
+    );
+}
+
+#[test]
+fn parse_comment_on_function_statement() {
+    let stmt =
+        parse_statement("comment on function public.add_one(int4) is 'hello function'").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CommentOnFunction(CommentOnFunctionStatement {
+            schema_name: Some("public".into()),
+            function_name: "add_one".into(),
+            arg_types: vec!["int4".into()],
+            comment: Some("hello function".into()),
+        })
+    );
+}
+
+#[test]
+fn parse_comment_on_function_null_statement() {
+    let stmt = parse_statement("comment on function noop() is null").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CommentOnFunction(CommentOnFunctionStatement {
+            schema_name: None,
+            function_name: "noop".into(),
+            arg_types: Vec::new(),
             comment: None,
         })
     );
@@ -3485,6 +3524,7 @@ fn parse_create_function_statement_with_returns_table() {
             schema_name: Some("public".into()),
             function_name: "pair_rows".into(),
             replace_existing: false,
+            cost: None,
             args: vec![CreateFunctionArg {
                 mode: FunctionArgMode::In,
                 name: Some("x".into()),
@@ -3523,6 +3563,7 @@ fn parse_create_or_replace_function_statement_with_returns_table() {
             schema_name: Some("public".into()),
             function_name: "pair_rows".into(),
             replace_existing: true,
+            cost: None,
             args: vec![CreateFunctionArg {
                 mode: FunctionArgMode::In,
                 name: Some("x".into()),
@@ -3574,6 +3615,7 @@ fn parse_create_trigger_statement_with_when_and_update_of() {
                     update_columns: vec!["name".into(), "note".into()],
                 },
             ],
+            referencing: Vec::new(),
             when_clause_sql: Some("new.name is not null".into()),
             function_schema_name: Some("public".into()),
             function_name: "audit_people".into(),
@@ -3599,14 +3641,47 @@ fn parse_drop_trigger_statement_on_table() {
 }
 
 #[test]
-fn parse_create_trigger_rejects_unsupported_truncate() {
+fn parse_create_trigger_statement_with_referencing_and_truncate() {
+    let stmt = parse_statement(
+        "create trigger audit_stmt after truncate on people referencing old table as old_rows execute function bad()",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateTrigger(CreateTriggerStatement {
+            replace_existing: false,
+            trigger_name: "audit_stmt".into(),
+            schema_name: None,
+            table_name: "people".into(),
+            timing: TriggerTiming::After,
+            level: TriggerLevel::Statement,
+            events: vec![TriggerEventSpec {
+                event: TriggerEvent::Truncate,
+                update_columns: Vec::new(),
+            }],
+            referencing: vec![TriggerReferencingSpec {
+                is_new: false,
+                is_table: true,
+                name: "old_rows".into(),
+            }],
+            when_clause_sql: None,
+            function_schema_name: None,
+            function_name: "bad".into(),
+            func_args: Vec::new(),
+        })
+    );
+}
+
+#[test]
+fn parse_create_trigger_rejects_duplicate_events() {
     let err = parse_statement(
-        "create trigger bad_truncate before truncate on people for each statement execute function bad()",
+        "create trigger bad_trigger before update or update of a on people execute function bad()",
     )
     .unwrap_err();
-    assert!(
-        matches!(err, ParseError::FeatureNotSupported(message) if message.contains("TRUNCATE triggers are not supported"))
-    );
+    assert!(matches!(
+        err,
+        ParseError::DetailedError { message, .. } if message == "duplicate trigger events specified"
+    ));
 }
 
 #[test]
@@ -3627,6 +3702,7 @@ fn parse_create_function_statement_with_unnamed_args() {
             schema_name: None,
             function_name: "binary_coercible".into(),
             replace_existing: false,
+            cost: None,
             args: vec![
                 CreateFunctionArg {
                     mode: FunctionArgMode::In,
@@ -3666,6 +3742,7 @@ fn parse_create_function_statement_with_pg_clauses_and_link_symbol() {
             schema_name: None,
             function_name: "binary_coercible".into(),
             replace_existing: false,
+            cost: None,
             args: vec![
                 CreateFunctionArg {
                     mode: FunctionArgMode::In,
@@ -3705,6 +3782,7 @@ fn parse_create_function_statement_with_sql_return_shorthand() {
             schema_name: None,
             function_name: "fipshash".into(),
             replace_existing: false,
+            cost: None,
             args: vec![CreateFunctionArg {
                 mode: FunctionArgMode::In,
                 name: None,
@@ -3720,6 +3798,39 @@ fn parse_create_function_statement_with_sql_return_shorthand() {
             parallel: FunctionParallel::Safe,
             language: "sql".into(),
             body: "select substr(encode(sha256($1), 'hex'), 1, 32)".into(),
+            link_symbol: None,
+        })
+    );
+}
+
+#[test]
+fn parse_create_function_statement_with_cost_clause() {
+    let stmt = parse_statement(
+        "create or replace function f_leak(text) returns bool cost 0.0000001 language plpgsql as $$ begin return true; end $$",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateFunction(CreateFunctionStatement {
+            schema_name: None,
+            function_name: "f_leak".into(),
+            replace_existing: true,
+            cost: Some("0.0000001".into()),
+            args: vec![CreateFunctionArg {
+                mode: FunctionArgMode::In,
+                name: None,
+                ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+            }],
+            return_spec: CreateFunctionReturnSpec::Type {
+                ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool)),
+                setof: false,
+            },
+            strict: false,
+            leakproof: false,
+            volatility: FunctionVolatility::Volatile,
+            parallel: FunctionParallel::Unsafe,
+            language: "plpgsql".into(),
+            body: " begin return true; end ".into(),
             link_symbol: None,
         })
     );
@@ -9585,19 +9696,30 @@ fn build_plan_rejects_positional_after_named_function_arg() {
 fn build_plan_for_unnest_uses_array_element_types() {
     let stmt = parse_select("select * from unnest(ARRAY['a']::varchar[], ARRAY[1, 2])").unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();
-    match plan {
+    let output_columns = match plan {
         Plan::FunctionScan {
             call: crate::include::nodes::primnodes::SetReturningCall::Unnest { output_columns, .. },
             ..
-        } => {
-            assert_eq!(output_columns.len(), 2);
-            assert_eq!(
-                output_columns[0].sql_type,
-                SqlType::new(SqlTypeKind::Varchar)
-            );
-            assert_eq!(output_columns[1].sql_type, SqlType::new(SqlTypeKind::Int4));
-        }
+        } => output_columns,
+        Plan::Projection { input, .. } => match *input {
+            Plan::FunctionScan {
+                call:
+                    crate::include::nodes::primnodes::SetReturningCall::Unnest {
+                        output_columns, ..
+                    },
+                ..
+            } => output_columns,
+            other => panic!("expected unnest function scan, got {other:?}"),
+        },
         other => panic!("expected unnest plan, got {other:?}"),
+    };
+    {
+        assert_eq!(output_columns.len(), 2);
+        assert_eq!(
+            output_columns[0].sql_type,
+            SqlType::new(SqlTypeKind::Varchar)
+        );
+        assert_eq!(output_columns[1].sql_type, SqlType::new(SqlTypeKind::Int4));
     }
 }
 
@@ -9754,6 +9876,30 @@ fn analyze_pg_locks_uses_expected_columns_and_types() {
             ("granted".into(), SqlType::new(SqlTypeKind::Bool)),
             ("fastpath".into(), SqlType::new(SqlTypeKind::Bool)),
             ("waitstart".into(), SqlType::new(SqlTypeKind::TimestampTz)),
+        ]
+    );
+}
+
+#[test]
+fn analyze_pg_policies_uses_expected_columns_and_types() {
+    let stmt = parse_select("select * from pg_policies").unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[]).unwrap();
+
+    assert_eq!(
+        query_column_names_and_types(&query),
+        vec![
+            ("schemaname".into(), SqlType::new(SqlTypeKind::Name)),
+            ("tablename".into(), SqlType::new(SqlTypeKind::Name)),
+            ("policyname".into(), SqlType::new(SqlTypeKind::Name)),
+            ("permissive".into(), SqlType::new(SqlTypeKind::Text)),
+            (
+                "roles".into(),
+                SqlType::array_of(SqlType::new(SqlTypeKind::Name))
+            ),
+            ("cmd".into(), SqlType::new(SqlTypeKind::Text)),
+            ("qual".into(), SqlType::new(SqlTypeKind::Text)),
+            ("with_check".into(), SqlType::new(SqlTypeKind::Text)),
         ]
     );
 }
