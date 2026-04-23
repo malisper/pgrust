@@ -309,9 +309,9 @@ run_one() {
         return
     fi
 
-    # max_protocol_version=3.0 keeps libpq (built from PG master, 3.2+) speaking
-    # the older wire protocol that pgrust currently implements. Harmless against
-    # real PG; remove once pgrust supports v3.2+.
+    # :HACK: max_protocol_version=3.0 keeps libpq (built from PG master, 3.2+)
+    # speaking the older wire protocol that pgrust currently implements.
+    # Harmless against real PG. Remove once pgrust supports v3.2+.
     local conninfo="host=127.0.0.1 port=$PORT user=$REGRESS_USER dbname=postgres max_protocol_version=3.0"
     if env "$ISOLATIONTESTER_LIB_ENV" "$ISOLATIONTESTER" "$conninfo" < "$spec" > "$actual" 2>&1; then
         if diff -u "$expected" "$actual" > "$diff_file" 2>&1; then
