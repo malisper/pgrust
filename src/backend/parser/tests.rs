@@ -10,14 +10,14 @@ use crate::include::catalog::{
 use crate::include::nodes::parsenodes::{
     AggregateArgType, AggregateSignatureKind, AliasColumnDef, AliasColumnSpec, ColumnConstraint,
     CommentOnAggregateStatement, CommentOnFunctionStatement, CompositeTypeAttributeDef,
-    CreateAggregateStatement,
-    CreateCompositeTypeStatement, CreateTriggerStatement, CreateTypeStatement,
-    DropAggregateStatement, DropTriggerStatement, DropTypeStatement, ForeignKeyAction,
-    ForeignKeyMatchType, IndexColumnDef, InsertSource, InsertStatement, JoinTreeNode,
-    PartitionStrategy, PublicationObjectSpec, PublicationOption, PublicationSchemaName,
-    RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum,
-    RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint,
-    TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerTiming, ViewCheckOption,
+    CreateAggregateStatement, CreateCompositeTypeStatement, CreateTriggerStatement,
+    CreateTypeStatement, DropAggregateStatement, DropTriggerStatement, DropTypeStatement,
+    ForeignKeyAction, ForeignKeyMatchType, IndexColumnDef, InsertSource, InsertStatement,
+    JoinTreeNode, PartitionStrategy, PublicationObjectSpec, PublicationOption,
+    PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey,
+    RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement,
+    SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerTiming,
+    ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 

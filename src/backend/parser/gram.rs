@@ -3304,7 +3304,9 @@ fn build_comment_on_aggregate_statement(
     })
 }
 
-fn build_comment_on_function_statement(sql: &str) -> Result<CommentOnFunctionStatement, ParseError> {
+fn build_comment_on_function_statement(
+    sql: &str,
+) -> Result<CommentOnFunctionStatement, ParseError> {
     let Some(rest) = sql.get("comment on function".len()..) else {
         return Err(ParseError::UnexpectedToken {
             expected: "COMMENT ON FUNCTION name(signature) IS ...",
