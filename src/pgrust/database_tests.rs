@@ -6736,6 +6736,97 @@ fn comment_on_missing_trigger_reports_table_name() {
 }
 
 #[test]
+fn create_trigger_reports_postgres_style_instead_of_table_error() {
+    let base = temp_dir("trigger_instead_of_table_error");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4)").unwrap();
+    db.execute(
+        1,
+        "create function items_trig() returns trigger language plpgsql as $$ begin return new; end $$",
+    )
+    .unwrap();
+
+    match db.execute(
+        1,
+        "create trigger items_instead instead of insert on items for each row execute function items_trig()",
+    ) {
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            sqlstate,
+            ..
+        }) if message == "\"items\" is a table"
+            && detail.as_deref() == Some("Tables cannot have INSTEAD OF triggers.")
+            && sqlstate == "42809" => {}
+        other => panic!("expected table/instead-of error, got {:?}", other),
+    }
+}
+
+#[test]
+fn create_trigger_reports_postgres_style_transition_table_errors() {
+    let base = temp_dir("trigger_transition_table_errors");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function items_trig() returns trigger language plpgsql as $$ begin return new; end $$",
+    )
+    .unwrap();
+
+    match db.execute(
+        1,
+        "create trigger items_multi after insert or update on items referencing new table as new_rows for each statement execute function items_trig()",
+    ) {
+        Err(ExecError::DetailedError { message, .. })
+            if message
+                == "transition tables cannot be specified for triggers with more than one event" => {}
+        other => panic!("expected transition-table multi-event error, got {:?}", other),
+    }
+
+    match db.execute(
+        1,
+        "create trigger items_rowref after insert on items referencing new row as new_row for each statement execute function items_trig()",
+    ) {
+        Err(ExecError::DetailedError {
+            message, hint, ..
+        }) if message == "ROW variable naming in the REFERENCING clause is not supported"
+            && hint.as_deref()
+                == Some("Use OLD TABLE or NEW TABLE for naming transition tables.") => {}
+        other => panic!("expected referencing row-name error, got {:?}", other),
+    }
+}
+
+#[test]
+fn statement_trigger_return_value_is_ignored() {
+    let dir = temp_dir("statement_trigger_return_value_ignored");
+    let db = Database::open(&dir, 16).unwrap();
+
+    db.execute(1, "create table items (id int4)").unwrap();
+    db.execute(
+        1,
+        "create function stmt_returns_new() returns trigger language plpgsql as $$ begin raise notice 'stmt fired'; return NEW; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger items_stmt before insert on items for each statement execute function stmt_returns_new()",
+    )
+    .unwrap();
+
+    clear_notices();
+    db.execute(1, "insert into items values (1)").unwrap();
+
+    assert_eq!(take_notice_messages(), vec![String::from("stmt fired")]);
+    assert_eq!(
+        query_rows(&db, 1, "select id from items"),
+        vec![vec![Value::Int32(1)]]
+    );
+}
+
+#[test]
 fn create_comment_and_drop_rule_updates_catalogs() {
     let base = temp_dir("rule_catalog_rows");
     let db = Database::open(&base, 16).unwrap();

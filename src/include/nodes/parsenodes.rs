@@ -610,6 +610,7 @@ pub struct CreateAggregateStatement {
 pub enum TriggerTiming {
     Before,
     After,
+    InsteadOf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -623,12 +624,20 @@ pub enum TriggerEvent {
     Insert,
     Update,
     Delete,
+    Truncate,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TriggerEventSpec {
     pub event: TriggerEvent,
     pub update_columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerReferencingSpec {
+    pub is_new: bool,
+    pub is_table: bool,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -640,6 +649,7 @@ pub struct CreateTriggerStatement {
     pub timing: TriggerTiming,
     pub level: TriggerLevel,
     pub events: Vec<TriggerEventSpec>,
+    pub referencing: Vec<TriggerReferencingSpec>,
     pub when_clause_sql: Option<String>,
     pub function_schema_name: Option<String>,
     pub function_name: String,
