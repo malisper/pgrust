@@ -22,6 +22,7 @@ jobs:
     name: cargo-test-run
     if: ${{ github.event_name != 'pull_request' }}
     runs-on:
+      group: Default
       labels: 32x
     steps:
       - name: Checkout
