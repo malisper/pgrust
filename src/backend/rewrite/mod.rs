@@ -13,7 +13,8 @@ pub(crate) use view_dml::{
     ResolvedAutoViewTarget, ViewDmlEvent, ViewDmlRewriteError, resolve_auto_updatable_view_target,
 };
 pub(crate) use views::{
-    load_view_return_query, load_view_return_select, split_stored_view_definition_sql,
+    format_view_definition, load_view_return_query, load_view_return_select,
+    split_stored_view_definition_sql,
 };
 
 use crate::backend::parser::{CatalogLookup, ParseError};

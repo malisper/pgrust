@@ -20341,6 +20341,28 @@ fn pg_get_userbyid_returns_role_name() {
 }
 
 #[test]
+fn pg_get_viewdef_returns_canonical_view_query() {
+    let dir = temp_dir("pg_get_viewdef");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table t1 (f1 int4)").unwrap();
+    db.execute(1, "create table t2 (f1 int4)").unwrap();
+    db.execute(
+        1,
+        "create view v1 as select f1 from t1 left join t2 using (f1) group by f1",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select pg_get_viewdef('v1'::regclass)"),
+        vec![vec![Value::Text(
+            " SELECT (f1)::integer AS f1\n   FROM (t1\n      LEFT JOIN t2 USING (f1))\n  GROUP BY f1;"
+                .into()
+        )]]
+    );
+}
+
+#[test]
 fn current_database_function_matches_pg_database_name() {
     let dir = temp_dir("current_database_function");
     let db = Database::open(&dir, 64).unwrap();
