@@ -1001,7 +1001,14 @@ impl Database {
             pronamespace: namespace_oid,
             proowner: BOOTSTRAP_SUPERUSER_OID,
             prolang: language_row.oid,
-            procost: 100.0,
+            procost: create_stmt
+                .cost
+                .as_deref()
+                .map(|cost| {
+                    cost.parse::<f64>()
+                        .expect("validated CREATE FUNCTION COST must parse")
+                })
+                .unwrap_or(100.0),
             prorows: if proretset { 1000.0 } else { 0.0 },
             provariadic: 0,
             prosupport: 0,

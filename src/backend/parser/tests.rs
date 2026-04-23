@@ -3524,6 +3524,7 @@ fn parse_create_function_statement_with_returns_table() {
             schema_name: Some("public".into()),
             function_name: "pair_rows".into(),
             replace_existing: false,
+            cost: None,
             args: vec![CreateFunctionArg {
                 mode: FunctionArgMode::In,
                 name: Some("x".into()),
@@ -3562,6 +3563,7 @@ fn parse_create_or_replace_function_statement_with_returns_table() {
             schema_name: Some("public".into()),
             function_name: "pair_rows".into(),
             replace_existing: true,
+            cost: None,
             args: vec![CreateFunctionArg {
                 mode: FunctionArgMode::In,
                 name: Some("x".into()),
@@ -3700,6 +3702,7 @@ fn parse_create_function_statement_with_unnamed_args() {
             schema_name: None,
             function_name: "binary_coercible".into(),
             replace_existing: false,
+            cost: None,
             args: vec![
                 CreateFunctionArg {
                     mode: FunctionArgMode::In,
@@ -3739,6 +3742,7 @@ fn parse_create_function_statement_with_pg_clauses_and_link_symbol() {
             schema_name: None,
             function_name: "binary_coercible".into(),
             replace_existing: false,
+            cost: None,
             args: vec![
                 CreateFunctionArg {
                     mode: FunctionArgMode::In,
@@ -3778,6 +3782,7 @@ fn parse_create_function_statement_with_sql_return_shorthand() {
             schema_name: None,
             function_name: "fipshash".into(),
             replace_existing: false,
+            cost: None,
             args: vec![CreateFunctionArg {
                 mode: FunctionArgMode::In,
                 name: None,
@@ -3793,6 +3798,39 @@ fn parse_create_function_statement_with_sql_return_shorthand() {
             parallel: FunctionParallel::Safe,
             language: "sql".into(),
             body: "select substr(encode(sha256($1), 'hex'), 1, 32)".into(),
+            link_symbol: None,
+        })
+    );
+}
+
+#[test]
+fn parse_create_function_statement_with_cost_clause() {
+    let stmt = parse_statement(
+        "create or replace function f_leak(text) returns bool cost 0.0000001 language plpgsql as $$ begin return true; end $$",
+    )
+    .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CreateFunction(CreateFunctionStatement {
+            schema_name: None,
+            function_name: "f_leak".into(),
+            replace_existing: true,
+            cost: Some("0.0000001".into()),
+            args: vec![CreateFunctionArg {
+                mode: FunctionArgMode::In,
+                name: None,
+                ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+            }],
+            return_spec: CreateFunctionReturnSpec::Type {
+                ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool)),
+                setof: false,
+            },
+            strict: false,
+            leakproof: false,
+            volatility: FunctionVolatility::Volatile,
+            parallel: FunctionParallel::Unsafe,
+            language: "plpgsql".into(),
+            body: " begin return true; end ".into(),
             link_symbol: None,
         })
     );
