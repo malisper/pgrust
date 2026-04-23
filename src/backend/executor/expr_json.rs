@@ -1544,6 +1544,8 @@ fn json_object_key_text(value: &Value, op: &'static str) -> Result<String, ExecE
         Value::Text(_) | Value::TextRef(_, _) => Ok(value.as_text().unwrap().to_string()),
         Value::Bit(v) => Ok(render_bit_text(v)),
         Value::Bytea(v) => Ok(format_bytea_text(v, ByteaOutputFormat::Hex)),
+        Value::Inet(v) => Ok(v.render_inet()),
+        Value::Cidr(v) => Ok(v.render_cidr()),
         Value::InternalChar(v) => Ok(crate::backend::executor::render_internal_char_text(*v)),
         Value::Int16(v) => Ok(v.to_string()),
         Value::Int32(v) => Ok(v.to_string()),
@@ -2799,6 +2801,8 @@ fn value_to_json_serde_with_config(
             SerdeJsonValue::String(value.as_text().unwrap().to_string())
         }
         Value::Bytea(v) => SerdeJsonValue::String(format_bytea_text(v, ByteaOutputFormat::Hex)),
+        Value::Inet(v) => SerdeJsonValue::String(v.render_inet()),
+        Value::Cidr(v) => SerdeJsonValue::String(v.render_cidr()),
         Value::InternalChar(v) => {
             SerdeJsonValue::String(crate::backend::executor::render_internal_char_text(*v))
         }
@@ -2909,6 +2913,8 @@ fn render_json_value_text_with_config(
         Value::Bytea(v) => {
             serde_json::to_string(&format_bytea_text(v, ByteaOutputFormat::Hex)).unwrap()
         }
+        Value::Inet(v) => serde_json::to_string(&v.render_inet()).unwrap(),
+        Value::Cidr(v) => serde_json::to_string(&v.render_cidr()).unwrap(),
         Value::InternalChar(v) => {
             serde_json::to_string(&crate::backend::executor::render_internal_char_text(*v)).unwrap()
         }

@@ -4,6 +4,7 @@
 use super::ExecError;
 use super::exec_expr::parse_numeric_text;
 use super::expr_geometry::{decode_path_bytes, decode_polygon_bytes};
+use super::expr_network::{parse_cidr_bytes, parse_inet_bytes};
 use super::expr_range::decode_range_bytes;
 use super::value_io::missing_column_value;
 use super::value_io::{decode_anyarray_bytes, decode_array_bytes};
@@ -410,6 +411,10 @@ impl CompiledTupleDecoder {
                                 values.push(Value::Null);
                                 continue;
                             }
+                            ScalarType::Inet | ScalarType::Cidr => {
+                                values.push(Value::Null);
+                                continue;
+                            }
                             ScalarType::Text | ScalarType::Record => {
                                 values.push(Value::Null);
                                 continue;
@@ -509,6 +514,12 @@ impl CompiledTupleDecoder {
                             ScalarType::Bytea => {
                                 values.push(Value::Bytea(bytes_slice.to_vec()));
                             }
+                            ScalarType::Inet => {
+                                values.push(Value::Inet(parse_inet_bytes(bytes_slice)?));
+                            }
+                            ScalarType::Cidr => {
+                                values.push(Value::Cidr(parse_cidr_bytes(bytes_slice)?));
+                            }
                             ScalarType::Text | ScalarType::Record => {
                                 values.push(Value::TextRef(
                                     bytes_slice.as_ptr(),
@@ -604,6 +615,12 @@ impl CompiledTupleDecoder {
                             }
                             ScalarType::Bytea => {
                                 values.push(Value::Bytea(bytes.to_vec()));
+                            }
+                            ScalarType::Inet => {
+                                values.push(Value::Inet(parse_inet_bytes(bytes)?));
+                            }
+                            ScalarType::Cidr => {
+                                values.push(Value::Cidr(parse_cidr_bytes(bytes)?));
                             }
                             ScalarType::Text | ScalarType::Record => {
                                 values.push(Value::TextRef(bytes.as_ptr(), bytes.len() as u32));

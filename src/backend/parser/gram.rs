@@ -1445,6 +1445,8 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
         "int2vector" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int2Vector))),
         "oidvector" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::OidVector))),
         "name" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Name))),
+        "inet" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Inet))),
+        "cidr" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Cidr))),
         "bpchar" | "pg_catalog.bpchar" => {
             return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Char)));
         }
@@ -10322,6 +10324,8 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Jsonb => "jsonb",
         SqlTypeKind::JsonPath => "jsonpath",
         SqlTypeKind::Xml => "xml",
+        SqlTypeKind::Inet => "inet",
+        SqlTypeKind::Cidr => "cidr",
         SqlTypeKind::Date => "date",
         SqlTypeKind::DateRange => "daterange",
         SqlTypeKind::Time => "time without time zone",
@@ -11350,6 +11354,8 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
                 "text" => SqlType::new(SqlTypeKind::Text),
                 "bool" | "boolean" => SqlType::new(SqlTypeKind::Bool),
                 "bytea" => SqlType::new(SqlTypeKind::Bytea),
+                "inet" => SqlType::new(SqlTypeKind::Inet),
+                "cidr" => SqlType::new(SqlTypeKind::Cidr),
                 "money" => SqlType::new(SqlTypeKind::Money),
                 "float4" | "real" => SqlType::new(SqlTypeKind::Float4),
                 "float8" => SqlType::new(SqlTypeKind::Float8),
@@ -11395,6 +11401,8 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
             }
         }
         Rule::kw_bytea => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bytea)),
+        Rule::kw_inet => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Inet)),
+        Rule::kw_cidr => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Cidr)),
         Rule::kw_money => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Money)),
         Rule::kw_float4 | Rule::kw_real => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Float4)),
         Rule::kw_float8 | Rule::double_precision_type => {

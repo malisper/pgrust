@@ -788,6 +788,8 @@ pub(crate) fn jsonb_from_value(
         Value::TextRef(_, _) => JsonbValue::String(value.as_text().unwrap().to_string()),
         Value::Xml(text) => JsonbValue::String(text.to_string()),
         Value::Bytea(bytes) => JsonbValue::String(format_bytea_text(bytes, ByteaOutputFormat::Hex)),
+        Value::Inet(v) => JsonbValue::String(v.render_inet()),
+        Value::Cidr(v) => JsonbValue::String(v.render_cidr()),
         Value::InternalChar(v) => {
             JsonbValue::String(crate::backend::executor::render_internal_char_text(*v))
         }
@@ -1070,6 +1072,8 @@ pub(crate) fn jsonb_builder_key(value: &Value) -> Result<String, ExecError> {
         Value::Text(text) => Ok(text.to_string()),
         Value::TextRef(_, _) => Ok(value.as_text().unwrap().to_string()),
         Value::Bytea(bytes) => Ok(format_bytea_text(bytes, ByteaOutputFormat::Hex)),
+        Value::Inet(v) => Ok(v.render_inet()),
+        Value::Cidr(v) => Ok(v.render_cidr()),
         Value::InternalChar(v) => Ok(crate::backend::executor::render_internal_char_text(*v)),
         Value::JsonPath(text) => Ok(text.to_string()),
         Value::Xml(text) => Ok(text.to_string()),
