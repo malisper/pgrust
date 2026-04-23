@@ -191,6 +191,7 @@ fn analyze_executor_context(
         stats: Arc::clone(&db.stats),
         session_stats: db.session_stats_state(client_id),
         snapshot: db.txns.read().snapshot_for_command(xid, cid).unwrap(),
+        transaction_state: None,
         client_id,
         current_database_name: db.current_database_name(),
         session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
@@ -19054,6 +19055,149 @@ fn explicit_transaction_allocates_xid_on_first_write() {
     );
 
     session.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn plpgsql_update_inside_autocommit_select_allocates_xid() {
+    let base = temp_dir("plpgsql_update_inside_select_xid");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table lazy_fn_items (id int4, note text)")
+        .unwrap();
+    db.execute(1, "insert into lazy_fn_items values (1, 'old')")
+        .unwrap();
+    db.execute(
+        1,
+        "create function lazy_fn_update() returns int4 language plpgsql as $$ begin update lazy_fn_items set note = 'new' where id = 1; return 0; end $$",
+    )
+    .unwrap();
+    let before = db.txns.read().next_xid();
+
+    assert_eq!(
+        query_rows(&db, 1, "select lazy_fn_update()"),
+        vec![vec![Value::Int32(0)]]
+    );
+    assert_eq!(db.txns.read().next_xid(), before + 1);
+    assert_eq!(
+        query_rows(&db, 1, "select note from lazy_fn_items where id = 1"),
+        vec![vec![Value::Text("new".into())]]
+    );
+}
+
+#[test]
+fn plpgsql_insert_inside_autocommit_select_commits() {
+    let base = temp_dir("plpgsql_insert_inside_select_commits");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table lazy_fn_insert_items (id int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function lazy_fn_insert() returns int4 language plpgsql as $$ begin insert into lazy_fn_insert_items values (7); return 0; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select lazy_fn_insert()"),
+        vec![vec![Value::Int32(0)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select id from lazy_fn_insert_items"),
+        vec![vec![Value::Int32(7)]]
+    );
+}
+
+#[test]
+fn plpgsql_delete_inside_autocommit_select_commits() {
+    let base = temp_dir("plpgsql_delete_inside_select_commits");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table lazy_fn_delete_items (id int4)")
+        .unwrap();
+    db.execute(1, "insert into lazy_fn_delete_items values (7)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function lazy_fn_delete() returns int4 language plpgsql as $$ begin delete from lazy_fn_delete_items where id = 7; return 0; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select lazy_fn_delete()"),
+        vec![vec![Value::Int32(0)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from lazy_fn_delete_items"),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn plpgsql_write_inside_autocommit_select_error_aborts_xid() {
+    let base = temp_dir("plpgsql_write_inside_select_abort");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table lazy_fn_abort_items (id int4, note text)")
+        .unwrap();
+    db.execute(1, "insert into lazy_fn_abort_items values (1, 'old')")
+        .unwrap();
+    db.execute(
+        1,
+        "create function lazy_fn_abort() returns int4 language plpgsql as $$ begin update lazy_fn_abort_items set note = 'new' where id = 1; raise exception 'boom'; end $$",
+    )
+    .unwrap();
+
+    assert!(db.execute(1, "select lazy_fn_abort()").is_err());
+    assert_eq!(
+        query_rows(&db, 1, "select note from lazy_fn_abort_items where id = 1"),
+        vec![vec![Value::Text("old".into())]]
+    );
+}
+
+#[test]
+fn plpgsql_write_inside_explicit_transaction_select_allocates_xid() {
+    let base = temp_dir("plpgsql_write_inside_explicit_select_xid");
+    let db = Database::open(&base, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table lazy_session_fn_items (id int4, note text)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into lazy_session_fn_items values (1, 'old')")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create function lazy_session_fn_update() returns int4 language plpgsql as $$ begin update lazy_session_fn_items set note = 'new' where id = 1; return 0; end $$",
+        )
+        .unwrap();
+    let before = db.txns.read().next_xid();
+
+    session.execute(&db, "begin").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select 1"),
+        vec![vec![Value::Int32(1)]]
+    );
+    assert_eq!(db.txns.read().next_xid(), before);
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select lazy_session_fn_update()"),
+        vec![vec![Value::Int32(0)]]
+    );
+    assert_eq!(db.txns.read().next_xid(), before + 1);
+    session.execute(&db, "commit").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select note from lazy_session_fn_items where id = 1"
+        ),
+        vec![vec![Value::Text("new".into())]]
+    );
 }
 
 #[test]

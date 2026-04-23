@@ -10,8 +10,8 @@ use crate::backend::commands::copyfrom::parse_text_array_literal;
 use crate::backend::commands::tablecmds::{execute_merge, execute_prepared_insert_row};
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
-    DeferredForeignKeyTracker, ExecError, ExecutorContext, StatementResult, Value, cast_value,
-    execute_readonly_statement, parse_bytea_text,
+    DeferredForeignKeyTracker, ExecError, ExecutorContext, ExecutorTransactionState,
+    StatementResult, Value, cast_value, execute_readonly_statement, parse_bytea_text,
 };
 use crate::backend::parser::{
     CatalogLookup, CopyFromStatement, CopySource, ParseError, ParseOptions, PreparedInsert,
@@ -388,6 +388,13 @@ impl Session {
         deferred_foreign_keys: Option<DeferredForeignKeyTracker>,
         statement_lock_scope_id: Option<u64>,
     ) -> ExecutorContext {
+        let transaction_state = Some(Arc::new(parking_lot::Mutex::new(
+            ExecutorTransactionState {
+                xid: (snapshot.current_xid != INVALID_TRANSACTION_ID)
+                    .then_some(snapshot.current_xid),
+                cid,
+            },
+        )));
         ExecutorContext {
             pool: Arc::clone(&db.pool),
             txns: db.txns.clone(),
@@ -402,6 +409,7 @@ impl Session {
             stats: Arc::clone(&db.stats),
             session_stats: Arc::clone(&self.stats_state),
             snapshot,
+            transaction_state,
             client_id: self.client_id,
             current_database_name: db.current_database_name(),
             session_user_oid: self.session_user_oid(),
@@ -3286,9 +3294,26 @@ impl Session {
                         .snapshot_for_command(INVALID_TRANSACTION_ID, cid)?,
                 };
                 let catalog = db.lazy_catalog_lookup(client_id, txn_ctx, search_path.as_deref());
-                let mut ctx =
-                    self.executor_context_for_catalog(db, snapshot, cid, &catalog, None, None);
+                let deferred_foreign_keys = self
+                    .active_txn
+                    .as_ref()
+                    .unwrap()
+                    .deferred_foreign_keys
+                    .clone();
+                let mut ctx = self.executor_context_for_catalog(
+                    db,
+                    snapshot,
+                    cid,
+                    &catalog,
+                    Some(deferred_foreign_keys),
+                    None,
+                );
                 let result = execute_readonly_statement(stmt, &catalog, &mut ctx);
+                if let Some(xid) = ctx.transaction_xid()
+                    && let Some(txn) = self.active_txn.as_mut()
+                {
+                    txn.xid = Some(xid);
+                }
                 self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
                 result
             }

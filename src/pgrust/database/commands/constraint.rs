@@ -57,6 +57,7 @@ fn ddl_executor_context(
         stats: std::sync::Arc::clone(&db.stats),
         session_stats: db.session_stats_state(client_id),
         snapshot,
+        transaction_state: None,
         client_id,
         current_database_name: db.current_database_name(),
         session_user_oid: db.auth_state(client_id).session_user_oid(),

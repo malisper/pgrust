@@ -269,6 +269,7 @@ mod tests {
                 crate::pgrust::database::SessionStatsState::default(),
             )),
             snapshot,
+            transaction_state: None,
             client_id: 0,
             current_database_name: "postgres".to_string(),
             session_user_oid: BOOTSTRAP_SUPERUSER_OID,

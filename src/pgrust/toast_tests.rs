@@ -130,6 +130,7 @@ fn toast_executor_context(
         stats: db.stats.clone(),
         session_stats: db.session_stats_state(client_id),
         snapshot: db.txns.read().snapshot_for_command(xid, cid).unwrap(),
+        transaction_state: None,
         client_id,
         current_database_name: db.current_database_name(),
         session_user_oid: db.auth_state(client_id).session_user_oid(),
