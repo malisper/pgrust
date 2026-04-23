@@ -47,6 +47,7 @@ fi
 SQL_DIR="$PG_REGRESS/sql"
 EXPECTED_DIR="$PG_REGRESS/expected"
 PG_REGRESS_ABS="$(cd "$PG_REGRESS" && pwd)"
+SCHEDULE_FILE="$PG_REGRESS/parallel_schedule"
 WORKTREE_NAME="$(basename "$PGRUST_DIR")"
 TABLESPACE_VERSION_DIRECTORY="PG_18_202406281"
 REGRESS_TABLESPACE_DIR=""
@@ -170,6 +171,50 @@ prepare_test_fixture() {
         *)
             ;;
     esac
+}
+
+build_ordered_test_files() {
+    local sql_dir="$1"
+    local schedule_file="$2"
+    local include_setup="$3"
+    local -a ordered_files=()
+    local -A seen=()
+
+    if [[ -f "$schedule_file" ]]; then
+        while IFS= read -r test_name; do
+            [[ -n "$test_name" ]] || continue
+            if [[ "$include_setup" != true && "$test_name" == "test_setup" ]]; then
+                continue
+            fi
+            local sql_file="$sql_dir/${test_name}.sql"
+            if [[ -f "$sql_file" && -z "${seen[$sql_file]:-}" ]]; then
+                ordered_files+=("$sql_file")
+                seen["$sql_file"]=1
+            fi
+        done < <(
+            awk '
+                /^test:[[:space:]]*/ {
+                    sub(/^test:[[:space:]]*/, "");
+                    for (i = 1; i <= NF; i++) {
+                        print $i;
+                    }
+                }
+            ' "$schedule_file"
+        )
+    fi
+
+    while IFS= read -r sql_file; do
+        [[ -n "$sql_file" ]] || continue
+        if [[ "$include_setup" != true && "$(basename "$sql_file")" == "test_setup.sql" ]]; then
+            continue
+        fi
+        if [[ -z "${seen[$sql_file]:-}" ]]; then
+            ordered_files+=("$sql_file")
+            seen["$sql_file"]=1
+        fi
+    done < <(find "$sql_dir" -maxdepth 1 -type f -name '*.sql' | sort)
+
+    printf '%s\n' "${ordered_files[@]}"
 }
 
 PORT=5433
@@ -420,7 +465,12 @@ if [[ -n "$SINGLE_TEST" ]]; then
         exit 1
     fi
 else
-    TEST_FILES=("$SQL_DIR"/*.sql)
+    mapfile -t TEST_FILES < <(
+        build_ordered_test_files \
+            "$SQL_DIR" \
+            "$SCHEDULE_FILE" \
+            "$([[ "$USE_PGRUST_SETUP" == false ]] && echo true || echo false)"
+    )
 fi
 
 if [[ "$USE_PGRUST_SETUP" == true ]]; then
