@@ -20678,6 +20678,205 @@ fn create_trigger_updates_pg_trigger_and_relhastriggers() {
 }
 
 #[test]
+fn information_schema_triggers_exposes_trigger_metadata() {
+    let dir = temp_dir("info_schema_triggers");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table main_table (a int4, b int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function trigger_func() returns trigger language plpgsql as $$ begin return null; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger after_ins_stmt_trig after insert on main_table for each statement execute function trigger_func()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger after_upd_row_trig after update on main_table for each row execute function trigger_func()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger after_upd_stmt_trig after update on main_table for each statement execute function trigger_func()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger before_ins_stmt_trig before insert on main_table for each statement execute function trigger_func()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger delete_a after delete on main_table for each row when (old.a = 123) execute function trigger_func()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger delete_when after delete on main_table for each statement when (true) execute function trigger_func()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger insert_a after insert on main_table for each row when (new.a = 123) execute function trigger_func()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger insert_when before insert on main_table for each statement when (true) execute function trigger_func()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger modified_a before update of a on main_table for each row when (old.a <> new.a) execute function trigger_func()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger modified_any before update of a on main_table for each row when (old.* is distinct from new.*) execute function trigger_func()",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select trigger_name, event_manipulation, event_object_schema, event_object_table,
+                    action_order, action_condition, action_orientation, action_timing,
+                    action_reference_old_table, action_reference_new_table
+             from information_schema.triggers
+             where event_object_table = 'main_table'
+             order by trigger_name, event_manipulation",
+        ),
+        vec![
+            vec![
+                Value::Text("after_ins_stmt_trig".into()),
+                Value::Text("INSERT".into()),
+                Value::Text("public".into()),
+                Value::Text("main_table".into()),
+                Value::Int32(1),
+                Value::Null,
+                Value::Text("STATEMENT".into()),
+                Value::Text("AFTER".into()),
+                Value::Null,
+                Value::Null,
+            ],
+            vec![
+                Value::Text("after_upd_row_trig".into()),
+                Value::Text("UPDATE".into()),
+                Value::Text("public".into()),
+                Value::Text("main_table".into()),
+                Value::Int32(1),
+                Value::Null,
+                Value::Text("ROW".into()),
+                Value::Text("AFTER".into()),
+                Value::Null,
+                Value::Null,
+            ],
+            vec![
+                Value::Text("after_upd_stmt_trig".into()),
+                Value::Text("UPDATE".into()),
+                Value::Text("public".into()),
+                Value::Text("main_table".into()),
+                Value::Int32(1),
+                Value::Null,
+                Value::Text("STATEMENT".into()),
+                Value::Text("AFTER".into()),
+                Value::Null,
+                Value::Null,
+            ],
+            vec![
+                Value::Text("before_ins_stmt_trig".into()),
+                Value::Text("INSERT".into()),
+                Value::Text("public".into()),
+                Value::Text("main_table".into()),
+                Value::Int32(1),
+                Value::Null,
+                Value::Text("STATEMENT".into()),
+                Value::Text("BEFORE".into()),
+                Value::Null,
+                Value::Null,
+            ],
+            vec![
+                Value::Text("delete_a".into()),
+                Value::Text("DELETE".into()),
+                Value::Text("public".into()),
+                Value::Text("main_table".into()),
+                Value::Int32(1),
+                Value::Text("(old.a = 123)".into()),
+                Value::Text("ROW".into()),
+                Value::Text("AFTER".into()),
+                Value::Null,
+                Value::Null,
+            ],
+            vec![
+                Value::Text("delete_when".into()),
+                Value::Text("DELETE".into()),
+                Value::Text("public".into()),
+                Value::Text("main_table".into()),
+                Value::Int32(1),
+                Value::Text("true".into()),
+                Value::Text("STATEMENT".into()),
+                Value::Text("AFTER".into()),
+                Value::Null,
+                Value::Null,
+            ],
+            vec![
+                Value::Text("insert_a".into()),
+                Value::Text("INSERT".into()),
+                Value::Text("public".into()),
+                Value::Text("main_table".into()),
+                Value::Int32(1),
+                Value::Text("(new.a = 123)".into()),
+                Value::Text("ROW".into()),
+                Value::Text("AFTER".into()),
+                Value::Null,
+                Value::Null,
+            ],
+            vec![
+                Value::Text("insert_when".into()),
+                Value::Text("INSERT".into()),
+                Value::Text("public".into()),
+                Value::Text("main_table".into()),
+                Value::Int32(2),
+                Value::Text("true".into()),
+                Value::Text("STATEMENT".into()),
+                Value::Text("BEFORE".into()),
+                Value::Null,
+                Value::Null,
+            ],
+            vec![
+                Value::Text("modified_a".into()),
+                Value::Text("UPDATE".into()),
+                Value::Text("public".into()),
+                Value::Text("main_table".into()),
+                Value::Int32(1),
+                Value::Text("(old.a <> new.a)".into()),
+                Value::Text("ROW".into()),
+                Value::Text("BEFORE".into()),
+                Value::Null,
+                Value::Null,
+            ],
+            vec![
+                Value::Text("modified_any".into()),
+                Value::Text("UPDATE".into()),
+                Value::Text("public".into()),
+                Value::Text("main_table".into()),
+                Value::Int32(2),
+                Value::Text("(old.* is distinct from new.*)".into()),
+                Value::Text("ROW".into()),
+                Value::Text("BEFORE".into()),
+                Value::Null,
+                Value::Null,
+            ],
+        ]
+    );
+}
+
+#[test]
 fn alter_table_row_security_flags_update_pg_class() {
     let dir = temp_dir("alter_table_row_security_flags");
     let db = Database::open(&dir, 64).unwrap();
