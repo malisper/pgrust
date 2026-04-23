@@ -103,7 +103,8 @@ use crate::backend::utils::misc::guc::normalize_guc_name;
 use crate::include::access::toast_compression::ToastCompressionId;
 use crate::include::catalog::{
     BOX_SPGIST_OPCLASS_OID, BRIN_AM_OID, BTREE_AM_OID, CURRENT_DATABASE_OID, FLOAT8_TYPE_OID,
-    GIN_AM_OID, GIST_AM_OID, HASH_AM_OID, PG_CATALOG_NAMESPACE_OID, PG_TOAST_NAMESPACE_OID,
+    GIN_AM_OID, GIST_AM_OID, HASH_AM_OID, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID,
+    PG_DATABASE_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_TOAST_NAMESPACE_OID,
     SPGIST_AM_OID, builtin_scalar_function_for_proc_oid,
 };
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
@@ -1178,6 +1179,48 @@ fn eval_pg_get_userbyid(values: &[Value], ctx: &ExecutorContext) -> Result<Value
         _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "pg_get_userbyid(oid)",
             actual: format!("PgGetUserById({} args)", values.len()),
+        })),
+    }
+}
+
+fn text_acl_array(acl: Vec<String>) -> Value {
+    Value::Array(
+        acl.into_iter()
+            .map(|item| Value::Text(item.into()))
+            .collect(),
+    )
+}
+
+fn eval_pg_get_acl(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null, _, _] | [_, Value::Null, _] | [_, _, Value::Null] => Ok(Value::Null),
+        [classid, objid, objsubid] => {
+            let classid = oid_arg_to_u32(classid, "pg_get_acl")?;
+            let objid = oid_arg_to_u32(objid, "pg_get_acl")?;
+            let objsubid = int32_arg(objsubid, "pg_get_acl")?;
+            if classid == 0 && objid == 0 {
+                return Ok(Value::Null);
+            }
+            let catalog = executor_catalog(ctx)?;
+            Ok(match classid {
+                PG_CLASS_RELATION_OID if objsubid == 0 => catalog
+                    .class_row_by_oid(objid)
+                    .and_then(|row| row.relacl.map(text_acl_array))
+                    .unwrap_or(Value::Null),
+                PG_DATABASE_RELATION_OID if objsubid == 0 => catalog
+                    .database_row_by_oid(objid)
+                    .and_then(|row| row.datacl.map(text_acl_array))
+                    .unwrap_or(Value::Null),
+                PG_FOREIGN_DATA_WRAPPER_RELATION_OID if objsubid == 0 => catalog
+                    .foreign_data_wrapper_row_by_oid(objid)
+                    .and_then(|row| row.fdwacl.map(text_acl_array))
+                    .unwrap_or(Value::Null),
+                _ => Value::Null,
+            })
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_get_acl(classid, objid, objsubid)",
+            actual: format!("PgGetAcl({} args)", values.len()),
         })),
     }
 }
@@ -3027,6 +3070,7 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::BitcastBigintToFloat8 => eval_bitcast_bigint_to_float8(&values),
         BuiltinScalarFunction::Random
         | BuiltinScalarFunction::GetDatabaseEncoding
+        | BuiltinScalarFunction::PgGetAcl
         | BuiltinScalarFunction::PgGetUserById
         | BuiltinScalarFunction::ObjDescription
         | BuiltinScalarFunction::PgDescribeObject
@@ -3680,6 +3724,7 @@ fn eval_builtin_function(
             _ => Err(malformed_expr_error("regprocedure_to_text")),
         },
         BuiltinScalarFunction::PgGetUserById => eval_pg_get_userbyid(&values, ctx),
+        BuiltinScalarFunction::PgGetAcl => eval_pg_get_acl(&values, ctx),
         BuiltinScalarFunction::Now
         | BuiltinScalarFunction::TransactionTimestamp
         | BuiltinScalarFunction::StatementTimestamp

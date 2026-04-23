@@ -7,7 +7,7 @@ use crate::include::nodes::primnodes::{
 };
 
 use super::inherit::append_translation;
-use super::pathnodes::is_synthetic_slot_id;
+use super::pathnodes::{is_synthetic_slot_id, rte_slot_varno};
 use super::{expand_join_rte_vars, flatten_join_alias_vars};
 
 fn projection_slot_var(
@@ -53,6 +53,7 @@ fn projection_target_index_for_semantic_expr(
 }
 
 fn path_relids(path: &Path) -> Vec<usize> {
+    let slot_relid = |slot_id: usize| rte_slot_varno(slot_id).unwrap_or(slot_id);
     match path {
         Path::Result { .. } => Vec::new(),
         Path::Append { source_id, .. } => vec![*source_id],
@@ -72,7 +73,7 @@ fn path_relids(path: &Path) -> Vec<usize> {
         Path::Values { slot_id, .. }
         | Path::FunctionScan { slot_id, .. }
         | Path::CteScan { slot_id, .. }
-        | Path::WorkTableScan { slot_id, .. } => vec![*slot_id],
+        | Path::WorkTableScan { slot_id, .. } => vec![slot_relid(*slot_id)],
         Path::RecursiveUnion {
             anchor, recursive, ..
         } => {

@@ -103,6 +103,7 @@ impl Database {
             return Ok(StatementResult::AffectedRows(0));
         };
         let new_name = normalize_rename_target_name(&rename_stmt.new_table_name)?;
+        let visible_type_rows = catalog.type_rows();
         ensure_relation_owner(self, client_id, &relation, &rename_stmt.table_name)?;
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
@@ -116,7 +117,7 @@ impl Database {
         let effect = self
             .catalog
             .write()
-            .rename_relation_mvcc(relation.relation_oid, &new_name, &ctx)
+            .rename_relation_mvcc(relation.relation_oid, &new_name, &visible_type_rows, &ctx)
             .map_err(map_catalog_error)?;
         catalog_effects.push(effect);
         Ok(StatementResult::AffectedRows(0))
@@ -183,6 +184,7 @@ impl Database {
             return Ok(StatementResult::AffectedRows(0));
         };
         let new_name = normalize_rename_target_name(&rename_stmt.new_table_name)?;
+        let visible_type_rows = catalog.type_rows();
         ensure_relation_owner(self, client_id, &relation, &rename_stmt.table_name)?;
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
@@ -196,7 +198,7 @@ impl Database {
         let effect = self
             .catalog
             .write()
-            .rename_relation_mvcc(relation.relation_oid, &new_name, &ctx)
+            .rename_relation_mvcc(relation.relation_oid, &new_name, &visible_type_rows, &ctx)
             .map_err(map_catalog_error)?;
         catalog_effects.push(effect);
         Ok(StatementResult::AffectedRows(0))
@@ -264,6 +266,7 @@ impl Database {
             return Ok(StatementResult::AffectedRows(0));
         };
         let new_table_name = normalize_rename_target_name(&rename_stmt.new_table_name)?;
+        let visible_type_rows = catalog.type_rows();
         ensure_relation_owner(self, client_id, &relation, &rename_stmt.table_name)?;
 
         if relation.relpersistence != 't' {
@@ -286,7 +289,12 @@ impl Database {
             let effect = self
                 .catalog
                 .write()
-                .rename_relation_mvcc(relation.relation_oid, &new_table_name, &ctx)
+                .rename_relation_mvcc(
+                    relation.relation_oid,
+                    &new_table_name,
+                    &visible_type_rows,
+                    &ctx,
+                )
                 .map_err(map_catalog_error)?;
             catalog_effects.push(effect);
         } else {

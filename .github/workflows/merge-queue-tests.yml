@@ -67,6 +67,7 @@ jobs:
     name: cargo-test-run
     needs:
       - changes
+      - cargo-fmt-check
     if: ${{ github.event_name != 'pull_request' && needs.changes.outputs.code == 'true' }}
     runs-on:
       group: large-runners-like-32x-paid
@@ -170,7 +171,6 @@ jobs:
               if result == "skipped" and job_name in allowed_skipped:
                   continue
               failed[job_name] = result
-
           if failed:
               print("The test workflow did not succeed:", file=sys.stderr)
               for job_name, result in failed.items():

@@ -666,6 +666,12 @@ impl Database {
                     comment_stmt,
                     configured_search_path,
                 ),
+            Statement::CommentOnFunction(ref comment_stmt) => self
+                .execute_comment_on_function_stmt_with_search_path(
+                    client_id,
+                    comment_stmt,
+                    configured_search_path,
+                ),
             Statement::CommentOnConstraint(ref comment_stmt) => self
                 .execute_comment_on_constraint_stmt_with_search_path(
                     client_id,
