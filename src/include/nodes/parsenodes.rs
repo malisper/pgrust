@@ -306,6 +306,7 @@ pub enum Statement {
     AlterSequenceOwner(AlterRelationOwnerStatement),
     AlterSequenceRename(AlterTableRenameStatement),
     AlterIndexRename(AlterTableRenameStatement),
+    AlterViewRename(AlterTableRenameStatement),
     AlterIndexAlterColumnStatistics(AlterIndexAlterColumnStatisticsStatement),
     AlterTableAddColumn(AlterTableAddColumnStatement),
     AlterTableAddConstraint(AlterTableAddConstraintStatement),
