@@ -3071,6 +3071,34 @@ fn parse_alter_role_rename_statement() {
             },
         })
     );
+
+    let stmt = parse_statement("alter table items add primary key (id)").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAddConstraint(AlterTableAddConstraintStatement {
+            if_exists: false,
+            only: false,
+            table_name: "items".into(),
+            constraint: TableConstraint::PrimaryKey {
+                attributes: attrs(),
+                columns: vec!["id".into()],
+            },
+        })
+    );
+
+    let stmt = parse_statement("alter table items add unique (note)").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAddConstraint(AlterTableAddConstraintStatement {
+            if_exists: false,
+            only: false,
+            table_name: "items".into(),
+            constraint: TableConstraint::Unique {
+                attributes: attrs(),
+                columns: vec!["note".into()],
+            },
+        })
+    );
 }
 
 #[test]
@@ -7516,6 +7544,34 @@ fn parse_create_table_partition_of_with_subpartition_spec() {
                     keys: vec![RawPartitionKey::Column("b".into())],
                 })
             );
+        }
+        other => panic!("expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_create_table_partition_of_with_table_elements() {
+    match parse_statement(
+        "create table measurement_lo partition of measurement \
+         (a int primary key, constraint measurement_lo_ck check (a > 0)) \
+         for values from (0) to (10)",
+    )
+    .unwrap()
+    {
+        Statement::CreateTable(ct) => {
+            assert_eq!(ct.partition_of.as_deref(), Some("measurement"));
+            assert_eq!(ct.elements.len(), 2);
+            assert!(matches!(
+                &ct.elements[0],
+                CreateTableElement::Column(column)
+                    if column.name == "a" && column.primary_key()
+            ));
+            assert!(matches!(
+                &ct.elements[1],
+                CreateTableElement::Constraint(TableConstraint::Check { attributes, expr_sql })
+                    if attributes.name.as_deref() == Some("measurement_lo_ck")
+                        && expr_sql == "a > 0"
+            ));
         }
         other => panic!("expected CreateTable, got {:?}", other),
     }
