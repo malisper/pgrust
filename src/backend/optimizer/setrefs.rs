@@ -2771,6 +2771,13 @@ fn validate_planner_expr(expr: &Expr, path_node: &str, field: &str) {
     }
 }
 
+fn validate_planner_projection_expr(expr: &Expr, path_node: &str, field: &str) {
+    if matches!(expr, Expr::Var(var) if is_executor_special_varno(var.varno)) {
+        return;
+    }
+    validate_planner_expr(expr, path_node, field);
+}
+
 fn validate_planner_set_returning_call(
     call: &crate::include::nodes::primnodes::SetReturningCall,
     path_node: &str,
@@ -2878,7 +2885,7 @@ fn validate_planner_path(path: &Path) {
         }
         Path::Projection { input, targets, .. } => {
             for target in targets {
-                validate_planner_expr(&target.expr, "Projection", "targets");
+                validate_planner_projection_expr(&target.expr, "Projection", "targets");
             }
             validate_planner_path(input);
         }

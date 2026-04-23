@@ -16,9 +16,113 @@ use super::ast::{
 struct PlpgsqlParser;
 
 pub fn parse_block(sql: &str) -> Result<Block, ParseError> {
+    reject_unsupported_exception_handler(sql)?;
     PlpgsqlParser::parse(Rule::pl_block, sql)
         .map_err(|e| map_pest_error("plpgsql block", e))
         .and_then(|mut pairs| build_pl_block(pairs.next().ok_or(ParseError::UnexpectedEof)?))
+}
+
+fn reject_unsupported_exception_handler(sql: &str) -> Result<(), ParseError> {
+    if find_exception_handler(sql).is_some() {
+        return Err(ParseError::FeatureNotSupported(
+            "PL/pgSQL EXCEPTION handlers".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn find_exception_handler(sql: &str) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut idx = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut dollar_tag: Option<&str> = None;
+    while idx < bytes.len() {
+        if let Some(tag) = dollar_tag {
+            if sql[idx..].starts_with(tag) {
+                idx += tag.len();
+                dollar_tag = None;
+            } else {
+                idx += 1;
+            }
+            continue;
+        }
+
+        let ch = bytes[idx] as char;
+        if in_single {
+            if ch == '\'' {
+                if bytes.get(idx + 1) == Some(&b'\'') {
+                    idx += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_double {
+            if ch == '"' {
+                if bytes.get(idx + 1) == Some(&b'"') {
+                    idx += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            idx += 1;
+            continue;
+        }
+
+        if bytes.get(idx) == Some(&b'-') && bytes.get(idx + 1) == Some(&b'-') {
+            idx += 2;
+            while idx < bytes.len() && bytes[idx] != b'\n' {
+                idx += 1;
+            }
+            continue;
+        }
+        if bytes.get(idx) == Some(&b'/') && bytes.get(idx + 1) == Some(&b'*') {
+            idx += 2;
+            while idx + 1 < bytes.len()
+                && !(bytes[idx] == b'*' && bytes.get(idx + 1) == Some(&b'/'))
+            {
+                idx += 1;
+            }
+            idx = (idx + 2).min(bytes.len());
+            continue;
+        }
+
+        match ch {
+            '\'' => {
+                in_single = true;
+                idx += 1;
+                continue;
+            }
+            '"' => {
+                in_double = true;
+                idx += 1;
+                continue;
+            }
+            '$' => {
+                if let Some(tag) = dollar_quote_tag_at(sql, idx) {
+                    idx += tag.len();
+                    dollar_tag = Some(tag);
+                    continue;
+                }
+            }
+            _ => {}
+        }
+
+        if keyword_at(sql, idx, "exception") {
+            let mut next = idx + "exception".len();
+            while next < bytes.len() && (bytes[next] as char).is_ascii_whitespace() {
+                next += 1;
+            }
+            if keyword_at(sql, next, "when") {
+                return Some(idx);
+            }
+        }
+        idx += 1;
+    }
+    None
 }
 
 fn map_pest_error(expected: &'static str, err: pest::error::Error<Rule>) -> ParseError {
@@ -883,6 +987,28 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(block.statements[0], Stmt::Block(_)));
+    }
+
+    #[test]
+    fn parse_rejects_unsupported_exception_handler() {
+        let err = parse_block(
+            "
+            begin
+                begin
+                    null;
+                exception when others then
+                    null;
+                end;
+            end
+            ",
+        )
+        .unwrap_err();
+
+        assert!(
+            format!("{err:?}")
+                .to_ascii_lowercase()
+                .contains("exception")
+        );
     }
 
     #[test]
