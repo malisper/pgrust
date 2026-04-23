@@ -4984,6 +4984,56 @@ fn parse_typed_string_literal_expression() {
 }
 
 #[test]
+fn parse_interval_typed_string_literals() {
+    let stmt = parse_select(
+        "select interval '1 day', interval(2) '1 day 01:02:03.456', interval '1-2' year to month, interval '12:34.5678' minute to second(2)",
+    )
+    .unwrap();
+    assert_eq!(stmt.targets.len(), 4);
+    for target in &stmt.targets {
+        assert!(matches!(
+            &target.expr,
+            SqlExpr::Cast(inner, ty)
+                if ty.as_builtin().is_some_and(|ty| ty.kind == SqlTypeKind::Interval)
+                    && matches!(inner.as_ref(), SqlExpr::Const(Value::Text(_)))
+        ));
+    }
+    assert!(matches!(
+        &stmt.targets[1].expr,
+        SqlExpr::Cast(_, ty)
+            if ty.as_builtin().is_some_and(|ty| {
+                ty.kind == SqlTypeKind::Interval && ty.typmod == 2
+            })
+    ));
+    assert!(matches!(
+        &stmt.targets[3].expr,
+        SqlExpr::Cast(_, ty)
+            if ty.as_builtin().is_some_and(|ty| {
+                ty.kind == SqlTypeKind::Interval && ty.typmod == 2
+            })
+    ));
+}
+
+#[test]
+fn parse_interval_field_qualified_casts() {
+    let stmt = parse_select(
+        "select f1::interval day to minute, cast(f1 as interval second(2)) from interval_tbl",
+    )
+    .unwrap();
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::Cast(_, ty) if ty.as_builtin().is_some_and(|ty| ty.kind == SqlTypeKind::Interval)
+    ));
+    assert!(matches!(
+        &stmt.targets[1].expr,
+        SqlExpr::Cast(_, ty)
+            if ty.as_builtin().is_some_and(|ty| {
+                ty.kind == SqlTypeKind::Interval && ty.typmod == 2
+            })
+    ));
+}
+
+#[test]
 fn parse_timestamptz_typed_string_literal_with_text_cast() {
     let stmt = parse_select("select timestamptz '2024-01-02 03:04:05+00'::text").unwrap();
     match &stmt.targets[0].expr {
@@ -5641,6 +5691,19 @@ fn analyze_timestamptz_typed_string_literal_keeps_timestamp_tz_type() {
         &query.target_list[0].expr,
         Expr::Cast(inner, ty)
             if *ty == SqlType::new(SqlTypeKind::TimestampTz)
+                && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _)))
+    ));
+}
+
+#[test]
+fn analyze_interval_typed_string_literal_keeps_interval_type() {
+    let stmt = parse_select("select interval '1 day'").unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[]).unwrap();
+    assert!(matches!(
+        &query.target_list[0].expr,
+        Expr::Cast(inner, ty)
+            if *ty == SqlType::new(SqlTypeKind::Interval)
                 && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _)))
     ));
 }
