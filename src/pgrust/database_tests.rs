@@ -6314,6 +6314,50 @@ fn create_schema_creates_namespace_row_and_allows_qualified_create_table() {
 }
 
 #[test]
+fn create_schema_executes_embedded_create_table_elements() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create schema tenant
+               create table parents (id int4 primary key)
+               create table children (id int4 primary key, parent_id int4 references parents)",
+        )
+        .unwrap();
+
+    session
+        .execute(&db, "insert into tenant.parents values (1)")
+        .unwrap();
+    session
+        .execute(&db, "insert into tenant.children values (10, 1)")
+        .unwrap();
+
+    match session
+        .execute(
+            &db,
+            "select n.nspname, c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'tenant' and c.relkind = 'r' order by c.relname",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![
+                        Value::Text("tenant".into()),
+                        Value::Text("children".into()),
+                    ],
+                    vec![Value::Text("tenant".into()), Value::Text("parents".into())],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn create_schema_supports_authorization_and_if_not_exists() {
     let db = Database::open_ephemeral(16).unwrap();
 
@@ -12662,6 +12706,59 @@ fn foreign_keys_on_update_set_default_rejects_missing_default_key() {
             ],
         ]
     );
+}
+
+#[test]
+fn foreign_keys_accept_supported_cross_type_columns() {
+    let db = Database::open_ephemeral(16).unwrap();
+
+    db.execute(1, "create table int_parents (id int4 primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table int_children (id int4 primary key, parent_id int8 references int_parents)",
+    )
+    .unwrap();
+    db.execute(1, "insert into int_parents values (1)").unwrap();
+    db.execute(1, "insert into int_children values (1, 1)")
+        .unwrap();
+    assert!(matches!(
+        db.execute(1, "insert into int_children values (2, 2)"),
+        Err(ExecError::ForeignKeyViolation { .. })
+    ));
+    assert!(matches!(
+        db.execute(1, "delete from int_parents where id = 1"),
+        Err(ExecError::ForeignKeyViolation { .. })
+    ));
+
+    db.execute(1, "create table numeric_parents (id numeric primary key)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table numeric_children (id int4 primary key, parent_id int4 references numeric_parents)",
+    )
+    .unwrap();
+    db.execute(1, "insert into numeric_parents values (10)")
+        .unwrap();
+    db.execute(1, "insert into numeric_children values (1, 10)")
+        .unwrap();
+    assert!(matches!(
+        db.execute(1, "insert into numeric_children values (2, 11)"),
+        Err(ExecError::ForeignKeyViolation { .. })
+    ));
+}
+
+#[test]
+fn foreign_keys_reject_unsupported_cross_type_columns() {
+    let db = Database::open_ephemeral(16).unwrap();
+
+    db.execute(1, "create table int_parents (id int4 primary key)")
+        .unwrap();
+    assert!(matches!(
+        db.execute(1, "create table numeric_children (parent_id numeric references int_parents)"),
+        Err(ExecError::Parse(ParseError::FeatureNotSupported(feature)))
+            if feature == "FOREIGN KEY with cross-type columns"
+    ));
 }
 
 #[test]

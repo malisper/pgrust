@@ -1304,6 +1304,7 @@ pub struct CreateSchemaStatement {
     pub schema_name: Option<String>,
     pub auth_role: Option<String>,
     pub if_not_exists: bool,
+    pub elements: Vec<Box<Statement>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -84,6 +84,12 @@ pub(crate) fn compare_order_values(
         }
         (Value::Int32(a), Value::Int32(b)) => Ok(a.cmp(b)),
         (Value::Int64(a), Value::Int64(b)) => Ok(a.cmp(b)),
+        (Value::Int16(a), Value::Float64(b)) => Ok(pg_float_cmp(f64::from(*a), *b)),
+        (Value::Int32(a), Value::Float64(b)) => Ok(pg_float_cmp(f64::from(*a), *b)),
+        (Value::Int64(a), Value::Float64(b)) => Ok(pg_float_cmp(*a as f64, *b)),
+        (Value::Float64(a), Value::Int16(b)) => Ok(pg_float_cmp(*a, f64::from(*b))),
+        (Value::Float64(a), Value::Int32(b)) => Ok(pg_float_cmp(*a, f64::from(*b))),
+        (Value::Float64(a), Value::Int64(b)) => Ok(pg_float_cmp(*a, *b as f64)),
         (Value::Date(a), Value::Date(b)) => Ok(a.cmp(b)),
         (Value::Time(a), Value::Time(b)) => Ok(a.cmp(b)),
         (Value::TimeTz(a), Value::TimeTz(b)) => Ok(a
