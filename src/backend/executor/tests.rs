@@ -2543,6 +2543,56 @@ fn explain_scan_filter_renders_single_seq_scan_line() {
 }
 
 #[test]
+fn explain_verbose_lateral_aggregate_renders_pg_style_details() {
+    let base = temp_dir("explain_verbose_lateral_aggregate");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "explain (verbose, costs off) \
+         select s1, s2, sm \
+         from generate_series(1, 3) s1, \
+              lateral (select s2, sum(s1 + s2) sm \
+                       from generate_series(1, 3) s2 group by s2) ss \
+         order by 1, 2",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(rendered.iter().any(|line| line.as_str() == "Sort"));
+            assert!(rendered
+                .iter()
+                .any(|line| line.as_str() == "  Output: s1.s1, s2.s2, sum((s1.s1 + s2.s2))"));
+            assert!(rendered
+                .iter()
+                .any(|line| line.as_str() == "  Sort Key: s1.s1, s2.s2"));
+            assert!(rendered.iter().any(|line| line.as_str() == "  ->  Nested Loop"));
+            assert!(rendered
+                .iter()
+                .any(|line| line.as_str() == "        ->  HashAggregate"));
+            assert!(rendered
+                .iter()
+                .any(|line| line.as_str() == "              Group Key: s2.s2"));
+            assert!(rendered.iter().any(|line| {
+                line.as_str() == "              ->  Function Scan on pg_catalog.generate_series s2"
+            }));
+            assert!(rendered
+                .iter()
+                .any(|line| line.as_str() == "                    Function Call: generate_series(1, 3)"));
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn explain_const_false_scan_filter_uses_one_time_filter() {
     let base = temp_dir("explain_const_false_scan_filter");
     let txns = TransactionManager::new_durable(&base).unwrap();

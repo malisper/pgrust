@@ -85,7 +85,11 @@ pub(crate) use expr_range::{
     parse_range_text,
 };
 pub(crate) use expr_xml::validate_xml_input;
-pub(crate) use nodes::{render_explain_expr, render_explain_projection_expr_with_qualifier};
+pub(crate) use nodes::{
+    render_explain_expr, render_explain_join_expr, render_explain_join_expr_inner,
+    render_explain_projection_expr_inner_with_qualifier,
+    render_explain_projection_expr_with_qualifier,
+};
 pub use startup::executor_start;
 pub(crate) use tsearch::{
     compare_tsquery, compare_tsvector, concat_tsvector, decode_tsquery_bytes,

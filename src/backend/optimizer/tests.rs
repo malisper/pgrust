@@ -1328,6 +1328,7 @@ fn explain_shows_initplan_for_rewritten_minmax_aggregate() {
         &planned.subplans,
         0,
         false,
+        false,
         &mut lines,
     );
 

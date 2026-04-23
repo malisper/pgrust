@@ -419,7 +419,7 @@ pub(crate) fn execute_explain(
             );
             format_explain_lines_with_costs(state.as_ref(), 1, false, costs, &mut lines);
         } else {
-            format_explain_plan_with_subplans(&plan_tree, &subplans, 0, costs, &mut lines);
+            format_explain_plan_with_subplans(&plan_tree, &subplans, 0, costs, verbose, &mut lines);
         }
     }
 
@@ -491,6 +491,7 @@ fn explain_update_lines(
             &input_plan.subplans,
             1,
             show_costs,
+            verbose,
             &mut lines,
         );
         return lines;
