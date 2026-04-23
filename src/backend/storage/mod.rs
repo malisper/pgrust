@@ -11,7 +11,7 @@ pub mod sync;
 ///
 /// Rust's `File::sync_data()` / `File::sync_all()` use macOS `F_FULLFSYNC`
 /// which also flushes the disk's hardware write cache — much slower.
-#[cfg(unix)]
+#[cfg(all(unix, not(test)))]
 pub fn fsync_file(file: &std::fs::File) -> std::io::Result<()> {
     use std::os::unix::io::AsRawFd;
     let ret = unsafe { libc::fsync(file.as_raw_fd()) };
@@ -22,7 +22,17 @@ pub fn fsync_file(file: &std::fs::File) -> std::io::Result<()> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(any(not(unix), test))]
 pub fn fsync_file(_file: &std::fs::File) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(not(test))]
+pub fn sync_file_data(file: &std::fs::File) -> std::io::Result<()> {
+    file.sync_data()
+}
+
+#[cfg(test)]
+pub fn sync_file_data(_file: &std::fs::File) -> std::io::Result<()> {
     Ok(())
 }

@@ -85,7 +85,10 @@ pub(crate) fn brin_form_tuple(
         }
     }
 
-    let any_nulls = tuple.columns.iter().any(|column| column.all_nulls || column.has_nulls);
+    let any_nulls = tuple
+        .columns
+        .iter()
+        .any(|column| column.all_nulls || column.has_nulls);
     let heap_tuple = HeapTuple::from_values(&disk_desc.attribute_descs(), &values)
         .map_err(|err| CatalogError::Io(format!("{err:?}")))?;
     let header_size = brin_header_size_with_bitmap(tuple.columns.len(), any_nulls);
@@ -96,12 +99,15 @@ pub(crate) fn brin_form_tuple(
         )));
     }
 
-    let total_len =
-        crate::backend::storage::page::bufpage::max_align(BrinTuple::SIZE + if any_nulls {
-            brin_null_bitmap_len(tuple.columns.len())
-        } else {
-            0
-        } + heap_tuple.data.len());
+    let total_len = crate::backend::storage::page::bufpage::max_align(
+        BrinTuple::SIZE
+            + if any_nulls {
+                brin_null_bitmap_len(tuple.columns.len())
+            } else {
+                0
+            }
+            + heap_tuple.data.len(),
+    );
     let mut bytes = vec![0u8; total_len];
     bytes[0..4].copy_from_slice(&tuple.blkno.to_le_bytes());
 

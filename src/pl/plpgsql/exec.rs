@@ -950,13 +950,8 @@ fn exec_function_insert(
         )
     })?;
     ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
-    let result = execute_insert(
-        stmt.clone(),
-        &catalog,
-        ctx,
-        ctx.snapshot.current_xid,
-        ctx.next_command_id,
-    );
+    let xid = ctx.ensure_write_xid()?;
+    let result = execute_insert(stmt.clone(), &catalog, ctx, xid, ctx.next_command_id);
     ctx.expr_bindings.outer_tuple = None;
     let result = result?;
     state.values[compiled.found_slot] = Value::Bool(statement_result_changed_rows(&result));
@@ -977,13 +972,8 @@ fn exec_function_update(
         )
     })?;
     ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
-    let result = execute_update(
-        stmt.clone(),
-        &catalog,
-        ctx,
-        ctx.snapshot.current_xid,
-        ctx.next_command_id,
-    );
+    let xid = ctx.ensure_write_xid()?;
+    let result = execute_update(stmt.clone(), &catalog, ctx, xid, ctx.next_command_id);
     ctx.expr_bindings.outer_tuple = None;
     let result = result?;
     state.values[compiled.found_slot] = Value::Bool(statement_result_changed_rows(&result));
@@ -1004,7 +994,8 @@ fn exec_function_delete(
         )
     })?;
     ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
-    let result = execute_delete(stmt.clone(), &catalog, ctx, ctx.snapshot.current_xid);
+    let xid = ctx.ensure_write_xid()?;
+    let result = execute_delete(stmt.clone(), &catalog, ctx, xid);
     ctx.expr_bindings.outer_tuple = None;
     let result = result?;
     state.values[compiled.found_slot] = Value::Bool(statement_result_changed_rows(&result));

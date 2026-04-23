@@ -171,7 +171,7 @@ fn persist_control_file(path: &Path, control: &ControlFile) -> Result<(), Contro
         fs::File::create(&tmp_path).map_err(|err| ControlFileError::Io(err.to_string()))?;
     file.write_all(&bytes)
         .map_err(|err| ControlFileError::Io(err.to_string()))?;
-    file.sync_data()
+    crate::backend::storage::sync_file_data(&file)
         .map_err(|err| ControlFileError::Io(err.to_string()))?;
     fs::rename(&tmp_path, path).map_err(|err| ControlFileError::Io(err.to_string()))?;
     Ok(())
