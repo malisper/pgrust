@@ -9,13 +9,14 @@ use crate::backend::utils::cache::system_views::{
 };
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
-    PgCollationRow, PgConstraintRow, PgDatabaseRow, PgForeignDataWrapperRow, PgInheritsRow,
-    PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgPartitionedTableRow, PgPolicyRow,
-    PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow, PgTriggerRow, PgTypeRow,
-    bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
-    bootstrap_pg_database_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
-    bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
-    builtin_range_rows, builtin_type_rows, synthetic_range_proc_rows_by_name,
+    PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgForeignDataWrapperRow,
+    PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
+    PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow,
+    PgTriggerRow, PgTypeRow, bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows,
+    bootstrap_pg_collation_rows, bootstrap_pg_database_rows, bootstrap_pg_language_rows,
+    bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
+    bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
+    synthetic_range_proc_rows_by_name,
 };
 use crate::pgrust::database::DatabaseStatsStore;
 use std::collections::BTreeSet;
@@ -54,6 +55,13 @@ impl VisibleCatalog {
         self.catcache
             .as_ref()
             .map(|catcache| catcache.trigger_rows_for_relation(relation_oid))
+            .unwrap_or_default()
+    }
+
+    pub fn depend_rows(&self) -> Vec<PgDependRow> {
+        self.catcache
+            .as_ref()
+            .map(CatCache::depend_rows)
             .unwrap_or_default()
     }
 

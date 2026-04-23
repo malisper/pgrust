@@ -13,7 +13,7 @@ use crate::backend::access::transam::xact::TransactionManager;
 use crate::backend::access::transam::xlog::{WalBgWriter, WalWriter, has_wal_segments};
 use crate::backend::access::transam::{ControlFileState, ControlFileStore};
 use crate::backend::catalog::{CatalogError, CatalogStore};
-use crate::backend::executor::ExecError;
+use crate::backend::executor::{ExecError, SessionReplicationRole};
 use crate::backend::storage::buffer::storage_backend::SmgrStorageBackend;
 use crate::backend::storage::lmgr::{
     AdvisoryLockManager, RowLockManager, TableLockManager, TransactionWaiter,
@@ -94,6 +94,7 @@ pub(crate) struct OpenDatabaseState {
     pub session_interrupt_states: Arc<RwLock<HashMap<ClientId, Arc<InterruptState>>>>,
     pub session_auth_states: Arc<RwLock<HashMap<ClientId, AuthState>>>,
     pub session_row_security_states: Arc<RwLock<HashMap<ClientId, bool>>>,
+    pub session_replication_role_states: Arc<RwLock<HashMap<ClientId, SessionReplicationRole>>>,
     pub session_stats_states: Arc<RwLock<HashMap<ClientId, Arc<RwLock<SessionStatsState>>>>>,
     pub session_temp_backend_ids: Arc<RwLock<HashMap<ClientId, TempBackendId>>>,
     pub database_create_grants: Arc<RwLock<Vec<DatabaseCreateGrant>>>,
@@ -123,6 +124,7 @@ impl OpenDatabaseState {
             session_interrupt_states: Arc::new(RwLock::new(HashMap::new())),
             session_auth_states: Arc::new(RwLock::new(HashMap::new())),
             session_row_security_states: Arc::new(RwLock::new(HashMap::new())),
+            session_replication_role_states: Arc::new(RwLock::new(HashMap::new())),
             session_stats_states: Arc::new(RwLock::new(HashMap::new())),
             session_temp_backend_ids: Arc::new(RwLock::new(HashMap::new())),
             database_create_grants: Arc::new(RwLock::new(Vec::new())),
@@ -359,6 +361,7 @@ impl Cluster {
                 session_interrupt_states: Arc::new(RwLock::new(HashMap::new())),
                 session_auth_states: Arc::new(RwLock::new(HashMap::new())),
                 session_row_security_states: Arc::new(RwLock::new(HashMap::new())),
+                session_replication_role_states: Arc::new(RwLock::new(HashMap::new())),
                 session_stats_states: Arc::new(RwLock::new(HashMap::new())),
                 session_temp_backend_ids: Arc::new(RwLock::new(HashMap::new())),
                 database_create_grants: Arc::new(RwLock::new(Vec::new())),
@@ -453,6 +456,7 @@ impl Cluster {
             session_interrupt_states: Arc::clone(&state.session_interrupt_states),
             session_auth_states: Arc::clone(&state.session_auth_states),
             session_row_security_states: Arc::clone(&state.session_row_security_states),
+            session_replication_role_states: Arc::clone(&state.session_replication_role_states),
             session_stats_states: Arc::clone(&state.session_stats_states),
             session_temp_backend_ids: Arc::clone(&state.session_temp_backend_ids),
             database_create_grants: Arc::clone(&state.database_create_grants),

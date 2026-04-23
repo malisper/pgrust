@@ -243,6 +243,7 @@ impl Database {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         use crate::backend::commands::tablecmds::{execute_truncate_table, execute_vacuum};
         let interrupts = self.interrupt_state(client_id);
+        let session_replication_role = self.session_replication_role(client_id);
 
         match stmt {
             Statement::Do(ref do_stmt) => execute_do(do_stmt),
@@ -620,6 +621,7 @@ impl Database {
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
+                    session_replication_role,
                     statement_lock_scope_id,
                     transaction_lock_scope_id: None,
                     next_command_id: 0,
@@ -638,6 +640,7 @@ impl Database {
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
                     deferred_foreign_keys: None,
+                    trigger_depth: 0,
                 };
                 let result = crate::backend::commands::tablecmds::execute_merge(
                     bound, &catalog, &mut ctx, xid, 0,
@@ -805,6 +808,7 @@ impl Database {
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
+                    session_replication_role,
                     statement_lock_scope_id,
                     transaction_lock_scope_id: None,
                     next_command_id: 0,
@@ -823,6 +827,7 @@ impl Database {
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
                     deferred_foreign_keys: Some(deferred_foreign_keys.clone()),
+                    trigger_depth: 0,
                 };
                 let result = match planned_select {
                     Some(planned_stmt) => execute_planned_stmt(planned_stmt, &mut ctx),
@@ -910,6 +915,7 @@ impl Database {
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
+                    session_replication_role,
                     statement_lock_scope_id,
                     transaction_lock_scope_id: None,
                     next_command_id: 0,
@@ -928,6 +934,7 @@ impl Database {
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
                     deferred_foreign_keys: Some(deferred_foreign_keys.clone()),
+                    trigger_depth: 0,
                 };
                 let result = super::rules::execute_bound_insert_with_rules(
                     prepared.stmt,
@@ -1009,6 +1016,7 @@ impl Database {
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
+                    session_replication_role,
                     statement_lock_scope_id,
                     transaction_lock_scope_id: None,
                     next_command_id: 0,
@@ -1027,6 +1035,7 @@ impl Database {
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
                     deferred_foreign_keys: Some(deferred_foreign_keys.clone()),
+                    trigger_depth: 0,
                 };
                 let result = super::rules::execute_bound_update_with_rules(
                     prepared.stmt,
@@ -1109,6 +1118,7 @@ impl Database {
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
+                    session_replication_role,
                     statement_lock_scope_id,
                     transaction_lock_scope_id: None,
                     next_command_id: 0,
@@ -1127,6 +1137,7 @@ impl Database {
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
                     deferred_foreign_keys: Some(deferred_foreign_keys.clone()),
+                    trigger_depth: 0,
                 };
                 let result = super::rules::execute_bound_delete_with_rules(
                     prepared.stmt,
@@ -1194,6 +1205,18 @@ impl Database {
                 .execute_create_trigger_stmt_with_search_path(
                     client_id,
                     create_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterTableTriggerState(ref alter_stmt) => self
+                .execute_alter_table_trigger_state_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterTriggerRename(ref alter_stmt) => self
+                .execute_alter_trigger_rename_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
                     configured_search_path,
                 ),
             Statement::CreatePolicy(ref create_stmt) => self
@@ -1443,6 +1466,7 @@ impl Database {
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
                     current_user_oid: self.auth_state(client_id).current_user_oid(),
                     active_role_oid: self.auth_state(client_id).active_role_oid(),
+                    session_replication_role,
                     statement_lock_scope_id,
                     transaction_lock_scope_id: None,
                     next_command_id: 0,
@@ -1461,6 +1485,7 @@ impl Database {
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
                     deferred_foreign_keys: None,
+                    trigger_depth: 0,
                 };
                 let result = execute_truncate_table(
                     truncate_stmt.clone(),
@@ -1555,6 +1580,7 @@ impl Database {
         let columns = query_desc.columns();
         let column_names = query_desc.column_names();
         let state = executor_start(query_desc.planned_stmt.plan_tree);
+        let session_replication_role = self.session_replication_role(client_id);
         let ctx = ExecutorContext {
             pool: std::sync::Arc::clone(&self.pool),
             txns: self.txns.clone(),
@@ -1576,6 +1602,7 @@ impl Database {
             session_user_oid: self.auth_state(client_id).session_user_oid(),
             current_user_oid: self.auth_state(client_id).current_user_oid(),
             active_role_oid: self.auth_state(client_id).active_role_oid(),
+            session_replication_role,
             statement_lock_scope_id,
             transaction_lock_scope_id,
             next_command_id: command_id,
@@ -1593,6 +1620,7 @@ impl Database {
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
             deferred_foreign_keys: None,
+            trigger_depth: 0,
         };
 
         Ok(SelectGuard {

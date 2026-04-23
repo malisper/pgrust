@@ -79,6 +79,7 @@ impl SeededSqlHarness {
                 session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 active_role_oid: None,
+                session_replication_role: Default::default(),
                 statement_lock_scope_id: None,
                 transaction_lock_scope_id: None,
                 next_command_id: 0,
@@ -96,6 +97,7 @@ impl SeededSqlHarness {
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
                 deferred_foreign_keys: None,
+                trigger_depth: 0,
             };
             let result = execute_sql(&sql, &mut catalog, &mut ctx, xid);
             (catalog, result)

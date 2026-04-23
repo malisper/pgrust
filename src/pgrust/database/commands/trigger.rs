@@ -3,20 +3,32 @@ use std::sync::Arc;
 
 use super::super::*;
 use crate::backend::parser::{
-    CatalogLookup, CommentOnTriggerStatement, CreateTriggerStatement, DropTriggerStatement,
-    ParseError, SqlTypeKind, TriggerEvent, TriggerLevel, TriggerTiming,
+    AlterTableTriggerMode, AlterTableTriggerStateStatement, AlterTableTriggerTarget,
+    AlterTriggerRenameStatement, CatalogLookup, CommentOnTriggerStatement, CreateTriggerStatement,
+    DropTriggerStatement, ParseError, RawWindowFrameBound, SqlCallArgs, SqlExpr, SqlType,
+    SqlTypeKind, TriggerEvent, TriggerLevel, TriggerTiming,
     bind_scalar_expr_in_named_relation_scope, parse_expr,
 };
-use crate::include::catalog::{PG_LANGUAGE_PLPGSQL_OID, PgTriggerRow};
-use crate::pgrust::database::ddl::{ensure_relation_owner, lookup_heap_relation_for_ddl};
+use crate::include::catalog::{PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID, PgTriggerRow};
+use crate::pgrust::database::ddl::{ensure_relation_owner, lookup_trigger_relation_for_ddl};
 
 const TRIGGER_TYPE_ROW: i16 = 1 << 0;
 const TRIGGER_TYPE_BEFORE: i16 = 1 << 1;
 const TRIGGER_TYPE_INSERT: i16 = 1 << 2;
 const TRIGGER_TYPE_DELETE: i16 = 1 << 3;
 const TRIGGER_TYPE_UPDATE: i16 = 1 << 4;
-const TRIGGER_TYPE_INSTEAD: i16 = 1 << 5;
-const TRIGGER_TYPE_TRUNCATE: i16 = 1 << 6;
+const TRIGGER_TYPE_TRUNCATE: i16 = 1 << 5;
+const TRIGGER_TYPE_INSTEAD: i16 = 1 << 6;
+
+const TRIGGER_DISABLED: char = 'D';
+const TRIGGER_ENABLED_ORIGIN: char = 'O';
+const TRIGGER_ENABLED_REPLICA: char = 'R';
+const TRIGGER_ENABLED_ALWAYS: char = 'A';
+
+const TRIGGER_NEW_TABLEOID_COLUMN: &str = "__trigger_new_tableoid";
+const TRIGGER_OLD_TABLEOID_COLUMN: &str = "__trigger_old_tableoid";
+const TRIGGER_NEW_CTID_COLUMN: &str = "__trigger_new_ctid";
+const TRIGGER_OLD_CTID_COLUMN: &str = "__trigger_old_ctid";
 
 impl Database {
     pub(crate) fn execute_create_trigger_stmt_with_search_path(
@@ -53,9 +65,7 @@ impl Database {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let relation_name = format_trigger_relation_name(stmt);
-        let relation = catalog.lookup_any_relation(&relation_name).ok_or_else(|| {
-            ExecError::Parse(ParseError::TableDoesNotExist(relation_name.clone()))
-        })?;
+        let relation = lookup_trigger_relation_for_ddl(&catalog, &relation_name)?;
         ensure_relation_owner(self, client_id, &relation, &relation_name)?;
 
         let trigger_name = stmt.trigger_name.to_ascii_lowercase();
@@ -67,13 +77,7 @@ impl Database {
             stmt,
             configured_search_path,
         )?;
-        validate_trigger_stmt(
-            stmt,
-            &relation_name,
-            relation.relkind,
-            &relation.desc,
-            &catalog,
-        )?;
+        validate_trigger_stmt(stmt, &relation, &relation_name, &catalog)?;
 
         let tgattr = trigger_update_attnums(stmt, &relation.desc)?;
         let tgtype = trigger_type_bits(stmt);
@@ -177,7 +181,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let relation_name = format_trigger_drop_relation_name(stmt);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &relation_name)?;
+        let relation = lookup_trigger_relation_for_ddl(&catalog, &relation_name)?;
         ensure_relation_owner(self, client_id, &relation, &relation_name)?;
 
         let Some(_existing) = catalog
@@ -227,7 +231,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &stmt.table_name)?;
+        let relation = lookup_trigger_relation_for_ddl(&catalog, &stmt.table_name)?;
         self.table_locks.lock_table_interruptible(
             relation.rel,
             TableLockMode::AccessExclusive,
@@ -261,7 +265,7 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let relation = lookup_heap_relation_for_ddl(&catalog, &stmt.table_name)?;
+        let relation = lookup_trigger_relation_for_ddl(&catalog, &stmt.table_name)?;
         ensure_relation_owner(self, client_id, &relation, &stmt.table_name)?;
         let trigger = lookup_trigger_row(&catalog, relation.relation_oid, &stmt.trigger_name)
             .ok_or_else(|| missing_trigger_error(&stmt.trigger_name, &stmt.table_name))?;
@@ -285,20 +289,162 @@ impl Database {
         catalog_effects.push(effect);
         Ok(StatementResult::AffectedRows(0))
     }
+
+    pub(crate) fn execute_alter_table_trigger_state_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &AlterTableTriggerStateStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_alter_table_trigger_state_stmt_in_transaction_with_search_path(
+            client_id,
+            stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_alter_table_trigger_state_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &AlterTableTriggerStateStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let relation = lookup_trigger_relation_for_ddl(&catalog, &stmt.table_name)?;
+        ensure_relation_owner(self, client_id, &relation, &stmt.table_name)?;
+
+        let all_triggers = catalog.trigger_rows_for_relation(relation.relation_oid);
+        let selected = match &stmt.target {
+            AlterTableTriggerTarget::Named(name) => {
+                let Some(row) = lookup_trigger_row(&catalog, relation.relation_oid, name) else {
+                    return Err(missing_trigger_error(name, &stmt.table_name));
+                };
+                vec![row]
+            }
+            AlterTableTriggerTarget::All => all_triggers,
+            AlterTableTriggerTarget::User => all_triggers
+                .into_iter()
+                .filter(|row| !row.tgisinternal)
+                .collect(),
+        };
+        if selected.is_empty() {
+            return Ok(StatementResult::AffectedRows(0));
+        }
+
+        let new_state = trigger_state_char(stmt.mode);
+        let interrupts = self.interrupt_state(client_id);
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: Arc::clone(&interrupts),
+        };
+        for row in selected {
+            let mut updated = row.clone();
+            updated.tgenabled = new_state;
+            let effect = self
+                .catalog
+                .write()
+                .replace_trigger_mvcc(&row, updated, &ctx)
+                .map_err(map_catalog_error)?
+                .1;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+        }
+        self.plan_cache.invalidate_all();
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    pub(crate) fn execute_alter_trigger_rename_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &AlterTriggerRenameStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_alter_trigger_rename_stmt_in_transaction_with_search_path(
+            client_id,
+            stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_alter_trigger_rename_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &AlterTriggerRenameStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let relation_name = qualified_relation_name(stmt.schema_name.as_deref(), &stmt.table_name);
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let relation = lookup_trigger_relation_for_ddl(&catalog, &relation_name)?;
+        ensure_relation_owner(self, client_id, &relation, &relation_name)?;
+        let existing = lookup_trigger_row(&catalog, relation.relation_oid, &stmt.trigger_name)
+            .ok_or_else(|| missing_trigger_error(&stmt.trigger_name, &relation_name))?;
+
+        let interrupts = self.interrupt_state(client_id);
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: Arc::clone(&interrupts),
+        };
+        let mut updated = existing.clone();
+        updated.tgname = stmt.new_trigger_name.to_ascii_lowercase();
+        let effect = self
+            .catalog
+            .write()
+            .replace_trigger_mvcc(&existing, updated, &ctx)
+            .map_err(map_catalog_error)?
+            .1;
+        self.apply_catalog_mutation_effect_immediate(&effect)?;
+        self.plan_cache.invalidate_all();
+        catalog_effects.push(effect);
+        Ok(StatementResult::AffectedRows(0))
+    }
 }
 
 fn format_trigger_relation_name(stmt: &CreateTriggerStatement) -> String {
-    stmt.schema_name
-        .as_deref()
-        .map(|schema| format!("{schema}.{}", stmt.table_name))
-        .unwrap_or_else(|| stmt.table_name.clone())
+    qualified_relation_name(stmt.schema_name.as_deref(), &stmt.table_name)
 }
 
 fn format_trigger_drop_relation_name(stmt: &DropTriggerStatement) -> String {
-    stmt.schema_name
-        .as_deref()
-        .map(|schema| format!("{schema}.{}", stmt.table_name))
-        .unwrap_or_else(|| stmt.table_name.clone())
+    qualified_relation_name(stmt.schema_name.as_deref(), &stmt.table_name)
+}
+
+fn qualified_relation_name(schema_name: Option<&str>, relation_name: &str) -> String {
+    schema_name
+        .map(|schema| format!("{schema}.{relation_name}"))
+        .unwrap_or_else(|| relation_name.to_string())
 }
 
 fn lookup_trigger_row(
@@ -366,13 +512,19 @@ fn resolve_trigger_function(
             sqlstate: "42883",
         });
     }
-    if function.prolang != PG_LANGUAGE_PLPGSQL_OID
-        || catalog
+    let supported_trigger_language = if function.prolang == PG_LANGUAGE_PLPGSQL_OID {
+        catalog
             .language_row_by_oid(function.prolang)
-            .is_none_or(|row| row.oid != PG_LANGUAGE_PLPGSQL_OID)
-    {
+            .is_some_and(|row| row.oid == PG_LANGUAGE_PLPGSQL_OID)
+    } else {
+        function.prolang == PG_LANGUAGE_INTERNAL_OID
+    };
+    if !supported_trigger_language {
         return Err(ExecError::DetailedError {
-            message: format!("trigger function {} must be written in plpgsql", proname),
+            message: format!(
+                "trigger function {} must be written in plpgsql or be an internal function",
+                proname
+            ),
             detail: None,
             hint: None,
             sqlstate: "0A000",
@@ -443,126 +595,19 @@ fn resolve_function_schema_oid(
 
 fn validate_trigger_stmt(
     stmt: &CreateTriggerStatement,
+    relation: &crate::backend::parser::BoundRelation,
     relation_name: &str,
-    relkind: char,
-    desc: &crate::backend::executor::RelationDesc,
     catalog: &dyn CatalogLookup,
 ) -> Result<(), ExecError> {
-    if relkind == 'r' && stmt.timing == TriggerTiming::InsteadOf {
-        return Err(wrong_object_type_error(
-            relation_name,
-            "table",
-            "Tables cannot have INSTEAD OF triggers.",
-        ));
-    }
-    if relkind == 'v' && stmt.timing != TriggerTiming::InsteadOf && stmt.level == TriggerLevel::Row
-    {
-        return Err(wrong_object_type_error(
-            relation_name,
-            "view",
-            "Views cannot have row-level BEFORE or AFTER triggers.",
-        ));
-    }
-    if relkind == 'v'
-        && stmt
-            .events
-            .iter()
-            .any(|event| event.event == TriggerEvent::Truncate)
-    {
-        return Err(wrong_object_type_error(
-            relation_name,
-            "view",
-            "Views cannot have TRUNCATE triggers.",
-        ));
-    }
-    if stmt
-        .events
-        .iter()
-        .any(|event| event.event == TriggerEvent::Truncate)
-        && stmt.level == TriggerLevel::Row
-    {
-        return Err(ExecError::DetailedError {
-            message: "TRUNCATE FOR EACH ROW triggers are not supported".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "0A000",
-        });
-    }
-    if stmt.timing == TriggerTiming::InsteadOf {
-        if stmt.level != TriggerLevel::Row {
-            return Err(feature_not_supported_error(
-                "INSTEAD OF triggers must be FOR EACH ROW",
-            ));
-        }
-        if stmt.when_clause_sql.is_some() {
-            return Err(feature_not_supported_error(
-                "INSTEAD OF triggers cannot have WHEN conditions",
-            ));
-        }
-        if stmt
-            .events
-            .iter()
-            .any(|event| !event.update_columns.is_empty())
-        {
-            return Err(feature_not_supported_error(
-                "INSTEAD OF triggers cannot have column lists",
-            ));
-        }
-    }
-    if !stmt.referencing.is_empty() {
-        if let Some(spec) = stmt.referencing.iter().find(|spec| !spec.is_table) {
-            let _ = spec;
-            return Err(ExecError::DetailedError {
-                message: "ROW variable naming in the REFERENCING clause is not supported".into(),
-                detail: None,
-                hint: Some("Use OLD TABLE or NEW TABLE for naming transition tables.".into()),
-                sqlstate: "0A000",
-            });
-        }
-        if relkind == 'v' {
-            return Err(wrong_object_type_error(
-                relation_name,
-                "view",
-                "Triggers on views cannot have transition tables.",
-            ));
-        }
-        if stmt.timing != TriggerTiming::After {
-            return Err(ExecError::DetailedError {
-                message: "transition table name can only be specified for an AFTER trigger".into(),
-                detail: None,
-                hint: None,
-                sqlstate: "42P17",
-            });
-        }
-        if stmt
-            .events
-            .iter()
-            .any(|event| event.event == TriggerEvent::Truncate)
-        {
-            return Err(feature_not_supported_error(
-                "TRUNCATE triggers with transition tables are not supported",
-            ));
-        }
-        if stmt.events.len() != 1 {
-            return Err(feature_not_supported_error(
-                "transition tables cannot be specified for triggers with more than one event",
-            ));
-        }
-        if stmt
-            .events
-            .iter()
-            .any(|event| !event.update_columns.is_empty())
-        {
-            return Err(feature_not_supported_error(
-                "transition tables cannot be specified for triggers with column lists",
-            ));
-        }
-    }
+    validate_trigger_relation_kind(stmt, relation.relkind, relation_name)?;
+    validate_trigger_referencing_usage(stmt, relation.relkind, relation_name)?;
+
     for event in &stmt.events {
         if event.event == TriggerEvent::Update {
             let mut seen = BTreeSet::new();
             for column in &event.update_columns {
-                let attnum = desc
+                let attnum = relation
+                    .desc
                     .columns
                     .iter()
                     .enumerate()
@@ -584,23 +629,30 @@ fn validate_trigger_stmt(
     }
 
     if let Some(when_clause_sql) = stmt.when_clause_sql.as_deref() {
-        let parsed = parse_expr(when_clause_sql).map_err(ExecError::Parse)?;
+        let mut parsed = parse_expr(when_clause_sql).map_err(ExecError::Parse)?;
+        rewrite_trigger_system_column_refs(&mut parsed);
         for event in &stmt.events {
+            validate_trigger_when_usage(stmt, event.event, when_clause_sql)?;
             let mut relation_scopes = Vec::new();
-            if stmt.level == crate::backend::parser::TriggerLevel::Row {
+            if stmt.level == TriggerLevel::Row {
                 match event.event {
-                    TriggerEvent::Insert => relation_scopes.push(("new", desc)),
+                    TriggerEvent::Insert => relation_scopes.push(("new", &relation.desc)),
                     TriggerEvent::Update => {
-                        relation_scopes.push(("new", desc));
-                        relation_scopes.push(("old", desc));
+                        relation_scopes.push(("new", &relation.desc));
+                        relation_scopes.push(("old", &relation.desc));
                     }
-                    TriggerEvent::Delete => relation_scopes.push(("old", desc)),
+                    TriggerEvent::Delete => relation_scopes.push(("old", &relation.desc)),
                     TriggerEvent::Truncate => {}
                 }
             }
-            let (_, when_type) =
-                bind_scalar_expr_in_named_relation_scope(&parsed, &relation_scopes, &[], catalog)
-                    .map_err(ExecError::Parse)?;
+            let local_columns = trigger_when_local_columns(event.event);
+            let (_, when_type) = bind_scalar_expr_in_named_relation_scope(
+                &parsed,
+                &relation_scopes,
+                &local_columns,
+                catalog,
+            )
+            .map_err(ExecError::Parse)?;
             if when_type.kind != SqlTypeKind::Bool {
                 return Err(ExecError::DetailedError {
                     message: "trigger WHEN condition must return type boolean".into(),
@@ -641,13 +693,13 @@ fn trigger_update_attnums(
 
 fn trigger_type_bits(stmt: &CreateTriggerStatement) -> i16 {
     let mut bits = 0;
-    if stmt.level == crate::backend::parser::TriggerLevel::Row {
+    if stmt.level == TriggerLevel::Row {
         bits |= TRIGGER_TYPE_ROW;
     }
     match stmt.timing {
         TriggerTiming::Before => bits |= TRIGGER_TYPE_BEFORE,
+        TriggerTiming::Instead => bits |= TRIGGER_TYPE_INSTEAD,
         TriggerTiming::After => {}
-        TriggerTiming::InsteadOf => bits |= TRIGGER_TYPE_INSTEAD,
     }
     for event in &stmt.events {
         bits |= match event.event {
@@ -658,6 +710,157 @@ fn trigger_type_bits(stmt: &CreateTriggerStatement) -> i16 {
         };
     }
     bits
+}
+
+fn validate_trigger_relation_kind(
+    stmt: &CreateTriggerStatement,
+    relkind: char,
+    relation_name: &str,
+) -> Result<(), ExecError> {
+    match relkind {
+        'v' => validate_view_trigger_stmt(stmt, relation_name),
+        _ => validate_table_trigger_stmt(stmt, relation_name),
+    }
+}
+
+fn validate_table_trigger_stmt(
+    stmt: &CreateTriggerStatement,
+    relation_name: &str,
+) -> Result<(), ExecError> {
+    if stmt
+        .events
+        .iter()
+        .any(|event| event.event == TriggerEvent::Truncate)
+    {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "TRUNCATE triggers are not supported".into(),
+        )));
+    }
+    if stmt.timing == TriggerTiming::Instead {
+        return Err(ExecError::DetailedError {
+            message: format!("\"{}\" is a table", relation_name),
+            detail: Some("Tables cannot have INSTEAD OF triggers.".into()),
+            hint: None,
+            sqlstate: "42809",
+        });
+    }
+    Ok(())
+}
+
+fn validate_view_trigger_stmt(
+    stmt: &CreateTriggerStatement,
+    relation_name: &str,
+) -> Result<(), ExecError> {
+    if stmt
+        .events
+        .iter()
+        .any(|event| event.event == TriggerEvent::Truncate)
+    {
+        return Err(ExecError::DetailedError {
+            message: format!("\"{}\" is a view", relation_name),
+            detail: Some("Views cannot have TRUNCATE triggers.".into()),
+            hint: None,
+            sqlstate: "42809",
+        });
+    }
+    if stmt.timing == TriggerTiming::Instead {
+        if stmt.when_clause_sql.is_some() {
+            return Err(ExecError::DetailedError {
+                message: "INSTEAD OF triggers cannot have WHEN conditions".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
+        if stmt
+            .events
+            .iter()
+            .any(|event| !event.update_columns.is_empty())
+        {
+            return Err(ExecError::DetailedError {
+                message: "INSTEAD OF triggers cannot have column lists".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
+        if stmt.level != TriggerLevel::Row {
+            return Err(ExecError::DetailedError {
+                message: "INSTEAD OF triggers must be FOR EACH ROW".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
+        return Ok(());
+    }
+
+    if stmt.level == TriggerLevel::Row {
+        return Err(ExecError::DetailedError {
+            message: format!("\"{}\" is a view", relation_name),
+            detail: Some("Views cannot have row-level BEFORE or AFTER triggers.".into()),
+            hint: None,
+            sqlstate: "42809",
+        });
+    }
+    Ok(())
+}
+
+fn validate_trigger_referencing_usage(
+    stmt: &CreateTriggerStatement,
+    relkind: char,
+    relation_name: &str,
+) -> Result<(), ExecError> {
+    if stmt.referencing.is_empty() {
+        return Ok(());
+    }
+    if stmt.referencing.iter().any(|spec| !spec.is_table) {
+        return Err(ExecError::DetailedError {
+            message: "ROW variable naming in the REFERENCING clause is not supported".into(),
+            detail: None,
+            hint: Some("Use OLD TABLE or NEW TABLE for naming transition tables.".into()),
+            sqlstate: "0A000",
+        });
+    }
+    if relkind == 'v' {
+        return Err(wrong_object_type_error(
+            relation_name,
+            "view",
+            "Triggers on views cannot have transition tables.",
+        ));
+    }
+    if stmt.timing != TriggerTiming::After {
+        return Err(ExecError::DetailedError {
+            message: "transition table name can only be specified for an AFTER trigger".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42P17",
+        });
+    }
+    if stmt
+        .events
+        .iter()
+        .any(|event| event.event == TriggerEvent::Truncate)
+    {
+        return Err(feature_not_supported_error(
+            "TRUNCATE triggers with transition tables are not supported",
+        ));
+    }
+    if stmt.events.len() != 1 {
+        return Err(feature_not_supported_error(
+            "transition tables cannot be specified for triggers with more than one event",
+        ));
+    }
+    if stmt
+        .events
+        .iter()
+        .any(|event| !event.update_columns.is_empty())
+    {
+        return Err(feature_not_supported_error(
+            "transition tables cannot be specified for triggers with column lists",
+        ));
+    }
+    Ok(())
 }
 
 fn wrong_object_type_error(relation_name: &str, kind: &str, detail: &str) -> ExecError {
@@ -675,5 +878,318 @@ fn feature_not_supported_error(message: &str) -> ExecError {
         detail: None,
         hint: None,
         sqlstate: "0A000",
+    }
+}
+
+fn validate_trigger_when_usage(
+    stmt: &CreateTriggerStatement,
+    event: TriggerEvent,
+    when_clause_sql: &str,
+) -> Result<(), ExecError> {
+    let lowered = when_clause_sql.to_ascii_lowercase();
+    let references_old = lowered.contains("old.");
+    let references_new = lowered.contains("new.");
+    let references_new_system = [
+        "new.tableoid",
+        "new.ctid",
+        "new.xmin",
+        "new.xmax",
+        "new.cmin",
+        "new.cmax",
+    ]
+    .iter()
+    .any(|needle| lowered.contains(needle));
+
+    if matches!(event, TriggerEvent::Insert) && references_old {
+        return Err(ExecError::DetailedError {
+            message: "INSERT trigger's WHEN condition cannot reference OLD values".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42P17",
+        });
+    }
+    if matches!(event, TriggerEvent::Delete) && references_new {
+        return Err(ExecError::DetailedError {
+            message: "DELETE trigger's WHEN condition cannot reference NEW values".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42P17",
+        });
+    }
+    if matches!(event, TriggerEvent::Truncate) && (references_old || references_new) {
+        return Err(ExecError::DetailedError {
+            message: "TRUNCATE trigger's WHEN condition cannot reference column values".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42P17",
+        });
+    }
+    if stmt.level == TriggerLevel::Statement && (references_old || references_new) {
+        return Err(ExecError::DetailedError {
+            message: "statement trigger's WHEN condition cannot reference column values".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42P17",
+        });
+    }
+    if stmt.level == TriggerLevel::Row
+        && stmt.timing == TriggerTiming::Before
+        && references_new_system
+    {
+        return Err(ExecError::DetailedError {
+            message: "BEFORE trigger's WHEN condition cannot reference NEW system columns".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42P17",
+        });
+    }
+    Ok(())
+}
+
+fn trigger_when_local_columns(event: TriggerEvent) -> Vec<(String, SqlType)> {
+    match event {
+        TriggerEvent::Insert => vec![
+            (
+                TRIGGER_NEW_TABLEOID_COLUMN.into(),
+                SqlType::new(SqlTypeKind::Oid),
+            ),
+            (
+                TRIGGER_NEW_CTID_COLUMN.into(),
+                SqlType::new(SqlTypeKind::Tid),
+            ),
+        ],
+        TriggerEvent::Update => vec![
+            (
+                TRIGGER_NEW_TABLEOID_COLUMN.into(),
+                SqlType::new(SqlTypeKind::Oid),
+            ),
+            (
+                TRIGGER_NEW_CTID_COLUMN.into(),
+                SqlType::new(SqlTypeKind::Tid),
+            ),
+            (
+                TRIGGER_OLD_TABLEOID_COLUMN.into(),
+                SqlType::new(SqlTypeKind::Oid),
+            ),
+            (
+                TRIGGER_OLD_CTID_COLUMN.into(),
+                SqlType::new(SqlTypeKind::Tid),
+            ),
+        ],
+        TriggerEvent::Delete => vec![
+            (
+                TRIGGER_OLD_TABLEOID_COLUMN.into(),
+                SqlType::new(SqlTypeKind::Oid),
+            ),
+            (
+                TRIGGER_OLD_CTID_COLUMN.into(),
+                SqlType::new(SqlTypeKind::Tid),
+            ),
+        ],
+        TriggerEvent::Truncate => Vec::new(),
+    }
+}
+
+fn rewrite_trigger_system_column_refs(expr: &mut SqlExpr) {
+    match expr {
+        SqlExpr::Column(name) => {
+            let lowered = name.to_ascii_lowercase();
+            if lowered == "new.tableoid" {
+                *name = TRIGGER_NEW_TABLEOID_COLUMN.into();
+            } else if lowered == "old.tableoid" {
+                *name = TRIGGER_OLD_TABLEOID_COLUMN.into();
+            } else if lowered == "new.ctid" {
+                *name = TRIGGER_NEW_CTID_COLUMN.into();
+            } else if lowered == "old.ctid" {
+                *name = TRIGGER_OLD_CTID_COLUMN.into();
+            }
+        }
+        SqlExpr::Add(left, right)
+        | SqlExpr::Sub(left, right)
+        | SqlExpr::BitAnd(left, right)
+        | SqlExpr::BitOr(left, right)
+        | SqlExpr::BitXor(left, right)
+        | SqlExpr::Shl(left, right)
+        | SqlExpr::Shr(left, right)
+        | SqlExpr::Mul(left, right)
+        | SqlExpr::Div(left, right)
+        | SqlExpr::Mod(left, right)
+        | SqlExpr::Concat(left, right)
+        | SqlExpr::Eq(left, right)
+        | SqlExpr::NotEq(left, right)
+        | SqlExpr::Lt(left, right)
+        | SqlExpr::LtEq(left, right)
+        | SqlExpr::Gt(left, right)
+        | SqlExpr::GtEq(left, right)
+        | SqlExpr::RegexMatch(left, right)
+        | SqlExpr::And(left, right)
+        | SqlExpr::Or(left, right)
+        | SqlExpr::IsDistinctFrom(left, right)
+        | SqlExpr::IsNotDistinctFrom(left, right)
+        | SqlExpr::ArrayOverlap(left, right)
+        | SqlExpr::ArrayContains(left, right)
+        | SqlExpr::ArrayContained(left, right)
+        | SqlExpr::JsonbContains(left, right)
+        | SqlExpr::JsonbContained(left, right)
+        | SqlExpr::JsonbExists(left, right)
+        | SqlExpr::JsonbExistsAny(left, right)
+        | SqlExpr::JsonbExistsAll(left, right)
+        | SqlExpr::JsonbPathExists(left, right)
+        | SqlExpr::JsonbPathMatch(left, right)
+        | SqlExpr::JsonGet(left, right)
+        | SqlExpr::JsonGetText(left, right)
+        | SqlExpr::JsonPath(left, right)
+        | SqlExpr::JsonPathText(left, right) => {
+            rewrite_trigger_system_column_refs(left);
+            rewrite_trigger_system_column_refs(right);
+        }
+        SqlExpr::BinaryOperator { left, right, .. }
+        | SqlExpr::GeometryBinaryOp { left, right, .. } => {
+            rewrite_trigger_system_column_refs(left);
+            rewrite_trigger_system_column_refs(right);
+        }
+        SqlExpr::UnaryPlus(inner)
+        | SqlExpr::Negate(inner)
+        | SqlExpr::BitNot(inner)
+        | SqlExpr::GeometryUnaryOp { expr: inner, .. }
+        | SqlExpr::PrefixOperator { expr: inner, .. }
+        | SqlExpr::Cast(inner, _)
+        | SqlExpr::IsNull(inner)
+        | SqlExpr::IsNotNull(inner)
+        | SqlExpr::Not(inner)
+        | SqlExpr::FieldSelect { expr: inner, .. }
+        | SqlExpr::Subscript { expr: inner, .. }
+        | SqlExpr::Collate { expr: inner, .. } => rewrite_trigger_system_column_refs(inner),
+        SqlExpr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | SqlExpr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            rewrite_trigger_system_column_refs(expr);
+            rewrite_trigger_system_column_refs(pattern);
+            if let Some(escape) = escape {
+                rewrite_trigger_system_column_refs(escape);
+            }
+        }
+        SqlExpr::Case {
+            arg,
+            args,
+            defresult,
+        } => {
+            if let Some(arg) = arg {
+                rewrite_trigger_system_column_refs(arg);
+            }
+            for when in args {
+                rewrite_trigger_system_column_refs(&mut when.expr);
+                rewrite_trigger_system_column_refs(&mut when.result);
+            }
+            if let Some(defresult) = defresult {
+                rewrite_trigger_system_column_refs(defresult);
+            }
+        }
+        SqlExpr::ArrayLiteral(values) | SqlExpr::Row(values) => {
+            for value in values {
+                rewrite_trigger_system_column_refs(value);
+            }
+        }
+        SqlExpr::InSubquery { expr, .. } => rewrite_trigger_system_column_refs(expr),
+        SqlExpr::QuantifiedSubquery { left, .. } => rewrite_trigger_system_column_refs(left),
+        SqlExpr::QuantifiedArray { left, array, .. } => {
+            rewrite_trigger_system_column_refs(left);
+            rewrite_trigger_system_column_refs(array);
+        }
+        SqlExpr::ArraySubscript { array, subscripts } => {
+            rewrite_trigger_system_column_refs(array);
+            for subscript in subscripts {
+                if let Some(lower) = &mut subscript.lower {
+                    rewrite_trigger_system_column_refs(lower);
+                }
+                if let Some(upper) = &mut subscript.upper {
+                    rewrite_trigger_system_column_refs(upper);
+                }
+            }
+        }
+        SqlExpr::Xml(xml) => {
+            for arg in &mut xml.named_args {
+                rewrite_trigger_system_column_refs(arg);
+            }
+            for arg in &mut xml.args {
+                rewrite_trigger_system_column_refs(arg);
+            }
+        }
+        SqlExpr::FuncCall {
+            args,
+            order_by,
+            filter,
+            over,
+            ..
+        } => {
+            if let SqlCallArgs::Args(args) = args {
+                for arg in args {
+                    rewrite_trigger_system_column_refs(&mut arg.value);
+                }
+            }
+            for item in order_by {
+                rewrite_trigger_system_column_refs(&mut item.expr);
+            }
+            if let Some(filter) = filter {
+                rewrite_trigger_system_column_refs(filter);
+            }
+            if let Some(over) = over {
+                for expr in &mut over.partition_by {
+                    rewrite_trigger_system_column_refs(expr);
+                }
+                for item in &mut over.order_by {
+                    rewrite_trigger_system_column_refs(&mut item.expr);
+                }
+                if let Some(frame) = &mut over.frame {
+                    rewrite_trigger_window_bound(&mut frame.start_bound);
+                    rewrite_trigger_window_bound(&mut frame.end_bound);
+                }
+            }
+        }
+        SqlExpr::Const(_)
+        | SqlExpr::Default
+        | SqlExpr::IntegerLiteral(_)
+        | SqlExpr::NumericLiteral(_)
+        | SqlExpr::ScalarSubquery(_)
+        | SqlExpr::ArraySubquery(_)
+        | SqlExpr::Exists(_)
+        | SqlExpr::Random
+        | SqlExpr::CurrentDate
+        | SqlExpr::CurrentUser
+        | SqlExpr::SessionUser
+        | SqlExpr::CurrentRole
+        | SqlExpr::CurrentTime { .. }
+        | SqlExpr::CurrentTimestamp { .. }
+        | SqlExpr::LocalTime { .. }
+        | SqlExpr::LocalTimestamp { .. } => {}
+    }
+}
+
+fn rewrite_trigger_window_bound(bound: &mut RawWindowFrameBound) {
+    match bound {
+        RawWindowFrameBound::OffsetPreceding(expr) | RawWindowFrameBound::OffsetFollowing(expr) => {
+            rewrite_trigger_system_column_refs(expr);
+        }
+        RawWindowFrameBound::UnboundedPreceding
+        | RawWindowFrameBound::CurrentRow
+        | RawWindowFrameBound::UnboundedFollowing => {}
+    }
+}
+
+fn trigger_state_char(mode: AlterTableTriggerMode) -> char {
+    match mode {
+        AlterTableTriggerMode::Disable => TRIGGER_DISABLED,
+        AlterTableTriggerMode::EnableOrigin => TRIGGER_ENABLED_ORIGIN,
+        AlterTableTriggerMode::EnableReplica => TRIGGER_ENABLED_REPLICA,
+        AlterTableTriggerMode::EnableAlways => TRIGGER_ENABLED_ALWAYS,
     }
 }
