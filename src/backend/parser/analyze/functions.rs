@@ -615,6 +615,8 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::CurrentDatabase | BuiltinScalarFunction::PgBackendPid => {
                 args.is_empty()
             }
+            BuiltinScalarFunction::PgGetTriggerDef => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::PgTriggerDepth => args.is_empty(),
             BuiltinScalarFunction::PgPartitionRoot => args.len() == 1,
             BuiltinScalarFunction::DatePart | BuiltinScalarFunction::DateTrunc => args.len() == 2,
             BuiltinScalarFunction::IsFinite => args.len() == 1,
@@ -1335,6 +1337,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("cashlarger", BuiltinScalarFunction::CashLarger),
         ("cashsmaller", BuiltinScalarFunction::CashSmaller),
         ("cash_words", BuiltinScalarFunction::CashWords),
+        ("pg_get_triggerdef", BuiltinScalarFunction::PgGetTriggerDef),
+        ("pg_trigger_depth", BuiltinScalarFunction::PgTriggerDepth),
         ("now", BuiltinScalarFunction::Now),
         (
             "transaction_timestamp",

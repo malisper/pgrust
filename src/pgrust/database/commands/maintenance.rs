@@ -896,6 +896,7 @@ impl Database {
             large_objects: Some(self.large_objects.clone()),
             async_notify_runtime: Some(self.async_notify_runtime.clone()),
             advisory_locks: Arc::clone(&self.advisory_locks),
+            row_locks: Arc::clone(&self.row_locks),
             checkpoint_stats: self.checkpoint_stats_snapshot(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
             interrupts: Arc::clone(&interrupts),
@@ -908,6 +909,7 @@ impl Database {
             session_user_oid: self.auth_state(client_id).session_user_oid(),
             current_user_oid: self.auth_state(client_id).current_user_oid(),
             active_role_oid: self.auth_state(client_id).active_role_oid(),
+            session_replication_role: self.session_replication_role(client_id),
             statement_lock_scope_id: None,
             transaction_lock_scope_id: None,
             next_command_id: cid,
@@ -925,6 +927,7 @@ impl Database {
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
             deferred_foreign_keys: None,
+            trigger_depth: 0,
         };
         let analyzed = collect_analyze_stats(targets, &catalog, &mut ctx)?;
         drop(ctx);
@@ -982,6 +985,7 @@ impl Database {
             large_objects: Some(self.large_objects.clone()),
             async_notify_runtime: Some(self.async_notify_runtime.clone()),
             advisory_locks: Arc::clone(&self.advisory_locks),
+            row_locks: Arc::clone(&self.row_locks),
             checkpoint_stats: self.checkpoint_stats_snapshot(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
             interrupts: Arc::clone(&interrupts),
@@ -994,6 +998,7 @@ impl Database {
             session_user_oid: self.auth_state(client_id).session_user_oid(),
             current_user_oid: self.auth_state(client_id).current_user_oid(),
             active_role_oid: self.auth_state(client_id).active_role_oid(),
+            session_replication_role: self.session_replication_role(client_id),
             statement_lock_scope_id: None,
             transaction_lock_scope_id: None,
             next_command_id: cid,
@@ -1011,6 +1016,7 @@ impl Database {
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
             deferred_foreign_keys: None,
+            trigger_depth: 0,
         };
         let vacuumed =
             crate::backend::commands::tablecmds::collect_vacuum_stats(targets, &catalog, &mut ctx)?;
@@ -1284,6 +1290,7 @@ impl Database {
                 large_objects: Some(self.large_objects.clone()),
                 async_notify_runtime: Some(self.async_notify_runtime.clone()),
                 advisory_locks: Arc::clone(&self.advisory_locks),
+                row_locks: Arc::clone(&self.row_locks),
                 checkpoint_stats: self.checkpoint_stats_snapshot(),
                 datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(
                 ),
@@ -1297,6 +1304,7 @@ impl Database {
                 session_user_oid: self.auth_state(client_id).session_user_oid(),
                 current_user_oid: self.auth_state(client_id).current_user_oid(),
                 active_role_oid: self.auth_state(client_id).active_role_oid(),
+                session_replication_role: self.session_replication_role(client_id),
                 statement_lock_scope_id: None,
                 transaction_lock_scope_id: None,
                 next_command_id: cid,
@@ -1314,6 +1322,7 @@ impl Database {
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
                 deferred_foreign_keys: None,
+                trigger_depth: 0,
             };
             for target in &targets {
                 rewrite_heap_rows_for_added_serial_column(

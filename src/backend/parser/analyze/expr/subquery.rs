@@ -13,11 +13,19 @@ fn bind_subquery_query(
     scope: &BoundScope,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
+    visible_agg_scope: Option<&VisibleAggregateScope>,
     ctes: &[BoundCte],
 ) -> Result<Query, ParseError> {
     let child_outer = child_outer_scopes(scope, outer_scopes);
-    let (query, _) =
-        analyze_select_query_with_outer(select, catalog, &child_outer, None, ctes, &[])?;
+    let (query, _) = analyze_select_query_with_outer(
+        select,
+        catalog,
+        &child_outer,
+        None,
+        visible_agg_scope,
+        ctes,
+        &[],
+    )?;
     Ok(query)
 }
 
@@ -29,7 +37,15 @@ fn bind_single_column_sublink(
     outer_scopes: &[BoundScope],
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
-    let query = bind_subquery_query(select, scope, catalog, outer_scopes, ctes)?;
+    let child_visible_agg_scope = child_visible_aggregate_scope();
+    let query = bind_subquery_query(
+        select,
+        scope,
+        catalog,
+        outer_scopes,
+        child_visible_agg_scope.as_ref(),
+        ctes,
+    )?;
     ensure_single_column_subquery(query.columns().len())?;
     Ok(Expr::SubLink(Box::new(SubLink {
         sublink_type,
@@ -82,13 +98,17 @@ pub(super) fn bind_exists_subquery_expr(
     Ok(Expr::SubLink(Box::new(SubLink {
         sublink_type: SubLinkType::ExistsSubLink,
         testexpr: None,
-        subselect: Box::new(bind_subquery_query(
-            select,
-            scope,
-            catalog,
-            outer_scopes,
-            ctes,
-        )?),
+        subselect: Box::new({
+            let child_visible_agg_scope = child_visible_aggregate_scope();
+            bind_subquery_query(
+                select,
+                scope,
+                catalog,
+                outer_scopes,
+                child_visible_agg_scope.as_ref(),
+                ctes,
+            )?
+        }),
     })))
 }
 
@@ -102,7 +122,15 @@ pub(super) fn bind_in_subquery_expr(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
-    let subquery = bind_subquery_query(subquery, scope, catalog, outer_scopes, ctes)?;
+    let child_visible_agg_scope = child_visible_aggregate_scope();
+    let subquery = bind_subquery_query(
+        subquery,
+        scope,
+        catalog,
+        outer_scopes,
+        child_visible_agg_scope.as_ref(),
+        ctes,
+    )?;
     ensure_single_column_subquery(subquery.columns().len())?;
     let any_expr = Expr::SubLink(Box::new(SubLink {
         sublink_type: SubLinkType::AnySubLink(SubqueryComparisonOp::Eq),
@@ -137,7 +165,15 @@ pub(super) fn bind_quantified_subquery_expr(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
-    let subquery = bind_subquery_query(subquery, scope, catalog, outer_scopes, ctes)?;
+    let child_visible_agg_scope = child_visible_aggregate_scope();
+    let subquery = bind_subquery_query(
+        subquery,
+        scope,
+        catalog,
+        outer_scopes,
+        child_visible_agg_scope.as_ref(),
+        ctes,
+    )?;
     ensure_single_column_subquery(subquery.columns().len())?;
     let left = Box::new(bind_expr_with_outer_and_ctes(
         left,

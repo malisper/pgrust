@@ -1,6 +1,7 @@
 mod agg;
 mod agg_output;
 mod agg_output_special;
+mod agg_scope;
 mod coerce;
 mod collation;
 mod constraints;
@@ -63,6 +64,7 @@ use crate::backend::utils::cache::system_views::{
 };
 use agg::*;
 use agg_output::*;
+use agg_scope::*;
 pub use coerce::is_binary_coercible_type;
 use coerce::*;
 use collation::*;
@@ -1416,7 +1418,7 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
             scope_columns.push(scope::ScopeColumn {
                 output_name: column.name.clone(),
                 hidden: column.hidden,
-                qualified_only: false,
+                qualified_only: true,
                 relation_names: vec![relation_name.clone()],
                 hidden_invalid_relation_names: Vec::new(),
                 hidden_missing_relation_names: Vec::new(),
@@ -1565,6 +1567,7 @@ fn analyze_non_recursive_cte_body(
     expanded_views: &[u32],
 ) -> Result<(Query, RelationDesc), ParseError> {
     let cte_outer_scopes = cte_body_outer_scopes(outer_scopes);
+    let visible_agg_scope = current_visible_aggregate_scope();
     match body {
         CteBody::Select(select) => {
             let (query, _) = analyze_select_query_with_outer(
@@ -1572,6 +1575,7 @@ fn analyze_non_recursive_cte_body(
                 catalog,
                 &cte_outer_scopes,
                 grouped_outer,
+                visible_agg_scope.as_ref(),
                 visible_ctes,
                 expanded_views,
             )?;
@@ -1597,6 +1601,7 @@ fn analyze_non_recursive_cte_body(
                 catalog,
                 &cte_outer_scopes,
                 grouped_outer,
+                visible_agg_scope.as_ref(),
                 visible_ctes,
                 expanded_views,
             )?;
@@ -1739,6 +1744,8 @@ fn bind_ctes(
                         sort_clause: Vec::new(),
                         limit_count: None,
                         limit_offset: 0,
+                        locking_clause: None,
+                        row_marks: Vec::new(),
                         project_set: None,
                         recursive_union: None,
                         set_operation: None,
@@ -1753,6 +1760,7 @@ fn bind_ctes(
                     catalog,
                     &recursive_outer_scopes,
                     grouped_outer.clone(),
+                    current_visible_aggregate_scope().as_ref(),
                     &recursive_visible,
                     expanded_views,
                 )?;
@@ -1805,6 +1813,8 @@ fn bind_ctes(
                         sort_clause: Vec::new(),
                         limit_count: None,
                         limit_offset: 0,
+                        locking_clause: None,
+                        row_marks: Vec::new(),
                         project_set: None,
                         recursive_union: Some(Box::new(RecursiveUnionQuery {
                             output_desc: desc.clone(),
@@ -2683,6 +2693,8 @@ fn bind_values_query_with_outer(
             sort_clause,
             limit_count: stmt.limit,
             limit_offset: stmt.offset.unwrap_or(0),
+            locking_clause: None,
+            row_marks: Vec::new(),
             project_set: None,
             recursive_union: None,
             set_operation: None,
@@ -2711,7 +2723,7 @@ fn build_values_plan_with_outer(
         .try_into()
         .expect("values rewrite should return a single query");
     Ok(crate::backend::optimizer::fold_query_constants(query)
-        .map(|query| planner(query, catalog))?)
+        .map(|query| planner(query, catalog))??)
 }
 
 fn bind_select_query_with_outer(
@@ -2719,151 +2731,121 @@ fn bind_select_query_with_outer(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<GroupedOuterScope>,
+    visible_agg_scope: Option<&VisibleAggregateScope>,
     outer_ctes: &[BoundCte],
     expanded_views: &[u32],
 ) -> Result<(Query, BoundScope), ParseError> {
-    if let Some(locking_clause) = stmt.locking_clause {
+    with_visible_aggregate_scope(visible_agg_scope.cloned(), || {
+        let local_ctes = bind_ctes(
+            stmt.with_recursive,
+            &stmt.with,
+            catalog,
+            outer_scopes,
+            grouped_outer.clone(),
+            outer_ctes,
+            expanded_views,
+        )?;
+        let mut visible_ctes = local_ctes.clone();
+        visible_ctes.extend_from_slice(outer_ctes);
+
         if stmt.set_operation.is_some() {
-            return Err(ParseError::FeatureNotSupportedMessage(format!(
-                "{} is not allowed with UNION/INTERSECT/EXCEPT",
-                locking_clause.sql()
-            )));
+            return bind_set_operation_query_with_outer(
+                stmt,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                &visible_ctes,
+                expanded_views,
+            );
         }
-        return Err(ParseError::FeatureNotSupported(locking_clause.sql().into()));
-    }
-    let local_ctes = bind_ctes(
-        stmt.with_recursive,
-        &stmt.with,
-        catalog,
-        outer_scopes,
-        grouped_outer.clone(),
-        outer_ctes,
-        expanded_views,
-    )?;
-    let mut visible_ctes = local_ctes.clone();
-    visible_ctes.extend_from_slice(outer_ctes);
 
-    if stmt.set_operation.is_some() {
-        return bind_set_operation_query_with_outer(
-            stmt,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            &visible_ctes,
-            expanded_views,
-        );
-    }
-
-    if stmt.distinct && (!stmt.order_by.is_empty() || stmt.limit.is_some() || stmt.offset.is_some())
-    {
-        return Err(ParseError::FeatureNotSupported(
-            "SELECT DISTINCT with ORDER BY/LIMIT/OFFSET".into(),
-        ));
-    }
-
-    if stmt.targets.is_empty() && stmt.from.is_none() {
-        return Err(ParseError::EmptySelectList);
-    }
-
-    let (mut base, scope) = if let Some(from) = &stmt.from {
-        bind_from_item_with_ctes(
-            from,
-            catalog,
-            outer_scopes,
-            grouped_outer.as_ref(),
-            &visible_ctes,
-            expanded_views,
-        )?
-    } else {
-        (AnalyzedFrom::result(), empty_scope())
-    };
-    if let Some(predicate) = &stmt.where_clause {
-        if expr_contains_agg(catalog, predicate) {
-            return Err(ParseError::AggInWhere);
+        if stmt.distinct
+            && (!stmt.order_by.is_empty() || stmt.limit.is_some() || stmt.offset.is_some())
+        {
+            return Err(ParseError::FeatureNotSupported(
+                "SELECT DISTINCT with ORDER BY/LIMIT/OFFSET".into(),
+            ));
         }
-        reject_window_clause(predicate, "WHERE")?;
-    }
-    for group_expr in &stmt.group_by {
-        reject_window_clause(group_expr, "GROUP BY")?;
-    }
-    if let Some(having) = &stmt.having {
-        reject_window_clause(having, "HAVING")?;
-    }
 
-    let bound_where_qual = stmt
-        .where_clause
-        .as_ref()
-        .map(|predicate| {
-            bind_expr_with_outer_and_ctes(
-                predicate,
-                &scope,
+        if stmt.targets.is_empty() && stmt.from.is_none() {
+            return Err(ParseError::EmptySelectList);
+        }
+
+        let (mut base, scope) = if let Some(from) = &stmt.from {
+            bind_from_item_with_ctes(
+                from,
                 catalog,
                 outer_scopes,
                 grouped_outer.as_ref(),
                 &visible_ctes,
-            )
-        })
-        .transpose()?;
+                expanded_views,
+            )?
+        } else {
+            (AnalyzedFrom::result(), empty_scope())
+        };
 
-    let needs_agg = !stmt.group_by.is_empty()
-        || targets_contain_agg(catalog, &stmt.targets)
-        || stmt.having.is_some();
-
-    if needs_agg
-        && select_targets_contain_set_returning_call(
-            &stmt.targets,
+        let target_exprs = stmt
+            .targets
+            .iter()
+            .map(|target| &target.expr)
+            .collect::<Vec<_>>();
+        let target_aggs = collect_local_aggregates(
+            &target_exprs,
             &scope,
             catalog,
             outer_scopes,
             grouped_outer.as_ref(),
             &visible_ctes,
-        )
-    {
-        return Err(ParseError::UnexpectedToken {
-            expected: "select-list set-returning function in a non-aggregate query",
-            actual: "set-returning function in aggregate query".into(),
-        });
-    }
-
-    let can_skip_scan_for_degenerate_having = needs_agg
-        && stmt.group_by.is_empty()
-        && !targets_contain_agg(catalog, &stmt.targets)
-        && stmt.having.as_ref().is_some_and(|having| {
-            !expr_contains_agg(catalog, having) && !expr_references_input_scope(having)
-        })
-        && stmt
-            .targets
-            .iter()
-            .all(|target| !expr_references_input_scope(&target.expr));
-
-    if can_skip_scan_for_degenerate_having {
-        base = AnalyzedFrom::result();
-    }
-
-    let where_qual = if can_skip_scan_for_degenerate_having {
-        None
-    } else {
-        bound_where_qual
-    };
-
-    let window_state = Rc::new(RefCell::new(WindowBindingState::default()));
-    register_named_window_specs(&window_state, &stmt.window_clauses)?;
-
-    if needs_agg {
-        let mut aggs: Vec<CollectedAggregate> = Vec::new();
-        for target in &stmt.targets {
-            collect_aggs(catalog, &target.expr, &mut aggs);
+            expanded_views,
+        )?;
+        if let Some(predicate) = &stmt.where_clause {
+            analyze_expr_aggregates_in_clause(
+                predicate,
+                AggregateClauseKind::Where,
+                &scope,
+                catalog,
+                outer_scopes,
+                grouped_outer.as_ref(),
+                &visible_ctes,
+                expanded_views,
+            )?;
+            reject_window_clause(predicate, "WHERE")?;
         }
-        if let Some(having) = &stmt.having {
-            collect_aggs(catalog, having, &mut aggs);
+        for group_expr in &stmt.group_by {
+            analyze_expr_aggregates_in_clause(
+                group_expr,
+                AggregateClauseKind::GroupBy,
+                &scope,
+                catalog,
+                outer_scopes,
+                grouped_outer.as_ref(),
+                &visible_ctes,
+                expanded_views,
+            )?;
+            reject_window_clause(group_expr, "GROUP BY")?;
         }
+        let having_agg_summary = if let Some(having) = &stmt.having {
+            reject_window_clause(having, "HAVING")?;
+            Some(analyze_expr_aggregates_in_clause(
+                having,
+                AggregateClauseKind::Having,
+                &scope,
+                catalog,
+                outer_scopes,
+                grouped_outer.as_ref(),
+                &visible_ctes,
+                expanded_views,
+            )?)
+        } else {
+            None
+        };
 
-        let group_keys: Vec<Expr> = stmt
-            .group_by
-            .iter()
-            .map(|e| {
+        let bound_where_qual = stmt
+            .where_clause
+            .as_ref()
+            .map(|predicate| {
                 bind_expr_with_outer_and_ctes(
-                    e,
+                    predicate,
                     &scope,
                     catalog,
                     outer_scopes,
@@ -2871,168 +2853,73 @@ fn bind_select_query_with_outer(
                     &visible_ctes,
                 )
             })
-            .collect::<Result<_, _>>()?;
-        let rewritten_group_keys = group_keys.clone();
+            .transpose()?;
 
-        return with_grouped_agg_cte_context(&visible_ctes, &local_ctes, || {
-            let accumulators: Vec<AggAccum> = aggs
+        let needs_agg =
+            !stmt.group_by.is_empty() || !target_aggs.is_empty() || stmt.having.is_some();
+
+        if needs_agg
+            && select_targets_contain_set_returning_call(
+                &stmt.targets,
+                &scope,
+                catalog,
+                outer_scopes,
+                grouped_outer.as_ref(),
+                &visible_ctes,
+            )
+        {
+            return Err(ParseError::UnexpectedToken {
+                expected: "select-list set-returning function in a non-aggregate query",
+                actual: "set-returning function in aggregate query".into(),
+            });
+        }
+
+        let can_skip_scan_for_degenerate_having = needs_agg
+            && stmt.group_by.is_empty()
+            && target_aggs.is_empty()
+            && stmt.having.as_ref().is_some_and(|having| {
+                !having_agg_summary
+                    .as_ref()
+                    .is_some_and(|summary| summary.has_local_agg)
+                    && !expr_references_input_scope(having)
+            })
+            && stmt
+                .targets
                 .iter()
-                .map(|agg| {
-                    if aggregate_args_are_named(agg.args.args()) {
-                        return Err(ParseError::UnexpectedToken {
-                            expected: "aggregate arguments without names",
-                            actual: agg.name.clone(),
-                        });
-                    }
-                    let arg_values: Vec<SqlExpr> = agg
-                        .args
-                        .args()
-                        .iter()
-                        .map(|arg| arg.value.clone())
-                        .collect();
-                    if let Some(func) = resolve_builtin_aggregate(&agg.name) {
-                        validate_aggregate_arity(func, &arg_values)?;
-                    }
-                    let arg_types = arg_values
-                        .iter()
-                        .map(|e| {
-                            infer_sql_expr_type_with_ctes(
-                                e,
-                                &scope,
-                                catalog,
-                                outer_scopes,
-                                grouped_outer.as_ref(),
-                                &visible_ctes,
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    let resolved =
-                        resolve_aggregate_call(catalog, &agg.name, &arg_types, agg.func_variadic)
-                            .ok_or_else(|| ParseError::UnexpectedToken {
-                            expected: "supported aggregate",
-                            actual: agg.name.clone(),
-                        })?;
-                    if resolved.is_custom() {
-                        if agg.distinct {
-                            return Err(ParseError::FeatureNotSupported(format!(
-                                "DISTINCT on custom aggregate {}",
-                                agg.name
-                            )));
-                        }
-                        if !agg.order_by.is_empty() {
-                            return Err(ParseError::FeatureNotSupported(format!(
-                                "aggregate ORDER BY on custom aggregate {}",
-                                agg.name
-                            )));
-                        }
-                    }
-                    let bound_args = arg_values
-                        .iter()
-                        .map(|e| {
-                            bind_expr_with_outer_and_ctes(
-                                e,
-                                &scope,
-                                catalog,
-                                outer_scopes,
-                                grouped_outer.as_ref(),
-                                &visible_ctes,
-                            )
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    for arg in &bound_args {
-                        reject_nested_local_ctes_in_agg_expr(arg)?;
-                    }
-                    let bound_filter = agg
-                        .filter
-                        .as_ref()
-                        .map(|expr| {
-                            bind_expr_with_outer_and_ctes(
-                                expr,
-                                &scope,
-                                catalog,
-                                outer_scopes,
-                                grouped_outer.as_ref(),
-                                &visible_ctes,
-                            )
-                        })
-                        .transpose()?;
-                    if let Some(filter) = &bound_filter {
-                        reject_nested_local_ctes_in_agg_expr(filter)?;
-                    }
-                    let bound_order_by = agg
-                        .order_by
-                        .iter()
-                        .map(|item| {
-                            let bound_expr = bind_expr_with_outer_and_ctes(
-                                &item.expr,
-                                &scope,
-                                catalog,
-                                outer_scopes,
-                                grouped_outer.as_ref(),
-                                &visible_ctes,
-                            )?;
-                            let (expr, collation_oid) =
-                                finalize_order_by_expr(bound_expr, catalog)?;
-                            Ok(OrderByEntry {
-                                expr,
-                                ressortgroupref: 0,
-                                descending: item.descending,
-                                nulls_first: item.nulls_first,
-                                collation_oid,
-                            })
-                        })
-                        .collect::<Result<Vec<_>, ParseError>>()?;
-                    for item in &bound_order_by {
-                        reject_nested_local_ctes_in_agg_expr(&item.expr)?;
-                    }
-                    let coerced_args = bound_args
-                        .into_iter()
-                        .zip(arg_types.iter().copied())
-                        .zip(resolved.declared_arg_types.iter().copied())
-                        .map(|((arg, actual_type), declared_type)| {
-                            coerce_bound_expr(arg, actual_type, declared_type)
-                        })
-                        .collect();
-                    Ok(AggAccum {
-                        aggfnoid: resolved.proc_oid,
-                        agg_variadic: resolved.func_variadic,
-                        args: coerced_args,
-                        order_by: bound_order_by,
-                        filter: bound_filter,
-                        distinct: agg.distinct,
-                        sql_type: resolved.result_type,
-                    })
-                })
-                .collect::<Result<_, _>>()?;
+                .all(|target| !expr_references_input_scope(&target.expr));
 
-            let n_keys = group_keys.len();
-            let mut output_columns: Vec<QueryColumn> = Vec::new();
-            for gk in &stmt.group_by {
-                output_columns.push(QueryColumn {
-                    name: sql_expr_name(gk),
-                    sql_type: infer_sql_expr_type_with_ctes(
-                        gk,
-                        &scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer.as_ref(),
-                        &visible_ctes,
-                    ),
-                    wire_type_oid: None,
-                });
+        if can_skip_scan_for_degenerate_having {
+            base = AnalyzedFrom::result();
+        }
+
+        let where_qual = if can_skip_scan_for_degenerate_having {
+            None
+        } else {
+            bound_where_qual
+        };
+
+        let window_state = Rc::new(RefCell::new(WindowBindingState::default()));
+        register_named_window_specs(&window_state, &stmt.window_clauses)?;
+
+        let mut aggs = target_aggs;
+        if let Some(summary) = &having_agg_summary {
+            for agg in &summary.local_aggs {
+                if !aggs.contains(agg) {
+                    aggs.push(agg.clone());
+                }
             }
-            for agg in &aggs {
-                let arg_values: Vec<SqlExpr> = agg
-                    .args
-                    .args()
+        }
+        let aggs = dedupe_local_aggregate_list(&aggs, &scope, catalog, outer_scopes, &visible_ctes);
+        let local_agg_scope = build_local_aggregate_scope(&scope, grouped_outer.as_ref(), &aggs);
+
+        with_local_aggregate_scope(local_agg_scope, || {
+            if needs_agg {
+                let group_keys: Vec<Expr> = stmt
+                    .group_by
                     .iter()
-                    .map(|arg| arg.value.clone())
-                    .collect();
-                let arg_types = arg_values
-                    .iter()
-                    .map(|expr| {
-                        infer_sql_expr_type_with_ctes(
-                            expr,
+                    .map(|e| {
+                        bind_expr_with_outer_and_ctes(
+                            e,
                             &scope,
                             catalog,
                             outer_scopes,
@@ -3040,49 +2927,228 @@ fn bind_select_query_with_outer(
                             &visible_ctes,
                         )
                     })
-                    .collect::<Vec<_>>();
-                let resolved =
-                    resolve_aggregate_call(catalog, &agg.name, &arg_types, agg.func_variadic)
+                    .collect::<Result<_, _>>()?;
+                let rewritten_group_keys = group_keys.clone();
+
+                return with_grouped_agg_cte_context(&visible_ctes, &local_ctes, || {
+                    let accumulators: Vec<AggAccum> = aggs
+                        .iter()
+                        .map(|agg| {
+                            if aggregate_args_are_named(agg.args.args()) {
+                                return Err(ParseError::UnexpectedToken {
+                                    expected: "aggregate arguments without names",
+                                    actual: agg.name.clone(),
+                                });
+                            }
+                            let arg_values: Vec<SqlExpr> = agg
+                                .args
+                                .args()
+                                .iter()
+                                .map(|arg| arg.value.clone())
+                                .collect();
+                            if let Some(func) = resolve_builtin_aggregate(&agg.name) {
+                                validate_aggregate_arity(func, &arg_values)?;
+                            }
+                            let arg_types = arg_values
+                                .iter()
+                                .map(|e| {
+                                    infer_sql_expr_type_with_ctes(
+                                        e,
+                                        &scope,
+                                        catalog,
+                                        outer_scopes,
+                                        grouped_outer.as_ref(),
+                                        &visible_ctes,
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            let resolved = resolve_aggregate_call(
+                                catalog,
+                                &agg.name,
+                                &arg_types,
+                                agg.func_variadic,
+                            )
+                            .ok_or_else(|| {
+                                ParseError::UnexpectedToken {
+                                    expected: "supported aggregate",
+                                    actual: agg.name.clone(),
+                                }
+                            })?;
+                            if resolved.is_custom() {
+                                if agg.distinct {
+                                    return Err(ParseError::FeatureNotSupported(format!(
+                                        "DISTINCT on custom aggregate {}",
+                                        agg.name
+                                    )));
+                                }
+                                if !agg.order_by.is_empty() {
+                                    return Err(ParseError::FeatureNotSupported(format!(
+                                        "aggregate ORDER BY on custom aggregate {}",
+                                        agg.name
+                                    )));
+                                }
+                            }
+                            let bound_args = arg_values
+                                .iter()
+                                .map(|e| {
+                                    bind_expr_with_outer_and_ctes(
+                                        e,
+                                        &scope,
+                                        catalog,
+                                        outer_scopes,
+                                        grouped_outer.as_ref(),
+                                        &visible_ctes,
+                                    )
+                                })
+                                .collect::<Result<Vec<_>, _>>()?;
+                            for arg in &bound_args {
+                                reject_nested_local_ctes_in_agg_expr(arg)?;
+                            }
+                            let bound_filter = agg
+                                .filter
+                                .as_ref()
+                                .map(|expr| {
+                                    bind_expr_with_outer_and_ctes(
+                                        expr,
+                                        &scope,
+                                        catalog,
+                                        outer_scopes,
+                                        grouped_outer.as_ref(),
+                                        &visible_ctes,
+                                    )
+                                })
+                                .transpose()?;
+                            if let Some(filter) = &bound_filter {
+                                reject_nested_local_ctes_in_agg_expr(filter)?;
+                            }
+                            let bound_order_by = agg
+                                .order_by
+                                .iter()
+                                .map(|item| {
+                                    let bound_expr = bind_expr_with_outer_and_ctes(
+                                        &item.expr,
+                                        &scope,
+                                        catalog,
+                                        outer_scopes,
+                                        grouped_outer.as_ref(),
+                                        &visible_ctes,
+                                    )?;
+                                    let (expr, collation_oid) =
+                                        finalize_order_by_expr(bound_expr, catalog)?;
+                                    Ok(OrderByEntry {
+                                        expr,
+                                        ressortgroupref: 0,
+                                        descending: item.descending,
+                                        nulls_first: item.nulls_first,
+                                        collation_oid,
+                                    })
+                                })
+                                .collect::<Result<Vec<_>, ParseError>>()?;
+                            for item in &bound_order_by {
+                                reject_nested_local_ctes_in_agg_expr(&item.expr)?;
+                            }
+                            let coerced_args = bound_args
+                                .into_iter()
+                                .zip(arg_types.iter().copied())
+                                .zip(resolved.declared_arg_types.iter().copied())
+                                .map(|((arg, actual_type), declared_type)| {
+                                    coerce_bound_expr(arg, actual_type, declared_type)
+                                })
+                                .collect();
+                            Ok(AggAccum {
+                                aggfnoid: resolved.proc_oid,
+                                agg_variadic: resolved.func_variadic,
+                                args: coerced_args,
+                                order_by: bound_order_by,
+                                filter: bound_filter,
+                                distinct: agg.distinct,
+                                sql_type: resolved.result_type,
+                            })
+                        })
+                        .collect::<Result<_, _>>()?;
+
+                    let n_keys = group_keys.len();
+                    let mut output_columns: Vec<QueryColumn> = Vec::new();
+                    for gk in &stmt.group_by {
+                        output_columns.push(QueryColumn {
+                            name: sql_expr_name(gk),
+                            sql_type: infer_sql_expr_type_with_ctes(
+                                gk,
+                                &scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer.as_ref(),
+                                &visible_ctes,
+                            ),
+                            wire_type_oid: None,
+                        });
+                    }
+                    for agg in &aggs {
+                        let arg_values: Vec<SqlExpr> = agg
+                            .args
+                            .args()
+                            .iter()
+                            .map(|arg| arg.value.clone())
+                            .collect();
+                        let arg_types = arg_values
+                            .iter()
+                            .map(|expr| {
+                                infer_sql_expr_type_with_ctes(
+                                    expr,
+                                    &scope,
+                                    catalog,
+                                    outer_scopes,
+                                    grouped_outer.as_ref(),
+                                    &visible_ctes,
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        let resolved = resolve_aggregate_call(
+                            catalog,
+                            &agg.name,
+                            &arg_types,
+                            agg.func_variadic,
+                        )
                         .ok_or_else(|| ParseError::UnexpectedToken {
                             expected: "supported aggregate",
                             actual: agg.name.clone(),
                         })?;
-                output_columns.push(QueryColumn {
-                    name: agg.name.clone(),
-                    sql_type: resolved.result_type,
-                    wire_type_oid: None,
-                });
-            }
+                        output_columns.push(QueryColumn {
+                            name: agg.name.clone(),
+                            sql_type: resolved.result_type,
+                            wire_type_oid: None,
+                        });
+                    }
 
-            let having = stmt
-                .having
-                .as_ref()
-                .map(|e| {
-                    bind_agg_output_expr_in_clause(
-                        e,
-                        UngroupedColumnClause::Having,
-                        &stmt.group_by,
-                        &group_keys,
-                        &scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer.as_ref(),
-                        &aggs,
-                        n_keys,
-                    )
-                })
-                .transpose()?;
+                    let having = stmt
+                        .having
+                        .as_ref()
+                        .map(|e| {
+                            bind_agg_output_expr_in_clause(
+                                e,
+                                UngroupedColumnClause::Having,
+                                &stmt.group_by,
+                                &group_keys,
+                                &scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer.as_ref(),
+                                &aggs,
+                                n_keys,
+                            )
+                        })
+                        .transpose()?;
 
-            let targets: Vec<TargetEntry> = with_window_binding(
-                window_state.clone(),
-                true,
-                || {
-                    if stmt.targets.len() == 1
-                        && matches!(stmt.targets[0].expr, SqlExpr::Column(ref name) if name == "*")
-                    {
-                        let mut targets = Vec::with_capacity(output_columns.len());
-                        for (i, name) in output_columns.iter().enumerate().take(n_keys) {
-                            targets.push(TargetEntry::new(
+                    let targets: Vec<TargetEntry> = with_window_binding(
+                        window_state.clone(),
+                        true,
+                        || {
+                            if stmt.targets.len() == 1
+                                && matches!(stmt.targets[0].expr, SqlExpr::Column(ref name) if name == "*")
+                            {
+                                let mut targets = Vec::with_capacity(output_columns.len());
+                                for (i, name) in output_columns.iter().enumerate().take(n_keys) {
+                                    targets.push(TargetEntry::new(
                         name.name.clone(),
                         group_keys.get(i).cloned().unwrap_or_else(|| {
                             panic!(
@@ -3094,232 +3160,246 @@ fn bind_select_query_with_outer(
                         i + 1,
                     )
                     .with_input_resno(i + 1));
+                                }
+                                for (i, accum) in accumulators.iter().enumerate() {
+                                    let target_index = n_keys + i;
+                                    let name = output_columns
+                                        .get(target_index)
+                                        .expect("aggregate output column")
+                                        .name
+                                        .clone();
+                                    targets.push(TargetEntry::new(
+                                        name,
+                                        Expr::aggref(
+                                            accum.aggfnoid,
+                                            accum.sql_type,
+                                            accum.agg_variadic,
+                                            accum.distinct,
+                                            accum.args.clone(),
+                                            accum.order_by.clone(),
+                                            accum.filter.clone(),
+                                            i,
+                                        ),
+                                        accum.sql_type,
+                                        target_index + 1,
+                                    ));
+                                }
+                                Ok(targets)
+                            } else {
+                                stmt.targets
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(index, item)| {
+                                        Ok(TargetEntry::new(
+                                            item.output_name.clone(),
+                                            bind_agg_output_expr_in_clause(
+                                                &item.expr,
+                                                UngroupedColumnClause::SelectTarget,
+                                                &stmt.group_by,
+                                                &group_keys,
+                                                &scope,
+                                                catalog,
+                                                outer_scopes,
+                                                grouped_outer.as_ref(),
+                                                &aggs,
+                                                n_keys,
+                                            )?,
+                                            infer_sql_expr_type_with_ctes(
+                                                &item.expr,
+                                                &scope,
+                                                catalog,
+                                                outer_scopes,
+                                                grouped_outer.as_ref(),
+                                                &visible_ctes,
+                                            ),
+                                            index + 1,
+                                        ))
+                                    })
+                                    .collect::<Result<_, _>>()
+                            }
+                        },
+                    )?;
+
+                    let sort_inputs = with_window_binding(window_state.clone(), true, || {
+                        if stmt.order_by.is_empty() {
+                            Ok(Vec::new())
+                        } else {
+                            bind_order_by_items(&stmt.order_by, &targets, catalog, |expr| {
+                                bind_agg_output_expr_in_clause(
+                                    expr,
+                                    UngroupedColumnClause::SelectTarget,
+                                    &stmt.group_by,
+                                    &group_keys,
+                                    &scope,
+                                    catalog,
+                                    outer_scopes,
+                                    grouped_outer.as_ref(),
+                                    &aggs,
+                                    n_keys,
+                                )
+                            })
                         }
-                        for (i, accum) in accumulators.iter().enumerate() {
-                            let target_index = n_keys + i;
-                            let name = output_columns
-                                .get(target_index)
-                                .expect("aggregate output column")
-                                .name
-                                .clone();
-                            targets.push(TargetEntry::new(
-                                name,
-                                Expr::aggref(
-                                    accum.aggfnoid,
-                                    accum.sql_type,
-                                    accum.agg_variadic,
-                                    accum.distinct,
-                                    accum.args.clone(),
-                                    accum.order_by.clone(),
-                                    accum.filter.clone(),
-                                    i,
-                                ),
-                                accum.sql_type,
-                                target_index + 1,
-                            ));
-                        }
-                        Ok(targets)
-                    } else {
-                        stmt.targets
-                            .iter()
-                            .enumerate()
-                            .map(|(index, item)| {
-                                Ok(TargetEntry::new(
-                                    item.output_name.clone(),
-                                    bind_agg_output_expr_in_clause(
-                                        &item.expr,
-                                        UngroupedColumnClause::SelectTarget,
-                                        &stmt.group_by,
-                                        &group_keys,
-                                        &scope,
-                                        catalog,
-                                        outer_scopes,
-                                        grouped_outer.as_ref(),
-                                        &aggs,
-                                        n_keys,
-                                    )?,
-                                    infer_sql_expr_type_with_ctes(
-                                        &item.expr,
+                    })?;
+                    let targets = targets;
+                    let sort_inputs = sort_inputs;
+                    let sort_clause = build_sort_clause(sort_inputs, &targets);
+                    let target_list = normalize_target_list(targets);
+                    let window_clauses = take_window_clauses(&window_state);
+
+                    let query = Query {
+                        command_type: crate::include::executor::execdesc::CommandType::Select,
+                        depends_on_row_security: false,
+                        rtable: base.rtable,
+                        jointree: base.jointree,
+                        target_list,
+                        where_qual,
+                        group_by: rewritten_group_keys,
+                        accumulators,
+                        window_clauses,
+                        having_qual: having,
+                        sort_clause,
+                        limit_count: stmt.limit,
+                        limit_offset: stmt.offset.unwrap_or(0),
+                        locking_clause: stmt.locking_clause,
+                        row_marks: Vec::new(),
+                        project_set: None,
+                        recursive_union: None,
+                        set_operation: None,
+                    };
+                    let query = apply_select_distinct(query, stmt.distinct);
+                    Ok((query, scope))
+                });
+            } else {
+                let bound_targets = with_window_binding(window_state.clone(), true, || {
+                    bind_select_targets(
+                        &stmt.targets,
+                        &scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer.as_ref(),
+                        &visible_ctes,
+                    )
+                })?;
+
+                match bound_targets {
+                    BoundSelectTargets::Plain(targets) => {
+                        let sort_inputs = with_window_binding(window_state.clone(), true, || {
+                            if stmt.order_by.is_empty() {
+                                Ok(Vec::new())
+                            } else {
+                                bind_order_by_items(&stmt.order_by, &targets, catalog, |expr| {
+                                    bind_expr_with_outer_and_ctes(
+                                        expr,
                                         &scope,
                                         catalog,
                                         outer_scopes,
                                         grouped_outer.as_ref(),
                                         &visible_ctes,
-                                    ),
-                                    index + 1,
-                                ))
-                            })
-                            .collect::<Result<_, _>>()
+                                    )
+                                })
+                            }
+                        })?;
+                        let sort_clause = build_sort_clause(sort_inputs, &targets);
+                        let window_clauses = take_window_clauses(&window_state);
+
+                        let is_identity = targets.len() == base.output_columns.len()
+                            && targets.iter().enumerate().all(|(i, t)| {
+                                t.input_resno == Some(i + 1)
+                                    && t.name == base.output_columns[i].name
+                            });
+                        let target_list = if is_identity {
+                            normalize_target_list(identity_target_list(
+                                &base.output_columns,
+                                &base.output_exprs,
+                            ))
+                        } else {
+                            normalize_target_list(targets)
+                        };
+
+                        let query = Query {
+                            command_type: crate::include::executor::execdesc::CommandType::Select,
+                            depends_on_row_security: false,
+                            rtable: base.rtable,
+                            jointree: base.jointree,
+                            target_list,
+                            where_qual,
+                            group_by: Vec::new(),
+                            accumulators: Vec::new(),
+                            window_clauses,
+                            having_qual: None,
+                            sort_clause,
+                            limit_count: stmt.limit,
+                            limit_offset: stmt.offset.unwrap_or(0),
+                            locking_clause: stmt.locking_clause,
+                            row_marks: Vec::new(),
+                            project_set: None,
+                            recursive_union: None,
+                            set_operation: None,
+                        };
+                        let query = apply_select_distinct(query, stmt.distinct);
+                        Ok((query, scope))
                     }
-                },
-            )?;
-
-            let sort_inputs = with_window_binding(window_state.clone(), true, || {
-                if stmt.order_by.is_empty() {
-                    Ok(Vec::new())
-                } else {
-                    bind_order_by_items(&stmt.order_by, &targets, catalog, |expr| {
-                        bind_agg_output_expr_in_clause(
-                            expr,
-                            UngroupedColumnClause::SelectTarget,
-                            &stmt.group_by,
-                            &group_keys,
-                            &scope,
-                            catalog,
-                            outer_scopes,
-                            grouped_outer.as_ref(),
-                            &aggs,
-                            n_keys,
-                        )
-                    })
-                }
-            })?;
-            let targets = targets;
-            let sort_inputs = sort_inputs;
-            let sort_clause = build_sort_clause(sort_inputs, &targets);
-            let target_list = normalize_target_list(targets);
-            let window_clauses = take_window_clauses(&window_state);
-
-            let query = Query {
-                command_type: crate::include::executor::execdesc::CommandType::Select,
-                depends_on_row_security: false,
-                rtable: base.rtable,
-                jointree: base.jointree,
-                target_list,
-                where_qual,
-                group_by: rewritten_group_keys,
-                accumulators,
-                window_clauses,
-                having_qual: having,
-                sort_clause,
-                limit_count: stmt.limit,
-                limit_offset: stmt.offset.unwrap_or(0),
-                project_set: None,
-                recursive_union: None,
-                set_operation: None,
-            };
-            let query = apply_select_distinct(query, stmt.distinct);
-            Ok((query, scope))
-        });
-    } else {
-        let bound_targets = with_window_binding(window_state.clone(), true, || {
-            bind_select_targets(
-                &stmt.targets,
-                &scope,
-                catalog,
-                outer_scopes,
-                grouped_outer.as_ref(),
-                &visible_ctes,
-            )
-        })?;
-
-        match bound_targets {
-            BoundSelectTargets::Plain(targets) => {
-                let sort_inputs = with_window_binding(window_state.clone(), true, || {
-                    if stmt.order_by.is_empty() {
-                        Ok(Vec::new())
-                    } else {
-                        bind_order_by_items(&stmt.order_by, &targets, catalog, |expr| {
-                            bind_expr_with_outer_and_ctes(
-                                expr,
-                                &scope,
-                                catalog,
-                                outer_scopes,
-                                grouped_outer.as_ref(),
-                                &visible_ctes,
-                            )
-                        })
-                    }
-                })?;
-                let sort_clause = build_sort_clause(sort_inputs, &targets);
-                let window_clauses = take_window_clauses(&window_state);
-
-                let is_identity = targets.len() == base.output_columns.len()
-                    && targets.iter().enumerate().all(|(i, t)| {
-                        t.input_resno == Some(i + 1) && t.name == base.output_columns[i].name
-                    });
-                let target_list = if is_identity {
-                    normalize_target_list(identity_target_list(
-                        &base.output_columns,
-                        &base.output_exprs,
-                    ))
-                } else {
-                    normalize_target_list(targets)
-                };
-
-                let query = Query {
-                    command_type: crate::include::executor::execdesc::CommandType::Select,
-                    depends_on_row_security: false,
-                    rtable: base.rtable,
-                    jointree: base.jointree,
-                    target_list,
-                    where_qual,
-                    group_by: Vec::new(),
-                    accumulators: Vec::new(),
-                    window_clauses,
-                    having_qual: None,
-                    sort_clause,
-                    limit_count: stmt.limit,
-                    limit_offset: stmt.offset.unwrap_or(0),
-                    project_set: None,
-                    recursive_union: None,
-                    set_operation: None,
-                };
-                let query = apply_select_distinct(query, stmt.distinct);
-                Ok((query, scope))
-            }
-            BoundSelectTargets::WithProjectSet {
-                project_targets,
-                final_targets,
-            } => {
-                let sort_inputs = with_window_binding(window_state.clone(), true, || {
-                    if stmt.order_by.is_empty() {
-                        Ok(Vec::new())
-                    } else {
-                        bind_order_by_items(&stmt.order_by, &final_targets, catalog, |expr| {
-                            bind_expr_with_outer_and_ctes(
-                                expr,
-                                &scope,
-                                catalog,
-                                outer_scopes,
-                                grouped_outer.as_ref(),
-                                &visible_ctes,
-                            )
-                        })
-                    }
-                })?;
-                let window_clauses = take_window_clauses(&window_state);
-                if !window_clauses.is_empty() {
-                    return Err(ParseError::FeatureNotSupported(
+                    BoundSelectTargets::WithProjectSet {
+                        project_targets,
+                        final_targets,
+                    } => {
+                        let sort_inputs = with_window_binding(window_state.clone(), true, || {
+                            if stmt.order_by.is_empty() {
+                                Ok(Vec::new())
+                            } else {
+                                bind_order_by_items(
+                                    &stmt.order_by,
+                                    &final_targets,
+                                    catalog,
+                                    |expr| {
+                                        bind_expr_with_outer_and_ctes(
+                                            expr,
+                                            &scope,
+                                            catalog,
+                                            outer_scopes,
+                                            grouped_outer.as_ref(),
+                                            &visible_ctes,
+                                        )
+                                    },
+                                )
+                            }
+                        })?;
+                        let window_clauses = take_window_clauses(&window_state);
+                        if !window_clauses.is_empty() {
+                            return Err(ParseError::FeatureNotSupported(
                         "queries mixing window functions with select-list set-returning functions"
                             .into(),
                     ));
+                        }
+                        let sort_clause = build_sort_clause(sort_inputs, &final_targets);
+                        let target_list = normalize_target_list(final_targets);
+                        let query = Query {
+                            command_type: crate::include::executor::execdesc::CommandType::Select,
+                            depends_on_row_security: false,
+                            rtable: base.rtable,
+                            jointree: base.jointree,
+                            target_list,
+                            where_qual,
+                            group_by: Vec::new(),
+                            accumulators: Vec::new(),
+                            window_clauses,
+                            having_qual: None,
+                            sort_clause,
+                            limit_count: stmt.limit,
+                            limit_offset: stmt.offset.unwrap_or(0),
+                            locking_clause: stmt.locking_clause,
+                            row_marks: Vec::new(),
+                            project_set: Some(project_targets),
+                            recursive_union: None,
+                            set_operation: None,
+                        };
+                        let query = apply_select_distinct(query, stmt.distinct);
+                        Ok((query, scope))
+                    }
                 }
-                let sort_clause = build_sort_clause(sort_inputs, &final_targets);
-                let target_list = normalize_target_list(final_targets);
-                let query = Query {
-                    command_type: crate::include::executor::execdesc::CommandType::Select,
-                    depends_on_row_security: false,
-                    rtable: base.rtable,
-                    jointree: base.jointree,
-                    target_list,
-                    where_qual,
-                    group_by: Vec::new(),
-                    accumulators: Vec::new(),
-                    window_clauses,
-                    having_qual: None,
-                    sort_clause,
-                    limit_count: stmt.limit,
-                    limit_offset: stmt.offset.unwrap_or(0),
-                    project_set: Some(project_targets),
-                    recursive_union: None,
-                    set_operation: None,
-                };
-                let query = apply_select_distinct(query, stmt.distinct);
-                Ok((query, scope))
             }
-        }
-    }
+        })
+    })
 }
 
 fn apply_select_distinct(query: Query, distinct: bool) -> Query {
@@ -3362,6 +3442,8 @@ fn apply_select_distinct(query: Query, distinct: bool) -> Query {
         sort_clause: Vec::new(),
         limit_count: None,
         limit_offset: 0,
+        locking_clause: None,
+        row_marks: Vec::new(),
         project_set: None,
         recursive_union: None,
         set_operation: Some(Box::new(SetOperationQuery {
@@ -3390,11 +3472,13 @@ fn bind_set_operation_query_with_outer(
         .inputs
         .iter()
         .map(|input| {
+            let visible_agg_scope = current_visible_aggregate_scope();
             analyze_select_query_with_outer(
                 input,
                 catalog,
                 outer_scopes,
                 grouped_outer.clone(),
+                visible_agg_scope.as_ref(),
                 visible_ctes,
                 expanded_views,
             )
@@ -3514,6 +3598,8 @@ fn bind_set_operation_query_with_outer(
             sort_clause,
             limit_count: stmt.limit,
             limit_offset: stmt.offset.unwrap_or(0),
+            locking_clause: stmt.locking_clause,
+            row_marks: Vec::new(),
             project_set: None,
             recursive_union: None,
             set_operation: Some(Box::new(SetOperationQuery {
@@ -3539,6 +3625,7 @@ fn build_plan_with_outer(
         catalog,
         outer_scopes,
         grouped_outer,
+        None,
         outer_ctes,
         expanded_views,
     )?;
@@ -3546,5 +3633,5 @@ fn build_plan_with_outer(
         .try_into()
         .expect("select rewrite should return a single query");
     Ok(crate::backend::optimizer::fold_query_constants(query)
-        .map(|query| planner(query, catalog))?)
+        .map(|query| planner(query, catalog))??)
 }

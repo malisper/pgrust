@@ -25,7 +25,7 @@ struct ResolvedIndexSupportMetadata {
 }
 
 impl Database {
-    fn relcache_index_meta_from_catalog(
+    pub(super) fn relcache_index_meta_from_catalog(
         &self,
         client_id: ClientId,
         txn_ctx: CatalogTxnContext,
@@ -522,6 +522,7 @@ impl Database {
                 current_user_oid: self.auth_state(client_id).current_user_oid(),
                 current_xid,
                 statement_lock_scope_id: None,
+                session_replication_role: self.session_replication_role(client_id),
                 visible_catalog: visible_catalog.clone(),
             }),
         };
@@ -651,6 +652,7 @@ impl Database {
                 large_objects: Some(self.large_objects.clone()),
                 async_notify_runtime: Some(self.async_notify_runtime.clone()),
                 advisory_locks: Arc::clone(&self.advisory_locks),
+                row_locks: Arc::clone(&self.row_locks),
                 checkpoint_stats: CheckpointStatsSnapshot::default(),
                 datetime_config: DateTimeConfig::default(),
                 interrupts,
@@ -663,6 +665,7 @@ impl Database {
                 session_user_oid: self.auth_state(client_id).session_user_oid(),
                 current_user_oid: self.auth_state(client_id).current_user_oid(),
                 active_role_oid: self.auth_state(client_id).active_role_oid(),
+                session_replication_role: self.session_replication_role(client_id),
                 statement_lock_scope_id: None,
                 transaction_lock_scope_id: None,
                 next_command_id: cid,
@@ -680,6 +683,7 @@ impl Database {
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
                 deferred_foreign_keys: None,
+                trigger_depth: 0,
             };
             let rows = collect_matching_rows_heap(
                 relation.rel,

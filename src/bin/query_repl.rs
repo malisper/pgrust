@@ -483,8 +483,11 @@ fn run_statement(
         | Statement::DropPublication(_)
         | Statement::CommentOnPublication(_)
         | Statement::CommentOnAggregate(_)
+        | Statement::CommentOnFunction(_)
         | Statement::CreateTrigger(_)
         | Statement::DropTrigger(_)
+        | Statement::AlterTableTriggerState(_)
+        | Statement::AlterTriggerRename(_)
         | Statement::CreateAggregate(_)
         | Statement::DropAggregate(_)
         | Statement::AlterTableSet(_)
@@ -696,10 +699,12 @@ fn run_statement(
                 stats: Arc::clone(&stats),
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
+                transaction_state: None,
                 client_id: 21,
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 active_role_oid: None,
+                session_replication_role: Default::default(),
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
@@ -716,9 +721,11 @@ fn run_statement(
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
                 deferred_foreign_keys: None,
+                trigger_depth: 0,
                 advisory_locks: Arc::new(
                     pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
                 ),
+                row_locks: Arc::new(pgrust::backend::storage::lmgr::RowLockManager::new()),
                 current_database_name: String::new(),
                 statement_lock_scope_id: None,
                 transaction_lock_scope_id: None,
@@ -741,10 +748,12 @@ fn run_statement(
                 stats: Arc::clone(&stats),
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
+                transaction_state: None,
                 client_id: 21,
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 active_role_oid: None,
+                session_replication_role: Default::default(),
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
@@ -761,9 +770,11 @@ fn run_statement(
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
                 deferred_foreign_keys: None,
+                trigger_depth: 0,
                 advisory_locks: Arc::new(
                     pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
                 ),
+                row_locks: Arc::new(pgrust::backend::storage::lmgr::RowLockManager::new()),
                 current_database_name: String::new(),
                 statement_lock_scope_id: None,
                 transaction_lock_scope_id: None,
@@ -786,10 +797,12 @@ fn run_statement(
                 stats: Arc::clone(&stats),
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
+                transaction_state: None,
                 client_id: 21,
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 active_role_oid: None,
+                session_replication_role: Default::default(),
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
@@ -806,9 +819,11 @@ fn run_statement(
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
                 deferred_foreign_keys: None,
+                trigger_depth: 0,
                 advisory_locks: Arc::new(
                     pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
                 ),
+                row_locks: Arc::new(pgrust::backend::storage::lmgr::RowLockManager::new()),
                 current_database_name: String::new(),
                 statement_lock_scope_id: None,
                 transaction_lock_scope_id: None,
@@ -831,10 +846,12 @@ fn run_statement(
                 stats: Arc::clone(&stats),
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
+                transaction_state: None,
                 client_id: 21,
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 active_role_oid: None,
+                session_replication_role: Default::default(),
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
@@ -851,9 +868,11 @@ fn run_statement(
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
                 deferred_foreign_keys: None,
+                trigger_depth: 0,
                 advisory_locks: Arc::new(
                     pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
                 ),
+                row_locks: Arc::new(pgrust::backend::storage::lmgr::RowLockManager::new()),
                 current_database_name: String::new(),
                 statement_lock_scope_id: None,
                 transaction_lock_scope_id: None,
@@ -964,10 +983,12 @@ fn run_statement(
                 stats: Arc::clone(&stats),
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
+                transaction_state: None,
                 client_id: 21,
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 active_role_oid: None,
+                session_replication_role: Default::default(),
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
@@ -984,9 +1005,11 @@ fn run_statement(
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
                 deferred_foreign_keys: None,
+                trigger_depth: 0,
                 advisory_locks: Arc::new(
                     pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
                 ),
+                row_locks: Arc::new(pgrust::backend::storage::lmgr::RowLockManager::new()),
                 current_database_name: String::new(),
                 statement_lock_scope_id: None,
                 transaction_lock_scope_id: None,
@@ -1009,10 +1032,12 @@ fn run_statement(
                 stats: Arc::clone(&stats),
                 session_stats: Arc::clone(&session_stats),
                 snapshot: txns.read().snapshot(INVALID_TRANSACTION_ID)?,
+                transaction_state: None,
                 client_id: 21,
                 session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 active_role_oid: None,
+                session_replication_role: Default::default(),
                 next_command_id: 0,
                 default_toast_compression:
                     pgrust::include::access::htup::AttributeCompression::Pglz,
@@ -1029,9 +1054,11 @@ fn run_statement(
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
                 deferred_foreign_keys: None,
+                trigger_depth: 0,
                 advisory_locks: Arc::new(
                     pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
                 ),
+                row_locks: Arc::new(pgrust::backend::storage::lmgr::RowLockManager::new()),
                 current_database_name: String::new(),
                 statement_lock_scope_id: None,
                 transaction_lock_scope_id: None,
@@ -1057,10 +1084,12 @@ fn run_statement(
                     stats: Arc::clone(&stats),
                     session_stats: Arc::clone(&session_stats),
                     snapshot: txns.read().snapshot(xid)?,
+                    transaction_state: None,
                     client_id: 21,
                     session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     active_role_oid: None,
+                    session_replication_role: Default::default(),
                     next_command_id: 0,
                     default_toast_compression:
                         pgrust::include::access::htup::AttributeCompression::Pglz,
@@ -1077,9 +1106,11 @@ fn run_statement(
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
                     deferred_foreign_keys: None,
+                    trigger_depth: 0,
                     advisory_locks: Arc::new(
                         pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
                     ),
+                    row_locks: Arc::new(pgrust::backend::storage::lmgr::RowLockManager::new()),
                     current_database_name: String::new(),
                     statement_lock_scope_id: None,
                     transaction_lock_scope_id: None,
@@ -1116,10 +1147,12 @@ fn run_statement(
                     stats: Arc::clone(&stats),
                     session_stats: Arc::clone(&session_stats),
                     snapshot: txns.read().snapshot(xid)?,
+                    transaction_state: None,
                     client_id: 21,
                     session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     active_role_oid: None,
+                    session_replication_role: Default::default(),
                     next_command_id: 0,
                     default_toast_compression:
                         pgrust::include::access::htup::AttributeCompression::Pglz,
@@ -1136,9 +1169,11 @@ fn run_statement(
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
                     deferred_foreign_keys: None,
+                    trigger_depth: 0,
                     advisory_locks: Arc::new(
                         pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
                     ),
+                    row_locks: Arc::new(pgrust::backend::storage::lmgr::RowLockManager::new()),
                     current_database_name: String::new(),
                     statement_lock_scope_id: None,
                     transaction_lock_scope_id: None,
@@ -1175,10 +1210,12 @@ fn run_statement(
                     stats: Arc::clone(&stats),
                     session_stats: Arc::clone(&session_stats),
                     snapshot: txns.read().snapshot(xid)?,
+                    transaction_state: None,
                     client_id: 21,
                     session_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     current_user_oid: pgrust::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                     active_role_oid: None,
+                    session_replication_role: Default::default(),
                     next_command_id: 0,
                     default_toast_compression:
                         pgrust::include::access::htup::AttributeCompression::Pglz,
@@ -1195,9 +1232,11 @@ fn run_statement(
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
                     deferred_foreign_keys: None,
+                    trigger_depth: 0,
                     advisory_locks: Arc::new(
                         pgrust::backend::storage::lmgr::AdvisoryLockManager::new(),
                     ),
+                    row_locks: Arc::new(pgrust::backend::storage::lmgr::RowLockManager::new()),
                     current_database_name: String::new(),
                     statement_lock_scope_id: None,
                     transaction_lock_scope_id: None,

@@ -153,12 +153,217 @@ fn bind_row_expr_fields(
             }
             continue;
         }
+        if let SqlExpr::FieldSelect { expr, field } = item
+            && field == "*"
+        {
+            let bound_expr = bind_expr_with_outer_and_ctes(
+                expr,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?;
+            for (_, expr) in expand_bound_record_expr_fields(&bound_expr, catalog)? {
+                let field_name = format!("f{}", field_exprs.len() + 1);
+                field_exprs.push((field_name, expr));
+            }
+            continue;
+        }
         let expr =
             bind_expr_with_outer_and_ctes(item, scope, catalog, outer_scopes, grouped_outer, ctes)?;
         let field_name = format!("f{}", field_exprs.len() + 1);
         field_exprs.push((field_name, expr));
     }
     Ok(field_exprs)
+}
+
+fn expand_bound_record_expr_fields(
+    expr: &Expr,
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<(String, Expr)>, ParseError> {
+    if let Expr::Row { fields, .. } = expr {
+        return Ok(fields.clone());
+    }
+
+    let Some(sql_type) = expr_sql_type_hint(expr) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "record expression",
+            actual: "field expansion .*".into(),
+        });
+    };
+
+    let fields = if matches!(sql_type.kind, SqlTypeKind::Composite) && sql_type.typrelid != 0 {
+        let relation = catalog
+            .lookup_relation_by_oid(sql_type.typrelid)
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "named composite type",
+                actual: format!("type relation {} not found", sql_type.typrelid),
+            })?;
+        relation
+            .desc
+            .columns
+            .into_iter()
+            .filter(|column| !column.dropped)
+            .map(|column| (column.name, column.sql_type))
+            .collect::<Vec<_>>()
+    } else if matches!(sql_type.kind, SqlTypeKind::Record) && sql_type.typmod > 0 {
+        lookup_anonymous_record_descriptor(sql_type.typmod)
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "record expression",
+                actual: "field expansion .*".into(),
+            })?
+            .fields
+            .into_iter()
+            .map(|field| (field.name, field.sql_type))
+            .collect::<Vec<_>>()
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "record expression",
+            actual: "field expansion .*".into(),
+        });
+    };
+
+    Ok(fields
+        .into_iter()
+        .map(|(field, field_type)| {
+            (
+                field.clone(),
+                Expr::FieldSelect {
+                    expr: Box::new(expr.clone()),
+                    field,
+                    field_type,
+                },
+            )
+        })
+        .collect())
+}
+
+fn bind_row_comparison_expr(
+    op: &'static str,
+    make: OpExprKind,
+    left_items: &[SqlExpr],
+    right_items: &[SqlExpr],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let left_fields = bind_row_expr_fields(
+        left_items,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    let right_fields = bind_row_expr_fields(
+        right_items,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    if left_fields.len() != right_fields.len() {
+        return Err(ParseError::DetailedError {
+            message: "unequal number of entries in row expressions".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
+    }
+    if left_fields.is_empty() {
+        return Err(ParseError::FeatureNotSupported(
+            "cannot compare rows of zero length".into(),
+        ));
+    }
+
+    let mut parts = Vec::with_capacity(left_fields.len());
+    for ((_, left), (_, right)) in left_fields.into_iter().zip(right_fields) {
+        let left_type = expr_sql_type_hint(&left).unwrap_or(SqlType::new(SqlTypeKind::Text));
+        let right_type = expr_sql_type_hint(&right).unwrap_or(SqlType::new(SqlTypeKind::Text));
+        parts.push(bind_lowered_comparison_expr(
+            op, make, left, left_type, left_type, right, right_type, right_type, None, None,
+            catalog,
+        )?);
+    }
+
+    if parts.len() == 1 {
+        return Ok(parts.pop().expect("single row comparison part"));
+    }
+    Ok(Expr::bool_expr(
+        if make == OpExprKind::Eq {
+            BoolExprType::And
+        } else {
+            BoolExprType::Or
+        },
+        parts,
+    ))
+}
+
+fn bind_row_distinct_expr(
+    negated: bool,
+    left_items: &[SqlExpr],
+    right_items: &[SqlExpr],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let left_fields = bind_row_expr_fields(
+        left_items,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    let right_fields = bind_row_expr_fields(
+        right_items,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    if left_fields.len() != right_fields.len() {
+        return Err(ParseError::DetailedError {
+            message: "unequal number of entries in row expressions".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
+    }
+
+    let mut parts = left_fields
+        .into_iter()
+        .zip(right_fields)
+        .map(|((_, left), (_, right))| {
+            if negated {
+                Expr::IsNotDistinctFrom(Box::new(left), Box::new(right))
+            } else {
+                Expr::IsDistinctFrom(Box::new(left), Box::new(right))
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if parts.is_empty() {
+        return Ok(Expr::Const(Value::Bool(negated)));
+    }
+    if parts.len() == 1 {
+        return Ok(parts.pop().expect("single row distinct part"));
+    }
+    Ok(Expr::bool_expr(
+        if negated {
+            BoolExprType::And
+        } else {
+            BoolExprType::Or
+        },
+        parts,
+    ))
 }
 
 fn bind_named_composite_row_cast(
@@ -451,9 +656,7 @@ fn bind_window_agg_call(
     validate_aggregate_arity(func, &arg_values)?;
     let arg_types = arg_values
         .iter()
-        .map(|expr| {
-            infer_sql_expr_type_with_ctes(expr, scope, catalog, outer_scopes, grouped_outer, ctes)
-        })
+        .map(|expr| infer_sql_expr_type_with_ctes(expr, scope, catalog, outer_scopes, None, ctes))
         .collect::<Vec<_>>();
     let resolved = resolve_builtin_aggregate_call(catalog, func, &arg_types, func_variadic);
     let bound_args = arg_values
@@ -549,6 +752,148 @@ fn bind_window_agg_call(
         coerced_args,
         aggregate_sql_type(func, arg_types.first().copied()),
     ))
+}
+
+fn bind_visible_outer_aggregate_call(
+    name: &str,
+    args: &[SqlFunctionArg],
+    order_by: &[OrderByItem],
+    distinct: bool,
+    func_variadic: bool,
+    filter: Option<&SqlExpr>,
+    _scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    _grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Option<Expr>, ParseError> {
+    let Some((aggno, visible_scope)) = match_visible_aggregate_call(
+        name,
+        &SqlCallArgs::Args(args.to_vec()),
+        order_by,
+        distinct,
+        func_variadic,
+        filter,
+        catalog,
+        outer_scopes,
+        ctes,
+    ) else {
+        return Ok(None);
+    };
+    let owner_scope = &visible_scope.input_scope;
+    let owner_outer_scopes = outer_scopes.get(visible_scope.levelsup..).unwrap_or(&[]);
+    let arg_values = args.iter().map(|arg| arg.value.clone()).collect::<Vec<_>>();
+    if let Some(func) = resolve_builtin_aggregate(name) {
+        validate_aggregate_arity(func, &arg_values)?;
+    }
+    let arg_types = arg_values
+        .iter()
+        .map(|expr| {
+            infer_sql_expr_type_with_ctes(
+                expr,
+                owner_scope,
+                catalog,
+                owner_outer_scopes,
+                None,
+                ctes,
+            )
+        })
+        .collect::<Vec<_>>();
+    let resolved =
+        resolve_aggregate_call(catalog, name, &arg_types, func_variadic).ok_or_else(|| {
+            ParseError::UnexpectedToken {
+                expected: "supported aggregate",
+                actual: name.to_string(),
+            }
+        })?;
+    if resolved.is_custom() {
+        if distinct {
+            return Err(ParseError::FeatureNotSupported(format!(
+                "DISTINCT on custom aggregate {name}"
+            )));
+        }
+        if !order_by.is_empty() {
+            return Err(ParseError::FeatureNotSupported(format!(
+                "aggregate ORDER BY on custom aggregate {name}"
+            )));
+        }
+    }
+    let bound_args = arg_values
+        .iter()
+        .map(|expr| {
+            bind_expr_with_outer_and_ctes(
+                expr,
+                owner_scope,
+                catalog,
+                owner_outer_scopes,
+                None,
+                ctes,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for arg in &bound_args {
+        reject_nested_local_ctes_in_agg_expr(arg)?;
+    }
+    let bound_filter = filter
+        .map(|expr| {
+            bind_expr_with_outer_and_ctes(
+                expr,
+                owner_scope,
+                catalog,
+                owner_outer_scopes,
+                None,
+                ctes,
+            )
+        })
+        .transpose()?;
+    if let Some(filter) = &bound_filter {
+        reject_nested_local_ctes_in_agg_expr(filter)?;
+    }
+    let bound_order_by = order_by
+        .iter()
+        .map(|item| {
+            let bound_expr = bind_expr_with_outer_and_ctes(
+                &item.expr,
+                owner_scope,
+                catalog,
+                owner_outer_scopes,
+                None,
+                ctes,
+            )?;
+            let (expr, collation_oid) = finalize_order_by_expr(bound_expr, catalog)?;
+            Ok(OrderByEntry {
+                expr,
+                ressortgroupref: 0,
+                descending: item.descending,
+                nulls_first: item.nulls_first,
+                collation_oid,
+            })
+        })
+        .collect::<Result<Vec<_>, ParseError>>()?;
+    for item in &bound_order_by {
+        reject_nested_local_ctes_in_agg_expr(&item.expr)?;
+    }
+    let coerced_args = bound_args
+        .into_iter()
+        .zip(arg_types.iter().copied())
+        .zip(resolved.declared_arg_types.iter().copied())
+        .map(|((arg, actual_type), declared_type)| {
+            coerce_bound_expr(arg, actual_type, declared_type)
+        })
+        .collect();
+    Ok(Some(Expr::Aggref(Box::new(
+        crate::include::nodes::primnodes::Aggref {
+            aggfnoid: resolved.proc_oid,
+            aggtype: resolved.result_type,
+            aggvariadic: resolved.func_variadic,
+            aggdistinct: distinct,
+            args: coerced_args,
+            aggorder: bound_order_by,
+            aggfilter: bound_filter,
+            agglevelsup: visible_scope.levelsup,
+            aggno,
+        },
+    ))))
 }
 
 fn bind_window_func_call(
@@ -1292,7 +1637,21 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             bind_explicit_collation(bound_inner, inner_type, collation, catalog)?
         }
         SqlExpr::Eq(left, right) => {
-            if let Some(result) = bind_maybe_multirange_comparison(
+            if let (SqlExpr::Row(left_items), SqlExpr::Row(right_items)) =
+                (left.as_ref(), right.as_ref())
+            {
+                bind_row_comparison_expr(
+                    "=",
+                    OpExprKind::Eq,
+                    left_items,
+                    right_items,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            } else if let Some(result) = bind_maybe_multirange_comparison(
                 "=",
                 left,
                 right,
@@ -1340,7 +1699,21 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
         }
         SqlExpr::NotEq(left, right) => {
-            if let Some(result) = bind_maybe_multirange_comparison(
+            if let (SqlExpr::Row(left_items), SqlExpr::Row(right_items)) =
+                (left.as_ref(), right.as_ref())
+            {
+                bind_row_comparison_expr(
+                    "<>",
+                    OpExprKind::NotEq,
+                    left_items,
+                    right_items,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            } else if let Some(result) = bind_maybe_multirange_comparison(
                 "<>",
                 left,
                 right,
@@ -1853,42 +2226,76 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             grouped_outer,
             ctes,
         )?)),
-        SqlExpr::IsDistinctFrom(left, right) => Expr::IsDistinctFrom(
-            Box::new(bind_expr_with_outer_and_ctes(
-                left,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-            Box::new(bind_expr_with_outer_and_ctes(
-                right,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-        ),
-        SqlExpr::IsNotDistinctFrom(left, right) => Expr::IsNotDistinctFrom(
-            Box::new(bind_expr_with_outer_and_ctes(
-                left,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-            Box::new(bind_expr_with_outer_and_ctes(
-                right,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?),
-        ),
+        SqlExpr::IsDistinctFrom(left, right) => {
+            if let (SqlExpr::Row(left_items), SqlExpr::Row(right_items)) =
+                (left.as_ref(), right.as_ref())
+            {
+                bind_row_distinct_expr(
+                    false,
+                    left_items,
+                    right_items,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            } else {
+                Expr::IsDistinctFrom(
+                    Box::new(bind_expr_with_outer_and_ctes(
+                        left,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?),
+                    Box::new(bind_expr_with_outer_and_ctes(
+                        right,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?),
+                )
+            }
+        }
+        SqlExpr::IsNotDistinctFrom(left, right) => {
+            if let (SqlExpr::Row(left_items), SqlExpr::Row(right_items)) =
+                (left.as_ref(), right.as_ref())
+            {
+                bind_row_distinct_expr(
+                    true,
+                    left_items,
+                    right_items,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            } else {
+                Expr::IsNotDistinctFrom(
+                    Box::new(bind_expr_with_outer_and_ctes(
+                        left,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?),
+                    Box::new(bind_expr_with_outer_and_ctes(
+                        right,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        grouped_outer,
+                        ctes,
+                    )?),
+                )
+            }
+        }
         SqlExpr::ArrayLiteral(elements) => Expr::ArrayLiteral {
             elements: elements
                 .iter()
@@ -2348,6 +2755,21 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                         grouped_outer,
                         ctes,
                     );
+                }
+                if let Some(bound_outer_agg) = bind_visible_outer_aggregate_call(
+                    name,
+                    args_list,
+                    order_by,
+                    *distinct,
+                    *func_variadic,
+                    filter.as_deref(),
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )? {
+                    return Ok(bound_outer_agg);
                 }
                 return Err(ParseError::UnexpectedToken {
                     expected: "non-aggregate expression",

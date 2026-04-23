@@ -85,11 +85,8 @@ pub(crate) use expr_range::{
     parse_range_text,
 };
 pub(crate) use expr_xml::validate_xml_input;
-pub(crate) use nodes::{
-    render_explain_expr, render_explain_join_expr, render_explain_join_expr_inner,
-    render_explain_projection_expr_inner_with_qualifier,
-    render_explain_projection_expr_with_qualifier,
-};
+pub(crate) use nodes::{render_explain_expr, render_explain_projection_expr_with_qualifier};
+pub(crate) use srf::set_returning_call_label;
 pub use startup::executor_start;
 pub(crate) use tsearch::{
     compare_tsquery, compare_tsvector, concat_tsvector, decode_tsquery_bytes,
@@ -111,8 +108,10 @@ use crate::backend::parser::{
     ParseError, Statement, bind_delete, bind_insert, bind_update, parse_statement, pg_plan_query,
     pg_plan_values_query,
 };
-use crate::backend::storage::lmgr::AdvisoryLockManager;
 use crate::backend::storage::lmgr::TableLockError;
+use crate::backend::storage::lmgr::{
+    AdvisoryLockManager, RowLockError, RowLockManager, RowLockMode, RowLockOwner, RowLockTag,
+};
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
@@ -176,6 +175,14 @@ impl DeferredForeignKeyTracker {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SessionReplicationRole {
+    #[default]
+    Origin,
+    Replica,
+    Local,
+}
+
 pub struct ExecutorContext {
     pub pool: std::sync::Arc<BufferPool<SmgrStorageBackend>>,
     pub txns: std::sync::Arc<parking_lot::RwLock<TransactionManager>>,
@@ -184,6 +191,7 @@ pub struct ExecutorContext {
     pub large_objects: Option<std::sync::Arc<LargeObjectRuntime>>,
     pub async_notify_runtime: Option<std::sync::Arc<AsyncNotifyRuntime>>,
     pub advisory_locks: std::sync::Arc<AdvisoryLockManager>,
+    pub row_locks: std::sync::Arc<RowLockManager>,
     pub checkpoint_stats: CheckpointStatsSnapshot,
     pub datetime_config: DateTimeConfig,
     pub interrupts: std::sync::Arc<InterruptState>,
@@ -196,6 +204,7 @@ pub struct ExecutorContext {
     pub session_user_oid: u32,
     pub current_user_oid: u32,
     pub active_role_oid: Option<u32>,
+    pub session_replication_role: SessionReplicationRole,
     pub statement_lock_scope_id: Option<u64>,
     pub transaction_lock_scope_id: Option<u64>,
     pub next_command_id: CommandId,
@@ -214,6 +223,7 @@ pub struct ExecutorContext {
     pub cte_producers: HashMap<usize, Rc<RefCell<PlanState>>>,
     pub recursive_worktables: HashMap<usize, Rc<RefCell<RecursiveWorkTable>>>,
     pub deferred_foreign_keys: Option<DeferredForeignKeyTracker>,
+    pub trigger_depth: usize,
 }
 
 #[derive(Debug)]
@@ -271,6 +281,39 @@ impl ExecutorContext {
             .snapshot_for_command(xid, CommandId::MAX)
             .map_err(|e| ExecError::Heap(HeapError::Mvcc(e)))?;
         Ok(xid)
+    }
+
+    pub fn row_lock_owner(&self) -> RowLockOwner {
+        if let Some(scope_id) = self.transaction_lock_scope_id {
+            RowLockOwner::transaction(self.client_id, scope_id)
+        } else if let Some(scope_id) = self.statement_lock_scope_id {
+            RowLockOwner::statement(self.client_id, scope_id)
+        } else {
+            RowLockOwner::session(self.client_id)
+        }
+    }
+
+    pub fn acquire_row_lock(
+        &self,
+        relation_oid: u32,
+        tid: crate::include::access::itemptr::ItemPointerData,
+        mode: RowLockMode,
+    ) -> Result<(), ExecError> {
+        match self.row_locks.lock_interruptible(
+            RowLockTag { relation_oid, tid },
+            mode,
+            self.row_lock_owner(),
+            self.interrupts.as_ref(),
+        ) {
+            Ok(()) => Ok(()),
+            Err(RowLockError::Interrupted(reason)) => Err(ExecError::Interrupted(reason)),
+            Err(RowLockError::DeadlockTimeout) => Err(ExecError::DetailedError {
+                message: "deadlock detected".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "40P01",
+            }),
+        }
     }
 }
 

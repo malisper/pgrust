@@ -17,6 +17,7 @@ use crate::backend::executor::value_io::{decode_value_with_toast, missing_column
 use crate::backend::executor::window::execute_window_clause;
 use crate::backend::libpq::pqformat::FloatFormatOptions;
 use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::backend::storage::lmgr::RowLockMode;
 use crate::backend::storage::page::bufpage::{
     ItemIdFlags, page_get_item_id_unchecked, page_get_item_unchecked, page_get_max_offset_number,
 };
@@ -28,7 +29,7 @@ use crate::include::catalog::PG_LARGEOBJECT_METADATA_RELATION_OID;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, CteScanState,
-    FilterState, FunctionScanState, IndexScanState, LimitState, MaterializedRow,
+    FilterState, FunctionScanState, IndexScanState, LimitState, LockRowsState, MaterializedRow,
     NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, PlanState, ProjectSetState,
     ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SetOpState, SlotKind,
     SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot, ValuesState, WindowAggState,
@@ -39,7 +40,7 @@ use crate::include::nodes::primnodes::{
     ScalarFunctionImpl, Var, attrno_index,
 };
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::rc::Rc;
 
 const EMPTY_SYSTEM_BINDINGS: [SystemVarBinding; 0] = [];
@@ -234,13 +235,73 @@ fn note_filtered_row(stats: &mut NodeExecStats) {
     stats.rows_removed_by_filter += 1;
 }
 
-fn materialize_cte_row(slot: &mut TupleSlot) -> Result<MaterializedRow, ExecError> {
+fn materialize_cte_row(
+    slot: &mut TupleSlot,
+    bindings: &[SystemVarBinding],
+) -> Result<MaterializedRow, ExecError> {
     let mut values = slot.values()?.to_vec();
     Value::materialize_all(&mut values);
     Ok(MaterializedRow::new(
         TupleSlot::virtual_row_with_metadata(values, slot.tid(), slot.table_oid),
-        Vec::new(),
+        bindings.to_vec(),
     ))
+}
+
+fn row_lock_read_only_error(mode: RowLockMode) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "{} is not allowed in a read-only execution context",
+            mode.pg_name()
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "25006",
+    }
+}
+
+fn lock_current_row_marks(
+    ctx: &ExecutorContext,
+    row_marks: &[crate::include::nodes::plannodes::PlanRowMark],
+    bindings: &[SystemVarBinding],
+) -> Result<(), ExecError> {
+    if row_marks.is_empty() {
+        return Ok(());
+    }
+    if !ctx.allow_side_effects {
+        let mode = row_marks
+            .first()
+            .map(|row_mark| RowLockMode::from_select_locking_clause(row_mark.strength))
+            .unwrap_or(RowLockMode::Exclusive);
+        return Err(row_lock_read_only_error(mode));
+    }
+
+    let mut seen = BTreeSet::new();
+    for row_mark in row_marks {
+        let binding = bindings
+            .iter()
+            .find(|binding| binding.varno == row_mark.rtindex)
+            .ok_or_else(|| {
+                internal_exec_error(format!(
+                    "missing system binding for row-marked relation {}",
+                    row_mark.relation_name
+                ))
+            })?;
+        let tid = binding.tid.ok_or_else(|| {
+            internal_exec_error(format!(
+                "missing tuple identity for row-marked relation {}",
+                row_mark.relation_name
+            ))
+        })?;
+        if !seen.insert((row_mark.relation_oid, tid)) {
+            continue;
+        }
+        ctx.acquire_row_lock(
+            row_mark.relation_oid,
+            tid,
+            RowLockMode::from_select_locking_clause(row_mark.strength),
+        )?;
+    }
+    Ok(())
 }
 
 fn internal_exec_error(message: impl Into<String>) -> ExecError {
@@ -298,10 +359,9 @@ fn set_op_result_rows(
 
     for (child_index, child) in children.iter_mut().enumerate() {
         let mut rows = Vec::new();
-        while let Some(slot) = child.exec_proc_node(ctx)? {
-            let mut values = slot.values()?.to_vec();
-            Value::materialize_all(&mut values);
-            let row = MaterializedRow::new(TupleSlot::virtual_row(values.clone()), Vec::new());
+        while child.exec_proc_node(ctx)?.is_some() {
+            let row = child.materialize_current_row()?;
+            let values = row.slot.tts_values.clone();
             rows.push(row.clone());
 
             if let Some(bucket) = buckets
@@ -369,6 +429,7 @@ fn load_materialized_row(
 ) {
     *slot = row.slot.clone();
     bindings.clear();
+    bindings.extend_from_slice(&row.system_bindings);
     set_active_system_bindings(ctx, bindings);
 }
 
@@ -448,6 +509,7 @@ impl PlanNode for AppendState {
                         vec![SystemVarBinding {
                             varno: self.source_id,
                             table_oid: binding.table_oid,
+                            tid: binding.tid,
                         }]
                     })
                     .unwrap_or_default();
@@ -525,6 +587,7 @@ impl PlanNode for SeqScanState {
                 self.current_bindings = vec![SystemVarBinding {
                     varno: self.source_id,
                     table_oid: self.relation_oid,
+                    tid: None,
                 }];
                 set_active_system_bindings(ctx, &self.current_bindings);
                 if let Some(qual) = &self.qual {
@@ -566,6 +629,7 @@ impl PlanNode for SeqScanState {
             self.current_bindings = vec![SystemVarBinding {
                 varno: self.source_id,
                 table_oid: self.relation_oid,
+                tid: None,
             }];
             set_active_system_bindings(ctx, &self.current_bindings);
 
@@ -635,6 +699,7 @@ impl PlanNode for SeqScanState {
                     self.current_bindings = vec![SystemVarBinding {
                         varno: self.source_id,
                         table_oid: self.relation_oid,
+                        tid: Some(tid),
                     }];
                     set_active_system_bindings(ctx, &self.current_bindings);
 
@@ -836,6 +901,7 @@ impl PlanNode for IndexScanState {
             self.current_bindings = vec![SystemVarBinding {
                 varno: self.source_id,
                 table_oid: self.relation_oid,
+                tid: Some(tid),
             }];
             set_active_system_bindings(ctx, &self.current_bindings);
 
@@ -1183,6 +1249,10 @@ impl PlanNode for BitmapHeapScanState {
             self.current_bindings = vec![SystemVarBinding {
                 varno: self.source_id,
                 table_oid: self.relation_oid,
+                tid: Some(crate::include::access::itemptr::ItemPointerData {
+                    block_number: self.bitmap_pages[self.current_page_index - 1],
+                    offset_number: offset,
+                }),
             }];
             set_active_system_bindings(ctx, &self.current_bindings);
 
@@ -2527,6 +2597,68 @@ impl PlanNode for LimitState {
     }
 }
 
+impl PlanNode for LockRowsState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        loop {
+            let Some(_slot) = self.input.exec_proc_node(ctx)? else {
+                finish_eof(&mut self.stats, start, ctx);
+                return Ok(None);
+            };
+            self.current_bindings = self.input.current_system_bindings().to_vec();
+            lock_current_row_marks(ctx, &self.row_marks, &self.current_bindings)?;
+            set_active_system_bindings(ctx, &self.current_bindings);
+            finish_row(&mut self.stats, start);
+            return Ok(self.input.current_slot());
+        }
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        self.input.current_slot()
+    }
+
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
+    }
+
+    fn column_names(&self) -> &[String] {
+        self.input.column_names()
+    }
+
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
+
+    fn node_label(&self) -> String {
+        "LockRows".into()
+    }
+
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        format_explain_lines_with_costs(&*self.input, indent + 1, analyze, show_costs, lines);
+    }
+}
+
 impl PlanNode for ProjectionState {
     fn exec_proc_node<'a>(
         &'a mut self,
@@ -3240,14 +3372,12 @@ impl PlanNode for CteScanState {
                 .entry(self.cte_id)
                 .or_insert_with(|| Rc::new(RefCell::new(executor_start(self.cte_plan.clone()))))
                 .clone();
-            match producer.borrow_mut().exec_proc_node(ctx)? {
-                Some(slot) => {
-                    let row = materialize_cte_row(slot)?;
-                    table.borrow_mut().rows.push(row);
-                }
-                None => {
-                    table.borrow_mut().eof = true;
-                }
+            let mut producer_state = producer.borrow_mut();
+            if producer_state.exec_proc_node(ctx)?.is_some() {
+                let row = producer_state.materialize_current_row()?;
+                table.borrow_mut().rows.push(row);
+            } else {
+                table.borrow_mut().eof = true;
             }
         }
     }
@@ -3311,64 +3441,53 @@ impl PlanNode for RecursiveUnionState {
         loop {
             ctx.check_for_interrupts()?;
             if !self.anchor_done {
-                match self.anchor.exec_proc_node(ctx)? {
-                    Some(slot) => {
-                        let mut row = materialize_cte_row(slot)?;
-                        if self.distinct {
-                            let signature = row.slot.values()?.to_vec();
-                            if !self.seen_rows.insert(signature) {
-                                continue;
-                            }
-                        }
-                        self.worktable.borrow_mut().rows.push(row.clone());
-                        load_materialized_row(
-                            &mut self.slot,
-                            &row,
-                            &mut self.current_bindings,
-                            ctx,
-                        );
-                        finish_row(&mut self.stats, start);
-                        return Ok(Some(&mut self.slot));
-                    }
-                    None => {
-                        self.anchor_done = true;
-                        self.recursive_state = Some(executor_start(self.recursive_plan.clone()));
-                        continue;
-                    }
-                }
-            }
-
-            let recursive_state = self
-                .recursive_state
-                .get_or_insert_with(|| executor_start(self.recursive_plan.clone()));
-            match recursive_state.exec_proc_node(ctx)? {
-                Some(slot) => {
-                    let mut row = materialize_cte_row(slot)?;
+                if self.anchor.exec_proc_node(ctx)?.is_some() {
+                    let mut row = self.anchor.materialize_current_row()?;
                     if self.distinct {
                         let signature = row.slot.values()?.to_vec();
                         if !self.seen_rows.insert(signature) {
                             continue;
                         }
                     }
-                    self.intermediate_rows.push(row.clone());
+                    self.worktable.borrow_mut().rows.push(row.clone());
                     load_materialized_row(&mut self.slot, &row, &mut self.current_bindings, ctx);
                     finish_row(&mut self.stats, start);
                     return Ok(Some(&mut self.slot));
-                }
-                None => {
-                    if self.intermediate_rows.is_empty() {
-                        ctx.recursive_worktables.remove(&self.worktable_id);
-                        finish_eof(&mut self.stats, start, ctx);
-                        return Ok(None);
-                    }
-                    if !self.recursive_references_worktable {
-                        ctx.recursive_worktables.remove(&self.worktable_id);
-                        finish_eof(&mut self.stats, start, ctx);
-                        return Ok(None);
-                    }
-                    self.worktable.borrow_mut().rows = std::mem::take(&mut self.intermediate_rows);
+                } else {
+                    self.anchor_done = true;
                     self.recursive_state = Some(executor_start(self.recursive_plan.clone()));
+                    continue;
                 }
+            }
+
+            let recursive_state = self
+                .recursive_state
+                .get_or_insert_with(|| executor_start(self.recursive_plan.clone()));
+            if recursive_state.exec_proc_node(ctx)?.is_some() {
+                let mut row = recursive_state.materialize_current_row()?;
+                if self.distinct {
+                    let signature = row.slot.values()?.to_vec();
+                    if !self.seen_rows.insert(signature) {
+                        continue;
+                    }
+                }
+                self.intermediate_rows.push(row.clone());
+                load_materialized_row(&mut self.slot, &row, &mut self.current_bindings, ctx);
+                finish_row(&mut self.stats, start);
+                return Ok(Some(&mut self.slot));
+            } else {
+                if self.intermediate_rows.is_empty() {
+                    ctx.recursive_worktables.remove(&self.worktable_id);
+                    finish_eof(&mut self.stats, start, ctx);
+                    return Ok(None);
+                }
+                if !self.recursive_references_worktable {
+                    ctx.recursive_worktables.remove(&self.worktable_id);
+                    finish_eof(&mut self.stats, start, ctx);
+                    return Ok(None);
+                }
+                self.worktable.borrow_mut().rows = std::mem::take(&mut self.intermediate_rows);
+                self.recursive_state = Some(executor_start(self.recursive_plan.clone()));
             }
         }
     }

@@ -212,6 +212,7 @@ fn run_conflict_update(
     let write_result = write_updated_row(
         &stmt.relation_name,
         stmt.rel,
+        stmt.relation_oid,
         stmt.toast,
         stmt.toast_index.as_ref(),
         &stmt.desc,

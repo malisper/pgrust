@@ -49,11 +49,6 @@ fn validate_partitioned_table_ddl(
     table_name: &str,
     lowered: &crate::backend::parser::LoweredCreateTable,
 ) -> Result<(), ExecError> {
-    if lowered.partition_spec.is_some() && !lowered.constraint_actions.is_empty() {
-        return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
-            "partitioned indexes on \"{table_name}\""
-        ))));
-    }
     if lowered.partition_spec.is_some() && !lowered.foreign_key_actions.is_empty() {
         return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
             "foreign keys on partitioned table \"{table_name}\""
@@ -300,103 +295,113 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<(), ExecError> {
         let interrupts = self.interrupt_state(client_id);
-        let catalog =
-            self.lazy_catalog_lookup(client_id, Some((xid, table_cid)), configured_search_path);
-        for (index, action) in lowered.constraint_actions.iter().enumerate() {
-            let action_cid = table_cid
-                .saturating_add(1)
-                .saturating_add((index as u32).saturating_mul(3));
-            let constraint_name = action
-                .constraint_name
-                .clone()
-                .expect("normalized key constraint name");
-            let index_name = self.choose_available_relation_name(
+        let mut next_cid = table_cid.saturating_add(1);
+        if relation.relkind == 'p' || relation.relispartition {
+            next_cid = self.install_partitioned_index_backed_constraints_in_transaction(
                 client_id,
                 xid,
-                action_cid,
-                relation.namespace_oid,
-                &constraint_name,
-            )?;
-            let index_columns = action
-                .columns
-                .iter()
-                .cloned()
-                .map(crate::backend::parser::IndexColumnDef::from)
-                .collect::<Vec<_>>();
-            let build_options = self.resolve_simple_index_build_options(
-                client_id,
-                Some((xid, action_cid)),
-                "btree",
+                next_cid,
                 relation,
-                &index_columns,
-                &[],
-            )?;
-            let index_entry = self.build_simple_index_in_transaction(
-                client_id,
-                relation,
-                &index_name,
-                catalog.materialize_visible_catalog(),
-                &index_columns,
-                None,
-                true,
-                action.primary,
-                action.nulls_not_distinct,
-                xid,
-                action_cid,
-                build_options.0,
-                build_options.1,
-                &build_options.2,
-                65_536,
+                &lowered.constraint_actions,
+                configured_search_path,
                 catalog_effects,
             )?;
-            let constraint_ctx = CatalogWriteContext {
-                pool: self.pool.clone(),
-                txns: self.txns.clone(),
-                xid,
-                cid: action_cid.saturating_add(2),
-                client_id,
-                waiter: None,
-                interrupts: Arc::clone(&interrupts),
-            };
-            let primary_key_owned_not_null_oids = if action.primary {
-                action
+        } else {
+            let catalog =
+                self.lazy_catalog_lookup(client_id, Some((xid, table_cid)), configured_search_path);
+            for action in &lowered.constraint_actions {
+                let action_cid = next_cid;
+                next_cid = next_cid.saturating_add(3);
+                let constraint_name = action
+                    .constraint_name
+                    .clone()
+                    .expect("normalized key constraint name");
+                let index_name = self.choose_available_relation_name(
+                    client_id,
+                    xid,
+                    action_cid,
+                    relation.namespace_oid,
+                    &constraint_name,
+                )?;
+                let index_columns = action
                     .columns
                     .iter()
-                    .filter_map(|column_name| {
-                        relation.desc.columns.iter().find_map(|column| {
-                            (column.name.eq_ignore_ascii_case(column_name)
-                                && column.not_null_primary_key_owned)
-                                .then_some(column.not_null_constraint_oid)
-                                .flatten()
+                    .cloned()
+                    .map(crate::backend::parser::IndexColumnDef::from)
+                    .collect::<Vec<_>>();
+                let build_options = self.resolve_simple_index_build_options(
+                    client_id,
+                    Some((xid, action_cid)),
+                    "btree",
+                    relation,
+                    &index_columns,
+                    &[],
+                )?;
+                let index_entry = self.build_simple_index_in_transaction(
+                    client_id,
+                    relation,
+                    &index_name,
+                    catalog.materialize_visible_catalog(),
+                    &index_columns,
+                    None,
+                    true,
+                    action.primary,
+                    action.nulls_not_distinct,
+                    xid,
+                    action_cid,
+                    build_options.0,
+                    build_options.1,
+                    &build_options.2,
+                    65_536,
+                    catalog_effects,
+                )?;
+                let constraint_ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid: action_cid.saturating_add(2),
+                    client_id,
+                    waiter: None,
+                    interrupts: Arc::clone(&interrupts),
+                };
+                let primary_key_owned_not_null_oids = if action.primary {
+                    action
+                        .columns
+                        .iter()
+                        .filter_map(|column_name| {
+                            relation.desc.columns.iter().find_map(|column| {
+                                (column.name.eq_ignore_ascii_case(column_name)
+                                    && column.not_null_primary_key_owned)
+                                    .then_some(column.not_null_constraint_oid)
+                                    .flatten()
+                            })
                         })
-                    })
-                    .collect::<Vec<_>>()
-            } else {
-                Vec::new()
-            };
-            let constraint_effect = self
-                .catalog
-                .write()
-                .create_index_backed_constraint_mvcc(
-                    relation.relation_oid,
-                    index_entry.relation_oid,
-                    constraint_name,
-                    if action.primary {
-                        crate::include::catalog::CONSTRAINT_PRIMARY
-                    } else {
-                        crate::include::catalog::CONSTRAINT_UNIQUE
-                    },
-                    &primary_key_owned_not_null_oids,
-                    &constraint_ctx,
-                )
-                .map_err(map_catalog_error)?;
-            self.apply_catalog_mutation_effect_immediate(&constraint_effect)?;
-            catalog_effects.push(constraint_effect);
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+                let constraint_effect = self
+                    .catalog
+                    .write()
+                    .create_index_backed_constraint_mvcc(
+                        relation.relation_oid,
+                        index_entry.relation_oid,
+                        constraint_name,
+                        if action.primary {
+                            crate::include::catalog::CONSTRAINT_PRIMARY
+                        } else {
+                            crate::include::catalog::CONSTRAINT_UNIQUE
+                        },
+                        &primary_key_owned_not_null_oids,
+                        &constraint_ctx,
+                    )
+                    .map_err(map_catalog_error)?;
+                self.apply_catalog_mutation_effect_immediate(&constraint_effect)?;
+                catalog_effects.push(constraint_effect);
+            }
         }
 
-        let check_base_cid = table_cid
-            .saturating_add(1)
-            .saturating_add((lowered.constraint_actions.len() as u32).saturating_mul(3));
+        let check_base_cid = next_cid;
         for (index, action) in lowered.check_actions.iter().enumerate() {
             let catalog = self.lazy_catalog_lookup(
                 client_id,
@@ -1506,18 +1511,25 @@ impl Database {
                                 partitioned_table: created.entry.partitioned_table.clone(),
                             }
                         };
-                        let constraint_cid_base = table_cid
-                            .saturating_add(u32::from(!lowered.parent_oids.is_empty()))
-                            .saturating_add(u32::from(
-                                lowered.partition_spec.is_some()
-                                    || lowered.partition_parent_oid.is_some(),
-                            ))
-                            .saturating_add(u32::from(
-                                lowered
-                                    .partition_bound
-                                    .as_ref()
-                                    .is_some_and(PartitionBoundSpec::is_default),
-                            ));
+                        let mut constraint_cid_base = table_cid.saturating_add(1);
+                        if !lowered.parent_oids.is_empty() {
+                            constraint_cid_base =
+                                constraint_cid_base.max(table_cid.saturating_add(2));
+                        }
+                        if lowered.partition_spec.is_some()
+                            || lowered.partition_parent_oid.is_some()
+                        {
+                            constraint_cid_base =
+                                constraint_cid_base.max(table_cid.saturating_add(3));
+                        }
+                        if lowered
+                            .partition_bound
+                            .as_ref()
+                            .is_some_and(PartitionBoundSpec::is_default)
+                        {
+                            constraint_cid_base =
+                                constraint_cid_base.max(table_cid.saturating_add(4));
+                        }
                         self.install_create_table_constraints_in_transaction(
                             client_id,
                             xid,
@@ -1626,17 +1638,20 @@ impl Database {
                             partitioned_table: created.entry.partitioned_table.clone(),
                         }
                     };
-                let constraint_cid_base = table_cid
-                    .saturating_add(u32::from(!lowered.parent_oids.is_empty()))
-                    .saturating_add(u32::from(
-                        lowered.partition_spec.is_some() || lowered.partition_parent_oid.is_some(),
-                    ))
-                    .saturating_add(u32::from(
-                        lowered
-                            .partition_bound
-                            .as_ref()
-                            .is_some_and(PartitionBoundSpec::is_default),
-                    ));
+                let mut constraint_cid_base = table_cid.saturating_add(1);
+                if !lowered.parent_oids.is_empty() {
+                    constraint_cid_base = constraint_cid_base.max(table_cid.saturating_add(2));
+                }
+                if lowered.partition_spec.is_some() || lowered.partition_parent_oid.is_some() {
+                    constraint_cid_base = constraint_cid_base.max(table_cid.saturating_add(3));
+                }
+                if lowered
+                    .partition_bound
+                    .as_ref()
+                    .is_some_and(PartitionBoundSpec::is_default)
+                {
+                    constraint_cid_base = constraint_cid_base.max(table_cid.saturating_add(4));
+                }
                 self.install_create_table_constraints_in_transaction(
                     client_id,
                     xid,
@@ -1821,6 +1836,7 @@ impl Database {
             large_objects: Some(self.large_objects.clone()),
             async_notify_runtime: Some(self.async_notify_runtime.clone()),
             advisory_locks: Arc::clone(&self.advisory_locks),
+            row_locks: Arc::clone(&self.row_locks),
             checkpoint_stats: self.checkpoint_stats_snapshot(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
             interrupts: Arc::clone(&interrupts),
@@ -1833,6 +1849,7 @@ impl Database {
             session_user_oid: self.auth_state(client_id).session_user_oid(),
             current_user_oid: self.auth_state(client_id).current_user_oid(),
             active_role_oid: self.auth_state(client_id).active_role_oid(),
+            session_replication_role: self.session_replication_role(client_id),
             statement_lock_scope_id: None,
             transaction_lock_scope_id: None,
             next_command_id: cid,
@@ -1850,6 +1867,7 @@ impl Database {
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
             deferred_foreign_keys: None,
+            trigger_depth: 0,
         };
         let query_result = execute_readonly_statement(
             Statement::Select(create_stmt.query.clone()),
@@ -1977,6 +1995,7 @@ impl Database {
             large_objects: Some(self.large_objects.clone()),
             async_notify_runtime: Some(self.async_notify_runtime.clone()),
             advisory_locks: Arc::clone(&self.advisory_locks),
+            row_locks: Arc::clone(&self.row_locks),
             checkpoint_stats: self.checkpoint_stats_snapshot(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
             interrupts,
@@ -1989,6 +2008,7 @@ impl Database {
             session_user_oid: self.auth_state(client_id).session_user_oid(),
             current_user_oid: self.auth_state(client_id).current_user_oid(),
             active_role_oid: self.auth_state(client_id).active_role_oid(),
+            session_replication_role: self.session_replication_role(client_id),
             statement_lock_scope_id: None,
             transaction_lock_scope_id: None,
             next_command_id: cid,
@@ -2006,6 +2026,7 @@ impl Database {
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
             deferred_foreign_keys: None,
+            trigger_depth: 0,
         };
         let inserted = crate::backend::commands::tablecmds::execute_insert_values(
             &table_name,

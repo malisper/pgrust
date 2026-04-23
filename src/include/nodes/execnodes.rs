@@ -65,6 +65,7 @@ pub(crate) struct ToastFetchContext {
 pub struct SystemVarBinding {
     pub(crate) varno: usize,
     pub(crate) table_oid: u32,
+    pub(crate) tid: Option<ItemPointerData>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -539,6 +540,15 @@ pub struct LimitState {
     pub(crate) offset: usize,
     pub(crate) skipped: usize,
     pub(crate) returned: usize,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+}
+
+#[derive(Debug)]
+pub struct LockRowsState {
+    pub(crate) input: PlanState,
+    pub(crate) row_marks: Vec<crate::include::nodes::plannodes::PlanRowMark>,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
     pub(crate) plan_info: PlanEstimate,
     pub(crate) stats: NodeExecStats,
 }

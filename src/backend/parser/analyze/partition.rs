@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use super::collation::default_collation_oid_for_type;
 use super::{
-    BoundRelation, CatalogLookup, CreateTableStatement, ParseError, PartitionStrategy,
-    RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum, RawPartitionSpec, SqlType,
-    TablePersistence, bind_scalar_expr_in_scope, sql_type_name,
+    BoundRelation, CatalogLookup, CreateTableStatement, IndexBackedConstraintAction, ParseError,
+    PartitionStrategy, RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum,
+    RawPartitionSpec, SqlType, TablePersistence, bind_scalar_expr_in_scope, sql_type_name,
 };
 use crate::backend::executor::{Value, cast_value};
 use crate::backend::utils::cache::catcache::sql_type_oid;
@@ -158,6 +158,44 @@ pub(crate) fn lower_partition_clause(
         spec,
         bound: Some(bound),
     })
+}
+
+pub(crate) fn validate_partitioned_index_backed_constraints(
+    relation_name: &str,
+    partition_spec: Option<&LoweredPartitionSpec>,
+    constraint_actions: &[IndexBackedConstraintAction],
+) -> Result<(), ParseError> {
+    let Some(partition_spec) = partition_spec else {
+        return Ok(());
+    };
+    for action in constraint_actions {
+        let normalized_columns = action
+            .columns
+            .iter()
+            .map(|column| column.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        for key_column in &partition_spec.key_columns {
+            if normalized_columns.contains(&key_column.to_ascii_lowercase()) {
+                continue;
+            }
+            let constraint_kind = if action.primary {
+                "PRIMARY KEY"
+            } else {
+                "UNIQUE"
+            };
+            return Err(ParseError::DetailedError {
+                message:
+                    "unique constraint on partitioned table must include all partitioning columns"
+                        .into(),
+                detail: Some(format!(
+                    "{constraint_kind} constraint on table \"{relation_name}\" lacks column \"{key_column}\" which is part of the partition key."
+                )),
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn relation_partition_spec(

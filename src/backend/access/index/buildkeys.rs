@@ -105,6 +105,7 @@ impl IndexBuildKeyProjector {
                 large_objects: expr_ctx.large_objects.clone(),
                 async_notify_runtime: None,
                 advisory_locks: expr_ctx.advisory_locks.clone(),
+                row_locks: std::sync::Arc::new(crate::backend::storage::lmgr::RowLockManager::new()),
                 checkpoint_stats: CheckpointStatsSnapshot::default(),
                 datetime_config: expr_ctx.datetime_config.clone(),
                 interrupts: ctx.interrupts.clone(),
@@ -117,6 +118,7 @@ impl IndexBuildKeyProjector {
                 session_user_oid: expr_ctx.session_user_oid,
                 current_user_oid: expr_ctx.current_user_oid,
                 active_role_oid: None,
+                session_replication_role: expr_ctx.session_replication_role,
                 statement_lock_scope_id: expr_ctx.statement_lock_scope_id,
                 transaction_lock_scope_id: None,
                 next_command_id: ctx.snapshot.current_cid,
@@ -133,6 +135,7 @@ impl IndexBuildKeyProjector {
                 cte_producers: std::collections::HashMap::new(),
                 recursive_worktables: std::collections::HashMap::new(),
                 deferred_foreign_keys: None,
+                trigger_depth: 0,
                 default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             }),
         })

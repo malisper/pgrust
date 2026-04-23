@@ -3,8 +3,9 @@ use crate::backend::parser::{BoundRelation, CatalogLookup};
 use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::pgrust::database::ddl::{
-    lookup_heap_relation_for_alter_table, lookup_index_relation_for_alter_index,
-    relation_kind_name, validate_alter_table_rename_column,
+    lookup_heap_relation_for_alter_table, lookup_index_or_partitioned_index_for_alter_index_rename,
+    lookup_table_or_partitioned_table_for_alter_table, relation_kind_name,
+    validate_alter_table_rename_column,
 };
 
 fn normalize_rename_target_name(name: &str) -> Result<String, ExecError> {
@@ -131,7 +132,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_index_relation_for_alter_index(
+        let Some(relation) = lookup_index_or_partitioned_index_for_alter_index_rename(
             &catalog,
             &rename_stmt.table_name,
             rename_stmt.if_exists,
@@ -174,7 +175,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_index_relation_for_alter_index(
+        let Some(relation) = lookup_index_or_partitioned_index_for_alter_index_rename(
             &catalog,
             &rename_stmt.table_name,
             rename_stmt.if_exists,
@@ -212,7 +213,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &rename_stmt.table_name,
             rename_stmt.if_exists,
@@ -257,7 +258,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &rename_stmt.table_name,
             rename_stmt.if_exists,

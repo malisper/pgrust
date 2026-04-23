@@ -11,7 +11,8 @@ use crate::backend::commands::tablecmds::{execute_merge, execute_prepared_insert
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
     DeferredForeignKeyTracker, ExecError, ExecutorContext, ExecutorTransactionState,
-    StatementResult, Value, cast_value, execute_readonly_statement, parse_bytea_text,
+    SessionReplicationRole, StatementResult, Value, cast_value, execute_readonly_statement,
+    parse_bytea_text,
 };
 use crate::backend::parser::{
     CatalogLookup, CopyFromStatement, CopySource, ParseError, ParseOptions, PreparedInsert,
@@ -58,6 +59,7 @@ pub struct SelectGuard<'a> {
     pub(crate) table_locks: &'a TableLockManager,
     pub(crate) client_id: ClientId,
     pub(crate) advisory_locks: Arc<crate::backend::storage::lmgr::AdvisoryLockManager>,
+    pub(crate) row_locks: Arc<crate::backend::storage::lmgr::RowLockManager>,
     pub(crate) statement_lock_scope_id: Option<u64>,
     pub(crate) interrupt_guard: Option<StatementInterruptGuard>,
 }
@@ -68,12 +70,15 @@ impl Drop for SelectGuard<'_> {
         if let Some(scope_id) = self.statement_lock_scope_id {
             self.advisory_locks
                 .unlock_all_statement(self.client_id, scope_id);
+            self.row_locks
+                .unlock_all_statement(self.client_id, scope_id);
         }
     }
 }
 
 struct StatementLockScopeGuard {
     advisory_locks: Arc<crate::backend::storage::lmgr::AdvisoryLockManager>,
+    row_locks: Arc<crate::backend::storage::lmgr::RowLockManager>,
     client_id: ClientId,
     scope_id: Option<u64>,
 }
@@ -81,11 +86,13 @@ struct StatementLockScopeGuard {
 impl StatementLockScopeGuard {
     fn new(
         advisory_locks: Arc<crate::backend::storage::lmgr::AdvisoryLockManager>,
+        row_locks: Arc<crate::backend::storage::lmgr::RowLockManager>,
         client_id: ClientId,
         scope_id: Option<u64>,
     ) -> Self {
         Self {
             advisory_locks,
+            row_locks,
             client_id,
             scope_id,
         }
@@ -100,6 +107,8 @@ impl Drop for StatementLockScopeGuard {
     fn drop(&mut self) {
         if let Some(scope_id) = self.scope_id {
             self.advisory_locks
+                .unlock_all_statement(self.client_id, scope_id);
+            self.row_locks
                 .unlock_all_statement(self.client_id, scope_id);
         }
     }
@@ -356,6 +365,18 @@ impl Session {
             .unwrap_or(true)
     }
 
+    pub(crate) fn session_replication_role(&self) -> SessionReplicationRole {
+        match self
+            .gucs
+            .get("session_replication_role")
+            .map(String::as_str)
+        {
+            Some(value) if value.eq_ignore_ascii_case("replica") => SessionReplicationRole::Replica,
+            Some(value) if value.eq_ignore_ascii_case("local") => SessionReplicationRole::Local,
+            _ => SessionReplicationRole::Origin,
+        }
+    }
+
     pub(crate) fn catalog_lookup<'a>(&self, db: &'a Database) -> LazyCatalogLookup<'a> {
         db.install_row_security_enabled(self.client_id, self.row_security_enabled());
         let search_path = self.configured_search_path();
@@ -403,6 +424,7 @@ impl Session {
             large_objects: Some(db.large_objects.clone()),
             async_notify_runtime: Some(db.async_notify_runtime.clone()),
             advisory_locks: Arc::clone(&db.advisory_locks),
+            row_locks: Arc::clone(&db.row_locks),
             checkpoint_stats: db.checkpoint_stats_snapshot(),
             datetime_config: self.datetime_config.clone(),
             interrupts: self.interrupts(),
@@ -415,6 +437,7 @@ impl Session {
             session_user_oid: self.session_user_oid(),
             current_user_oid: self.current_user_oid(),
             active_role_oid: self.active_role_oid(),
+            session_replication_role: self.session_replication_role(),
             statement_lock_scope_id,
             transaction_lock_scope_id: self.active_advisory_scope_id(),
             next_command_id: cid,
@@ -432,6 +455,7 @@ impl Session {
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
             deferred_foreign_keys,
+            trigger_depth: 0,
         }
     }
 
@@ -627,6 +651,8 @@ impl Session {
                         .publish(self.client_id, &txn.pending_async_notifications);
                     db.advisory_locks
                         .unlock_all_transaction(self.client_id, txn.advisory_scope_id);
+                    db.row_locks
+                        .unlock_all_transaction(self.client_id, txn.advisory_scope_id);
                     self.stats_state.write().commit_top_level_xact(&db.stats);
                     Ok(r)
                 })()
@@ -660,6 +686,8 @@ impl Session {
         db.finalize_aborted_temp_effects(self.client_id, &txn.temp_effects);
         db.finalize_aborted_sequence_effects(&txn.sequence_effects);
         db.advisory_locks
+            .unlock_all_transaction(self.client_id, txn.advisory_scope_id);
+        db.row_locks
             .unlock_all_transaction(self.client_id, txn.advisory_scope_id);
         if self.auth != txn.auth_at_start {
             self.auth = txn.auth_at_start.clone();
@@ -707,6 +735,7 @@ impl Session {
         let _interrupt_guard = self.statement_interrupt_guard()?;
         let statement_lock_scope = StatementLockScopeGuard::new(
             Arc::clone(&db.advisory_locks),
+            Arc::clone(&db.row_locks),
             self.client_id,
             self.active_txn
                 .is_none()
@@ -714,6 +743,7 @@ impl Session {
         );
         db.install_auth_state(self.client_id, self.auth.clone());
         db.install_row_security_enabled(self.client_id, self.row_security_enabled());
+        db.install_session_replication_role(self.client_id, self.session_replication_role());
         db.install_temp_backend_id(self.client_id, self.temp_backend_id);
         db.install_stats_state(self.client_id, Arc::clone(&self.stats_state));
         let result = stacker::grow(32 * 1024 * 1024, || {
@@ -970,6 +1000,22 @@ impl Session {
                 db.execute_create_trigger_stmt_with_search_path(
                     self.client_id,
                     create_stmt,
+                    search_path.as_deref(),
+                )
+            }
+            Statement::AlterTableTriggerState(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_alter_table_trigger_state_stmt_with_search_path(
+                    self.client_id,
+                    alter_stmt,
+                    search_path.as_deref(),
+                )
+            }
+            Statement::AlterTriggerRename(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_alter_trigger_rename_stmt_with_search_path(
+                    self.client_id,
+                    alter_stmt,
                     search_path.as_deref(),
                 )
             }
@@ -2045,6 +2091,8 @@ impl Session {
             db.finalize_aborted_sequence_effects(&txn.sequence_effects);
             db.advisory_locks
                 .unlock_all_transaction(self.client_id, txn.advisory_scope_id);
+            db.row_locks
+                .unlock_all_transaction(self.client_id, txn.advisory_scope_id);
             for rel in txn.held_table_locks.keys().copied() {
                 db.table_locks.unlock_table(rel, self.client_id);
             }
@@ -2057,6 +2105,7 @@ impl Session {
         // backend-exit lock cleanup even if the session missed normal unwind.
         db.table_locks.unlock_all_for_client(self.client_id);
         db.advisory_locks.unlock_all_session(self.client_id);
+        db.row_locks.unlock_all_session(self.client_id);
     }
 
     fn lock_table_if_needed(
@@ -2111,6 +2160,7 @@ impl Session {
         select_stmt: &SelectStatement,
     ) -> Result<SelectGuard<'a>, ExecError> {
         db.install_auth_state(self.client_id, self.auth.clone());
+        db.install_session_replication_role(self.client_id, self.session_replication_role());
         db.install_temp_backend_id(self.client_id, self.temp_backend_id);
         db.install_interrupt_state(self.client_id, self.interrupts());
         let (txn_ctx, transaction_lock_scope_id) = if let Some(ref mut txn) = self.active_txn {
@@ -2261,6 +2311,30 @@ impl Session {
                 db.execute_create_trigger_stmt_in_transaction_with_search_path(
                     client_id,
                     create_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    catalog_effects,
+                )
+            }
+            Statement::AlterTableTriggerState(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                db.execute_alter_table_trigger_state_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    catalog_effects,
+                )
+            }
+            Statement::AlterTriggerRename(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                db.execute_alter_trigger_rename_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
                     xid,
                     cid,
                     search_path.as_deref(),
@@ -3914,6 +3988,9 @@ impl Session {
         if name == "row_security" {
             db.install_row_security_enabled(self.client_id, self.row_security_enabled());
             db.plan_cache.invalidate_all();
+        } else if name == "session_replication_role" {
+            db.install_session_replication_role(self.client_id, self.session_replication_role());
+            db.plan_cache.invalidate_all();
         }
         Ok(StatementResult::AffectedRows(0))
     }
@@ -3954,6 +4031,12 @@ impl Session {
             if normalized == "row_security" {
                 db.install_row_security_enabled(self.client_id, self.row_security_enabled());
                 db.plan_cache.invalidate_all();
+            } else if normalized == "session_replication_role" {
+                db.install_session_replication_role(
+                    self.client_id,
+                    self.session_replication_role(),
+                );
+                db.plan_cache.invalidate_all();
             }
         } else {
             self.gucs.clear();
@@ -3964,6 +4047,7 @@ impl Session {
                 .write()
                 .set_fetch_consistency(StatsFetchConsistency::Cache);
             db.install_row_security_enabled(self.client_id, true);
+            db.install_session_replication_role(self.client_id, self.session_replication_role());
             db.plan_cache.invalidate_all();
         }
         Ok(StatementResult::AffectedRows(0))
@@ -4150,6 +4234,17 @@ impl Session {
                 parse_bool_guc(value).ok_or_else(|| {
                     ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
                 })?;
+            }
+            "session_replication_role" => {
+                if !matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "origin" | "replica" | "local"
+                ) {
+                    return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                        value.to_string(),
+                    )));
+                }
+                stored_value = value.to_ascii_lowercase();
             }
             "default_toast_compression" => {
                 stored_value = parse_default_toast_compression_guc_value(value)?.to_string();

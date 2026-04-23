@@ -54,7 +54,6 @@ pub enum ParseError {
         token: String,
         clause: UngroupedColumnClause,
     },
-    AggInWhere,
     SubqueryMustReturnOneColumn,
     UnknownConfigurationParameter(String),
     UnrecognizedParameter(String),
@@ -160,9 +159,6 @@ impl fmt::Display for ParseError {
                     f,
                     "column \"{display_name}\" must appear in the GROUP BY clause or be used in an aggregate function"
                 )
-            }
-            ParseError::AggInWhere => {
-                write!(f, "aggregate functions are not allowed in WHERE")
             }
             ParseError::SubqueryMustReturnOneColumn => {
                 write!(f, "subquery must return only one column")
@@ -335,8 +331,10 @@ pub enum Statement {
     AlterTableInherit(AlterTableInheritStatement),
     AlterTableNoInherit(AlterTableNoInheritStatement),
     AlterTableAttachPartition(AlterTableAttachPartitionStatement),
+    AlterTableTriggerState(AlterTableTriggerStateStatement),
     AlterPublication(AlterPublicationStatement),
     AlterOperator(AlterOperatorStatement),
+    AlterTriggerRename(AlterTriggerRenameStatement),
     CommentOnTable(CommentOnTableStatement),
     CommentOnIndex(CommentOnIndexStatement),
     CommentOnConstraint(CommentOnConstraintStatement),
@@ -421,6 +419,8 @@ pub struct Query {
     pub sort_clause: Vec<SortGroupClause>,
     pub limit_count: Option<usize>,
     pub limit_offset: usize,
+    pub locking_clause: Option<SelectLockingClause>,
+    pub row_marks: Vec<QueryRowMark>,
     pub project_set: Option<Vec<ProjectSetTarget>>,
     pub recursive_union: Option<Box<RecursiveUnionQuery>>,
     pub set_operation: Option<Box<SetOperationQuery>>,
@@ -444,6 +444,12 @@ impl Query {
             .map(|column| column.name)
             .collect()
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryRowMark {
+    pub rtindex: usize,
+    pub strength: SelectLockingClause,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -612,7 +618,7 @@ pub struct CreateAggregateStatement {
 pub enum TriggerTiming {
     Before,
     After,
-    InsteadOf,
+    Instead,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -621,7 +627,7 @@ pub enum TriggerLevel {
     Statement,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TriggerEvent {
     Insert,
     Update,
@@ -858,6 +864,23 @@ impl SelectLockingClause {
             SelectLockingClause::ForUpdate => "FOR UPDATE",
             SelectLockingClause::ForKeyShare => "FOR KEY SHARE",
             SelectLockingClause::ForShare => "FOR SHARE",
+        }
+    }
+
+    pub fn strongest(self, other: SelectLockingClause) -> SelectLockingClause {
+        if self.rank() >= other.rank() {
+            self
+        } else {
+            other
+        }
+    }
+
+    fn rank(self) -> u8 {
+        match self {
+            SelectLockingClause::ForKeyShare => 0,
+            SelectLockingClause::ForShare => 1,
+            SelectLockingClause::ForNoKeyUpdate => 2,
+            SelectLockingClause::ForUpdate => 3,
         }
     }
 }
@@ -1190,13 +1213,13 @@ impl CreateTableStatement {
     pub fn columns(&self) -> impl Iterator<Item = &ColumnDef> {
         self.elements.iter().filter_map(|element| match element {
             CreateTableElement::Column(column) => Some(column),
-            CreateTableElement::Constraint(_) => None,
+            CreateTableElement::Constraint(_) | CreateTableElement::Like(_) => None,
         })
     }
 
     pub fn constraints(&self) -> impl Iterator<Item = &TableConstraint> {
         self.elements.iter().filter_map(|element| match element {
-            CreateTableElement::Column(_) => None,
+            CreateTableElement::Column(_) | CreateTableElement::Like(_) => None,
             CreateTableElement::Constraint(constraint) => Some(constraint),
         })
     }
@@ -1713,6 +1736,38 @@ pub struct AlterTableAttachPartitionStatement {
     pub parent_table: String,
     pub partition_table: String,
     pub bound: RawPartitionBoundSpec,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterTableTriggerTarget {
+    Named(String),
+    All,
+    User,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlterTableTriggerMode {
+    Disable,
+    EnableOrigin,
+    EnableReplica,
+    EnableAlways,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableTriggerStateStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub target: AlterTableTriggerTarget,
+    pub mode: AlterTableTriggerMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTriggerRenameStatement {
+    pub trigger_name: String,
+    pub schema_name: Option<String>,
+    pub table_name: String,
+    pub new_trigger_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2281,6 +2336,25 @@ pub struct CreateDomainStatement {
 pub enum CreateTableElement {
     Column(ColumnDef),
     Constraint(TableConstraint),
+    Like(CreateTableLikeClause),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTableLikeClause {
+    pub relation_name: String,
+    pub options: Vec<CreateTableLikeOption>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateTableLikeOption {
+    IncludingDefaults,
+    IncludingConstraints,
+    IncludingIndexes,
+    IncludingAll,
+    ExcludingDefaults,
+    ExcludingConstraints,
+    ExcludingIndexes,
+    ExcludingAll,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

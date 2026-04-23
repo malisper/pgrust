@@ -191,7 +191,10 @@ fn execute_statement_with_source(
             expected: "PUBLICATION handled by database/session layer",
             actual: "PUBLICATION".into(),
         })),
-        Statement::CreateTrigger(_) | Statement::DropTrigger(_) => {
+        Statement::CreateTrigger(_)
+        | Statement::DropTrigger(_)
+        | Statement::AlterTableTriggerState(_)
+        | Statement::AlterTriggerRename(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "TRIGGER handled by database/session layer",
                 actual: "TRIGGER".into(),
@@ -466,7 +469,20 @@ pub fn execute_readonly_statement(
     match stmt {
         Statement::Do(stmt) => execute_do(&stmt),
         Statement::Explain(stmt) => execute_explain(stmt, catalog, ctx),
-        Statement::Select(stmt) => execute_planned_stmt(pg_plan_query(&stmt, catalog)?, ctx),
+        Statement::Select(stmt) => {
+            if let Some(locking_clause) = stmt.locking_clause {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "{} is not allowed in a read-only execution context",
+                        locking_clause.sql()
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "25006",
+                });
+            }
+            execute_planned_stmt(pg_plan_query(&stmt, catalog)?, ctx)
+        }
         Statement::Values(stmt) => execute_planned_stmt(pg_plan_values_query(&stmt, catalog)?, ctx),
         Statement::Analyze(stmt) => execute_analyze(stmt, catalog),
         Statement::Show(_)
