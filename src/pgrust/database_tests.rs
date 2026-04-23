@@ -6411,6 +6411,59 @@ fn comment_on_aggregate_uses_pg_proc_description_rows() {
 }
 
 #[test]
+fn comment_on_function_uses_pg_proc_description_rows() {
+    let base = temp_dir("comment_on_function");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create function add_one(x int4) returns int4 language plpgsql as $$ begin return x + 1; end $$",
+    )
+    .unwrap();
+
+    db.execute(1, "comment on function add_one(int4) is 'increments input'")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            &format!(
+                "select d.description \
+                 from pg_description d \
+                 join pg_proc p on p.oid = d.objoid \
+                 where p.proname = 'add_one' \
+                   and p.prokind = 'f' \
+                   and d.classoid = {} \
+                   and d.objsubid = 0",
+                PG_PROC_RELATION_OID
+            )
+        ),
+        vec![vec![Value::Text("increments input".into())]]
+    );
+
+    db.execute(1, "comment on function add_one(int4) is null")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            &format!(
+                "select count(*) \
+                 from pg_description d \
+                 join pg_proc p on p.oid = d.objoid \
+                 where p.proname = 'add_one' \
+                   and p.prokind = 'f' \
+                   and d.classoid = {} \
+                   and d.objsubid = 0",
+                PG_PROC_RELATION_OID
+            )
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
 fn drop_aggregate_removes_proc_and_aggregate_rows() {
     let base = temp_dir("drop_aggregate_rows");
     let db = Database::open(&base, 16).unwrap();
@@ -7096,6 +7149,22 @@ fn assert_view_dml_error(
     }
 }
 
+fn assert_view_column_dml_error(err: ExecError, expected_message: &str, expected_detail: &str) {
+    match err {
+        ExecError::DetailedError {
+            sqlstate,
+            message,
+            detail: Some(detail),
+            hint: None,
+        } => {
+            assert_eq!(sqlstate, "55000");
+            assert_eq!(message, expected_message);
+            assert_eq!(detail, expected_detail);
+        }
+        other => panic!("expected column-level view DML error, got {other:?}"),
+    }
+}
+
 #[test]
 fn simple_view_auto_dml_routes_to_base_table() {
     let base = temp_dir("auto_simple_view_dml");
@@ -7481,12 +7550,11 @@ fn non_simple_views_reject_auto_dml() {
         "aggregate functions",
         "ON INSERT DO INSTEAD rule",
     );
-    assert_view_dml_error(
+    assert_view_column_dml_error(
         db.execute(1, "update computed_view set next_id = 5 where id = 1")
             .unwrap_err(),
-        "cannot update view \"computed_view\"",
-        "simple base table columns",
-        "ON UPDATE DO INSTEAD rule",
+        "cannot update column \"next_id\" of view \"computed_view\"",
+        "View columns that are not columns of their base relation are not updatable.",
     );
 }
 
@@ -7604,6 +7672,50 @@ fn auto_view_errors_preserve_postgres_distinct_with_and_hint_text() {
             );
         }
         other => panic!("expected WITH view DML error, got {other:?}"),
+    }
+}
+
+#[test]
+fn auto_view_errors_preserve_postgres_column_specific_text() {
+    let base = temp_dir("auto_view_column_messages");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null, name text)")
+        .unwrap();
+    db.execute(1, "insert into items values (1, 'alpha')")
+        .unwrap();
+    db.execute(
+        1,
+        "create view system_view as select ctid, id, name from items",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create view duplicate_view as select id, name, id as duplicate_id from items",
+    )
+    .unwrap();
+
+    assert_view_column_dml_error(
+        db.execute(1, "insert into system_view values (null, 2, 'beta')")
+            .unwrap_err(),
+        "cannot insert into column \"ctid\" of view \"system_view\"",
+        "View columns that refer to system columns are not updatable.",
+    );
+
+    match db
+        .execute(1, "update duplicate_view set id = 2, duplicate_id = 3")
+        .unwrap_err()
+    {
+        ExecError::DetailedError {
+            sqlstate,
+            message,
+            detail: None,
+            hint: None,
+        } => {
+            assert_eq!(sqlstate, "42601");
+            assert_eq!(message, "multiple assignments to same column \"id\"");
+        }
+        other => panic!("expected duplicate-assignment error, got {other:?}"),
     }
 }
 

@@ -10,7 +10,8 @@ pub(crate) use row_security::{
 };
 pub(crate) use rules::{format_stored_rule_definition, split_stored_rule_action_sql};
 pub(crate) use view_dml::{
-    ResolvedAutoViewTarget, ViewDmlEvent, ViewDmlRewriteError, resolve_auto_updatable_view_target,
+    NonUpdatableViewColumnReason, ResolvedAutoViewTarget, ViewDmlEvent, ViewDmlRewriteError,
+    resolve_auto_updatable_view_target,
 };
 pub(crate) use views::{
     format_view_definition, load_view_return_query, load_view_return_select,

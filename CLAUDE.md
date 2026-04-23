@@ -14,6 +14,32 @@
 
 The current codebase was recently refactored to separate parser, logical plan, and executor-runtime responsibilities more cleanly. Prefer extending those boundaries instead of reintroducing cross-layer dependencies.
 
+## Worktrees
+
+Run code changes inside a git worktree instead of the primary checkout. Multiple agents and humans frequently run against this repo in parallel on the same machine; sharing one working copy produces merge races, stale-index bugs, and half-applied edits across unrelated tasks.
+
+Use a worktree when:
+
+- The work will produce at least one commit or PR.
+- The work spans more than one turn of file edits.
+
+Skip the worktree for:
+
+- Pure exploration, reading, or answering questions without file changes.
+- One-off shell/inspection commands.
+
+Conventions:
+
+- Path: `../pgrust-worktrees/<short-descriptive-name>/` (sibling to this repo).
+- Branch: follow the existing `<owner>/<short-description>` pattern where it applies (e.g. `malisper/alter-table-todo`, `jason/isolation-tests-setup`).
+- Base: `perf-optimization`.
+- Create: `git worktree add ../pgrust-worktrees/<name> -b <branch> perf-optimization`.
+- Remove when merged or abandoned: `git worktree remove ../pgrust-worktrees/<name>`.
+
+If you use Conductor (conductor.build), its workspaces live at `~/conductor/pgrust/<city>/` instead — no collision with the path above. Pick `perf-optimization` as the base in the New Workspace dialog, and rename the auto-generated city branch to match our `<owner>/<short-description>` pattern once you know what you're working on.
+
+In Claude Code specifically: prefer the `EnterWorktree` tool when starting work, which sets up the worktree and switches the working directory in one step. Fall back to the `git worktree add` command above if the tool isn't available.
+
 ## Formatting
 
 Rust formatting is pinned: `rust-toolchain.toml` fixes the rustc/rustfmt version and `rustfmt.toml` fixes the style edition. CI fails any PR that is not formatted with that exact rustfmt.
