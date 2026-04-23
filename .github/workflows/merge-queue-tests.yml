@@ -16,17 +16,13 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_PROFILE_TEST_OPT_LEVEL: "3"
   RUST_BACKTRACE: "1"
-  TOTAL_SHARDS: "12"
 
 jobs:
-  cargo-test-shard:
-    name: cargo-test-shard-${{ matrix.shard }}
+  cargo-test-run:
+    name: cargo-test-run
     if: ${{ github.event_name != 'pull_request' }}
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"]
+    runs-on:
+      labels: ubuntu-24.04-32core
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,20 +36,19 @@ jobs:
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Run sharded cargo tests
+      - name: Run cargo tests
         run: |
           cargo nextest run \
             --locked \
             --lib \
             --profile ci \
-            --partition "hash:${{ matrix.shard }}/${TOTAL_SHARDS}" \
             --config-file .config/nextest.toml
 
       - name: Upload JUnit timing report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit-shard-${{ matrix.shard }}
+          name: junit-report
           path: target/nextest/ci/junit.xml
           if-no-files-found: error
           retention-days: 14
@@ -62,7 +57,7 @@ jobs:
     name: cargo-test
     runs-on: ubuntu-latest
     needs:
-      - cargo-test-shard
+      - cargo-test-run
     if: always()
     steps:
       - name: Pass quickly on pull requests
@@ -79,7 +74,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: junit-shard-*
+          pattern: junit-report
           merge-multiple: false
 
       - name: Summarize test timings
@@ -87,7 +82,7 @@ jobs:
         run: |
           python3 scripts/github/render_nextest_timings.py artifacts/*/*.xml >>"$GITHUB_STEP_SUMMARY"
 
-      - name: Fail if any shard failed
+      - name: Fail if test run failed
         if: ${{ github.event_name != 'pull_request' }}
         env:
           NEEDS_JSON: ${{ toJson(needs) }}
@@ -104,7 +99,7 @@ jobs:
               if info["result"] != "success"
           }
           if failed:
-              print("One or more test shards did not succeed:", file=sys.stderr)
+              print("The test workflow did not succeed:", file=sys.stderr)
               for job_name, result in failed.items():
                   print(f"  {job_name}: {result}", file=sys.stderr)
               sys.exit(1)
