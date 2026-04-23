@@ -212,6 +212,19 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'f',
             's',
         ),
+        proc_row_with_parallel(
+            2026,
+            "pg_backend_pid",
+            INT4_TYPE_OID,
+            "",
+            "pg_backend_pid",
+            0,
+            false,
+            false,
+            'f',
+            's',
+            'r',
+        ),
         proc_row(
             3424,
             "pg_partition_root",
@@ -3432,6 +3445,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("random_normal", BuiltinScalarFunction::RandomNormal),
         ("drandom_normal", BuiltinScalarFunction::RandomNormal),
         ("current_database", BuiltinScalarFunction::CurrentDatabase),
+        ("pg_backend_pid", BuiltinScalarFunction::PgBackendPid),
         ("cashlarger", BuiltinScalarFunction::CashLarger),
         ("cashsmaller", BuiltinScalarFunction::CashSmaller),
         ("cash_words", BuiltinScalarFunction::CashWords),
@@ -7397,6 +7411,7 @@ mod tests {
     fn builtin_scalar_helpers_have_proc_oid_mappings() {
         for func in [
             BuiltinScalarFunction::CurrentDatabase,
+            BuiltinScalarFunction::PgBackendPid,
             BuiltinScalarFunction::CurrentSetting,
             BuiltinScalarFunction::RegProcedureToText,
             BuiltinScalarFunction::RegRoleToText,
@@ -7462,6 +7477,23 @@ mod tests {
             assert_eq!(row.proparallel, 'r');
             assert_eq!(builtin_scalar_function_for_proc_oid(row.oid), Some(func));
         }
+    }
+
+    #[test]
+    fn bootstrap_rows_include_pg_backend_pid() {
+        let row = bootstrap_pg_proc_rows()
+            .into_iter()
+            .find(|row| row.proname == "pg_backend_pid")
+            .expect("pg_backend_pid row");
+        assert_eq!(row.oid, 2026);
+        assert_eq!(row.prorettype, INT4_TYPE_OID);
+        assert_eq!(row.proargtypes, "");
+        assert_eq!(row.provolatile, 's');
+        assert_eq!(row.proparallel, 'r');
+        assert_eq!(
+            builtin_scalar_function_for_proc_oid(row.oid),
+            Some(BuiltinScalarFunction::PgBackendPid)
+        );
     }
 
     #[test]
