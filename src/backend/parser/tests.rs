@@ -9,14 +9,15 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::parsenodes::{
     AggregateArgType, AggregateSignatureKind, AliasColumnDef, AliasColumnSpec, ColumnConstraint,
-    CommentOnAggregateStatement, CompositeTypeAttributeDef, CreateAggregateStatement,
-    CreateCompositeTypeStatement, CreateTriggerStatement, CreateTypeStatement,
-    DropAggregateStatement, DropTriggerStatement, DropTypeStatement, ForeignKeyAction,
-    ForeignKeyMatchType, IndexColumnDef, InsertSource, InsertStatement, JoinTreeNode,
-    PartitionStrategy, PublicationObjectSpec, PublicationOption, PublicationSchemaName,
-    RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum,
-    RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint,
-    TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerTiming, ViewCheckOption,
+    CommentOnAggregateStatement, CommentOnFunctionStatement, CompositeTypeAttributeDef,
+    CreateAggregateStatement, CreateCompositeTypeStatement, CreateTriggerStatement,
+    CreateTypeStatement, DropAggregateStatement, DropTriggerStatement, DropTypeStatement,
+    ForeignKeyAction, ForeignKeyMatchType, IndexColumnDef, InsertSource, InsertStatement,
+    JoinTreeNode, PartitionStrategy, PublicationObjectSpec, PublicationOption,
+    PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey,
+    RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement,
+    SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerTiming,
+    ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -1718,6 +1719,35 @@ fn parse_comment_on_index_null_statement() {
         stmt,
         Statement::CommentOnIndex(CommentOnIndexStatement {
             index_name: "items_idx".into(),
+            comment: None,
+        })
+    );
+}
+
+#[test]
+fn parse_comment_on_function_statement() {
+    let stmt =
+        parse_statement("comment on function public.add_one(int4) is 'hello function'").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CommentOnFunction(CommentOnFunctionStatement {
+            schema_name: Some("public".into()),
+            function_name: "add_one".into(),
+            arg_types: vec!["int4".into()],
+            comment: Some("hello function".into()),
+        })
+    );
+}
+
+#[test]
+fn parse_comment_on_function_null_statement() {
+    let stmt = parse_statement("comment on function noop() is null").unwrap();
+    assert_eq!(
+        stmt,
+        Statement::CommentOnFunction(CommentOnFunctionStatement {
+            schema_name: None,
+            function_name: "noop".into(),
+            arg_types: Vec::new(),
             comment: None,
         })
     );
