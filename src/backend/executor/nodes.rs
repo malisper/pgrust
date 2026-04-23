@@ -31,8 +31,8 @@ use crate::include::nodes::execnodes::{
     FilterState, FunctionScanState, IndexScanState, LimitState, MaterializedRow,
     NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, PlanState, ProjectSetState,
     ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SetOpState, SlotKind,
-    SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot, ValuesState,
-    WindowAggState, WorkTableScanState,
+    SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot, ValuesState, WindowAggState,
+    WorkTableScanState,
 };
 use crate::include::nodes::primnodes::{
     BuiltinScalarFunction, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR, RelationDesc,
@@ -263,8 +263,8 @@ fn collect_visible_page_offsets(
     snapshot: &crate::backend::utils::time::snapmgr::Snapshot,
     txns: &parking_lot::RwLock<crate::backend::access::transam::xact::TransactionManager>,
 ) -> Result<Vec<u16>, ExecError> {
-    let max_offset = page_get_max_offset_number(page)
-        .map_err(crate::include::access::htup::TupleError::from)?;
+    let max_offset =
+        page_get_max_offset_number(page).map_err(crate::include::access::htup::TupleError::from)?;
     let txns_guard = txns.read();
     let mut offsets = Vec::new();
     for off in 1..=max_offset {
@@ -1091,16 +1091,17 @@ impl BitmapHeapScanState {
             let pin = ctx
                 .pool
                 .pin_existing_block(ctx.client_id, self.rel, ForkNumber::Main, block)
-                .map_err(|err| internal_exec_error(format!("bitmap heap pin block failed: {err:?}")))?;
+                .map_err(|err| {
+                    internal_exec_error(format!("bitmap heap pin block failed: {err:?}"))
+                })?;
             let buffer_id = pin.into_raw();
             let owned_pin =
                 crate::OwnedBufferPin::wrap_existing(std::sync::Arc::clone(&ctx.pool), buffer_id);
             let pin_rc = Rc::new(owned_pin);
 
-            let guard = ctx
-                .pool
-                .lock_buffer_shared(buffer_id)
-                .map_err(|err| internal_exec_error(format!("bitmap heap shared lock failed: {err:?}")))?;
+            let guard = ctx.pool.lock_buffer_shared(buffer_id).map_err(|err| {
+                internal_exec_error(format!("bitmap heap shared lock failed: {err:?}"))
+            })?;
             let offsets = collect_visible_page_offsets(&guard, &ctx.snapshot, &ctx.txns)?;
             drop(guard);
 

@@ -1,5 +1,5 @@
-use super::*;
 use super::tests_support::SeededSqlHarness;
+use super::*;
 use crate::RelFileLocator;
 use crate::backend::access::heap::heapam::{heap_flush, heap_insert_mvcc, heap_update};
 use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
@@ -1882,8 +1882,10 @@ fn insert_sql_inserts_multiple_rows() {
 
 #[test]
 fn on_conflict_do_nothing_inserts_when_no_conflict() {
-    let mut harness =
-        SeededSqlHarness::new("upsert_insert_no_conflict", catalog_with_people_primary_key());
+    let mut harness = SeededSqlHarness::new(
+        "upsert_insert_no_conflict",
+        catalog_with_people_primary_key(),
+    );
     let xid = harness.txns.begin();
     assert_eq!(
         harness
@@ -1899,8 +1901,10 @@ fn on_conflict_do_nothing_inserts_when_no_conflict() {
 
 #[test]
 fn on_conflict_targeted_do_nothing_skips_duplicate() {
-    let mut harness =
-        SeededSqlHarness::new("upsert_targeted_do_nothing", catalog_with_people_primary_key());
+    let mut harness = SeededSqlHarness::new(
+        "upsert_targeted_do_nothing",
+        catalog_with_people_primary_key(),
+    );
 
     let insert_xid = harness.txns.begin();
     harness
@@ -1937,8 +1941,10 @@ fn on_conflict_targeted_do_nothing_skips_duplicate() {
 
 #[test]
 fn on_conflict_targetless_do_nothing_skips_duplicate() {
-    let mut harness =
-        SeededSqlHarness::new("upsert_targetless_do_nothing", catalog_with_people_primary_key());
+    let mut harness = SeededSqlHarness::new(
+        "upsert_targetless_do_nothing",
+        catalog_with_people_primary_key(),
+    );
 
     let insert_xid = harness.txns.begin();
     harness
@@ -2039,8 +2045,10 @@ fn on_conflict_do_update_where_false_skips_row() {
 
 #[test]
 fn on_conflict_do_update_rejects_duplicate_input_rows() {
-    let mut harness =
-        SeededSqlHarness::new("upsert_duplicate_input_rows", catalog_with_people_primary_key());
+    let mut harness = SeededSqlHarness::new(
+        "upsert_duplicate_input_rows",
+        catalog_with_people_primary_key(),
+    );
     let xid = harness.txns.begin();
     let err = harness
         .execute(
@@ -2199,8 +2207,10 @@ fn on_conflict_do_update_allows_duplicate_input_after_arbiter_key_changes() {
 
 #[test]
 fn on_conflict_null_arbiter_keys_do_not_conflict() {
-    let mut harness =
-        SeededSqlHarness::new("upsert_null_arbiter_keys", catalog_with_people_note_unique_index());
+    let mut harness = SeededSqlHarness::new(
+        "upsert_null_arbiter_keys",
+        catalog_with_people_note_unique_index(),
+    );
 
     let first_xid = harness.txns.begin();
     harness
@@ -2251,7 +2261,10 @@ fn update_sql_updates_matching_rows() {
     );
     harness.txns.commit(update_xid).unwrap();
     match harness
-        .execute(INVALID_TRANSACTION_ID, "select note from people where id = 1")
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select note from people where id = 1",
+        )
         .unwrap()
     {
         StatementResult::Query { rows, .. } => {
@@ -2414,7 +2427,10 @@ fn null_predicates_work_in_where_clause() {
         .unwrap();
     harness.txns.commit(insert_xid).unwrap();
     match harness
-        .execute(INVALID_TRANSACTION_ID, "select id from people where note is null")
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select id from people where note is null",
+        )
         .unwrap()
     {
         StatementResult::Query { rows, .. } => {
@@ -7536,7 +7552,10 @@ fn qualified_star_target_expands_relation_columns() {
 
     assert_query_rows(
         harness
-            .execute(INVALID_TRANSACTION_ID, "select p.* from people p order by p.id")
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select p.* from people p order by p.id",
+            )
             .unwrap(),
         vec![
             vec![
@@ -9645,7 +9664,10 @@ fn join_alias_hides_inner_relation_names() {
 fn ambiguous_cross_join_column_reports_ambiguity() {
     let mut harness = seed_people_and_pets("ambiguous_cross_join_column");
     let err = harness
-        .execute(INVALID_TRANSACTION_ID, "select id from people cross join pets")
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select id from people cross join pets",
+        )
         .unwrap_err();
     assert!(matches!(
         err,

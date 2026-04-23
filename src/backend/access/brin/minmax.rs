@@ -4,8 +4,8 @@ use crate::backend::catalog::CatalogError;
 use crate::backend::executor::compare_order_values;
 use crate::include::access::brin_internal::BrinValues;
 use crate::include::catalog::{
-    BRIN_MINMAX_ADD_VALUE_PROC_OID, BRIN_MINMAX_CONSISTENT_PROC_OID,
-    BRIN_MINMAX_OPCINFO_PROC_OID, BRIN_MINMAX_UNION_PROC_OID,
+    BRIN_MINMAX_ADD_VALUE_PROC_OID, BRIN_MINMAX_CONSISTENT_PROC_OID, BRIN_MINMAX_OPCINFO_PROC_OID,
+    BRIN_MINMAX_UNION_PROC_OID,
 };
 use crate::include::nodes::datum::Value;
 
@@ -121,19 +121,19 @@ pub(crate) fn minmax_consistent(
         BrinMinmaxStrategy::Less => {
             Ok(compare_minmax_values(&column.values[0], scan_value)? == Ordering::Less)
         }
-        BrinMinmaxStrategy::LessEqual => Ok(compare_minmax_values(&column.values[0], scan_value)?
-            != Ordering::Greater),
+        BrinMinmaxStrategy::LessEqual => {
+            Ok(compare_minmax_values(&column.values[0], scan_value)? != Ordering::Greater)
+        }
         BrinMinmaxStrategy::Equal => {
-            let min_matches = compare_minmax_values(&column.values[0], scan_value)?
-                != Ordering::Greater;
-            let max_matches = compare_minmax_values(&column.values[1], scan_value)?
-                != Ordering::Less;
+            let min_matches =
+                compare_minmax_values(&column.values[0], scan_value)? != Ordering::Greater;
+            let max_matches =
+                compare_minmax_values(&column.values[1], scan_value)? != Ordering::Less;
             Ok(min_matches && max_matches)
         }
-        BrinMinmaxStrategy::GreaterEqual => Ok(compare_minmax_values(
-            &column.values[1],
-            scan_value,
-        )? != Ordering::Less),
+        BrinMinmaxStrategy::GreaterEqual => {
+            Ok(compare_minmax_values(&column.values[1], scan_value)? != Ordering::Less)
+        }
         BrinMinmaxStrategy::Greater => {
             Ok(compare_minmax_values(&column.values[1], scan_value)? == Ordering::Greater)
         }
@@ -191,30 +191,36 @@ mod tests {
     #[test]
     fn minmax_add_value_expands_bounds() {
         let mut column = summary();
-        assert!(minmax_add_value(
-            BRIN_MINMAX_ADD_VALUE_PROC_OID,
-            &mut column,
-            &Value::Int32(10),
-            false,
-        )
-        .unwrap());
+        assert!(
+            minmax_add_value(
+                BRIN_MINMAX_ADD_VALUE_PROC_OID,
+                &mut column,
+                &Value::Int32(10),
+                false,
+            )
+            .unwrap()
+        );
         assert_eq!(column.values[0], Value::Int32(10));
         assert_eq!(column.values[1], Value::Int32(10));
 
-        assert!(minmax_add_value(
-            BRIN_MINMAX_ADD_VALUE_PROC_OID,
-            &mut column,
-            &Value::Int32(4),
-            false,
-        )
-        .unwrap());
-        assert!(minmax_add_value(
-            BRIN_MINMAX_ADD_VALUE_PROC_OID,
-            &mut column,
-            &Value::Int32(19),
-            false,
-        )
-        .unwrap());
+        assert!(
+            minmax_add_value(
+                BRIN_MINMAX_ADD_VALUE_PROC_OID,
+                &mut column,
+                &Value::Int32(4),
+                false,
+            )
+            .unwrap()
+        );
+        assert!(
+            minmax_add_value(
+                BRIN_MINMAX_ADD_VALUE_PROC_OID,
+                &mut column,
+                &Value::Int32(19),
+                false,
+            )
+            .unwrap()
+        );
 
         assert_eq!(column.values[0], Value::Int32(4));
         assert_eq!(column.values[1], Value::Int32(19));
@@ -238,34 +244,42 @@ mod tests {
         )
         .unwrap();
 
-        assert!(minmax_consistent(
-            BRIN_MINMAX_CONSISTENT_PROC_OID,
-            &column,
-            BrinMinmaxStrategy::Equal,
-            &Value::Int32(10),
-        )
-        .unwrap());
-        assert!(!minmax_consistent(
-            BRIN_MINMAX_CONSISTENT_PROC_OID,
-            &column,
-            BrinMinmaxStrategy::Equal,
-            &Value::Int32(30),
-        )
-        .unwrap());
-        assert!(minmax_consistent(
-            BRIN_MINMAX_CONSISTENT_PROC_OID,
-            &column,
-            BrinMinmaxStrategy::GreaterEqual,
-            &Value::Int32(19),
-        )
-        .unwrap());
-        assert!(!minmax_consistent(
-            BRIN_MINMAX_CONSISTENT_PROC_OID,
-            &column,
-            BrinMinmaxStrategy::Less,
-            &Value::Int32(2),
-        )
-        .unwrap());
+        assert!(
+            minmax_consistent(
+                BRIN_MINMAX_CONSISTENT_PROC_OID,
+                &column,
+                BrinMinmaxStrategy::Equal,
+                &Value::Int32(10),
+            )
+            .unwrap()
+        );
+        assert!(
+            !minmax_consistent(
+                BRIN_MINMAX_CONSISTENT_PROC_OID,
+                &column,
+                BrinMinmaxStrategy::Equal,
+                &Value::Int32(30),
+            )
+            .unwrap()
+        );
+        assert!(
+            minmax_consistent(
+                BRIN_MINMAX_CONSISTENT_PROC_OID,
+                &column,
+                BrinMinmaxStrategy::GreaterEqual,
+                &Value::Int32(19),
+            )
+            .unwrap()
+        );
+        assert!(
+            !minmax_consistent(
+                BRIN_MINMAX_CONSISTENT_PROC_OID,
+                &column,
+                BrinMinmaxStrategy::Less,
+                &Value::Int32(2),
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -312,13 +326,15 @@ mod tests {
     #[test]
     fn minmax_handles_all_null_summaries() {
         let all_nulls = summary();
-        assert!(!minmax_consistent(
-            BRIN_MINMAX_CONSISTENT_PROC_OID,
-            &all_nulls,
-            BrinMinmaxStrategy::Equal,
-            &Value::Text("x".into()),
-        )
-        .unwrap());
+        assert!(
+            !minmax_consistent(
+                BRIN_MINMAX_CONSISTENT_PROC_OID,
+                &all_nulls,
+                BrinMinmaxStrategy::Equal,
+                &Value::Text("x".into()),
+            )
+            .unwrap()
+        );
 
         let mut left = summary();
         let right = summary();
