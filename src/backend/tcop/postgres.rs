@@ -224,6 +224,18 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return None;
             }
         }
+        ExecError::Parse(crate::backend::parser::ParseError::FeatureNotSupportedMessage(
+            message,
+        )) => {
+            if matches!(
+                message.as_str(),
+                "a column list with SET NULL is only supported for ON DELETE actions"
+                    | "a column list with SET DEFAULT is only supported for ON DELETE actions"
+            ) {
+                return find_case_insensitive_token_position(sql, "ON UPDATE");
+            }
+            return None;
+        }
         ExecError::Parse(crate::backend::parser::ParseError::InvalidPublicationTableName(name))
         | ExecError::Parse(crate::backend::parser::ParseError::InvalidPublicationSchemaName(
             name,
@@ -6465,6 +6477,18 @@ mod tests {
     }
 
     #[test]
+    fn exec_error_position_points_at_on_update_for_fk_set_null_column_lists() {
+        let sql = "CREATE TABLE FKTABLE (tid int, id int, foo int, FOREIGN KEY (tid, foo) REFERENCES PKTABLE ON UPDATE SET NULL (foo));";
+        let err = ExecError::Parse(
+            crate::backend::parser::ParseError::FeatureNotSupportedMessage(
+                "a column list with SET NULL is only supported for ON DELETE actions".into(),
+            ),
+        );
+
+        assert_eq!(exec_error_position(sql, &err), Some(91));
+    }
+
+    #[test]
     fn simple_query_reports_position_for_date_input_error() {
         let db = Database::open(temp_dir("date_error_position"), 16).unwrap();
         let mut state = ConnectionState {
@@ -6478,6 +6502,28 @@ mod tests {
         handle_query(&mut output, &db, &mut state, "select date '1997-02-29';").unwrap();
 
         assert_eq!(first_error_response_position(&output), Some(14));
+    }
+
+    #[test]
+    fn simple_query_reports_position_for_fk_set_null_column_lists() {
+        let db = Database::open(temp_dir("fk_set_null_column_list_position"), 16).unwrap();
+        let mut state = ConnectionState {
+            session: Session::new(2),
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
+            copy_in: None,
+        };
+        let mut output = Vec::new();
+
+        handle_query(
+            &mut output,
+            &db,
+            &mut state,
+            "CREATE TABLE FKTABLE (tid int, id int, foo int, FOREIGN KEY (tid, foo) REFERENCES PKTABLE ON UPDATE SET NULL (foo));",
+        )
+        .unwrap();
+
+        assert_eq!(first_error_response_position(&output), Some(91));
     }
 
     #[test]
