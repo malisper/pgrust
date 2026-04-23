@@ -13,7 +13,7 @@ use crate::backend::utils::cache::syscache::{
     ensure_proc_rows, ensure_rewrite_rows, ensure_statistic_rows, ensure_type_rows,
 };
 use crate::backend::utils::cache::system_views::{
-    build_pg_locks_rows, build_pg_rules_rows, build_pg_stat_io_rows,
+    build_pg_locks_rows, build_pg_policies_rows, build_pg_rules_rows, build_pg_stat_io_rows,
     build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
     build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_views_rows,
 };
@@ -990,6 +990,23 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             authids,
             ensure_class_rows(self.db, self.client_id, self.txn_ctx),
             ensure_rewrite_rows(self.db, self.client_id, self.txn_ctx),
+        )
+    }
+
+    fn pg_policies_rows(&self) -> Vec<Vec<Value>> {
+        let authids = self
+            .db
+            .auth_catalog(self.client_id, self.txn_ctx)
+            .map(|catalog| catalog.roles().to_vec())
+            .unwrap_or_default();
+        let policy_rows = visible_catcache(self.db, self.client_id, self.txn_ctx)
+            .map(|catcache| catcache.policy_rows())
+            .unwrap_or_default();
+        build_pg_policies_rows(
+            ensure_namespace_rows(self.db, self.client_id, self.txn_ctx),
+            authids,
+            ensure_class_rows(self.db, self.client_id, self.txn_ctx),
+            policy_rows,
         )
     }
 

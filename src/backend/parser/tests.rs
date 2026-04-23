@@ -9843,6 +9843,30 @@ fn analyze_pg_locks_uses_expected_columns_and_types() {
 }
 
 #[test]
+fn analyze_pg_policies_uses_expected_columns_and_types() {
+    let stmt = parse_select("select * from pg_policies").unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[]).unwrap();
+
+    assert_eq!(
+        query_column_names_and_types(&query),
+        vec![
+            ("schemaname".into(), SqlType::new(SqlTypeKind::Name)),
+            ("tablename".into(), SqlType::new(SqlTypeKind::Name)),
+            ("policyname".into(), SqlType::new(SqlTypeKind::Name)),
+            ("permissive".into(), SqlType::new(SqlTypeKind::Text)),
+            (
+                "roles".into(),
+                SqlType::array_of(SqlType::new(SqlTypeKind::Name))
+            ),
+            ("cmd".into(), SqlType::new(SqlTypeKind::Text)),
+            ("qual".into(), SqlType::new(SqlTypeKind::Text)),
+            ("with_check".into(), SqlType::new(SqlTypeKind::Text)),
+        ]
+    );
+}
+
+#[test]
 fn analyze_json_each_rejects_typed_column_definitions_for_out_parameters() {
     let stmt =
         parse_select("select * from json_each('{\"a\":1}'::json) as j(key text, value json)")

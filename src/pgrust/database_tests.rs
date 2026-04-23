@@ -1869,6 +1869,18 @@ fn float_value(value: &Value) -> f64 {
     }
 }
 
+fn typed_text_array_value(values: &[&str], element_type_oid: u32) -> Value {
+    Value::PgArray(
+        crate::include::nodes::datum::ArrayValue::from_1d(
+            values
+                .iter()
+                .map(|value| Value::Text((*value).into()))
+                .collect(),
+        )
+        .with_element_type_oid(element_type_oid),
+    )
+}
+
 fn relation_locator_for(db: &Database, client_id: u32, relname: &str) -> crate::RelFileLocator {
     crate::RelFileLocator {
         spc_oid: 0,
@@ -4472,7 +4484,10 @@ fn nested_views_and_pg_views_work() {
         query_rows(
             &db,
             1,
-            "select schemaname, viewname, viewowner, definition from pg_views order by viewname",
+            "select schemaname, viewname, viewowner, definition
+             from pg_views
+             where schemaname = 'public'
+             order by viewname",
         ),
         vec![
             vec![
@@ -4489,6 +4504,27 @@ fn nested_views_and_pg_views_work() {
             ],
         ]
     );
+}
+
+#[test]
+fn pg_views_includes_pg_policies_metadata() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let rows = query_rows(
+        &db,
+        1,
+        "select schemaname, viewname, viewowner, definition
+         from pg_views
+         where schemaname = 'pg_catalog' and viewname = 'pg_policies'",
+    );
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], Value::Text("pg_catalog".into()));
+    assert_eq!(rows[0][1], Value::Text("pg_policies".into()));
+    assert_eq!(rows[0][2], Value::Text("postgres".into()));
+    match &rows[0][3] {
+        Value::Text(definition) => assert!(definition.contains("FROM pg_catalog.pg_policy")),
+        other => panic!("expected pg_policies definition text, got {other:?}"),
+    }
 }
 
 #[test]
@@ -20494,6 +20530,21 @@ fn create_alter_and_drop_policy_updates_pg_policy() {
         ),
         vec![vec![Value::Text("p1".into()), Value::Text("a > 0".into())]]
     );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select policyname, roles, qual, with_check
+             from pg_policies
+             where policyname = 'p1'",
+        ),
+        vec![vec![
+            Value::Text("p1".into()),
+            typed_text_array_value(&["app_role"], crate::include::catalog::NAME_TYPE_OID),
+            Value::Text("a > 0".into()),
+            Value::Null,
+        ]]
+    );
 
     session
         .execute(&db, "alter policy p1 on items rename to p2")
@@ -20517,6 +20568,21 @@ fn create_alter_and_drop_policy_updates_pg_policy() {
             Value::Text("a > 2".into()),
         ]]
     );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select policyname, roles, qual, with_check
+             from pg_policies
+             where policyname = 'p2'",
+        ),
+        vec![vec![
+            Value::Text("p2".into()),
+            typed_text_array_value(&["app_role"], crate::include::catalog::NAME_TYPE_OID),
+            Value::Text("a > 1".into()),
+            Value::Text("a > 2".into()),
+        ]]
+    );
 
     session.execute(&db, "drop policy p2 on items").unwrap();
     assert_eq!(
@@ -20527,6 +20593,84 @@ fn create_alter_and_drop_policy_updates_pg_policy() {
         ),
         vec![vec![Value::Int64(0)]]
     );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_policies where policyname = 'p2'"
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn pg_policies_exposes_public_and_named_role_policies() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role app_role nologin")
+        .unwrap();
+    session
+        .execute(&db, "create role report_role nologin")
+        .unwrap();
+    session
+        .execute(&db, "create table items (a int4, owner text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy p_named on items for select to report_role, app_role using (a > 0)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create policy p_public on items for insert to public with check (a > 1)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select schemaname, tablename, policyname, permissive, roles, cmd, qual, with_check
+             from pg_policies
+             order by policyname",
+        ),
+        vec![
+            vec![
+                Value::Text("public".into()),
+                Value::Text("items".into()),
+                Value::Text("p_named".into()),
+                Value::Text("PERMISSIVE".into()),
+                typed_text_array_value(
+                    &["app_role", "report_role"],
+                    crate::include::catalog::NAME_TYPE_OID,
+                ),
+                Value::Text("SELECT".into()),
+                Value::Text("a > 0".into()),
+                Value::Null,
+            ],
+            vec![
+                Value::Text("public".into()),
+                Value::Text("items".into()),
+                Value::Text("p_public".into()),
+                Value::Text("PERMISSIVE".into()),
+                typed_text_array_value(&["public"], crate::include::catalog::NAME_TYPE_OID),
+                Value::Text("INSERT".into()),
+                Value::Null,
+                Value::Text("a > 1".into()),
+            ],
+        ]
+    );
+}
+
+#[test]
+fn pg_policies_query_succeeds_on_fresh_database() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+
+    assert!(query_rows(&db, 1, "select * from pg_policies").is_empty());
 }
 
 #[test]
