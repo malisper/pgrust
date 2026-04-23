@@ -33,7 +33,11 @@ fn table_owner_default_acl(owner_name: &str, relkind: char) -> Option<String> {
 fn parse_acl_item(item: &str) -> Option<(String, String, String)> {
     let (grantee, rest) = item.split_once('=')?;
     let (privileges, grantor) = rest.split_once('/')?;
-    Some((grantee.to_string(), privileges.to_string(), grantor.to_string()))
+    Some((
+        grantee.to_string(),
+        privileges.to_string(),
+        grantor.to_string(),
+    ))
 }
 
 fn canonicalize_acl_privileges(privileges: &str, allowed: &str) -> String {
@@ -51,7 +55,9 @@ fn grant_table_acl_entry(
 ) {
     if let Some(existing) = acl.iter_mut().find(|item| {
         parse_acl_item(item)
-            .map(|(item_grantee, _, item_grantor)| item_grantee == grantee && item_grantor == grantor)
+            .map(|(item_grantee, _, item_grantor)| {
+                item_grantee == grantee && item_grantor == grantor
+            })
             .unwrap_or(false)
     }) {
         let (_, existing_privileges, _) = parse_acl_item(existing).expect("validated above");
@@ -225,12 +231,13 @@ impl Database {
             GrantObjectPrivilege::CreateOnDatabase => {
                 self.execute_grant_database_create_stmt(client_id, stmt)
             }
-            GrantObjectPrivilege::AllPrivilegesOnTable | GrantObjectPrivilege::SelectOnTable => self
-                .execute_grant_table_acl_stmt_with_search_path(
+            GrantObjectPrivilege::AllPrivilegesOnTable | GrantObjectPrivilege::SelectOnTable => {
+                self.execute_grant_table_acl_stmt_with_search_path(
                     client_id,
                     stmt,
                     configured_search_path,
-                ),
+                )
+            }
             GrantObjectPrivilege::AllPrivilegesOnSchema => {
                 let catcache = self
                     .backend_catcache(client_id, None)
@@ -272,12 +279,13 @@ impl Database {
             GrantObjectPrivilege::CreateOnDatabase => {
                 self.execute_revoke_database_create_stmt(client_id, stmt)
             }
-            GrantObjectPrivilege::AllPrivilegesOnTable | GrantObjectPrivilege::SelectOnTable => self
-                .execute_revoke_table_acl_stmt_with_search_path(
+            GrantObjectPrivilege::AllPrivilegesOnTable | GrantObjectPrivilege::SelectOnTable => {
+                self.execute_revoke_table_acl_stmt_with_search_path(
                     client_id,
                     stmt,
                     configured_search_path,
-                ),
+                )
+            }
             GrantObjectPrivilege::AllPrivilegesOnSchema => {
                 let catcache = self
                     .backend_catcache(client_id, None)

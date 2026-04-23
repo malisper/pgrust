@@ -157,7 +157,10 @@ fn render_view_query(query: &Query, catalog: &dyn CatalogLookup) -> String {
     )];
 
     if let Some(jointree) = &query.jointree {
-        lines.push(format!("   FROM {}", render_from_node(query, jointree, catalog, 3)));
+        lines.push(format!(
+            "   FROM {}",
+            render_from_node(query, jointree, catalog, 3)
+        ));
     }
     if let Some(where_qual) = &query.where_qual {
         lines.push(format!(
@@ -222,9 +225,7 @@ fn render_from_node(
                 .rtable
                 .get(rtindex.saturating_sub(1))
                 .and_then(|rte| match &rte.kind {
-                    RangeTblEntryKind::Join {
-                        joinmergedcols, ..
-                    } => Some(
+                    RangeTblEntryKind::Join { joinmergedcols, .. } => Some(
                         rte.desc
                             .columns
                             .iter()
@@ -294,7 +295,11 @@ fn render_expr(expr: &Expr, query: &Query, catalog: &dyn CatalogLookup) -> Strin
         Expr::Const(value) => render_literal(value),
         Expr::Cast(inner, ty) => {
             if matches!(**inner, Expr::Const(_)) {
-                format!("{}::{}", render_expr(inner, query, catalog), render_sql_type(*ty))
+                format!(
+                    "{}::{}",
+                    render_expr(inner, query, catalog),
+                    render_sql_type(*ty)
+                )
             } else {
                 format!(
                     "({})::{}",
@@ -461,7 +466,10 @@ fn render_literal(value: &Value) -> String {
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
         Value::Text(_) | Value::TextRef(_, _) => {
-            format!("'{}'", value.as_text().unwrap_or_default().replace('\'', "''"))
+            format!(
+                "'{}'",
+                value.as_text().unwrap_or_default().replace('\'', "''")
+            )
         }
         Value::Numeric(numeric) => numeric.render(),
         other => format!("{other:?}"),
@@ -517,9 +525,11 @@ fn join_using_var_needs_cast(var: &Var, sql_type: SqlType, query: &Query) -> boo
             jointype,
             joinmergedcols,
             ..
-        } => matches!(jointype, JoinType::Left | JoinType::Right | JoinType::Full)
-            && column_index < *joinmergedcols
-            && var.vartype == sql_type,
+        } => {
+            matches!(jointype, JoinType::Left | JoinType::Right | JoinType::Full)
+                && column_index < *joinmergedcols
+                && var.vartype == sql_type
+        }
         _ => false,
     }
 }
