@@ -2907,6 +2907,8 @@ fn sql_type_display_name(ty: SqlType) -> String {
         SqlTypeKind::Bit => "bit",
         SqlTypeKind::VarBit => "bit varying",
         SqlTypeKind::Bytea => "bytea",
+        SqlTypeKind::Inet => "inet",
+        SqlTypeKind::Cidr => "cidr",
         SqlTypeKind::Float4 => "real",
         SqlTypeKind::Float8 => "double precision",
         SqlTypeKind::Money => "money",

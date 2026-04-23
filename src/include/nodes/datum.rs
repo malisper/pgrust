@@ -7,6 +7,7 @@ use num_bigint::BigInt;
 use num_integer::Integer;
 use num_traits::{Signed, Zero};
 use std::hash::{Hash, Hasher};
+use std::net::IpAddr;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BitString {
@@ -39,6 +40,33 @@ pub struct RecordDescriptor {
     pub typrelid: u32,
     pub typmod: i32,
     pub fields: Vec<RecordFieldDesc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct InetValue {
+    pub addr: IpAddr,
+    pub bits: u8,
+}
+
+impl InetValue {
+    pub fn max_bits(&self) -> u8 {
+        match self.addr {
+            IpAddr::V4(_) => 32,
+            IpAddr::V6(_) => 128,
+        }
+    }
+
+    pub fn render_inet(&self) -> String {
+        if self.bits == self.max_bits() {
+            self.addr.to_string()
+        } else {
+            format!("{}/{}", self.addr, self.bits)
+        }
+    }
+
+    pub fn render_cidr(&self) -> String {
+        format!("{}/{}", self.addr, self.bits)
+    }
 }
 
 impl RecordDescriptor {
@@ -506,6 +534,8 @@ pub enum Value {
     TimestampTz(TimestampTzADT),
     Bit(BitString),
     Bytea(Vec<u8>),
+    Inet(InetValue),
+    Cidr(InetValue),
     Point(GeoPoint),
     Lseg(GeoLseg),
     Path(GeoPath),
@@ -873,6 +903,8 @@ impl Value {
             Value::TimestampTz(v) => Value::TimestampTz(*v),
             Value::Bit(v) => Value::Bit(v.clone()),
             Value::Bytea(v) => Value::Bytea(v.clone()),
+            Value::Inet(v) => Value::Inet(v.clone()),
+            Value::Cidr(v) => Value::Cidr(v.clone()),
             Value::Point(v) => Value::Point(v.clone()),
             Value::Lseg(v) => Value::Lseg(v.clone()),
             Value::Path(v) => Value::Path(v.clone()),
@@ -967,6 +999,8 @@ impl Value {
             Value::TimestampTz(_) => Some(SqlType::new(SqlTypeKind::TimestampTz)),
             Value::Bit(bits) => Some(SqlType::with_bit_len(SqlTypeKind::VarBit, bits.bit_len)),
             Value::Bytea(_) => Some(SqlType::new(SqlTypeKind::Bytea)),
+            Value::Inet(_) => Some(SqlType::new(SqlTypeKind::Inet)),
+            Value::Cidr(_) => Some(SqlType::new(SqlTypeKind::Cidr)),
             Value::Point(_) => Some(SqlType::new(SqlTypeKind::Point)),
             Value::Lseg(_) => Some(SqlType::new(SqlTypeKind::Lseg)),
             Value::Path(_) => Some(SqlType::new(SqlTypeKind::Path)),
@@ -1033,6 +1067,8 @@ impl PartialEq for Value {
             (Value::TimestampTz(a), Value::TimestampTz(b)) => a == b,
             (Value::Bit(a), Value::Bit(b)) => a == b,
             (Value::Bytea(a), Value::Bytea(b)) => a == b,
+            (Value::Inet(a), Value::Inet(b)) => a == b,
+            (Value::Cidr(a), Value::Cidr(b)) => a == b,
             (Value::Point(a), Value::Point(b)) => {
                 a.x.to_bits() == b.x.to_bits() && a.y.to_bits() == b.y.to_bits()
             }
@@ -1151,6 +1187,14 @@ impl std::hash::Hash for Value {
             }
             Value::Bytea(v) => {
                 13u8.hash(state);
+                v.hash(state);
+            }
+            Value::Inet(v) => {
+                26u8.hash(state);
+                v.hash(state);
+            }
+            Value::Cidr(v) => {
+                27u8.hash(state);
                 v.hash(state);
             }
             Value::Point(v) => {

@@ -21,6 +21,7 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         ScalarType::TimestampTz => (8, AttributeAlign::Double),
         ScalarType::BitString => (-1, AttributeAlign::Int),
         ScalarType::Bytea => (-1, AttributeAlign::Int),
+        ScalarType::Inet | ScalarType::Cidr => (-1, AttributeAlign::Int),
         ScalarType::Point => (16, AttributeAlign::Double),
         ScalarType::Lseg => (32, AttributeAlign::Double),
         ScalarType::Path => (-1, AttributeAlign::Int),
@@ -114,6 +115,8 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         SqlTypeKind::Bit
         | SqlTypeKind::VarBit
         | SqlTypeKind::Bytea
+        | SqlTypeKind::Inet
+        | SqlTypeKind::Cidr
         | SqlTypeKind::Record
         | SqlTypeKind::Composite
         | SqlTypeKind::Varchar
@@ -225,6 +228,8 @@ pub(crate) fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         SqlTypeKind::OidVector => ScalarType::Text,
         SqlTypeKind::Bit | SqlTypeKind::VarBit => ScalarType::BitString,
         SqlTypeKind::Bytea => ScalarType::Bytea,
+        SqlTypeKind::Inet => ScalarType::Inet,
+        SqlTypeKind::Cidr => ScalarType::Cidr,
         SqlTypeKind::Point => ScalarType::Point,
         SqlTypeKind::Lseg => ScalarType::Lseg,
         SqlTypeKind::Path => ScalarType::Path,

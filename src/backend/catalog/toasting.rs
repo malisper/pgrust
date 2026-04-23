@@ -96,6 +96,8 @@ fn type_maximum_size(column: &crate::backend::executor::ColumnDesc) -> Option<us
         | crate::backend::parser::SqlTypeKind::Tid
         | crate::backend::parser::SqlTypeKind::OidVector
         | crate::backend::parser::SqlTypeKind::Bytea
+        | crate::backend::parser::SqlTypeKind::Inet
+        | crate::backend::parser::SqlTypeKind::Cidr
         | crate::backend::parser::SqlTypeKind::Interval
         | crate::backend::parser::SqlTypeKind::Path
         | crate::backend::parser::SqlTypeKind::Polygon

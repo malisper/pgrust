@@ -113,6 +113,8 @@ fn render_value_json(value: &Value) -> String {
             v,
             ByteaOutputFormat::Hex,
         )),
+        Value::Inet(v) => json_string(&v.render_inet()),
+        Value::Cidr(v) => json_string(&v.render_cidr()),
         Value::Date(_)
         | Value::Time(_)
         | Value::TimeTz(_)

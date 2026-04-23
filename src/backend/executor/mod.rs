@@ -20,6 +20,7 @@ mod expr_locks;
 mod expr_math;
 mod expr_money;
 mod expr_multirange;
+mod expr_network;
 mod expr_numeric;
 pub(crate) mod expr_ops;
 pub(crate) mod expr_range;
@@ -79,6 +80,10 @@ pub(crate) use expr_multirange::{
     compare_multirange_values, decode_multirange_bytes, encode_multirange_bytes,
     eval_multirange_function, multirange_intersection_agg_transition, parse_multirange_text,
     range_agg_transition,
+};
+pub(crate) use expr_network::{
+    compare_network_values, encode_network_bytes, parse_cidr_bytes, parse_cidr_text,
+    parse_inet_bytes, parse_inet_text, render_network_text,
 };
 pub use expr_range::render_range_text;
 pub(crate) use expr_range::{

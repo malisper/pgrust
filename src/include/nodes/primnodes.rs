@@ -23,6 +23,8 @@ pub enum ScalarType {
     TimestampTz,
     BitString,
     Bytea,
+    Inet,
+    Cidr,
     Point,
     Lseg,
     Path,
