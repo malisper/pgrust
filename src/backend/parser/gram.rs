@@ -11367,47 +11367,50 @@ fn build_alter_table_target(pair: Pair<'_, Rule>) -> Result<(bool, bool, String)
     ))
 }
 
-fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
-    fn add_array_bounds(ty: RawTypeName, bounds: usize) -> RawTypeName {
-        let mut ty = ty;
-        for _ in 0..bounds {
-            ty = match ty {
-                RawTypeName::Builtin(inner_ty) => RawTypeName::Builtin(SqlType::array_of(inner_ty)),
-                RawTypeName::Named { name, array_bounds } => RawTypeName::Named {
-                    name,
-                    array_bounds: array_bounds.saturating_add(1),
-                },
-                other => other,
-            };
-        }
-        ty
+fn add_array_bounds(ty: RawTypeName, bounds: usize) -> RawTypeName {
+    let mut ty = ty;
+    for _ in 0..bounds {
+        ty = match ty {
+            RawTypeName::Builtin(inner_ty) => RawTypeName::Builtin(SqlType::array_of(inner_ty)),
+            RawTypeName::Named { name, array_bounds } => RawTypeName::Named {
+                name,
+                array_bounds: array_bounds.saturating_add(1),
+            },
+            other => other,
+        };
     }
+    ty
+}
 
+fn type_array_suffix_bounds(suffix: Pair<'_, Rule>) -> usize {
+    match suffix.as_rule() {
+        Rule::type_array_suffix => suffix
+            .into_inner()
+            .map(|part| match part.as_rule() {
+                Rule::array_suffix => 1usize,
+                Rule::array_decl_suffix => part
+                    .into_inner()
+                    .filter(|inner| inner.as_rule() == Rule::array_suffix)
+                    .count(),
+                _ => 0,
+            })
+            .sum(),
+        Rule::array_suffix => 1,
+        Rule::array_decl_suffix => suffix
+            .into_inner()
+            .filter(|inner| inner.as_rule() == Rule::array_suffix)
+            .count(),
+        _ => 0,
+    }
+}
+
+fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
     match pair.as_rule() {
         Rule::type_name | Rule::known_type_name => {
             let mut inner = pair.into_inner();
             let mut ty = build_type_name(inner.next().expect("type_name base"));
             for suffix in inner {
-                let bounds = match suffix.as_rule() {
-                    Rule::type_array_suffix => suffix
-                        .into_inner()
-                        .map(|part| match part.as_rule() {
-                            Rule::array_suffix => 1usize,
-                            Rule::array_decl_suffix => part
-                                .into_inner()
-                                .filter(|inner| inner.as_rule() == Rule::array_suffix)
-                                .count(),
-                            _ => 0,
-                        })
-                        .sum(),
-                    Rule::array_suffix => 1,
-                    Rule::array_decl_suffix => suffix
-                        .into_inner()
-                        .filter(|inner| inner.as_rule() == Rule::array_suffix)
-                        .count(),
-                    _ => 0,
-                };
-                ty = add_array_bounds(ty, bounds);
+                ty = add_array_bounds(ty, type_array_suffix_bounds(suffix));
             }
             ty
         }
@@ -11633,10 +11636,20 @@ fn build_cast_type_name(pair: Pair<'_, Rule>) -> Result<RawTypeName, ParseError>
     let mut inner = pair.into_inner();
     let first = inner.next().ok_or(ParseError::UnexpectedEof)?;
     let mut ty = build_type_name(first);
-    if let Some(field_clause) = inner.find(|part| part.as_rule() == Rule::interval_field_clause)
-        && let Some(precision) = interval_field_clause_precision(field_clause)?
-    {
-        ty = RawTypeName::Builtin(SqlType::new(SqlTypeKind::Interval).with_typmod(precision));
+    for part in inner {
+        match part.as_rule() {
+            Rule::interval_field_clause => {
+                if let Some(precision) = interval_field_clause_precision(part)? {
+                    ty = RawTypeName::Builtin(
+                        SqlType::new(SqlTypeKind::Interval).with_typmod(precision),
+                    );
+                }
+            }
+            Rule::type_array_suffix | Rule::array_suffix | Rule::array_decl_suffix => {
+                ty = add_array_bounds(ty, type_array_suffix_bounds(part));
+            }
+            _ => {}
+        }
     }
     Ok(ty)
 }

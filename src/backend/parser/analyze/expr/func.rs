@@ -517,66 +517,6 @@ pub(super) fn bind_scalar_function_call(
                 .map(|(ty, arg)| coerce_bound_expr(arg, ty, SqlType::new(SqlTypeKind::Int4)))
                 .collect(),
         )),
-        BuiltinScalarFunction::MakeInterval => Ok(build_func(
-            false,
-            arg_types
-                .into_iter()
-                .zip(bound_args)
-                .enumerate()
-                .map(|(idx, (ty, arg))| {
-                    let target = if idx == 6 {
-                        SqlType::new(SqlTypeKind::Float8)
-                    } else {
-                        SqlType::new(SqlTypeKind::Int4)
-                    };
-                    coerce_bound_expr(arg, ty, target)
-                })
-                .collect(),
-        )),
-        BuiltinScalarFunction::JustifyHours
-        | BuiltinScalarFunction::JustifyDays
-        | BuiltinScalarFunction::JustifyInterval
-        | BuiltinScalarFunction::IntervalHash => Ok(build_func(
-            false,
-            vec![coerce_bound_expr(
-                bound_args[0].clone(),
-                arg_types[0],
-                SqlType::new(SqlTypeKind::Interval),
-            )],
-        )),
-        BuiltinScalarFunction::DateBin => {
-            let source_type = match arg_types[1].kind {
-                SqlTypeKind::TimestampTz => SqlType::new(SqlTypeKind::TimestampTz),
-                _ => SqlType::new(SqlTypeKind::Timestamp),
-            };
-            Ok(build_func(
-                false,
-                vec![
-                    coerce_bound_expr(
-                        bound_args[0].clone(),
-                        arg_types[0],
-                        SqlType::new(SqlTypeKind::Interval),
-                    ),
-                    coerce_bound_expr(bound_args[1].clone(), arg_types[1], source_type),
-                    coerce_bound_expr(bound_args[2].clone(), arg_types[2], source_type),
-                ],
-            ))
-        }
-        BuiltinScalarFunction::Timezone => Ok(build_func(
-            false,
-            vec![
-                coerce_bound_expr(
-                    bound_args[0].clone(),
-                    arg_types[0],
-                    if matches!(arg_types[0].kind, SqlTypeKind::Interval) {
-                        SqlType::new(SqlTypeKind::Interval)
-                    } else {
-                        SqlType::new(SqlTypeKind::Text)
-                    },
-                ),
-                bound_args[1].clone(),
-            ],
-        )),
         BuiltinScalarFunction::ToTsVector
         | BuiltinScalarFunction::ToTsQuery
         | BuiltinScalarFunction::PlainToTsQuery

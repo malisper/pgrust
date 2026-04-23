@@ -3594,13 +3594,6 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("date_trunc", BuiltinScalarFunction::DateTrunc),
         ("isfinite", BuiltinScalarFunction::IsFinite),
         ("make_date", BuiltinScalarFunction::MakeDate),
-        ("make_interval", BuiltinScalarFunction::MakeInterval),
-        ("justify_hours", BuiltinScalarFunction::JustifyHours),
-        ("justify_days", BuiltinScalarFunction::JustifyDays),
-        ("justify_interval", BuiltinScalarFunction::JustifyInterval),
-        ("interval_hash", BuiltinScalarFunction::IntervalHash),
-        ("date_bin", BuiltinScalarFunction::DateBin),
-        ("timezone", BuiltinScalarFunction::Timezone),
         (
             "getdatabaseencoding",
             BuiltinScalarFunction::GetDatabaseEncoding,

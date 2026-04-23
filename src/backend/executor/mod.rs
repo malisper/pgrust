@@ -15,7 +15,6 @@ mod expr_date;
 mod expr_datetime;
 mod expr_format;
 pub(crate) mod expr_geometry;
-mod expr_interval;
 mod expr_json;
 mod expr_locks;
 mod expr_math;

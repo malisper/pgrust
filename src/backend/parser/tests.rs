@@ -5017,7 +5017,7 @@ fn parse_interval_typed_string_literals() {
 #[test]
 fn parse_interval_field_qualified_casts() {
     let stmt = parse_select(
-        "select f1::interval day to minute, cast(f1 as interval second(2)) from interval_tbl",
+        "select f1::interval day to minute, cast(f1 as interval second(2)), f1::interval[] from interval_tbl",
     )
     .unwrap();
     assert!(matches!(
@@ -5030,6 +5030,11 @@ fn parse_interval_field_qualified_casts() {
             if ty.as_builtin().is_some_and(|ty| {
                 ty.kind == SqlTypeKind::Interval && ty.typmod == 2
             })
+    ));
+    assert!(matches!(
+        &stmt.targets[2].expr,
+        SqlExpr::Cast(_, ty)
+            if *ty == RawTypeName::Builtin(SqlType::array_of(SqlType::new(SqlTypeKind::Interval)))
     ));
 }
 
