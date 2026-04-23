@@ -1,5 +1,7 @@
 use super::super::*;
-use crate::backend::executor::execute_planned_stmt;
+use crate::backend::executor::{
+    ExecutorTransactionState, SharedExecutorTransactionState, execute_planned_stmt,
+};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 
 impl Database {
@@ -597,6 +599,7 @@ impl Database {
                     stats: std::sync::Arc::clone(&self.stats),
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
+                    transaction_state: None,
                     client_id,
                     current_database_name: self.current_database_name(),
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
@@ -753,6 +756,13 @@ impl Database {
                 )?;
 
                 let snapshot = self.txns.read().snapshot(INVALID_TRANSACTION_ID)?;
+                let transaction_state: SharedExecutorTransactionState =
+                    Arc::new(parking_lot::Mutex::new(ExecutorTransactionState {
+                        xid: None,
+                        cid: 0,
+                    }));
+                let deferred_foreign_keys =
+                    crate::backend::executor::DeferredForeignKeyTracker::default();
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
@@ -767,6 +777,7 @@ impl Database {
                     stats: std::sync::Arc::clone(&self.stats),
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
+                    transaction_state: Some(Arc::clone(&transaction_state)),
                     client_id,
                     current_database_name: self.current_database_name(),
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
@@ -789,7 +800,7 @@ impl Database {
                     cte_tables: std::collections::HashMap::new(),
                     cte_producers: std::collections::HashMap::new(),
                     recursive_worktables: std::collections::HashMap::new(),
-                    deferred_foreign_keys: None,
+                    deferred_foreign_keys: Some(deferred_foreign_keys.clone()),
                 };
                 let result = match planned_select {
                     Some(planned_stmt) => execute_planned_stmt(planned_stmt, &mut ctx),
@@ -798,10 +809,39 @@ impl Database {
                 let pending_async_notifications =
                     std::mem::take(&mut ctx.pending_async_notifications);
                 drop(ctx);
-                if result.is_ok() {
-                    self.async_notify_runtime
-                        .publish(client_id, &pending_async_notifications);
-                }
+                let xid = transaction_state.lock().xid;
+                let result = if let Some(xid) = xid {
+                    let validation_catalog =
+                        self.lazy_catalog_lookup(client_id, Some((xid, 1)), configured_search_path);
+                    let result = result.and_then(|result| {
+                        crate::pgrust::database::foreign_keys::validate_deferred_foreign_key_constraints(
+                            self,
+                            client_id,
+                            &validation_catalog,
+                            xid,
+                            1,
+                            Arc::clone(&interrupts),
+                            datetime_config,
+                            &deferred_foreign_keys,
+                        )?;
+                        Ok(result)
+                    });
+                    self.finish_txn_with_async_notifications(
+                        client_id,
+                        xid,
+                        result,
+                        &[],
+                        &[],
+                        &[],
+                        pending_async_notifications,
+                    )
+                } else {
+                    if result.is_ok() {
+                        self.async_notify_runtime
+                            .publish(client_id, &pending_async_notifications);
+                    }
+                    result
+                };
 
                 unlock_relations(&self.table_locks, client_id, &rels);
                 result
@@ -841,6 +881,7 @@ impl Database {
                     stats: std::sync::Arc::clone(&self.stats),
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
+                    transaction_state: None,
                     client_id,
                     current_database_name: self.current_database_name(),
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
@@ -938,6 +979,7 @@ impl Database {
                     stats: std::sync::Arc::clone(&self.stats),
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
+                    transaction_state: None,
                     client_id,
                     current_database_name: self.current_database_name(),
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
@@ -1036,6 +1078,7 @@ impl Database {
                     stats: std::sync::Arc::clone(&self.stats),
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
+                    transaction_state: None,
                     client_id,
                     current_database_name: self.current_database_name(),
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
@@ -1368,6 +1411,7 @@ impl Database {
                     stats: std::sync::Arc::clone(&self.stats),
                     session_stats: self.session_stats_state(client_id),
                     snapshot,
+                    transaction_state: None,
                     client_id,
                     current_database_name: self.current_database_name(),
                     session_user_oid: self.auth_state(client_id).session_user_oid(),
@@ -1499,6 +1543,7 @@ impl Database {
             stats: std::sync::Arc::clone(&self.stats),
             session_stats: self.session_stats_state(client_id),
             snapshot,
+            transaction_state: None,
             client_id,
             current_database_name: self.current_database_name(),
             session_user_oid: self.auth_state(client_id).session_user_oid(),
