@@ -298,6 +298,7 @@ pub enum Statement {
     CreateRule(CreateRuleStatement),
     CreatePolicy(CreatePolicyStatement),
     CreateStatistics(CreateStatisticsStatement),
+    AlterStatistics(AlterStatisticsStatement),
     CreateForeignDataWrapper(CreateForeignDataWrapperStatement),
     CreateIndex(CreateIndexStatement),
     CreateOperator(CreateOperatorStatement),
@@ -1362,6 +1363,13 @@ pub struct CreateStatisticsStatement {
     pub kinds: Vec<String>,
     pub targets: Vec<String>,
     pub from_clause: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterStatisticsStatement {
+    pub if_exists: bool,
+    pub statistics_name: String,
+    pub statistics_target: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

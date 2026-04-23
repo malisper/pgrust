@@ -176,6 +176,7 @@ fn execute_statement_with_source(
         | Statement::AlterTableSet(_)
         | Statement::AlterTableSetRowSecurity(_)
         | Statement::CreateStatistics(_)
+        | Statement::AlterStatistics(_)
         | Statement::CreatePolicy(_)
         | Statement::AlterPolicy(_)
         | Statement::DropPolicy(_) => Ok(StatementResult::AffectedRows(0)),
