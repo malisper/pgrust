@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Run PostgreSQL regression tests against pgrust and report pass/fail statistics.
 #
 # Usage: scripts/run_regression.sh [--port PORT] [--skip-build] [--skip-server] [--timeout SECS] [--test TESTNAME] [--upstream-setup]
@@ -178,7 +178,15 @@ build_ordered_test_files() {
     local schedule_file="$2"
     local include_setup="$3"
     local -a ordered_files=()
-    local -A seen=()
+
+    already_seen() {
+        local needle="$1"
+        local existing
+        for existing in "${ordered_files[@]}"; do
+            [[ "$existing" == "$needle" ]] && return 0
+        done
+        return 1
+    }
 
     if [[ -f "$schedule_file" ]]; then
         while IFS= read -r test_name; do
@@ -187,9 +195,8 @@ build_ordered_test_files() {
                 continue
             fi
             local sql_file="$sql_dir/${test_name}.sql"
-            if [[ -f "$sql_file" && -z "${seen[$sql_file]:-}" ]]; then
+            if [[ -f "$sql_file" ]] && ! already_seen "$sql_file"; then
                 ordered_files+=("$sql_file")
-                seen["$sql_file"]=1
             fi
         done < <(
             awk '
@@ -208,9 +215,8 @@ build_ordered_test_files() {
         if [[ "$include_setup" != true && "$(basename "$sql_file")" == "test_setup.sql" ]]; then
             continue
         fi
-        if [[ -z "${seen[$sql_file]:-}" ]]; then
+        if ! already_seen "$sql_file"; then
             ordered_files+=("$sql_file")
-            seen["$sql_file"]=1
         fi
     done < <(find "$sql_dir" -maxdepth 1 -type f -name '*.sql' | sort)
 
@@ -255,6 +261,8 @@ USE_PGRUST_SETUP=true
 REGRESS_USER="${PGRUST_REGRESS_USER:-${PGUSER:-$(id -un)}}"
 REGRESS_TABLESPACE_DIR=""
 STARTUP_WAIT_SECS="${PGRUST_STARTUP_WAIT_SECS:-300}"
+SUMMARY_READY=false
+SUMMARY_WRITTEN=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -289,14 +297,24 @@ export PGRUST_REGRESS_TABLESPACE_DIR="$REGRESS_TABLESPACE_DIR"
 export PGRUST_TABLESPACE_VERSION_DIRECTORY="$TABLESPACE_VERSION_DIRECTORY"
 PREPARED_SETUP_SQL="$RESULTS_DIR/fixtures/test_setup_pgrust.sql"
 
-cleanup() {
+stop_server() {
     if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
         echo "Stopping pgrust server (PID $SERVER_PID)..."
         kill "$SERVER_PID" 2>/dev/null || true
         wait "$SERVER_PID" 2>/dev/null || true
     fi
 }
+
+cleanup() {
+    if [[ "${SUMMARY_READY:-false}" == true && "${SUMMARY_WRITTEN:-false}" == false ]] && declare -F write_summary >/dev/null; then
+        write_summary "aborted"
+    fi
+
+    stop_server
+}
 trap cleanup EXIT
+trap 'RUN_STATUS="aborted"; exit 130' INT
+trap 'RUN_STATUS="aborted"; exit 143' TERM
 
 port_is_listening() {
     lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
@@ -360,7 +378,7 @@ start_server() {
 
 restart_server() {
     echo "  -> Server crashed, restarting..."
-    cleanup
+    stop_server
     rm -rf "$DATA_DIR"
     mkdir -p "$DATA_DIR"
     write_regression_config
@@ -389,6 +407,36 @@ elif command -v gtimeout >/dev/null 2>&1; then
 else
     TIMEOUT_CMD=""
 fi
+
+run_psql_file() {
+    local timeout_secs="$1"
+    local input_file="$2"
+    local output_file="$3"
+    shift 3
+
+    if [[ -n "$TIMEOUT_CMD" ]]; then
+        "$TIMEOUT_CMD" "$timeout_secs" "$@" < "$input_file" > "$output_file" 2>&1
+        return $?
+    fi
+
+    "$@" < "$input_file" > "$output_file" 2>&1 &
+    local child_pid=$!
+    local elapsed=0
+
+    while kill -0 "$child_pid" 2>/dev/null; do
+        if [[ "$elapsed" -ge "$timeout_secs" ]]; then
+            kill "$child_pid" 2>/dev/null || true
+            sleep 1
+            kill -9 "$child_pid" 2>/dev/null || true
+            wait "$child_pid" 2>/dev/null || true
+            return 124
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+
+    wait "$child_pid"
+}
 
 # Build pgrust_server
 if [[ "$SKIP_BUILD" == false ]]; then
@@ -461,18 +509,10 @@ run_bootstrap_setup() {
     fi
 
     echo "Running $setup_label..."
-    if [[ -n "$TIMEOUT_CMD" ]]; then
-        if ! $TIMEOUT_CMD "$TIMEOUT" psql "${PG_ARGS[@]}" -v ON_ERROR_STOP=1 -a -q < "$setup_sql" > "$setup_out" 2>&1; then
-            echo "ERROR: $setup_label failed"
-            echo "See: $setup_out"
-            return 1
-        fi
-    else
-        if ! psql "${PG_ARGS[@]}" -v ON_ERROR_STOP=1 -a -q < "$setup_sql" > "$setup_out" 2>&1; then
-            echo "ERROR: $setup_label failed"
-            echo "See: $setup_out"
-            return 1
-        fi
+    if ! run_psql_file "$TIMEOUT" "$setup_sql" "$setup_out" psql "${PG_ARGS[@]}" -v ON_ERROR_STOP=1 -a -q; then
+        echo "ERROR: $setup_label failed"
+        echo "See: $setup_out"
+        return 1
     fi
 
     return 0
@@ -492,7 +532,10 @@ if [[ -n "$SINGLE_TEST" ]]; then
         exit 1
     fi
 else
-    mapfile -t TEST_FILES < <(
+    TEST_FILES=()
+    while IFS= read -r sql_file; do
+        [[ -n "$sql_file" ]] && TEST_FILES+=("$sql_file")
+    done < <(
         build_ordered_test_files \
             "$SQL_DIR" \
             "$SCHEDULE_FILE" \
@@ -537,6 +580,110 @@ QUERIES_MISMATCHED=0
 pass_list=()
 fail_list=()
 error_list=()
+SUMMARY_READY=true
+RUN_STATUS="completed"
+
+write_summary() {
+    local status="${1:-completed}"
+    local pass_pct=0
+    local query_pct=0
+
+    if [[ $TOTAL -gt 0 ]]; then
+        pass_pct=$((PASSED * 100 / TOTAL))
+    fi
+    if [[ $TOTAL_QUERIES -gt 0 ]]; then
+        query_pct=$((QUERIES_MATCHED * 100 / TOTAL_QUERIES))
+    fi
+
+    cat > "$RESULTS_DIR/summary.json" <<EOF
+{
+  "status": "$status",
+  "tests": {
+    "planned": ${#TEST_FILES[@]},
+    "total": $TOTAL,
+    "passed": $PASSED,
+    "failed": $FAILED,
+    "errored": $ERRORED,
+    "pass_rate_pct": $pass_pct
+  },
+  "queries": {
+    "total": $TOTAL_QUERIES,
+    "matched": $QUERIES_MATCHED,
+    "mismatched": $QUERIES_MISMATCHED,
+    "match_rate_pct": $query_pct
+  }
+}
+EOF
+
+    SUMMARY_WRITTEN=true
+}
+
+print_summary() {
+    local status="${1:-completed}"
+    local pass_pct=0
+    local query_pct=0
+
+    echo ""
+    echo "=============================================="
+    if [[ "$status" == "completed" ]]; then
+        echo "RESULTS SUMMARY"
+    else
+        echo "PARTIAL RESULTS SUMMARY ($status)"
+    fi
+    echo "=============================================="
+    echo ""
+    echo "Test files:"
+    echo "  Planned: ${#TEST_FILES[@]}"
+    echo "  Total:   $TOTAL"
+    echo "  Passed:  $PASSED"
+    echo "  Failed:  $FAILED"
+    echo "  Errored: $ERRORED"
+
+    if [[ $TOTAL -gt 0 ]]; then
+        pass_pct=$((PASSED * 100 / TOTAL))
+        echo "  Pass rate: ${pass_pct}% ($PASSED / $TOTAL)"
+    fi
+
+    echo ""
+    echo "Individual queries:"
+    echo "  Total:     $TOTAL_QUERIES"
+    echo "  Matched:   $QUERIES_MATCHED"
+    echo "  Mismatched:$QUERIES_MISMATCHED"
+
+    if [[ $TOTAL_QUERIES -gt 0 ]]; then
+        query_pct=$((QUERIES_MATCHED * 100 / TOTAL_QUERIES))
+        echo "  Match rate: ${query_pct}% ($QUERIES_MATCHED / $TOTAL_QUERIES)"
+    fi
+
+    echo ""
+    echo "Results directory: $RESULTS_DIR"
+    echo "  output/  — actual test output"
+    echo "  diff/    — diffs for failed tests"
+
+    if [[ ${#pass_list[@]} -gt 0 ]]; then
+        echo ""
+        echo "PASSED TESTS (${#pass_list[@]}):"
+        for t in "${pass_list[@]}"; do
+            echo "  $t"
+        done
+    fi
+
+    if [[ ${#fail_list[@]} -gt 0 ]]; then
+        echo ""
+        echo "FAILED TESTS (${#fail_list[@]}):"
+        for t in "${fail_list[@]}"; do
+            echo "  $t"
+        done
+    fi
+
+    if [[ ${#error_list[@]} -gt 0 ]]; then
+        echo ""
+        echo "ERRORED TESTS (${#error_list[@]}):"
+        for t in "${error_list[@]}"; do
+            echo "  $t"
+        done
+    fi
+}
 
 echo ""
 echo "Running ${#TEST_FILES[@]} regression tests..."
@@ -702,17 +849,17 @@ for sql_file in "${TEST_FILES[@]}"; do
 
     # Run the test with timeout (if available)
     # -a = echo all input, -q = quiet mode (matches PG regression test runner)
-    if [[ -n "$TIMEOUT_CMD" ]]; then
-        if $TIMEOUT_CMD "$TIMEOUT" psql "${PG_ARGS[@]}" -a -q < "$sql_file" > "$output_file" 2>&1; then
-            :
-        else
-            exit_code=$?
-            if [[ $exit_code -eq 124 ]]; then
-                echo "TIMEOUT" >> "$output_file"
+    if run_psql_file "$TIMEOUT" "$sql_file" "$output_file" psql "${PG_ARGS[@]}" -a -q; then
+        :
+    else
+        exit_code=$?
+        if [[ $exit_code -eq 124 ]]; then
+            echo "TIMEOUT" >> "$output_file"
+            if [[ "$SKIP_SERVER" == false ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
+                kill "$SERVER_PID" 2>/dev/null || true
+                wait "$SERVER_PID" 2>/dev/null || true
             fi
         fi
-    else
-        psql "${PG_ARGS[@]}" -a -q < "$sql_file" > "$output_file" 2>&1 || true
     fi
 
     # Compare output to expected.
@@ -778,6 +925,7 @@ for sql_file in "${TEST_FILES[@]}"; do
             # If server crashed, try to restart it
             if [[ "$SKIP_SERVER" == false ]] && ! kill -0 "$SERVER_PID" 2>/dev/null; then
                 if ! restart_server; then
+                    RUN_STATUS="aborted"
                     break
                 fi
             fi
@@ -789,80 +937,7 @@ for sql_file in "${TEST_FILES[@]}"; do
     fi
 done
 
-echo ""
-echo "=============================================="
-echo "RESULTS SUMMARY"
-echo "=============================================="
-echo ""
-echo "Test files:"
-echo "  Total:   $TOTAL"
-echo "  Passed:  $PASSED"
-echo "  Failed:  $FAILED"
-echo "  Errored: $ERRORED"
-
-if [[ $TOTAL -gt 0 ]]; then
-    pass_pct=$((PASSED * 100 / TOTAL))
-    echo "  Pass rate: ${pass_pct}% ($PASSED / $TOTAL)"
-fi
-
-echo ""
-echo "Individual queries:"
-echo "  Total:     $TOTAL_QUERIES"
-echo "  Matched:   $QUERIES_MATCHED"
-echo "  Mismatched:$QUERIES_MISMATCHED"
-
-if [[ $TOTAL_QUERIES -gt 0 ]]; then
-    query_pct=$((QUERIES_MATCHED * 100 / TOTAL_QUERIES))
-    echo "  Match rate: ${query_pct}% ($QUERIES_MATCHED / $TOTAL_QUERIES)"
-fi
-
-echo ""
-echo "Results directory: $RESULTS_DIR"
-echo "  output/  — actual test output"
-echo "  diff/    — diffs for failed tests"
-
-if [[ ${#pass_list[@]} -gt 0 ]]; then
-    echo ""
-    echo "PASSED TESTS (${#pass_list[@]}):"
-    for t in "${pass_list[@]}"; do
-        echo "  $t"
-    done
-fi
-
-if [[ ${#fail_list[@]} -gt 0 ]]; then
-    echo ""
-    echo "FAILED TESTS (${#fail_list[@]}):"
-    for t in "${fail_list[@]}"; do
-        echo "  $t"
-    done
-fi
-
-if [[ ${#error_list[@]} -gt 0 ]]; then
-    echo ""
-    echo "ERRORED TESTS (${#error_list[@]}):"
-    for t in "${error_list[@]}"; do
-        echo "  $t"
-    done
-fi
-
-# Write machine-readable summary
-cat > "$RESULTS_DIR/summary.json" <<EOF
-{
-  "tests": {
-    "total": $TOTAL,
-    "passed": $PASSED,
-    "failed": $FAILED,
-    "errored": $ERRORED,
-    "pass_rate_pct": ${pass_pct:-0}
-  },
-  "queries": {
-    "total": $TOTAL_QUERIES,
-    "matched": $QUERIES_MATCHED,
-    "mismatched": $QUERIES_MISMATCHED,
-    "match_rate_pct": ${query_pct:-0}
-  }
-}
-EOF
-
+print_summary "$RUN_STATUS"
+write_summary "$RUN_STATUS"
 echo ""
 echo "Machine-readable summary: $RESULTS_DIR/summary.json"
