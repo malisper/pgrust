@@ -192,6 +192,7 @@ pub struct ExecutorContext {
     pub current_user_oid: u32,
     pub active_role_oid: Option<u32>,
     pub statement_lock_scope_id: Option<u64>,
+    pub transaction_lock_scope_id: Option<u64>,
     pub next_command_id: CommandId,
     pub default_toast_compression: crate::include::access::htup::AttributeCompression,
     pub expr_bindings: ExprEvalBindings,

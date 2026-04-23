@@ -63,6 +63,7 @@ fn ddl_executor_context(
         current_user_oid: db.auth_state(client_id).current_user_oid(),
         active_role_oid: db.auth_state(client_id).active_role_oid(),
         statement_lock_scope_id: None,
+        transaction_lock_scope_id: None,
         next_command_id: cid,
         default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
         expr_bindings: crate::backend::executor::ExprEvalBindings::default(),

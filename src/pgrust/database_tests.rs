@@ -197,6 +197,7 @@ fn analyze_executor_context(
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         active_role_oid: None,
         statement_lock_scope_id: None,
+        transaction_lock_scope_id: None,
         next_command_id: cid,
         default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
         timed: false,
@@ -18981,6 +18982,111 @@ fn concurrent_transactions_update_counter() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn standalone_selects_do_not_allocate_xids() {
+    let base = temp_dir("standalone_selects_no_xids");
+    let db = Database::open(&base, 64).unwrap();
+    let before = db.txns.read().next_xid();
+
+    for _ in 0..5 {
+        assert_eq!(
+            query_rows(&db, 1, "select 1"),
+            vec![vec![Value::Int32(1)]]
+        );
+    }
+
+    assert_eq!(db.txns.read().next_xid(), before);
+}
+
+#[test]
+fn begin_select_commit_does_not_allocate_xid() {
+    let base = temp_dir("begin_select_commit_no_xid");
+    let db = Database::open(&base, 64).unwrap();
+    let mut session = Session::new(1);
+    let before = db.txns.read().next_xid();
+
+    session.execute(&db, "begin").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select 1"),
+        vec![vec![Value::Int32(1)]]
+    );
+    session.execute(&db, "commit").unwrap();
+
+    assert_eq!(db.txns.read().next_xid(), before);
+}
+
+#[test]
+fn explicit_transaction_allocates_xid_on_first_write() {
+    let base = temp_dir("lazy_xid_first_write");
+    let db = Database::open(&base, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table lazy_xid_items (id int4)")
+        .unwrap();
+    let before = db.txns.read().next_xid();
+
+    session.execute(&db, "begin").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select 1"),
+        vec![vec![Value::Int32(1)]]
+    );
+    assert_eq!(db.txns.read().next_xid(), before);
+
+    session
+        .execute(&db, "insert into lazy_xid_items values (7)")
+        .unwrap();
+    assert!(
+        db.txns.read().next_xid() > before,
+        "first write should allocate a real xid"
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select id from lazy_xid_items"),
+        vec![vec![Value::Int32(7)]]
+    );
+
+    session.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn transaction_scoped_advisory_lock_does_not_allocate_xid() {
+    let base = temp_dir("advisory_xact_lock_no_xid");
+    let db = Database::open(&base, 64).unwrap();
+    let mut session = Session::new(1);
+    let before = db.txns.read().next_xid();
+
+    session.execute(&db, "begin").unwrap();
+    let _ = session_query_rows(&mut session, &db, "select pg_advisory_xact_lock(42)");
+    assert_eq!(db.txns.read().next_xid(), before);
+    assert_eq!(db.advisory_locks.snapshot().len(), 1);
+
+    session.execute(&db, "commit").unwrap();
+    assert_eq!(db.txns.read().next_xid(), before);
+    assert!(db.advisory_locks.snapshot().is_empty());
+}
+
+#[test]
+fn pg_notify_in_read_only_transaction_does_not_allocate_xid() {
+    let base = temp_dir("pg_notify_read_only_no_xid");
+    let db = Database::open(&base, 64).unwrap();
+    let mut notifier = Session::new(1);
+    let mut listener = Session::new(2);
+    listener.execute(&db, "listen alerts").unwrap();
+    let before = db.txns.read().next_xid();
+
+    notifier.execute(&db, "begin").unwrap();
+    let _ = session_query_rows(&mut notifier, &db, "select pg_notify('alerts', 'payload')");
+    assert_eq!(db.txns.read().next_xid(), before);
+    assert!(db.async_notify_runtime.pending_notifications(2).is_empty());
+
+    notifier.execute(&db, "commit").unwrap();
+    assert_eq!(db.txns.read().next_xid(), before);
+    let delivered = db.async_notify_runtime.pending_notifications(2);
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].channel, "alerts");
+    assert_eq!(delivered[0].payload, "payload");
 }
 
 /// Within a single BEGIN block, a row inserted earlier in the transaction
