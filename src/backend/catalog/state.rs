@@ -22,7 +22,8 @@ use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::backend::utils::misc::interrupts::InterruptReason;
 use crate::include::access::brin::BrinOptions;
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_NOTNULL, PUBLIC_NAMESPACE_OID, PgAuthIdRow,
+    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE,
+    DEPENDENCY_INTERNAL, PG_CONSTRAINT_RELATION_OID, PUBLIC_NAMESPACE_OID, PgAuthIdRow,
     PgAuthMembersRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgInheritsRow,
     PgPartitionedTableRow, PgPolicyRow, PgPublicationNamespaceRow, PgPublicationRelRow,
     PgPublicationRow, PgRewriteRow, PgTablespaceRow, PgTriggerRow, bootstrap_pg_auth_members_rows,
@@ -35,6 +36,121 @@ const DEFAULT_DB_OID: u32 = 1;
 
 fn dropped_column_name(attnum: usize) -> String {
     format!("........pg.dropped.{attnum}........")
+}
+
+fn build_catalog_index_entry(
+    table: &CatalogEntry,
+    unique: bool,
+    primary: bool,
+    columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
+    options: &CatalogIndexBuildOptions,
+    predicate_sql: Option<&str>,
+    relation_oid: u32,
+    rel_number: u32,
+    relkind: char,
+    indisready: bool,
+    indisvalid: bool,
+) -> Result<CatalogEntry, CatalogError> {
+    let mut indkey = Vec::with_capacity(columns.len());
+    let mut index_columns = Vec::with_capacity(columns.len());
+    let mut expr_sqls = Vec::new();
+    for (position, column_name) in columns.iter().enumerate() {
+        if let Some(expr_sql) = column_name.expr_sql.as_deref() {
+            indkey.push(0);
+            expr_sqls.push(expr_sql.to_string());
+            let expr_type = column_name
+                .expr_type
+                .ok_or(CatalogError::Corrupt("missing expression index sql type"))?;
+            index_columns.push(column_desc(
+                format!("expr{}", position + 1),
+                expr_type,
+                true,
+            ));
+            continue;
+        }
+
+        let (attnum, column) = table
+            .desc
+            .columns
+            .iter()
+            .enumerate()
+            .find(|(_, column)| column.name.eq_ignore_ascii_case(&column_name.name))
+            .ok_or_else(|| CatalogError::UnknownColumn(column_name.name.clone()))?;
+        indkey.push(attnum.saturating_add(1) as i16);
+        let mut column = column.clone();
+        column.not_null_constraint_oid = None;
+        column.not_null_constraint_name = None;
+        column.not_null_constraint_validated = false;
+        column.not_null_primary_key_owned = false;
+        column.attrdef_oid = None;
+        column.default_expr = None;
+        index_columns.push(column);
+    }
+    if options.indclass.len() != columns.len()
+        || options.indcollation.len() != columns.len()
+        || options.indoption.len() != columns.len()
+    {
+        return Err(CatalogError::Corrupt("index build options length mismatch"));
+    }
+
+    Ok(CatalogEntry {
+        rel: RelFileLocator {
+            spc_oid: DEFAULT_SPC_OID,
+            db_oid: table.rel.db_oid,
+            rel_number,
+        },
+        relation_oid,
+        namespace_oid: table.namespace_oid,
+        owner_oid: table.owner_oid,
+        relacl: None,
+        row_type_oid: 0,
+        array_type_oid: 0,
+        reltoastrelid: 0,
+        relpersistence: table.relpersistence,
+        relkind,
+        am_oid: options.am_oid,
+        relhassubclass: false,
+        relhastriggers: false,
+        relispartition: false,
+        relpartbound: None,
+        relrowsecurity: false,
+        relforcerowsecurity: false,
+        relpages: 0,
+        reltuples: if relkind_has_storage(relkind) {
+            -1.0
+        } else {
+            0.0
+        },
+        relallvisible: 0,
+        relallfrozen: 0,
+        relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
+        desc: RelationDesc {
+            columns: index_columns,
+        },
+        partitioned_table: None,
+        index_meta: Some(CatalogIndexMeta {
+            indrelid: table.relation_oid,
+            indkey,
+            indisunique: unique,
+            indnullsnotdistinct: options.indnullsnotdistinct,
+            indisprimary: primary,
+            indisvalid,
+            indisready,
+            indislive: true,
+            indclass: options.indclass.clone(),
+            indcollation: options.indcollation.clone(),
+            indoption: options.indoption.clone(),
+            indexprs: (!expr_sqls.is_empty())
+                .then(|| serde_json::to_string(&expr_sqls))
+                .transpose()
+                .map_err(|_| CatalogError::Corrupt("invalid index expression metadata"))?,
+            indpred: predicate_sql
+                .map(str::trim)
+                .filter(|pred| !pred.is_empty())
+                .map(str::to_string),
+            brin_options: options.brin_options.clone(),
+        }),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -563,103 +679,63 @@ impl Catalog {
         if table.relkind != 'r' && table.relkind != 't' {
             return Err(CatalogError::UnknownTable(relation_oid.to_string()));
         }
-        let mut indkey = Vec::with_capacity(columns.len());
-        let mut index_columns = Vec::with_capacity(columns.len());
-        let mut expr_sqls = Vec::new();
-        for (position, column_name) in columns.iter().enumerate() {
-            if let Some(expr_sql) = column_name.expr_sql.as_deref() {
-                indkey.push(0);
-                expr_sqls.push(expr_sql.to_string());
-                let expr_type = column_name
-                    .expr_type
-                    .ok_or(CatalogError::Corrupt("missing expression index sql type"))?;
-                index_columns.push(column_desc(
-                    format!("expr{}", position + 1),
-                    expr_type,
-                    true,
-                ));
-                continue;
-            }
+        let entry = build_catalog_index_entry(
+            &table,
+            unique,
+            primary,
+            columns,
+            options,
+            predicate_sql,
+            self.next_oid,
+            self.next_rel_number,
+            'i',
+            false,
+            false,
+        )?;
+        self.next_rel_number = self
+            .next_rel_number
+            .saturating_add(u32::from(relkind_has_storage(entry.relkind)));
+        self.next_oid = self.next_oid.saturating_add(1);
+        self.replace_depend_rows_for_entry(&entry);
+        self.tables.insert(index_name, entry.clone());
+        Ok(entry)
+    }
 
-            let (attnum, column) = table
-                .desc
-                .columns
-                .iter()
-                .enumerate()
-                .find(|(_, column)| column.name.eq_ignore_ascii_case(&column_name.name))
-                .ok_or_else(|| CatalogError::UnknownColumn(column_name.name.clone()))?;
-            indkey.push(attnum.saturating_add(1) as i16);
-            let mut column = column.clone();
-            column.not_null_constraint_oid = None;
-            column.not_null_constraint_name = None;
-            column.not_null_constraint_validated = false;
-            column.not_null_primary_key_owned = false;
-            column.attrdef_oid = None;
-            column.default_expr = None;
-            index_columns.push(column);
-        }
-        if options.indclass.len() != columns.len()
-            || options.indcollation.len() != columns.len()
-            || options.indoption.len() != columns.len()
-        {
-            return Err(CatalogError::Corrupt("index build options length mismatch"));
+    pub fn create_partitioned_index_for_relation_with_options_and_flags(
+        &mut self,
+        index_name: impl Into<String>,
+        relation_oid: u32,
+        unique: bool,
+        primary: bool,
+        columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
+        options: &CatalogIndexBuildOptions,
+        predicate_sql: Option<&str>,
+    ) -> Result<CatalogEntry, CatalogError> {
+        let index_name = index_name.into().to_ascii_lowercase();
+        if self.tables.contains_key(&index_name) {
+            return Err(CatalogError::TableAlreadyExists(index_name));
         }
 
-        let entry = CatalogEntry {
-            rel: RelFileLocator {
-                spc_oid: DEFAULT_SPC_OID,
-                db_oid: table.rel.db_oid,
-                rel_number: self.next_rel_number,
-            },
-            relation_oid: self.next_oid,
-            namespace_oid: table.namespace_oid,
-            owner_oid: table.owner_oid,
-            relacl: None,
-            row_type_oid: 0,
-            array_type_oid: 0,
-            reltoastrelid: 0,
-            relpersistence: table.relpersistence,
-            relkind: 'i',
-            am_oid: options.am_oid,
-            relhassubclass: false,
-            relhastriggers: false,
-            relispartition: false,
-            relpartbound: None,
-            relrowsecurity: false,
-            relforcerowsecurity: false,
-            relpages: 0,
-            reltuples: -1.0,
-            relallvisible: 0,
-            relallfrozen: 0,
-            relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
-            desc: RelationDesc {
-                columns: index_columns,
-            },
-            partitioned_table: None,
-            index_meta: Some(CatalogIndexMeta {
-                indrelid: table.relation_oid,
-                indkey,
-                indisunique: unique,
-                indnullsnotdistinct: options.indnullsnotdistinct,
-                indisprimary: primary,
-                indisvalid: false,
-                indisready: false,
-                indislive: true,
-                indclass: options.indclass.clone(),
-                indcollation: options.indcollation.clone(),
-                indoption: options.indoption.clone(),
-                indexprs: (!expr_sqls.is_empty())
-                    .then(|| serde_json::to_string(&expr_sqls))
-                    .transpose()
-                    .map_err(|_| CatalogError::Corrupt("invalid index expression metadata"))?,
-                indpred: predicate_sql
-                    .map(str::trim)
-                    .filter(|pred| !pred.is_empty())
-                    .map(str::to_string),
-                brin_options: options.brin_options.clone(),
-            }),
-        };
-        self.next_rel_number = self.next_rel_number.saturating_add(1);
+        let table = self
+            .get_by_oid(relation_oid)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        if table.relkind != 'p' {
+            return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+        }
+        let entry = build_catalog_index_entry(
+            &table,
+            unique,
+            primary,
+            columns,
+            options,
+            predicate_sql,
+            self.next_oid,
+            0,
+            'I',
+            true,
+            true,
+        )?;
         self.next_oid = self.next_oid.saturating_add(1);
         self.replace_depend_rows_for_entry(&entry);
         self.tables.insert(index_name, entry.clone());
@@ -674,17 +750,43 @@ impl Catalog {
         contype: char,
         primary_key_owned_not_null_oids: &[u32],
     ) -> Result<PgConstraintRow, CatalogError> {
+        self.create_index_backed_constraint_with_inheritance(
+            relation_oid,
+            index_oid,
+            conname,
+            contype,
+            primary_key_owned_not_null_oids,
+            0,
+            true,
+            0,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_index_backed_constraint_with_inheritance(
+        &mut self,
+        relation_oid: u32,
+        index_oid: u32,
+        conname: impl Into<String>,
+        contype: char,
+        primary_key_owned_not_null_oids: &[u32],
+        conparentid: u32,
+        conislocal: bool,
+        coninhcount: i16,
+        connoinherit: bool,
+    ) -> Result<PgConstraintRow, CatalogError> {
         let table = self
             .get_by_oid(relation_oid)
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        if table.relkind != 'r' {
+        if table.relkind != 'r' && table.relkind != 'p' {
             return Err(CatalogError::UnknownTable(relation_oid.to_string()));
         }
         let table_namespace_oid = table.namespace_oid;
         let index = self
             .get_by_oid(index_oid)
             .ok_or_else(|| CatalogError::UnknownTable(index_oid.to_string()))?;
-        if index.relkind != 'i' {
+        if index.relkind != 'i' && index.relkind != 'I' {
             return Err(CatalogError::UnknownTable(index_oid.to_string()));
         }
 
@@ -709,7 +811,7 @@ impl Catalog {
             conrelid: relation_oid,
             contypid: 0,
             conindid: index_oid,
-            conparentid: 0,
+            conparentid,
             confrelid: 0,
             confupdtype: ' ',
             confdeltype: ' ',
@@ -722,9 +824,9 @@ impl Catalog {
             confdelsetcols: None,
             conexclop: None,
             conbin: None,
-            conislocal: true,
-            coninhcount: 0,
-            connoinherit: false,
+            conislocal,
+            coninhcount,
+            connoinherit,
             conperiod: false,
         };
         self.next_oid = self.next_oid.saturating_add(1);
@@ -735,8 +837,62 @@ impl Catalog {
             relation_oid,
             index_oid,
         ));
-        if contype == crate::include::catalog::CONSTRAINT_PRIMARY {
+        if contype == CONSTRAINT_PRIMARY {
             for &not_null_constraint_oid in primary_key_owned_not_null_oids {
+                self.depends.extend(primary_key_owned_not_null_depend_rows(
+                    not_null_constraint_oid,
+                    row.oid,
+                ));
+            }
+        }
+        sort_pg_depend_rows(&mut self.depends);
+        Ok(row)
+    }
+
+    pub fn update_index_backed_constraint_inheritance(
+        &mut self,
+        relation_oid: u32,
+        constraint_oid: u32,
+        conparentid: u32,
+        conislocal: bool,
+        coninhcount: i16,
+        connoinherit: bool,
+    ) -> Result<PgConstraintRow, CatalogError> {
+        let position = self
+            .constraints
+            .iter()
+            .position(|row| row.oid == constraint_oid && row.conrelid == relation_oid)
+            .ok_or_else(|| CatalogError::UnknownTable(constraint_oid.to_string()))?;
+        let mut row = self.constraints[position].clone();
+        if !matches!(row.contype, CONSTRAINT_PRIMARY | CONSTRAINT_UNIQUE) || row.conindid == 0 {
+            return Err(CatalogError::UnknownTable(constraint_oid.to_string()));
+        }
+        let primary_key_owned_not_null_oids = self
+            .depends
+            .iter()
+            .filter(|depend| {
+                depend.classid == PG_CONSTRAINT_RELATION_OID
+                    && depend.refclassid == PG_CONSTRAINT_RELATION_OID
+                    && depend.refobjid == constraint_oid
+                    && depend.deptype == DEPENDENCY_INTERNAL
+            })
+            .map(|depend| depend.objid)
+            .collect::<Vec<_>>();
+        row.conparentid = conparentid;
+        row.conislocal = conislocal;
+        row.coninhcount = coninhcount;
+        row.connoinherit = connoinherit;
+        self.constraints[position] = row.clone();
+        sort_pg_constraint_rows(&mut self.constraints);
+        self.depends
+            .retain(|depend| depend.objid != constraint_oid && depend.refobjid != constraint_oid);
+        self.depends.extend(index_backed_constraint_depend_rows(
+            row.oid,
+            row.conrelid,
+            row.conindid,
+        ));
+        if row.contype == CONSTRAINT_PRIMARY {
+            for not_null_constraint_oid in primary_key_owned_not_null_oids {
                 self.depends.extend(primary_key_owned_not_null_depend_rows(
                     not_null_constraint_oid,
                     row.oid,
@@ -925,7 +1081,7 @@ impl Catalog {
             .get(&name)
             .cloned()
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        if old_entry.relkind != 'r' {
+        if !matches!(old_entry.relkind, 'r' | 'p') {
             return Err(CatalogError::UnknownTable(relation_oid.to_string()));
         }
 
@@ -966,7 +1122,7 @@ impl Catalog {
             .get(&name)
             .cloned()
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        if old_entry.relkind != 'r' {
+        if !matches!(old_entry.relkind, 'r' | 'p') {
             return Err(CatalogError::UnknownTable(relation_oid.to_string()));
         }
 
@@ -1001,7 +1157,7 @@ impl Catalog {
             .get(&name)
             .cloned()
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        if old_entry.relkind != 'r' {
+        if !matches!(old_entry.relkind, 'r' | 'p') {
             return Err(CatalogError::UnknownTable(relation_oid.to_string()));
         }
 
@@ -1313,7 +1469,7 @@ impl Catalog {
             .get(&name)
             .cloned()
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        if old_entry.relkind != 'r' {
+        if !matches!(old_entry.relkind, 'r' | 'p' | 'i' | 'I') {
             return Err(CatalogError::UnknownTable(relation_oid.to_string()));
         }
         if old_entry
@@ -1748,7 +1904,7 @@ impl Catalog {
             .get(&name)
             .cloned()
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        if old_entry.relkind != 'i' {
+        if !matches!(old_entry.relkind, 'i' | 'I') {
             return Err(CatalogError::UnknownTable(relation_oid.to_string()));
         }
         let entry = self
@@ -1981,8 +2137,12 @@ impl Catalog {
         self.next_oid = self.next_oid.max(row.oid.saturating_add(1));
         self.triggers.push(row.clone());
         crate::include::catalog::sort_pg_trigger_rows(&mut self.triggers);
-        self.depends
-            .extend(trigger_depend_rows(row.oid, row.tgrelid, row.tgfoid));
+        self.depends.extend(trigger_depend_rows(
+            row.oid,
+            row.tgrelid,
+            row.tgfoid,
+            &row.tgattr,
+        ));
         sort_pg_depend_rows(&mut self.depends);
         if !entry.relhastriggers {
             let mut new_entry = entry.clone();
@@ -2043,7 +2203,7 @@ impl Catalog {
         self.constraints.retain(|row| {
             !(row.conrelid == entry.relation_oid && row.contype == CONSTRAINT_NOTNULL)
         });
-        if entry.relkind != 'r' {
+        if !matches!(entry.relkind, 'r' | 'p') {
             return;
         }
         let relname = relation_name.rsplit('.').next().unwrap_or(relation_name);
@@ -2065,7 +2225,7 @@ impl Catalog {
             return;
         }
         self.depends.extend(derived_pg_depend_rows(entry));
-        if entry.relkind == 'r'
+        if matches!(entry.relkind, 'r' | 'p')
             && let Some(primary_constraint_oid) =
                 self.primary_constraint_oid_for_relation(entry.relation_oid)
         {

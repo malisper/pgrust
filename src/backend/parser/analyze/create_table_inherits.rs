@@ -7,7 +7,7 @@ use super::create_table::{LoweredCreateTable, lower_create_table};
 use super::{
     BoundRelation, CatalogLookup, ColumnConstraint, ConstraintAttributes, CreateTableElement,
     CreateTableStatement, ParseError, RawTypeName, TableConstraint, TablePersistence,
-    lower_partition_clause,
+    lower_partition_clause, validate_partitioned_index_backed_constraints,
 };
 
 #[derive(Debug, Clone)]
@@ -23,16 +23,45 @@ pub fn lower_create_table_with_catalog(
     catalog: &dyn CatalogLookup,
     persistence: TablePersistence,
 ) -> Result<LoweredCreateTable, ParseError> {
+    let mut stmt_with_resolved_persistence = stmt.clone();
+    stmt_with_resolved_persistence.persistence = persistence;
+    let stmt = &stmt_with_resolved_persistence;
+
     if stmt.inherits.is_empty() && stmt.partition_of.is_none() {
         let mut lowered = lower_create_table(stmt, catalog)?;
         let partition = lower_partition_clause(stmt, &lowered.relation_desc, catalog, persistence)?;
         lowered.partition_spec = partition.spec;
         lowered.partition_parent_oid = partition.parent_oid;
         lowered.partition_bound = partition.bound;
+        validate_partitioned_index_backed_constraints(
+            &stmt.table_name,
+            lowered.partition_spec.as_ref(),
+            &lowered.constraint_actions,
+        )?;
         return Ok(lowered);
     }
 
     let parents = resolve_parent_relations(stmt, catalog, persistence)?;
+    if stmt.partition_of.is_some() && local_primary_key_count(stmt) > 0 {
+        let parent_has_primary_key = parents.iter().any(|parent| {
+            parent.relkind == 'p'
+                && catalog
+                    .constraint_rows_for_relation(parent.relation_oid)
+                    .into_iter()
+                    .any(|row| row.contype == crate::include::catalog::CONSTRAINT_PRIMARY)
+        });
+        if parent_has_primary_key {
+            return Err(ParseError::DetailedError {
+                message: format!(
+                    "multiple primary keys for table \"{}\" are not allowed",
+                    stmt.table_name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        }
+    }
     let merged_columns = merge_inherited_columns(stmt, &parents)?;
     let inherited_constraints = inherited_table_constraints(&parents, catalog);
     let mut synthetic = stmt.clone();
@@ -71,6 +100,11 @@ pub fn lower_create_table_with_catalog(
     lowered.partition_spec = partition.spec;
     lowered.partition_parent_oid = partition.parent_oid;
     lowered.partition_bound = partition.bound;
+    validate_partitioned_index_backed_constraints(
+        &stmt.table_name,
+        lowered.partition_spec.as_ref(),
+        &lowered.constraint_actions,
+    )?;
     Ok(lowered)
 }
 
@@ -79,36 +113,95 @@ fn inherited_table_constraints(
     catalog: &dyn CatalogLookup,
 ) -> Vec<TableConstraint> {
     let mut constraints = Vec::new();
-    let mut seen = BTreeSet::new();
+    let mut seen_checks = BTreeSet::new();
+    let mut seen_keys = BTreeSet::new();
     for parent in parents {
         for row in catalog
             .constraint_rows_for_relation(parent.relation_oid)
             .into_iter()
-            .filter(|row| {
-                row.contype == crate::include::catalog::CONSTRAINT_CHECK && !row.connoinherit
-            })
         {
-            let Some(expr_sql) = row.conbin.clone() else {
-                continue;
-            };
-            let key = (
-                row.conname.to_ascii_lowercase(),
-                expr_sql.to_ascii_lowercase(),
-            );
-            if !seen.insert(key) {
-                continue;
+            match row.contype {
+                crate::include::catalog::CONSTRAINT_CHECK if !row.connoinherit => {
+                    let Some(expr_sql) = row.conbin.clone() else {
+                        continue;
+                    };
+                    let key = (
+                        row.conname.to_ascii_lowercase(),
+                        expr_sql.to_ascii_lowercase(),
+                    );
+                    if !seen_checks.insert(key) {
+                        continue;
+                    }
+                    constraints.push(TableConstraint::Check {
+                        attributes: ConstraintAttributes {
+                            name: Some(row.conname),
+                            not_valid: !row.convalidated,
+                            ..ConstraintAttributes::default()
+                        },
+                        expr_sql,
+                    });
+                }
+                crate::include::catalog::CONSTRAINT_PRIMARY
+                | crate::include::catalog::CONSTRAINT_UNIQUE
+                    if parent.relkind == 'p' =>
+                {
+                    let Some(columns) = row
+                        .conkey
+                        .as_ref()
+                        .map(|attnums| inherited_constraint_columns(parent, attnums))
+                    else {
+                        continue;
+                    };
+                    let key = (
+                        row.contype,
+                        columns
+                            .iter()
+                            .map(|column| column.to_ascii_lowercase())
+                            .collect::<Vec<_>>(),
+                    );
+                    if !seen_keys.insert(key) {
+                        continue;
+                    }
+                    if row.contype == crate::include::catalog::CONSTRAINT_PRIMARY {
+                        constraints.push(TableConstraint::PrimaryKey {
+                            attributes: ConstraintAttributes::default(),
+                            columns,
+                        });
+                    } else {
+                        constraints.push(TableConstraint::Unique {
+                            attributes: ConstraintAttributes::default(),
+                            columns,
+                        });
+                    }
+                }
+                _ => {}
             }
-            constraints.push(TableConstraint::Check {
-                attributes: ConstraintAttributes {
-                    name: Some(row.conname),
-                    not_valid: !row.convalidated,
-                    ..ConstraintAttributes::default()
-                },
-                expr_sql,
-            });
         }
     }
     constraints
+}
+
+fn inherited_constraint_columns(parent: &BoundRelation, attnums: &[i16]) -> Vec<String> {
+    attnums
+        .iter()
+        .filter_map(|attnum| {
+            parent
+                .desc
+                .columns
+                .get(attnum.saturating_sub(1) as usize)
+                .filter(|column| !column.dropped)
+                .map(|column| column.name.clone())
+        })
+        .collect()
+}
+
+fn local_primary_key_count(stmt: &CreateTableStatement) -> usize {
+    let column_primary_keys = stmt.columns().filter(|column| column.primary_key()).count();
+    let table_primary_keys = stmt
+        .constraints()
+        .filter(|constraint| matches!(constraint, TableConstraint::PrimaryKey { .. }))
+        .count();
+    column_primary_keys.saturating_add(table_primary_keys)
 }
 
 fn resolve_parent_relations(

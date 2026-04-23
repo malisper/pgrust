@@ -18,8 +18,9 @@ use crate::backend::utils::cache::syscache::{
 use crate::include::access::htup::{AttributeCompression, AttributeStorage};
 use crate::include::catalog::{
     CONSTRAINT_FOREIGN, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_CATALOG_NAMESPACE_OID,
-    PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TYPE_RELATION_OID,
-    PUBLIC_NAMESPACE_OID, builtin_range_name_for_sql_type, relkind_is_analyzable,
+    PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TRIGGER_RELATION_OID,
+    PG_TYPE_RELATION_OID, PUBLIC_NAMESPACE_OID, builtin_range_name_for_sql_type,
+    relkind_is_analyzable,
 };
 use crate::include::nodes::primnodes::{Var, user_attrno};
 
@@ -46,6 +47,22 @@ pub(super) fn lookup_heap_relation_for_ddl(
     }
 }
 
+pub(super) fn lookup_trigger_relation_for_ddl(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+) -> Result<BoundRelation, ExecError> {
+    match catalog.lookup_any_relation(name) {
+        Some(entry) if matches!(entry.relkind, 'r' | 'v') => Ok(entry),
+        Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
+            name: name.to_string(),
+            expected: "table or view",
+        })),
+        None => Err(ExecError::Parse(ParseError::TableDoesNotExist(
+            name.to_string(),
+        ))),
+    }
+}
+
 pub(super) fn lookup_heap_relation_for_alter_table(
     catalog: &dyn CatalogLookup,
     name: &str,
@@ -58,6 +75,24 @@ pub(super) fn lookup_heap_relation_for_alter_table(
     }
 }
 
+pub(super) fn lookup_table_or_partitioned_table_for_alter_table(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+    if_exists: bool,
+) -> Result<Option<BoundRelation>, ExecError> {
+    match catalog.lookup_any_relation(name) {
+        Some(entry) if matches!(entry.relkind, 'r' | 'p') => Ok(Some(entry)),
+        Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
+            name: name.to_string(),
+            expected: "table",
+        })),
+        None if if_exists => Ok(None),
+        None => Err(ExecError::Parse(ParseError::TableDoesNotExist(
+            name.to_string(),
+        ))),
+    }
+}
+
 pub(super) fn lookup_index_relation_for_alter_index(
     catalog: &dyn CatalogLookup,
     name: &str,
@@ -65,6 +100,24 @@ pub(super) fn lookup_index_relation_for_alter_index(
 ) -> Result<Option<BoundRelation>, ExecError> {
     match catalog.lookup_any_relation(name) {
         Some(entry) if entry.relkind == 'i' => Ok(Some(entry)),
+        Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
+            name: name.to_string(),
+            expected: "index",
+        })),
+        None if if_exists => Ok(None),
+        None => Err(ExecError::Parse(ParseError::TableDoesNotExist(
+            name.to_string(),
+        ))),
+    }
+}
+
+pub(super) fn lookup_index_or_partitioned_index_for_alter_index_rename(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+    if_exists: bool,
+) -> Result<Option<BoundRelation>, ExecError> {
+    match catalog.lookup_any_relation(name) {
+        Some(entry) if matches!(entry.relkind, 'i' | 'I') => Ok(Some(entry)),
         Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
             name: name.to_string(),
             expected: "index",
@@ -127,7 +180,7 @@ pub(super) fn relation_kind_name(relkind: char) -> &'static str {
         'p' => "partitioned table",
         'S' => "sequence",
         'v' => "view",
-        'i' => "index",
+        'i' | 'I' => "index",
         _ => "table",
     }
 }
@@ -143,12 +196,12 @@ pub(super) fn ensure_relation_owner(
     if auth.has_effective_membership(relation.owner_oid, &auth_catalog) {
         return Ok(());
     }
+    let owner_object_kind = match relation.relkind {
+        'p' => "table",
+        _ => relation_kind_name(relation.relkind),
+    };
     Err(ExecError::DetailedError {
-        message: format!(
-            "must be owner of {} {}",
-            relation_kind_name(relation.relkind),
-            display_name
-        ),
+        message: format!("must be owner of {} {}", owner_object_kind, display_name),
         detail: None,
         hint: None,
         sqlstate: "42501",
@@ -327,6 +380,52 @@ pub(crate) fn reject_column_with_foreign_key_dependencies(
         expected: operation,
         actual,
     }))
+}
+
+pub(crate) fn reject_column_with_trigger_dependencies(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    column_name: &str,
+    attnum: i16,
+) -> Result<(), ExecError> {
+    let Some(visible) = catalog.materialize_visible_catalog() else {
+        return Ok(());
+    };
+    let relation_name = relation_name_for_oid(catalog, relation_oid);
+    let trigger_rows = catalog.trigger_rows_for_relation(relation_oid);
+    let details = visible
+        .depend_rows()
+        .into_iter()
+        .filter(|row| {
+            row.classid == PG_TRIGGER_RELATION_OID
+                && row.refclassid == PG_CLASS_RELATION_OID
+                && row.refobjid == relation_oid
+                && row.refobjsubid == i32::from(attnum)
+        })
+        .filter_map(|row| {
+            trigger_rows
+                .iter()
+                .find(|trigger| trigger.oid == row.objid)
+                .map(|trigger| {
+                    format!(
+                        "trigger {} on table {} depends on column {} of table {}",
+                        trigger.tgname, relation_name, column_name, relation_name
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    if details.is_empty() {
+        return Ok(());
+    }
+    Err(ExecError::DetailedError {
+        message: format!(
+            "cannot drop column {} of table {} because other objects depend on it",
+            column_name, relation_name
+        ),
+        detail: Some(details.join("\n")),
+        hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
+        sqlstate: "2BP01",
+    })
 }
 
 pub(crate) fn reject_index_with_referencing_foreign_keys(

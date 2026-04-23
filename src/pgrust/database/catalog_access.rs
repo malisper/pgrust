@@ -144,9 +144,7 @@ impl Database {
                 .filter(|schema| !schema.is_empty())
                 .collect::<Vec<_>>()
         });
-        let search_path = configured_path
-            .clone()
-            .unwrap_or_else(|| self.effective_search_path(client_id, configured_search_path));
+        let search_path = configured_path.unwrap_or_else(|| vec!["public".into()]);
 
         for schema_name in search_path {
             if schema_name.is_empty() || schema_name == "$user" || schema_name == "pg_catalog" {

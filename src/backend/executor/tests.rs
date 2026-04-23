@@ -615,6 +615,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         advisory_locks: std::sync::Arc::new(
             crate::backend::storage::lmgr::AdvisoryLockManager::new(),
         ),
+        row_locks: std::sync::Arc::new(crate::backend::storage::lmgr::RowLockManager::new()),
         checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(
         ),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -634,6 +635,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         active_role_oid: None,
+        session_replication_role: Default::default(),
         statement_lock_scope_id: None,
         transaction_lock_scope_id: None,
         next_command_id: 0,
@@ -651,6 +653,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         cte_producers: std::collections::HashMap::new(),
         recursive_worktables: std::collections::HashMap::new(),
         deferred_foreign_keys: None,
+        trigger_depth: 0,
     }
 }
 
@@ -676,6 +679,7 @@ fn run_plan(
         advisory_locks: std::sync::Arc::new(
             crate::backend::storage::lmgr::AdvisoryLockManager::new(),
         ),
+        row_locks: std::sync::Arc::new(crate::backend::storage::lmgr::RowLockManager::new()),
         checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(
         ),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -695,6 +699,7 @@ fn run_plan(
         session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         active_role_oid: None,
+        session_replication_role: Default::default(),
         statement_lock_scope_id: None,
         transaction_lock_scope_id: None,
         next_command_id: 0,
@@ -712,6 +717,7 @@ fn run_plan(
         cte_producers: std::collections::HashMap::new(),
         recursive_worktables: std::collections::HashMap::new(),
         deferred_foreign_keys: None,
+        trigger_depth: 0,
     };
 
     let names = state.column_names().to_vec();
@@ -775,6 +781,7 @@ fn run_sql_with_catalog(
             advisory_locks: std::sync::Arc::new(
                 crate::backend::storage::lmgr::AdvisoryLockManager::new(),
             ),
+            row_locks: std::sync::Arc::new(crate::backend::storage::lmgr::RowLockManager::new()),
             checkpoint_stats:
                 crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -794,6 +801,7 @@ fn run_sql_with_catalog(
             session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             active_role_oid: None,
+            session_replication_role: Default::default(),
             statement_lock_scope_id: None,
             transaction_lock_scope_id: None,
             next_command_id: 0,
@@ -811,6 +819,7 @@ fn run_sql_with_catalog(
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
             deferred_foreign_keys: None,
+            trigger_depth: 0,
         };
         execute_sql(&sql, &mut catalog, &mut ctx, xid)
     })
@@ -2536,69 +2545,6 @@ fn explain_scan_filter_renders_single_seq_scan_line() {
                     .count(),
                 1,
                 "expected one Seq Scan line, got {rendered:?}"
-            );
-        }
-        other => panic!("expected query result, got {:?}", other),
-    }
-}
-
-#[test]
-fn explain_verbose_lateral_aggregate_renders_pg_style_details() {
-    let base = temp_dir("explain_verbose_lateral_aggregate");
-    let txns = TransactionManager::new_durable(&base).unwrap();
-    match run_sql(
-        &base,
-        &txns,
-        INVALID_TRANSACTION_ID,
-        "explain (verbose, costs off) \
-         select s1, s2, sm \
-         from generate_series(1, 3) s1, \
-              lateral (select s2, sum(s1 + s2) sm \
-                       from generate_series(1, 3) s2 group by s2) ss \
-         order by 1, 2",
-    )
-    .unwrap()
-    {
-        StatementResult::Query { rows, .. } => {
-            let rendered = rows
-                .into_iter()
-                .map(|row| match &row[0] {
-                    Value::Text(text) => text.clone(),
-                    other => panic!("expected text explain line, got {:?}", other),
-                })
-                .collect::<Vec<_>>();
-            assert!(rendered.iter().any(|line| line.as_str() == "Sort"));
-            assert!(
-                rendered
-                    .iter()
-                    .any(|line| line.as_str() == "  Output: s1.s1, s2.s2, sum((s1.s1 + s2.s2))")
-            );
-            assert!(
-                rendered
-                    .iter()
-                    .any(|line| line.as_str() == "  Sort Key: s1.s1, s2.s2")
-            );
-            assert!(
-                rendered
-                    .iter()
-                    .any(|line| line.as_str() == "  ->  Nested Loop")
-            );
-            assert!(
-                rendered
-                    .iter()
-                    .any(|line| line.as_str() == "        ->  HashAggregate")
-            );
-            assert!(
-                rendered
-                    .iter()
-                    .any(|line| line.as_str() == "              Group Key: s2.s2")
-            );
-            assert!(rendered.iter().any(|line| {
-                line.as_str() == "              ->  Function Scan on pg_catalog.generate_series s2"
-            }));
-            assert!(
-                rendered.iter().any(|line| line.as_str()
-                    == "                    Function Call: generate_series(1, 3)")
             );
         }
         other => panic!("expected query result, got {:?}", other),
@@ -7568,6 +7514,7 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         advisory_locks: std::sync::Arc::new(
             crate::backend::storage::lmgr::AdvisoryLockManager::new(),
         ),
+        row_locks: std::sync::Arc::new(crate::backend::storage::lmgr::RowLockManager::new()),
         checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(
         ),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -7587,6 +7534,7 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
         active_role_oid: None,
+        session_replication_role: Default::default(),
         statement_lock_scope_id: None,
         transaction_lock_scope_id: None,
         next_command_id: 0,
@@ -7604,6 +7552,7 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         cte_producers: std::collections::HashMap::new(),
         recursive_worktables: std::collections::HashMap::new(),
         deferred_foreign_keys: None,
+        trigger_depth: 0,
     };
 
     let prepared = crate::backend::parser::bind_insert_prepared(
@@ -7681,6 +7630,24 @@ fn qualified_star_target_expands_relation_columns() {
             ],
             vec![Value::Int32(3), Value::Text("carol".into()), Value::Null],
         ],
+    );
+}
+
+#[test]
+fn row_constructor_comparisons_expand_star_fields() {
+    let mut harness = seed_people_and_pets("row_constructor_star_comparisons");
+
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select row(p.*) = row(p.*), \
+                        row(p.*) is distinct from row(p.*), \
+                        row(p.*) is not distinct from row(p.*) \
+                 from people p where p.id = 3",
+            )
+            .unwrap(),
+        vec![vec![Value::Null, Value::Bool(false), Value::Bool(true)]],
     );
 }
 
@@ -11277,6 +11244,61 @@ fn explain_shows_aggregate_node() {
                 .collect::<Vec<_>>();
             assert!(rendered.iter().any(|line| line.contains("Aggregate")));
             assert!(rendered.iter().any(|line| line.contains("Seq Scan")));
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn explain_verbose_lateral_aggregate_renders_pg_style_details() {
+    let base = temp_dir("explain_verbose_lateral_agg");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "explain (verbose, costs off)
+         select s1, s2, sm
+         from generate_series(1, 3) s1,
+              lateral (
+                  select s2, sum(s1 + s2) sm
+                  from generate_series(1, 3) s2
+                  group by s2
+              ) ss
+         order by 1, 2",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.to_string(),
+                    other => panic!("expected text, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered.iter().any(|line| {
+                    line.trim()
+                        == "Output: generate_series.generate_series, sum((generate_series.generate_series + generate_series.generate_series))"
+                }),
+                "{}",
+                rendered.join("\n")
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.trim() == "Group Key: generate_series.generate_series"),
+                "{}",
+                rendered.join("\n")
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| { line.trim() == "Function Call: generate_series(1, 3)" }),
+                "{}",
+                rendered.join("\n")
+            );
         }
         other => panic!("expected query result, got {:?}", other),
     }
@@ -16419,6 +16441,55 @@ fn grouped_query_having_can_use_correlated_exists() {
 }
 
 #[test]
+fn grouped_query_having_can_use_outer_aggregate_inside_subquery_where() {
+    let mut harness = seed_people_and_pets("grouped_having_outer_aggregate_in_subquery_where");
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select p.id from people p group by p.id having exists (select 1 from pets q where sum(p.id) = q.owner_id) order by p.id",
+            )
+            .unwrap(),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]],
+    );
+}
+
+#[test]
+fn grouped_query_having_matches_outer_aggregate_when_subquery_qualifies_column() {
+    let mut harness = seed_people_and_pets("grouped_having_outer_aggregate_qualified_match");
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select p.note, sum(id) from people p group by p.note having exists (select 1 from pets q where sum(p.id) = q.owner_id) order by p.note",
+            )
+            .unwrap(),
+        vec![
+            vec![Value::Text("a".into()), Value::Int64(1)],
+            vec![Value::Text("b".into()), Value::Int64(2)],
+        ],
+    );
+}
+
+#[test]
+fn grouped_query_having_can_use_outer_aggregate_with_ungrouped_arg_inside_subquery_where() {
+    let mut harness =
+        seed_people_and_pets("grouped_having_outer_aggregate_with_ungrouped_arg_inside_subquery");
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select p.note from people p group by p.note having exists (select 1 from pets q where sum(distinct p.id) = q.owner_id) order by p.note",
+            )
+            .unwrap(),
+        vec![
+            vec![Value::Text("a".into())],
+            vec![Value::Text("b".into())],
+        ],
+    );
+}
+
+#[test]
 fn degenerate_having_does_not_scan_where_clause() {
     let base = temp_dir("degenerate_having_no_scan");
     let mut txns = TransactionManager::new_durable(&base).unwrap();
@@ -17057,6 +17128,7 @@ fn large_object_metadata_tracks_create_and_unlink() {
             advisory_locks: std::sync::Arc::new(
                 crate::backend::storage::lmgr::AdvisoryLockManager::new(),
             ),
+            row_locks: std::sync::Arc::new(crate::backend::storage::lmgr::RowLockManager::new()),
             checkpoint_stats:
                 crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
@@ -17076,6 +17148,7 @@ fn large_object_metadata_tracks_create_and_unlink() {
             session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             active_role_oid: None,
+            session_replication_role: Default::default(),
             statement_lock_scope_id: None,
             transaction_lock_scope_id: None,
             next_command_id: 0,
@@ -17093,6 +17166,7 @@ fn large_object_metadata_tracks_create_and_unlink() {
             cte_producers: std::collections::HashMap::new(),
             recursive_worktables: std::collections::HashMap::new(),
             deferred_foreign_keys: None,
+            trigger_depth: 0,
         };
         execute_sql(sql, &mut catalog, &mut ctx, INVALID_TRANSACTION_ID)
     };

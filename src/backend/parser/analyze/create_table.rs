@@ -3,8 +3,12 @@ use std::collections::BTreeSet;
 use crate::backend::access::common::toast_compression::ensure_attribute_compression_supported;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
-use crate::backend::parser::{SerialKind, SqlType, SqlTypeKind};
+use crate::backend::parser::{
+    ColumnConstraint, ConstraintAttributes, CreateTableElement, CreateTableLikeClause,
+    CreateTableLikeOption, RawTypeName, SerialKind, SqlType, SqlTypeKind, TableConstraint,
+};
 use crate::include::access::htup::{AttributeCompression, AttributeStorage};
+use crate::include::catalog::{CONSTRAINT_CHECK, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE};
 use crate::pgrust::database::ddl::format_sql_type_name;
 
 use super::{
@@ -47,8 +51,9 @@ pub fn lower_create_table(
     stmt: &CreateTableStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<LoweredCreateTable, ParseError> {
-    let columns = stmt.columns().cloned().collect::<Vec<_>>();
-    let normalized = normalize_create_table_constraints(stmt, catalog)?;
+    let expanded = expand_create_table_like_clauses(stmt, catalog)?;
+    let columns = expanded.columns().cloned().collect::<Vec<_>>();
+    let normalized = normalize_create_table_constraints(&expanded, catalog)?;
     let constraint_actions = normalized.index_backed.clone();
     let mut owned_sequences = Vec::new();
 
@@ -150,6 +155,176 @@ pub fn lower_create_table(
     })
 }
 
+fn expand_create_table_like_clauses(
+    stmt: &CreateTableStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<CreateTableStatement, ParseError> {
+    if !stmt
+        .elements
+        .iter()
+        .any(|element| matches!(element, CreateTableElement::Like(_)))
+    {
+        return Ok(stmt.clone());
+    }
+
+    let mut expanded = stmt.clone();
+    expanded.elements = Vec::new();
+    for element in &stmt.elements {
+        match element {
+            CreateTableElement::Column(_) | CreateTableElement::Constraint(_) => {
+                expanded.elements.push(element.clone());
+            }
+            CreateTableElement::Like(like) => {
+                expanded.elements.extend(expand_like_clause(like, catalog)?);
+            }
+        }
+    }
+    Ok(expanded)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LikeExpansionOptions {
+    defaults: bool,
+    constraints: bool,
+    indexes: bool,
+}
+
+impl LikeExpansionOptions {
+    fn from_clause(clause: &CreateTableLikeClause) -> Self {
+        let mut options = Self {
+            defaults: false,
+            constraints: false,
+            indexes: false,
+        };
+        for option in &clause.options {
+            match option {
+                CreateTableLikeOption::IncludingDefaults => options.defaults = true,
+                CreateTableLikeOption::IncludingConstraints => options.constraints = true,
+                CreateTableLikeOption::IncludingIndexes => options.indexes = true,
+                CreateTableLikeOption::IncludingAll => {
+                    options.defaults = true;
+                    options.constraints = true;
+                    options.indexes = true;
+                }
+                CreateTableLikeOption::ExcludingDefaults => options.defaults = false,
+                CreateTableLikeOption::ExcludingConstraints => options.constraints = false,
+                CreateTableLikeOption::ExcludingIndexes => options.indexes = false,
+                CreateTableLikeOption::ExcludingAll => {
+                    options.defaults = false;
+                    options.constraints = false;
+                    options.indexes = false;
+                }
+            }
+        }
+        options
+    }
+}
+
+fn expand_like_clause(
+    clause: &CreateTableLikeClause,
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<CreateTableElement>, ParseError> {
+    let source = catalog
+        .lookup_any_relation(&clause.relation_name)
+        .ok_or_else(|| ParseError::UnknownTable(clause.relation_name.clone()))?;
+    if !matches!(source.relkind, 'r' | 'p' | 'v' | 'm' | 'f' | 'c') {
+        return Err(ParseError::FeatureNotSupported(format!(
+            "CREATE TABLE LIKE source relation kind {}",
+            source.relkind
+        )));
+    }
+    let options = LikeExpansionOptions::from_clause(clause);
+    let mut elements = source
+        .desc
+        .columns
+        .iter()
+        .filter(|column| !column.dropped)
+        .map(|column| {
+            let mut constraints = Vec::new();
+            if !column.storage.nullable {
+                constraints.push(ColumnConstraint::NotNull {
+                    attributes: ConstraintAttributes {
+                        name: column.not_null_constraint_name.clone(),
+                        not_valid: !column.not_null_constraint_validated,
+                        no_inherit: column.not_null_constraint_no_inherit,
+                        ..ConstraintAttributes::default()
+                    },
+                });
+            }
+            CreateTableElement::Column(crate::backend::parser::ColumnDef {
+                name: column.name.clone(),
+                ty: RawTypeName::Builtin(column.sql_type),
+                default_expr: options
+                    .defaults
+                    .then(|| column.default_expr.clone())
+                    .flatten(),
+                compression: match column.storage.attcompression {
+                    AttributeCompression::Default => None,
+                    compression => Some(compression),
+                },
+                constraints,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let constraints = catalog.constraint_rows_for_relation(source.relation_oid);
+    if options.constraints {
+        elements.extend(constraints.iter().filter_map(|row| {
+            if row.contype != CONSTRAINT_CHECK {
+                return None;
+            }
+            Some(CreateTableElement::Constraint(TableConstraint::Check {
+                attributes: ConstraintAttributes {
+                    name: Some(row.conname.clone()),
+                    not_valid: !row.convalidated,
+                    no_inherit: row.connoinherit,
+                    enforced: Some(row.conenforced),
+                    ..ConstraintAttributes::default()
+                },
+                expr_sql: row.conbin.clone()?,
+            }))
+        }));
+    }
+
+    if options.indexes {
+        for row in constraints
+            .iter()
+            .filter(|row| row.contype == CONSTRAINT_PRIMARY || row.contype == CONSTRAINT_UNIQUE)
+        {
+            let Some(columns) = constraint_column_names(row.conkey.as_deref(), &source.desc) else {
+                continue;
+            };
+            let attributes = ConstraintAttributes::default();
+            elements.push(CreateTableElement::Constraint(
+                if row.contype == CONSTRAINT_PRIMARY {
+                    TableConstraint::PrimaryKey {
+                        attributes,
+                        columns,
+                    }
+                } else {
+                    TableConstraint::Unique {
+                        attributes,
+                        columns,
+                    }
+                },
+            ));
+        }
+    }
+
+    Ok(elements)
+}
+
+fn constraint_column_names(attnums: Option<&[i16]>, desc: &RelationDesc) -> Option<Vec<String>> {
+    attnums?
+        .iter()
+        .map(|attnum| {
+            let index = usize::try_from(*attnum).ok()?.checked_sub(1)?;
+            let column = desc.columns.get(index)?;
+            (!column.dropped).then(|| column.name.clone())
+        })
+        .collect()
+}
+
 fn validate_create_column_compression(
     sql_type: SqlType,
     compression: AttributeCompression,
@@ -193,6 +368,30 @@ mod tests {
         ColumnDef, ConstraintAttributes, CreateTableElement, OnCommitAction, RawTypeName, SqlType,
         TablePersistence,
     };
+    use crate::include::catalog::PgConstraintRow;
+
+    #[derive(Default)]
+    struct LikeCatalog {
+        relation: Option<crate::backend::parser::BoundRelation>,
+        constraints: Vec<PgConstraintRow>,
+    }
+
+    impl crate::backend::parser::CatalogLookup for LikeCatalog {
+        fn lookup_any_relation(&self, name: &str) -> Option<crate::backend::parser::BoundRelation> {
+            self.relation
+                .as_ref()
+                .filter(|_| name == "source_table")
+                .cloned()
+        }
+
+        fn constraint_rows_for_relation(&self, relation_oid: u32) -> Vec<PgConstraintRow> {
+            self.relation
+                .as_ref()
+                .filter(|relation| relation.relation_oid == relation_oid)
+                .map(|_| self.constraints.clone())
+                .unwrap_or_default()
+        }
+    }
 
     #[test]
     fn lower_create_table_rejects_anyarray_columns() {
@@ -285,6 +484,127 @@ mod tests {
         assert!(!lowered.relation_desc.columns[1].not_null_constraint_validated);
         assert!(lowered.relation_desc.columns[1].not_null_constraint_no_inherit);
         assert!(lowered.not_null_actions[1].no_inherit);
+    }
+
+    #[test]
+    fn lower_create_table_like_including_all_expands_columns_and_constraints() {
+        let mut source_desc = RelationDesc {
+            columns: vec![
+                column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                column_desc("note", SqlType::new(SqlTypeKind::Text), true),
+            ],
+        };
+        source_desc.columns[0].not_null_constraint_name = Some("source_id_not_null".into());
+        source_desc.columns[0].default_expr = Some("7".into());
+        let catalog = LikeCatalog {
+            relation: Some(crate::backend::parser::BoundRelation {
+                rel: crate::RelFileLocator {
+                    spc_oid: 1,
+                    db_oid: 1,
+                    rel_number: 42,
+                },
+                relation_oid: 42,
+                toast: None,
+                namespace_oid: crate::include::catalog::PUBLIC_NAMESPACE_OID,
+                owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+                relpersistence: 'p',
+                relkind: 'r',
+                relispartition: false,
+                relpartbound: None,
+                desc: source_desc,
+                partitioned_table: None,
+            }),
+            constraints: vec![
+                PgConstraintRow {
+                    oid: 100,
+                    conname: "source_check".into(),
+                    connamespace: crate::include::catalog::PUBLIC_NAMESPACE_OID,
+                    contype: CONSTRAINT_CHECK,
+                    condeferrable: false,
+                    condeferred: false,
+                    conenforced: true,
+                    convalidated: true,
+                    conrelid: 42,
+                    contypid: 0,
+                    conindid: 0,
+                    conparentid: 0,
+                    confrelid: 0,
+                    confupdtype: 'a',
+                    confdeltype: 'a',
+                    confmatchtype: 's',
+                    conkey: None,
+                    confkey: None,
+                    conpfeqop: None,
+                    conppeqop: None,
+                    conffeqop: None,
+                    confdelsetcols: None,
+                    conexclop: None,
+                    conbin: Some("id > 0".into()),
+                    conislocal: true,
+                    coninhcount: 0,
+                    connoinherit: false,
+                    conperiod: false,
+                },
+                PgConstraintRow {
+                    oid: 101,
+                    conname: "source_pkey".into(),
+                    connamespace: crate::include::catalog::PUBLIC_NAMESPACE_OID,
+                    contype: CONSTRAINT_PRIMARY,
+                    condeferrable: false,
+                    condeferred: false,
+                    conenforced: true,
+                    convalidated: true,
+                    conrelid: 42,
+                    contypid: 0,
+                    conindid: 102,
+                    conparentid: 0,
+                    confrelid: 0,
+                    confupdtype: 'a',
+                    confdeltype: 'a',
+                    confmatchtype: 's',
+                    conkey: Some(vec![1]),
+                    confkey: None,
+                    conpfeqop: None,
+                    conppeqop: None,
+                    conffeqop: None,
+                    confdelsetcols: None,
+                    conexclop: None,
+                    conbin: None,
+                    conislocal: true,
+                    coninhcount: 0,
+                    connoinherit: false,
+                    conperiod: false,
+                },
+            ],
+        };
+        let stmt = CreateTableStatement {
+            schema_name: None,
+            table_name: "copy_table".into(),
+            persistence: TablePersistence::Permanent,
+            on_commit: OnCommitAction::PreserveRows,
+            elements: vec![CreateTableElement::Like(CreateTableLikeClause {
+                relation_name: "source_table".into(),
+                options: vec![CreateTableLikeOption::IncludingAll],
+            })],
+            inherits: Vec::new(),
+            partition_spec: None,
+            partition_of: None,
+            partition_bound: None,
+            if_not_exists: false,
+        };
+
+        let lowered = lower_create_table(&stmt, &catalog).unwrap();
+        assert_eq!(lowered.relation_desc.columns.len(), 2);
+        assert_eq!(
+            lowered.relation_desc.columns[0].default_expr.as_deref(),
+            Some("7")
+        );
+        assert_eq!(lowered.check_actions[0].constraint_name, "source_check");
+        assert_eq!(
+            lowered.constraint_actions[0].constraint_name.as_deref(),
+            Some("copy_table_pkey")
+        );
+        assert_eq!(lowered.constraint_actions[0].columns, vec!["id"]);
     }
 
     #[test]

@@ -11,8 +11,10 @@ use crate::include::catalog::{
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::TupleSlot;
 use crate::include::nodes::parsenodes::{ForeignKeyAction, ForeignKeyMatchType};
-use crate::pgrust::database::ddl::is_system_column_name;
-use crate::pgrust::database::ddl::lookup_heap_relation_for_alter_table;
+use crate::pgrust::database::ddl::{
+    is_system_column_name, lookup_heap_relation_for_alter_table,
+    lookup_table_or_partitioned_table_for_alter_table,
+};
 
 fn relation_basename(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
@@ -51,6 +53,7 @@ fn ddl_executor_context(
         large_objects: Some(db.large_objects.clone()),
         async_notify_runtime: Some(db.async_notify_runtime.clone()),
         advisory_locks: std::sync::Arc::clone(&db.advisory_locks),
+        row_locks: std::sync::Arc::clone(&db.row_locks),
         checkpoint_stats: db.checkpoint_stats_snapshot(),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
         interrupts,
@@ -63,6 +66,7 @@ fn ddl_executor_context(
         session_user_oid: db.auth_state(client_id).session_user_oid(),
         current_user_oid: db.auth_state(client_id).current_user_oid(),
         active_role_oid: db.auth_state(client_id).active_role_oid(),
+        session_replication_role: db.session_replication_role(client_id),
         statement_lock_scope_id: None,
         transaction_lock_scope_id: None,
         next_command_id: cid,
@@ -80,6 +84,7 @@ fn ddl_executor_context(
         cte_producers: std::collections::HashMap::new(),
         recursive_worktables: std::collections::HashMap::new(),
         deferred_foreign_keys: None,
+        trigger_depth: 0,
     })
 }
 
@@ -402,7 +407,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -445,7 +450,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -686,7 +691,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -731,7 +736,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
-        let Some(relation) = lookup_heap_relation_for_alter_table(
+        let Some(relation) = lookup_table_or_partitioned_table_for_alter_table(
             &catalog,
             &alter_stmt.table_name,
             alter_stmt.if_exists,
@@ -853,6 +858,18 @@ impl Database {
                 catalog_effects.push(effect);
             }
             crate::backend::parser::NormalizedAlterTableConstraint::IndexBacked(action) => {
+                if relation.relkind == 'p' || relation.relispartition {
+                    let _ = self.install_partitioned_index_backed_constraints_in_transaction(
+                        client_id,
+                        xid,
+                        cid.saturating_add(1),
+                        &relation,
+                        &[action],
+                        configured_search_path,
+                        catalog_effects,
+                    )?;
+                    return Ok(StatementResult::AffectedRows(0));
+                }
                 let mut primary_key_owned_not_null_oids = Vec::new();
                 if action.primary {
                     let mut used_names = existing_constraints
@@ -1187,6 +1204,18 @@ impl Database {
                 catalog_effects.push(effect);
             }
             CONSTRAINT_PRIMARY | CONSTRAINT_UNIQUE => {
+                if row.conparentid != 0 || row.coninhcount > 0 {
+                    return Err(ExecError::DetailedError {
+                        message: format!(
+                            "cannot drop inherited constraint \"{}\" of relation \"{}\"",
+                            row.conname,
+                            relation_basename(&drop_stmt.table_name),
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "0A000",
+                    });
+                }
                 if row.conindid != 0 {
                     reject_index_with_referencing_foreign_keys(
                         &catalog,

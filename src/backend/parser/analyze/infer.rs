@@ -28,6 +28,48 @@ pub(super) fn infer_sql_expr_type(
     infer_sql_expr_type_with_ctes(expr, scope, catalog, outer_scopes, grouped_outer, &[])
 }
 
+fn infer_visible_outer_aggregate_type(
+    name: &str,
+    args: &SqlCallArgs,
+    order_by: &[OrderByItem],
+    distinct: bool,
+    func_variadic: bool,
+    filter: Option<&SqlExpr>,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    ctes: &[BoundCte],
+) -> Option<SqlType> {
+    let (_, visible_scope) = match_visible_aggregate_call(
+        name,
+        args,
+        order_by,
+        distinct,
+        func_variadic,
+        filter,
+        catalog,
+        outer_scopes,
+        ctes,
+    )?;
+    let owner_scope = &visible_scope.input_scope;
+    let owner_outer_scopes = outer_scopes.get(visible_scope.levelsup..).unwrap_or(&[]);
+    let arg_types = args
+        .args()
+        .iter()
+        .map(|arg| {
+            infer_sql_expr_type_with_ctes(
+                &arg.value,
+                owner_scope,
+                catalog,
+                owner_outer_scopes,
+                None,
+                ctes,
+            )
+        })
+        .collect::<Vec<_>>();
+    resolve_aggregate_call(catalog, name, &arg_types, func_variadic)
+        .map(|resolved| resolved.result_type)
+}
+
 pub(super) fn infer_sql_expr_type_with_ctes(
     expr: &SqlExpr,
     scope: &BoundScope,
@@ -385,6 +427,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             catalog,
             outer_scopes,
             grouped_outer.cloned(),
+            None,
             ctes,
             &[],
         )
@@ -404,6 +447,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 catalog,
                 outer_scopes,
                 grouped_outer.cloned(),
+                None,
                 ctes,
                 &[],
             )
@@ -425,9 +469,25 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::FuncCall {
             name,
             args,
+            order_by,
+            distinct,
             func_variadic,
+            filter,
             ..
         } => {
+            if let Some(result_type) = infer_visible_outer_aggregate_type(
+                name,
+                args,
+                order_by,
+                *distinct,
+                *func_variadic,
+                filter.as_deref(),
+                catalog,
+                outer_scopes,
+                ctes,
+            ) {
+                return result_type;
+            }
             let aggregate_arg_types = args
                 .args()
                 .iter()

@@ -37,7 +37,7 @@ use crate::pl::plpgsql::TriggerOperation;
 
 use super::explain::{
     format_buffer_usage, format_explain_lines_with_costs, format_explain_plan_with_subplans,
-    push_explain_line,
+    format_verbose_explain_plan_with_subplans, push_explain_line,
 };
 use super::partition::route_partition_target;
 use super::trigger::RuntimeTriggers;
@@ -419,7 +419,13 @@ pub(crate) fn execute_explain(
             );
             format_explain_lines_with_costs(state.as_ref(), 1, false, costs, &mut lines);
         } else {
-            format_explain_plan_with_subplans(&plan_tree, &subplans, 0, costs, verbose, &mut lines);
+            if verbose {
+                format_verbose_explain_plan_with_subplans(
+                    &plan_tree, &subplans, 0, costs, &mut lines,
+                );
+            } else {
+                format_explain_plan_with_subplans(&plan_tree, &subplans, 0, costs, &mut lines);
+            }
         }
     }
 
@@ -491,7 +497,6 @@ fn explain_update_lines(
             &input_plan.subplans,
             1,
             show_costs,
-            verbose,
             &mut lines,
         );
         return lines;
@@ -1045,6 +1050,7 @@ pub(crate) fn rollback_inserted_row(
 pub(crate) fn write_updated_row(
     relation_name: &str,
     rel: crate::backend::storage::smgr::RelFileLocator,
+    _relation_oid: u32,
     toast: Option<ToastRelationRef>,
     toast_index: Option<&BoundIndexRelation>,
     desc: &RelationDesc,
@@ -1629,6 +1635,7 @@ fn apply_referential_action_to_rows(
                 let _ = write_updated_row(
                     &constraint.child_relation_name,
                     constraint.child_rel,
+                    constraint.child_relation_oid,
                     constraint.child_toast,
                     toast_index.as_ref(),
                     &constraint.child_desc,
@@ -2754,7 +2761,7 @@ pub(crate) fn materialize_insert_rows(
                 .expect("insert-select rewrite should return a single query");
             let query =
                 crate::backend::optimizer::fold_query_constants(query).map_err(ExecError::Parse)?;
-            let planned = planner(query, catalog);
+            let planned = planner(query, catalog).map_err(ExecError::Parse)?;
             let result: Result<Vec<Vec<Value>>, ExecError> = (|| {
                 let saved_subplans = std::mem::replace(&mut ctx.subplans, planned.subplans.clone());
                 let mut state = executor_start(planned.plan_tree.clone());
@@ -3858,6 +3865,7 @@ pub(crate) fn execute_insert_rows(
                 desc,
                 TriggerOperation::Insert,
                 &[],
+                ctx.session_replication_role,
             )
         })
         .transpose()?;
@@ -3972,6 +3980,7 @@ pub fn execute_prepared_insert_row(
                 &prepared.desc,
                 TriggerOperation::Insert,
                 &[],
+                ctx.session_replication_role,
             )
         })
         .transpose()?;
@@ -4072,6 +4081,7 @@ pub fn execute_update_with_waiter(
                         &target.desc,
                         TriggerOperation::Update,
                         &modified_attnums,
+                        ctx.session_replication_role,
                     )
                 })
                 .transpose()?;
@@ -4144,6 +4154,7 @@ pub fn execute_update_with_waiter(
                     match write_updated_row(
                         &target.relation_name,
                         target.rel,
+                        target.relation_oid,
                         target.toast,
                         target.toast_index.as_ref(),
                         &target.desc,
@@ -4397,6 +4408,7 @@ fn execute_update_from_joined_input(
                         &target.desc,
                         TriggerOperation::Update,
                         &modified_attnums,
+                        ctx.session_replication_role,
                     )
                 })
                 .transpose()
@@ -4478,6 +4490,7 @@ fn execute_update_from_joined_input(
                 match write_updated_row(
                     &target.relation_name,
                     target.rel,
+                    target.relation_oid,
                     target.toast,
                     target.toast_index.as_ref(),
                     &target.desc,
@@ -4598,6 +4611,7 @@ pub fn execute_delete_with_waiter(
                         &target.desc,
                         TriggerOperation::Delete,
                         &[],
+                        ctx.session_replication_role,
                     )
                 })
                 .transpose()?;

@@ -1299,8 +1299,16 @@ fn resolve_referenced_key(
     catalog: &dyn super::CatalogLookup,
 ) -> Result<ResolvedReferencedKey, ParseError> {
     let relation = catalog
-        .lookup_relation(referenced_table)
+        .lookup_any_relation(referenced_table)
         .ok_or_else(|| ParseError::UnknownTable(referenced_table.to_string()))?;
+    if !matches!(relation.relkind, 'r' | 'p') {
+        return Err(ParseError::UnknownTable(referenced_table.to_string()));
+    }
+    if relation.relkind == 'p' {
+        return Err(ParseError::FeatureNotSupported(
+            "REFERENCES to partitioned tables".into(),
+        ));
+    }
     let _ = child_relation_name;
     let _ = child_relation_oid;
     validate_foreign_key_persistence(child_persistence, relation.relpersistence)?;

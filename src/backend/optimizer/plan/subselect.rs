@@ -37,7 +37,11 @@ fn lower_sublink_to_subplan(
         .target_list
         .first()
         .map(|target| target.sql_type);
-    let plan_id = append_planned_subquery(planner(*sublink.subselect, catalog), subplans);
+    let plan_id = append_planned_subquery(
+        planner(*sublink.subselect, catalog)
+            .expect("locking validation should complete before subplan lowering"),
+        subplans,
+    );
     Expr::SubPlan(Box::new(SubPlan {
         sublink_type: sublink.sublink_type,
         testexpr,
@@ -1181,6 +1185,15 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             limit,
             offset,
         },
+        Plan::LockRows {
+            plan_info,
+            input,
+            row_marks,
+        } => Plan::LockRows {
+            plan_info,
+            input: Box::new(rebase_plan_subplan_ids(*input, base)),
+            row_marks,
+        },
         Plan::Projection {
             plan_info,
             input,
@@ -1499,6 +1512,15 @@ pub(super) fn finalize_plan_subqueries(
             input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
             limit,
             offset,
+        },
+        Plan::LockRows {
+            plan_info,
+            input,
+            row_marks,
+        } => Plan::LockRows {
+            plan_info,
+            input: Box::new(finalize_plan_subqueries(*input, catalog, subplans)),
+            row_marks,
         },
         Plan::Projection {
             plan_info,
