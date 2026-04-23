@@ -3045,9 +3045,9 @@ fn parse_alter_user_password_statement() {
         stmt,
         Statement::AlterRole(AlterRoleStatement {
             role_name: "regress_priv_user2".into(),
-            action: AlterRoleAction::Options(vec![RoleOption::Password(Some(
-                "verysecret".into(),
-            ))]),
+            action: AlterRoleAction::Options(vec![RoleOption::Password(
+                Some("verysecret".into(),)
+            )]),
         })
     );
 }
