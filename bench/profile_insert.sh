@@ -5,6 +5,9 @@
 # Must be run from a terminal with sudo available for dtrace.
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+TARGET_DIR="$("$ROOT_DIR/scripts/cargo_target_dir.sh")"
+
 AUTOCOMMIT=""
 ROWS=""
 OUT=""
@@ -49,7 +52,7 @@ cargo build --release
 sudo -v
 
 # Launch benchmark. It SIGSTOPs itself after setup when --wait is passed.
-./target/release/bench_insert --rows "${ROWS}" ${AUTOCOMMIT} --wait &
+"${TARGET_DIR}/release/bench_insert" --rows "${ROWS}" ${AUTOCOMMIT} --wait &
 BENCH_PID=$!
 
 # Wait for it to stop after initialization.
