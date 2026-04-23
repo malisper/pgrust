@@ -10750,6 +10750,7 @@ fn raw_type_output_name(ty: &RawTypeName) -> &str {
         RawTypeName::Serial(SerialKind::Small) => "smallserial",
         RawTypeName::Serial(SerialKind::Regular) => "serial",
         RawTypeName::Serial(SerialKind::Big) => "bigserial",
+        RawTypeName::Named { name, .. } if name.eq_ignore_ascii_case("float") => "float8",
         RawTypeName::Named { name, .. } => name.as_str(),
         RawTypeName::Record => "record",
     }
