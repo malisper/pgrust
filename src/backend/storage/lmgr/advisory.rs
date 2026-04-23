@@ -5,7 +5,6 @@ use std::time::Duration;
 use parking_lot::{Condvar, Mutex};
 
 use crate::ClientId;
-use crate::backend::access::transam::xact::TransactionId;
 use crate::backend::utils::activity::now_timestamptz;
 use crate::backend::utils::misc::interrupts::{
     InterruptReason, InterruptState, check_for_interrupts,
@@ -43,7 +42,7 @@ impl AdvisoryLockMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AdvisoryLockScope {
     Session,
-    Transaction(TransactionId),
+    Transaction(u64),
     Statement(u64),
 }
 
@@ -61,10 +60,10 @@ impl AdvisoryLockOwner {
         }
     }
 
-    pub fn transaction(client_id: ClientId, xid: TransactionId) -> Self {
+    pub fn transaction(client_id: ClientId, scope_id: u64) -> Self {
         Self {
             client_id,
-            scope: AdvisoryLockScope::Transaction(xid),
+            scope: AdvisoryLockScope::Transaction(scope_id),
         }
     }
 
@@ -78,7 +77,9 @@ impl AdvisoryLockOwner {
     pub(crate) fn virtualtransaction(self) -> String {
         match self.scope {
             AdvisoryLockScope::Session => format!("{}/session", self.client_id),
-            AdvisoryLockScope::Transaction(xid) => format!("{}/xid:{xid}", self.client_id),
+            AdvisoryLockScope::Transaction(scope_id) => {
+                format!("{}/xact:{scope_id}", self.client_id)
+            }
             AdvisoryLockScope::Statement(scope_id) => {
                 format!("{}/stmt:{scope_id}", self.client_id)
             }
@@ -234,8 +235,8 @@ impl AdvisoryLockManager {
         self.unlock_matching(|owner| owner == AdvisoryLockOwner::session(client_id));
     }
 
-    pub fn unlock_all_transaction(&self, client_id: ClientId, xid: TransactionId) {
-        self.unlock_matching(|owner| owner == AdvisoryLockOwner::transaction(client_id, xid));
+    pub fn unlock_all_transaction(&self, client_id: ClientId, scope_id: u64) {
+        self.unlock_matching(|owner| owner == AdvisoryLockOwner::transaction(client_id, scope_id));
     }
 
     pub fn unlock_all_statement(&self, client_id: ClientId, scope_id: u64) {

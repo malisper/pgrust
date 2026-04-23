@@ -76,6 +76,7 @@ impl SeededSqlHarness {
                 current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
                 active_role_oid: None,
                 statement_lock_scope_id: None,
+                transaction_lock_scope_id: None,
                 next_command_id: 0,
                 default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
                 expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
