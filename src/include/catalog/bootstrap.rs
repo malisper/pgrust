@@ -33,6 +33,8 @@ pub const PG_INHERITS_RELATION_OID: u32 = 2611;
 pub const PG_PARTITIONED_TABLE_RELATION_OID: u32 = 3350;
 pub const PG_REWRITE_RELATION_OID: u32 = 2618;
 pub const PG_STATISTIC_RELATION_OID: u32 = 2619;
+pub const PG_STATISTIC_EXT_RELATION_OID: u32 = 3381;
+pub const PG_STATISTIC_EXT_DATA_RELATION_OID: u32 = 3429;
 pub const PG_TRIGGER_RELATION_OID: u32 = 2620;
 pub const PG_POLICY_RELATION_OID: u32 = 3256;
 pub const PG_LANGUAGE_RELATION_OID: u32 = 2612;
@@ -55,7 +57,9 @@ pub const PG_DEPEND_ROWTYPE_OID: u32 = 0;
 pub const PG_INDEX_ROWTYPE_OID: u32 = 0;
 pub const PG_INHERITS_ROWTYPE_OID: u32 = 0;
 pub const PG_REWRITE_ROWTYPE_OID: u32 = 0;
-pub const PG_STATISTIC_ROWTYPE_OID: u32 = 0;
+pub const PG_STATISTIC_ROWTYPE_OID: u32 = 10029;
+pub const PG_STATISTIC_EXT_ROWTYPE_OID: u32 = 10031;
+pub const PG_STATISTIC_EXT_DATA_ROWTYPE_OID: u32 = 10033;
 pub const PG_TRIGGER_ROWTYPE_OID: u32 = 0;
 pub const PG_PUBLICATION_ROWTYPE_OID: u32 = 0;
 pub const PG_PUBLICATION_REL_ROWTYPE_OID: u32 = 0;
@@ -89,9 +93,11 @@ pub const XID_TYPE_OID: u32 = 28;
 pub const OIDVECTOR_TYPE_OID: u32 = 30;
 pub const REGTYPE_TYPE_OID: u32 = 2206;
 pub const REGROLE_TYPE_OID: u32 = 4096;
+pub const REGNAMESPACE_TYPE_OID: u32 = 4089;
 pub const REGPROCEDURE_TYPE_OID: u32 = 2202;
 pub const REGOPERATOR_ARRAY_TYPE_OID: u32 = 2209;
 pub const REGCLASS_ARRAY_TYPE_OID: u32 = 2210;
+pub const REGNAMESPACE_ARRAY_TYPE_OID: u32 = 4090;
 pub const REGPROCEDURE_ARRAY_TYPE_OID: u32 = 2207;
 pub const ANYOID: u32 = 2276;
 pub const ANYELEMENTOID: u32 = 2283;
@@ -102,6 +108,9 @@ pub const INTERNAL_TYPE_OID: u32 = 2281;
 pub const FDW_HANDLER_TYPE_OID: u32 = 3115;
 pub const RECORD_TYPE_OID: u32 = 2249;
 pub const RECORD_ARRAY_TYPE_OID: u32 = 2287;
+pub const PG_STATISTIC_ARRAY_TYPE_OID: u32 = 10028;
+pub const PG_STATISTIC_EXT_ARRAY_TYPE_OID: u32 = 10030;
+pub const PG_STATISTIC_EXT_DATA_ARRAY_TYPE_OID: u32 = 10032;
 pub const TEXT_ARRAY_TYPE_OID: u32 = 1009;
 pub const TID_ARRAY_TYPE_OID: u32 = 1010;
 pub const XID_ARRAY_TYPE_OID: u32 = 1011;
@@ -176,6 +185,9 @@ pub const JSON_ARRAY_TYPE_OID: u32 = 199;
 pub const XML_TYPE_OID: u32 = 142;
 pub const XML_ARRAY_TYPE_OID: u32 = 143;
 pub const PG_NODE_TREE_TYPE_OID: u32 = 194;
+pub const PG_NDISTINCT_TYPE_OID: u32 = 3361;
+pub const PG_DEPENDENCIES_TYPE_OID: u32 = 3402;
+pub const PG_MCV_LIST_TYPE_OID: u32 = 5017;
 pub const OID_ARRAY_TYPE_OID: u32 = 1028;
 pub const JSONB_TYPE_OID: u32 = 3802;
 pub const JSONB_ARRAY_TYPE_OID: u32 = 3807;
@@ -230,6 +242,8 @@ pub enum BootstrapCatalogKind {
     PgPartitionedTable,
     PgRewrite,
     PgStatistic,
+    PgStatisticExt,
+    PgStatisticExtData,
     PgTrigger,
     PgPolicy,
     PgPublication,
@@ -282,6 +296,8 @@ impl BootstrapCatalogKind {
             Self::PgPartitionedTable => PG_PARTITIONED_TABLE_RELATION_OID,
             Self::PgRewrite => PG_REWRITE_RELATION_OID,
             Self::PgStatistic => PG_STATISTIC_RELATION_OID,
+            Self::PgStatisticExt => PG_STATISTIC_EXT_RELATION_OID,
+            Self::PgStatisticExtData => PG_STATISTIC_EXT_DATA_RELATION_OID,
             Self::PgTrigger => PG_TRIGGER_RELATION_OID,
             Self::PgPolicy => PG_POLICY_RELATION_OID,
             Self::PgPublication => PG_PUBLICATION_RELATION_OID,
@@ -327,6 +343,8 @@ impl BootstrapCatalogKind {
             Self::PgPartitionedTable => "pg_partitioned_table",
             Self::PgRewrite => "pg_rewrite",
             Self::PgStatistic => "pg_statistic",
+            Self::PgStatisticExt => "pg_statistic_ext",
+            Self::PgStatisticExtData => "pg_statistic_ext_data",
             Self::PgTrigger => "pg_trigger",
             Self::PgPolicy => "pg_policy",
             Self::PgPublication => "pg_publication",
@@ -372,6 +390,8 @@ impl BootstrapCatalogKind {
             Self::PgPartitionedTable => PG_PARTITIONED_TABLE_ROWTYPE_OID,
             Self::PgRewrite => PG_REWRITE_ROWTYPE_OID,
             Self::PgStatistic => PG_STATISTIC_ROWTYPE_OID,
+            Self::PgStatisticExt => PG_STATISTIC_EXT_ROWTYPE_OID,
+            Self::PgStatisticExtData => PG_STATISTIC_EXT_DATA_ROWTYPE_OID,
             Self::PgTrigger => PG_TRIGGER_ROWTYPE_OID,
             Self::PgPolicy => 0,
             Self::PgPublication => PG_PUBLICATION_ROWTYPE_OID,
@@ -379,6 +399,15 @@ impl BootstrapCatalogKind {
             Self::PgPublicationNamespace => PG_PUBLICATION_NAMESPACE_ROWTYPE_OID,
             Self::PgOpclass => 0,
             Self::PgOpfamily => 0,
+        }
+    }
+
+    pub const fn array_type_oid(self) -> u32 {
+        match self {
+            Self::PgStatistic => PG_STATISTIC_ARRAY_TYPE_OID,
+            Self::PgStatisticExt => PG_STATISTIC_EXT_ARRAY_TYPE_OID,
+            Self::PgStatisticExtData => PG_STATISTIC_EXT_DATA_ARRAY_TYPE_OID,
+            _ => 0,
         }
     }
 
@@ -394,7 +423,7 @@ impl BootstrapCatalogKind {
     }
 }
 
-pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 40] = [
+pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 42] = [
     BootstrapCatalogKind::PgNamespace,
     BootstrapCatalogKind::PgType,
     BootstrapCatalogKind::PgProc,
@@ -429,6 +458,8 @@ pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 40] = [
     BootstrapCatalogKind::PgPartitionedTable,
     BootstrapCatalogKind::PgRewrite,
     BootstrapCatalogKind::PgStatistic,
+    BootstrapCatalogKind::PgStatisticExt,
+    BootstrapCatalogKind::PgStatisticExtData,
     BootstrapCatalogKind::PgTrigger,
     BootstrapCatalogKind::PgPolicy,
     BootstrapCatalogKind::PgPublication,
@@ -437,7 +468,7 @@ pub const CORE_BOOTSTRAP_KINDS: [BootstrapCatalogKind; 40] = [
     BootstrapCatalogKind::PgAggregate,
 ];
 
-pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 40] {
+pub const fn bootstrap_catalog_kinds() -> [BootstrapCatalogKind; 42] {
     CORE_BOOTSTRAP_KINDS
 }
 
@@ -476,6 +507,8 @@ pub fn bootstrap_relation_desc(kind: BootstrapCatalogKind) -> RelationDesc {
         BootstrapCatalogKind::PgPartitionedTable => pg_partitioned_table_desc(),
         BootstrapCatalogKind::PgRewrite => pg_rewrite_desc(),
         BootstrapCatalogKind::PgStatistic => pg_statistic_desc(),
+        BootstrapCatalogKind::PgStatisticExt => pg_statistic_ext_desc(),
+        BootstrapCatalogKind::PgStatisticExtData => pg_statistic_ext_data_desc(),
         BootstrapCatalogKind::PgTrigger => pg_trigger_desc(),
         BootstrapCatalogKind::PgPolicy => pg_policy_desc(),
         BootstrapCatalogKind::PgPublication => pg_publication_desc(),
@@ -490,7 +523,7 @@ pub const fn bootstrap_namespace_oid() -> u32 {
     PG_CATALOG_NAMESPACE_OID
 }
 
-pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 40] = [
+pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 42] = [
     BootstrapCatalogRelation {
         oid: PG_NAMESPACE_RELATION_OID,
         name: "pg_namespace",
@@ -628,6 +661,14 @@ pub const CORE_BOOTSTRAP_RELATIONS: [BootstrapCatalogRelation; 40] = [
         name: "pg_statistic",
     },
     BootstrapCatalogRelation {
+        oid: PG_STATISTIC_EXT_RELATION_OID,
+        name: "pg_statistic_ext",
+    },
+    BootstrapCatalogRelation {
+        oid: PG_STATISTIC_EXT_DATA_RELATION_OID,
+        name: "pg_statistic_ext_data",
+    },
+    BootstrapCatalogRelation {
         oid: PG_TRIGGER_RELATION_OID,
         name: "pg_trigger",
     },
@@ -711,21 +752,29 @@ mod tests {
         );
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[32].oid, PG_REWRITE_RELATION_OID);
         assert_eq!(CORE_BOOTSTRAP_RELATIONS[33].oid, PG_STATISTIC_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[34].oid, PG_TRIGGER_RELATION_OID);
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[35].oid, PG_POLICY_RELATION_OID);
         assert_eq!(
-            CORE_BOOTSTRAP_RELATIONS[36].oid,
+            CORE_BOOTSTRAP_RELATIONS[34].oid,
+            PG_STATISTIC_EXT_RELATION_OID
+        );
+        assert_eq!(
+            CORE_BOOTSTRAP_RELATIONS[35].oid,
+            PG_STATISTIC_EXT_DATA_RELATION_OID
+        );
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[36].oid, PG_TRIGGER_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[37].oid, PG_POLICY_RELATION_OID);
+        assert_eq!(
+            CORE_BOOTSTRAP_RELATIONS[38].oid,
             PG_PUBLICATION_RELATION_OID
         );
         assert_eq!(
-            CORE_BOOTSTRAP_RELATIONS[37].oid,
+            CORE_BOOTSTRAP_RELATIONS[39].oid,
             PG_PUBLICATION_REL_RELATION_OID
         );
         assert_eq!(
-            CORE_BOOTSTRAP_RELATIONS[38].oid,
+            CORE_BOOTSTRAP_RELATIONS[40].oid,
             PG_PUBLICATION_NAMESPACE_RELATION_OID
         );
-        assert_eq!(CORE_BOOTSTRAP_RELATIONS[39].oid, PG_AGGREGATE_RELATION_OID);
+        assert_eq!(CORE_BOOTSTRAP_RELATIONS[41].oid, PG_AGGREGATE_RELATION_OID);
     }
 
     #[test]
@@ -771,6 +820,8 @@ mod tests {
                 "pg_partitioned_table",
                 "pg_rewrite",
                 "pg_statistic",
+                "pg_statistic_ext",
+                "pg_statistic_ext_data",
                 "pg_trigger",
                 "pg_policy",
                 "pg_publication",
@@ -802,7 +853,8 @@ use super::{
     pg_largeobject_metadata_desc, pg_namespace_desc, pg_opclass_desc, pg_operator_desc,
     pg_opfamily_desc, pg_partitioned_table_desc, pg_policy_desc, pg_proc_desc, pg_publication_desc,
     pg_publication_namespace_desc, pg_publication_rel_desc, pg_rewrite_desc, pg_statistic_desc,
-    pg_tablespace_desc, pg_trigger_desc, pg_ts_config_desc, pg_ts_config_map_desc, pg_ts_dict_desc,
-    pg_ts_parser_desc, pg_ts_template_desc, pg_type_desc,
+    pg_statistic_ext_data_desc, pg_statistic_ext_desc, pg_tablespace_desc, pg_trigger_desc,
+    pg_ts_config_desc, pg_ts_config_map_desc, pg_ts_dict_desc, pg_ts_parser_desc,
+    pg_ts_template_desc, pg_type_desc,
 };
 use crate::backend::executor::RelationDesc;
