@@ -7,7 +7,8 @@ use crate::backend::parser::{ParseError, SqlExpr, SqlType, parse_expr, parse_typ
 use crate::include::catalog::RECORD_TYPE_OID;
 
 use super::ast::{
-    AliasDecl, AssignTarget, Block, Decl, RaiseLevel, ReturnQueryKind, Stmt, VarDecl,
+    AliasDecl, AssignTarget, Block, Decl, ForQuerySource, ForTarget, RaiseLevel,
+    ReturnQueryKind, Stmt, VarDecl,
 };
 
 #[derive(Parser)]
@@ -162,7 +163,7 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
         Rule::assign_stmt => build_assign_stmt(inner),
         Rule::if_stmt => build_if_stmt(inner),
         Rule::while_stmt => build_while_stmt(inner),
-        Rule::for_int_stmt => build_for_stmt(inner),
+        Rule::for_stmt => build_for_stmt(inner),
         Rule::raise_stmt => build_raise_stmt(inner),
         Rule::return_stmt => build_return_stmt(inner),
         Rule::return_next_stmt => build_return_next_stmt(inner),
@@ -278,23 +279,66 @@ fn build_if_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
 }
 
 fn build_for_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
-    let mut var_name = None;
-    let mut start_expr = None;
-    let mut end_expr = None;
+    let mut targets = Vec::new();
+    let mut source = None;
     let mut body = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
-            Rule::ident if var_name.is_none() => var_name = Some(build_ident(part)),
-            Rule::expr_until_range => start_expr = Some(part.as_str().trim().to_string()),
-            Rule::expr_until_loop => end_expr = Some(part.as_str().trim().to_string()),
+            Rule::for_target_list => {
+                targets.extend(
+                    part.into_inner()
+                        .filter(|inner| inner.as_rule() == Rule::assign_target)
+                        .map(build_assign_target)
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
+            }
+            Rule::expr_until_loop if source.is_none() => {
+                source = Some(part.as_str().trim().to_string());
+            }
             Rule::stmt => body.push(build_stmt(part)?),
             _ => {}
         }
     }
-    Ok(Stmt::ForInt {
-        var_name: var_name.ok_or(ParseError::UnexpectedEof)?,
-        start_expr: start_expr.ok_or(ParseError::UnexpectedEof)?,
-        end_expr: end_expr.ok_or(ParseError::UnexpectedEof)?,
+    let source = source.ok_or(ParseError::UnexpectedEof)?;
+
+    if source_starts_with_execute(&source) {
+        let (sql_expr, using_exprs) = split_execute_query_source(&source)?;
+        return Ok(Stmt::ForQuery {
+            target: build_for_target(targets)?,
+            source: ForQuerySource::Execute {
+                sql_expr,
+                using_exprs,
+            },
+            body,
+        });
+    }
+
+    if let Some(range_index) = find_top_level_range_op(&source) {
+        let [AssignTarget::Name(var_name)] = targets.as_slice() else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "single loop variable for integer FOR loop",
+                actual: format!("{targets:?}"),
+            });
+        };
+        let start_expr = source[..range_index].trim();
+        let end_expr = source[range_index + 2..].trim();
+        if start_expr.is_empty() || end_expr.is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "FOR start_expr .. end_expr",
+                actual: source,
+            });
+        }
+        return Ok(Stmt::ForInt {
+            var_name: var_name.clone(),
+            start_expr: start_expr.to_string(),
+            end_expr: end_expr.to_string(),
+            body,
+        });
+    }
+
+    Ok(Stmt::ForQuery {
+        target: build_for_target(targets)?,
+        source: ForQuerySource::Static(source),
         body,
     })
 }
@@ -422,6 +466,317 @@ fn build_ident(pair: Pair<'_, Rule>) -> String {
     } else {
         raw.to_ascii_lowercase()
     }
+}
+
+fn build_for_target(targets: Vec<AssignTarget>) -> Result<ForTarget, ParseError> {
+    match targets.as_slice() {
+        [] => Err(ParseError::UnexpectedEof),
+        [target] => Ok(ForTarget::Single(target.clone())),
+        _ => Ok(ForTarget::List(targets)),
+    }
+}
+
+fn source_starts_with_execute(source: &str) -> bool {
+    let trimmed = source.trim_start();
+    keyword_at(trimmed, 0, "execute")
+}
+
+fn split_execute_query_source(source: &str) -> Result<(String, Vec<String>), ParseError> {
+    let trimmed = source.trim_start();
+    let rest = trimmed["execute".len()..].trim_start();
+    if rest.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "FOR ... IN EXECUTE <query>",
+            actual: source.to_string(),
+        });
+    }
+
+    let Some(using_index) = find_next_top_level_keyword(rest, &["using"]) else {
+        return Ok((rest.to_string(), Vec::new()));
+    };
+    let sql_expr = rest[..using_index].trim();
+    let using_sql = rest[using_index + "using".len()..].trim();
+    if sql_expr.is_empty() || using_sql.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "FOR ... IN EXECUTE <query> USING expr [, ...]",
+            actual: source.to_string(),
+        });
+    }
+    let using_exprs = split_top_level_csv(using_sql).ok_or_else(|| ParseError::UnexpectedToken {
+        expected: "FOR ... IN EXECUTE <query> USING expr [, ...]",
+        actual: source.to_string(),
+    })?;
+    Ok((sql_expr.to_string(), using_exprs))
+}
+
+fn find_next_top_level_keyword(sql: &str, keywords: &[&str]) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        let ch = bytes[idx] as char;
+        if in_single {
+            if ch == '\'' {
+                if bytes.get(idx + 1) == Some(&b'\'') {
+                    idx += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_double {
+            if ch == '"' {
+                if bytes.get(idx + 1) == Some(&b'"') {
+                    idx += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if let Some(tag) = dollar_quote_tag_at(sql, idx) {
+            if let Some(close) = sql[idx + tag.len()..].find(tag) {
+                idx += tag.len() + close + tag.len();
+                continue;
+            }
+            idx += tag.len();
+            continue;
+        }
+
+        match ch {
+            '\'' => {
+                in_single = true;
+                idx += 1;
+                continue;
+            }
+            '"' => {
+                in_double = true;
+                idx += 1;
+                continue;
+            }
+            '(' => {
+                depth += 1;
+                idx += 1;
+                continue;
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                idx += 1;
+                continue;
+            }
+            '[' => {
+                bracket_depth += 1;
+                idx += 1;
+                continue;
+            }
+            ']' => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                idx += 1;
+                continue;
+            }
+            _ => {}
+        }
+
+        if depth == 0
+            && bracket_depth == 0
+            && keywords.iter().any(|keyword| keyword_at(sql, idx, keyword))
+        {
+            return Some(idx);
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn find_top_level_range_op(sql: &str) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut idx = 0usize;
+    while idx + 1 < bytes.len() {
+        let ch = bytes[idx] as char;
+        if in_single {
+            if ch == '\'' {
+                if bytes.get(idx + 1) == Some(&b'\'') {
+                    idx += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_double {
+            if ch == '"' {
+                if bytes.get(idx + 1) == Some(&b'"') {
+                    idx += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if let Some(tag) = dollar_quote_tag_at(sql, idx) {
+            if let Some(close) = sql[idx + tag.len()..].find(tag) {
+                idx += tag.len() + close + tag.len();
+                continue;
+            }
+            idx += tag.len();
+            continue;
+        }
+
+        match ch {
+            '\'' => {
+                in_single = true;
+                idx += 1;
+                continue;
+            }
+            '"' => {
+                in_double = true;
+                idx += 1;
+                continue;
+            }
+            '(' => {
+                depth += 1;
+                idx += 1;
+                continue;
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                idx += 1;
+                continue;
+            }
+            '[' => {
+                bracket_depth += 1;
+                idx += 1;
+                continue;
+            }
+            ']' => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                idx += 1;
+                continue;
+            }
+            '.' if depth == 0 && bracket_depth == 0 && bytes[idx + 1] == b'.' => {
+                return Some(idx);
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+    None
+}
+
+fn split_top_level_csv(input: &str) -> Option<Vec<String>> {
+    let bytes = input.as_bytes();
+    let mut depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut start = 0usize;
+    let mut parts = Vec::new();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        let ch = bytes[idx] as char;
+        if in_single {
+            if ch == '\'' {
+                if bytes.get(idx + 1) == Some(&b'\'') {
+                    idx += 2;
+                    continue;
+                }
+                in_single = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if in_double {
+            if ch == '"' {
+                if bytes.get(idx + 1) == Some(&b'"') {
+                    idx += 2;
+                    continue;
+                }
+                in_double = false;
+            }
+            idx += 1;
+            continue;
+        }
+        if let Some(tag) = dollar_quote_tag_at(input, idx) {
+            if let Some(close) = input[idx + tag.len()..].find(tag) {
+                idx += tag.len() + close + tag.len();
+                continue;
+            }
+            idx += tag.len();
+            continue;
+        }
+
+        match ch {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            ',' if depth == 0 && bracket_depth == 0 => {
+                let part = input[start..idx].trim();
+                if part.is_empty() {
+                    return None;
+                }
+                parts.push(part.to_string());
+                start = idx + 1;
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+
+    let tail = input[start..].trim();
+    if tail.is_empty() {
+        return None;
+    }
+    parts.push(tail.to_string());
+    Some(parts)
+}
+
+fn dollar_quote_tag_at(sql: &str, idx: usize) -> Option<&str> {
+    let bytes = sql.as_bytes();
+    if bytes.get(idx) != Some(&b'$') {
+        return None;
+    }
+    let mut end = idx + 1;
+    while let Some(byte) = bytes.get(end) {
+        let ch = *byte as char;
+        if ch == '$' {
+            return Some(&sql[idx..=end]);
+        }
+        if !is_identifier_char(ch) {
+            return None;
+        }
+        end += 1;
+    }
+    None
+}
+
+fn keyword_at(sql: &str, idx: usize, keyword: &str) -> bool {
+    let bytes = sql.as_bytes();
+    let end = idx.saturating_add(keyword.len());
+    if end > bytes.len() || !sql[idx..end].eq_ignore_ascii_case(keyword) {
+        return false;
+    }
+    let before_ok = idx == 0 || !is_identifier_char(bytes[idx - 1] as char);
+    let after_ok = end == bytes.len() || !is_identifier_char(bytes[end] as char);
+    before_ok && after_ok
+}
+
+fn is_identifier_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
 }
 
 #[cfg(test)]
@@ -553,13 +908,93 @@ mod tests {
     }
 
     #[test]
-    fn reject_query_style_for_loops_quickly() {
-        let err = parse_block(
+    fn parse_static_query_for_loop() {
+        let block = parse_block(
             "
             begin
                 for objtype in values
                     ('table'), ('index'), ('sequence'), ('view')
                 loop
+                    null;
+                end loop;
+            end
+            ",
+        )
+        .unwrap();
+
+        let Stmt::ForQuery { target, source, body } = &block.statements[0] else {
+            panic!("expected query FOR loop");
+        };
+        assert_eq!(
+            target,
+            &ForTarget::Single(AssignTarget::Name("objtype".into()))
+        );
+        assert_eq!(
+            source,
+            &ForQuerySource::Static(
+                "values\n                    ('table'), ('index'), ('sequence'), ('view')".into()
+            )
+        );
+        assert_eq!(body.len(), 1);
+    }
+
+    #[test]
+    fn parse_dynamic_execute_query_for_loop_with_using() {
+        let block = parse_block(
+            "
+            begin
+                for ln in execute format('select %s', $1) using current_value, current_value + 1 loop
+                    null;
+                end loop;
+            end
+            ",
+        )
+        .unwrap();
+
+        let Stmt::ForQuery { target, source, .. } = &block.statements[0] else {
+            panic!("expected query FOR loop");
+        };
+        assert_eq!(target, &ForTarget::Single(AssignTarget::Name("ln".into())));
+        assert_eq!(
+            source,
+            &ForQuerySource::Execute {
+                sql_expr: "format('select %s', $1)".into(),
+                using_exprs: vec!["current_value".into(), "current_value + 1".into()],
+            }
+        );
+    }
+
+    #[test]
+    fn parse_query_for_loop_with_scalar_target_list() {
+        let block = parse_block(
+            "
+            begin
+                for a, b in values (1, 'x') loop
+                    null;
+                end loop;
+            end
+            ",
+        )
+        .unwrap();
+
+        let Stmt::ForQuery { target, .. } = &block.statements[0] else {
+            panic!("expected query FOR loop");
+        };
+        assert_eq!(
+            target,
+            &ForTarget::List(vec![
+                AssignTarget::Name("a".into()),
+                AssignTarget::Name("b".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn reject_multi_target_integer_for_loops() {
+        let err = parse_block(
+            "
+            begin
+                for a, b in 1..3 loop
                     null;
                 end loop;
             end
