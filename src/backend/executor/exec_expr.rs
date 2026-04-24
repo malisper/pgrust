@@ -35,7 +35,7 @@ use super::expr_datetime::{
 use super::expr_geometry::eval_geometry_function;
 use super::expr_json::{
     eval_json_builtin_function, eval_json_get, eval_json_path, eval_json_record_builtin_function,
-    eval_jsonpath_operator,
+    eval_jsonpath_operator, jsonb_to_tsvector_value,
 };
 use super::expr_locks::eval_advisory_lock_builtin_function;
 use super::expr_math::{
@@ -2049,6 +2049,68 @@ fn eval_pg_column_compression_values(values: &[Value]) -> Result<Value, ExecErro
     }
 }
 
+fn eval_pg_column_size_values(values: &[Value]) -> Result<Value, ExecError> {
+    let [value] = values else {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_column_size(any)",
+            actual: format!("PgColumnSize({} args)", values.len()),
+        }));
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+
+    let size = match value {
+        Value::Jsonb(bytes) | Value::Bytea(bytes) => bytes.len(),
+        Value::Text(text) | Value::Json(text) | Value::JsonPath(text) | Value::Xml(text) => {
+            text.len()
+        }
+        Value::TextRef(_, _) => value.as_text().unwrap_or_default().len(),
+        Value::Int16(_) => 2,
+        Value::Int32(_) | Value::Date(_) | Value::InternalChar(_) => 4,
+        Value::Int64(_)
+        | Value::Money(_)
+        | Value::Float64(_)
+        | Value::Time(_)
+        | Value::Timestamp(_)
+        | Value::TimestampTz(_) => 8,
+        Value::TimeTz(_) => 12,
+        Value::Bool(_) => 1,
+        Value::Numeric(numeric) => numeric.render().len(),
+        Value::Bit(bits) => bits.bytes.len(),
+        Value::TsVector(vector) => crate::backend::executor::render_tsvector_text(vector).len(),
+        Value::TsQuery(query) => crate::backend::executor::render_tsquery_text(query).len(),
+        Value::PgArray(array) => format_array_value_text(array).len(),
+        Value::Array(array) => format_array_text(array).len(),
+        Value::Record(record) => {
+            crate::backend::executor::value_io::format_record_text(record).len()
+        }
+        Value::Range(_) => crate::backend::executor::render_range_text(value)
+            .unwrap_or_default()
+            .len(),
+        Value::Inet(_) | Value::Cidr(_) => crate::backend::executor::render_network_text(value)
+            .unwrap_or_default()
+            .len(),
+        Value::Multirange(_) => super::expr_multirange::render_multirange_text(value)
+            .unwrap_or_default()
+            .len(),
+        Value::Point(_)
+        | Value::Lseg(_)
+        | Value::Path(_)
+        | Value::Line(_)
+        | Value::Box(_)
+        | Value::Polygon(_)
+        | Value::Circle(_) => crate::backend::executor::render_geometry_text(
+            value,
+            crate::backend::libpq::pqformat::FloatFormatOptions::default(),
+        )
+        .unwrap_or_default()
+        .len(),
+        Value::Null => unreachable!("SQL NULL handled above"),
+    };
+    Ok(Value::Int32(size.min(i32::MAX as usize) as i32))
+}
+
 fn eval_pg_relation_is_publishable(
     values: &[Value],
     ctx: &ExecutorContext,
@@ -3386,6 +3448,7 @@ fn eval_plpgsql_builtin_function(
     }
     match func {
         BuiltinScalarFunction::ToTsVector
+        | BuiltinScalarFunction::JsonbToTsVector
         | BuiltinScalarFunction::ToTsQuery
         | BuiltinScalarFunction::PlainToTsQuery
         | BuiltinScalarFunction::PhraseToTsQuery
@@ -3438,6 +3501,7 @@ fn eval_plpgsql_builtin_function(
             sqlstate: "0A000",
         }),
         BuiltinScalarFunction::PgColumnCompression => eval_pg_column_compression_values(&values),
+        BuiltinScalarFunction::PgColumnSize => eval_pg_column_size_values(&values),
         BuiltinScalarFunction::PgSizePretty => eval_pg_size_pretty_function(&values),
         BuiltinScalarFunction::PgSizeBytes => eval_pg_size_bytes_function(&values),
         BuiltinScalarFunction::Lower => eval_lower_function(&values),
@@ -3787,6 +3851,16 @@ fn eval_text_search_builtin_function(
 
     match func {
         BuiltinScalarFunction::ToTsVector => {
+            if let [Value::Jsonb(_)] = values {
+                return jsonb_to_tsvector_value(None, &values[0], None);
+            }
+            if let [_, Value::Jsonb(_)] = values {
+                return jsonb_to_tsvector_value(
+                    arg_text(values, 0, "to_tsvector")?.as_deref(),
+                    &values[1],
+                    None,
+                );
+            }
             let result = match values {
                 [Value::Null] | [_, Value::Null] | [Value::Null, _] => return Ok(Value::Null),
                 [_] => crate::backend::tsearch::to_tsvector_with_config_name(
@@ -3807,6 +3881,26 @@ fn eval_text_search_builtin_function(
                 .map(Value::TsVector)
                 .map_err(|e| parse_error("to_tsvector", e))
         }
+        BuiltinScalarFunction::JsonbToTsVector => match values {
+            [Value::Null, _]
+            | [_, Value::Null]
+            | [Value::Null, _, _]
+            | [_, Value::Null, _]
+            | [_, _, Value::Null] => {
+                return Ok(Value::Null);
+            }
+            [Value::Jsonb(_), _] => jsonb_to_tsvector_value(None, &values[0], values.get(1)),
+            [_, Value::Jsonb(_), _] => jsonb_to_tsvector_value(
+                arg_text(values, 0, "jsonb_to_tsvector")?.as_deref(),
+                &values[1],
+                values.get(2),
+            ),
+            _ => Err(ExecError::TypeMismatch {
+                op: "jsonb_to_tsvector",
+                left: values.first().cloned().unwrap_or(Value::Null),
+                right: values.get(1).cloned().unwrap_or(Value::Null),
+            }),
+        },
         BuiltinScalarFunction::ToTsQuery => {
             let result = match values {
                 [Value::Null] | [_, Value::Null] | [Value::Null, _] => return Ok(Value::Null),
@@ -4282,6 +4376,7 @@ fn eval_builtin_function(
     }
     match func {
         BuiltinScalarFunction::ToTsVector
+        | BuiltinScalarFunction::JsonbToTsVector
         | BuiltinScalarFunction::ToTsQuery
         | BuiltinScalarFunction::PlainToTsQuery
         | BuiltinScalarFunction::PhraseToTsQuery
@@ -4571,6 +4666,7 @@ fn eval_builtin_function(
         }
         BuiltinScalarFunction::PgBackendPid => Ok(Value::Int32(ctx.client_id as i32)),
         BuiltinScalarFunction::PgColumnCompression => eval_pg_column_compression_values(&values),
+        BuiltinScalarFunction::PgColumnSize => eval_pg_column_size_values(&values),
         BuiltinScalarFunction::PgPartitionRoot => eval_pg_partition_root(&values, ctx),
         BuiltinScalarFunction::ObjDescription => eval_obj_description(&values, ctx),
         BuiltinScalarFunction::PgDescribeObject => eval_pg_describe_object(&values, ctx),
