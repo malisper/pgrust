@@ -388,7 +388,8 @@ start_server() {
 }
 
 restart_server() {
-    echo "  -> Server crashed, restarting..."
+    local reason="${1:-Server crashed, restarting...}"
+    echo "  -> $reason"
     stop_server
     rm -rf "$DATA_DIR"
     mkdir -p "$DATA_DIR"
@@ -583,6 +584,7 @@ TOTAL=0
 PASSED=0
 FAILED=0
 ERRORED=0
+TIMED_OUT=0
 
 TOTAL_QUERIES=0
 QUERIES_MATCHED=0
@@ -591,6 +593,7 @@ QUERIES_MISMATCHED=0
 pass_list=()
 fail_list=()
 error_list=()
+timeout_list=()
 SUMMARY_READY=true
 RUN_STATUS="completed"
 
@@ -615,6 +618,7 @@ write_summary() {
     "passed": $PASSED,
     "failed": $FAILED,
     "errored": $ERRORED,
+    "timed_out": $TIMED_OUT,
     "pass_rate_pct": $pass_pct
   },
   "queries": {
@@ -649,6 +653,7 @@ print_summary() {
     echo "  Passed:  $PASSED"
     echo "  Failed:  $FAILED"
     echo "  Errored: $ERRORED"
+    echo "  Timed out: $TIMED_OUT"
 
     if [[ $TOTAL -gt 0 ]]; then
         pass_pct=$((PASSED * 100 / TOTAL))
@@ -691,6 +696,14 @@ print_summary() {
         echo ""
         echo "ERRORED TESTS (${#error_list[@]}):"
         for t in "${error_list[@]}"; do
+            echo "  $t"
+        done
+    fi
+
+    if [[ ${#timeout_list[@]} -gt 0 ]]; then
+        echo ""
+        echo "TIMED OUT TESTS (${#timeout_list[@]}):"
+        for t in "${timeout_list[@]}"; do
             echo "  $t"
         done
     fi
@@ -927,15 +940,28 @@ for sql_file in "${TEST_FILES[@]}"; do
         pass_list+=("$test_name")
         rm -f "$diff_file"
     else
-        # Check if it was an error (connection refused, crash, etc.) vs just wrong output
-        if grep -q "connection refused\|could not connect\|server closed the connection unexpectedly\|TIMEOUT" "$output_file" 2>/dev/null; then
+        # Check if it timed out, crashed/disconnected, or just produced wrong output.
+        if grep -q "TIMEOUT" "$output_file" 2>/dev/null; then
+            printf "%-40s TIMEOUT (%d/%d queries matched)\n" "$test_name" "$q_matched" "$q_total"
+            TIMED_OUT=$((TIMED_OUT + 1))
+            timeout_list+=("$test_name")
+
+            # A hard psql timeout may leave the server busy with the timed-out
+            # query. Restart it without reporting that as a crash.
+            if [[ "$SKIP_SERVER" == false ]] && ! kill -0 "$SERVER_PID" 2>/dev/null; then
+                if ! restart_server "Timed out; restarting server to clear active query..."; then
+                    RUN_STATUS="aborted"
+                    break
+                fi
+            fi
+        elif grep -q "connection refused\|could not connect\|server closed the connection unexpectedly" "$output_file" 2>/dev/null; then
             printf "%-40s ERROR (%d/%d queries matched)\n" "$test_name" "$q_matched" "$q_total"
             ERRORED=$((ERRORED + 1))
             error_list+=("$test_name")
 
             # If server crashed, try to restart it
             if [[ "$SKIP_SERVER" == false ]] && ! kill -0 "$SERVER_PID" 2>/dev/null; then
-                if ! restart_server; then
+                if ! restart_server "Server crashed, restarting..."; then
                     RUN_STATUS="aborted"
                     break
                 fi
