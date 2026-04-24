@@ -2737,6 +2737,84 @@ fn explain_scan_filter_renders_single_seq_scan_line() {
 }
 
 #[test]
+fn explain_expr_renders_user_function_current_user_and_initplan() {
+    use crate::backend::parser::{SqlType, SqlTypeKind};
+    use crate::include::nodes::primnodes::{
+        BoolExprType, OpExprKind, ScalarFunctionImpl, SubLinkType, SubPlan,
+    };
+
+    let int4 = SqlType::new(SqlTypeKind::Int4);
+    let text = SqlType::new(SqlTypeKind::Text);
+    let bool_ty = SqlType::new(SqlTypeKind::Bool);
+    let expr = Expr::bool_expr(
+        BoolExprType::And,
+        vec![
+            Expr::binary_op(
+                OpExprKind::LtEq,
+                bool_ty,
+                Expr::Var(Var {
+                    varno: 1,
+                    varattno: user_attrno(2),
+                    varlevelsup: 0,
+                    vartype: int4,
+                }),
+                Expr::SubPlan(Box::new(SubPlan {
+                    sublink_type: SubLinkType::ExprSubLink,
+                    testexpr: None,
+                    first_col_type: Some(int4),
+                    plan_id: 0,
+                    par_param: Vec::new(),
+                    args: Vec::new(),
+                })),
+            ),
+            Expr::func_with_impl(
+                16506,
+                Some(bool_ty),
+                false,
+                ScalarFunctionImpl::UserDefined { proc_oid: 16506 },
+                vec![Expr::Var(Var {
+                    varno: 1,
+                    varattno: user_attrno(4),
+                    varlevelsup: 0,
+                    vartype: text,
+                })],
+            ),
+            Expr::binary_op(
+                OpExprKind::Eq,
+                bool_ty,
+                Expr::Var(Var {
+                    varno: 1,
+                    varattno: user_attrno(0),
+                    varlevelsup: 0,
+                    vartype: text,
+                }),
+                Expr::CurrentUser,
+            ),
+        ],
+    );
+    let mut expr = expr;
+    if let Expr::Bool(bool_expr) = &mut expr
+        && let Expr::Func(func) = &mut bool_expr.args[1]
+    {
+        func.funcname = Some("f_leak".into());
+    }
+
+    assert_eq!(
+        render_explain_expr(
+            &expr,
+            &[
+                "pguser".into(),
+                "cid".into(),
+                "dlevel".into(),
+                "dauthor".into(),
+                "dtitle".into(),
+            ],
+        ),
+        "((dlevel <= (InitPlan 1).col1 AND f_leak(dtitle) AND pguser = CURRENT_USER))"
+    );
+}
+
+#[test]
 fn explain_const_false_scan_filter_uses_one_time_filter() {
     let base = temp_dir("explain_const_false_scan_filter");
     let txns = TransactionManager::new_durable(&base).unwrap();

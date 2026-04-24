@@ -1257,6 +1257,7 @@ pub struct OpExpr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FuncExpr {
     pub funcid: u32,
+    pub funcname: Option<String>,
     pub funcresulttype: Option<SqlType>,
     pub funcvariadic: bool,
     pub implementation: ScalarFunctionImpl,
@@ -1524,6 +1525,7 @@ impl Expr {
     ) -> Self {
         Expr::Func(Box::new(FuncExpr {
             funcid,
+            funcname: None,
             funcresulttype,
             funcvariadic,
             implementation,
@@ -1627,17 +1629,22 @@ impl Expr {
 
     pub fn user_defined_func(
         funcid: u32,
+        funcname: Option<String>,
         funcresulttype: Option<SqlType>,
         funcvariadic: bool,
         args: Vec<Expr>,
     ) -> Self {
-        Self::func_with_impl(
+        let mut expr = Self::func_with_impl(
             funcid,
             funcresulttype,
             funcvariadic,
             ScalarFunctionImpl::UserDefined { proc_oid: funcid },
             args,
-        )
+        );
+        if let Expr::Func(func) = &mut expr {
+            func.funcname = funcname;
+        }
+        expr
     }
 
     pub fn builtin_window_func(
