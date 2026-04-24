@@ -23178,6 +23178,88 @@ fn create_function_named_composite_rows_expand_from_relation_rowtype() {
 }
 
 #[test]
+fn plpgsql_declare_type_rowtype_and_labeled_record_qualification_work() {
+    let dir = temp_dir("plpgsql_decl_type_rowtype_labels");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table pl_decl_items (id int4, note text)")
+        .unwrap();
+    db.execute(1, "insert into pl_decl_items values (1, 'alpha')")
+        .unwrap();
+    db.execute(
+        1,
+        "create function pl_decl_type_ref() returns text language plpgsql as $$
+            declare
+                copied pl_decl_items.note%TYPE;
+            begin
+                select into copied note from pl_decl_items where id = 1;
+                return copied;
+            end
+        $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function pl_decl_rowtype_ref() returns text language plpgsql as $$
+            declare
+                item pl_decl_items%ROWTYPE;
+            begin
+                select into item * from pl_decl_items where id = 1;
+                return item.note;
+            end
+        $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function pl_decl_labeled_ref() returns text language plpgsql as $$
+            <<outer>>
+            declare
+                item record;
+                result text;
+            begin
+                select into item * from pl_decl_items where id = 1;
+                declare
+                    inner_item record;
+                begin
+                    select into inner_item * from pl_decl_items where note = \"outer\".item.note;
+                    result := inner_item.note;
+                end;
+                return result;
+            end
+        $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function pl_decl_empty_declare() returns bool language plpgsql as $$
+            declare
+            begin
+                return true;
+            end
+        $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select pl_decl_type_ref()"),
+        vec![vec![Value::Text("alpha".into())]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select pl_decl_rowtype_ref()"),
+        vec![vec![Value::Text("alpha".into())]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select pl_decl_labeled_ref()"),
+        vec![vec![Value::Text("alpha".into())]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select pl_decl_empty_declare()"),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
 fn create_trigger_updates_pg_trigger_and_relhastriggers() {
     let dir = temp_dir("create_trigger_catalog_rows");
     let db = Database::open(&dir, 64).unwrap();
