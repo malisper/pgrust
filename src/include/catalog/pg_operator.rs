@@ -12,15 +12,16 @@ use crate::include::catalog::{
     INT4_CMP_GE_PROC_OID, INT4_CMP_GT_PROC_OID, INT4_CMP_LE_PROC_OID, INT4_CMP_LT_PROC_OID,
     INT4_CMP_NE_PROC_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID, INT8RANGE_TYPE_OID,
     INTERNAL_CHAR_TYPE_OID, JSONB_CMP_EQ_PROC_OID, JSONB_CMP_GE_PROC_OID, JSONB_CMP_GT_PROC_OID,
-    JSONB_CMP_LE_PROC_OID, JSONB_CMP_LT_PROC_OID, JSONB_CMP_NE_PROC_OID, JSONB_TYPE_OID,
-    LINE_TYPE_OID, LSEG_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID, OID_TYPE_OID, PATH_TYPE_OID,
-    PG_CATALOG_NAMESPACE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, TEXT_CMP_EQ_PROC_OID,
-    TEXT_CMP_GE_PROC_OID, TEXT_CMP_GT_PROC_OID, TEXT_CMP_LE_PROC_OID, TEXT_CMP_LT_PROC_OID,
-    TEXT_CMP_NE_PROC_OID, TEXT_STARTS_WITH_PROC_OID, TEXT_TYPE_OID, TID_TYPE_OID, TIME_TYPE_OID,
-    TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TIMETZ_TYPE_OID, TSRANGE_TYPE_OID,
-    TSTZRANGE_TYPE_OID, VARBIT_CMP_EQ_PROC_OID, VARBIT_CMP_GE_PROC_OID, VARBIT_CMP_GT_PROC_OID,
-    VARBIT_CMP_LE_PROC_OID, VARBIT_CMP_LT_PROC_OID, VARBIT_CMP_NE_PROC_OID, VARBIT_TYPE_OID,
-    bootstrap_pg_proc_rows,
+    JSONB_CMP_LE_PROC_OID, JSONB_CMP_LT_PROC_OID, JSONB_CMP_NE_PROC_OID, JSONB_CONTAINED_PROC_OID,
+    JSONB_CONTAINS_PROC_OID, JSONB_EXISTS_ALL_PROC_OID, JSONB_EXISTS_ANY_PROC_OID,
+    JSONB_EXISTS_PROC_OID, JSONB_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID, NUMERIC_TYPE_OID,
+    NUMRANGE_TYPE_OID, OID_TYPE_OID, PATH_TYPE_OID, PG_CATALOG_NAMESPACE_OID, POINT_TYPE_OID,
+    POLYGON_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_CMP_EQ_PROC_OID, TEXT_CMP_GE_PROC_OID,
+    TEXT_CMP_GT_PROC_OID, TEXT_CMP_LE_PROC_OID, TEXT_CMP_LT_PROC_OID, TEXT_CMP_NE_PROC_OID,
+    TEXT_STARTS_WITH_PROC_OID, TEXT_TYPE_OID, TID_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_TYPE_OID,
+    TIMESTAMPTZ_TYPE_OID, TIMETZ_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID,
+    VARBIT_CMP_EQ_PROC_OID, VARBIT_CMP_GE_PROC_OID, VARBIT_CMP_GT_PROC_OID, VARBIT_CMP_LE_PROC_OID,
+    VARBIT_CMP_LT_PROC_OID, VARBIT_CMP_NE_PROC_OID, VARBIT_TYPE_OID, bootstrap_pg_proc_rows,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +42,12 @@ pub struct PgOperatorRow {
     pub oprrest: u32,
     pub oprjoin: u32,
 }
+
+pub const JSONB_CONTAINS_OPERATOR_OID: u32 = 3246;
+pub const JSONB_EXISTS_OPERATOR_OID: u32 = 3247;
+pub const JSONB_EXISTS_ANY_OPERATOR_OID: u32 = 3248;
+pub const JSONB_EXISTS_ALL_OPERATOR_OID: u32 = 3249;
+pub const JSONB_CONTAINED_OPERATOR_OID: u32 = 3250;
 
 pub fn pg_operator_desc() -> RelationDesc {
     RelationDesc {
@@ -591,6 +598,61 @@ pub fn bootstrap_pg_operator_rows() -> Vec<PgOperatorRow> {
             3244,
             3242,
             JSONB_CMP_GE_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            JSONB_CONTAINS_OPERATOR_OID,
+            "@>",
+            JSONB_TYPE_OID,
+            JSONB_TYPE_OID,
+            JSONB_CONTAINED_OPERATOR_OID,
+            0,
+            JSONB_CONTAINS_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            JSONB_CONTAINED_OPERATOR_OID,
+            "<@",
+            JSONB_TYPE_OID,
+            JSONB_TYPE_OID,
+            JSONB_CONTAINS_OPERATOR_OID,
+            0,
+            JSONB_CONTAINED_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            JSONB_EXISTS_OPERATOR_OID,
+            "?",
+            JSONB_TYPE_OID,
+            TEXT_TYPE_OID,
+            0,
+            0,
+            JSONB_EXISTS_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            JSONB_EXISTS_ANY_OPERATOR_OID,
+            "?|",
+            JSONB_TYPE_OID,
+            TEXT_ARRAY_TYPE_OID,
+            0,
+            0,
+            JSONB_EXISTS_ANY_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            JSONB_EXISTS_ALL_OPERATOR_OID,
+            "?&",
+            JSONB_TYPE_OID,
+            TEXT_ARRAY_TYPE_OID,
+            0,
+            0,
+            JSONB_EXISTS_ALL_PROC_OID,
             false,
             false,
         ),

@@ -7,6 +7,7 @@ pub mod brin_tuple;
 pub mod brin_xlog;
 pub mod detoast;
 pub mod genam;
+pub mod gin;
 pub mod gist;
 pub mod heapam_xlog;
 pub mod heaptoast;

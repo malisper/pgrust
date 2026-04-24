@@ -11,6 +11,7 @@ use crate::backend::parser::SqlType;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name, sql_type_oid};
 use crate::include::access::brin::BrinOptions;
+use crate::include::access::gin::GinOptions;
 use crate::include::catalog::{
     ANYOID, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, PG_CATALOG_NAMESPACE_OID,
     PG_CONSTRAINT_RELATION_OID, PgPartitionedTableRow, bootstrap_catalog_kinds,
@@ -72,6 +73,7 @@ pub struct IndexRelCacheEntry {
     #[serde(skip)]
     pub rd_indpred: Option<Option<Expr>>,
     pub brin_options: Option<BrinOptions>,
+    pub gin_options: Option<GinOptions>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -177,6 +179,18 @@ impl IndexSupportLookup {
 }
 
 impl IndexRelCacheEntry {
+    fn indexed_operator_type_oid(&self, desc: &RelationDesc, column_index: usize) -> Option<u32> {
+        self.opcintype_oids
+            .get(column_index)
+            .copied()
+            .filter(|oid| *oid != 0)
+            .or_else(|| {
+                desc.columns
+                    .get(column_index)
+                    .map(|column| sql_type_oid(column.sql_type))
+            })
+    }
+
     fn indexed_operand_type_oid(&self, desc: &RelationDesc, column_index: usize) -> Option<u32> {
         self.opckeytype_oids
             .get(column_index)
@@ -293,7 +307,7 @@ impl IndexRelCacheEntry {
         purpose: Option<char>,
         predicate: impl Fn(&IndexAmOpEntry) -> bool,
     ) -> Option<u16> {
-        let left_type_oid = self.indexed_operand_type_oid(desc, column_index);
+        let left_type_oid = self.indexed_operator_type_oid(desc, column_index);
         let mut best: Option<(u8, i16)> = None;
         for entry in self.amop_entries.get(column_index)?.iter() {
             if purpose.is_some_and(|purpose| entry.purpose != purpose) || !predicate(entry) {
@@ -533,6 +547,7 @@ impl RelCache {
                             rd_indexprs: None,
                             rd_indpred: None,
                             brin_options: None,
+                            gin_options: None,
                         };
                     };
                     let indclass = index.indclass.clone();
@@ -569,6 +584,7 @@ impl RelCache {
                         rd_indexprs: None,
                         rd_indpred: None,
                         brin_options: None,
+                        gin_options: None,
                     }
                 }),
             };
@@ -751,6 +767,7 @@ fn from_catalog_entry(entry: &CatalogEntry, support_lookup: &IndexSupportLookup)
                 rd_indexprs: None,
                 rd_indpred: None,
                 brin_options: index.brin_options.clone(),
+                gin_options: index.gin_options.clone(),
             }
         }),
     }
@@ -836,6 +853,7 @@ mod tests {
                     indnullsnotdistinct: false,
                     indisexclusion: false,
                     brin_options: None,
+                    gin_options: None,
                 },
             )
             .unwrap();
@@ -885,6 +903,7 @@ mod tests {
                     indnullsnotdistinct: true,
                     indisexclusion: false,
                     brin_options: None,
+                    gin_options: None,
                 },
             )
             .unwrap();
@@ -942,6 +961,7 @@ mod tests {
             rd_indexprs: None,
             rd_indpred: None,
             brin_options: None,
+            gin_options: None,
         };
         let contains_proc_oid = bootstrap_pg_operator_rows()
             .into_iter()
@@ -1007,6 +1027,7 @@ mod tests {
             rd_indexprs: None,
             rd_indpred: None,
             brin_options: None,
+            gin_options: None,
         };
         let distance_operator = bootstrap_pg_operator_rows()
             .into_iter()
