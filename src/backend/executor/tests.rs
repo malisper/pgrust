@@ -9861,6 +9861,142 @@ fn select_list_generate_series_promotes_integer_bounds_with_numeric_step() {
 }
 
 #[test]
+fn select_list_srf_inside_scalar_expression_expands_rows() {
+    let base = temp_dir("project_set_scalar_expr");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select generate_series(1, 3) + 10",
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Int32(11)],
+            vec![Value::Int32(12)],
+            vec![Value::Int32(13)],
+        ],
+    );
+}
+
+#[test]
+fn select_list_srf_inside_scalar_function_expands_rows() {
+    let base = temp_dir("project_set_scalar_func");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select abs(generate_series(-2, 2))",
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Int32(2)],
+            vec![Value::Int32(1)],
+            vec![Value::Int32(0)],
+            vec![Value::Int32(1)],
+            vec![Value::Int32(2)],
+        ],
+    );
+}
+
+#[test]
+fn select_list_nested_srf_uses_multiple_project_set_levels() {
+    let base = temp_dir("project_set_nested_srf");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select generate_series(1, generate_series(1, 3))",
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Int32(1)],
+            vec![Value::Int32(1)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(1)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(3)],
+        ],
+    );
+}
+
+#[test]
+fn select_list_srf_mixes_with_aggregate_output() {
+    let base = temp_dir("project_set_with_aggregate");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name) values (1, 'alice'), (2, 'bob')",
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select count(*), generate_series(1, 2) from people",
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Int64(2), Value::Int32(1)],
+            vec![Value::Int64(2), Value::Int32(2)],
+        ],
+    );
+}
+
+#[test]
+fn select_list_srf_mixes_with_window_output() {
+    let base = temp_dir("project_set_with_window");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select row_number() over (), generate_series(1, 2)",
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Int64(1), Value::Int32(1)],
+            vec![Value::Int64(1), Value::Int32(2)],
+        ],
+    );
+}
+
+#[test]
+fn srf_rejected_in_case_and_aggregate_arguments() {
+    let base = temp_dir("project_set_invalid_contexts");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert!(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select case when true then generate_series(1, 2) else 0 end",
+        )
+        .is_err()
+    );
+    assert!(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select sum(generate_series(1, 2))",
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn select_list_unnest_expands_rows() {
     let base = temp_dir("project_set_unnest");
     let txns = TransactionManager::new_durable(&base).unwrap();

@@ -5,6 +5,7 @@ use crate::backend::executor::{Expr, Plan};
 use crate::backend::parser::{CatalogLookup, FromItem, JoinConstraint, SqlExpr};
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntryKind};
 use crate::include::nodes::plannodes::PlannedStmt;
+use crate::include::nodes::primnodes::set_returning_call_exprs;
 
 pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLocator>) {
     match expr {
@@ -57,6 +58,11 @@ pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLoc
         Expr::CaseTest(_) => {}
         Expr::Func(func) => {
             for arg in &func.args {
+                collect_rels_from_expr(arg, rels);
+            }
+        }
+        Expr::SetReturning(srf) => {
+            for arg in set_returning_call_exprs(&srf.call) {
                 collect_rels_from_expr(arg, rels);
             }
         }
@@ -192,18 +198,6 @@ fn collect_rels_from_query(query: &Query, rels: &mut BTreeSet<RelFileLocator>) {
     }
     for target in &query.target_list {
         collect_rels_from_expr(&target.expr, rels);
-    }
-    if let Some(targets) = &query.project_set {
-        for target in targets {
-            match target {
-                crate::include::nodes::primnodes::ProjectSetTarget::Scalar(entry) => {
-                    collect_rels_from_expr(&entry.expr, rels);
-                }
-                crate::include::nodes::primnodes::ProjectSetTarget::Set { call, .. } => {
-                    collect_rels_from_set_returning_call(call, rels);
-                }
-            }
-        }
     }
     if let Some(recursive_union) = &query.recursive_union {
         collect_rels_from_query(&recursive_union.anchor, rels);

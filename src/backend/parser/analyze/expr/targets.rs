@@ -4,31 +4,20 @@ use crate::backend::utils::record::{
 };
 pub(crate) enum BoundSelectTargets {
     Plain(Vec<TargetEntry>),
-    WithProjectSet {
-        project_targets: Vec<ProjectSetTarget>,
-        final_targets: Vec<TargetEntry>,
-    },
-}
-
-#[derive(Clone)]
-enum TopLevelSelectSrfTarget {
-    Call {
-        name: String,
-        args: Vec<SqlFunctionArg>,
-        func_variadic: bool,
-    },
-    FieldSelect {
-        name: String,
-        args: Vec<SqlFunctionArg>,
-        func_variadic: bool,
-        field: String,
-    },
 }
 
 struct BoundSelectListSrfTarget {
+    output_name: String,
     call: SetReturningCall,
     sql_type: SqlType,
     column_index: usize,
+}
+
+struct BoundScalarSelectTarget {
+    output_name: String,
+    expr: Expr,
+    sql_type: SqlType,
+    input_resno: Option<usize>,
 }
 
 fn input_resno_for_scope_expr(scope: &BoundScope, expr: &Expr) -> Option<usize> {
@@ -47,213 +36,82 @@ pub(crate) fn bind_select_targets(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<BoundSelectTargets, ParseError> {
-    let mut has_srf = false;
+    let mut entries = Vec::with_capacity(targets.len());
     for item in targets {
-        let info = classify_select_target_srf(
-            &item.expr,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        );
-        if info.has_nested {
-            return Err(ParseError::UnexpectedToken {
-                expected: "set-returning function at top level of select list",
-                actual: format!("{:?}", item.expr),
-            });
-        }
-        has_srf |= info.top_level.is_some();
-    }
-
-    if !has_srf {
-        return Ok(BoundSelectTargets::Plain(bind_plain_select_targets(
-            targets,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?));
-    }
-
-    let mut project_targets = scope
-        .columns
-        .iter()
-        .enumerate()
-        .map(|(index, column)| {
-            ProjectSetTarget::Scalar(
+        let item_targets =
+            bind_select_item_once(item, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+        for bound in item_targets {
+            entries.push(
                 TargetEntry::new(
-                    column.output_name.clone(),
-                    scope.output_exprs.get(index).cloned().unwrap_or_else(|| {
-                        panic!("bound scope output_exprs missing project-set base column {index}")
-                    }),
-                    scope.desc.columns[index].sql_type,
-                    index + 1,
+                    bound.output_name,
+                    bound.expr,
+                    bound.sql_type,
+                    entries.len() + 1,
                 )
-                .with_input_resno(index + 1),
-            )
-        })
-        .collect::<Vec<_>>();
-
-    let mut final_targets = Vec::new();
-    let mut srf_index = 0usize;
-    let base_width = scope.columns.len();
-
-    for item in targets {
-        if let Some(target) = top_level_set_returning_target(
-            &item.expr,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        ) {
-            let bound_target = bind_select_list_srf_target(
-                &target,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            )?;
-            let output_name = item.output_name.clone();
-            project_targets.push(ProjectSetTarget::Set {
-                name: output_name.clone(),
-                call: bound_target.call,
-                sql_type: bound_target.sql_type,
-                column_index: bound_target.column_index,
-            });
-            final_targets.push(
-                TargetEntry::new(
-                    output_name,
-                    Expr::Const(Value::Null),
-                    bound_target.sql_type,
-                    final_targets.len() + 1,
-                )
-                .with_input_resno(base_width + srf_index + 1),
+                .with_input_resno_opt(bound.input_resno),
             );
-            srf_index += 1;
-            continue;
         }
-
-        let expr = bind_expr_with_outer_and_ctes(
-            &item.expr,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?;
-        let input_resno = input_resno_for_scope_expr(scope, &expr);
-        final_targets.push(
-            TargetEntry::new(
-                item.output_name.clone(),
-                expr,
-                infer_sql_expr_type_with_ctes(
-                    &item.expr,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                ),
-                final_targets.len() + 1,
-            )
-            .with_input_resno_opt(input_resno),
-        );
     }
-
-    Ok(BoundSelectTargets::WithProjectSet {
-        project_targets,
-        final_targets,
-    })
+    Ok(BoundSelectTargets::Plain(entries))
 }
 
-pub(crate) fn select_targets_contain_set_returning_call(
-    targets: &[SelectItem],
+fn bind_select_item_once(
+    item: &SelectItem,
     scope: &BoundScope,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
-) -> bool {
-    targets.iter().any(|item| {
-        classify_select_target_srf(
-            &item.expr,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )
-        .top_level
-        .is_some()
-    })
+) -> Result<Vec<BoundScalarSelectTarget>, ParseError> {
+    if let SqlExpr::Column(name) = &item.expr {
+        if name == "*" {
+            return Ok(bound_scalar_items_from_target_entries(expand_star_targets(
+                scope, None,
+            )?));
+        }
+        if let Some(relation) = name.strip_suffix(".*") {
+            return Ok(bound_scalar_items_from_target_entries(
+                expand_named_star_targets(scope, outer_scopes, relation)?,
+            ));
+        }
+    }
+    if let SqlExpr::FieldSelect { expr, field } = &item.expr
+        && field == "*"
+    {
+        return Ok(bound_scalar_items_from_target_entries(
+            expand_record_expr_targets(expr, scope, catalog, outer_scopes, grouped_outer, ctes, 1)?,
+        ));
+    }
+
+    let typed = bind_typed_expr_with_outer_and_ctes(
+        &item.expr,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    let input_resno = input_resno_for_scope_expr(scope, &typed.expr);
+    Ok(vec![BoundScalarSelectTarget {
+        output_name: item.output_name.clone(),
+        expr: typed.expr,
+        sql_type: typed.sql_type,
+        input_resno,
+    }])
 }
 
-fn bind_plain_select_targets(
-    targets: &[SelectItem],
-    scope: &BoundScope,
-    catalog: &dyn CatalogLookup,
-    outer_scopes: &[BoundScope],
-    grouped_outer: Option<&GroupedOuterScope>,
-    ctes: &[BoundCte],
-) -> Result<Vec<TargetEntry>, ParseError> {
-    let mut entries = Vec::new();
-    for item in targets {
-        if let SqlExpr::Column(name) = &item.expr {
-            if name == "*" {
-                entries.extend(expand_star_targets(scope, None)?);
-                continue;
-            }
-            if let Some(relation) = name.strip_suffix(".*") {
-                entries.extend(expand_named_star_targets(scope, outer_scopes, relation)?);
-                continue;
-            }
-        }
-        if let SqlExpr::FieldSelect { expr, field } = &item.expr
-            && field == "*"
-        {
-            entries.extend(expand_record_expr_targets(
-                expr,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-                entries.len() + 1,
-            )?);
-            continue;
-        }
-
-        let expr = bind_expr_with_outer_and_ctes(
-            &item.expr,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?;
-        let input_resno = input_resno_for_scope_expr(scope, &expr);
-        entries.push(
-            TargetEntry::new(
-                item.output_name.clone(),
-                expr,
-                infer_sql_expr_type_with_ctes(
-                    &item.expr,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                ),
-                entries.len() + 1,
-            )
-            .with_input_resno_opt(input_resno),
-        );
-    }
-    Ok(entries)
+fn bound_scalar_items_from_target_entries(
+    entries: Vec<TargetEntry>,
+) -> Vec<BoundScalarSelectTarget> {
+    entries
+        .into_iter()
+        .map(|entry| BoundScalarSelectTarget {
+            output_name: entry.name,
+            expr: entry.expr,
+            sql_type: entry.sql_type,
+            input_resno: entry.input_resno,
+        })
+        .collect()
 }
 
 fn expand_named_star_targets(
@@ -367,143 +225,18 @@ fn record_expr_fields(
     })
 }
 
-#[derive(Default)]
-struct TargetSrfInfo {
-    top_level: Option<TopLevelSelectSrfTarget>,
-    has_nested: bool,
-}
-
-fn classify_select_target_srf(
-    expr: &SqlExpr,
-    scope: &BoundScope,
-    catalog: &dyn CatalogLookup,
-    outer_scopes: &[BoundScope],
-    grouped_outer: Option<&GroupedOuterScope>,
-    ctes: &[BoundCte],
-) -> TargetSrfInfo {
-    if let Some(target) =
-        top_level_set_returning_target(expr, scope, catalog, outer_scopes, grouped_outer, ctes)
-    {
-        TargetSrfInfo {
-            top_level: Some(target),
-            has_nested: false,
-        }
-    } else {
-        let mut info = TargetSrfInfo::default();
-        visit_nested_srfs(
-            expr,
-            &mut info,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        );
-        info
-    }
-}
-
-fn top_level_set_returning_target(
-    expr: &SqlExpr,
-    scope: &BoundScope,
-    catalog: &dyn CatalogLookup,
-    outer_scopes: &[BoundScope],
-    grouped_outer: Option<&GroupedOuterScope>,
-    ctes: &[BoundCte],
-) -> Option<TopLevelSelectSrfTarget> {
-    match expr {
-        SqlExpr::FuncCall {
-            name,
-            args,
-            order_by,
-            distinct,
-            func_variadic,
-            filter,
-            over,
-            ..
-        } if func_call_is_set_returning(
-            name,
-            args.args(),
-            *func_variadic,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        ) && order_by.is_empty()
-            && !*distinct
-            && filter.is_none()
-            && over.is_none() =>
-        {
-            Some(TopLevelSelectSrfTarget::Call {
-                name: name.clone(),
-                args: args.args().to_vec(),
-                func_variadic: *func_variadic,
-            })
-        }
-        SqlExpr::FieldSelect { expr, field } => match expr.as_ref() {
-            SqlExpr::FuncCall {
-                name,
-                args,
-                order_by,
-                distinct,
-                func_variadic,
-                filter,
-                over,
-                ..
-            } if func_call_is_set_returning(
-                name,
-                args.args(),
-                *func_variadic,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            ) && order_by.is_empty()
-                && !*distinct
-                && filter.is_none()
-                && over.is_none() =>
-            {
-                Some(TopLevelSelectSrfTarget::FieldSelect {
-                    name: name.clone(),
-                    args: args.args().to_vec(),
-                    func_variadic: *func_variadic,
-                    field: field.clone(),
-                })
-            }
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-fn bind_select_list_srf_target(
-    target: &TopLevelSelectSrfTarget,
+fn bind_select_list_srf_target_from_parts(
+    output_name: String,
+    name: &str,
+    args: &[SqlFunctionArg],
+    func_variadic: bool,
+    projected_field: Option<&str>,
     scope: &BoundScope,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<BoundSelectListSrfTarget, ParseError> {
-    let (name, args, func_variadic, projected_field) = match target {
-        TopLevelSelectSrfTarget::Call {
-            name,
-            args,
-            func_variadic,
-        } => (name.as_str(), args.as_slice(), *func_variadic, None),
-        TopLevelSelectSrfTarget::FieldSelect {
-            name,
-            args,
-            func_variadic,
-            field,
-        } => (
-            name.as_str(),
-            args.as_slice(),
-            *func_variadic,
-            Some(field.as_str()),
-        ),
-    };
     let call = bind_select_list_srf_call(
         name,
         args,
@@ -537,447 +270,48 @@ fn bind_select_list_srf_target(
         }
     };
     Ok(BoundSelectListSrfTarget {
+        output_name,
         call,
         sql_type,
         column_index,
     })
 }
 
-fn visit_nested_srfs(
-    expr: &SqlExpr,
-    info: &mut TargetSrfInfo,
+pub(super) fn bind_set_returning_expr_from_parts(
+    name: &str,
+    args: &[SqlFunctionArg],
+    func_variadic: bool,
+    projected_field: Option<&str>,
     scope: &BoundScope,
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
-) {
-    match expr {
-        SqlExpr::Collate { expr, .. } => visit_nested_srfs(
-            expr,
-            info,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        ),
-        SqlExpr::FuncCall {
-            name,
-            args,
-            order_by,
-            distinct,
-            func_variadic,
-            filter,
-            over,
-            ..
-        } => {
-            if func_call_is_set_returning(
-                name,
-                args.args(),
-                *func_variadic,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            ) && order_by.is_empty()
-                && !*distinct
-                && filter.is_none()
-                && over.is_none()
-            {
-                info.has_nested = true;
-            }
-            for arg in args.args() {
-                visit_nested_srfs(
-                    &arg.value,
-                    info,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                );
-            }
-            for item in order_by {
-                visit_nested_srfs(
-                    &item.expr,
-                    info,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                );
-            }
-            if let Some(filter) = filter.as_deref() {
-                visit_nested_srfs(
-                    filter,
-                    info,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                );
-            }
-        }
-        SqlExpr::Add(left, right)
-        | SqlExpr::Sub(left, right)
-        | SqlExpr::BitAnd(left, right)
-        | SqlExpr::BitOr(left, right)
-        | SqlExpr::BitXor(left, right)
-        | SqlExpr::Shl(left, right)
-        | SqlExpr::Shr(left, right)
-        | SqlExpr::Mul(left, right)
-        | SqlExpr::Div(left, right)
-        | SqlExpr::Mod(left, right)
-        | SqlExpr::Concat(left, right)
-        | SqlExpr::Eq(left, right)
-        | SqlExpr::NotEq(left, right)
-        | SqlExpr::Lt(left, right)
-        | SqlExpr::LtEq(left, right)
-        | SqlExpr::Gt(left, right)
-        | SqlExpr::GtEq(left, right)
-        | SqlExpr::RegexMatch(left, right)
-        | SqlExpr::And(left, right)
-        | SqlExpr::Or(left, right)
-        | SqlExpr::IsDistinctFrom(left, right)
-        | SqlExpr::IsNotDistinctFrom(left, right)
-        | SqlExpr::ArrayOverlap(left, right)
-        | SqlExpr::ArrayContains(left, right)
-        | SqlExpr::ArrayContained(left, right)
-        | SqlExpr::JsonbContains(left, right)
-        | SqlExpr::JsonbContained(left, right)
-        | SqlExpr::JsonbExists(left, right)
-        | SqlExpr::JsonbExistsAny(left, right)
-        | SqlExpr::JsonbExistsAll(left, right)
-        | SqlExpr::JsonbPathExists(left, right)
-        | SqlExpr::JsonbPathMatch(left, right)
-        | SqlExpr::JsonGet(left, right)
-        | SqlExpr::JsonGetText(left, right)
-        | SqlExpr::JsonPath(left, right)
-        | SqlExpr::JsonPathText(left, right) => {
-            visit_nested_srfs(
-                left,
-                info,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            );
-            visit_nested_srfs(
-                right,
-                info,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            );
-        }
-        SqlExpr::BinaryOperator { left, right, .. } => {
-            visit_nested_srfs(
-                left,
-                info,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            );
-            visit_nested_srfs(
-                right,
-                info,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            );
-        }
-        SqlExpr::Like {
-            expr,
-            pattern,
-            escape,
-            ..
-        } => {
-            visit_nested_srfs(
-                expr,
-                info,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            );
-            visit_nested_srfs(
-                pattern,
-                info,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            );
-            if let Some(escape) = escape {
-                visit_nested_srfs(
-                    escape,
-                    info,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                );
-            }
-        }
-        SqlExpr::Similar {
-            expr,
-            pattern,
-            escape,
-            ..
-        } => {
-            visit_nested_srfs(
-                expr,
-                info,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            );
-            visit_nested_srfs(
-                pattern,
-                info,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            );
-            if let Some(escape) = escape {
-                visit_nested_srfs(
-                    escape,
-                    info,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                );
-            }
-        }
-        SqlExpr::Case {
-            arg,
-            args,
-            defresult,
-        } => {
-            if let Some(arg) = arg {
-                visit_nested_srfs(arg, info, scope, catalog, outer_scopes, grouped_outer, ctes);
-            }
-            for arm in args {
-                visit_nested_srfs(
-                    &arm.expr,
-                    info,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                );
-                visit_nested_srfs(
-                    &arm.result,
-                    info,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                );
-            }
-            if let Some(defresult) = defresult {
-                visit_nested_srfs(
-                    defresult,
-                    info,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                );
-            }
-        }
-        SqlExpr::UnaryPlus(inner)
-        | SqlExpr::Negate(inner)
-        | SqlExpr::BitNot(inner)
-        | SqlExpr::Not(inner)
-        | SqlExpr::IsNull(inner)
-        | SqlExpr::IsNotNull(inner)
-        | SqlExpr::Cast(inner, _)
-        | SqlExpr::GeometryUnaryOp { expr: inner, .. }
-        | SqlExpr::PrefixOperator { expr: inner, .. }
-        | SqlExpr::FieldSelect { expr: inner, .. } => visit_nested_srfs(
-            inner,
-            info,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        ),
-        SqlExpr::Subscript { expr: inner, .. } => visit_nested_srfs(
-            inner,
-            info,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        ),
-        SqlExpr::ArraySubscript { array, subscripts } => {
-            visit_nested_srfs(
-                array,
-                info,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            );
-            for subscript in subscripts {
-                if let Some(lower) = &subscript.lower {
-                    visit_nested_srfs(
-                        lower,
-                        info,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    );
-                }
-                if let Some(upper) = &subscript.upper {
-                    visit_nested_srfs(
-                        upper,
-                        info,
-                        scope,
-                        catalog,
-                        outer_scopes,
-                        grouped_outer,
-                        ctes,
-                    );
-                }
-            }
-        }
-        SqlExpr::GeometryBinaryOp { left, right, .. } => {
-            visit_nested_srfs(
-                left,
-                info,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            );
-            visit_nested_srfs(
-                right,
-                info,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            );
-        }
-        SqlExpr::ArrayLiteral(items) | SqlExpr::Row(items) => {
-            for item in items {
-                visit_nested_srfs(
-                    item,
-                    info,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                );
-            }
-        }
-        SqlExpr::InSubquery { expr, .. } => visit_nested_srfs(
-            expr,
-            info,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        ),
-        SqlExpr::QuantifiedSubquery { left, .. } => {
-            visit_nested_srfs(
-                left,
-                info,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            );
-        }
-        SqlExpr::QuantifiedArray { left, array, .. } => {
-            visit_nested_srfs(
-                left,
-                info,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            );
-            visit_nested_srfs(
-                array,
-                info,
-                scope,
-                catalog,
-                outer_scopes,
-                grouped_outer,
-                ctes,
-            );
-        }
-        SqlExpr::Xml(xml) => {
-            for child in xml.child_exprs() {
-                visit_nested_srfs(
-                    child,
-                    info,
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                );
-            }
-        }
-        SqlExpr::Column(_)
-        | SqlExpr::Default
-        | SqlExpr::Const(_)
-        | SqlExpr::IntegerLiteral(_)
-        | SqlExpr::NumericLiteral(_)
-        | SqlExpr::ScalarSubquery(_)
-        | SqlExpr::ArraySubquery(_)
-        | SqlExpr::Exists(_)
-        | SqlExpr::Random
-        | SqlExpr::CurrentDate
-        | SqlExpr::CurrentUser
-        | SqlExpr::SessionUser
-        | SqlExpr::CurrentRole
-        | SqlExpr::CurrentTime { .. }
-        | SqlExpr::CurrentTimestamp { .. }
-        | SqlExpr::LocalTime { .. }
-        | SqlExpr::LocalTimestamp { .. } => {}
-    }
+) -> Result<Expr, ParseError> {
+    let output_name = projected_field
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| name.to_ascii_lowercase());
+    let bound = bind_select_list_srf_target_from_parts(
+        output_name.clone(),
+        name,
+        args,
+        func_variadic,
+        projected_field,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    )?;
+    Ok(Expr::set_returning(
+        output_name,
+        bound.call,
+        bound.sql_type,
+        bound.column_index,
+    ))
 }
 
-fn func_call_is_set_returning(
+pub(super) fn root_call_returns_set(
     name: &str,
     args: &[SqlFunctionArg],
     func_variadic: bool,
@@ -1009,7 +343,6 @@ fn func_call_is_set_returning(
         .ok()
         .is_some_and(|resolved| resolved.prokind == 'f' && resolved.proretset)
 }
-
 fn bind_select_list_srf_call(
     name: &str,
     args: &[SqlFunctionArg],

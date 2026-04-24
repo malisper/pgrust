@@ -6,8 +6,8 @@ use crate::include::nodes::parsenodes::{
 };
 use crate::include::nodes::pathnodes::{PathTarget, PlannerInfo, RelOptInfo};
 use crate::include::nodes::primnodes::{
-    AggAccum, AggFunc, Aggref, Expr, ProjectSetTarget, SetReturningCall, SortGroupClause, SubLink,
-    SubLinkType, TargetEntry, Var, is_system_attr,
+    AggAccum, AggFunc, Aggref, Expr, SetReturningCall, SortGroupClause, SubLink, SubLinkType,
+    TargetEntry, Var, expr_contains_set_returning, is_system_attr, set_returning_call_exprs,
 };
 
 use super::joininfo::build_special_join_info;
@@ -71,15 +71,6 @@ fn prepare_query_for_locking_with_inherited(
         .into_iter()
         .map(prepare_sort_clause_for_locking)
         .collect::<Result<Vec<_>, _>>()?;
-    query.project_set = query
-        .project_set
-        .map(|targets| {
-            targets
-                .into_iter()
-                .map(prepare_project_set_target_for_locking)
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .transpose()?;
     query.recursive_union = query
         .recursive_union
         .map(|recursive_union| prepare_recursive_union_for_locking(*recursive_union).map(Box::new))
@@ -141,7 +132,7 @@ fn validate_select_locking(query: &Query, strength: SelectLockingClause) -> Resu
             strength.sql()
         )));
     }
-    if query.project_set.is_some() {
+    if query.has_target_srfs {
         return Err(ParseError::FeatureNotSupportedMessage(format!(
             "{} is not allowed with set-returning functions in the target list",
             strength.sql()
@@ -384,27 +375,6 @@ fn prepare_window_func_for_locking(
             .map(prepare_expr_for_locking)
             .collect::<Result<Vec<_>, _>>()?,
         ..func
-    })
-}
-
-fn prepare_project_set_target_for_locking(
-    target: ProjectSetTarget,
-) -> Result<ProjectSetTarget, ParseError> {
-    Ok(match target {
-        ProjectSetTarget::Scalar(entry) => {
-            ProjectSetTarget::Scalar(prepare_target_entry_for_locking(entry)?)
-        }
-        ProjectSetTarget::Set {
-            name,
-            call,
-            sql_type,
-            column_index,
-        } => ProjectSetTarget::Set {
-            name,
-            call: prepare_set_returning_call_for_locking(call)?,
-            sql_type,
-            column_index,
-        },
     })
 }
 
@@ -864,7 +834,7 @@ fn rewrite_minmax_aggregate_query(query: Query) -> Query {
     if !query.group_by.is_empty()
         || query.having_qual.is_some()
         || !query.window_clauses.is_empty()
-        || query.project_set.is_some()
+        || query.has_target_srfs
         || query.recursive_union.is_some()
         || query.set_operation.is_some()
         || query.accumulators.is_empty()
@@ -916,7 +886,7 @@ fn rewrite_minmax_aggregate_query(query: Query) -> Query {
         limit_offset: query.limit_offset,
         locking_clause: query.locking_clause,
         row_marks: query.row_marks,
-        project_set: None,
+        has_target_srfs: false,
         recursive_union: None,
         set_operation: None,
     }
@@ -980,7 +950,7 @@ fn build_minmax_sublink(query: &Query, accum: &AggAccum) -> Option<Expr> {
         limit_offset: 0,
         locking_clause: None,
         row_marks: Vec::new(),
-        project_set: None,
+        has_target_srfs: false,
         recursive_union: None,
         set_operation: None,
     };
@@ -1097,6 +1067,9 @@ fn expr_contains_sublink_for_minmax_rewrite(expr: &Expr) -> bool {
         Expr::Func(func) => func
             .args
             .iter()
+            .any(expr_contains_sublink_for_minmax_rewrite),
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
             .any(expr_contains_sublink_for_minmax_rewrite),
         Expr::ScalarArrayOp(saop) => {
             expr_contains_sublink_for_minmax_rewrite(&saop.left)
@@ -1442,6 +1415,9 @@ fn expr_contains_local_var_outside_subquery(expr: &Expr) -> bool {
             .args
             .iter()
             .any(expr_contains_local_var_outside_subquery),
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
+            .any(expr_contains_local_var_outside_subquery),
         Expr::SubLink(sublink) => sublink
             .testexpr
             .as_deref()
@@ -1622,49 +1598,6 @@ fn make_processed_tlist(parse: &Query) -> Vec<TargetEntry> {
     processed_tlist
 }
 
-pub(super) fn project_set_base_width(project_set: &[ProjectSetTarget]) -> usize {
-    project_set
-        .iter()
-        .take_while(|target| matches!(target, ProjectSetTarget::Scalar(_)))
-        .count()
-}
-
-pub(super) fn target_references_project_set_output(
-    target: &TargetEntry,
-    base_width: usize,
-) -> bool {
-    target
-        .input_resno
-        .is_some_and(|input_resno| input_resno > base_width)
-}
-
-fn collect_set_returning_call_supporting_inputs(call: &SetReturningCall, exprs: &mut Vec<Expr>) {
-    match call {
-        SetReturningCall::GenerateSeries {
-            start, stop, step, ..
-        } => {
-            collect_supporting_inputs(start, exprs);
-            collect_supporting_inputs(stop, exprs);
-            collect_supporting_inputs(step, exprs);
-        }
-        SetReturningCall::PartitionTree { relid, .. }
-        | SetReturningCall::PartitionAncestors { relid, .. } => {
-            collect_supporting_inputs(relid, exprs);
-        }
-        SetReturningCall::Unnest { args, .. }
-        | SetReturningCall::JsonTableFunction { args, .. }
-        | SetReturningCall::JsonRecordFunction { args, .. }
-        | SetReturningCall::RegexTableFunction { args, .. }
-        | SetReturningCall::StringTableFunction { args, .. }
-        | SetReturningCall::TextSearchTableFunction { args, .. }
-        | SetReturningCall::UserDefined { args, .. } => {
-            for arg in args {
-                collect_supporting_inputs(arg, exprs);
-            }
-        }
-    }
-}
-
 fn make_sort_input_target(
     parse: &Query,
     processed_tlist: &[TargetEntry],
@@ -1674,33 +1607,27 @@ fn make_sort_input_target(
         return final_target.clone();
     }
 
-    let Some(project_set) = parse.project_set.as_ref() else {
-        return PathTarget::from_target_list(processed_tlist);
-    };
-
-    let base_width = project_set_base_width(project_set);
-    let have_srf_sortcols = processed_tlist.iter().any(|target| {
-        target.ressortgroupref != 0 && target_references_project_set_output(target, base_width)
-    });
-    if have_srf_sortcols {
-        return PathTarget::from_target_list(processed_tlist);
-    }
-
-    let mut input_target = PathTarget::new(Vec::new());
-    for target in processed_tlist {
-        if target_references_project_set_output(target, base_width) {
-            continue;
+    if parse.has_target_srfs {
+        let have_srf_sortcols = processed_tlist
+            .iter()
+            .any(|target| target.ressortgroupref != 0 && expr_contains_set_returning(&target.expr));
+        if have_srf_sortcols {
+            return PathTarget::from_target_list(processed_tlist);
         }
-        input_target.add_column_to_pathtarget(target.expr.clone(), target.ressortgroupref);
-    }
-    for target in project_set {
-        if let ProjectSetTarget::Set { call, .. } = target {
-            let mut supporting_inputs = Vec::new();
-            collect_set_returning_call_supporting_inputs(call, &mut supporting_inputs);
-            input_target.add_new_columns_to_pathtarget(supporting_inputs);
+        let mut input_target = PathTarget::new(Vec::new());
+        for target in processed_tlist {
+            if expr_contains_set_returning(&target.expr) {
+                let mut supporting_inputs = Vec::new();
+                collect_supporting_inputs(&target.expr, &mut supporting_inputs);
+                input_target.add_new_columns_to_pathtarget(supporting_inputs);
+                continue;
+            }
+            input_target.add_column_to_pathtarget(target.expr.clone(), target.ressortgroupref);
         }
+        return input_target;
     }
-    input_target
+
+    PathTarget::from_target_list(processed_tlist)
 }
 
 fn make_group_input_target(parse: &Query) -> PathTarget {
@@ -1856,6 +1783,9 @@ fn expr_contains_window_func(expr: &Expr) -> bool {
                 || expr_contains_window_func(&case_expr.defresult)
         }
         Expr::Func(func) => func.args.iter().any(expr_contains_window_func),
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
+            .any(expr_contains_window_func),
         Expr::SubLink(sublink) => sublink
             .testexpr
             .as_deref()
@@ -1975,6 +1905,11 @@ fn collect_group_input_exprs(expr: &Expr, group_by: &[Expr], exprs: &mut Vec<Exp
         }
         Expr::CaseTest(_) => {}
         Expr::Func(func) => collect_expr_vec(&func.args, group_by, exprs),
+        Expr::SetReturning(srf) => {
+            for arg in set_returning_call_exprs(&srf.call) {
+                collect_group_input_exprs(arg, group_by, exprs);
+            }
+        }
         Expr::SubLink(sublink) => {
             if let Some(testexpr) = &sublink.testexpr {
                 collect_group_input_exprs(testexpr, group_by, exprs);
@@ -2116,6 +2051,11 @@ fn collect_supporting_inputs(expr: &Expr, exprs: &mut Vec<Expr>) {
                 collect_supporting_inputs(arg, exprs);
             }
         }
+        Expr::SetReturning(srf) => {
+            for arg in set_returning_call_exprs(&srf.call) {
+                collect_supporting_inputs(arg, exprs);
+            }
+        }
         Expr::SubLink(sublink) => {
             if let Some(testexpr) = &sublink.testexpr {
                 collect_supporting_inputs(testexpr, exprs);
@@ -2225,11 +2165,6 @@ fn collect_query_outer_refs(query: &Query, levelsup: usize, exprs: &mut Vec<Expr
     for clause in &query.sort_clause {
         collect_query_outer_refs_expr(&clause.expr, levelsup, exprs);
     }
-    if let Some(project_set) = query.project_set.as_ref() {
-        for target in project_set {
-            collect_project_set_outer_refs(target, levelsup, exprs);
-        }
-    }
     if let Some(jointree) = query.jointree.as_ref() {
         collect_jointree_outer_refs(jointree, levelsup, exprs);
     }
@@ -2279,21 +2214,6 @@ fn collect_jointree_outer_refs(node: &JoinTreeNode, levelsup: usize, exprs: &mut
             collect_jointree_outer_refs(left, levelsup, exprs);
             collect_jointree_outer_refs(right, levelsup, exprs);
             collect_query_outer_refs_expr(quals, levelsup, exprs);
-        }
-    }
-}
-
-fn collect_project_set_outer_refs(
-    target: &ProjectSetTarget,
-    levelsup: usize,
-    exprs: &mut Vec<Expr>,
-) {
-    match target {
-        ProjectSetTarget::Scalar(entry) => {
-            collect_query_outer_refs_expr(&entry.expr, levelsup, exprs)
-        }
-        ProjectSetTarget::Set { call, .. } => {
-            collect_set_returning_call_outer_refs(call, levelsup, exprs)
         }
     }
 }
@@ -2393,6 +2313,11 @@ fn collect_query_outer_refs_expr(expr: &Expr, levelsup: usize, exprs: &mut Vec<E
         Expr::CaseTest(_) => {}
         Expr::Func(func) => {
             for arg in &func.args {
+                collect_query_outer_refs_expr(arg, levelsup, exprs);
+            }
+        }
+        Expr::SetReturning(srf) => {
+            for arg in set_returning_call_exprs(&srf.call) {
                 collect_query_outer_refs_expr(arg, levelsup, exprs);
             }
         }

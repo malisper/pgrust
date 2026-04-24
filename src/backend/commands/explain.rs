@@ -7,7 +7,7 @@ use crate::include::nodes::execnodes::*;
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, ParamKind, ProjectSetTarget, SetReturningCall, SubPlan, TargetEntry,
-    WindowClause, WindowFrameBound, WindowFuncKind,
+    WindowClause, WindowFrameBound, WindowFuncKind, set_returning_call_exprs,
 };
 use crate::include::storage::buf_internals::BufferUsageStats;
 
@@ -1018,6 +1018,11 @@ fn collect_direct_expr_subplans<'a>(expr: &'a Expr, out: &mut Vec<&'a SubPlan>) 
         }
         Expr::Func(func) => {
             for arg in &func.args {
+                collect_direct_expr_subplans(arg, out);
+            }
+        }
+        Expr::SetReturning(srf) => {
+            for arg in set_returning_call_exprs(&srf.call) {
                 collect_direct_expr_subplans(arg, out);
             }
         }
