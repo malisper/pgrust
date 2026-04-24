@@ -636,7 +636,7 @@ impl RelCache {
     }
 }
 
-fn relation_locator_for_class_row(
+pub(crate) fn relation_locator_for_class_row(
     relation_oid: u32,
     relfilenode: u32,
     current_db_oid: u32,

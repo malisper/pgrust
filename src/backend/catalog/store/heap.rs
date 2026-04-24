@@ -2952,19 +2952,22 @@ impl CatalogStore {
         ctx: &CatalogWriteContext,
     ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
         let index_name = index_name.into();
-        let (catcache, relcache) = visible_catalog_caches_for_ctx(self, ctx)?;
-        if relcache.get_by_name(&index_name).is_some() {
+        let table = self
+            .relation_id_get_relation(ctx, relation_oid)?
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        if self
+            .get_relname_relid(ctx, &syscache_relname(&index_name), table.namespace_oid)?
+            .is_some()
+        {
             return Err(CatalogError::TableAlreadyExists(
                 normalize_catalog_name(&index_name).to_ascii_lowercase(),
             ));
         }
-        let table = relcache
-            .get_by_oid(relation_oid)
-            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        let table_entry = catalog_entry_from_visible_relation(&catcache, table)?;
+        let table_entry = catalog_entry_from_relation(&table);
         let mut control = self.control_state()?;
+        let type_lookup = CatalogStoreTypeLookup { store: &*self, ctx };
         let entry = build_index_entry(
-            &catcache,
+            &type_lookup,
             index_name.clone(),
             &table_entry,
             unique,
@@ -2976,7 +2979,7 @@ impl CatalogStore {
         )?;
         let kinds = create_index_sync_kinds();
         self.persist_control_values(control.next_oid, control.next_rel_number)?;
-        let rows = rows_for_new_relation_entry(&catcache, &index_name, &entry)?;
+        let rows = rows_for_new_relation_entry(&type_lookup, &index_name, &entry)?;
         insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
         self.control = control;
 
@@ -3002,19 +3005,22 @@ impl CatalogStore {
         ctx: &CatalogWriteContext,
     ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
         let index_name = index_name.into();
-        let (catcache, relcache) = visible_catalog_caches_for_ctx(self, ctx)?;
-        if relcache.get_by_name(&index_name).is_some() {
+        let table = self
+            .relation_id_get_relation(ctx, relation_oid)?
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        if self
+            .get_relname_relid(ctx, &syscache_relname(&index_name), table.namespace_oid)?
+            .is_some()
+        {
             return Err(CatalogError::TableAlreadyExists(
                 normalize_catalog_name(&index_name).to_ascii_lowercase(),
             ));
         }
-        let table = relcache
-            .get_by_oid(relation_oid)
-            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        let table_entry = catalog_entry_from_visible_relation(&catcache, table)?;
+        let table_entry = catalog_entry_from_relation(&table);
         let mut control = self.control_state()?;
+        let type_lookup = CatalogStoreTypeLookup { store: &*self, ctx };
         let entry = build_partitioned_index_entry(
-            &catcache,
+            &type_lookup,
             index_name.clone(),
             &table_entry,
             unique,
@@ -3026,7 +3032,7 @@ impl CatalogStore {
         )?;
         let kinds = create_index_sync_kinds();
         self.persist_control_values(control.next_oid, control.next_rel_number)?;
-        let rows = rows_for_new_relation_entry(&catcache, &index_name, &entry)?;
+        let rows = rows_for_new_relation_entry(&type_lookup, &index_name, &entry)?;
         insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
         self.control = control;
 
@@ -3136,24 +3142,32 @@ impl CatalogStore {
         ctx: &CatalogWriteContext,
     ) -> Result<(PgConstraintRow, CatalogMutationEffect), CatalogError> {
         let conname = conname.into();
-        let (catcache, relcache) = visible_catalog_caches_for_ctx(self, ctx)?;
-        let table = relcache
-            .get_by_oid(relation_oid)
+        let table = self
+            .relation_id_get_relation(ctx, relation_oid)?
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
         if table.relkind != 'r' && table.relkind != 'p' {
             return Err(CatalogError::UnknownTable(relation_oid.to_string()));
         }
-        let index = relcache
-            .get_by_oid(index_oid)
+        let index = self
+            .relation_id_get_relation(ctx, index_oid)?
             .ok_or_else(|| CatalogError::UnknownTable(index_oid.to_string()))?;
         if index.relkind != 'i' && index.relkind != 'I' {
             return Err(CatalogError::UnknownTable(index_oid.to_string()));
         }
-        if catcache.constraint_rows().into_iter().any(|row| {
-            row.conrelid == relation_oid
-                && row.contype == contype
-                && row.conname.eq_ignore_ascii_case(&conname)
-        }) {
+        if self
+            .search_sys_cache_list1(
+                ctx,
+                SysCacheId::ConstraintRelId,
+                Value::Int64(i64::from(relation_oid)),
+            )?
+            .into_iter()
+            .any(|tuple| match tuple {
+                SysCacheTuple::Constraint(row) => {
+                    row.contype == contype && row.conname.eq_ignore_ascii_case(&conname)
+                }
+                _ => false,
+            })
+        {
             return Err(CatalogError::TableAlreadyExists(conname));
         }
 
@@ -5196,7 +5210,7 @@ fn build_relation_entry(
 }
 
 fn build_index_entry(
-    catcache: &CatCache,
+    type_lookup: &impl PgTypeLookup,
     index_name: String,
     table: &CatalogEntry,
     unique: bool,
@@ -5207,7 +5221,7 @@ fn build_index_entry(
     control: &mut CatalogControl,
 ) -> Result<CatalogEntry, CatalogError> {
     build_index_entry_with_relkind(
-        catcache,
+        type_lookup,
         index_name,
         table,
         unique,
@@ -5223,7 +5237,7 @@ fn build_index_entry(
 }
 
 fn build_partitioned_index_entry(
-    catcache: &CatCache,
+    type_lookup: &impl PgTypeLookup,
     index_name: String,
     table: &CatalogEntry,
     unique: bool,
@@ -5234,7 +5248,7 @@ fn build_partitioned_index_entry(
     control: &mut CatalogControl,
 ) -> Result<CatalogEntry, CatalogError> {
     build_index_entry_with_relkind(
-        catcache,
+        type_lookup,
         index_name,
         table,
         unique,
@@ -5250,7 +5264,7 @@ fn build_partitioned_index_entry(
 }
 
 fn build_index_entry_with_relkind(
-    catcache: &CatCache,
+    type_lookup: &impl PgTypeLookup,
     index_name: String,
     table: &CatalogEntry,
     unique: bool,
@@ -5279,7 +5293,7 @@ fn build_index_entry_with_relkind(
         && options.indcollation.is_empty()
         && options.indoption.is_empty()
     {
-        default_index_build_options_for_relation(catcache, table, columns)?
+        default_index_build_options_for_relation(type_lookup, table, columns)?
     } else {
         options.clone()
     };
@@ -5476,7 +5490,7 @@ fn build_toast_catalog_changes(
 }
 
 fn default_index_build_options_for_relation(
-    catcache: &CatCache,
+    type_lookup: &impl PgTypeLookup,
     table: &CatalogEntry,
     columns: &[crate::include::nodes::parsenodes::IndexColumnDef],
 ) -> Result<CatalogIndexBuildOptions, CatalogError> {
@@ -5490,7 +5504,7 @@ fn default_index_build_options_for_relation(
             .iter()
             .find(|column| column.name.eq_ignore_ascii_case(&column_name.name))
             .ok_or_else(|| CatalogError::UnknownColumn(column_name.name.clone()))?;
-        let type_oid = resolved_sql_type_oid(catcache, table, column.sql_type)?;
+        let type_oid = resolved_sql_type_oid(type_lookup, table, column.sql_type)?;
         let opclass_oid = crate::include::catalog::default_btree_opclass_oid(type_oid)
             .ok_or_else(|| CatalogError::UnknownType("index column type".into()))?;
         indclass.push(opclass_oid);
@@ -6211,6 +6225,56 @@ fn catalog_entry_from_visible_relation(
             brin_options: index.brin_options.clone(),
         }),
     })
+}
+
+fn catalog_entry_from_relation(relation: &RelCacheEntry) -> CatalogEntry {
+    CatalogEntry {
+        rel: relation.rel,
+        relation_oid: relation.relation_oid,
+        namespace_oid: relation.namespace_oid,
+        owner_oid: relation.owner_oid,
+        relacl: None,
+        row_type_oid: relation.row_type_oid,
+        array_type_oid: relation.array_type_oid,
+        reltoastrelid: relation.reltoastrelid,
+        relpersistence: relation.relpersistence,
+        relkind: relation.relkind,
+        am_oid: relation
+            .index
+            .as_ref()
+            .map(|index| index.am_oid)
+            .unwrap_or_else(|| crate::include::catalog::relam_for_relkind(relation.relkind)),
+        relhassubclass: false,
+        relhastriggers: relation.relhastriggers,
+        relispartition: relation.relispartition,
+        relpartbound: relation.relpartbound.clone(),
+        relrowsecurity: relation.relrowsecurity,
+        relforcerowsecurity: relation.relforcerowsecurity,
+        relpages: 0,
+        reltuples: 0.0,
+        relallvisible: 0,
+        relallfrozen: 0,
+        relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
+        desc: relation.desc.clone(),
+        partitioned_table: relation.partitioned_table.clone(),
+        index_meta: relation.index.as_ref().map(|index| CatalogIndexMeta {
+            indrelid: index.indrelid,
+            indkey: index.indkey.clone(),
+            indisunique: index.indisunique,
+            indnullsnotdistinct: index.indnullsnotdistinct,
+            indisprimary: index.indisprimary,
+            indisexclusion: index.indisexclusion,
+            indisvalid: index.indisvalid,
+            indisready: index.indisready,
+            indislive: index.indislive,
+            indclass: index.indclass.clone(),
+            indcollation: index.indcollation.clone(),
+            indoption: index.indoption.clone(),
+            indexprs: index.indexprs.clone(),
+            indpred: index.indpred.clone(),
+            brin_options: index.brin_options.clone(),
+        }),
+    }
 }
 
 fn resolved_sql_type_oid(

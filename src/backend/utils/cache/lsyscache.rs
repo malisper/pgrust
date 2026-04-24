@@ -8,9 +8,10 @@ use crate::backend::storage::smgr::{BLCKSZ, ForkNumber, StorageManager};
 use crate::backend::utils::cache::catcache::normalize_catalog_name;
 use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
-    backend_catcache, backend_relcache, ensure_am_rows, ensure_attribute_rows, ensure_class_rows,
-    ensure_constraint_rows, ensure_index_rows, ensure_inherit_rows, ensure_namespace_rows,
-    ensure_proc_rows, ensure_rewrite_rows, ensure_statistic_rows, ensure_type_rows,
+    SysCacheId, SysCacheTuple, backend_catcache, backend_relcache, ensure_am_rows,
+    ensure_attribute_rows, ensure_class_rows, ensure_constraint_rows, ensure_index_rows,
+    ensure_namespace_rows, ensure_proc_rows, ensure_rewrite_rows, ensure_statistic_rows,
+    ensure_type_rows, search_sys_cache_list1_db, search_sys_cache1_db, search_sys_cache2_db,
 };
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_policies_rows, build_pg_rules_rows,
@@ -31,6 +32,10 @@ use crate::include::nodes::datum::Value;
 use crate::pgrust::database::{
     Database, DatabaseStatsStore, TempNamespace, default_pg_stat_io_keys,
 };
+
+fn oid_key(oid: u32) -> Value {
+    Value::Int64(i64::from(oid))
+}
 
 fn namespace_row_by_name(
     db: &Database,
@@ -62,10 +67,13 @@ fn class_row_by_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     oid: u32,
 ) -> Option<crate::include::catalog::PgClassRow> {
-    backend_catcache(db, client_id, txn_ctx)
+    search_sys_cache1_db(db, client_id, txn_ctx, SysCacheId::RelOid, oid_key(oid))
         .ok()?
-        .class_by_oid(oid)
-        .cloned()
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Class(row) => Some(row),
+            _ => None,
+        })
 }
 
 fn class_row_by_name_namespace(
@@ -75,15 +83,24 @@ fn class_row_by_name_namespace(
     relname: &str,
     namespace_oid: u32,
 ) -> Option<crate::include::catalog::PgClassRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .ok()?
-        .class_rows()
-        .into_iter()
-        .find(|row| {
-            row.relnamespace == namespace_oid
-                && row.relname.eq_ignore_ascii_case(relname)
-                && !db.other_session_temp_namespace_oid(client_id, row.relnamespace)
-        })
+    search_sys_cache2_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::RelNameNsp,
+        Value::Text(relname.to_ascii_lowercase().into()),
+        oid_key(namespace_oid),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Class(row)
+            if !db.other_session_temp_namespace_oid(client_id, row.relnamespace) =>
+        {
+            Some(row)
+        }
+        _ => None,
+    })
 }
 
 fn attribute_rows_for_relation(
@@ -92,16 +109,125 @@ fn attribute_rows_for_relation(
     txn_ctx: Option<(TransactionId, CommandId)>,
     relation_oid: u32,
 ) -> Vec<crate::include::catalog::PgAttributeRow> {
-    let mut rows = backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| {
-            catcache
-                .attributes_by_relid(relation_oid)
-                .unwrap_or(&[])
-                .to_vec()
-        })
-        .unwrap_or_default();
+    let mut rows = search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::AttrNum,
+        oid_key(relation_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Attribute(row) => Some(row),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
     rows.sort_by_key(|row| row.attnum);
     rows
+}
+
+fn inheritance_parent_rows(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relation_oid: u32,
+) -> Vec<PgInheritsRow> {
+    let mut rows = search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::InheritsRelIdSeqNo,
+        oid_key(relation_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Inherits(row) => Some(row),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+    rows.sort_by_key(|row| (row.inhseqno, row.inhparent));
+    rows
+}
+
+fn inheritance_child_rows(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relation_oid: u32,
+) -> Vec<PgInheritsRow> {
+    let mut rows = search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::InheritsParent,
+        oid_key(relation_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Inherits(row) => Some(row),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+    rows.sort_by_key(|row| (row.inhseqno, row.inhrelid));
+    rows
+}
+
+fn partitioned_table_row_by_relid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relation_oid: u32,
+) -> Option<crate::include::catalog::PgPartitionedTableRow> {
+    search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::PartRelId,
+        oid_key(relation_oid),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::PartitionedTable(row) => Some(row),
+        _ => None,
+    })
+}
+
+fn constraint_rows_for_relation_syscache(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relation_oid: u32,
+) -> Vec<PgConstraintRow> {
+    search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::ConstraintRelId,
+        oid_key(relation_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Constraint(row) => Some(row),
+                _ => None,
+            })
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 fn attrdef_rows_for_relation(
@@ -151,10 +277,13 @@ fn type_row_by_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     oid: u32,
 ) -> Option<PgTypeRow> {
-    backend_catcache(db, client_id, txn_ctx)
+    search_sys_cache1_db(db, client_id, txn_ctx, SysCacheId::TypeOid, oid_key(oid))
         .ok()?
-        .type_by_oid(oid)
-        .cloned()
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Type(row) => Some(row),
+            _ => None,
+        })
 }
 
 fn visible_catcache(
@@ -717,11 +846,9 @@ pub fn constraint_rows_for_relation(
     txn_ctx: Option<(TransactionId, CommandId)>,
     relation_oid: u32,
 ) -> Vec<PgConstraintRow> {
-    if let Ok(catcache) = backend_catcache(db, client_id, txn_ctx) {
-        let rows = catcache.constraint_rows_for_relation(relation_oid);
-        if !rows.is_empty() {
-            return rows;
-        }
+    let rows = constraint_rows_for_relation_syscache(db, client_id, txn_ctx, relation_oid);
+    if !rows.is_empty() {
+        return rows;
     }
     if let Ok(relcache) = backend_relcache(db, client_id, txn_ctx)
         && let Some(entry) = relcache.get_by_oid(relation_oid)
@@ -968,18 +1095,19 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         class_row_by_oid(self.db, self.client_id, self.txn_ctx, relation_oid)
     }
 
+    fn partitioned_table_row(
+        &self,
+        relation_oid: u32,
+    ) -> Option<crate::include::catalog::PgPartitionedTableRow> {
+        partitioned_table_row_by_relid(self.db, self.client_id, self.txn_ctx, relation_oid)
+    }
+
     fn inheritance_parents(&self, relation_oid: u32) -> Vec<PgInheritsRow> {
-        ensure_inherit_rows(self.db, self.client_id, self.txn_ctx)
-            .into_iter()
-            .filter(|row| row.inhrelid == relation_oid)
-            .collect()
+        inheritance_parent_rows(self.db, self.client_id, self.txn_ctx, relation_oid)
     }
 
     fn inheritance_children(&self, relation_oid: u32) -> Vec<PgInheritsRow> {
-        ensure_inherit_rows(self.db, self.client_id, self.txn_ctx)
-            .into_iter()
-            .filter(|row| row.inhparent == relation_oid)
-            .collect()
+        inheritance_child_rows(self.db, self.client_id, self.txn_ctx, relation_oid)
     }
 
     fn statistic_rows_for_relation(&self, relation_oid: u32) -> Vec<PgStatisticRow> {
