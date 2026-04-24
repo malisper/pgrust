@@ -12,6 +12,11 @@ on:
     - cron: '30 19 * * *'   # ~12:30 PDT start -> ~1:00pm PDT finish
     - cron: '45 2 * * *'    # ~7:45pm PDT start -> ~8:15pm PDT finish
   workflow_dispatch:
+    inputs:
+      command_timeout:
+        description: 'Regression command timeout, e.g. 210m for normal runs or 2m for abort-path smoke tests'
+        required: false
+        default: '210m'
 
 permissions:
   contents: write   # required to push to the regression-history branch
@@ -24,7 +29,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
   REGRESS_RESULTS_DIR: ${{ github.workspace }}/regress-results
-  REGRESS_COMMAND_TIMEOUT: 210m
+  REGRESS_COMMAND_TIMEOUT: ${{ inputs.command_timeout || '210m' }}
   # Pin to the PG18 SHA the project currently develops against. Bump when the
   # team decides to track a newer upstream — fixtures (.out files) are tied to
   # this revision.
