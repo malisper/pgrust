@@ -12,7 +12,8 @@ use crate::backend::utils::cache::syscache::{
     ensure_attribute_rows, ensure_class_rows, ensure_constraint_rows, ensure_index_rows,
     ensure_namespace_rows, ensure_proc_rows, ensure_rewrite_rows, ensure_statistic_rows,
     ensure_type_rows, relation_id_get_relation_db, search_sys_cache_list1_db,
-    search_sys_cache_list3_db, search_sys_cache1_db, search_sys_cache2_db,
+    search_sys_cache_list2_db, search_sys_cache_list3_db, search_sys_cache1_db,
+    search_sys_cache2_db,
 };
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_policies_rows, build_pg_rules_rows,
@@ -24,12 +25,14 @@ use crate::include::access::brin_page::{
     BRIN_PAGE_CONTENT_OFFSET, BrinMetaPageData, brin_is_meta_page,
 };
 use crate::include::catalog::{
-    PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow,
-    PgCollationRow, PgConstraintRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
-    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticExtDataRow,
+    CONSTRAINT_FOREIGN, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PgAggregateRow, PgAmRow,
+    PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow, PgCollationRow,
+    PgConstraintRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
+    PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticExtDataRow,
     PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTypeRow,
 };
 use crate::include::nodes::datum::Value;
+use crate::include::nodes::parsenodes::SqlType;
 use crate::pgrust::database::{
     Database, DatabaseStatsStore, TempNamespace, default_pg_stat_io_keys,
 };
@@ -253,6 +256,102 @@ fn constraint_rows_for_relation_syscache(
     .unwrap_or_default()
 }
 
+fn constraint_row_by_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    oid: u32,
+) -> Option<PgConstraintRow> {
+    search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::ConstraintOid,
+        oid_key(oid),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Constraint(row) => Some(row),
+        _ => None,
+    })
+}
+
+fn constraint_rows_referencing_class_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    referenced_oid: u32,
+) -> Vec<PgConstraintRow> {
+    let mut seen = BTreeSet::new();
+    let mut rows = search_sys_cache_list2_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::DependReference,
+        oid_key(PG_CLASS_RELATION_OID),
+        oid_key(referenced_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Depend(row)
+                    if row.classid == PG_CONSTRAINT_RELATION_OID && seen.insert(row.objid) =>
+                {
+                    constraint_row_by_oid(db, client_id, txn_ctx, row.objid)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+    crate::backend::catalog::pg_constraint::sort_pg_constraint_rows(&mut rows);
+    rows
+}
+
+fn constraint_rows_for_index(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    index_oid: u32,
+) -> Vec<PgConstraintRow> {
+    let mut rows = constraint_rows_referencing_class_oid(db, client_id, txn_ctx, index_oid)
+        .into_iter()
+        .filter(|row| row.conindid == index_oid)
+        .collect::<Vec<_>>();
+    crate::backend::catalog::pg_constraint::sort_pg_constraint_rows(&mut rows);
+    rows
+}
+
+fn foreign_key_constraint_rows_referencing_relation(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relation_oid: u32,
+) -> Vec<PgConstraintRow> {
+    let mut rows = constraint_rows_referencing_class_oid(db, client_id, txn_ctx, relation_oid)
+        .into_iter()
+        .filter(|row| row.contype == CONSTRAINT_FOREIGN && row.confrelid == relation_oid)
+        .collect::<Vec<_>>();
+    crate::backend::catalog::pg_constraint::sort_pg_constraint_rows(&mut rows);
+    rows
+}
+
+fn foreign_key_constraint_rows_referencing_index(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    index_oid: u32,
+) -> Vec<PgConstraintRow> {
+    let mut rows = constraint_rows_for_index(db, client_id, txn_ctx, index_oid)
+        .into_iter()
+        .filter(|row| row.contype == CONSTRAINT_FOREIGN)
+        .collect::<Vec<_>>();
+    crate::backend::catalog::pg_constraint::sort_pg_constraint_rows(&mut rows);
+    rows
+}
+
 fn attrdef_rows_for_relation(
     db: &Database,
     client_id: ClientId,
@@ -343,6 +442,191 @@ fn type_row_by_oid(
             SysCacheTuple::Type(row) => Some(row),
             _ => None,
         })
+}
+
+fn type_row_by_name_namespace(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    name: &str,
+    namespace_oid: u32,
+) -> Option<PgTypeRow> {
+    search_sys_cache2_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::TypeNameNsp,
+        catalog_name_key(name),
+        oid_key(namespace_oid),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Type(row)
+            if !db.other_session_temp_namespace_oid(client_id, row.typnamespace) =>
+        {
+            Some(row)
+        }
+        _ => None,
+    })
+}
+
+fn dynamic_type_rows_for_search_path(db: &Database, search_path: &[String]) -> Vec<PgTypeRow> {
+    let mut rows = db.domain_type_rows_for_search_path(search_path);
+    rows.extend(db.enum_type_rows_for_search_path(search_path));
+    rows.extend(db.range_type_rows_for_search_path(search_path));
+    rows
+}
+
+fn range_proc_type_rows(db: &Database, search_path: &[String]) -> Vec<PgTypeRow> {
+    let mut rows = crate::include::catalog::builtin_type_rows();
+    rows.extend(db.range_type_rows_for_search_path(search_path));
+    rows
+}
+
+fn is_visible_range_proc_name(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    search_path: &[String],
+    name: &str,
+) -> bool {
+    crate::include::catalog::is_synthetic_range_proc_name(name)
+        || visible_type_row_by_name(db, client_id, txn_ctx, search_path, name)
+            .is_some_and(|row| row.sql_type.is_range() || row.sql_type.is_multirange())
+}
+
+fn dynamic_type_row_by_oid(db: &Database, search_path: &[String], oid: u32) -> Option<PgTypeRow> {
+    dynamic_type_rows_for_search_path(db, search_path)
+        .into_iter()
+        .find(|row| row.oid == oid)
+}
+
+fn dynamic_type_row_by_name(
+    db: &Database,
+    search_path: &[String],
+    name: &str,
+) -> Option<PgTypeRow> {
+    let normalized = crate::backend::parser::analyze::normalize_catalog_lookup_name(name);
+    dynamic_type_rows_for_search_path(db, search_path)
+        .into_iter()
+        .find(|row| row.typname.eq_ignore_ascii_case(normalized))
+}
+
+fn dynamic_type_row_by_name_namespace(
+    db: &Database,
+    search_path: &[String],
+    name: &str,
+    namespace_oid: u32,
+) -> Option<PgTypeRow> {
+    let normalized = crate::backend::parser::analyze::normalize_catalog_lookup_name(name);
+    dynamic_type_rows_for_search_path(db, search_path)
+        .into_iter()
+        .find(|row| {
+            row.typnamespace == namespace_oid && row.typname.eq_ignore_ascii_case(normalized)
+        })
+}
+
+fn visible_type_row_by_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    search_path: &[String],
+    oid: u32,
+) -> Option<PgTypeRow> {
+    type_row_by_oid(db, client_id, txn_ctx, oid)
+        .filter(|row| !db.other_session_temp_namespace_oid(client_id, row.typnamespace))
+        .or_else(|| dynamic_type_row_by_oid(db, search_path, oid))
+}
+
+fn visible_type_row_by_name(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    search_path: &[String],
+    name: &str,
+) -> Option<PgTypeRow> {
+    let lowered = name.to_ascii_lowercase();
+    if let Some((schema, typname)) = lowered.split_once('.') {
+        let namespace_oid = namespace_row_by_name(db, client_id, txn_ctx, schema)?.oid;
+        return type_row_by_name_namespace(db, client_id, txn_ctx, typname, namespace_oid).or_else(
+            || dynamic_type_row_by_name_namespace(db, search_path, typname, namespace_oid),
+        );
+    }
+
+    let normalized = crate::backend::parser::analyze::normalize_catalog_lookup_name(name);
+    for schema in search_path {
+        let Some(namespace) = namespace_row_by_name(db, client_id, txn_ctx, schema) else {
+            continue;
+        };
+        if let Some(row) =
+            type_row_by_name_namespace(db, client_id, txn_ctx, normalized, namespace.oid)
+        {
+            return Some(row);
+        }
+    }
+    dynamic_type_row_by_name(db, search_path, normalized)
+}
+
+fn visible_type_row_for_sql_type(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    search_path: &[String],
+    sql_type: SqlType,
+) -> Option<PgTypeRow> {
+    if !sql_type.is_array && sql_type.type_oid != 0 {
+        return visible_type_row_by_oid(db, client_id, txn_ctx, search_path, sql_type.type_oid);
+    }
+    crate::include::catalog::builtin_type_rows()
+        .into_iter()
+        .find(|row| row.sql_type == sql_type)
+        .or_else(|| {
+            dynamic_type_rows_for_search_path(db, search_path)
+                .into_iter()
+                .find(|row| row.sql_type == sql_type)
+        })
+}
+
+fn visible_type_oid_for_sql_type(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    search_path: &[String],
+    sql_type: SqlType,
+) -> Option<u32> {
+    if sql_type.is_array {
+        let element = sql_type.element_type();
+        let element_oid = if element.type_oid != 0 {
+            element.type_oid
+        } else {
+            visible_type_row_for_sql_type(db, client_id, txn_ctx, search_path, element)?.oid
+        };
+        return visible_type_row_by_oid(db, client_id, txn_ctx, search_path, element_oid)
+            .and_then(|row| (row.typarray != 0).then_some(row.typarray));
+    }
+    if let Some(range_type) = crate::include::catalog::range_type_ref_for_sql_type(sql_type) {
+        return Some(range_type.type_oid());
+    }
+    if let Some(multirange_type) =
+        crate::include::catalog::multirange_type_ref_for_sql_type(sql_type)
+    {
+        return Some(multirange_type.type_oid());
+    }
+    if sql_type.type_oid != 0 {
+        return Some(sql_type.type_oid);
+    }
+    if let Some(row) = visible_type_row_for_sql_type(db, client_id, txn_ctx, search_path, sql_type)
+    {
+        return Some(row.oid);
+    }
+    crate::include::catalog::builtin_type_rows()
+        .into_iter()
+        .chain(dynamic_type_rows_for_search_path(db, search_path))
+        .find(|row| {
+            row.sql_type.kind == sql_type.kind && row.sql_type.is_array == sql_type.is_array
+        })
+        .map(|row| row.oid)
 }
 
 fn visible_catcache(
@@ -1326,17 +1610,57 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         constraint_rows_for_relation(self.db, self.client_id, self.txn_ctx, relation_oid)
     }
 
+    fn constraint_row_by_oid(&self, oid: u32) -> Option<PgConstraintRow> {
+        constraint_row_by_oid(self.db, self.client_id, self.txn_ctx, oid)
+    }
+
+    fn constraint_rows_for_index(&self, index_oid: u32) -> Vec<PgConstraintRow> {
+        constraint_rows_for_index(self.db, self.client_id, self.txn_ctx, index_oid)
+    }
+
+    fn foreign_key_constraint_rows_referencing_relation(
+        &self,
+        relation_oid: u32,
+    ) -> Vec<PgConstraintRow> {
+        foreign_key_constraint_rows_referencing_relation(
+            self.db,
+            self.client_id,
+            self.txn_ctx,
+            relation_oid,
+        )
+    }
+
+    fn foreign_key_constraint_rows_referencing_index(
+        &self,
+        index_oid: u32,
+    ) -> Vec<PgConstraintRow> {
+        foreign_key_constraint_rows_referencing_index(
+            self.db,
+            self.client_id,
+            self.txn_ctx,
+            index_oid,
+        )
+    }
+
     fn constraint_rows(&self) -> Vec<PgConstraintRow> {
         ensure_constraint_rows(self.db, self.client_id, self.txn_ctx)
     }
 
     fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
         let mut rows = proc_rows_by_name(self.db, self.client_id, self.txn_ctx, name);
-        rows.extend(crate::include::catalog::synthetic_range_proc_rows_by_name(
+        if is_visible_range_proc_name(
+            self.db,
+            self.client_id,
+            self.txn_ctx,
+            &self.search_path,
             name,
-            &self.type_rows(),
-            &self.range_rows(),
-        ));
+        ) {
+            rows.extend(crate::include::catalog::synthetic_range_proc_rows_by_name(
+                name,
+                &range_proc_type_rows(self.db, &self.search_path),
+                &self.range_rows(),
+            ));
+        }
         dedup_proc_rows(&mut rows);
         rows
     }
@@ -1345,7 +1669,7 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         proc_row_by_oid(self.db, self.client_id, self.txn_ctx, oid).or_else(|| {
             crate::include::catalog::synthetic_range_proc_row_by_oid(
                 oid,
-                &self.type_rows(),
+                &range_proc_type_rows(self.db, &self.search_path),
                 &self.range_rows(),
             )
         })
@@ -1361,6 +1685,36 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         rows.extend(self.db.enum_type_rows_for_search_path(&self.search_path));
         rows.extend(self.db.range_type_rows_for_search_path(&self.search_path));
         rows
+    }
+
+    fn type_by_oid(&self, oid: u32) -> Option<PgTypeRow> {
+        visible_type_row_by_oid(
+            self.db,
+            self.client_id,
+            self.txn_ctx,
+            &self.search_path,
+            oid,
+        )
+    }
+
+    fn type_by_name(&self, name: &str) -> Option<PgTypeRow> {
+        visible_type_row_by_name(
+            self.db,
+            self.client_id,
+            self.txn_ctx,
+            &self.search_path,
+            name,
+        )
+    }
+
+    fn type_oid_for_sql_type(&self, sql_type: SqlType) -> Option<u32> {
+        visible_type_oid_for_sql_type(
+            self.db,
+            self.client_id,
+            self.txn_ctx,
+            &self.search_path,
+            sql_type,
+        )
     }
 
     fn range_rows(&self) -> Vec<crate::include::catalog::PgRangeRow> {
