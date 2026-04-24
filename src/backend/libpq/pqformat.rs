@@ -1251,6 +1251,12 @@ pub(crate) fn send_bind_complete(w: &mut impl Write) -> io::Result<()> {
     Ok(())
 }
 
+pub(crate) fn send_portal_suspended(w: &mut impl Write) -> io::Result<()> {
+    w.write_all(&[b's'])?;
+    w.write_all(&4_i32.to_be_bytes())?;
+    Ok(())
+}
+
 pub(crate) fn send_close_complete(w: &mut impl Write) -> io::Result<()> {
     w.write_all(&[b'3'])?;
     w.write_all(&4_i32.to_be_bytes())?;

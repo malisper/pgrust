@@ -397,6 +397,10 @@ pub enum Statement {
     Notify(NotifyStatement),
     Listen(ListenStatement),
     Unlisten(UnlistenStatement),
+    DeclareCursor(DeclareCursorStatement),
+    Fetch(FetchStatement),
+    Move(FetchStatement),
+    ClosePortal(ClosePortalStatement),
     Insert(InsertStatement),
     Merge(MergeStatement),
     Update(UpdateStatement),
@@ -815,6 +819,46 @@ pub struct ListenStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnlistenStatement {
     pub channel: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorScrollOption {
+    Unspecified,
+    Scroll,
+    NoScroll,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclareCursorStatement {
+    pub name: String,
+    pub binary: bool,
+    pub insensitive: bool,
+    pub scroll: CursorScrollOption,
+    pub hold: bool,
+    pub query: SelectStatement,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FetchDirection {
+    Next,
+    Prior,
+    First,
+    Last,
+    Absolute(i64),
+    Relative(i64),
+    Forward(Option<i64>),
+    Backward(Option<i64>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchStatement {
+    pub cursor_name: String,
+    pub direction: FetchDirection,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClosePortalStatement {
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
