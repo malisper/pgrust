@@ -2375,6 +2375,8 @@ pub struct ColumnDef {
     pub ty: RawTypeName,
     pub default_expr: Option<String>,
     pub generated: Option<ColumnGeneratedDef>,
+    pub identity: Option<ColumnIdentityKind>,
+    pub storage: Option<crate::include::access::htup::AttributeStorage>,
     pub compression: Option<crate::include::access::htup::AttributeCompression>,
     pub constraints: Vec<ColumnConstraint>,
 }
@@ -2406,6 +2408,29 @@ impl ColumnDef {
 pub struct ColumnGeneratedDef {
     pub expr_sql: String,
     pub kind: ColumnGeneratedKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ColumnIdentityKind {
+    Always,
+    ByDefault,
+}
+
+impl ColumnIdentityKind {
+    pub const fn catalog_char(self) -> char {
+        match self {
+            Self::Always => 'a',
+            Self::ByDefault => 'd',
+        }
+    }
+
+    pub const fn from_catalog_char(value: char) -> Option<Self> {
+        match value {
+            'a' => Some(Self::Always),
+            'd' => Some(Self::ByDefault),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -2455,10 +2480,22 @@ pub enum CreateTableLikeOption {
     IncludingDefaults,
     IncludingConstraints,
     IncludingIndexes,
+    IncludingIdentity,
+    IncludingGenerated,
+    IncludingComments,
+    IncludingStorage,
+    IncludingCompression,
+    IncludingStatistics,
     IncludingAll,
     ExcludingDefaults,
     ExcludingConstraints,
     ExcludingIndexes,
+    ExcludingIdentity,
+    ExcludingGenerated,
+    ExcludingComments,
+    ExcludingStorage,
+    ExcludingCompression,
+    ExcludingStatistics,
     ExcludingAll,
 }
 

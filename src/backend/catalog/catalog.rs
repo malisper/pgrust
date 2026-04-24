@@ -70,6 +70,7 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         default_expr: None,
         default_sequence_oid: None,
         generated: None,
+        identity: None,
         missing_default_value: None,
     }
 }

@@ -4639,6 +4639,148 @@ impl CatalogStore {
         self.comment_shared_object_mvcc(relation_oid, PG_CLASS_RELATION_OID, comment, ctx)
     }
 
+    pub fn comment_column_mvcc(
+        &mut self,
+        relation_oid: u32,
+        attnum: i32,
+        comment: Option<&str>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        self.comment_object_subid_mvcc(relation_oid, PG_CLASS_RELATION_OID, attnum, comment, ctx)
+    }
+
+    pub fn copy_relation_column_comments_mvcc(
+        &mut self,
+        source_relation_oid: u32,
+        target_relation_oid: u32,
+        max_target_attnum: i32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let snapshot = ctx
+            .txns
+            .read()
+            .snapshot_for_command(ctx.xid, ctx.cid)
+            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+        let source_rows = probe_system_catalog_rows_visible_in_db(
+            &ctx.pool,
+            &ctx.txns,
+            &snapshot,
+            ctx.client_id,
+            self.scope_db_oid(),
+            PG_DESCRIPTION_O_C_O_INDEX_OID,
+            vec![
+                crate::include::access::scankey::ScanKeyData {
+                    attribute_number: 1,
+                    strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                    argument: Value::Int64(i64::from(source_relation_oid)),
+                },
+                crate::include::access::scankey::ScanKeyData {
+                    attribute_number: 2,
+                    strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                    argument: Value::Int64(i64::from(PG_CLASS_RELATION_OID)),
+                },
+            ],
+        )?
+        .into_iter()
+        .map(pg_description_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?;
+
+        let copied_rows = source_rows
+            .into_iter()
+            .filter(|row| row.objsubid > 0 && row.objsubid <= max_target_attnum)
+            .map(|row| PgDescriptionRow {
+                objoid: target_relation_oid,
+                classoid: PG_CLASS_RELATION_OID,
+                objsubid: row.objsubid,
+                description: row.description,
+            })
+            .collect::<Vec<_>>();
+        if copied_rows.is_empty() {
+            return Ok(CatalogMutationEffect::default());
+        }
+
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                descriptions: copied_rows,
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &[BootstrapCatalogKind::PgDescription],
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgDescription]);
+        effect_record_oid(&mut effect.relation_oids, target_relation_oid);
+        Ok(effect)
+    }
+
+    pub fn copy_object_comment_mvcc(
+        &mut self,
+        source_object_oid: u32,
+        source_classoid: u32,
+        target_object_oid: u32,
+        target_classoid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let snapshot = ctx
+            .txns
+            .read()
+            .snapshot_for_command(ctx.xid, ctx.cid)
+            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+        let source_rows = probe_system_catalog_rows_visible_in_db(
+            &ctx.pool,
+            &ctx.txns,
+            &snapshot,
+            ctx.client_id,
+            self.scope_db_oid(),
+            PG_DESCRIPTION_O_C_O_INDEX_OID,
+            vec![
+                crate::include::access::scankey::ScanKeyData {
+                    attribute_number: 1,
+                    strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                    argument: Value::Int64(i64::from(source_object_oid)),
+                },
+                crate::include::access::scankey::ScanKeyData {
+                    attribute_number: 2,
+                    strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                    argument: Value::Int64(i64::from(source_classoid)),
+                },
+                crate::include::access::scankey::ScanKeyData {
+                    attribute_number: 3,
+                    strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                    argument: Value::Int32(0),
+                },
+            ],
+        )?
+        .into_iter()
+        .map(pg_description_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?;
+        let Some(source_row) = source_rows.first() else {
+            return Ok(CatalogMutationEffect::default());
+        };
+
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                descriptions: vec![PgDescriptionRow {
+                    objoid: target_object_oid,
+                    classoid: target_classoid,
+                    objsubid: 0,
+                    description: source_row.description.clone(),
+                }],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &[BootstrapCatalogKind::PgDescription],
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &[BootstrapCatalogKind::PgDescription]);
+        effect_record_oid(&mut effect.relation_oids, target_object_oid);
+        Ok(effect)
+    }
+
     pub fn comment_role_mvcc(
         &mut self,
         role_oid: u32,
@@ -4730,7 +4872,18 @@ impl CatalogStore {
         comment: Option<&str>,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
-        let existing = description_rows_for_object_mvcc(self, ctx, object_oid, classoid, 0)?;
+        self.comment_object_subid_mvcc(object_oid, classoid, 0, comment, ctx)
+    }
+
+    fn comment_object_subid_mvcc(
+        &mut self,
+        object_oid: u32,
+        classoid: u32,
+        objsubid: i32,
+        comment: Option<&str>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let existing = description_rows_for_object_mvcc(self, ctx, object_oid, classoid, objsubid)?;
 
         let normalized = comment.and_then(|text| (!text.is_empty()).then_some(text));
         if let Some(existing_row) = existing.first() {
@@ -4750,7 +4903,7 @@ impl CatalogStore {
                         descriptions: vec![PgDescriptionRow {
                             objoid: object_oid,
                             classoid,
-                            objsubid: 0,
+                            objsubid,
                             description: text.to_string(),
                         }],
                         ..PhysicalCatalogRows::default()
@@ -4766,7 +4919,7 @@ impl CatalogStore {
                     descriptions: vec![PgDescriptionRow {
                         objoid: object_oid,
                         classoid,
-                        objsubid: 0,
+                        objsubid,
                         description: text.to_string(),
                     }],
                     ..PhysicalCatalogRows::default()
@@ -5591,6 +5744,10 @@ fn rows_for_new_relation_entry(
                     attstattarget: column.attstattarget,
                     attinhcount: column.attinhcount,
                     attislocal: column.attislocal,
+                    attidentity: column
+                        .identity
+                        .map(|kind| kind.catalog_char())
+                        .unwrap_or('\0'),
                     attgenerated: column
                         .generated
                         .map(|kind| kind.catalog_char())

@@ -78,6 +78,8 @@ struct ColumnDescFile {
     default_expr: Option<String>,
     #[serde(default)]
     generated: Option<crate::include::nodes::parsenodes::ColumnGeneratedKind>,
+    #[serde(default)]
+    identity: Option<crate::include::nodes::parsenodes::ColumnIdentityKind>,
 }
 
 pub(super) fn relcache_init_path_for_scope(base_dir: &Path, scope: CatalogScope) -> PathBuf {
@@ -256,6 +258,7 @@ fn column_desc_to_file(column: &ColumnDesc) -> ColumnDescFile {
         attrdef_oid: column.attrdef_oid,
         default_expr: column.default_expr.clone(),
         generated: column.generated,
+        identity: column.identity,
     }
 }
 
@@ -284,6 +287,7 @@ fn column_desc_from_file(column: ColumnDescFile) -> ColumnDesc {
         default_expr: column.default_expr,
         default_sequence_oid,
         generated: column.generated,
+        identity: column.identity,
         missing_default_value: None,
     }
 }
