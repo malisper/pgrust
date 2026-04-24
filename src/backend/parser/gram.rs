@@ -6867,6 +6867,11 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_alter_column_type_stmt => Ok(Statement::AlterTableAlterColumnType(
             build_alter_table_alter_column_type(inner)?,
         )),
+        Rule::alter_table_alter_column_expression_stmt => {
+            Ok(Statement::AlterTableAlterColumnExpression(
+                build_alter_table_alter_column_expression(inner)?,
+            ))
+        }
         Rule::alter_table_alter_column_default_stmt => Ok(Statement::AlterTableAlterColumnDefault(
             build_alter_table_alter_column_default(inner)?,
         )),
@@ -10874,6 +10879,7 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
         inner.next().ok_or(ParseError::UnexpectedEof)?,
     ))?;
     let mut default_expr = None;
+    let mut generated = None;
     let mut constraints = Vec::new();
     for flag in inner {
         let Some(flag) = (match flag.as_rule() {
@@ -10889,9 +10895,26 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
                     .find(|part| matches!(part.as_rule(), Rule::expr | Rule::b_expr))
                     .map(|expr| expr.as_str().to_string());
             }
+            Rule::column_generated => {
+                set_column_generated(&mut generated, build_column_generated(flag)?, &name)?;
+            }
             Rule::nullable => {}
-            Rule::named_column_constraint
-            | Rule::not_null_column_constraint
+            Rule::named_column_constraint => {
+                let generated_part = flag
+                    .clone()
+                    .into_inner()
+                    .find(|part| part.as_rule() == Rule::column_generated);
+                if let Some(generated_part) = generated_part {
+                    set_column_generated(
+                        &mut generated,
+                        build_column_generated(generated_part)?,
+                        &name,
+                    )?;
+                } else {
+                    constraints.push(build_column_constraint(flag)?)
+                }
+            }
+            Rule::not_null_column_constraint
             | Rule::check_column_constraint
             | Rule::primary_key_column_constraint
             | Rule::unique_column_constraint
@@ -10905,8 +10928,59 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
         name,
         ty,
         default_expr,
+        generated,
         compression: None,
         constraints,
+    })
+}
+
+fn set_column_generated(
+    target: &mut Option<ColumnGeneratedDef>,
+    value: ColumnGeneratedDef,
+    column_name: &str,
+) -> Result<(), ParseError> {
+    if target.is_some() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "single generation clause",
+            actual: format!("multiple generation clauses specified for column \"{column_name}\""),
+        });
+    }
+    *target = Some(value);
+    Ok(())
+}
+
+fn build_column_generated(pair: Pair<'_, Rule>) -> Result<ColumnGeneratedDef, ParseError> {
+    let mut when = None;
+    let mut expr_sql = None;
+    let mut kind = ColumnGeneratedKind::Virtual;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::generated_when => when = Some(part.as_str().trim().to_ascii_lowercase()),
+            Rule::expr => expr_sql = Some(part.as_str().trim().to_string()),
+            Rule::generated_storage => {
+                kind = match part.as_str().trim().to_ascii_lowercase().as_str() {
+                    "stored" => ColumnGeneratedKind::Stored,
+                    "virtual" => ColumnGeneratedKind::Virtual,
+                    other => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "VIRTUAL or STORED",
+                            actual: other.into(),
+                        });
+                    }
+                };
+            }
+            _ => {}
+        }
+    }
+    if when.as_deref() != Some("always") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "GENERATED ALWAYS",
+            actual: "for a generated column, GENERATED ALWAYS must be specified".into(),
+        });
+    }
+    Ok(ColumnGeneratedDef {
+        expr_sql: expr_sql.ok_or(ParseError::UnexpectedEof)?,
+        kind,
     })
 }
 
@@ -11237,6 +11311,60 @@ fn build_alter_table_alter_column_default(
         column_name: column_name.ok_or(ParseError::UnexpectedEof)?,
         default_expr,
         default_expr_sql,
+    })
+}
+
+fn build_alter_table_alter_column_expression(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableAlterColumnExpressionStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
+    let mut table_name = None;
+    let mut column_name = None;
+    let mut action = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::identifier if column_name.is_none() => column_name = Some(build_identifier(part)),
+            Rule::alter_table_column_expression_action => {
+                for inner in part.into_inner() {
+                    match inner.as_rule() {
+                        Rule::alter_table_set_expression_action => {
+                            let expr = inner
+                                .into_inner()
+                                .find(|item| item.as_rule() == Rule::expr)
+                                .ok_or(ParseError::UnexpectedEof)?;
+                            action = Some(AlterColumnExpressionAction::Set {
+                                expr_sql: expr.as_str().trim().to_string(),
+                                expr: build_expr(expr)?,
+                            });
+                        }
+                        Rule::alter_table_drop_expression_action => {
+                            let missing_ok = inner
+                                .into_inner()
+                                .any(|item| item.as_rule() == Rule::if_exists_clause);
+                            action = Some(AlterColumnExpressionAction::Drop { missing_ok });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(AlterTableAlterColumnExpressionStatement {
+        if_exists,
+        only,
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        column_name: column_name.ok_or(ParseError::UnexpectedEof)?,
+        action: action.ok_or(ParseError::UnexpectedEof)?,
     })
 }
 

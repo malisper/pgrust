@@ -251,6 +251,68 @@ fn ephemeral_database_executes_basic_sql() {
 }
 
 #[test]
+fn generated_columns_compute_on_insert_update_and_read() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table stored_generated (a int4, b int4 generated always as (a + 1) stored)",
+        )
+        .expect("create stored generated table");
+    session
+        .execute(&db, "insert into stored_generated(a) values (4)")
+        .expect("insert generated row");
+    session
+        .execute(&db, "insert into stored_generated values (5, default)")
+        .expect("insert generated default row");
+    assert_single_int_column_rows(
+        session
+            .execute(&db, "select b from stored_generated order by a")
+            .expect("select stored generated rows"),
+        vec![vec![Value::Int32(5)], vec![Value::Int32(6)]],
+    );
+
+    session
+        .execute(&db, "update stored_generated set a = 9 where a = 4")
+        .expect("update generated row");
+    assert_single_int_column_rows(
+        session
+            .execute(&db, "select b from stored_generated where a = 9")
+            .expect("select updated generated row"),
+        vec![vec![Value::Int32(10)]],
+    );
+
+    let err = session
+        .execute(&db, "insert into stored_generated values (7, 99)")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::DetailedError {
+            sqlstate: "428C9",
+            ..
+        })
+    ));
+
+    session
+        .execute(
+            &db,
+            "create table virtual_generated (a int4, b int4 generated always as (a + 1))",
+        )
+        .expect("create virtual generated table");
+    session
+        .execute(&db, "insert into virtual_generated(a) values (11)")
+        .expect("insert virtual generated row");
+    assert_single_int_column_rows(
+        session
+            .execute(&db, "select b from virtual_generated where b = 12")
+            .expect("select virtual generated row"),
+        vec![vec![Value::Int32(12)]],
+    );
+}
+
+#[test]
 fn pg_backend_pid_returns_session_client_id() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
 

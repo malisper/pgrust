@@ -2245,7 +2245,12 @@ fn psql_describe_columns_query(
                 row.push(Value::InternalChar(0));
             }
             if include_attgenerated {
-                row.push(Value::InternalChar(0));
+                row.push(Value::InternalChar(
+                    column
+                        .generated
+                        .map(|kind| kind.catalog_char() as u8)
+                        .unwrap_or(0),
+                ));
             }
             if include_is_key {
                 let is_key = entry

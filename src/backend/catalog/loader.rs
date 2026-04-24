@@ -355,6 +355,10 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                 desc.attstattarget = attr.attstattarget;
                 desc.attinhcount = attr.attinhcount;
                 desc.attislocal = attr.attislocal;
+                desc.generated =
+                    crate::include::nodes::parsenodes::ColumnGeneratedKind::from_catalog_char(
+                        attr.attgenerated,
+                    );
                 desc.dropped = attr.attisdropped;
                 if let Some(attrdef) = attrdefs_by_key.get(&(row.oid, attr.attnum)) {
                     desc.attrdef_oid = Some(attrdef.oid);

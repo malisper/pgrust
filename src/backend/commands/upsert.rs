@@ -15,8 +15,9 @@ use crate::pl::plpgsql::TriggerOperation;
 
 use super::tablecmds::{
     WriteUpdatedRowResult, apply_assignment_target, build_index_insert_context,
-    index_key_values_for_row, insert_index_entry_for_row, rollback_inserted_row,
-    row_matches_index_predicate, slot_toast_context, write_insert_heap_row, write_updated_row,
+    index_key_values_for_row, insert_index_entry_for_row, materialize_generated_columns,
+    rollback_inserted_row, row_matches_index_predicate, slot_toast_context, write_insert_heap_row,
+    write_updated_row,
 };
 use super::trigger::{RuntimeTriggers, TriggerTransitionCapture};
 
@@ -220,6 +221,7 @@ fn run_conflict_update(
         };
         new_values = trigger_values;
     }
+    materialize_generated_columns(&stmt.desc, &mut new_values, ctx)?;
 
     let write_result = write_updated_row(
         &stmt.relation_name,
@@ -494,12 +496,18 @@ pub(crate) fn execute_insert_on_conflict_rows(
         predicate,
     } = &on_conflict.action
     {
+        let mut rows_with_generated = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut row = row.clone();
+            materialize_generated_columns(&stmt.desc, &mut row, ctx)?;
+            rows_with_generated.push(row);
+        }
         preflight_on_conflict_updates(
             stmt,
             &arbiter_indexes,
             assignments,
             predicate.as_ref(),
-            rows,
+            &rows_with_generated,
             &desc,
             &attr_descs,
             ctx,
@@ -507,12 +515,13 @@ pub(crate) fn execute_insert_on_conflict_rows(
     }
 
     for values in rows {
-        let Some(values) = (match &insert_triggers {
+        let Some(mut values) = (match &insert_triggers {
             Some(triggers) => triggers.before_row_insert(values.clone(), ctx)?,
             None => Some(values.clone()),
         }) else {
             continue;
         };
+        materialize_generated_columns(&stmt.desc, &mut values, ctx)?;
         loop {
             ctx.check_for_interrupts()?;
             if let Some(conflict) = probe_arbiter_conflict(stmt, &arbiter_indexes, &values, ctx)? {

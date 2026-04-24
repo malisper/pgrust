@@ -9,6 +9,7 @@ mod create_table;
 mod create_table_inherits;
 mod expr;
 mod functions;
+mod generated;
 mod geometry;
 mod index_predicates;
 mod infer;
@@ -76,6 +77,11 @@ pub use create_table_inherits::*;
 pub(crate) use expr::bind_expr_with_outer_and_ctes;
 use expr::*;
 use functions::*;
+pub(crate) use generated::{
+    bind_generated_expr, expr_references_column, generated_relation_output_exprs,
+    scope_for_base_relation_with_generated, scope_for_relation_with_generated,
+    validate_generated_columns,
+};
 use geometry::*;
 pub(crate) use index_predicates::*;
 use infer::*;

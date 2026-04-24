@@ -2134,6 +2134,9 @@ pub(crate) fn decode_value_with_toast(
 }
 
 pub(crate) fn missing_column_value(column: &ColumnDesc) -> Value {
+    if column.generated.is_some() {
+        return Value::Null;
+    }
     column
         .missing_default_value
         .clone()
