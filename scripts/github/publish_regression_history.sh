@@ -27,6 +27,10 @@ if [[ -z "${RESULTS_DIR:-}" || ! -d "$RESULTS_DIR" ]]; then
     exit 1
 fi
 
+if [[ -z "${REGRESS_EXIT_CODE:-}" && -f "$RESULTS_DIR/exit_code.txt" ]]; then
+    REGRESS_EXIT_CODE="$(tr -d '\r\n' < "$RESULTS_DIR/exit_code.txt")"
+fi
+
 # Use the GitHub Actions auto-token by default; allow override for local testing.
 GH_REPO_SLUG="${GITHUB_REPOSITORY:-Pager-Free/pgrust}"
 HISTORY_REMOTE="${HISTORY_REMOTE:-https://x-access-token:${GITHUB_TOKEN:?GITHUB_TOKEN required}@github.com/${GH_REPO_SLUG}.git}"
