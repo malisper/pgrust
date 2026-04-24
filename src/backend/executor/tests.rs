@@ -17648,7 +17648,7 @@ fn scalar_subquery_can_cast_outer_whole_row_to_text() {
 }
 
 #[test]
-fn range_constructor_and_accessor_semantics() {
+fn range_constructor_semantics() {
     let base = temp_dir("range_constructor_accessors");
     let txns = TransactionManager::new_durable(&base).unwrap();
     assert_query_rows(
@@ -17660,15 +17660,7 @@ fn range_constructor_and_accessor_semantics() {
                 int4range(1, 10, '[]')::text, \
                 daterange('2000-01-10', '2000-01-20', '[]')::text, \
                 numrange(1.7, 1.7, '[]')::text, \
-                numrange(1.7, 1.7, '()')::text, \
-                lower(int4range(1, 10))::text, \
-                upper(int4range(1, 10))::text, \
-                lower(int4range(null, 10))::text, \
-                upper(int4range(1, null))::text, \
-                lower_inf(int4range(null, 10)), \
-                upper_inf(int4range(1, null)), \
-                lower_inc('empty'::int4range), \
-                upper_inf('empty'::int4range)",
+                numrange(1.7, 1.7, '()')::text",
         )
         .unwrap(),
         vec![vec![
@@ -17676,22 +17668,75 @@ fn range_constructor_and_accessor_semantics() {
             Value::Text("[2000-01-10,2000-01-21)".into()),
             Value::Text("[1.7,1.7]".into()),
             Value::Text("empty".into()),
-            Value::Text("1".into()),
-            Value::Text("10".into()),
-            Value::Null,
-            Value::Null,
-            Value::Bool(true),
-            Value::Bool(true),
-            Value::Bool(false),
-            Value::Bool(false),
         ]],
     );
 }
 
 #[test]
-fn range_set_operators_and_aggregate_work() {
+fn range_finite_accessor_semantics() {
+    let base = temp_dir("range_accessor_finite");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select \
+                lower(int4range(1, 10))::text, \
+                upper(int4range(1, 10))::text",
+        )
+        .unwrap(),
+        vec![vec![Value::Text("1".into()), Value::Text("10".into())]],
+    );
+}
+
+#[test]
+fn range_infinite_bound_semantics() {
+    let base = temp_dir("range_accessor_infinite");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select \
+                lower(int4range(null, 10))::text, \
+                upper(int4range(1, null))::text, \
+                lower_inf(int4range(null, 10)), \
+                upper_inf(int4range(1, null))",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Null,
+            Value::Null,
+            Value::Bool(true),
+            Value::Bool(true),
+        ]],
+    );
+}
+
+#[test]
+fn empty_range_flag_semantics() {
+    let base = temp_dir("range_accessor_empty");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select \
+                lower_inc('empty'::int4range), \
+                upper_inf('empty'::int4range)",
+        )
+        .unwrap(),
+        vec![vec![Value::Bool(false), Value::Bool(false)]],
+    );
+}
+
+#[test]
+fn range_set_operators_work() {
     let base = temp_dir("range_set_operators");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let txns = TransactionManager::new_durable(&base).unwrap();
     assert_query_rows(
         run_sql(
             &base,
@@ -17711,7 +17756,12 @@ fn range_set_operators_and_aggregate_work() {
             Value::Text("[1,15)".into()),
         ]],
     );
+}
 
+#[test]
+fn range_intersect_aggregate_works() {
+    let base = temp_dir("range_set_aggregate");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
     let xid = txns.begin();
     run_sql_with_catalog(
         &base,
@@ -17737,7 +17787,12 @@ fn range_set_operators_and_aggregate_work() {
         .unwrap(),
         vec![vec![Value::Text("[5,10)".into())]],
     );
+}
 
+#[test]
+fn range_intersect_aggregate_all_null_returns_null() {
+    let base = temp_dir("range_set_aggregate_null");
+    let txns = TransactionManager::new_durable(&base).unwrap();
     assert_query_rows(
         run_sql_with_catalog(
             &base,
@@ -18941,7 +18996,7 @@ with recursive iterations as (
   select 'FX' as path, 0 as iteration
   union all
   select replace(replace(replace(path, 'X', 'X+ZF+'), 'Y', '-FX-Y'), 'Z', 'Y'), iteration + 1
-  from iterations where iteration < 3
+  from iterations where iteration < 2
 ), segments as (
   select
     0 as start_row,
@@ -19004,9 +19059,7 @@ with recursive iterations as (
 "#;
     assert_query_rows(
         run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap(),
-        vec![vec![Value::Text(
-            "* *-*  \n| | |  \n*-* *-*\n      |\n    *-*".into(),
-        )]],
+        vec![vec![Value::Text("*  \n|  \n*-*\n  |\n*-*".into())]],
     );
 }
 

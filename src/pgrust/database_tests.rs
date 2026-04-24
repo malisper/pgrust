@@ -14780,10 +14780,7 @@ fn create_index_builds_multilevel_btree_root() {
 
     db.execute(1, "create table items (id int4 not null, note text)")
         .unwrap();
-    for i in 0..1500 {
-        db.execute(1, &format!("insert into items values ({i}, 'row{i}')"))
-            .unwrap();
-    }
+    db.execute(1, &insert_items_sql(0..1500, "row")).unwrap();
     db.execute(1, "create index items_id_idx on items (id)")
         .unwrap();
 
