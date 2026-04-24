@@ -19,3 +19,11 @@ ns-657.awsdns-18.net==>ns-example.awsdns.net
 pgrust/domains/==>demo-infra/
 Pager-Free==>your-github-org
 pagerfreeglobal==>your-projects-parent
+.github/workflows/auto-queue-pr.yml==>private-ci-workflow
+.github/workflows/merge-queue-tests.yml==>private-ci-workflow
+auto-queue-pr.yml==>private-ci-workflow
+merge-queue-tests.yml==>private-ci-workflow
+private Pager-Free merge queue==>private CI
+private your-github-org merge queue==>private CI
+private merge-queue workflows==>private CI
+private merge-queue infra==>private CI

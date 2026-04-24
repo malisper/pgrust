@@ -105,15 +105,16 @@ git log -1 --oneline
 # 3. filter-repo: drop private paths, strip scripts/internal, replace strings
 # ---------------------------------------------------------------------------
 echo ">>> 3. filter-repo: drop private paths (including this folder)"
-# .github/workflows/{auto-queue-pr,merge-queue-tests}.yml are private CI
-# (Pager-Free merge queue). They reference perf-optimization as the trigger
-# branch and don't run on the public main branch — drop them so public
-# users don't see dead CI infra.
+# .github/workflows/{auto-queue-pr,merge-queue-tests}.yml and
+# docs/github-merge-queue.md are private CI (Pager-Free merge queue).
+# They reference perf-optimization as the trigger branch and don't run on
+# the public main branch, so drop them from public history.
 git filter-repo --force \
   --path scripts/internal --invert-paths \
   --path issues.jsonl --invert-paths \
   --path domains --invert-paths \
   --path docs/shipments-query-gaps.md --invert-paths \
+  --path docs/github-merge-queue.md --invert-paths \
   --path .github/workflows/auto-queue-pr.yml --invert-paths \
   --path .github/workflows/merge-queue-tests.yml --invert-paths
 
@@ -192,7 +193,7 @@ if [[ "$MODE" == "dry" ]]; then
   echo "Inspect manually:"
   echo "  cd $CLONE"
   echo "  git log --oneline | head"
-  echo "  git ls-tree -r HEAD --name-only | rg '^(issues\\.jsonl|domains/|docs/shipments-query-gaps\\.md|scripts/internal/)'   # expect empty"
+  echo "  git ls-tree -r HEAD --name-only | rg '^(issues\\.jsonl|domains/|docs/(shipments-query-gaps|github-merge-queue)\\.md|scripts/internal/|\\.github/workflows/(auto-queue-pr|merge-queue-tests)\\.yml)'   # expect empty"
   echo "  git log --all -p | rg -e \"\$LEAK_RE\"   # expect empty"
   echo ""
   echo "When ready to FORCE-PUSH over github.com/${PUBLIC_OWNER}/${PUBLIC_NAME}:main:"
