@@ -11,7 +11,8 @@ use crate::backend::utils::cache::syscache::{
     SysCacheId, SysCacheTuple, backend_catcache, backend_relcache, ensure_am_rows,
     ensure_attribute_rows, ensure_class_rows, ensure_constraint_rows, ensure_index_rows,
     ensure_namespace_rows, ensure_proc_rows, ensure_rewrite_rows, ensure_statistic_rows,
-    ensure_type_rows, search_sys_cache_list1_db, search_sys_cache1_db, search_sys_cache2_db,
+    ensure_type_rows, relation_id_get_relation_db, search_sys_cache_list1_db, search_sys_cache1_db,
+    search_sys_cache2_db,
 };
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_policies_rows, build_pg_rules_rows,
@@ -236,15 +237,23 @@ fn attrdef_rows_for_relation(
     txn_ctx: Option<(TransactionId, CommandId)>,
     relation_oid: u32,
 ) -> Vec<crate::include::catalog::PgAttrdefRow> {
-    let mut rows: Vec<_> = backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| {
-            catcache
-                .attrdef_rows()
-                .into_iter()
-                .filter(|row| row.adrelid == relation_oid)
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut rows = search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::AttrDefault,
+        oid_key(relation_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Attrdef(row) => Some(row),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
     rows.sort_by_key(|row| row.adnum);
     rows
 }
@@ -255,9 +264,23 @@ fn trigger_rows_for_relation(
     txn_ctx: Option<(TransactionId, CommandId)>,
     relation_oid: u32,
 ) -> Vec<PgTriggerRow> {
-    visible_catcache(db, client_id, txn_ctx)
-        .map(|catcache| catcache.trigger_rows_for_relation(relation_oid))
-        .unwrap_or_default()
+    search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::TriggerRelidName,
+        oid_key(relation_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Trigger(row) => Some(row),
+                _ => None,
+            })
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 fn policy_rows_for_relation(
@@ -583,11 +606,44 @@ pub fn index_row_by_indexrelid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     relation_oid: u32,
 ) -> Option<PgIndexRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .ok()?
-        .index_rows()
-        .into_iter()
-        .find(|row| row.indexrelid == relation_oid)
+    search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::IndexRelId,
+        oid_key(relation_oid),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Index(row) => Some(row),
+        _ => None,
+    })
+}
+
+fn index_rows_for_heap(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relation_oid: u32,
+) -> Vec<PgIndexRow> {
+    search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::IndexIndRelId,
+        oid_key(relation_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Index(row) => Some(row),
+                _ => None,
+            })
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 pub fn index_relation_oids_for_heap(
@@ -596,18 +652,12 @@ pub fn index_relation_oids_for_heap(
     txn_ctx: Option<(TransactionId, CommandId)>,
     relation_oid: u32,
 ) -> Vec<u32> {
-    backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| {
-            catcache
-                .index_rows()
-                .into_iter()
-                .filter(|row| row.indrelid == relation_oid)
-                .map(|row| row.indexrelid)
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect()
-        })
-        .unwrap_or_default()
+    index_rows_for_heap(db, client_id, txn_ctx, relation_oid)
+        .into_iter()
+        .map(|row| row.indexrelid)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 pub fn relation_entry_by_oid(
@@ -629,6 +679,11 @@ pub fn relation_entry_by_oid(
         })
     {
         return Some(entry);
+    }
+
+    if let Ok(Some(entry)) = relation_id_get_relation_db(db, client_id, txn_ctx, relation_oid) {
+        return (!db.other_session_temp_namespace_oid(client_id, entry.namespace_oid))
+            .then_some(entry);
     }
 
     let entry = backend_relcache(db, client_id, txn_ctx)
@@ -1074,10 +1129,23 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
     }
 
     fn rewrite_rows_for_relation(&self, relation_oid: u32) -> Vec<PgRewriteRow> {
-        ensure_rewrite_rows(self.db, self.client_id, self.txn_ctx)
-            .into_iter()
-            .filter(|row| row.ev_class == relation_oid)
-            .collect()
+        search_sys_cache_list1_db(
+            self.db,
+            self.client_id,
+            self.txn_ctx,
+            SysCacheId::RuleRelName,
+            oid_key(relation_oid),
+        )
+        .map(|tuples| {
+            tuples
+                .into_iter()
+                .filter_map(|tuple| match tuple {
+                    SysCacheTuple::Rewrite(row) => Some(row),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
     }
 
     fn trigger_rows_for_relation(&self, relation_oid: u32) -> Vec<PgTriggerRow> {

@@ -1,12 +1,15 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::ClientId;
 use crate::backend::access::transam::xact::{CommandId, TransactionId};
 use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::catalog::indexing::probe_system_catalog_rows_visible_in_db;
 use crate::backend::catalog::rowcodec::{
-    pg_attribute_row_from_values, pg_class_row_from_values, pg_constraint_row_from_values,
-    pg_index_row_from_values, pg_inherits_row_from_values, pg_partitioned_table_row_from_values,
-    pg_type_row_from_values,
+    pg_attrdef_row_from_values, pg_attribute_row_from_values, pg_class_row_from_values,
+    pg_constraint_row_from_values, pg_depend_row_from_values, pg_index_row_from_values,
+    pg_inherits_row_from_values, pg_partitioned_table_row_from_values, pg_rewrite_row_from_values,
+    pg_trigger_row_from_values, pg_type_row_from_values,
 };
 use crate::backend::catalog::store::{CatalogStore, CatalogWriteContext};
 use crate::backend::utils::cache::catcache::CatCache;
@@ -18,10 +21,10 @@ use crate::backend::utils::time::snapmgr::{Snapshot, get_catalog_snapshot};
 use crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::catalog::{
-    PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgClassRow, PgCollationRow,
-    PgConstraintRow, PgDependRow, PgIndexRow, PgInheritsRow, PgNamespaceRow, PgOpclassRow,
-    PgOpfamilyRow, PgPartitionedTableRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTypeRow,
-    bootstrap_composite_type_rows, builtin_type_rows,
+    PG_CONSTRAINT_RELATION_OID, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow,
+    PgClassRow, PgCollationRow, PgConstraintRow, PgDependRow, PgIndexRow, PgInheritsRow,
+    PgNamespaceRow, PgOpclassRow, PgOpfamilyRow, PgPartitionedTableRow, PgProcRow, PgRewriteRow,
+    PgStatisticRow, PgTriggerRow, PgTypeRow, bootstrap_composite_type_rows, builtin_type_rows,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::SqlType;
@@ -29,15 +32,23 @@ use crate::pgrust::database::Database;
 
 const PG_ATTRIBUTE_RELID_ATTNAM_INDEX_OID: u32 = 2658;
 const PG_ATTRIBUTE_RELID_ATTNUM_INDEX_OID: u32 = 2659;
+const PG_ATTRDEF_ADRELID_ADNUM_INDEX_OID: u32 = 2656;
+const PG_ATTRDEF_OID_INDEX_OID: u32 = 2657;
 const PG_CLASS_OID_INDEX_OID: u32 = 2662;
 const PG_CLASS_RELNAME_NSP_INDEX_OID: u32 = 2663;
 const PG_CONSTRAINT_CONRELID_CONTYPID_CONNAME_INDEX_OID: u32 = 2665;
 const PG_CONSTRAINT_OID_INDEX_OID: u32 = 2667;
+const PG_DEPEND_DEPENDER_INDEX_OID: u32 = 2673;
+const PG_DEPEND_REFERENCE_INDEX_OID: u32 = 2674;
 const PG_INDEX_INDRELID_INDEX_OID: u32 = 2678;
 const PG_INDEX_INDEXRELID_INDEX_OID: u32 = 2679;
 const PG_INHERITS_RELID_SEQNO_INDEX_OID: u32 = 2680;
 const PG_INHERITS_PARENT_INDEX_OID: u32 = 2187;
 const PG_PARTITIONED_TABLE_PARTRELID_INDEX_OID: u32 = 3351;
+const PG_REWRITE_OID_INDEX_OID: u32 = 2692;
+const PG_REWRITE_REL_RULENAME_INDEX_OID: u32 = 2693;
+const PG_TRIGGER_RELID_NAME_INDEX_OID: u32 = 2701;
+const PG_TRIGGER_OID_INDEX_OID: u32 = 2702;
 const PG_TYPE_OID_INDEX_OID: u32 = 2703;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -46,10 +57,18 @@ pub enum SysCacheId {
     AttrName,
     // PostgreSQL syscache name: ATTNUM.
     AttrNum,
+    // PostgreSQL systable scan index: AttrDefaultIndexId.
+    AttrDefault,
+    // PostgreSQL systable scan index: AttrDefaultOidIndexId.
+    AttrDefaultOid,
     // PostgreSQL syscache name: CONSTROID.
     ConstraintOid,
     // PostgreSQL-like relation constraint lookup over pg_constraint_conrelid_*.
     ConstraintRelId,
+    // PostgreSQL systable scan index: DependDependerIndexId.
+    DependDepender,
+    // PostgreSQL systable scan index: DependReferenceIndexId.
+    DependReference,
     // PostgreSQL syscache name: INDEXRELID.
     IndexRelId,
     // PostgreSQL-like heap index lookup over pg_index_indrelid_index.
@@ -64,6 +83,14 @@ pub enum SysCacheId {
     RelOid,
     // PostgreSQL syscache name: RELNAMENSP.
     RelNameNsp,
+    // PostgreSQL systable scan index: RewriteOidIndexId.
+    RewriteOid,
+    // PostgreSQL syscache name: RULERELNAME.
+    RuleRelName,
+    // PostgreSQL systable scan index: TriggerRelidNameIndexId.
+    TriggerRelidName,
+    // PostgreSQL systable scan index: TriggerOidIndexId.
+    TriggerOid,
     // PostgreSQL syscache name: TYPEOID.
     TypeOid,
 }
@@ -73,8 +100,12 @@ impl SysCacheId {
         match self {
             Self::AttrName => PG_ATTRIBUTE_RELID_ATTNAM_INDEX_OID,
             Self::AttrNum => PG_ATTRIBUTE_RELID_ATTNUM_INDEX_OID,
+            Self::AttrDefault => PG_ATTRDEF_ADRELID_ADNUM_INDEX_OID,
+            Self::AttrDefaultOid => PG_ATTRDEF_OID_INDEX_OID,
             Self::ConstraintOid => PG_CONSTRAINT_OID_INDEX_OID,
             Self::ConstraintRelId => PG_CONSTRAINT_CONRELID_CONTYPID_CONNAME_INDEX_OID,
+            Self::DependDepender => PG_DEPEND_DEPENDER_INDEX_OID,
+            Self::DependReference => PG_DEPEND_REFERENCE_INDEX_OID,
             Self::IndexRelId => PG_INDEX_INDEXRELID_INDEX_OID,
             Self::IndexIndRelId => PG_INDEX_INDRELID_INDEX_OID,
             Self::InheritsRelIdSeqNo => PG_INHERITS_RELID_SEQNO_INDEX_OID,
@@ -82,33 +113,51 @@ impl SysCacheId {
             Self::PartRelId => PG_PARTITIONED_TABLE_PARTRELID_INDEX_OID,
             Self::RelOid => PG_CLASS_OID_INDEX_OID,
             Self::RelNameNsp => PG_CLASS_RELNAME_NSP_INDEX_OID,
+            Self::RewriteOid => PG_REWRITE_OID_INDEX_OID,
+            Self::RuleRelName => PG_REWRITE_REL_RULENAME_INDEX_OID,
+            Self::TriggerRelidName => PG_TRIGGER_RELID_NAME_INDEX_OID,
+            Self::TriggerOid => PG_TRIGGER_OID_INDEX_OID,
             Self::TypeOid => PG_TYPE_OID_INDEX_OID,
         }
     }
 
     fn expected_keys(self) -> usize {
         match self {
-            Self::ConstraintOid
+            Self::AttrDefaultOid
+            | Self::ConstraintOid
             | Self::ConstraintRelId
             | Self::IndexRelId
             | Self::IndexIndRelId
             | Self::InheritsParent
             | Self::PartRelId
             | Self::RelOid
+            | Self::RewriteOid
+            | Self::TriggerOid
             | Self::TypeOid => 1,
-            Self::AttrName | Self::AttrNum | Self::InheritsRelIdSeqNo | Self::RelNameNsp => 2,
+            Self::AttrDefault
+            | Self::AttrName
+            | Self::AttrNum
+            | Self::InheritsRelIdSeqNo
+            | Self::RelNameNsp
+            | Self::RuleRelName
+            | Self::TriggerRelidName => 2,
+            Self::DependDepender | Self::DependReference => 3,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SysCacheTuple {
+    Attrdef(PgAttrdefRow),
     Attribute(PgAttributeRow),
     Class(PgClassRow),
     Constraint(PgConstraintRow),
+    Depend(PgDependRow),
     Index(PgIndexRow),
     Inherits(PgInheritsRow),
     PartitionedTable(PgPartitionedTableRow),
+    Rewrite(PgRewriteRow),
+    Trigger(PgTriggerRow),
     Type(PgTypeRow),
 }
 
@@ -151,11 +200,17 @@ fn sys_cache_tuple_from_values(
     values: Vec<Value>,
 ) -> Result<SysCacheTuple, CatalogError> {
     match cache_id {
+        SysCacheId::AttrDefault | SysCacheId::AttrDefaultOid => {
+            pg_attrdef_row_from_values(values).map(SysCacheTuple::Attrdef)
+        }
         SysCacheId::AttrName | SysCacheId::AttrNum => {
             pg_attribute_row_from_values(values).map(SysCacheTuple::Attribute)
         }
         SysCacheId::ConstraintOid | SysCacheId::ConstraintRelId => {
             pg_constraint_row_from_values(values).map(SysCacheTuple::Constraint)
+        }
+        SysCacheId::DependDepender | SysCacheId::DependReference => {
+            pg_depend_row_from_values(values).map(SysCacheTuple::Depend)
         }
         SysCacheId::IndexRelId | SysCacheId::IndexIndRelId => {
             pg_index_row_from_values(values).map(SysCacheTuple::Index)
@@ -168,6 +223,12 @@ fn sys_cache_tuple_from_values(
         }
         SysCacheId::RelOid | SysCacheId::RelNameNsp => {
             pg_class_row_from_values(values).map(SysCacheTuple::Class)
+        }
+        SysCacheId::RewriteOid | SysCacheId::RuleRelName => {
+            pg_rewrite_row_from_values(values).map(SysCacheTuple::Rewrite)
+        }
+        SysCacheId::TriggerRelidName | SysCacheId::TriggerOid => {
+            pg_trigger_row_from_values(values).map(SysCacheTuple::Trigger)
         }
         SysCacheId::TypeOid => pg_type_row_from_values(values).map(SysCacheTuple::Type),
     }
@@ -307,6 +368,29 @@ impl CatalogStore {
         cache_id: SysCacheId,
         key1: Value,
     ) -> Result<Vec<SysCacheTuple>, CatalogError> {
+        self.search_sys_cache_list(ctx, cache_id, vec![key1])
+    }
+
+    pub(crate) fn search_sys_cache_list2(
+        &self,
+        ctx: &CatalogWriteContext,
+        cache_id: SysCacheId,
+        key1: Value,
+        key2: Value,
+    ) -> Result<Vec<SysCacheTuple>, CatalogError> {
+        self.search_sys_cache_list(ctx, cache_id, vec![key1, key2])
+    }
+
+    fn search_sys_cache_list(
+        &self,
+        ctx: &CatalogWriteContext,
+        cache_id: SysCacheId,
+        keys: Vec<Value>,
+    ) -> Result<Vec<SysCacheTuple>, CatalogError> {
+        if keys.is_empty() || keys.len() > cache_id.expected_keys() {
+            return Err(CatalogError::Corrupt("syscache list key count mismatch"));
+        }
+
         let snapshot = ctx
             .txns
             .read()
@@ -319,7 +403,7 @@ impl CatalogStore {
             ctx.client_id,
             self.scope_db_oid(),
             cache_id.index_oid(),
-            equality_scan_keys(&[key1]),
+            equality_scan_keys(&keys),
         )?;
 
         rows.into_iter()
@@ -373,6 +457,54 @@ impl CatalogStore {
             .collect::<Vec<_>>();
         attributes.sort_by_key(|row| row.attnum);
 
+        let attrdefs = self
+            .search_sys_cache_list1(ctx, SysCacheId::AttrDefault, oid_key(relation_oid))?
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Attrdef(row) => Some((row.adnum, row)),
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        let constraints = self
+            .search_sys_cache_list1(ctx, SysCacheId::ConstraintRelId, oid_key(relation_oid))?
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Constraint(row) => Some(row),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let not_null_constraints = constraints
+            .iter()
+            .filter(|row| row.contype == crate::include::catalog::CONSTRAINT_NOTNULL)
+            .filter_map(|row| {
+                let attnum = *row.conkey.as_ref()?.first()?;
+                Some((attnum, row))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let primary_constraint_oids = constraints
+            .iter()
+            .filter(|row| row.contype == crate::include::catalog::CONSTRAINT_PRIMARY)
+            .map(|row| row.oid)
+            .collect::<BTreeSet<_>>();
+        let mut pk_owned_not_null = BTreeSet::new();
+        for primary_constraint_oid in primary_constraint_oids {
+            pk_owned_not_null.extend(
+                self.search_sys_cache_list2(
+                    ctx,
+                    SysCacheId::DependReference,
+                    oid_key(PG_CONSTRAINT_RELATION_OID),
+                    oid_key(primary_constraint_oid),
+                )?
+                .into_iter()
+                .filter_map(|tuple| match tuple {
+                    SysCacheTuple::Depend(row) if row.classid == PG_CONSTRAINT_RELATION_OID => {
+                        Some(row.objid)
+                    }
+                    _ => None,
+                }),
+            );
+        }
+
         let mut columns = Vec::with_capacity(attributes.len());
         for attr in attributes {
             let sql_type = self
@@ -403,6 +535,22 @@ impl CatalogStore {
                     attr.attgenerated,
                 );
             desc.dropped = attr.attisdropped;
+            if let Some(constraint) = not_null_constraints.get(&attr.attnum) {
+                desc.not_null_constraint_oid = Some(constraint.oid);
+                desc.not_null_constraint_name = Some(constraint.conname.clone());
+                desc.not_null_constraint_validated = constraint.convalidated;
+                desc.not_null_constraint_is_local = constraint.conislocal;
+                desc.not_null_constraint_inhcount = constraint.coninhcount;
+                desc.not_null_constraint_no_inherit = constraint.connoinherit;
+                desc.not_null_primary_key_owned = pk_owned_not_null.contains(&constraint.oid);
+            }
+            if let Some(attrdef) = attrdefs.get(&attr.attnum) {
+                desc.attrdef_oid = Some(attrdef.oid);
+                desc.default_expr = Some(attrdef.adbin.clone());
+                desc.default_sequence_oid =
+                    crate::pgrust::database::default_sequence_oid_from_default_expr(&attrdef.adbin);
+                desc.missing_default_value = None;
+            }
             columns.push(desc);
         }
 
@@ -429,16 +577,14 @@ impl CatalogStore {
             })
             .transpose()?;
         let partitioned_table = matches!(class_row.relkind, 'p')
-            .then(|| {
-                self.search_sys_cache1(ctx, SysCacheId::PartRelId, oid_key(relation_oid))?
-                    .into_iter()
-                    .find_map(|tuple| match tuple {
-                        SysCacheTuple::PartitionedTable(row) => Some(row),
-                        _ => None,
-                    })
-                    .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))
-            })
-            .transpose()?;
+            .then(|| self.search_sys_cache1(ctx, SysCacheId::PartRelId, oid_key(relation_oid)))
+            .transpose()?
+            .into_iter()
+            .flatten()
+            .find_map(|tuple| match tuple {
+                SysCacheTuple::PartitionedTable(row) => Some(row),
+                _ => None,
+            });
 
         Ok(Some(RelCacheEntry {
             rel: relation_locator_for_class_row(
@@ -494,6 +640,258 @@ impl CatalogStore {
             }),
         }))
     }
+}
+
+pub(crate) fn relation_id_get_relation_db(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relation_oid: u32,
+) -> Result<Option<RelCacheEntry>, CatalogError> {
+    let Some(class_row) = search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::RelOid,
+        oid_key(relation_oid),
+    )?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Class(row) => Some(row),
+        _ => None,
+    }) else {
+        return Ok(None);
+    };
+
+    let mut attributes = search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::AttrNum,
+        oid_key(relation_oid),
+    )?
+    .into_iter()
+    .filter_map(|tuple| match tuple {
+        SysCacheTuple::Attribute(row) => Some(row),
+        _ => None,
+    })
+    .collect::<Vec<_>>();
+    attributes.sort_by_key(|row| row.attnum);
+
+    let attrdefs = search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::AttrDefault,
+        oid_key(relation_oid),
+    )?
+    .into_iter()
+    .filter_map(|tuple| match tuple {
+        SysCacheTuple::Attrdef(row) => Some((row.adnum, row)),
+        _ => None,
+    })
+    .collect::<BTreeMap<_, _>>();
+    let constraints = search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::ConstraintRelId,
+        oid_key(relation_oid),
+    )?
+    .into_iter()
+    .filter_map(|tuple| match tuple {
+        SysCacheTuple::Constraint(row) => Some(row),
+        _ => None,
+    })
+    .collect::<Vec<_>>();
+    let not_null_constraints = constraints
+        .iter()
+        .filter(|row| row.contype == crate::include::catalog::CONSTRAINT_NOTNULL)
+        .filter_map(|row| {
+            let attnum = *row.conkey.as_ref()?.first()?;
+            Some((attnum, row))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let primary_constraint_oids = constraints
+        .iter()
+        .filter(|row| row.contype == crate::include::catalog::CONSTRAINT_PRIMARY)
+        .map(|row| row.oid)
+        .collect::<BTreeSet<_>>();
+    let mut pk_owned_not_null = BTreeSet::new();
+    for primary_constraint_oid in primary_constraint_oids {
+        pk_owned_not_null.extend(
+            search_sys_cache_list2_db(
+                db,
+                client_id,
+                txn_ctx,
+                SysCacheId::DependReference,
+                oid_key(PG_CONSTRAINT_RELATION_OID),
+                oid_key(primary_constraint_oid),
+            )?
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Depend(row) if row.classid == PG_CONSTRAINT_RELATION_OID => {
+                    Some(row.objid)
+                }
+                _ => None,
+            }),
+        );
+    }
+
+    let mut columns = Vec::with_capacity(attributes.len());
+    for attr in attributes {
+        let sql_type = search_sys_cache1_db(
+            db,
+            client_id,
+            txn_ctx,
+            SysCacheId::TypeOid,
+            oid_key(attr.atttypid),
+        )?
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Type(row) => Some(row.sql_type),
+            _ => None,
+        })
+        .ok_or(CatalogError::Corrupt("unknown atttypid"))?;
+        let mut desc = column_desc(
+            attr.attname,
+            SqlType {
+                typmod: attr.atttypmod,
+                ..sql_type
+            },
+            !attr.attnotnull,
+        );
+        desc.storage.attlen = attr.attlen;
+        desc.storage.attalign = attr.attalign;
+        desc.storage.attstorage = attr.attstorage;
+        desc.storage.attcompression = attr.attcompression;
+        desc.attstattarget = attr.attstattarget;
+        desc.attinhcount = attr.attinhcount;
+        desc.attislocal = attr.attislocal;
+        desc.generated = crate::include::nodes::parsenodes::ColumnGeneratedKind::from_catalog_char(
+            attr.attgenerated,
+        );
+        desc.dropped = attr.attisdropped;
+        if let Some(constraint) = not_null_constraints.get(&attr.attnum) {
+            desc.not_null_constraint_oid = Some(constraint.oid);
+            desc.not_null_constraint_name = Some(constraint.conname.clone());
+            desc.not_null_constraint_validated = constraint.convalidated;
+            desc.not_null_constraint_is_local = constraint.conislocal;
+            desc.not_null_constraint_inhcount = constraint.coninhcount;
+            desc.not_null_constraint_no_inherit = constraint.connoinherit;
+            desc.not_null_primary_key_owned = pk_owned_not_null.contains(&constraint.oid);
+        }
+        if let Some(attrdef) = attrdefs.get(&attr.attnum) {
+            desc.attrdef_oid = Some(attrdef.oid);
+            desc.default_expr = Some(attrdef.adbin.clone());
+            desc.default_sequence_oid =
+                crate::pgrust::database::default_sequence_oid_from_default_expr(&attrdef.adbin);
+            desc.missing_default_value = None;
+        }
+        columns.push(desc);
+    }
+
+    let array_type_oid = if class_row.reltype == 0 {
+        0
+    } else {
+        search_sys_cache1_db(
+            db,
+            client_id,
+            txn_ctx,
+            SysCacheId::TypeOid,
+            oid_key(class_row.reltype),
+        )?
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Type(row) => Some(row.typarray),
+            _ => None,
+        })
+        .unwrap_or(0)
+    };
+    let index_row = matches!(class_row.relkind, 'i' | 'I')
+        .then(|| {
+            search_sys_cache1_db(
+                db,
+                client_id,
+                txn_ctx,
+                SysCacheId::IndexRelId,
+                oid_key(relation_oid),
+            )?
+            .into_iter()
+            .find_map(|tuple| match tuple {
+                SysCacheTuple::Index(row) => Some(row),
+                _ => None,
+            })
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))
+        })
+        .transpose()?;
+    let partitioned_table = matches!(class_row.relkind, 'p')
+        .then(|| {
+            search_sys_cache1_db(
+                db,
+                client_id,
+                txn_ctx,
+                SysCacheId::PartRelId,
+                oid_key(relation_oid),
+            )
+        })
+        .transpose()?
+        .into_iter()
+        .flatten()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::PartitionedTable(row) => Some(row),
+            _ => None,
+        });
+
+    Ok(Some(RelCacheEntry {
+        rel: relation_locator_for_class_row(class_row.oid, class_row.relfilenode, db.database_oid),
+        relation_oid: class_row.oid,
+        namespace_oid: class_row.relnamespace,
+        owner_oid: class_row.relowner,
+        row_type_oid: class_row.reltype,
+        array_type_oid,
+        reltoastrelid: class_row.reltoastrelid,
+        relpersistence: class_row.relpersistence,
+        relkind: class_row.relkind,
+        relispartition: class_row.relispartition,
+        relpartbound: class_row.relpartbound,
+        relhastriggers: class_row.relhastriggers,
+        relrowsecurity: class_row.relrowsecurity,
+        relforcerowsecurity: class_row.relforcerowsecurity,
+        desc: crate::backend::executor::RelationDesc { columns },
+        partitioned_table,
+        index: index_row.map(|index| IndexRelCacheEntry {
+            indexrelid: index.indexrelid,
+            indrelid: index.indrelid,
+            indnatts: index.indnatts,
+            indnkeyatts: index.indnkeyatts,
+            indisunique: index.indisunique,
+            indnullsnotdistinct: index.indnullsnotdistinct,
+            indisprimary: index.indisprimary,
+            indisexclusion: index.indisexclusion,
+            indimmediate: index.indimmediate,
+            indisclustered: index.indisclustered,
+            indisvalid: index.indisvalid,
+            indcheckxmin: index.indcheckxmin,
+            indisready: index.indisready,
+            indislive: index.indislive,
+            indisreplident: index.indisreplident,
+            am_oid: class_row.relam,
+            am_handler_oid: None,
+            indkey: index.indkey,
+            indclass: index.indclass,
+            indcollation: index.indcollation,
+            indoption: index.indoption,
+            opfamily_oids: Vec::new(),
+            opcintype_oids: Vec::new(),
+            opckeytype_oids: Vec::new(),
+            amop_entries: Vec::new(),
+            amproc_entries: Vec::new(),
+            indexprs: index.indexprs,
+            indpred: index.indpred,
+            brin_options: None,
+        }),
+    }))
 }
 
 pub(crate) fn search_sys_cache_db(
@@ -556,6 +954,31 @@ pub(crate) fn search_sys_cache_list1_db(
     cache_id: SysCacheId,
     key1: Value,
 ) -> Result<Vec<SysCacheTuple>, CatalogError> {
+    search_sys_cache_list_db(db, client_id, txn_ctx, cache_id, vec![key1])
+}
+
+pub(crate) fn search_sys_cache_list2_db(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    cache_id: SysCacheId,
+    key1: Value,
+    key2: Value,
+) -> Result<Vec<SysCacheTuple>, CatalogError> {
+    search_sys_cache_list_db(db, client_id, txn_ctx, cache_id, vec![key1, key2])
+}
+
+fn search_sys_cache_list_db(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    cache_id: SysCacheId,
+    keys: Vec<Value>,
+) -> Result<Vec<SysCacheTuple>, CatalogError> {
+    if keys.is_empty() || keys.len() > cache_id.expected_keys() {
+        return Err(CatalogError::Corrupt("syscache list key count mismatch"));
+    }
+
     let snapshot = get_catalog_snapshot(db, client_id, txn_ctx, None)
         .ok_or_else(|| CatalogError::Io("catalog snapshot failed".into()))?;
     let rows = probe_system_catalog_rows_visible_in_db(
@@ -565,7 +988,7 @@ pub(crate) fn search_sys_cache_list1_db(
         client_id,
         db.database_oid,
         cache_id.index_oid(),
-        equality_scan_keys(&[key1]),
+        equality_scan_keys(&keys),
     )?;
 
     rows.into_iter()

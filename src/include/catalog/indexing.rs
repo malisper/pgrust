@@ -64,6 +64,8 @@ const PG_INDEX_INDEXRELID_INDEX_KEYS: [i16; 1] = [1];
 const PG_INHERITS_RELID_SEQNO_INDEX_KEYS: [i16; 2] = [1, 3];
 const PG_INHERITS_PARENT_INDEX_KEYS: [i16; 1] = [2];
 const PG_PARTITIONED_TABLE_PARTRELID_INDEX_KEYS: [i16; 1] = [1];
+const PG_REWRITE_OID_INDEX_KEYS: [i16; 1] = [1];
+const PG_REWRITE_REL_RULENAME_INDEX_KEYS: [i16; 2] = [3, 2];
 const PG_TRIGGER_RELID_NAME_INDEX_KEYS: [i16; 2] = [2, 4];
 const PG_TRIGGER_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_PUBLICATION_OID_INDEX_KEYS: [i16; 1] = [1];
@@ -167,7 +169,7 @@ const OID_INT2_BOOL_OPCLASS_3: [u32; 3] = [
     BOOL_BTREE_OPCLASS_OID,
 ];
 
-pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 79] = [
+pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 81] = [
     CatalogIndexDescriptor {
         relation_oid: 2684,
         relation_name: "pg_namespace_nspname_index",
@@ -567,6 +569,22 @@ pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 79] = [
         unique: true,
         key_attnums: &PG_PARTITIONED_TABLE_PARTRELID_INDEX_KEYS,
         opclass_oids: &OID_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 2692,
+        relation_name: "pg_rewrite_oid_index",
+        heap_kind: BootstrapCatalogKind::PgRewrite,
+        unique: true,
+        key_attnums: &PG_REWRITE_OID_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 2693,
+        relation_name: "pg_rewrite_rel_rulename_index",
+        heap_kind: BootstrapCatalogKind::PgRewrite,
+        unique: true,
+        key_attnums: &PG_REWRITE_REL_RULENAME_INDEX_KEYS,
+        opclass_oids: &OID_NAME_OPCLASS_2,
     },
     CatalogIndexDescriptor {
         relation_oid: 2701,
