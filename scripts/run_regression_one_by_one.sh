@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Run PostgreSQL regression tests against pgrust, executing one statement at a
 # time inside a single psql session per test, with per-statement timings and a
 # server-side statement timeout.
@@ -185,6 +185,8 @@ USE_PGRUST_SETUP=true
 REGRESS_USER="${PGRUST_REGRESS_USER:-${PGUSER:-$(id -un)}}"
 REGRESS_TABLESPACE_DIR=""
 STARTUP_WAIT_SECS="${PGRUST_STARTUP_WAIT_SECS:-300}"
+RUN_SQL_STMT_COUNT=0
+RUN_SQL_SERVER_CRASHED=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -374,7 +376,7 @@ restart_server() {
 }
 
 echo "Building pgrust_server ($SERVER_PROFILE)..."
-(cd "$PGRUST_DIR" && env "${BUILD_ENV[@]}" cargo build "${BUILD_ARGS[@]}" 2>&1) || {
+(cd "$PGRUST_DIR" && env ${BUILD_ENV+"${BUILD_ENV[@]}"} cargo build "${BUILD_ARGS[@]}" 2>&1) || {
     echo "ERROR: Build failed"
     exit 1
 }
@@ -668,6 +670,8 @@ run_sql_one_by_one() {
 
     local stmt_count
     stmt_count="$(split_sql_statements "$sql_path" "$split_dir")"
+    RUN_SQL_STMT_COUNT="$stmt_count"
+    RUN_SQL_SERVER_CRASHED=false
     : > "$clean_output"
     : > "$raw_output"
     rm -f "$timings_output"
@@ -712,24 +716,11 @@ run_sql_one_by_one() {
             break
         fi
 
+        RUN_SQL_SERVER_CRASHED=true
         echo "$crash_id" >> "$skipped_ids_path"
 
-        if [[ "$SKIP_SERVER" == false ]]; then
-            if ! restart_server; then
-                break
-            fi
-            if [[ "$on_error_stop" == true ]]; then
-                break
-            fi
-            run_bootstrap_setup_one_by_one
-        else
-            break
-        fi
-
-        start_idx=$((10#$crash_id + 1))
+        break
     done
-
-    echo "$stmt_count"
 }
 
 run_bootstrap_setup_one_by_one
@@ -1016,13 +1007,14 @@ for sql_file in "${TEST_FILES[@]}"; do
     sql_file="$PREPARED_SQL_FILE"
     expected_file="$PREPARED_EXPECTED_FILE"
 
-    stmt_count="$(run_sql_one_by_one \
+    run_sql_one_by_one \
         "$sql_file" \
         "$output_file" \
         "$raw_output_file" \
         "$timings_file" \
         "$tmp_dir" \
-        false)"
+        false
+    stmt_count="$RUN_SQL_STMT_COUNT"
 
     matched=false
     best_diff_lines=999999
@@ -1070,15 +1062,17 @@ for sql_file in "${TEST_FILES[@]}"; do
         pass_list+=("$test_name")
         rm -f "$diff_file"
     else
-        if grep -qi "connection refused\|could not connect\|server closed the connection unexpectedly\|statement timeout" "$raw_output_file" 2>/dev/null; then
+        if [[ "$RUN_SQL_SERVER_CRASHED" == true ]] || grep -qi "connection refused\|could not connect\|server closed the connection unexpectedly\|statement timeout" "$raw_output_file" 2>/dev/null; then
             printf "%-40s ERROR (%d/%d queries matched, %d timeouts)\n" \
                 "$test_name" "$q_matched" "$q_total" "$timing_timeouts"
             ERRORED=$((ERRORED + 1))
             error_list+=("$test_name")
 
-            if [[ "$SKIP_SERVER" == false ]] && ! kill -0 "$SERVER_PID" 2>/dev/null; then
-                if ! restart_server; then
-                    break
+            if [[ "$SKIP_SERVER" == false ]]; then
+                if [[ "$RUN_SQL_SERVER_CRASHED" == true ]] || ! kill -0 "$SERVER_PID" 2>/dev/null; then
+                    if ! restart_server; then
+                        break
+                    fi
                 fi
             fi
         else
