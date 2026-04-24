@@ -430,6 +430,10 @@ impl RelCache {
                     desc.attstattarget = attr.attstattarget;
                     desc.attinhcount = attr.attinhcount;
                     desc.attislocal = attr.attislocal;
+                    desc.identity =
+                        crate::include::nodes::parsenodes::ColumnIdentityKind::from_catalog_char(
+                            attr.attidentity,
+                        );
                     desc.generated =
                         crate::include::nodes::parsenodes::ColumnGeneratedKind::from_catalog_char(
                             attr.attgenerated,

@@ -7,10 +7,10 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{ColumnDesc, ExecError, Expr, RelationDesc};
 use crate::backend::parser::{
     AlterColumnExpressionAction, BoundRelation, CatalogLookup, CheckConstraintAction, ColumnDef,
-    NotNullConstraintAction, OwnedSequenceSpec, ParseError, RawTypeName, SqlExpr, SqlType,
-    SqlTypeKind, bind_generated_expr, bind_scalar_expr_in_scope, derive_literal_default_value,
-    expr_references_column, normalize_alter_table_add_column_constraints, raw_type_name_hint,
-    resolve_raw_type_name,
+    NotNullConstraintAction, OwnedSequenceSpec, ParseError, RawTypeName, SerialKind, SqlExpr,
+    SqlType, SqlTypeKind, bind_generated_expr, bind_scalar_expr_in_scope,
+    derive_literal_default_value, expr_references_column,
+    normalize_alter_table_add_column_constraints, raw_type_name_hint, resolve_raw_type_name,
 };
 use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
@@ -624,12 +624,27 @@ pub(super) fn validate_alter_table_add_column(
         RawTypeName::Serial(_) => raw_type_name_hint(&column.ty),
         _ => resolve_raw_type_name(&column.ty, catalog).map_err(ExecError::Parse)?,
     };
-    let mut desc = column_desc(column.name.clone(), sql_type, serial_kind.is_none());
+    let mut desc = column_desc(
+        column.name.clone(),
+        sql_type,
+        serial_kind.is_none() && column.identity.is_none(),
+    );
     if column.generated.is_some() && column.default_expr.is_some() {
         return Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "generated column without DEFAULT",
             actual: format!(
                 "both default and generation expression specified for column \"{}\"",
+                column.name
+            ),
+        }));
+    }
+    if column.identity.is_some()
+        && (column.generated.is_some() || column.default_expr.is_some() || serial_kind.is_some())
+    {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "identity column without DEFAULT, generated expression, or serial type",
+            actual: format!(
+                "conflicting identity definition for column \"{}\"",
                 column.name
             ),
         }));
@@ -655,11 +670,16 @@ pub(super) fn validate_alter_table_add_column(
     if let Some(generated) = &column.generated {
         desc.default_expr = Some(generated.expr_sql.clone());
         desc.generated = Some(generated.kind);
+    } else if let Some(identity) = column.identity {
+        desc.identity = Some(identity);
     } else if serial_kind.is_none() {
         desc.default_expr = column.default_expr.clone();
         if let Some(sql) = desc.default_expr.as_deref() {
             desc.missing_default_value = Some(derive_literal_default_value(sql, desc.sql_type)?);
         }
+    }
+    if let Some(storage) = column.storage {
+        desc.storage.attstorage = storage;
     }
     let mut relation_with_new_column = relation_desc.clone();
     relation_with_new_column.columns.push(desc.clone());
@@ -668,9 +688,16 @@ pub(super) fn validate_alter_table_add_column(
     let constraint_actions =
         normalize_alter_table_add_column_constraints(table_name, column, existing_constraints)
             .map_err(ExecError::Parse)?;
+    let owned_sequence_kind = if let Some(serial_kind) = serial_kind {
+        Some(serial_kind)
+    } else if column.identity.is_some() {
+        Some(serial_kind_for_identity_sql_type(sql_type).map_err(ExecError::Parse)?)
+    } else {
+        None
+    };
     Ok(AlterTableAddColumnPlan {
         column: desc,
-        owned_sequence: serial_kind.map(|serial_kind| OwnedSequenceSpec {
+        owned_sequence: owned_sequence_kind.map(|serial_kind| OwnedSequenceSpec {
             column_index: relation_desc.columns.len(),
             column_name: column.name.clone(),
             serial_kind,
@@ -679,6 +706,18 @@ pub(super) fn validate_alter_table_add_column(
         not_null_action: constraint_actions.not_null,
         check_actions: constraint_actions.checks,
     })
+}
+
+fn serial_kind_for_identity_sql_type(sql_type: SqlType) -> Result<SerialKind, ParseError> {
+    match sql_type.kind {
+        SqlTypeKind::Int2 if !sql_type.is_array => Ok(SerialKind::Small),
+        SqlTypeKind::Int4 if !sql_type.is_array => Ok(SerialKind::Regular),
+        SqlTypeKind::Int8 if !sql_type.is_array => Ok(SerialKind::Big),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "smallint, integer, or bigint identity column",
+            actual: format_sql_type_name(sql_type),
+        }),
+    }
 }
 
 pub(super) fn validate_alter_table_rename_column(

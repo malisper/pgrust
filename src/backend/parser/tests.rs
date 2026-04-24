@@ -2401,6 +2401,8 @@ fn parse_alter_table_add_column_statement() {
                 ty: builtin_type(SqlType::new(SqlTypeKind::Text)),
                 default_expr: Some("'hello'".into()),
                 generated: None,
+                identity: None,
+                storage: None,
                 compression: None,
                 constraints: vec![],
             },
@@ -6926,6 +6928,24 @@ fn parse_insert_update_delete() {
                     [CreateTableElement::Like(CreateTableLikeClause { relation_name, options })]
                         if relation_name == "source_table"
                             && options == &[CreateTableLikeOption::IncludingAll]
+                )
+    ));
+    assert!(matches!(
+        parse_statement("create table widgets (like source_table including identity including generated including comments including storage including compression including statistics)").unwrap(),
+        Statement::CreateTable(ct)
+            if ct.table_name == "widgets"
+                && matches!(
+                    ct.elements.as_slice(),
+                    [CreateTableElement::Like(CreateTableLikeClause { relation_name, options })]
+                        if relation_name == "source_table"
+                            && options == &[
+                                CreateTableLikeOption::IncludingIdentity,
+                                CreateTableLikeOption::IncludingGenerated,
+                                CreateTableLikeOption::IncludingComments,
+                                CreateTableLikeOption::IncludingStorage,
+                                CreateTableLikeOption::IncludingCompression,
+                                CreateTableLikeOption::IncludingStatistics,
+                            ]
                 )
     ));
     assert!(matches!(
