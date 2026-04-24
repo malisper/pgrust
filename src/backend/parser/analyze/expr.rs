@@ -3059,6 +3059,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 }
                 return bind_user_defined_scalar_function_call(
                     resolved.proc_oid,
+                    Some(resolved.proname.clone()),
                     resolved.result_type,
                     &resolved.declared_arg_types,
                     args_list,

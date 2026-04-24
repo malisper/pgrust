@@ -245,6 +245,7 @@ fn bind_json_constructor_arg_expr(
 
 pub(super) fn bind_user_defined_scalar_function_call(
     proc_oid: u32,
+    funcname: Option<String>,
     result_type: SqlType,
     declared_arg_types: &[SqlType],
     args: &[SqlFunctionArg],
@@ -295,6 +296,7 @@ pub(super) fn bind_user_defined_scalar_function_call(
         .collect();
     Ok(Expr::user_defined_func(
         proc_oid,
+        funcname,
         Some(result_type),
         false,
         coerced_args,
@@ -335,6 +337,7 @@ pub(super) fn bind_resolved_scalar_function_call(
         .collect::<Vec<_>>();
     bind_user_defined_scalar_function_call(
         resolved.proc_oid,
+        Some(resolved.proname.clone()),
         resolved.result_type,
         &resolved.declared_arg_types,
         &positional_args,
