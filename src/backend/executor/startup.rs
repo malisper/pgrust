@@ -389,6 +389,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 order_by_keys,
                 direction,
                 scan: None,
+                scan_exhausted: false,
                 slot,
                 source_id,
                 relation_oid,
