@@ -30,6 +30,7 @@ fn direct_partition_children(
     inherits.sort_by_key(|row| (row.inhseqno, row.inhrelid));
     inherits
         .into_iter()
+        .filter(|row| !row.inhdetachpending)
         .map(|row| {
             catalog
                 .relation_by_oid(row.inhrelid)
@@ -191,6 +192,7 @@ fn declarative_parent(
     let parent_oid = catalog
         .inheritance_parents(relation.relation_oid)
         .into_iter()
+        .filter(|row| !row.inhdetachpending)
         .find_map(|row| {
             catalog
                 .relation_by_oid(row.inhparent)
@@ -1037,6 +1039,58 @@ pub(crate) fn validate_partition_relation_compatibility(
             hint: None,
             sqlstate: "42P16",
         });
+    }
+    if child.relkind == 'r' && !catalog.inheritance_children(child.relation_oid).is_empty() {
+        return Err(ExecError::DetailedError {
+            message: format!("table \"{child_name}\" is already an inheritance parent"),
+            detail: None,
+            hint: None,
+            sqlstate: "42P16",
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_default_partition_rows_for_new_bound(
+    catalog: &dyn CatalogLookup,
+    parent: &BoundRelation,
+    bound: &PartitionBoundSpec,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    if bound.is_default() {
+        return Ok(());
+    }
+    let Some(default_partition) = default_partition(catalog, parent, None)? else {
+        return Ok(());
+    };
+    let relation_oids = if default_partition.relkind == 'p' {
+        catalog
+            .find_all_inheritors(default_partition.relation_oid)
+            .into_iter()
+            .filter(|oid| {
+                catalog
+                    .relation_by_oid(*oid)
+                    .is_some_and(|relation| relation.relkind == 'r')
+            })
+            .collect::<Vec<_>>()
+    } else {
+        vec![default_partition.relation_oid]
+    };
+    for relation_oid in relation_oids {
+        let Some(relation) = catalog.relation_by_oid(relation_oid) else {
+            continue;
+        };
+        for (_, row) in
+            collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, ctx)?
+        {
+            if candidate_row_matches_partition(catalog, parent, bound, &row, None)? {
+                return Err(partition_constraint_violation(
+                    &relation_name_for_oid(catalog, relation_oid),
+                    &row,
+                    &ctx.datetime_config,
+                ));
+            }
+        }
     }
     Ok(())
 }

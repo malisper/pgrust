@@ -516,6 +516,7 @@ fn run_statement(
         | Statement::AlterTableInherit(_)
         | Statement::AlterTableNoInherit(_)
         | Statement::AlterTableAttachPartition(_)
+        | Statement::AlterTableDetachPartition(_)
         | Statement::AlterIndexRename(_)
         | Statement::AlterTableSetRowSecurity(_)
         | Statement::CreatePolicy(_)
