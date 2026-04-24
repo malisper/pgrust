@@ -164,6 +164,49 @@ mod tests {
     }
 
     #[test]
+    fn execute_do_exception_block_handles_raise() {
+        run_plpgsql_test("execute_do_exception_block_handles_raise", || {
+            let stmt = DoStatement {
+                language: None,
+                code: r#"
+                    begin
+                        begin
+                            raise exception 'boom';
+                        exception when others then
+                            raise notice 'handled';
+                        end;
+                    end
+                "#
+                .into(),
+            };
+
+            assert_eq!(execute_do(&stmt).unwrap(), StatementResult::AffectedRows(0));
+            assert_eq!(
+                take_notices(),
+                vec![PlpgsqlNotice {
+                    level: RaiseLevel::Notice,
+                    message: "handled".into(),
+                }]
+            );
+        });
+    }
+
+    #[test]
+    fn execute_do_assert_raises_assert_failure() {
+        run_plpgsql_test("execute_do_assert_raises_assert_failure", || {
+            let stmt = DoStatement {
+                language: None,
+                code: "begin assert false, 'bad assert'; end".into(),
+            };
+            let err = execute_do(&stmt).unwrap_err();
+            assert!(matches!(
+                err,
+                ExecError::DetailedError { message, sqlstate: "P0004", .. } if message == "bad assert"
+            ));
+        });
+    }
+
+    #[test]
     fn execute_do_raise_accepts_dollar_quoted_message() {
         run_plpgsql_test("execute_do_raise_accepts_dollar_quoted_message", || {
             let stmt = DoStatement {

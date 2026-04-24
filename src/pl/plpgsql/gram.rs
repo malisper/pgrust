@@ -9,8 +9,8 @@ use crate::backend::parser::{
 use crate::include::catalog::RECORD_TYPE_OID;
 
 use super::ast::{
-    AliasDecl, AliasTarget, AssignTarget, Block, Decl, ForQuerySource, ForTarget, RaiseLevel,
-    ReturnQueryKind, Stmt, VarDecl,
+    AliasDecl, AliasTarget, AssignTarget, Block, Decl, ExceptionCondition, ExceptionHandler,
+    ForQuerySource, ForTarget, RaiseLevel, ReturnQueryKind, Stmt, VarDecl,
 };
 
 #[derive(Parser)]
@@ -18,113 +18,9 @@ use super::ast::{
 struct PlpgsqlParser;
 
 pub fn parse_block(sql: &str) -> Result<Block, ParseError> {
-    reject_unsupported_exception_handler(sql)?;
     PlpgsqlParser::parse(Rule::pl_block, sql)
         .map_err(|e| map_pest_error("plpgsql block", e))
         .and_then(|mut pairs| build_pl_block(pairs.next().ok_or(ParseError::UnexpectedEof)?))
-}
-
-fn reject_unsupported_exception_handler(sql: &str) -> Result<(), ParseError> {
-    if find_exception_handler(sql).is_some() {
-        return Err(ParseError::FeatureNotSupported(
-            "PL/pgSQL EXCEPTION handlers".into(),
-        ));
-    }
-    Ok(())
-}
-
-fn find_exception_handler(sql: &str) -> Option<usize> {
-    let bytes = sql.as_bytes();
-    let mut idx = 0usize;
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut dollar_tag: Option<&str> = None;
-    while idx < bytes.len() {
-        if let Some(tag) = dollar_tag {
-            if sql[idx..].starts_with(tag) {
-                idx += tag.len();
-                dollar_tag = None;
-            } else {
-                idx += 1;
-            }
-            continue;
-        }
-
-        let ch = bytes[idx] as char;
-        if in_single {
-            if ch == '\'' {
-                if bytes.get(idx + 1) == Some(&b'\'') {
-                    idx += 2;
-                    continue;
-                }
-                in_single = false;
-            }
-            idx += 1;
-            continue;
-        }
-        if in_double {
-            if ch == '"' {
-                if bytes.get(idx + 1) == Some(&b'"') {
-                    idx += 2;
-                    continue;
-                }
-                in_double = false;
-            }
-            idx += 1;
-            continue;
-        }
-
-        if bytes.get(idx) == Some(&b'-') && bytes.get(idx + 1) == Some(&b'-') {
-            idx += 2;
-            while idx < bytes.len() && bytes[idx] != b'\n' {
-                idx += 1;
-            }
-            continue;
-        }
-        if bytes.get(idx) == Some(&b'/') && bytes.get(idx + 1) == Some(&b'*') {
-            idx += 2;
-            while idx + 1 < bytes.len()
-                && !(bytes[idx] == b'*' && bytes.get(idx + 1) == Some(&b'/'))
-            {
-                idx += 1;
-            }
-            idx = (idx + 2).min(bytes.len());
-            continue;
-        }
-
-        match ch {
-            '\'' => {
-                in_single = true;
-                idx += 1;
-                continue;
-            }
-            '"' => {
-                in_double = true;
-                idx += 1;
-                continue;
-            }
-            '$' => {
-                if let Some(tag) = dollar_quote_tag_at(sql, idx) {
-                    idx += tag.len();
-                    dollar_tag = Some(tag);
-                    continue;
-                }
-            }
-            _ => {}
-        }
-
-        if keyword_at(sql, idx, "exception") {
-            let mut next = idx + "exception".len();
-            while next < bytes.len() && (bytes[next] as char).is_ascii_whitespace() {
-                next += 1;
-            }
-            if keyword_at(sql, next, "when") {
-                return Some(idx);
-            }
-        }
-        idx += 1;
-    }
-    None
 }
 
 fn map_pest_error(expected: &'static str, err: pest::error::Error<Rule>) -> ParseError {
@@ -154,11 +50,13 @@ fn build_block(pair: Pair<'_, Rule>) -> Result<Block, ParseError> {
     let mut label = None;
     let mut declarations = Vec::new();
     let mut statements = Vec::new();
+    let mut exception_handlers = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::block_label => label = Some(build_block_label(part)?),
             Rule::declare_section => declarations = build_declare_section(part)?,
             Rule::stmt => statements.push(build_stmt(part)?),
+            Rule::exception_section => exception_handlers = build_exception_section(part)?,
             _ => {}
         }
     }
@@ -166,7 +64,60 @@ fn build_block(pair: Pair<'_, Rule>) -> Result<Block, ParseError> {
         label,
         declarations,
         statements,
+        exception_handlers,
     })
+}
+
+fn build_exception_section(pair: Pair<'_, Rule>) -> Result<Vec<ExceptionHandler>, ParseError> {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::exception_clause)
+        .map(build_exception_clause)
+        .collect()
+}
+
+fn build_exception_clause(pair: Pair<'_, Rule>) -> Result<ExceptionHandler, ParseError> {
+    let mut conditions = Vec::new();
+    let mut statements = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::exception_condition => conditions.push(build_exception_condition(part)?),
+            Rule::stmt => statements.push(build_stmt(part)?),
+            _ => {}
+        }
+    }
+    if conditions.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    Ok(ExceptionHandler {
+        conditions,
+        statements,
+    })
+}
+
+fn build_exception_condition(pair: Pair<'_, Rule>) -> Result<ExceptionCondition, ParseError> {
+    let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+    match inner.as_rule() {
+        Rule::others_condition => Ok(ExceptionCondition::Others),
+        Rule::sqlstate_condition => {
+            let sql = inner
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::sql_string)
+                .ok_or(ParseError::UnexpectedEof)?;
+            let expr = parse_expr(sql.as_str())?;
+            let SqlExpr::Const(Value::Text(sqlstate)) = expr else {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "SQLSTATE string literal",
+                    actual: sql.as_str().into(),
+                });
+            };
+            Ok(ExceptionCondition::SqlState(sqlstate.to_string()))
+        }
+        Rule::ident => Ok(ExceptionCondition::ConditionName(build_ident(inner))),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "exception condition",
+            actual: inner.as_str().into(),
+        }),
+    }
 }
 
 fn build_block_label(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
@@ -315,10 +266,12 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
         Rule::while_stmt => build_while_stmt(inner),
         Rule::for_stmt => build_for_stmt(inner),
         Rule::raise_stmt => build_raise_stmt(inner),
+        Rule::assert_stmt => build_assert_stmt(inner),
         Rule::return_stmt => build_return_stmt(inner),
         Rule::return_next_stmt => build_return_next_stmt(inner),
         Rule::return_query_stmt => build_return_query_stmt(inner),
         Rule::perform_stmt => build_perform_stmt(inner),
+        Rule::dynamic_execute_stmt => build_dynamic_execute_stmt(inner),
         Rule::exec_sql_stmt => build_exec_sql_stmt(inner),
         _ => Err(ParseError::UnexpectedToken {
             expected: "plpgsql statement",
@@ -553,6 +506,24 @@ fn build_raise_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
     })
 }
 
+fn build_assert_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let mut condition = None;
+    let mut message = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::expr_until_comma_or_semi => condition = Some(part.as_str().trim().to_string()),
+            Rule::expr_until_semi => message = Some(part.as_str().trim().to_string()),
+            _ => {}
+        }
+    }
+    Ok(Stmt::Assert {
+        condition: condition
+            .filter(|text| !text.is_empty())
+            .ok_or(ParseError::UnexpectedEof)?,
+        message: message.filter(|text| !text.is_empty()),
+    })
+}
+
 fn raise_params_from_raw_sql(
     raw: &str,
     message_sql: Option<&str>,
@@ -628,6 +599,21 @@ fn build_perform_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
     Ok(Stmt::Perform { sql })
 }
 
+fn build_dynamic_execute_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let raw = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::exec_sql_text)
+        .map(|part| part.as_str().trim().to_string())
+        .filter(|text| !text.is_empty())
+        .ok_or(ParseError::UnexpectedEof)?;
+    let (sql_expr, into_targets, using_exprs) = split_dynamic_execute_stmt(&raw)?;
+    Ok(Stmt::DynamicExecute {
+        sql_expr,
+        into_targets,
+        using_exprs,
+    })
+}
+
 fn build_exec_sql_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
     let sql = pair
         .into_inner()
@@ -687,6 +673,89 @@ fn split_execute_query_source(source: &str) -> Result<(String, Vec<String>), Par
             actual: source.to_string(),
         })?;
     Ok((sql_expr.to_string(), using_exprs))
+}
+
+fn split_dynamic_execute_stmt(
+    source: &str,
+) -> Result<(String, Vec<AssignTarget>, Vec<String>), ParseError> {
+    let using_index = find_next_top_level_keyword(source, &["using"]);
+    let (before_using, using_exprs) = match using_index {
+        Some(index) => {
+            let using_sql = source[index + "using".len()..].trim();
+            if using_sql.is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "EXECUTE <query> USING expr [, ...]",
+                    actual: source.to_string(),
+                });
+            }
+            let exprs =
+                split_top_level_csv(using_sql).ok_or_else(|| ParseError::UnexpectedToken {
+                    expected: "EXECUTE <query> USING expr [, ...]",
+                    actual: source.to_string(),
+                })?;
+            (source[..index].trim_end(), exprs)
+        }
+        None => (source.trim_end(), Vec::new()),
+    };
+
+    let into_index = find_next_top_level_keyword(before_using, &["into"]);
+    let (sql_expr, into_targets) = match into_index {
+        Some(index) => {
+            let sql_expr = before_using[..index].trim();
+            let targets_sql = before_using[index + "into".len()..].trim();
+            if sql_expr.is_empty() || targets_sql.is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "EXECUTE <query> INTO target [, ...]",
+                    actual: source.to_string(),
+                });
+            }
+            let targets = split_top_level_csv(targets_sql)
+                .ok_or_else(|| ParseError::UnexpectedToken {
+                    expected: "EXECUTE <query> INTO target [, ...]",
+                    actual: source.to_string(),
+                })?
+                .iter()
+                .map(|target| parse_dynamic_execute_into_target(target))
+                .collect::<Result<Vec<_>, _>>()?;
+            (sql_expr, targets)
+        }
+        None => (before_using.trim(), Vec::new()),
+    };
+
+    if sql_expr.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "EXECUTE <query>",
+            actual: source.to_string(),
+        });
+    }
+    Ok((sql_expr.to_string(), into_targets, using_exprs))
+}
+
+fn parse_dynamic_execute_into_target(target: &str) -> Result<AssignTarget, ParseError> {
+    let trimmed = target.trim();
+    match parse_expr(trimmed)? {
+        SqlExpr::Column(name) => {
+            if let Some((relation, field)) = name.rsplit_once('.') {
+                Ok(AssignTarget::Field {
+                    relation: relation.to_string(),
+                    field: field.to_string(),
+                })
+            } else {
+                Ok(AssignTarget::Name(name))
+            }
+        }
+        SqlExpr::FieldSelect { expr, field } => match *expr {
+            SqlExpr::Column(relation) => Ok(AssignTarget::Field { relation, field }),
+            _ => Err(ParseError::UnexpectedToken {
+                expected: "PL/pgSQL EXECUTE INTO target",
+                actual: trimmed.into(),
+            }),
+        },
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "PL/pgSQL EXECUTE INTO target",
+            actual: trimmed.into(),
+        }),
+    }
 }
 
 fn find_next_top_level_keyword(sql: &str, keywords: &[&str]) -> Option<usize> {
@@ -1172,25 +1241,55 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_unsupported_exception_handler() {
-        let err = parse_block(
+    fn parse_exception_handler() {
+        let block = parse_block(
             "
             begin
                 begin
                     null;
                 exception when others then
-                    null;
+                    raise notice 'handled';
                 end;
             end
             ",
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(
-            format!("{err:?}")
-                .to_ascii_lowercase()
-                .contains("exception")
+        let Stmt::Block(nested) = &block.statements[0] else {
+            panic!("expected nested block statement");
+        };
+        assert_eq!(nested.exception_handlers.len(), 1);
+        assert_eq!(
+            nested.exception_handlers[0].conditions,
+            vec![ExceptionCondition::Others]
         );
+        assert_eq!(nested.exception_handlers[0].statements.len(), 1);
+    }
+
+    #[test]
+    fn parse_assert_and_dynamic_execute() {
+        let block = parse_block(
+            "
+            begin
+                assert x > 0, 'x must be positive';
+                execute format('select %s', '1') into y using x;
+            end
+            ",
+        )
+        .unwrap();
+
+        assert!(matches!(block.statements[0], Stmt::Assert { .. }));
+        let Stmt::DynamicExecute {
+            sql_expr,
+            into_targets,
+            using_exprs,
+        } = &block.statements[1]
+        else {
+            panic!("expected dynamic EXECUTE statement");
+        };
+        assert_eq!(sql_expr, "format('select %s', '1')");
+        assert_eq!(into_targets, &vec![AssignTarget::Name("y".into())]);
+        assert_eq!(using_exprs, &vec!["x".to_string()]);
     }
 
     #[test]
