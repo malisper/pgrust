@@ -41,7 +41,14 @@ fi
 # Dropped-path prefixes: new files under these paths are rejected because
 # publish-public.sh drops them from public history. (scripts/internal/ is
 # also dropped but intentionally stays in private, so it's not in this list.)
-DROP_PATHS=("issues.jsonl" "domains/" "docs/records-query-gaps.md")
+DROP_PATHS=(
+    "issues.jsonl"
+    "domains/"
+    "docs/records-query-gaps.md"
+    "docs/github-merge-queue.md"
+    "private-ci-workflow"
+    "private-ci-workflow"
+)
 
 # Staged additions: only the + lines of the content diff. Exclude
 # scripts/internal/ (dropped from every publish) and .githooks/ (this file
