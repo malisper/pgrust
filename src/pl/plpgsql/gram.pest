@@ -5,8 +5,9 @@ line_comment = _{ "--" ~ (!"\n" ~ ANY)* }
 block_comment = _{ "/*" ~ (!"*/" ~ ANY)* ~ "*/" }
 
 pl_block = { SOI ~ block ~ semi? ~ EOI }
-block = { declare_section? ~ kw_begin ~ stmt* ~ kw_end }
-declare_section = { kw_declare ~ (!kw_begin ~ decl_stmt)+ }
+block = { block_label? ~ declare_section? ~ kw_begin ~ stmt* ~ kw_end ~ ident? }
+block_label = { "<<" ~ ident ~ ">>" }
+declare_section = { kw_declare ~ (!kw_begin ~ decl_stmt)* }
 decl_stmt = { alias_decl | var_decl }
 var_decl = { !kw_begin ~ ident ~ type_name_text ~ default_clause? ~ semi }
 alias_decl = { !kw_begin ~ ident ~ kw_alias ~ kw_for ~ alias_target ~ semi }

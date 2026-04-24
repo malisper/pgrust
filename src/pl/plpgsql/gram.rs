@@ -3,7 +3,9 @@ use pest::iterators::Pair;
 use pest_derive::Parser;
 
 use crate::backend::executor::Value;
-use crate::backend::parser::{ParseError, SqlExpr, SqlType, parse_expr, parse_type_name};
+use crate::backend::parser::{
+    ParseError, RawTypeName, SerialKind, SqlExpr, SqlType, SqlTypeKind, parse_expr, parse_type_name,
+};
 use crate::include::catalog::RECORD_TYPE_OID;
 
 use super::ast::{
@@ -149,19 +151,29 @@ fn build_pl_block(pair: Pair<'_, Rule>) -> Result<Block, ParseError> {
 }
 
 fn build_block(pair: Pair<'_, Rule>) -> Result<Block, ParseError> {
+    let mut label = None;
     let mut declarations = Vec::new();
     let mut statements = Vec::new();
     for part in pair.into_inner() {
         match part.as_rule() {
+            Rule::block_label => label = Some(build_block_label(part)?),
             Rule::declare_section => declarations = build_declare_section(part)?,
             Rule::stmt => statements.push(build_stmt(part)?),
             _ => {}
         }
     }
     Ok(Block {
+        label,
         declarations,
         statements,
     })
+}
+
+fn build_block_label(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
+    pair.into_inner()
+        .find(|part| part.as_rule() == Rule::ident)
+        .map(build_ident)
+        .ok_or(ParseError::UnexpectedEof)
 }
 
 fn build_declare_section(pair: Pair<'_, Rule>) -> Result<Vec<Decl>, ParseError> {
@@ -191,24 +203,8 @@ fn build_var_decl(pair: Pair<'_, Rule>) -> Result<VarDecl, ParseError> {
         match part.as_rule() {
             Rule::ident => name = Some(build_ident(part)),
             Rule::type_name_text => {
-                let parsed = parse_type_name(part.as_str().trim())?;
-                ty = Some(match parsed {
-                    crate::backend::parser::RawTypeName::Builtin(sql_type) => sql_type,
-                    crate::backend::parser::RawTypeName::Serial(kind) => {
-                        return Err(ParseError::FeatureNotSupported(format!(
-                            "{} is only allowed in CREATE TABLE / ALTER TABLE ADD COLUMN",
-                            match kind {
-                                crate::backend::parser::SerialKind::Small => "smallserial",
-                                crate::backend::parser::SerialKind::Regular => "serial",
-                                crate::backend::parser::SerialKind::Big => "bigserial",
-                            }
-                        )));
-                    }
-                    crate::backend::parser::RawTypeName::Record => SqlType::record(RECORD_TYPE_OID),
-                    crate::backend::parser::RawTypeName::Named { name, .. } => {
-                        return Err(ParseError::UnsupportedType(name));
-                    }
-                });
+                let type_name = part.as_str().trim();
+                ty = Some((type_name.to_string(), decl_type_hint(type_name)?));
             }
             Rule::default_clause => {
                 default_expr = part
@@ -221,9 +217,43 @@ fn build_var_decl(pair: Pair<'_, Rule>) -> Result<VarDecl, ParseError> {
     }
     Ok(VarDecl {
         name: name.ok_or(ParseError::UnexpectedEof)?,
-        ty: ty.ok_or(ParseError::UnexpectedEof)?,
+        type_name: ty
+            .as_ref()
+            .map(|(type_name, _)| type_name.clone())
+            .ok_or(ParseError::UnexpectedEof)?,
+        ty: ty.map(|(_, ty)| ty).ok_or(ParseError::UnexpectedEof)?,
         default_expr,
     })
+}
+
+fn decl_type_hint(type_name: &str) -> Result<SqlType, ParseError> {
+    if type_name.trim_end().to_ascii_lowercase().ends_with("%type")
+        || type_name
+            .trim_end()
+            .to_ascii_lowercase()
+            .ends_with("%rowtype")
+    {
+        return Ok(SqlType::record(RECORD_TYPE_OID));
+    }
+    match parse_type_name(type_name)? {
+        RawTypeName::Builtin(sql_type) => Ok(sql_type),
+        RawTypeName::Serial(kind) => Err(ParseError::FeatureNotSupported(format!(
+            "{} is only allowed in CREATE TABLE / ALTER TABLE ADD COLUMN",
+            match kind {
+                SerialKind::Small => "smallserial",
+                SerialKind::Regular => "serial",
+                SerialKind::Big => "bigserial",
+            }
+        ))),
+        RawTypeName::Record => Ok(SqlType::record(RECORD_TYPE_OID)),
+        RawTypeName::Named { array_bounds, .. } => {
+            let mut ty = SqlType::new(SqlTypeKind::Composite);
+            for _ in 0..array_bounds {
+                ty = SqlType::array_of(ty);
+            }
+            Ok(ty)
+        }
+    }
 }
 
 fn build_alias_decl(pair: Pair<'_, Rule>) -> Result<AliasDecl, ParseError> {
@@ -957,12 +987,56 @@ mod tests {
         )
         .unwrap();
         assert_eq!(block.declarations.len(), 1);
+        assert_eq!(block.label, None);
         let Decl::Var(total_decl) = &block.declarations[0] else {
             panic!("expected variable declaration");
         };
         assert_eq!(total_decl.name, "total");
         assert_eq!(total_decl.ty.kind, SqlTypeKind::Int4);
         assert_eq!(block.statements.len(), 3);
+    }
+
+    #[test]
+    fn parse_block_accepts_empty_declare_section() {
+        let block = parse_block(
+            "
+            declare
+            begin
+                null;
+            end
+            ",
+        )
+        .unwrap();
+
+        assert!(block.declarations.is_empty());
+        assert_eq!(block.statements, vec![Stmt::Null]);
+    }
+
+    #[test]
+    fn parse_block_accepts_label_and_percent_declarations() {
+        let block = parse_block(
+            "
+            <<outer>>
+            declare
+                xname HSlot.slotname%TYPE;
+                syrow System%ROWTYPE;
+            begin
+                null;
+            end
+            ",
+        )
+        .unwrap();
+
+        assert_eq!(block.label.as_deref(), Some("outer"));
+        assert_eq!(block.declarations.len(), 2);
+        let Decl::Var(type_decl) = &block.declarations[0] else {
+            panic!("expected variable declaration");
+        };
+        assert_eq!(type_decl.type_name, "HSlot.slotname%TYPE");
+        let Decl::Var(row_decl) = &block.declarations[1] else {
+            panic!("expected variable declaration");
+        };
+        assert_eq!(row_decl.type_name, "System%ROWTYPE");
     }
 
     #[test]

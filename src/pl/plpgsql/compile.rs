@@ -13,7 +13,7 @@ use crate::backend::parser::{
     Statement, bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
     bind_scalar_expr_in_named_slot_scope, bind_update_with_outer_scopes, parse_expr,
     parse_statement, parse_type_name, pg_plan_query_with_outer_scopes_and_ctes,
-    pg_plan_values_query_with_outer_scopes_and_ctes,
+    pg_plan_values_query_with_outer_scopes_and_ctes, resolve_raw_type_name,
 };
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::{PgProcRow, RECORD_TYPE_OID};
@@ -256,10 +256,18 @@ struct RelationScopeVar {
     trigger_row: Option<TriggerReturnedRow>,
 }
 
+#[derive(Debug, Clone)]
+struct LabeledScope {
+    label: String,
+    vars: HashMap<String, ScopeVar>,
+    relation_scopes: Vec<RelationScopeVar>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct CompileEnv {
     vars: HashMap<String, ScopeVar>,
     relation_scopes: Vec<RelationScopeVar>,
+    labeled_scopes: Vec<LabeledScope>,
     local_ctes: Vec<BoundCte>,
     parameter_slots: Vec<ScopeVar>,
     positional_parameter_names: Vec<String>,
@@ -309,6 +317,46 @@ impl CompileEnv {
 
     fn get_var(&self, name: &str) -> Option<&ScopeVar> {
         self.vars.get(&name.to_ascii_lowercase())
+    }
+
+    fn get_labeled_var(&self, label: &str, name: &str) -> Option<&ScopeVar> {
+        self.labeled_scopes
+            .iter()
+            .rev()
+            .find(|scope| scope.label.eq_ignore_ascii_case(label))
+            .and_then(|scope| scope.vars.get(&name.to_ascii_lowercase()))
+    }
+
+    fn get_labeled_relation_field(
+        &self,
+        label: &str,
+        relation: &str,
+        field: &str,
+    ) -> Option<&SlotScopeColumn> {
+        self.labeled_scopes
+            .iter()
+            .rev()
+            .find(|scope| scope.label.eq_ignore_ascii_case(label))
+            .and_then(|scope| {
+                scope
+                    .relation_scopes
+                    .iter()
+                    .find(|relation_scope| relation_scope.name.eq_ignore_ascii_case(relation))
+            })
+            .and_then(|scope| {
+                scope
+                    .columns
+                    .iter()
+                    .find(|column| !column.hidden && column.name.eq_ignore_ascii_case(field))
+            })
+    }
+
+    fn push_label_scope(&mut self, label: &str) {
+        self.labeled_scopes.push(LabeledScope {
+            label: label.to_ascii_lowercase(),
+            vars: self.vars.clone(),
+            relation_scopes: self.relation_scopes.clone(),
+        });
     }
 
     fn get_parameter(&self, index: usize) -> Option<&ScopeVar> {
@@ -691,6 +739,9 @@ fn compile_block(
             Decl::Alias(decl) => compile_alias_decl(decl, &mut env)?,
         }
     }
+    if let Some(label) = &block.label {
+        env.push_label_scope(label);
+    }
     let statements = block
         .statements
         .iter()
@@ -709,7 +760,8 @@ fn compile_var_decl(
     catalog: &dyn CatalogLookup,
     env: &mut CompileEnv,
 ) -> Result<CompiledVar, ParseError> {
-    let slot = env.define_var(&decl.name, decl.ty);
+    let ty = resolve_decl_type(&decl.type_name, catalog)?;
+    let slot = env.define_var(&decl.name, ty);
     let default_expr = decl
         .default_expr
         .as_deref()
@@ -717,9 +769,53 @@ fn compile_var_decl(
         .transpose()?;
     Ok(CompiledVar {
         slot,
-        ty: decl.ty,
+        ty,
         default_expr,
     })
+}
+
+fn resolve_decl_type(type_name: &str, catalog: &dyn CatalogLookup) -> Result<SqlType, ParseError> {
+    let trimmed = type_name.trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if let Some(prefix) = lowered.strip_suffix("%type") {
+        let original_prefix = &trimmed[..prefix.len()];
+        let Some((relation_name, column_name)) = original_prefix.trim().rsplit_once('.') else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "PL/pgSQL %TYPE reference in relation.column form",
+                actual: type_name.into(),
+            });
+        };
+        let relation = catalog
+            .lookup_any_relation(relation_name.trim())
+            .ok_or_else(|| ParseError::UnsupportedType(relation_name.trim().into()))?;
+        return relation
+            .desc
+            .columns
+            .iter()
+            .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(column_name.trim()))
+            .map(|column| column.sql_type)
+            .ok_or_else(|| ParseError::UnknownColumn(original_prefix.trim().into()));
+    }
+    if let Some(prefix) = lowered.strip_suffix("%rowtype") {
+        let relation_name = &trimmed[..prefix.len()];
+        let relation = catalog
+            .lookup_any_relation(relation_name.trim())
+            .ok_or_else(|| ParseError::UnsupportedType(relation_name.trim().into()))?;
+        return Ok(relation_row_type(&relation, catalog));
+    }
+    resolve_raw_type_name(&parse_type_name(trimmed)?, catalog)
+}
+
+fn relation_row_type(
+    relation: &crate::backend::parser::BoundRelation,
+    catalog: &dyn CatalogLookup,
+) -> SqlType {
+    catalog
+        .type_rows()
+        .into_iter()
+        .find(|row| row.typrelid == relation.relation_oid)
+        .map(|row| SqlType::named_composite(row.oid, relation.relation_oid))
+        .unwrap_or_else(|| SqlType::record(RECORD_TYPE_OID))
 }
 
 fn compile_alias_decl(
@@ -950,8 +1046,9 @@ fn plan_select_for_env(
     catalog: &dyn CatalogLookup,
     env: &CompileEnv,
 ) -> Result<PlannedStmt, ParseError> {
+    let stmt = normalize_plpgsql_select(stmt.clone(), env);
     pg_plan_query_with_outer_scopes_and_ctes(
-        stmt,
+        &stmt,
         catalog,
         &[outer_scope_for_sql(env)],
         &env.local_ctes,
@@ -1018,11 +1115,10 @@ fn compile_perform_stmt(
     env: &CompileEnv,
 ) -> Result<CompiledStmt, ParseError> {
     let rewritten_sql = rewrite_plpgsql_sql_text(sql, env)?;
-    let planned = pg_plan_query_with_outer_scopes_and_ctes(
+    let planned = plan_select_for_env(
         &crate::backend::parser::parse_select(&format!("select {rewritten_sql}"))?,
         catalog,
-        &[outer_scope_for_sql(env)],
-        &env.local_ctes,
+        env,
     )?;
     Ok(CompiledStmt::Perform { plan: planned })
 }
@@ -1642,11 +1738,10 @@ fn compile_select_into_stmt(
     env: &mut CompileEnv,
 ) -> Result<CompiledStmt, ParseError> {
     let rewritten_sql = rewrite_plpgsql_sql_text(select_sql, env)?;
-    let planned = pg_plan_query_with_outer_scopes_and_ctes(
+    let planned = plan_select_for_env(
         &crate::backend::parser::parse_select(&rewritten_sql)?,
         catalog,
-        &[outer_scope_for_sql(env)],
-        &env.local_ctes,
+        env,
     )?;
     let mut targets = target_refs
         .iter()
@@ -2163,6 +2258,9 @@ fn find_top_level_token(input: &str, token: &str) -> Option<usize> {
 fn normalize_plpgsql_expr(expr: SqlExpr, env: &CompileEnv) -> SqlExpr {
     match expr {
         SqlExpr::Column(name) => {
+            if let Some(expr) = normalize_labeled_column_name(&name, env) {
+                return expr;
+            }
             if let Some((base, field)) = name.rsplit_once('.')
                 && let Some(var) = env.get_var(base)
                 && matches!(var.ty.kind, SqlTypeKind::Record | SqlTypeKind::Composite)
@@ -2173,6 +2271,15 @@ fn normalize_plpgsql_expr(expr: SqlExpr, env: &CompileEnv) -> SqlExpr {
                 };
             }
             SqlExpr::Column(name)
+        }
+        SqlExpr::FieldSelect { expr, field } => {
+            if let Some(normalized) = normalize_labeled_field_select(&expr, &field, env) {
+                return normalized;
+            }
+            SqlExpr::FieldSelect {
+                expr: Box::new(normalize_plpgsql_expr(*expr, env)),
+                field,
+            }
         }
         SqlExpr::Add(left, right) => SqlExpr::Add(
             Box::new(normalize_plpgsql_expr(*left, env)),
@@ -2300,12 +2407,119 @@ fn normalize_plpgsql_expr(expr: SqlExpr, env: &CompileEnv) -> SqlExpr {
                 .map(|item| normalize_plpgsql_expr(item, env))
                 .collect(),
         ),
-        SqlExpr::FieldSelect { expr, field } => SqlExpr::FieldSelect {
-            expr: Box::new(normalize_plpgsql_expr(*expr, env)),
-            field,
-        },
         other => other,
     }
+}
+
+fn normalize_labeled_column_name(name: &str, env: &CompileEnv) -> Option<SqlExpr> {
+    let (label_and_var, field) = name.rsplit_once('.')?;
+    let (label, qualifier) = label_and_var.rsplit_once('.')?;
+    if let Some(scope_var) = env.get_labeled_var(label, qualifier)
+        && matches!(
+            scope_var.ty.kind,
+            SqlTypeKind::Record | SqlTypeKind::Composite
+        )
+    {
+        return Some(SqlExpr::FieldSelect {
+            expr: Box::new(SqlExpr::Column(qualifier.to_string())),
+            field: field.to_string(),
+        });
+    }
+    if env
+        .get_labeled_relation_field(label, qualifier, field)
+        .is_some()
+    {
+        return Some(SqlExpr::FieldSelect {
+            expr: Box::new(SqlExpr::Column(qualifier.to_string())),
+            field: field.to_string(),
+        });
+    }
+    None
+}
+
+fn normalize_labeled_field_select(
+    expr: &SqlExpr,
+    field: &str,
+    env: &CompileEnv,
+) -> Option<SqlExpr> {
+    if let SqlExpr::Column(label) = expr
+        && let Some((qualifier, nested_field)) = field.rsplit_once('.')
+    {
+        if let Some(scope_var) = env.get_labeled_var(label, qualifier)
+            && matches!(
+                scope_var.ty.kind,
+                SqlTypeKind::Record | SqlTypeKind::Composite
+            )
+        {
+            return Some(SqlExpr::FieldSelect {
+                expr: Box::new(SqlExpr::Column(qualifier.to_string())),
+                field: nested_field.to_string(),
+            });
+        }
+        if env
+            .get_labeled_relation_field(label, qualifier, nested_field)
+            .is_some()
+        {
+            return Some(SqlExpr::FieldSelect {
+                expr: Box::new(SqlExpr::Column(qualifier.to_string())),
+                field: nested_field.to_string(),
+            });
+        }
+    }
+
+    let SqlExpr::FieldSelect {
+        expr,
+        field: qualifier,
+    } = expr
+    else {
+        return None;
+    };
+    let SqlExpr::Column(label) = expr.as_ref() else {
+        return None;
+    };
+    if let Some((qualifier, nested_field)) = field.rsplit_once('.') {
+        if let Some(scope_var) = env.get_labeled_var(label, qualifier)
+            && matches!(
+                scope_var.ty.kind,
+                SqlTypeKind::Record | SqlTypeKind::Composite
+            )
+        {
+            return Some(SqlExpr::FieldSelect {
+                expr: Box::new(SqlExpr::Column(qualifier.to_string())),
+                field: nested_field.to_string(),
+            });
+        }
+        if env
+            .get_labeled_relation_field(label, qualifier, nested_field)
+            .is_some()
+        {
+            return Some(SqlExpr::FieldSelect {
+                expr: Box::new(SqlExpr::Column(qualifier.to_string())),
+                field: nested_field.to_string(),
+            });
+        }
+    }
+    if let Some(scope_var) = env.get_labeled_var(label, qualifier)
+        && matches!(
+            scope_var.ty.kind,
+            SqlTypeKind::Record | SqlTypeKind::Composite
+        )
+    {
+        return Some(SqlExpr::FieldSelect {
+            expr: Box::new(SqlExpr::Column(qualifier.clone())),
+            field: field.to_string(),
+        });
+    }
+    if env
+        .get_labeled_relation_field(label, qualifier, field)
+        .is_some()
+    {
+        return Some(SqlExpr::FieldSelect {
+            expr: Box::new(SqlExpr::Column(qualifier.clone())),
+            field: field.to_string(),
+        });
+    }
+    None
 }
 
 fn normalize_plpgsql_select(mut stmt: SelectStatement, env: &CompileEnv) -> SelectStatement {
@@ -2514,6 +2728,22 @@ mod tests {
         assert_eq!(
             rewrite_plpgsql_query_condition("count(*) = 0 from Room where roomno = new.roomno"),
             Some("(select count(*) from Room where roomno = new.roomno) = 0".into())
+        );
+    }
+
+    #[test]
+    fn normalizes_labeled_record_field_reference() {
+        let mut env = CompileEnv::default();
+        env.define_var("item", SqlType::record(RECORD_TYPE_OID));
+        env.push_label_scope("outer");
+
+        let parsed = parse_expr("\"outer\".item.note").unwrap();
+        assert_eq!(
+            normalize_plpgsql_expr(parsed, &env),
+            SqlExpr::FieldSelect {
+                expr: Box::new(SqlExpr::Column("item".into())),
+                field: "note".into(),
+            }
         );
     }
 
