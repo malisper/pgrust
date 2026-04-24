@@ -38,16 +38,16 @@ use crate::backend::utils::cache::syscache::{SysCacheId, SysCacheTuple};
 use crate::include::catalog::{
     BootstrapCatalogKind, CONSTRAINT_CHECK, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
     CONSTRAINT_UNIQUE, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_AM_RELATION_OID,
-    PG_AMOP_RELATION_OID, PG_AMPROC_RELATION_OID, PG_AUTHID_RELATION_OID, PG_CLASS_RELATION_OID,
-    PG_CONSTRAINT_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_NAMESPACE_RELATION_OID,
-    PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_OPFAMILY_RELATION_OID,
-    PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
-    PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_STATISTIC_EXT_RELATION_OID,
-    PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow, PgAmopRow, PgAmprocRow,
-    PgAttrdefRow, PgAttributeRow, PgClassRow, PgConstraintRow, PgDatabaseRow, PgDependRow,
-    PgDescriptionRow, PgForeignDataWrapperRow, PgInheritsRow, PgNamespaceRow, PgOpclassRow,
-    PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow,
-    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
+    PG_AMOP_RELATION_OID, PG_AMPROC_RELATION_OID, PG_ATTRDEF_RELATION_OID, PG_AUTHID_RELATION_OID,
+    PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
+    PG_NAMESPACE_RELATION_OID, PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID,
+    PG_OPFAMILY_RELATION_OID, PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID,
+    PG_PUBLICATION_REL_RELATION_OID, PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID,
+    PG_STATISTIC_EXT_RELATION_OID, PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
+    PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgClassRow, PgConstraintRow,
+    PgDatabaseRow, PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow, PgInheritsRow,
+    PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow,
+    PgProcRow, PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
     PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTypeRow,
     relkind_has_storage,
 };
@@ -2396,12 +2396,13 @@ impl CatalogStore {
             return Ok(CatalogMutationEffect::default());
         }
 
-        let (catcache, relcache) = visible_catalog_caches_for_ctx(self, ctx)?;
-        let child_relation = relcache
-            .get_by_oid(relation_oid)
+        let child_relation = self
+            .relation_id_get_relation(ctx, relation_oid)?
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        let child_entry = catalog_entry_from_visible_relation(&catcache, child_relation)?;
-        let old_child_rows = rows_for_existing_relation(&catcache, &child_entry)?;
+        let child_class = class_row_by_oid_mvcc(self, ctx, relation_oid)?
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let child_entry = catalog_entry_from_relation_row(&child_class, &child_relation);
+        let old_child_rows = rows_for_existing_relation_mvcc(self, ctx, &child_entry)?;
 
         let mut rows_to_delete = PhysicalCatalogRows {
             depends: old_child_rows.depends.clone(),
@@ -2441,9 +2442,7 @@ impl CatalogStore {
             .collect();
 
         for &parent_oid in parent_oids {
-            let old_parent = catcache
-                .class_by_oid(parent_oid)
-                .cloned()
+            let old_parent = class_row_by_oid_mvcc(self, ctx, parent_oid)?
                 .ok_or_else(|| CatalogError::UnknownTable(parent_oid.to_string()))?;
             if old_parent.relhassubclass {
                 continue;
@@ -2481,25 +2480,20 @@ impl CatalogStore {
         parent_oid: u32,
         ctx: &CatalogWriteContext,
     ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
-        let (catcache, relcache) = visible_catalog_caches_for_ctx(self, ctx)?;
-        let child_relation = relcache
-            .get_by_oid(relation_oid)
+        let child_relation = self
+            .relation_id_get_relation(ctx, relation_oid)?
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
         if child_relation.relkind != 'r' {
             return Err(CatalogError::UnknownTable(relation_oid.to_string()));
         }
-        let parent_relation = relcache
-            .get_by_oid(parent_oid)
+        let parent_relation = self
+            .relation_id_get_relation(ctx, parent_oid)?
             .ok_or_else(|| CatalogError::UnknownTable(parent_oid.to_string()))?;
         if parent_relation.relkind != 'r' {
             return Err(CatalogError::UnknownTable(parent_oid.to_string()));
         }
 
-        let mut current_inherits = catcache
-            .inherit_rows()
-            .into_iter()
-            .filter(|row| row.inhrelid == relation_oid)
-            .collect::<Vec<_>>();
+        let mut current_inherits = relation_inherits_mvcc(self, ctx, relation_oid)?;
         crate::include::catalog::sort_pg_inherits_rows(&mut current_inherits);
         let removed_inherit = current_inherits
             .iter()
@@ -2514,27 +2508,22 @@ impl CatalogStore {
         let current_parent_relations = current_inherits
             .iter()
             .map(|row| {
-                relcache
-                    .get_by_oid(row.inhparent)
-                    .cloned()
+                self.relation_id_get_relation(ctx, row.inhparent)?
                     .ok_or_else(|| CatalogError::UnknownTable(row.inhparent.to_string()))
             })
             .collect::<Result<Vec<_>, _>>()?;
         let remaining_parent_relations = remaining_inherits
             .iter()
             .map(|row| {
-                relcache
-                    .get_by_oid(row.inhparent)
-                    .cloned()
+                self.relation_id_get_relation(ctx, row.inhparent)?
                     .ok_or_else(|| CatalogError::UnknownTable(row.inhparent.to_string()))
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let child_name = catcache
-            .class_by_oid(relation_oid)
-            .map(|row| row.relname.clone())
+        let child_class = class_row_by_oid_mvcc(self, ctx, relation_oid)?
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        let old_child_entry = catalog_entry_from_visible_relation(&catcache, child_relation)?;
+        let child_name = child_class.relname.clone();
+        let old_child_entry = catalog_entry_from_relation_row(&child_class, &child_relation);
         let mut new_child_entry = old_child_entry.clone();
 
         for column in &mut new_child_entry.desc.columns {
@@ -2569,22 +2558,23 @@ impl CatalogStore {
             }
         }
 
-        let mut preserved_constraints = catcache
-            .constraint_rows_for_relation(relation_oid)
+        let mut preserved_constraints = relation_constraints_mvcc(self, ctx, relation_oid)?
             .into_iter()
             .filter(|row| row.contype != CONSTRAINT_NOTNULL)
             .map(|mut row| {
                 if row.contype == CONSTRAINT_CHECK {
-                    let current_parent_match_count = inherited_parent_check_match_count(
-                        &catcache,
+                    let current_parent_match_count = inherited_parent_check_match_count_mvcc(
+                        self,
+                        ctx,
                         &current_parent_relations,
                         &row,
-                    );
-                    let remaining_parent_match_count = inherited_parent_check_match_count(
-                        &catcache,
+                    )?;
+                    let remaining_parent_match_count = inherited_parent_check_match_count_mvcc(
+                        self,
+                        ctx,
                         &remaining_parent_relations,
                         &row,
-                    );
+                    )?;
                     let had_local_definition =
                         row.conislocal && row.coninhcount == current_parent_match_count as i16;
                     row.coninhcount = remaining_parent_match_count as i16;
@@ -2593,9 +2583,9 @@ impl CatalogStore {
                         row.connoinherit = false;
                     }
                 }
-                row
+                Ok(row)
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, CatalogError>>()?;
         sort_pg_constraint_rows(&mut preserved_constraints);
 
         let mut new_constraints = derived_pg_constraint_rows(
@@ -2607,25 +2597,23 @@ impl CatalogStore {
         new_constraints.extend(preserved_constraints);
         sort_pg_constraint_rows(&mut new_constraints);
 
+        let type_lookup = CatalogStoreTypeLookup { store: &*self, ctx };
         let new_attributes =
-            rows_for_new_relation_entry(&catcache, &child_name, &new_child_entry)?.attributes;
-        let old_attributes = catcache
-            .attributes_by_relid(relation_oid)
-            .unwrap_or(&[])
-            .to_vec();
-        let old_constraints = catcache.constraint_rows_for_relation(relation_oid);
-        let removed_depends = catcache
-            .depend_rows()
-            .into_iter()
-            .filter(|row| {
-                row.classid == PG_CLASS_RELATION_OID
-                    && row.objid == relation_oid
-                    && row.refclassid == PG_CLASS_RELATION_OID
-                    && row.refobjid == parent_oid
-                    && row.refobjsubid == 0
-                    && row.deptype == DEPENDENCY_NORMAL
-            })
-            .collect::<Vec<_>>();
+            rows_for_new_relation_entry(&type_lookup, &child_name, &new_child_entry)?.attributes;
+        let old_attributes = relation_attributes_mvcc(self, ctx, relation_oid)?;
+        let old_constraints = relation_constraints_mvcc(self, ctx, relation_oid)?;
+        let removed_depends =
+            depend_rows_for_object_mvcc(self, ctx, PG_CLASS_RELATION_OID, relation_oid)?
+                .into_iter()
+                .filter(|row| {
+                    row.classid == PG_CLASS_RELATION_OID
+                        && row.objid == relation_oid
+                        && row.refclassid == PG_CLASS_RELATION_OID
+                        && row.refobjid == parent_oid
+                        && row.refobjsubid == 0
+                        && row.deptype == DEPENDENCY_NORMAL
+                })
+                .collect::<Vec<_>>();
 
         let mut rows_to_delete = PhysicalCatalogRows {
             attributes: old_attributes,
@@ -2640,9 +2628,8 @@ impl CatalogStore {
             ..PhysicalCatalogRows::default()
         };
 
-        if let Some(old_parent) = catcache.class_by_oid(parent_oid).cloned() {
-            let has_remaining_children = catcache
-                .inherit_rows()
+        if let Some(old_parent) = class_row_by_oid_mvcc(self, ctx, parent_oid)? {
+            let has_remaining_children = relation_inherited_by_mvcc(self, ctx, parent_oid)?
                 .into_iter()
                 .any(|row| row.inhparent == parent_oid && row.inhrelid != relation_oid);
             if old_parent.relhassubclass != has_remaining_children {
@@ -5685,6 +5672,31 @@ fn inherited_parent_check_match_count(
         .count()
 }
 
+fn inherited_parent_check_match_count_mvcc(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    parents: &[RelCacheEntry],
+    child_constraint: &PgConstraintRow,
+) -> Result<usize, CatalogError> {
+    let mut count = 0;
+    for parent in parents {
+        if relation_constraints_mvcc(store, ctx, parent.relation_oid)?
+            .into_iter()
+            .any(|parent_constraint| {
+                parent_constraint.contype == CONSTRAINT_CHECK
+                    && !parent_constraint.connoinherit
+                    && parent_constraint
+                        .conname
+                        .eq_ignore_ascii_case(&child_constraint.conname)
+                    && parent_constraint.conbin == child_constraint.conbin
+            })
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 fn trigger_row_visible(
     catcache: &CatCache,
     relation_oid: u32,
@@ -6083,6 +6095,376 @@ fn index_row_for_entry(entry: &CatalogEntry) -> Option<crate::include::catalog::
         indexprs: index_meta.indexprs.clone(),
         indpred: index_meta.indpred.clone(),
     })
+}
+
+fn oid_key(oid: u32) -> Value {
+    Value::Int64(i64::from(oid))
+}
+
+fn class_row_by_oid_mvcc(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    relation_oid: u32,
+) -> Result<Option<PgClassRow>, CatalogError> {
+    Ok(store
+        .search_sys_cache1(ctx, SysCacheId::RelOid, oid_key(relation_oid))?
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Class(row) => Some(row),
+            _ => None,
+        }))
+}
+
+fn type_row_by_oid_mvcc(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    type_oid: u32,
+) -> Result<Option<PgTypeRow>, CatalogError> {
+    Ok(store
+        .search_sys_cache1(ctx, SysCacheId::TypeOid, oid_key(type_oid))?
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Type(row) => Some(row),
+            _ => None,
+        }))
+}
+
+fn relation_constraints_mvcc(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    relation_oid: u32,
+) -> Result<Vec<PgConstraintRow>, CatalogError> {
+    Ok(store
+        .search_sys_cache_list1(ctx, SysCacheId::ConstraintRelId, oid_key(relation_oid))?
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Constraint(row) => Some(row),
+            _ => None,
+        })
+        .collect())
+}
+
+fn relation_attributes_mvcc(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    relation_oid: u32,
+) -> Result<Vec<PgAttributeRow>, CatalogError> {
+    let mut rows = store
+        .search_sys_cache_list1(ctx, SysCacheId::AttrNum, oid_key(relation_oid))?
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Attribute(row) => Some(row),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| row.attnum);
+    Ok(rows)
+}
+
+fn relation_attrdefs_mvcc(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    relation_oid: u32,
+) -> Result<Vec<PgAttrdefRow>, CatalogError> {
+    let mut rows = store
+        .search_sys_cache_list1(ctx, SysCacheId::AttrDefault, oid_key(relation_oid))?
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Attrdef(row) => Some(row),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| row.adnum);
+    Ok(rows)
+}
+
+fn relation_inherits_mvcc(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    relation_oid: u32,
+) -> Result<Vec<PgInheritsRow>, CatalogError> {
+    let mut rows = store
+        .search_sys_cache_list1(ctx, SysCacheId::InheritsRelIdSeqNo, oid_key(relation_oid))?
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Inherits(row) => Some(row),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    crate::include::catalog::sort_pg_inherits_rows(&mut rows);
+    Ok(rows)
+}
+
+fn relation_inherited_by_mvcc(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    relation_oid: u32,
+) -> Result<Vec<PgInheritsRow>, CatalogError> {
+    let mut rows = store
+        .search_sys_cache_list1(ctx, SysCacheId::InheritsParent, oid_key(relation_oid))?
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Inherits(row) => Some(row),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| (row.inhseqno, row.inhrelid));
+    Ok(rows)
+}
+
+fn relation_rewrites_mvcc(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    relation_oid: u32,
+) -> Result<Vec<PgRewriteRow>, CatalogError> {
+    Ok(store
+        .search_sys_cache_list1(ctx, SysCacheId::RuleRelName, oid_key(relation_oid))?
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Rewrite(row) => Some(row),
+            _ => None,
+        })
+        .collect())
+}
+
+fn relation_triggers_mvcc(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    relation_oid: u32,
+) -> Result<Vec<crate::include::catalog::PgTriggerRow>, CatalogError> {
+    Ok(store
+        .search_sys_cache_list1(ctx, SysCacheId::TriggerRelidName, oid_key(relation_oid))?
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Trigger(row) => Some(row),
+            _ => None,
+        })
+        .collect())
+}
+
+fn partitioned_table_row_mvcc(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    relation_oid: u32,
+) -> Result<Option<PgPartitionedTableRow>, CatalogError> {
+    Ok(store
+        .search_sys_cache1(ctx, SysCacheId::PartRelId, oid_key(relation_oid))?
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::PartitionedTable(row) => Some(row),
+            _ => None,
+        }))
+}
+
+fn index_rows_for_relation_mvcc(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    relation_oid: u32,
+) -> Result<Vec<crate::include::catalog::PgIndexRow>, CatalogError> {
+    Ok(store
+        .search_sys_cache_list1(ctx, SysCacheId::IndexRelId, oid_key(relation_oid))?
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Index(row) => Some(row),
+            _ => None,
+        })
+        .collect())
+}
+
+fn depend_rows_for_object_mvcc(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    classid: u32,
+    objid: u32,
+) -> Result<Vec<PgDependRow>, CatalogError> {
+    Ok(store
+        .search_sys_cache_list2(
+            ctx,
+            SysCacheId::DependDepender,
+            oid_key(classid),
+            oid_key(objid),
+        )?
+        .into_iter()
+        .filter_map(|tuple| match tuple {
+            SysCacheTuple::Depend(row) => Some(row),
+            _ => None,
+        })
+        .collect())
+}
+
+fn collect_depend_rows_for_object_mvcc(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    classid: u32,
+    objid: u32,
+    rows: &mut Vec<PgDependRow>,
+) -> Result<(), CatalogError> {
+    rows.extend(depend_rows_for_object_mvcc(store, ctx, classid, objid)?);
+    Ok(())
+}
+
+fn catalog_entry_from_relation_row(
+    class_row: &PgClassRow,
+    relation: &RelCacheEntry,
+) -> CatalogEntry {
+    CatalogEntry {
+        rel: relation.rel,
+        relation_oid: relation.relation_oid,
+        namespace_oid: relation.namespace_oid,
+        owner_oid: relation.owner_oid,
+        relacl: class_row.relacl.clone(),
+        row_type_oid: relation.row_type_oid,
+        array_type_oid: relation.array_type_oid,
+        reltoastrelid: relation.reltoastrelid,
+        relpersistence: relation.relpersistence,
+        relkind: relation.relkind,
+        am_oid: class_row.relam,
+        relhassubclass: class_row.relhassubclass,
+        relhastriggers: relation.relhastriggers,
+        relispartition: class_row.relispartition,
+        relpartbound: class_row.relpartbound.clone(),
+        relrowsecurity: class_row.relrowsecurity,
+        relforcerowsecurity: class_row.relforcerowsecurity,
+        relpages: class_row.relpages,
+        reltuples: class_row.reltuples,
+        relallvisible: class_row.relallvisible,
+        relallfrozen: class_row.relallfrozen,
+        relfrozenxid: class_row.relfrozenxid,
+        desc: relation.desc.clone(),
+        partitioned_table: relation.partitioned_table.clone(),
+        index_meta: relation.index.as_ref().map(|index| CatalogIndexMeta {
+            indrelid: index.indrelid,
+            indkey: index.indkey.clone(),
+            indisunique: index.indisunique,
+            indnullsnotdistinct: index.indnullsnotdistinct,
+            indisprimary: index.indisprimary,
+            indisexclusion: index.indisexclusion,
+            indisvalid: index.indisvalid,
+            indisready: index.indisready,
+            indislive: index.indislive,
+            indclass: index.indclass.clone(),
+            indcollation: index.indcollation.clone(),
+            indoption: index.indoption.clone(),
+            indexprs: index.indexprs.clone(),
+            indpred: index.indpred.clone(),
+            brin_options: index.brin_options.clone(),
+        }),
+    }
+}
+
+fn rows_for_existing_relation_mvcc(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    entry: &CatalogEntry,
+) -> Result<PhysicalCatalogRows, CatalogError> {
+    let class_row = class_row_by_oid_mvcc(store, ctx, entry.relation_oid)?
+        .ok_or_else(|| CatalogError::UnknownTable(entry.relation_oid.to_string()))?;
+    let attributes = relation_attributes_mvcc(store, ctx, entry.relation_oid)?;
+    let attrdefs = relation_attrdefs_mvcc(store, ctx, entry.relation_oid)?;
+    let rewrites = relation_rewrites_mvcc(store, ctx, entry.relation_oid)?;
+    let triggers = relation_triggers_mvcc(store, ctx, entry.relation_oid)?;
+    let inherits = relation_inherits_mvcc(store, ctx, entry.relation_oid)?;
+    let constraints = if matches!(entry.relkind, 'r' | 'p') {
+        relation_constraints_mvcc(store, ctx, entry.relation_oid)?
+    } else {
+        Vec::new()
+    };
+
+    let mut rows = PhysicalCatalogRows {
+        classes: vec![class_row],
+        attributes,
+        attrdefs,
+        rewrites,
+        triggers,
+        inherits,
+        partitioned_tables: partitioned_table_row_mvcc(store, ctx, entry.relation_oid)?
+            .into_iter()
+            .collect(),
+        constraints,
+        ..PhysicalCatalogRows::default()
+    };
+    if entry.row_type_oid != 0
+        && let Some(row) = type_row_by_oid_mvcc(store, ctx, entry.row_type_oid)?
+    {
+        rows.types.push(row);
+    }
+    if entry.array_type_oid != 0
+        && let Some(row) = type_row_by_oid_mvcc(store, ctx, entry.array_type_oid)?
+    {
+        rows.types.push(row);
+    }
+    if matches!(entry.relkind, 'i' | 'I') {
+        rows.indexes.extend(index_rows_for_relation_mvcc(
+            store,
+            ctx,
+            entry.relation_oid,
+        )?);
+    }
+
+    collect_depend_rows_for_object_mvcc(
+        store,
+        ctx,
+        PG_CLASS_RELATION_OID,
+        entry.relation_oid,
+        &mut rows.depends,
+    )?;
+    if entry.row_type_oid != 0 {
+        collect_depend_rows_for_object_mvcc(
+            store,
+            ctx,
+            PG_TYPE_RELATION_OID,
+            entry.row_type_oid,
+            &mut rows.depends,
+        )?;
+    }
+    if entry.array_type_oid != 0 {
+        collect_depend_rows_for_object_mvcc(
+            store,
+            ctx,
+            PG_TYPE_RELATION_OID,
+            entry.array_type_oid,
+            &mut rows.depends,
+        )?;
+    }
+    for row in &rows.attrdefs {
+        collect_depend_rows_for_object_mvcc(
+            store,
+            ctx,
+            PG_ATTRDEF_RELATION_OID,
+            row.oid,
+            &mut rows.depends,
+        )?;
+    }
+    for row in &rows.rewrites {
+        collect_depend_rows_for_object_mvcc(
+            store,
+            ctx,
+            PG_REWRITE_RELATION_OID,
+            row.oid,
+            &mut rows.depends,
+        )?;
+    }
+    for row in &rows.triggers {
+        collect_depend_rows_for_object_mvcc(
+            store,
+            ctx,
+            PG_TRIGGER_RELATION_OID,
+            row.oid,
+            &mut rows.depends,
+        )?;
+    }
+    for row in &rows.constraints {
+        collect_depend_rows_for_object_mvcc(
+            store,
+            ctx,
+            PG_CONSTRAINT_RELATION_OID,
+            row.oid,
+            &mut rows.depends,
+        )?;
+    }
+    sort_pg_depend_rows(&mut rows.depends);
+    rows.depends.dedup();
+    Ok(rows)
 }
 
 fn rows_for_existing_relation(
