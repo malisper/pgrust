@@ -1169,8 +1169,11 @@ impl BitmapHeapScanState {
             let guard = ctx.pool.lock_buffer_shared(buffer_id).map_err(|err| {
                 internal_exec_error(format!("bitmap heap shared lock failed: {err:?}"))
             })?;
-            let offsets = collect_visible_page_offsets(&guard, &ctx.snapshot, &ctx.txns)?;
+            let mut offsets = collect_visible_page_offsets(&guard, &ctx.snapshot, &ctx.txns)?;
             drop(guard);
+            if let Some(exact_offsets) = self.bitmap_index.bitmap.exact_offsets(block) {
+                offsets.retain(|offset| exact_offsets.contains(offset));
+            }
 
             if offsets.is_empty() {
                 continue;

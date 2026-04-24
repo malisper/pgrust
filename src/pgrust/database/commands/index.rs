@@ -9,8 +9,9 @@ use crate::include::access::amapi::{
     IndexBuildEmptyContext, IndexBuildExprContext, IndexInsertContext, IndexUniqueCheck,
 };
 use crate::include::access::brin::BrinOptions;
+use crate::include::access::gin::GinOptions;
 use crate::include::catalog::{
-    BRIN_AM_OID, GIST_AM_OID, GIST_RANGE_FAMILY_OID, SPGIST_AM_OID, builtin_range_rows,
+    BRIN_AM_OID, GIN_AM_OID, GIST_AM_OID, GIST_RANGE_FAMILY_OID, SPGIST_AM_OID, builtin_range_rows,
     multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::parsenodes::RelOption;
@@ -125,6 +126,7 @@ impl Database {
             rd_indexprs: None,
             rd_indpred: None,
             brin_options: meta.brin_options.clone(),
+            gin_options: meta.gin_options.clone(),
         })
     }
 
@@ -156,6 +158,48 @@ impl Database {
 
             return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
                 "BRIN option \"{}\"",
+                option.name
+            ))));
+        }
+        Ok(resolved)
+    }
+
+    fn resolve_gin_options(&self, options: &[RelOption]) -> Result<GinOptions, ExecError> {
+        let mut resolved = GinOptions::default();
+        for option in options {
+            if option.name.eq_ignore_ascii_case("fastupdate") {
+                resolved.fastupdate = match option.value.to_ascii_lowercase().as_str() {
+                    "on" | "true" | "yes" | "1" => true,
+                    "off" | "false" | "no" | "0" => false,
+                    _ => {
+                        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                            expected: "boolean fastupdate",
+                            actual: option.value.clone(),
+                        }));
+                    }
+                };
+                continue;
+            }
+
+            if option.name.eq_ignore_ascii_case("gin_pending_list_limit") {
+                let pending_list_limit_kb = option.value.parse::<u32>().map_err(|_| {
+                    ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "positive integer gin_pending_list_limit",
+                        actual: option.value.clone(),
+                    })
+                })?;
+                if pending_list_limit_kb == 0 {
+                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "positive integer gin_pending_list_limit",
+                        actual: option.value.clone(),
+                    }));
+                }
+                resolved.pending_list_limit_kb = pending_list_limit_kb;
+                continue;
+            }
+
+            return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+                "GIN option \"{}\"",
                 option.name
             ))));
         }
@@ -405,12 +449,17 @@ impl Database {
         let brin_options = if access_method.oid == BRIN_AM_OID {
             Some(self.resolve_brin_options(options)?)
         } else {
-            if !options.is_empty() {
+            if !options.is_empty() && access_method.oid != GIN_AM_OID {
                 return Err(ExecError::Parse(ParseError::UnexpectedToken {
                     expected: "simple index definition",
                     actual: "unsupported CREATE INDEX feature".into(),
                 }));
             }
+            None
+        };
+        let gin_options = if access_method.oid == GIN_AM_OID {
+            Some(self.resolve_gin_options(options)?)
+        } else {
             None
         };
 
@@ -425,6 +474,7 @@ impl Database {
                 indnullsnotdistinct: false,
                 indisexclusion: false,
                 brin_options,
+                gin_options,
             },
         ))
     }
@@ -485,6 +535,7 @@ impl Database {
                 indnullsnotdistinct: false,
                 indisexclusion: true,
                 brin_options: None,
+                gin_options: None,
             },
         ))
     }

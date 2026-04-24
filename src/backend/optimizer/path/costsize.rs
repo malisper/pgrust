@@ -12,7 +12,7 @@ use crate::include::access::brin::BRIN_DEFAULT_PAGES_PER_RANGE;
 use crate::include::access::brin_page::REVMAP_PAGE_MAXITEMS;
 use crate::include::access::htup::SIZEOF_HEAP_TUPLE_HEADER;
 use crate::include::catalog::{
-    BRIN_AM_OID, BTREE_AM_OID, GIST_AM_OID, PgStatisticRow, SPGIST_AM_OID,
+    BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, PgStatisticRow, SPGIST_AM_OID,
     bootstrap_pg_operator_rows, builtin_scalar_function_for_proc_oid,
     proc_oid_for_builtin_scalar_function, relkind_has_storage,
 };
@@ -1222,6 +1222,105 @@ fn estimate_brin_bitmap_candidate(
     AccessCandidate { total_cost, plan }
 }
 
+fn estimate_gin_bitmap_candidate(
+    source_id: usize,
+    rel: RelFileLocator,
+    relation_name: String,
+    relation_oid: u32,
+    toast: Option<ToastRelationRef>,
+    desc: RelationDesc,
+    stats: &RelationStats,
+    spec: IndexPathSpec,
+    order_items: Option<Vec<OrderByEntry>>,
+    catalog: &dyn CatalogLookup,
+) -> AccessCandidate {
+    let index_pages = catalog
+        .class_row_by_oid(spec.index.relation_oid)
+        .map(|row| row.relpages.max(1) as f64)
+        .unwrap_or(DEFAULT_NUM_PAGES);
+    let qual_selectivity = spec
+        .used_quals
+        .iter()
+        .map(|expr| clause_selectivity(expr, Some(stats), stats.reltuples))
+        .product::<f64>()
+        .clamp(0.0, 1.0);
+    let index_rows = clamp_rows(stats.reltuples * qual_selectivity);
+    let index_startup_cost = spec
+        .used_quals
+        .iter()
+        .map(|expr| predicate_cost(expr) * CPU_OPERATOR_COST)
+        .sum::<f64>()
+        + CPU_OPERATOR_COST;
+    let index_total_cost = index_startup_cost
+        + index_pages * RANDOM_PAGE_COST * 0.25
+        + index_rows * CPU_INDEX_TUPLE_COST;
+    let bitmap_index = Path::BitmapIndexScan {
+        plan_info: PlanEstimate::new(index_startup_cost, index_total_cost, index_rows, 0),
+        pathtarget: PathTarget::new(Vec::new()),
+        source_id,
+        rel,
+        relation_oid,
+        index_rel: spec.index.rel,
+        am_oid: spec.index.index_meta.am_oid,
+        desc: desc.clone(),
+        index_desc: spec.index.desc.clone(),
+        index_meta: spec.index.index_meta.clone(),
+        keys: spec.keys.clone(),
+        index_quals: spec.used_quals.clone(),
+    };
+
+    let mut recheck_qual = spec.used_quals.clone();
+    if let Some(residual) = spec.residual.clone() {
+        recheck_qual.extend(flatten_and_conjuncts(&residual));
+    }
+    let recheck_expr = and_exprs(recheck_qual.clone());
+    let rows = recheck_expr
+        .as_ref()
+        .map(|expr| {
+            clamp_rows(stats.reltuples * clause_selectivity(expr, Some(stats), stats.reltuples))
+        })
+        .unwrap_or(index_rows);
+    let heap_pages = stats.relpages.max(1.0).min(rows.max(1.0));
+    let recheck_cost = recheck_expr
+        .as_ref()
+        .map(|expr| predicate_cost(expr) * rows * CPU_OPERATOR_COST)
+        .unwrap_or(0.0);
+    let mut total_cost = bitmap_index.plan_info().total_cost.as_f64()
+        + heap_pages * RANDOM_PAGE_COST
+        + rows * CPU_TUPLE_COST
+        + recheck_cost;
+    let mut plan = Path::BitmapHeapScan {
+        plan_info: PlanEstimate::new(
+            bitmap_index.plan_info().startup_cost.as_f64(),
+            total_cost,
+            rows,
+            stats.width,
+        ),
+        pathtarget: slot_output_target(source_id, &desc.columns, |column| column.sql_type),
+        source_id,
+        rel,
+        relation_name,
+        relation_oid,
+        toast,
+        desc,
+        bitmapqual: Box::new(bitmap_index),
+        recheck_qual,
+    };
+
+    if let Some(items) = order_items {
+        let sort_cost = estimate_sort_cost(rows, items.len());
+        total_cost += sort_cost;
+        plan = Path::OrderBy {
+            plan_info: PlanEstimate::new(total_cost - sort_cost, total_cost, rows, stats.width),
+            pathtarget: plan.semantic_output_target(),
+            input: Box::new(plan),
+            items,
+        };
+    }
+
+    AccessCandidate { total_cost, plan }
+}
+
 pub(super) fn estimate_index_candidate(
     source_id: usize,
     rel: RelFileLocator,
@@ -1236,6 +1335,20 @@ pub(super) fn estimate_index_candidate(
 ) -> AccessCandidate {
     if spec.index.index_meta.am_oid == BRIN_AM_OID {
         return estimate_brin_bitmap_candidate(
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            toast,
+            desc,
+            stats,
+            spec,
+            order_items,
+            catalog,
+        );
+    }
+    if spec.index.index_meta.am_oid == GIN_AM_OID {
+        return estimate_gin_bitmap_candidate(
             source_id,
             rel,
             relation_name,
@@ -2113,6 +2226,10 @@ pub(super) fn build_index_path_spec(
             let (keys, used_indexes) = build_brin_index_keys(index, &parsed_quals);
             (keys, used_indexes, 0)
         }
+        GIN_AM_OID => {
+            let (keys, used_indexes) = build_gist_index_keys(index, &parsed_quals);
+            (keys, used_indexes, 0)
+        }
         GIST_AM_OID | SPGIST_AM_OID => {
             let (keys, used_indexes) = build_gist_index_keys(index, &parsed_quals);
             (keys, used_indexes, 0)
@@ -2211,6 +2328,22 @@ fn clause_selectivity(expr: &Expr, stats: Option<&RelationStats>, reltuples: f64
                 Ordering::Greater,
             )
             .max(eq_selectivity(&op.args[0], &op.args[1], stats, reltuples))
+        }
+        Expr::Op(op)
+            if matches!(
+                op.op,
+                OpExprKind::JsonbContains
+                    | OpExprKind::JsonbContained
+                    | OpExprKind::JsonbExists
+                    | OpExprKind::JsonbExistsAny
+                    | OpExprKind::JsonbExistsAll
+            ) =>
+        {
+            // :HACK: PostgreSQL has JSONB-specific selectivity estimators.
+            // Until pgrust has statistics for extracted JSONB keys, use the
+            // equality fallback so GIN bitmap paths are not costed as if they
+            // must visit half the table.
+            DEFAULT_EQ_SEL
         }
         Expr::Func(func) => builtin_index_qual_selectivity(func.funcid).unwrap_or(DEFAULT_BOOL_SEL),
         _ => DEFAULT_BOOL_SEL,
