@@ -27,6 +27,7 @@ use crate::backend::utils::misc::checkpoint::{CheckpointConfig, CheckpointStatsS
 use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::include::catalog::relkind_has_storage;
 use crate::pgrust::auth::AuthState;
+use crate::pgrust::autovacuum::{AutovacuumConfig, AutovacuumRuntime};
 use crate::pgrust::database::{
     AsyncNotifyRuntime, ConversionEntry, Database, DatabaseCreateGrant, DatabaseError,
     DatabaseOpenOptions, DatabaseStatsStore, DomainEntry, EnumTypeEntry, LargeObjectRuntime,
@@ -43,6 +44,8 @@ pub struct Cluster {
 pub(crate) struct ClusterShared {
     pub base_dir: PathBuf,
     pub durable_shutdown: bool,
+    pub autovacuum_config: AutovacuumConfig,
+    pub autovacuum_runtime: Arc<AutovacuumRuntime>,
     pub pool: Arc<BufferPool<SmgrStorageBackend>>,
     pub wal: Option<Arc<WalWriter>>,
     pub txns: Arc<RwLock<TransactionManager>>,
@@ -149,8 +152,10 @@ impl OpenDatabaseState {
 impl Drop for ClusterShared {
     fn drop(&mut self) {
         if !self.durable_shutdown {
+            self.autovacuum_runtime.shutdown_and_join();
             return;
         }
+        self.autovacuum_runtime.shutdown_and_join();
         if let Some(checkpointer) = self.checkpointer.as_ref() {
             let _ = checkpointer.shutdown_and_join();
         } else {
@@ -286,30 +291,33 @@ impl Cluster {
                 control.full_page_writes = checkpoint_config.full_page_writes;
             })?;
         }
-        Ok(Self {
-            shared: Arc::new(ClusterShared {
-                base_dir,
-                durable_shutdown: options.durable_shutdown,
-                pool,
-                wal: Some(wal),
-                txns,
-                shared_catalog: Arc::new(RwLock::new(shared_catalog)),
-                txn_waiter: Arc::new(TransactionWaiter::new()),
-                table_locks: Arc::new(TableLockManager::new()),
-                plan_cache: Arc::new(PlanCache::new()),
-                open_databases: Arc::new(RwLock::new(open_databases)),
-                active_connections: Arc::new(RwLock::new(HashMap::new())),
-                session_activity: Arc::new(RwLock::new(HashMap::new())),
-                next_temp_backend_id: AtomicU64::new(1),
-                free_temp_backend_ids: Arc::new(RwLock::new(BTreeSet::new())),
-                checkpoint_config,
-                checkpoint_stats,
-                control_file,
-                checkpoint_commit_barrier,
-                checkpointer,
-                wal_bg_writer: Some(Arc::new(wal_bg_writer)),
-            }),
-        })
+        let autovacuum_runtime = Arc::new(AutovacuumRuntime::new());
+        let shared = Arc::new(ClusterShared {
+            base_dir,
+            durable_shutdown: options.durable_shutdown,
+            autovacuum_config: options.autovacuum,
+            autovacuum_runtime: Arc::clone(&autovacuum_runtime),
+            pool,
+            wal: Some(wal),
+            txns,
+            shared_catalog: Arc::new(RwLock::new(shared_catalog)),
+            txn_waiter: Arc::new(TransactionWaiter::new()),
+            table_locks: Arc::new(TableLockManager::new()),
+            plan_cache: Arc::new(PlanCache::new()),
+            open_databases: Arc::new(RwLock::new(open_databases)),
+            active_connections: Arc::new(RwLock::new(HashMap::new())),
+            session_activity: Arc::new(RwLock::new(HashMap::new())),
+            next_temp_backend_id: AtomicU64::new(1),
+            free_temp_backend_ids: Arc::new(RwLock::new(BTreeSet::new())),
+            checkpoint_config,
+            checkpoint_stats,
+            control_file,
+            checkpoint_commit_barrier,
+            checkpointer,
+            wal_bg_writer: Some(Arc::new(wal_bg_writer)),
+        });
+        autovacuum_runtime.start(Arc::downgrade(&shared), options.autovacuum);
+        Ok(Self { shared })
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -384,10 +392,13 @@ impl Cluster {
         let checkpoint_stats = Arc::new(RwLock::new(CheckpointStatsSnapshot::default()));
         let checkpoint_commit_barrier = Arc::new(CheckpointCommitBarrier::new());
 
+        let autovacuum_runtime = Arc::new(AutovacuumRuntime::new());
         Ok(Self {
             shared: Arc::new(ClusterShared {
                 base_dir: PathBuf::new(),
                 durable_shutdown: false,
+                autovacuum_config: AutovacuumConfig::test_default(),
+                autovacuum_runtime,
                 pool,
                 wal: None,
                 txns,
@@ -443,6 +454,7 @@ impl Cluster {
             database_oid: row.oid,
             pool: Arc::clone(&self.shared.pool),
             wal: self.shared.wal.clone(),
+            autovacuum_config: self.shared.autovacuum_config,
             checkpoint_config: Arc::clone(&self.shared.checkpoint_config),
             checkpoint_stats: Arc::clone(&self.shared.checkpoint_stats),
             checkpoint_commit_barrier: Arc::clone(&self.shared.checkpoint_commit_barrier),
@@ -525,6 +537,10 @@ impl Cluster {
 
     pub(crate) fn shared(&self) -> &Arc<ClusterShared> {
         &self.shared
+    }
+
+    pub(crate) fn from_shared(shared: Arc<ClusterShared>) -> Self {
+        Self { shared }
     }
 
     pub(crate) fn open_database_state(
