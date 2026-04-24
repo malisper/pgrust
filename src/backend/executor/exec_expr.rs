@@ -1879,6 +1879,9 @@ fn eval_pg_column_size_values(values: &[Value]) -> Result<Value, ExecError> {
         Value::Range(_) => crate::backend::executor::render_range_text(value)
             .unwrap_or_default()
             .len(),
+        Value::Inet(_) | Value::Cidr(_) => crate::backend::executor::render_network_text(value)
+            .unwrap_or_default()
+            .len(),
         Value::Multirange(_) => super::expr_multirange::render_multirange_text(value)
             .unwrap_or_default()
             .len(),

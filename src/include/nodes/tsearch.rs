@@ -612,6 +612,6 @@ mod tests {
     #[test]
     fn tsquery_round_trip() {
         let query = TsQuery::parse("foo & !bar <2> baz:*A").unwrap();
-        assert_eq!(query.render(), "foo & !bar <2> baz:A*");
+        assert_eq!(query.render(), "'foo' & !'bar' <2> 'baz':A*");
     }
 }

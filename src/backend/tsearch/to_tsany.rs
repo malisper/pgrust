@@ -461,55 +461,58 @@ mod tests {
     fn websearch_ignores_tsquery_syntax_and_weights() {
         assert_eq!(
             websearch("simple", "I have a fat:*ABCD cat"),
-            "i & have & a & fat & abcd & cat"
+            "'i' & 'have' & 'a' & 'fat' & 'abcd' & 'cat'"
         );
         assert_eq!(
             websearch("simple", "fat:A!cat:B|rat:C<"),
-            "fat & a & cat & b & rat & c"
+            "'fat' & 'a' & 'cat' & 'b' & 'rat' & 'c'"
         );
-        assert_eq!(websearch("simple", "abc : def"), "abc & def");
+        assert_eq!(websearch("simple", "abc : def"), "'abc' & 'def'");
         assert_eq!(websearch("simple", ":"), "''");
-        assert_eq!(websearch("simple", "abc & def"), "abc & def");
-        assert_eq!(websearch("simple", "abc <-> def"), "abc & def");
+        assert_eq!(websearch("simple", "abc & def"), "'abc' & 'def'");
+        assert_eq!(websearch("simple", "abc <-> def"), "'abc' & 'def'");
     }
 
     #[test]
     fn websearch_handles_phrases_and_document_tokens() {
-        assert_eq!(websearch("simple", "fat*rat"), "fat <-> rat");
-        assert_eq!(websearch("simple", "fat-rat"), "'fat-rat' <-> fat <-> rat");
-        assert_eq!(websearch("simple", "fat_rat"), "fat <-> rat");
+        assert_eq!(websearch("simple", "fat*rat"), "'fat' <-> 'rat'");
+        assert_eq!(
+            websearch("simple", "fat-rat"),
+            "'fat-rat' <-> 'fat' <-> 'rat'"
+        );
+        assert_eq!(websearch("simple", "fat_rat"), "'fat' <-> 'rat'");
         assert_eq!(
             websearch("english", "\"pg_class pg\""),
-            "pg <-> class <-> pg"
+            "'pg' <-> 'class' <-> 'pg'"
         );
         assert_eq!(
             websearch("english", "abc \"pg_class pg\""),
-            "abc & pg <-> class <-> pg"
+            "'abc' & 'pg' <-> 'class' <-> 'pg'"
         );
     }
 
     #[test]
     fn websearch_handles_or_and_negated_phrases() {
-        assert_eq!(websearch("simple", "cat or rat"), "cat | rat");
-        assert_eq!(websearch("simple", "cat OR"), "cat & or");
-        assert_eq!(websearch("simple", "OR rat"), "or & rat");
-        assert_eq!(websearch("simple", "or OR or"), "or | or");
+        assert_eq!(websearch("simple", "cat or rat"), "'cat' | 'rat'");
+        assert_eq!(websearch("simple", "cat OR"), "'cat' & 'or'");
+        assert_eq!(websearch("simple", "OR rat"), "'or' & 'rat'");
+        assert_eq!(websearch("simple", "or OR or"), "'or' | 'or'");
         assert_eq!(
             websearch("simple", "(foo bar) or (ding dong)"),
-            "foo & bar | ding & dong"
+            "'foo' & 'bar' | 'ding' & 'dong'"
         );
         assert_eq!(
             websearch("simple", "\"fat cat\"or\"fat rat\""),
-            "fat <-> cat | fat <-> rat"
+            "'fat' <-> 'cat' | 'fat' <-> 'rat'"
         );
         assert_eq!(
             websearch("english", "cat -\"fat rat\" cheese"),
-            "cat & !(fat <-> rat) & chees"
+            "'cat' & !('fat' <-> 'rat') & 'chees'"
         );
-        assert_eq!(websearch("english", "this is ----fine"), "!!!!fine");
+        assert_eq!(websearch("english", "this is ----fine"), "!!!!'fine'");
         assert_eq!(
             websearch("english", " or \"pg pg_class pg\" or "),
-            "pg <-> pg <-> class <-> pg"
+            "'pg' <-> 'pg' <-> 'class' <-> 'pg'"
         );
     }
 }
