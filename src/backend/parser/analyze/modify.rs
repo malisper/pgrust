@@ -11,7 +11,7 @@ use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::plannodes::PlannedStmt;
 use crate::include::nodes::primnodes::JoinType;
 use crate::include::nodes::primnodes::{
-    SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO, TargetEntry, Var,
+    SELF_ITEM_POINTER_ATTR_NO, TABLE_OID_ATTR_NO, TargetEntry, Var, expr_contains_set_returning,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -526,10 +526,16 @@ fn bind_returning_targets(
         return Ok(Vec::new());
     }
     match bind_select_targets(targets, scope, catalog, outer_scopes, None, local_ctes)? {
+        BoundSelectTargets::Plain(targets)
+            if targets
+                .iter()
+                .any(|target| expr_contains_set_returning(&target.expr)) =>
+        {
+            Err(ParseError::FeatureNotSupported(
+                "set-returning functions are not allowed in RETURNING".into(),
+            ))
+        }
         BoundSelectTargets::Plain(targets) => Ok(targets),
-        BoundSelectTargets::WithProjectSet { .. } => Err(ParseError::FeatureNotSupported(
-            "set-returning functions are not allowed in RETURNING".into(),
-        )),
     }
 }
 
@@ -690,7 +696,7 @@ fn query_from_projection_with_qual(input: AnalyzedFrom, where_qual: Option<Expr>
         limit_offset: 0,
         locking_clause: None,
         row_marks: Vec::new(),
-        project_set: None,
+        has_target_srfs: false,
         recursive_union: None,
         set_operation: None,
     }

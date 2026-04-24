@@ -4,7 +4,8 @@ use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntry, Rang
 use crate::include::nodes::primnodes::{
     Aggref, BoolExpr, BoolExprType, CaseExpr, CaseWhen, Expr, ExprArraySubscript, FuncExpr,
     JoinType, OpExpr, OpExprKind, OrderByEntry, RelationDesc, ScalarArrayOpExpr, SubLink,
-    SubLinkType, Var, WindowFuncExpr, WindowFuncKind, XmlExpr, user_attrno,
+    SubLinkType, Var, WindowFuncExpr, WindowFuncKind, XmlExpr, set_returning_call_exprs,
+    user_attrno,
 };
 
 use super::{and_exprs, expr_relids, flatten_and_conjuncts, joininfo, relids_subset};
@@ -284,7 +285,7 @@ fn simple_exists_query(query: &Query) -> bool {
         && query.limit_offset == 0
         && query.locking_clause.is_none()
         && query.row_marks.is_empty()
-        && query.project_set.is_none()
+        && !query.has_target_srfs
         && query.recursive_union.is_none()
         && query.set_operation.is_none()
         && query.jointree.is_some()
@@ -586,6 +587,7 @@ fn adjust_expr_for_pullup(expr: Expr, offset: usize, levels_to_parent: usize) ->
             args: adjust_exprs_for_pullup(func.args, offset, levels_to_parent)?,
             ..*func
         })),
+        Expr::SetReturning(_) => return None,
         Expr::SubLink(sublink) => Expr::SubLink(Box::new(SubLink {
             testexpr: adjust_optional_box_expr(sublink.testexpr, offset, levels_to_parent)?,
             subselect: sublink.subselect,
@@ -862,6 +864,9 @@ fn expr_contains_sublink(expr: &Expr) -> bool {
                 || expr_contains_sublink(&case_expr.defresult)
         }
         Expr::Func(func) => func.args.iter().any(expr_contains_sublink),
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
+            .any(expr_contains_sublink),
         Expr::ScalarArrayOp(saop) => {
             expr_contains_sublink(&saop.left) || expr_contains_sublink(&saop.right)
         }
@@ -956,6 +961,9 @@ fn expr_contains_outer_var(expr: &Expr) -> bool {
                 || expr_contains_outer_var(&case_expr.defresult)
         }
         Expr::Func(func) => func.args.iter().any(expr_contains_outer_var),
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
+            .any(expr_contains_outer_var),
         Expr::SubLink(sublink) => sublink
             .testexpr
             .as_ref()

@@ -1,4 +1,6 @@
-use crate::include::nodes::primnodes::{BoolExprType, Expr, SELF_ITEM_POINTER_ATTR_NO};
+use crate::include::nodes::primnodes::{
+    BoolExprType, Expr, SELF_ITEM_POINTER_ATTR_NO, set_returning_call_exprs,
+};
 
 pub(crate) fn predicate_implies_index_predicate(
     filter: Option<&Expr>,
@@ -57,6 +59,9 @@ pub(crate) fn expr_uses_ctid(expr: &Expr) -> bool {
         }
         Expr::CaseTest(_) => false,
         Expr::Func(func) => func.args.iter().any(expr_uses_ctid),
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
+            .any(expr_uses_ctid),
         Expr::SubLink(sublink) => sublink.testexpr.as_deref().is_some_and(expr_uses_ctid),
         Expr::SubPlan(subplan) => subplan.testexpr.as_deref().is_some_and(expr_uses_ctid),
         Expr::ScalarArrayOp(saop) => expr_uses_ctid(&saop.left) || expr_uses_ctid(&saop.right),

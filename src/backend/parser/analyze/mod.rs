@@ -48,9 +48,9 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
-    AggAccum, AggFunc, BuiltinScalarFunction, Expr, JsonTableFunction, OrderByEntry,
-    ProjectSetTarget, QueryColumn, RelationDesc, SetReturningCall, SortGroupClause, TargetEntry,
-    ToastRelationRef, Var, user_attrno,
+    AggAccum, AggFunc, BuiltinScalarFunction, Expr, JsonTableFunction, OrderByEntry, QueryColumn,
+    RelationDesc, SetReturningCall, SortGroupClause, TargetEntry, ToastRelationRef, Var,
+    expr_contains_set_returning, user_attrno,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2091,7 +2091,7 @@ fn bind_ctes(
                         limit_offset: 0,
                         locking_clause: None,
                         row_marks: Vec::new(),
-                        project_set: None,
+                        has_target_srfs: false,
                         recursive_union: None,
                         set_operation: None,
                     },
@@ -2160,7 +2160,7 @@ fn bind_ctes(
                         limit_offset: 0,
                         locking_clause: None,
                         row_marks: Vec::new(),
-                        project_set: None,
+                        has_target_srfs: false,
                         recursive_union: Some(Box::new(RecursiveUnionQuery {
                             output_desc: desc.clone(),
                             anchor: anchor_query,
@@ -3034,7 +3034,7 @@ pub(crate) fn bound_cte_from_materialized_rows(
             limit_offset: 0,
             locking_clause: None,
             row_marks: Vec::new(),
-            project_set: None,
+            has_target_srfs: false,
             recursive_union: None,
             set_operation: None,
         },
@@ -3125,7 +3125,7 @@ fn bind_values_query_with_outer(
             limit_offset: stmt.offset.unwrap_or(0),
             locking_clause: None,
             row_marks: Vec::new(),
-            project_set: None,
+            has_target_srfs: false,
             recursive_union: None,
             set_operation: None,
         },
@@ -3284,25 +3284,17 @@ fn bind_select_query_with_outer(
                 )
             })
             .transpose()?;
+        if bound_where_qual
+            .as_ref()
+            .is_some_and(expr_contains_set_returning)
+        {
+            return Err(ParseError::FeatureNotSupported(
+                "set-returning functions are not allowed in WHERE".into(),
+            ));
+        }
 
         let needs_agg =
             !stmt.group_by.is_empty() || !target_aggs.is_empty() || stmt.having.is_some();
-
-        if needs_agg
-            && select_targets_contain_set_returning_call(
-                &stmt.targets,
-                &scope,
-                catalog,
-                outer_scopes,
-                grouped_outer.as_ref(),
-                &visible_ctes,
-            )
-        {
-            return Err(ParseError::UnexpectedToken {
-                expected: "select-list set-returning function in a non-aggregate query",
-                actual: "set-returning function in aggregate query".into(),
-            });
-        }
 
         let can_skip_scan_for_degenerate_having = needs_agg
             && stmt.group_by.is_empty()
@@ -3424,6 +3416,12 @@ fn bind_select_query_with_outer(
                                 .collect::<Result<Vec<_>, _>>()?;
                             for arg in &bound_args {
                                 reject_nested_local_ctes_in_agg_expr(arg)?;
+                                if expr_contains_set_returning(arg) {
+                                    return Err(ParseError::FeatureNotSupported(
+                                        "set-returning functions are not allowed in aggregate arguments"
+                                            .into(),
+                                    ));
+                                }
                             }
                             let bound_filter = agg
                                 .filter
@@ -3441,6 +3439,12 @@ fn bind_select_query_with_outer(
                                 .transpose()?;
                             if let Some(filter) = &bound_filter {
                                 reject_nested_local_ctes_in_agg_expr(filter)?;
+                                if expr_contains_set_returning(filter) {
+                                    return Err(ParseError::FeatureNotSupported(
+                                        "set-returning functions are not allowed in aggregate FILTER"
+                                            .into(),
+                                    ));
+                                }
                             }
                             let bound_order_by = agg
                                 .order_by
@@ -3467,6 +3471,12 @@ fn bind_select_query_with_outer(
                                 .collect::<Result<Vec<_>, ParseError>>()?;
                             for item in &bound_order_by {
                                 reject_nested_local_ctes_in_agg_expr(&item.expr)?;
+                                if expr_contains_set_returning(&item.expr) {
+                                    return Err(ParseError::FeatureNotSupported(
+                                        "set-returning functions are not allowed in aggregate ORDER BY"
+                                            .into(),
+                                    ));
+                                }
                             }
                             let coerced_args = bound_args
                                 .into_iter()
@@ -3559,6 +3569,11 @@ fn bind_select_query_with_outer(
                             )
                         })
                         .transpose()?;
+                    if having.as_ref().is_some_and(expr_contains_set_returning) {
+                        return Err(ParseError::FeatureNotSupported(
+                            "set-returning functions are not allowed in HAVING".into(),
+                        ));
+                    }
 
                     let targets: Vec<TargetEntry> = with_window_binding(
                         window_state.clone(),
@@ -3665,6 +3680,9 @@ fn bind_select_query_with_outer(
                     let sort_inputs = sort_inputs;
                     let sort_clause = build_sort_clause(sort_inputs, &targets);
                     let target_list = normalize_target_list(targets);
+                    let has_target_srfs = target_list
+                        .iter()
+                        .any(|target| expr_contains_set_returning(&target.expr));
                     let window_clauses = take_window_clauses(&window_state);
 
                     let query = Query {
@@ -3683,7 +3701,7 @@ fn bind_select_query_with_outer(
                         limit_offset: stmt.offset.unwrap_or(0),
                         locking_clause: stmt.locking_clause,
                         row_marks: Vec::new(),
-                        project_set: None,
+                        has_target_srfs,
                         recursive_union: None,
                         set_operation: None,
                     };
@@ -3702,122 +3720,64 @@ fn bind_select_query_with_outer(
                     )
                 })?;
 
-                match bound_targets {
-                    BoundSelectTargets::Plain(targets) => {
-                        let sort_inputs = with_window_binding(window_state.clone(), true, || {
-                            if stmt.order_by.is_empty() {
-                                Ok(Vec::new())
-                            } else {
-                                bind_order_by_items(&stmt.order_by, &targets, catalog, |expr| {
-                                    bind_expr_with_outer_and_ctes(
-                                        expr,
-                                        &scope,
-                                        catalog,
-                                        outer_scopes,
-                                        grouped_outer.as_ref(),
-                                        &visible_ctes,
-                                    )
-                                })
-                            }
-                        })?;
-                        let sort_clause = build_sort_clause(sort_inputs, &targets);
-                        let window_clauses = take_window_clauses(&window_state);
-
-                        let is_identity = targets.len() == base.output_columns.len()
-                            && targets.iter().enumerate().all(|(i, t)| {
-                                t.input_resno == Some(i + 1)
-                                    && t.name == base.output_columns[i].name
-                            });
-                        let target_list = if is_identity {
-                            normalize_target_list(identity_target_list(
-                                &base.output_columns,
-                                &base.output_exprs,
-                            ))
-                        } else {
-                            normalize_target_list(targets)
-                        };
-
-                        let query = Query {
-                            command_type: crate::include::executor::execdesc::CommandType::Select,
-                            depends_on_row_security: false,
-                            rtable: base.rtable,
-                            jointree: base.jointree,
-                            target_list,
-                            where_qual,
-                            group_by: Vec::new(),
-                            accumulators: Vec::new(),
-                            window_clauses,
-                            having_qual: None,
-                            sort_clause,
-                            limit_count: stmt.limit,
-                            limit_offset: stmt.offset.unwrap_or(0),
-                            locking_clause: stmt.locking_clause,
-                            row_marks: Vec::new(),
-                            project_set: None,
-                            recursive_union: None,
-                            set_operation: None,
-                        };
-                        let query = apply_select_distinct(query, stmt.distinct);
-                        Ok((query, scope))
+                let BoundSelectTargets::Plain(targets) = bound_targets;
+                let sort_inputs = with_window_binding(window_state.clone(), true, || {
+                    if stmt.order_by.is_empty() {
+                        Ok(Vec::new())
+                    } else {
+                        bind_order_by_items(&stmt.order_by, &targets, catalog, |expr| {
+                            bind_expr_with_outer_and_ctes(
+                                expr,
+                                &scope,
+                                catalog,
+                                outer_scopes,
+                                grouped_outer.as_ref(),
+                                &visible_ctes,
+                            )
+                        })
                     }
-                    BoundSelectTargets::WithProjectSet {
-                        project_targets,
-                        final_targets,
-                    } => {
-                        let sort_inputs = with_window_binding(window_state.clone(), true, || {
-                            if stmt.order_by.is_empty() {
-                                Ok(Vec::new())
-                            } else {
-                                bind_order_by_items(
-                                    &stmt.order_by,
-                                    &final_targets,
-                                    catalog,
-                                    |expr| {
-                                        bind_expr_with_outer_and_ctes(
-                                            expr,
-                                            &scope,
-                                            catalog,
-                                            outer_scopes,
-                                            grouped_outer.as_ref(),
-                                            &visible_ctes,
-                                        )
-                                    },
-                                )
-                            }
-                        })?;
-                        let window_clauses = take_window_clauses(&window_state);
-                        if !window_clauses.is_empty() {
-                            return Err(ParseError::FeatureNotSupported(
-                        "queries mixing window functions with select-list set-returning functions"
-                            .into(),
-                    ));
-                        }
-                        let sort_clause = build_sort_clause(sort_inputs, &final_targets);
-                        let target_list = normalize_target_list(final_targets);
-                        let query = Query {
-                            command_type: crate::include::executor::execdesc::CommandType::Select,
-                            depends_on_row_security: false,
-                            rtable: base.rtable,
-                            jointree: base.jointree,
-                            target_list,
-                            where_qual,
-                            group_by: Vec::new(),
-                            accumulators: Vec::new(),
-                            window_clauses,
-                            having_qual: None,
-                            sort_clause,
-                            limit_count: stmt.limit,
-                            limit_offset: stmt.offset.unwrap_or(0),
-                            locking_clause: stmt.locking_clause,
-                            row_marks: Vec::new(),
-                            project_set: Some(project_targets),
-                            recursive_union: None,
-                            set_operation: None,
-                        };
-                        let query = apply_select_distinct(query, stmt.distinct);
-                        Ok((query, scope))
-                    }
-                }
+                })?;
+                let sort_clause = build_sort_clause(sort_inputs, &targets);
+                let window_clauses = take_window_clauses(&window_state);
+
+                let is_identity = targets.len() == base.output_columns.len()
+                    && targets.iter().enumerate().all(|(i, t)| {
+                        t.input_resno == Some(i + 1) && t.name == base.output_columns[i].name
+                    });
+                let target_list = if is_identity {
+                    normalize_target_list(identity_target_list(
+                        &base.output_columns,
+                        &base.output_exprs,
+                    ))
+                } else {
+                    normalize_target_list(targets)
+                };
+
+                let has_target_srfs = target_list
+                    .iter()
+                    .any(|target| expr_contains_set_returning(&target.expr));
+                let query = Query {
+                    command_type: crate::include::executor::execdesc::CommandType::Select,
+                    depends_on_row_security: false,
+                    rtable: base.rtable,
+                    jointree: base.jointree,
+                    target_list,
+                    where_qual,
+                    group_by: Vec::new(),
+                    accumulators: Vec::new(),
+                    window_clauses,
+                    having_qual: None,
+                    sort_clause,
+                    limit_count: stmt.limit,
+                    limit_offset: stmt.offset.unwrap_or(0),
+                    locking_clause: stmt.locking_clause,
+                    row_marks: Vec::new(),
+                    has_target_srfs,
+                    recursive_union: None,
+                    set_operation: None,
+                };
+                let query = apply_select_distinct(query, stmt.distinct);
+                Ok((query, scope))
             }
         })
     })
@@ -3865,7 +3825,7 @@ fn apply_select_distinct(query: Query, distinct: bool) -> Query {
         limit_offset: 0,
         locking_clause: None,
         row_marks: Vec::new(),
-        project_set: None,
+        has_target_srfs: false,
         recursive_union: None,
         set_operation: Some(Box::new(SetOperationQuery {
             output_desc,
@@ -4021,7 +3981,7 @@ fn bind_set_operation_query_with_outer(
             limit_offset: stmt.offset.unwrap_or(0),
             locking_clause: stmt.locking_clause,
             row_marks: Vec::new(),
-            project_set: None,
+            has_target_srfs: false,
             recursive_union: None,
             set_operation: Some(Box::new(SetOperationQuery {
                 output_desc: desc.clone(),

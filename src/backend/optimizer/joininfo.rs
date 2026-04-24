@@ -1,7 +1,7 @@
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{PlannerInfo, RestrictInfo, SpecialJoinInfo};
 use crate::include::nodes::primnodes::{
-    BoolExprType, Expr, ExprArraySubscript, JoinType, attrno_index,
+    BoolExprType, Expr, ExprArraySubscript, JoinType, attrno_index, set_returning_call_exprs,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -635,6 +635,11 @@ fn collect_expr_relids(expr: &Expr, relids: &mut Vec<usize>) {
                 collect_expr_relids(arg, relids);
             }
         }
+        Expr::SetReturning(srf) => {
+            for arg in set_returning_call_exprs(&srf.call) {
+                collect_expr_relids(arg, relids);
+            }
+        }
         Expr::SubLink(sublink) => {
             if let Some(testexpr) = &sublink.testexpr {
                 collect_expr_relids(testexpr, relids);
@@ -757,7 +762,7 @@ mod tests {
             sort_clause: Vec::new(),
             limit_count: None,
             limit_offset: 0,
-            project_set: None,
+            has_target_srfs: false,
             recursive_union: None,
             set_operation: None,
             locking_clause: None,

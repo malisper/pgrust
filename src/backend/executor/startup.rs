@@ -9,7 +9,7 @@ use crate::include::nodes::execnodes::{
     SetOpState, SubqueryScanState, ValuesState, WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::parsenodes::SqlTypeKind;
-use crate::include::nodes::primnodes::{Expr, SetReturningCall};
+use crate::include::nodes::primnodes::{Expr, SetReturningCall, set_returning_call_exprs};
 
 use std::rc::Rc;
 
@@ -48,6 +48,9 @@ fn expr_uses_outer_columns(expr: &Expr) -> bool {
         }
         Expr::CaseTest(_) => false,
         Expr::Func(func) => func.args.iter().any(expr_uses_outer_columns),
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
+            .any(expr_uses_outer_columns),
         Expr::SubLink(sublink) => sublink
             .testexpr
             .as_deref()

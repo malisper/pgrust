@@ -13,7 +13,7 @@ use crate::include::nodes::primnodes::{
     AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, INNER_VAR, OUTER_VAR, OpExpr,
     OrderByEntry, Param, ParamKind, QueryColumn, ScalarArrayOpExpr, SubPlan, TargetEntry, Var,
     WindowClause, WindowFuncExpr, WindowFuncKind, attrno_index, is_executor_special_varno,
-    is_system_attr, user_attrno,
+    is_system_attr, set_returning_call_exprs, user_attrno,
 };
 
 #[derive(Clone, Debug)]
@@ -373,11 +373,16 @@ fn build_project_set_tlist(
                         (entry.sql_type, entry.ressortgroupref, match_exprs)
                     }
                     crate::include::nodes::primnodes::ProjectSetTarget::Set {
-                        sql_type, ..
+                        source_expr,
+                        sql_type,
+                        ..
                     } => (
                         *sql_type,
                         0,
-                        vec![slot_var(slot_id, user_attrno(index), *sql_type)],
+                        vec![
+                            slot_var(slot_id, user_attrno(index), *sql_type),
+                            source_expr.clone(),
+                        ],
                     ),
                 };
                 IndexedTlistEntry {
@@ -2018,11 +2023,13 @@ fn lower_project_set_target(
         }
         ProjectSetTarget::Set {
             name,
+            source_expr,
             call,
             sql_type,
             column_index,
         } => ProjectSetTarget::Set {
             name,
+            source_expr,
             call: lower_set_returning_call(ctx, call, mode),
             sql_type,
             column_index,
@@ -2329,6 +2336,9 @@ fn validate_executable_expr(expr: &Expr, plan_node: &str, field: &str) {
         }
         Expr::WindowFunc(window_func) => panic!(
             "executable plan contains unresolved WindowFunc in {plan_node}.{field}: {window_func:?}"
+        ),
+        Expr::SetReturning(srf) => panic!(
+            "executable plan contains unresolved set-returning expression in {plan_node}.{field}: {srf:?}"
         ),
         Expr::SubLink(sublink) => panic!(
             "executable plan contains unresolved SubLink in {plan_node}.{field}: {sublink:?}"
@@ -2686,6 +2696,11 @@ fn validate_planner_expr(expr: &Expr, path_node: &str, field: &str) {
             .args
             .iter()
             .for_each(|arg| validate_planner_expr(arg, path_node, field)),
+        Expr::SetReturning(srf) => {
+            for arg in set_returning_call_exprs(&srf.call) {
+                validate_planner_expr(arg, path_node, field);
+            }
+        }
         Expr::SubLink(sublink) => {
             if let Some(testexpr) = &sublink.testexpr {
                 validate_planner_expr(testexpr, path_node, field);
@@ -3840,11 +3855,13 @@ fn set_project_set_references(
                 }
                 crate::include::nodes::primnodes::ProjectSetTarget::Set {
                     name,
+                    source_expr,
                     call,
                     sql_type,
                     column_index,
                 } => crate::include::nodes::primnodes::ProjectSetTarget::Set {
                     name,
+                    source_expr,
                     call: fix_set_returning_call_upper_exprs(ctx.root, call, &input, &input_tlist),
                     sql_type,
                     column_index,
