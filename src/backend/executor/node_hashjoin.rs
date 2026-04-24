@@ -196,14 +196,42 @@ impl PlanNode for HashJoinState {
                         .expect("hash table must be built before probing")
                         .entries[entry_index]
                         .matched = true;
+                    if matches!(self.kind, JoinType::Anti) {
+                        self.phase = HashJoinPhase::NeedNewOuter;
+                        self.current_outer = None;
+                        continue;
+                    }
                     if !eval_qual_list(&self.qual, &mut self.slot, ctx)? {
                         continue;
+                    }
+                    if matches!(self.kind, JoinType::Semi) {
+                        let outer = self
+                            .current_outer
+                            .take()
+                            .expect("current outer tuple must exist for semi join");
+                        store_virtual_row(&mut self.slot, outer.slot.tts_values);
+                        self.current_bindings = outer.system_bindings;
+                        set_active_system_bindings(ctx, &self.current_bindings);
+                        self.phase = HashJoinPhase::NeedNewOuter;
+                        self.stats.rows += 1;
+                        return Ok(Some(&mut self.slot));
                     }
                     self.stats.rows += 1;
                     return Ok(Some(&mut self.slot));
                 }
                 HashJoinPhase::FillOuterTuple => {
                     self.phase = HashJoinPhase::NeedNewOuter;
+                    if !self.matched_outer && matches!(self.kind, JoinType::Anti) {
+                        let outer = self
+                            .current_outer
+                            .take()
+                            .expect("current outer tuple must exist for anti fill");
+                        store_virtual_row(&mut self.slot, outer.slot.tts_values);
+                        self.current_bindings = outer.system_bindings;
+                        set_active_system_bindings(ctx, &self.current_bindings);
+                        self.stats.rows += 1;
+                        return Ok(Some(&mut self.slot));
+                    }
                     if !self.matched_outer && matches!(self.kind, JoinType::Left | JoinType::Full) {
                         let outer = self
                             .current_outer
@@ -266,7 +294,7 @@ impl PlanNode for HashJoinState {
     }
 
     fn column_names(&self) -> &[String] {
-        &self.combined_names
+        &self.output_names
     }
 
     fn node_stats(&self) -> &crate::include::nodes::execnodes::NodeExecStats {
@@ -287,6 +315,8 @@ impl PlanNode for HashJoinState {
             JoinType::Left => "Hash Left Join".into(),
             JoinType::Right => "Hash Right Join".into(),
             JoinType::Full => "Hash Full Join".into(),
+            JoinType::Semi => "Hash Semi Join".into(),
+            JoinType::Anti => "Hash Anti Join".into(),
             JoinType::Cross => "Hash Join".into(),
         }
     }

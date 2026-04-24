@@ -176,6 +176,7 @@ build_ordered_test_files() {
 PORT=5433
 SKIP_SERVER=false
 SINGLE_TEST=""
+STATEMENT_TIMEOUT=5
 WORKTREE_NAME="$(basename "$PGRUST_DIR")"
 RESULTS_DIR=""
 DATA_DIR=""
@@ -413,7 +414,7 @@ export PGRUST_REGRESS_TABLESPACE_DIR="$REGRESS_TABLESPACE_DIR"
 export PGTZ="America/Los_Angeles"
 export PGDATESTYLE="Postgres, MDY"
 setup_pg_regress_env
-export PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c statement_timeout=5s"
+export PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c statement_timeout=${STATEMENT_TIMEOUT}s"
 # PG18 psql adds a verbose \d+ Compression column by default. Keep the
 # regression client surface aligned with the checked-in expected files until
 # the repo moves those fixtures to the new default shape.
@@ -783,7 +784,7 @@ error_list=()
 echo ""
 echo "Running ${#TEST_FILES[@]} regression tests one statement at a time..."
 echo "=================================================================="
-echo "Per-query statement_timeout: 5s"
+echo "Per-query statement_timeout: ${STATEMENT_TIMEOUT}s"
 echo ""
 
 count_matching_queries() {

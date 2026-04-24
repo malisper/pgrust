@@ -80,10 +80,7 @@ pub(super) fn residual_where_qual(root: &PlannerInfo) -> Option<Expr> {
     let clauses = flatten_and_conjuncts(where_qual)
         .into_iter()
         .map(|clause| expand_join_rte_vars(root, clause))
-        .filter(|clause| {
-            let relids = expr_relids(clause);
-            has_outer_joins(root) || !is_pushable_base_clause(root, &relids)
-        })
+        .filter(|clause| !is_pushable_base_clause(root, &expr_relids(clause)))
         .collect();
     and_exprs(clauses)
 }
@@ -112,9 +109,7 @@ fn assign_base_restrictinfo(root: &mut PlannerInfo) {
                 .map(joininfo::make_restrict_info),
         );
     }
-    if !has_outer_joins(root)
-        && let Some(where_qual) = root.parse.where_qual.as_ref()
-    {
+    if let Some(where_qual) = root.parse.where_qual.as_ref() {
         for clause in flatten_and_conjuncts(where_qual) {
             let restrict = joininfo::make_restrict_info(expand_join_rte_vars(root, clause));
             if !is_pushable_base_clause(root, &restrict.required_relids) {
@@ -895,6 +890,7 @@ fn set_base_rel_pathlists(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) {
 }
 
 fn build_join_restrict_clauses(
+    root: &PlannerInfo,
     kind: JoinType,
     explicit_qual: Option<Expr>,
     left_relids: &[usize],
@@ -904,6 +900,7 @@ fn build_join_restrict_clauses(
     let join_relids = relids_union(left_relids, right_relids);
     let mut clauses = Vec::new();
     if let Some(explicit_qual) = explicit_qual {
+        let explicit_qual = expand_join_rte_vars(root, explicit_qual);
         clauses.extend(
             flatten_and_conjuncts(&explicit_qual)
                 .into_iter()
@@ -982,11 +979,14 @@ fn join_reltarget(
     _relids: &[usize],
     left_rel: &RelOptInfo,
     right_rel: &RelOptInfo,
+    kind: JoinType,
 ) -> PathTarget {
     let mut exprs = left_rel.reltarget.exprs.clone();
-    exprs.extend(right_rel.reltarget.exprs.clone());
     let mut sortgrouprefs = left_rel.reltarget.sortgrouprefs.clone();
-    sortgrouprefs.extend(right_rel.reltarget.sortgrouprefs.clone());
+    if !matches!(kind, JoinType::Semi | JoinType::Anti) {
+        exprs.extend(right_rel.reltarget.exprs.clone());
+        sortgrouprefs.extend(right_rel.reltarget.sortgrouprefs.clone());
+    }
     PathTarget::with_sortgrouprefs(exprs, sortgrouprefs)
 }
 
@@ -1173,41 +1173,68 @@ fn make_join_rel(
         } else {
             (left_rel, right_rel)
         };
-        let reltarget = join_reltarget(root, &relids, logical_left_rel, logical_right_rel);
+        let logical_kind = if spec.reversed {
+            reverse_join_type(spec.kind)
+        } else {
+            spec.kind
+        };
+        let reltarget = join_reltarget(
+            root,
+            &relids,
+            logical_left_rel,
+            logical_right_rel,
+            logical_kind,
+        );
         let mut output_columns = logical_left_rel
             .cheapest_total_path()
             .map(Path::columns)
             .unwrap_or_default();
-        output_columns.extend(
-            logical_right_rel
-                .cheapest_total_path()
-                .map(Path::columns)
-                .unwrap_or_default(),
-        );
+        if !matches!(logical_kind, JoinType::Semi | JoinType::Anti) {
+            output_columns.extend(
+                logical_right_rel
+                    .cheapest_total_path()
+                    .map(Path::columns)
+                    .unwrap_or_default(),
+            );
+        }
         let join_restrict_clauses = build_join_restrict_clauses(
-            spec.kind,
+            root,
+            logical_kind,
             spec.explicit_qual.clone(),
-            &left_rel.relids,
-            &right_rel.relids,
+            &logical_left_rel.relids,
+            &logical_right_rel.relids,
             &root.inner_join_clauses,
         );
-        let mut candidate_paths = Vec::new();
-        for left_path in &left_rel.pathlist {
-            for right_path in &right_rel.pathlist {
-                let paths = build_join_paths_with_root(
-                    root,
-                    left_path.clone(),
-                    right_path.clone(),
-                    &left_rel.relids,
-                    &right_rel.relids,
-                    spec.kind,
-                    join_restrict_clauses.clone(),
-                    reltarget.clone(),
-                    output_columns.clone(),
-                );
-                for path in paths {
-                    candidate_paths.push(path);
-                }
+        let mut join_restrict_clauses_for_rel = join_restrict_clauses.clone();
+        let mut candidate_paths = collect_join_candidate_paths(
+            root,
+            logical_left_rel,
+            logical_right_rel,
+            logical_kind,
+            &join_restrict_clauses,
+            &reltarget,
+            &output_columns,
+        );
+        if candidate_paths.is_empty() && spec.reversed {
+            let fallback_join_restrict_clauses = build_join_restrict_clauses(
+                root,
+                spec.kind,
+                spec.explicit_qual.clone(),
+                &left_rel.relids,
+                &right_rel.relids,
+                &root.inner_join_clauses,
+            );
+            candidate_paths = collect_join_candidate_paths(
+                root,
+                left_rel,
+                right_rel,
+                spec.kind,
+                &fallback_join_restrict_clauses,
+                &reltarget,
+                &output_columns,
+            );
+            if !candidate_paths.is_empty() {
+                join_restrict_clauses_for_rel = fallback_join_restrict_clauses;
             }
         }
         (
@@ -1215,7 +1242,7 @@ fn make_join_rel(
             spec,
             reltarget,
             output_columns,
-            join_restrict_clauses,
+            join_restrict_clauses_for_rel,
             candidate_paths,
         )
     };
@@ -1246,6 +1273,37 @@ fn make_join_rel(
     }
     bestpath::set_cheapest(join_rel);
     Some(())
+}
+
+fn collect_join_candidate_paths(
+    root: &PlannerInfo,
+    left_rel: &RelOptInfo,
+    right_rel: &RelOptInfo,
+    kind: JoinType,
+    join_restrict_clauses: &[RestrictInfo],
+    reltarget: &PathTarget,
+    output_columns: &[QueryColumn],
+) -> Vec<Path> {
+    let mut candidate_paths = Vec::new();
+    for left_path in &left_rel.pathlist {
+        for right_path in &right_rel.pathlist {
+            let paths = build_join_paths_with_root(
+                root,
+                left_path.clone(),
+                right_path.clone(),
+                &left_rel.relids,
+                &right_rel.relids,
+                kind,
+                join_restrict_clauses.to_vec(),
+                reltarget.clone(),
+                output_columns.to_vec(),
+            );
+            for path in paths {
+                candidate_paths.push(path);
+            }
+        }
+    }
+    candidate_paths
 }
 
 fn join_search_one_level(root: &mut PlannerInfo, level: usize, catalog: &dyn CatalogLookup) {

@@ -236,14 +236,16 @@ impl Path {
                     }
                 })
                 .collect(),
-            Self::NestedLoopJoin { left, right, .. } => {
-                let mut vars = left.output_vars();
-                vars.extend(right.output_vars());
-                vars
+            Self::NestedLoopJoin {
+                left, right, kind, ..
             }
-            Self::HashJoin { left, right, .. } => {
+            | Self::HashJoin {
+                left, right, kind, ..
+            } => {
                 let mut vars = left.output_vars();
-                vars.extend(right.output_vars());
+                if !matches!(kind, JoinType::Semi | JoinType::Anti) {
+                    vars.extend(right.output_vars());
+                }
                 vars
             }
         }
@@ -355,7 +357,14 @@ impl Path {
                 })
                 .collect(),
             Self::NestedLoopJoin { left, kind, .. }
-                if matches!(kind, JoinType::Inner | JoinType::Cross | JoinType::Left) =>
+                if matches!(
+                    kind,
+                    JoinType::Inner
+                        | JoinType::Cross
+                        | JoinType::Left
+                        | JoinType::Semi
+                        | JoinType::Anti
+                ) =>
             {
                 left.pathkeys()
             }

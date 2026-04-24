@@ -1,4 +1,5 @@
 use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
+use crate::backend::parser::analyze::bound_index_relation_from_relcache_entry;
 use crate::backend::parser::{BoundRelation, CatalogLookup};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::RelCache;
@@ -258,37 +259,16 @@ impl CatalogLookup for VisibleCatalog {
         &self,
         relation_oid: u32,
     ) -> Vec<crate::backend::parser::BoundIndexRelation> {
-        let mut seen = BTreeSet::new();
         self.relcache
-            .entries()
-            .filter_map(|(name, entry)| {
-                let index_meta = entry.index.as_ref()?;
-                if index_meta.indrelid != relation_oid || !seen.insert(entry.relation_oid) {
-                    return None;
-                }
-                Some(crate::backend::parser::BoundIndexRelation {
-                    name: name.rsplit('.').next().unwrap_or(name).to_string(),
-                    rel: entry.rel,
-                    relation_oid: entry.relation_oid,
-                    desc: entry.desc.clone(),
-                    index_meta: index_meta.clone(),
-                    index_exprs: self
-                        .relation_by_oid(index_meta.indrelid)
-                        .and_then(|heap| {
-                            crate::backend::parser::analyze::bind_index_exprs(
-                                index_meta, &heap.desc, self,
-                            )
-                            .ok()
-                        })
-                        .unwrap_or_default(),
-                    index_predicate: self.relation_by_oid(index_meta.indrelid).and_then(|heap| {
-                        crate::backend::parser::analyze::bind_index_predicate(
-                            index_meta, &heap.desc, self,
-                        )
-                        .ok()
-                        .flatten()
-                    }),
-                })
+            .relation_get_index_list(relation_oid)
+            .into_iter()
+            .filter_map(|index_oid| {
+                let entry = self.relcache.get_by_oid(index_oid)?;
+                let name = self
+                    .relcache
+                    .relation_name_by_oid(index_oid)
+                    .unwrap_or_else(|| index_oid.to_string());
+                bound_index_relation_from_relcache_entry(name, entry, self)
             })
             .collect()
     }

@@ -494,10 +494,17 @@ fn planner_info_for_sql(sql: &str) -> PlannerInfo {
 
 fn planned_stmt_for_sql(sql: &str) -> crate::include::nodes::plannodes::PlannedStmt {
     let catalog = LiteralDefaultCatalog;
+    planned_stmt_for_sql_with_catalog(sql, &catalog)
+}
+
+fn planned_stmt_for_sql_with_catalog(
+    sql: &str,
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+) -> crate::include::nodes::plannodes::PlannedStmt {
     let stmt = parse_select(sql).expect("parse");
-    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+    let (query, _) = analyze_select_query_with_outer(&stmt, catalog, &[], None, None, &[], &[])
         .expect("analyze");
-    super::planner(query, &catalog).expect("plan")
+    super::planner(query, catalog).expect("plan")
 }
 
 fn planned_stmt_for_values_sql(sql: &str) -> crate::include::nodes::plannodes::PlannedStmt {
@@ -593,6 +600,60 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
             ..
         } => plan_contains(left, predicate) || plan_contains(right, predicate),
     }
+}
+
+#[test]
+fn outer_join_preserved_side_where_qual_pushes_to_base_scan() {
+    let catalog = catalog_with_people_and_pets();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select p.id
+         from people p left join pets q on q.owner_id = p.id
+         where p.id = 1",
+        &catalog,
+    );
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| {
+            matches!(
+                plan,
+                Plan::Filter { input, .. }
+                    if matches!(
+                        input.as_ref(),
+                        Plan::SeqScan { relation_name, .. } if relation_name == "people"
+                    )
+            )
+        }),
+        "expected preserved-side WHERE qual to be pushed to the people base scan, got {:?}",
+        planned.plan_tree
+    );
+}
+
+#[test]
+fn outer_join_paths_keep_logical_left_orientation() {
+    let catalog = catalog_with_people_and_pets();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select p.id
+         from people p join people p2 on p.id = p2.id
+           left join pets q on q.owner_id = p.id",
+        &catalog,
+    );
+
+    assert!(
+        !plan_contains(&planned.plan_tree, |plan| {
+            matches!(
+                plan,
+                Plan::NestedLoopJoin {
+                    kind: JoinType::Right,
+                    ..
+                } | Plan::HashJoin {
+                    kind: JoinType::Right,
+                    ..
+                }
+            )
+        }),
+        "expected special join path construction to keep logical left-join orientation, got {:?}",
+        planned.plan_tree
+    );
 }
 
 fn find_seq_scan(plan: &Plan) -> Option<&Plan> {

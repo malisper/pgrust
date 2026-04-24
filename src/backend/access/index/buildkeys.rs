@@ -2,7 +2,9 @@ use crate::backend::catalog::CatalogError;
 use crate::backend::commands::tablecmds::index_key_values_for_row;
 use crate::backend::executor::value_io::{decode_value, missing_column_value};
 use crate::backend::executor::{ExecError, ExecutorContext};
-use crate::backend::parser::{BoundIndexRelation, bind_index_exprs, bind_index_predicate};
+use crate::backend::parser::{
+    BoundIndexRelation, relation_get_index_expressions, relation_get_index_predicate,
+};
 use crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot;
 use crate::include::access::amapi::IndexBuildContext;
 use crate::include::access::itemptr::ItemPointerData;
@@ -79,10 +81,12 @@ impl IndexBuildKeyProjector {
         let catalog = expr_ctx.visible_catalog.as_ref().ok_or_else(|| {
             CatalogError::Io("index build missing visible catalog for index evaluation".into())
         })?;
-        let index_exprs = bind_index_exprs(&ctx.index_meta, &ctx.heap_desc, catalog)
+        let mut index_meta = ctx.index_meta.clone();
+        let index_exprs = relation_get_index_expressions(&mut index_meta, &ctx.heap_desc, catalog)
             .map_err(|err| CatalogError::Io(format!("index expression bind failed: {err:?}")))?;
-        let index_predicate = bind_index_predicate(&ctx.index_meta, &ctx.heap_desc, catalog)
-            .map_err(|err| CatalogError::Io(format!("index predicate bind failed: {err:?}")))?;
+        let index_predicate =
+            relation_get_index_predicate(&mut index_meta, &ctx.heap_desc, catalog)
+                .map_err(|err| CatalogError::Io(format!("index predicate bind failed: {err:?}")))?;
         let compiled_predicate = index_predicate
             .as_ref()
             .map(crate::backend::executor::exec_expr::compile_predicate);
@@ -92,7 +96,7 @@ impl IndexBuildKeyProjector {
                 rel: ctx.index_relation,
                 relation_oid: ctx.index_meta.indexrelid,
                 desc: ctx.index_desc.clone(),
-                index_meta: ctx.index_meta.clone(),
+                index_meta,
                 index_exprs,
                 index_predicate,
             }),

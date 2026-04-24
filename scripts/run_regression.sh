@@ -319,6 +319,7 @@ SKIP_BUILD=false
 SKIP_SERVER=false
 TIMEOUT=60
 JOBS=4
+STATEMENT_TIMEOUT=5
 SINGLE_TEST=""
 RESULTS_DIR=""
 DATA_DIR=""
@@ -356,7 +357,7 @@ SERVER_PROFILE=release
 SERVER_PROFILE_DIR=release
 BUILD_ENV=()
 BUILD_ARGS=(--release --bin pgrust_server)
-if [[ -n "$SINGLE_TEST" ]]; then
+if [[ -n "$SINGLE_TEST" && "$SINGLE_TEST" != "alter_table" ]]; then
     SERVER_PROFILE="dev, opt-level 0"
     SERVER_PROFILE_DIR=debug
     BUILD_ENV=(CARGO_PROFILE_DEV_OPT_LEVEL=0)
@@ -565,7 +566,7 @@ export PGRUST_REGRESS_TABLESPACE_DIR="$REGRESS_TABLESPACE_DIR"
 export PGTZ="America/Los_Angeles"
 export PGDATESTYLE="Postgres, MDY"
 setup_pg_regress_env
-export PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c statement_timeout=5s"
+export PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c statement_timeout=${STATEMENT_TIMEOUT}s"
 # PG18 psql adds a verbose \d+ Compression column by default. Keep the
 # regression client surface aligned with the checked-in expected files until
 # the repo moves those fixtures to the new default shape.
@@ -604,7 +605,8 @@ run_bootstrap_setup() {
     return 0
 }
 
-echo "Per-query statement_timeout: 5s"
+echo "Per-query statement_timeout: ${STATEMENT_TIMEOUT}s"
+echo "Per-file timeout: ${TIMEOUT}s"
 
 if ! run_bootstrap_setup; then
     exit 1
@@ -663,17 +665,24 @@ timeout_list=()
 SUMMARY_READY=true
 RUN_STATUS="completed"
 
+rate_pct() {
+    local numerator="$1"
+    local denominator="$2"
+
+    if [[ "$denominator" -gt 0 ]]; then
+        LC_ALL=C awk -v n="$numerator" -v d="$denominator" 'BEGIN { printf "%.2f", (n * 100) / d }'
+    else
+        printf "0.00"
+    fi
+}
+
 write_summary() {
     local status="${1:-completed}"
     local pass_pct=0
     local query_pct=0
 
-    if [[ $TOTAL -gt 0 ]]; then
-        pass_pct=$((PASSED * 100 / TOTAL))
-    fi
-    if [[ $TOTAL_QUERIES -gt 0 ]]; then
-        query_pct=$((QUERIES_MATCHED * 100 / TOTAL_QUERIES))
-    fi
+    pass_pct="$(rate_pct "$PASSED" "$TOTAL")"
+    query_pct="$(rate_pct "$QUERIES_MATCHED" "$TOTAL_QUERIES")"
 
     cat > "$RESULTS_DIR/summary.json" <<EOF
 {
@@ -722,7 +731,7 @@ print_summary() {
     echo "  Timed out: $TIMED_OUT"
 
     if [[ $TOTAL -gt 0 ]]; then
-        pass_pct=$((PASSED * 100 / TOTAL))
+        pass_pct="$(rate_pct "$PASSED" "$TOTAL")"
         echo "  Pass rate: ${pass_pct}% ($PASSED / $TOTAL)"
     fi
 
@@ -733,7 +742,7 @@ print_summary() {
     echo "  Mismatched:$QUERIES_MISMATCHED"
 
     if [[ $TOTAL_QUERIES -gt 0 ]]; then
-        query_pct=$((QUERIES_MATCHED * 100 / TOTAL_QUERIES))
+        query_pct="$(rate_pct "$QUERIES_MATCHED" "$TOTAL_QUERIES")"
         echo "  Match rate: ${query_pct}% ($QUERIES_MATCHED / $TOTAL_QUERIES)"
     fi
 

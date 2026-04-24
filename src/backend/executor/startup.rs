@@ -505,7 +505,16 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 .into_iter()
                 .chain(right_plan.column_names())
                 .collect();
-            let ncols = combined_names.len();
+            let output_names = if matches!(
+                kind,
+                crate::include::nodes::primnodes::JoinType::Semi
+                    | crate::include::nodes::primnodes::JoinType::Anti
+            ) {
+                left.column_names()
+            } else {
+                combined_names.clone()
+            };
+            let ncols = output_names.len();
             Box::new(NestedLoopJoinState {
                 left: executor_start(*left),
                 right: executor_start(right_plan.clone()),
@@ -516,6 +525,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 join_qual,
                 qual,
                 combined_names,
+                output_names,
                 left_rows: None,
                 right_rows: None,
                 right_matched: None,
@@ -565,6 +575,15 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 .into_iter()
                 .chain(hash_input.column_names())
                 .collect();
+            let output_names = if matches!(
+                kind,
+                crate::include::nodes::primnodes::JoinType::Semi
+                    | crate::include::nodes::primnodes::JoinType::Anti
+            ) {
+                left.column_names()
+            } else {
+                combined_names.clone()
+            };
 
             Box::new(HashJoinState {
                 left: executor_start(*left),
@@ -579,6 +598,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 join_qual,
                 qual,
                 combined_names,
+                output_names,
                 left_width,
                 right_width,
                 phase: HashJoinPhase::BuildHashTable,
@@ -587,7 +607,17 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 current_bucket_index: 0,
                 matched_outer: false,
                 unmatched_inner_index: 0,
-                slot: TupleSlot::empty(left_width + right_width),
+                slot: TupleSlot::empty(
+                    if matches!(
+                        kind,
+                        crate::include::nodes::primnodes::JoinType::Semi
+                            | crate::include::nodes::primnodes::JoinType::Anti
+                    ) {
+                        left_width
+                    } else {
+                        left_width + right_width
+                    },
+                ),
                 current_bindings: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),

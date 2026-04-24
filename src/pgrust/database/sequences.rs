@@ -75,7 +75,10 @@ impl SequenceRuntime {
         for (_, entry) in catalog
             .catalog_snapshot()?
             .entries()
-            .filter(|(_, entry)| entry.relkind == 'S')
+            // PostgreSQL treats temp relation state as backend-local. Stale
+            // temp sequence catalog rows are cleaned when the temp namespace is
+            // reused, not loaded as durable sequence state during database open.
+            .filter(|(_, entry)| entry.relkind == 'S' && entry.relpersistence != 't')
         {
             let payload = load_sequence_file(data_dir.as_deref(), entry.relation_oid)?;
             data.insert(entry.relation_oid, payload);
