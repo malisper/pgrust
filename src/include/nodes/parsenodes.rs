@@ -295,6 +295,7 @@ pub enum Statement {
     CreateTableAs(CreateTableAsStatement),
     CreateSequence(CreateSequenceStatement),
     CreateView(CreateViewStatement),
+    RefreshMaterializedView(RefreshMaterializedViewStatement),
     CreateRule(CreateRuleStatement),
     CreatePolicy(CreatePolicyStatement),
     CreateStatistics(CreateStatisticsStatement),
@@ -377,6 +378,7 @@ pub enum Statement {
     DropDomain(DropDomainStatement),
     DropForeignDataWrapper(DropForeignDataWrapperStatement),
     DropView(DropViewStatement),
+    DropMaterializedView(DropMaterializedViewStatement),
     DropRule(DropRuleStatement),
     DropPolicy(DropPolicyStatement),
     DropSchema(DropSchemaStatement),
@@ -477,6 +479,7 @@ pub enum RangeTblEntryKind {
         rel: crate::RelFileLocator,
         relation_oid: u32,
         relkind: char,
+        relispopulated: bool,
         toast: Option<ToastRelationRef>,
     },
     Join {
@@ -1337,7 +1340,16 @@ pub struct CreateTableAsStatement {
     pub on_commit: OnCommitAction,
     pub column_names: Vec<String>,
     pub query: SelectStatement,
+    pub query_sql: Option<String>,
     pub if_not_exists: bool,
+    pub object_type: TableAsObjectType,
+    pub skip_data: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableAsObjectType {
+    Table,
+    MaterializedView,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1365,6 +1377,13 @@ pub enum ViewCheckOption {
     None,
     Local,
     Cascaded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefreshMaterializedViewStatement {
+    pub relation_name: String,
+    pub concurrently: bool,
+    pub skip_data: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2326,6 +2345,12 @@ pub struct DropTypeStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DropViewStatement {
+    pub if_exists: bool,
+    pub view_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropMaterializedViewStatement {
     pub if_exists: bool,
     pub view_names: Vec<String>,
 }

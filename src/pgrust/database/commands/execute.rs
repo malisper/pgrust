@@ -1281,6 +1281,14 @@ impl Database {
                     0,
                     configured_search_path,
                 ),
+            Statement::RefreshMaterializedView(ref refresh_stmt) => self
+                .execute_refresh_materialized_view_stmt_with_search_path(
+                    client_id,
+                    refresh_stmt,
+                    None,
+                    0,
+                    configured_search_path,
+                ),
             Statement::DropTable(ref drop_stmt) => {
                 let xid = self.txns.write().begin();
                 let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
@@ -1410,6 +1418,14 @@ impl Database {
                 guard.disarm();
                 result
             }
+            Statement::DropMaterializedView(ref drop_stmt) => self
+                .execute_drop_materialized_view_stmt_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    None,
+                    0,
+                    configured_search_path,
+                ),
             Statement::DropRule(ref drop_stmt) => self.execute_drop_rule_stmt_with_search_path(
                 client_id,
                 drop_stmt,

@@ -522,6 +522,8 @@ fn run_statement(
         | Statement::CreatePolicy(_)
         | Statement::AlterPolicy(_)
         | Statement::AlterOperator(_)
+        | Statement::RefreshMaterializedView(_)
+        | Statement::DropMaterializedView(_)
         | Statement::DropPolicy(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::AlterTableOwner(stmt) => {
             Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(

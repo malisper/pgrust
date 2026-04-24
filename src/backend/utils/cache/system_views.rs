@@ -71,6 +71,65 @@ pub fn build_pg_views_rows(
     rows.into_iter().map(|(_, _, row)| row).collect()
 }
 
+pub fn build_pg_matviews_rows(
+    namespaces: Vec<PgNamespaceRow>,
+    authids: Vec<PgAuthIdRow>,
+    classes: Vec<PgClassRow>,
+    indexes: Vec<PgIndexRow>,
+    rewrites: Vec<PgRewriteRow>,
+) -> Vec<Vec<Value>> {
+    let namespace_names = namespaces
+        .into_iter()
+        .map(|row| (row.oid, row.nspname))
+        .collect::<BTreeMap<_, _>>();
+    let role_names = authids
+        .into_iter()
+        .map(|row| (row.oid, row.rolname))
+        .collect::<BTreeMap<_, _>>();
+    let return_rules = rewrites
+        .into_iter()
+        .filter(|row| row.rulename == "_RETURN")
+        .map(|row| (row.ev_class, row.ev_action))
+        .collect::<BTreeMap<_, _>>();
+    let mut index_counts = BTreeMap::<u32, usize>::new();
+    for index in indexes {
+        *index_counts.entry(index.indrelid).or_default() += 1;
+    }
+
+    let mut rows = classes
+        .into_iter()
+        .filter(|class| class.relkind == 'm')
+        .filter_map(|class| {
+            let definition = return_rules.get(&class.oid)?.clone();
+            let schemaname = namespace_names
+                .get(&class.relnamespace)
+                .cloned()
+                .unwrap_or_else(|| "public".to_string());
+            Some((
+                schemaname.clone(),
+                class.relname.clone(),
+                vec![
+                    Value::Text(schemaname.into()),
+                    Value::Text(class.relname.clone().into()),
+                    Value::Text(
+                        role_names
+                            .get(&class.relowner)
+                            .cloned()
+                            .unwrap_or_else(|| "unknown".into())
+                            .into(),
+                    ),
+                    Value::Null,
+                    Value::Bool(index_counts.get(&class.oid).copied().unwrap_or_default() > 0),
+                    Value::Bool(class.relispopulated),
+                    Value::Text(definition.into()),
+                ],
+            ))
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    rows.into_iter().map(|(_, _, row)| row).collect()
+}
+
 pub fn build_pg_indexes_rows(
     namespaces: Vec<PgNamespaceRow>,
     classes: Vec<PgClassRow>,

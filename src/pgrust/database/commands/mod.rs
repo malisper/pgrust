@@ -16,6 +16,7 @@ mod foreign_data_wrapper;
 mod index;
 mod inheritance;
 mod maintenance;
+mod matview;
 mod opclass;
 mod operator;
 mod owner;

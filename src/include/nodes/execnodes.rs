@@ -303,6 +303,7 @@ pub struct SeqScanState {
     pub(crate) rel: RelFileLocator,
     pub(crate) relation_name: String,
     pub(crate) relkind: char,
+    pub(crate) relispopulated: bool,
     pub(crate) toast_relation: Option<ToastRelationRef>,
     pub(crate) column_names: Vec<String>,
     pub(crate) desc: Rc<RelationDesc>,

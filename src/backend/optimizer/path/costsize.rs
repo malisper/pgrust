@@ -137,6 +137,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 relation_name,
                 relation_oid,
                 relkind,
+                relispopulated,
                 toast,
                 desc,
                 ..
@@ -151,6 +152,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     relation_name,
                     relation_oid,
                     relkind,
+                    relispopulated,
                     toast,
                     desc,
                 }
@@ -751,14 +753,50 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
 }
 
 fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Result<Path, Path> {
-    let (source_id, rel, relation_name, relation_oid, relkind, toast, desc, filter, order_items) =
-        match plan {
+    let (
+        source_id,
+        rel,
+        relation_name,
+        relation_oid,
+        relkind,
+        relispopulated,
+        toast,
+        desc,
+        filter,
+        order_items,
+    ) = match plan {
+        Path::SeqScan {
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            relkind,
+            relispopulated,
+            toast,
+            desc,
+            ..
+        } => (
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            relkind,
+            relispopulated,
+            toast,
+            desc,
+            None,
+            None,
+        ),
+        Path::Filter {
+            input, predicate, ..
+        } => match *input {
             Path::SeqScan {
                 source_id,
                 rel,
                 relation_name,
                 relation_oid,
                 relkind,
+                relispopulated,
                 toast,
                 desc,
                 ..
@@ -768,10 +806,43 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
                 relation_name,
                 relation_oid,
                 relkind,
+                relispopulated,
+                toast,
+                desc,
+                Some(predicate),
+                None,
+            ),
+            other => {
+                return Err(Path::Filter {
+                    plan_info: PlanEstimate::default(),
+                    pathtarget: other.semantic_output_target(),
+                    input: Box::new(other),
+                    predicate,
+                });
+            }
+        },
+        Path::OrderBy { input, items, .. } => match *input {
+            Path::SeqScan {
+                source_id,
+                rel,
+                relation_name,
+                relation_oid,
+                relkind,
+                relispopulated,
+                toast,
+                desc,
+                ..
+            } => (
+                source_id,
+                rel,
+                relation_name,
+                relation_oid,
+                relkind,
+                relispopulated,
                 toast,
                 desc,
                 None,
-                None,
+                Some(items),
             ),
             Path::Filter {
                 input, predicate, ..
@@ -782,6 +853,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
                     relation_name,
                     relation_oid,
                     relkind,
+                    relispopulated,
                     toast,
                     desc,
                     ..
@@ -791,90 +863,38 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
                     relation_name,
                     relation_oid,
                     relkind,
+                    relispopulated,
                     toast,
                     desc,
                     Some(predicate),
-                    None,
+                    Some(items),
                 ),
                 other => {
-                    return Err(Path::Filter {
+                    let input = Path::Filter {
                         plan_info: PlanEstimate::default(),
                         pathtarget: other.semantic_output_target(),
                         input: Box::new(other),
                         predicate,
-                    });
-                }
-            },
-            Path::OrderBy { input, items, .. } => match *input {
-                Path::SeqScan {
-                    source_id,
-                    rel,
-                    relation_name,
-                    relation_oid,
-                    relkind,
-                    toast,
-                    desc,
-                    ..
-                } => (
-                    source_id,
-                    rel,
-                    relation_name,
-                    relation_oid,
-                    relkind,
-                    toast,
-                    desc,
-                    None,
-                    Some(items),
-                ),
-                Path::Filter {
-                    input, predicate, ..
-                } => match *input {
-                    Path::SeqScan {
-                        source_id,
-                        rel,
-                        relation_name,
-                        relation_oid,
-                        relkind,
-                        toast,
-                        desc,
-                        ..
-                    } => (
-                        source_id,
-                        rel,
-                        relation_name,
-                        relation_oid,
-                        relkind,
-                        toast,
-                        desc,
-                        Some(predicate),
-                        Some(items),
-                    ),
-                    other => {
-                        let input = Path::Filter {
-                            plan_info: PlanEstimate::default(),
-                            pathtarget: other.semantic_output_target(),
-                            input: Box::new(other),
-                            predicate,
-                        };
-                        return Err(Path::OrderBy {
-                            plan_info: PlanEstimate::default(),
-                            pathtarget: input.semantic_output_target(),
-                            input: Box::new(input),
-                            items,
-                        });
-                    }
-                },
-                other => {
+                    };
                     return Err(Path::OrderBy {
                         plan_info: PlanEstimate::default(),
-                        pathtarget: other.semantic_output_target(),
-                        input: Box::new(other),
+                        pathtarget: input.semantic_output_target(),
+                        input: Box::new(input),
                         items,
                     });
                 }
             },
-            other => return Err(other),
-        };
+            other => {
+                return Err(Path::OrderBy {
+                    plan_info: PlanEstimate::default(),
+                    pathtarget: other.semantic_output_target(),
+                    input: Box::new(other),
+                    items,
+                });
+            }
+        },
+        other => return Err(other),
+    };
 
     let filter = filter;
     let order_items = order_items;
@@ -886,6 +906,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
         relation_name.clone(),
         relation_oid,
         relkind,
+        relispopulated,
         toast,
         desc.clone(),
         &stats,
@@ -1012,6 +1033,7 @@ pub(super) fn estimate_seqscan_candidate(
     relation_name: String,
     relation_oid: u32,
     relkind: char,
+    relispopulated: bool,
     toast: Option<ToastRelationRef>,
     desc: RelationDesc,
     stats: &RelationStats,
@@ -1029,6 +1051,7 @@ pub(super) fn estimate_seqscan_candidate(
         relation_name,
         relation_oid,
         relkind,
+        relispopulated,
         toast,
         desc,
     };

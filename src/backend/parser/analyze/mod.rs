@@ -61,8 +61,8 @@ static NEXT_WORKTABLE_ID: AtomicUsize = AtomicUsize::new(1);
 static NEXT_CTE_ID: AtomicUsize = AtomicUsize::new(1);
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{
-    build_pg_indexes_rows, build_pg_locks_rows, build_pg_policies_rows, build_pg_rules_rows,
-    build_pg_stats_rows, build_pg_views_rows,
+    build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
+    build_pg_rules_rows, build_pg_stats_rows, build_pg_views_rows,
 };
 use agg::*;
 use agg_output::*;
@@ -788,6 +788,10 @@ pub trait CatalogLookup {
         Vec::new()
     }
 
+    fn pg_matviews_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
+
     fn pg_indexes_rows(&self) -> Vec<Vec<Value>> {
         Vec::new()
     }
@@ -1207,6 +1211,17 @@ impl CatalogLookup for Catalog {
         )
     }
 
+    fn pg_matviews_rows(&self) -> Vec<Vec<Value>> {
+        let catcache = crate::backend::utils::cache::catcache::CatCache::from_catalog(self);
+        build_pg_matviews_rows(
+            catcache.namespace_rows(),
+            catcache.authid_rows(),
+            catcache.class_rows(),
+            catcache.index_rows(),
+            catcache.rewrite_rows(),
+        )
+    }
+
     fn pg_indexes_rows(&self) -> Vec<Vec<Value>> {
         let catcache = crate::backend::utils::cache::catcache::CatCache::from_catalog(self);
         build_pg_indexes_rows(
@@ -1314,6 +1329,7 @@ impl CatalogLookup for RelCache {
             owner_oid: entry.owner_oid,
             relpersistence: entry.relpersistence,
             relkind: entry.relkind,
+            relispopulated: entry.relispopulated,
             relispartition: entry.relispartition,
             relpartbound: entry.relpartbound.clone(),
             desc: entry.desc.clone(),
@@ -1402,6 +1418,7 @@ fn bound_relation_from_relcache_entry(
         owner_oid: entry.owner_oid,
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
+        relispopulated: entry.relispopulated,
         relispartition: entry.relispartition,
         relpartbound: entry.relpartbound.clone(),
         desc: entry.desc.clone(),
