@@ -177,6 +177,8 @@ pub fn system_catalog_index_relcache(
         amproc_entries: Vec::new(),
         indexprs: None,
         indpred: None,
+        rd_indexprs: None,
+        rd_indpred: None,
         brin_options: None,
     }
 }

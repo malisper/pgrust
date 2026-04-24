@@ -1198,7 +1198,7 @@ fn index_rows_for_heap(
     .unwrap_or_default()
 }
 
-pub fn index_relation_oids_for_heap(
+pub fn relation_get_index_list(
     db: &Database,
     client_id: ClientId,
     txn_ctx: Option<(TransactionId, CommandId)>,
@@ -1210,6 +1210,15 @@ pub fn index_relation_oids_for_heap(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+pub fn index_relation_oids_for_heap(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relation_oid: u32,
+) -> Vec<u32> {
+    relation_get_index_list(db, client_id, txn_ctx, relation_oid)
 }
 
 pub fn relation_entry_by_oid(
@@ -1428,7 +1437,7 @@ pub fn has_index_on_relation(
     txn_ctx: Option<(TransactionId, CommandId)>,
     relation_oid: u32,
 ) -> bool {
-    !index_relation_oids_for_heap(db, client_id, txn_ctx, relation_oid).is_empty()
+    !relation_get_index_list(db, client_id, txn_ctx, relation_oid).is_empty()
 }
 
 pub fn access_method_name_for_relation(
@@ -1979,40 +1988,44 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         &self,
         relation_oid: u32,
     ) -> Vec<crate::backend::parser::BoundIndexRelation> {
-        index_relation_oids_for_heap(self.db, self.client_id, self.txn_ctx, relation_oid)
+        relation_get_index_list(self.db, self.client_id, self.txn_ctx, relation_oid)
             .into_iter()
             .filter_map(|index_oid| {
                 let entry =
                     relation_entry_by_oid(self.db, self.client_id, self.txn_ctx, index_oid)?;
-                let index_meta = entry.index.as_ref()?.clone();
+                let mut index_meta = entry.index.as_ref()?.clone();
                 let class =
                     class_row_by_oid(self.db, self.client_id, self.txn_ctx, entry.relation_oid)?;
+                let (index_exprs, index_predicate) = relation_entry_by_oid(
+                    self.db,
+                    self.client_id,
+                    self.txn_ctx,
+                    index_meta.indrelid,
+                )
+                .map(|heap| {
+                    let index_exprs = crate::backend::parser::relation_get_index_expressions(
+                        &mut index_meta,
+                        &heap.desc,
+                        self,
+                    )
+                    .unwrap_or_default();
+                    let index_predicate = crate::backend::parser::relation_get_index_predicate(
+                        &mut index_meta,
+                        &heap.desc,
+                        self,
+                    )
+                    .ok()
+                    .flatten();
+                    (index_exprs, index_predicate)
+                })
+                .unwrap_or_default();
                 Some(crate::backend::parser::BoundIndexRelation {
                     name: class.relname,
                     rel: entry.rel,
                     relation_oid: entry.relation_oid,
                     desc: entry.desc,
-                    index_exprs: relation_entry_by_oid(
-                        self.db,
-                        self.client_id,
-                        self.txn_ctx,
-                        index_meta.indrelid,
-                    )
-                    .and_then(|heap| {
-                        crate::backend::parser::bind_index_exprs(&index_meta, &heap.desc, self).ok()
-                    })
-                    .unwrap_or_default(),
-                    index_predicate: relation_entry_by_oid(
-                        self.db,
-                        self.client_id,
-                        self.txn_ctx,
-                        index_meta.indrelid,
-                    )
-                    .and_then(|heap| {
-                        crate::backend::parser::bind_index_predicate(&index_meta, &heap.desc, self)
-                            .ok()
-                            .flatten()
-                    }),
+                    index_exprs,
+                    index_predicate,
                     index_meta,
                 })
             })

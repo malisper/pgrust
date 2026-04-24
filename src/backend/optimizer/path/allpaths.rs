@@ -1115,9 +1115,6 @@ fn join_is_legal(
         if let Some(reversed) =
             rel_matches_special_join(sjinfo, &left_rel.relids, &right_rel.relids)
         {
-            if reversed && matches!(sjinfo.jointype, JoinType::Semi | JoinType::Anti) {
-                return None;
-            }
             if matched_sj.is_some() {
                 return None;
             }
@@ -1201,19 +1198,25 @@ fn make_join_rel(
         let join_restrict_clauses = build_join_restrict_clauses(
             spec.kind,
             spec.explicit_qual.clone(),
-            &left_rel.relids,
-            &right_rel.relids,
+            &logical_left_rel.relids,
+            &logical_right_rel.relids,
             &root.inner_join_clauses,
         );
         let mut candidate_paths = Vec::new();
-        for left_path in &left_rel.pathlist {
-            for right_path in &right_rel.pathlist {
+        let (path_left_rel, path_right_rel) =
+            if matches!(spec.kind, JoinType::Semi | JoinType::Anti) && spec.reversed {
+                (right_rel, left_rel)
+            } else {
+                (left_rel, right_rel)
+            };
+        for left_path in &path_left_rel.pathlist {
+            for right_path in &path_right_rel.pathlist {
                 let paths = build_join_paths_with_root(
                     root,
                     left_path.clone(),
                     right_path.clone(),
-                    &left_rel.relids,
-                    &right_rel.relids,
+                    &path_left_rel.relids,
+                    &path_right_rel.relids,
                     spec.kind,
                     join_restrict_clauses.clone(),
                     reltarget.clone(),

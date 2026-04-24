@@ -13,7 +13,7 @@
 #   2. Splitting each .sql file into one-statement fragments
 #   3. Running them sequentially through \i in a single psql session
 #   4. Enabling \timing so every statement is timed
-#   5. Applying statement_timeout = '60s' for every psql session
+#   5. Applying statement_timeout = '5s' for every psql session
 
 set -euo pipefail
 
@@ -176,7 +176,7 @@ build_ordered_test_files() {
 PORT=5433
 SKIP_SERVER=false
 SINGLE_TEST=""
-STATEMENT_TIMEOUT=60
+STATEMENT_TIMEOUT=5
 WORKTREE_NAME="$(basename "$PGRUST_DIR")"
 RESULTS_DIR=""
 DATA_DIR=""

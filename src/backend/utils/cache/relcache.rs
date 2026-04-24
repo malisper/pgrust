@@ -16,6 +16,7 @@ use crate::include::catalog::{
     PG_CONSTRAINT_RELATION_OID, PgPartitionedTableRow, bootstrap_catalog_kinds,
     system_catalog_index_by_oid,
 };
+use crate::include::nodes::primnodes::Expr;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexAmOpEntry {
@@ -66,6 +67,10 @@ pub struct IndexRelCacheEntry {
     pub amproc_entries: Vec<Vec<IndexAmProcEntry>>,
     pub indexprs: Option<String>,
     pub indpred: Option<String>,
+    #[serde(skip)]
+    pub rd_indexprs: Option<Vec<Expr>>,
+    #[serde(skip)]
+    pub rd_indpred: Option<Option<Expr>>,
     pub brin_options: Option<BrinOptions>,
 }
 
@@ -521,6 +526,8 @@ impl RelCache {
                             amproc_entries: Vec::new(),
                             indexprs: None,
                             indpred: None,
+                            rd_indexprs: None,
+                            rd_indpred: None,
                             brin_options: None,
                         };
                     };
@@ -555,6 +562,8 @@ impl RelCache {
                         amproc_entries: support.amproc_entries,
                         indexprs: index.indexprs.clone(),
                         indpred: index.indpred.clone(),
+                        rd_indexprs: None,
+                        rd_indpred: None,
                         brin_options: None,
                     }
                 }),
@@ -583,6 +592,30 @@ impl RelCache {
 
     pub fn get_by_oid(&self, oid: u32) -> Option<&RelCacheEntry> {
         self.by_oid.get(&oid)
+    }
+
+    pub fn relation_get_index_list(&self, relation_oid: u32) -> Vec<u32> {
+        self.by_oid
+            .values()
+            .filter_map(|entry| {
+                let index = entry.index.as_ref()?;
+                (index.indrelid == relation_oid && index.indislive).then_some(entry.relation_oid)
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    pub fn relation_name_by_oid(&self, relation_oid: u32) -> Option<String> {
+        self.by_name
+            .iter()
+            .find(|(name, entry)| entry.relation_oid == relation_oid && !name.contains('.'))
+            .or_else(|| {
+                self.by_name
+                    .iter()
+                    .find(|(_, entry)| entry.relation_oid == relation_oid)
+            })
+            .map(|(name, _)| name.rsplit('.').next().unwrap_or(name).to_string())
     }
 
     pub fn with_search_path(&self, search_path: &[String]) -> Self {
@@ -711,6 +744,8 @@ fn from_catalog_entry(entry: &CatalogEntry, support_lookup: &IndexSupportLookup)
                 amproc_entries: support.amproc_entries,
                 indexprs: index.indexprs.clone(),
                 indpred: index.indpred.clone(),
+                rd_indexprs: None,
+                rd_indpred: None,
                 brin_options: index.brin_options.clone(),
             }
         }),
@@ -900,6 +935,8 @@ mod tests {
             amproc_entries: support.amproc_entries,
             indexprs: None,
             indpred: None,
+            rd_indexprs: None,
+            rd_indpred: None,
             brin_options: None,
         };
         let contains_proc_oid = bootstrap_pg_operator_rows()
@@ -963,6 +1000,8 @@ mod tests {
             amproc_entries: support.amproc_entries,
             indexprs: None,
             indpred: None,
+            rd_indexprs: None,
+            rd_indpred: None,
             brin_options: None,
         };
         let distance_operator = bootstrap_pg_operator_rows()

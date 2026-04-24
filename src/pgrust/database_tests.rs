@@ -12391,6 +12391,32 @@ fn unique_expression_index_rejects_duplicate_expression_value() {
 }
 
 #[test]
+fn expression_index_self_join_query_does_not_recurse_while_planning() {
+    let base = temp_dir("expression_index_self_join");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table sj (a int unique, b int, c int unique)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into sj values (1, null, 2), (null, 2, null), (2, 1, 1), (3, 1, 3)",
+    )
+    .unwrap();
+    db.execute(1, "create unique index sj_fn_idx on sj((a * a))")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from sj j1, sj j2 \
+             where j1.b = j2.b and j1.a*j1.a = 1 and j2.a*j2.a = 1",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
 fn explain_bootstrap_seqscan_shows_relation_name_and_filter() {
     let base = temp_dir("explain_bootstrap_seqscan");
     let db = Database::open(&base, 16).unwrap();
