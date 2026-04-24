@@ -17,6 +17,17 @@
 #
 # Safe to Ctrl-C at any point; nothing is pushed until the PAUSE gate in
 # --republish mode has been passed.
+#
+# STATUS (2026-04-24): this is the new canonical publish script. An older
+# inline-redactions version still lives at
+#   pagerfree-shared/docs/hn-launch/ops/publish-pgrust.sh
+# and was the one actually used for the 2026-04-24 republish. Both scripts
+# currently produce the same scrubbed output (verified via --republish-dry).
+# Once this script has been used for one successful real publish (not just
+# dry-run), the old file will be replaced with a 3-line pointer here and
+# retired. Until that swap happens, keep the redaction rules in sync:
+# updates to scripts/internal/redactions.txt need matching edits to the
+# heredoc in the old script.
 
 set -euo pipefail
 
