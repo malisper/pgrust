@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use crate::backend::commands::tablecmds::collect_matching_rows_heap;
 use crate::backend::executor::value_io::format_failing_row_detail;
@@ -8,8 +8,8 @@ use crate::backend::executor::{
 };
 use crate::backend::parser::{
     BoundRelation, CatalogLookup, LoweredPartitionSpec, PartitionBoundSpec,
-    PartitionRangeDatumValue, SerializedPartitionValue, deserialize_partition_bound,
-    partition_value_to_value, relation_partition_spec,
+    PartitionRangeDatumValue, PartitionStrategy, SerializedPartitionValue,
+    deserialize_partition_bound, partition_value_to_value, relation_partition_spec,
 };
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::catalog::BPCHAR_HASH_OPCLASS_OID;
@@ -41,6 +41,130 @@ fn direct_partition_children(
                 })
         })
         .collect()
+}
+
+const PARTITION_CACHED_FIND_THRESHOLD: usize = 16;
+
+#[derive(Default)]
+pub(crate) struct PartitionTupleRouting {
+    partition_dispatch_info: HashMap<u32, PartitionDispatch>,
+}
+
+impl PartitionTupleRouting {
+    fn dispatch_info_for_relation(
+        &mut self,
+        catalog: &dyn CatalogLookup,
+        relation: &BoundRelation,
+    ) -> Result<&mut PartitionDispatch, ExecError> {
+        if !self
+            .partition_dispatch_info
+            .contains_key(&relation.relation_oid)
+        {
+            let dispatch = exec_init_partition_dispatch_info(catalog, relation)?;
+            self.partition_dispatch_info
+                .insert(relation.relation_oid, dispatch);
+        }
+        Ok(self
+            .partition_dispatch_info
+            .get_mut(&relation.relation_oid)
+            .expect("partition dispatch was just cached"))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PartitionDispatch {
+    reldesc: BoundRelation,
+    key: LoweredPartitionSpec,
+    partdesc: PartitionDesc,
+}
+
+#[derive(Debug, Clone)]
+struct PartitionDesc {
+    children: Vec<PartitionDescEntry>,
+    boundinfo: PartitionBoundInfo,
+    last_found_datum_index: Option<usize>,
+    last_found_part_index: Option<usize>,
+    last_found_count: usize,
+}
+
+impl PartitionDesc {
+    fn cached_partition_index(&self) -> Option<usize> {
+        if self.last_found_count >= PARTITION_CACHED_FIND_THRESHOLD {
+            self.last_found_part_index
+        } else {
+            None
+        }
+    }
+
+    fn record_partition_match(&mut self, part_index: usize) {
+        if self.last_found_datum_index == Some(part_index) {
+            self.last_found_count += 1;
+        } else {
+            self.last_found_datum_index = Some(part_index);
+            self.last_found_part_index = Some(part_index);
+            self.last_found_count = 1;
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PartitionDescEntry {
+    reldesc: BoundRelation,
+    bound: PartitionBoundSpec,
+    is_leaf: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PartitionBoundInfo {
+    indexes: Vec<usize>,
+    default_index: Option<usize>,
+}
+
+pub(crate) fn exec_setup_partition_tuple_routing(
+    catalog: &dyn CatalogLookup,
+    root: &BoundRelation,
+) -> Result<PartitionTupleRouting, ExecError> {
+    let mut proute = PartitionTupleRouting::default();
+    if root.relkind == 'p' {
+        proute.dispatch_info_for_relation(catalog, root)?;
+    }
+    Ok(proute)
+}
+
+fn exec_init_partition_dispatch_info(
+    catalog: &dyn CatalogLookup,
+    relation: &BoundRelation,
+) -> Result<PartitionDispatch, ExecError> {
+    let key = relation_partition_spec(relation).map_err(ExecError::Parse)?;
+    let mut children = Vec::new();
+    let mut boundinfo = PartitionBoundInfo::default();
+    for child in direct_partition_children(catalog, relation.relation_oid)? {
+        let bound = child_partition_bound(&child)?;
+        let index = children.len();
+        if bound.is_default() {
+            if boundinfo.default_index.is_none() {
+                boundinfo.default_index = Some(index);
+            }
+        } else {
+            boundinfo.indexes.push(index);
+        }
+        children.push(PartitionDescEntry {
+            is_leaf: child.partitioned_table.is_none(),
+            reldesc: child,
+            bound,
+        });
+    }
+    Ok(PartitionDispatch {
+        reldesc: relation.clone(),
+        key,
+        partdesc: PartitionDesc {
+            children,
+            boundinfo,
+            last_found_datum_index: None,
+            last_found_part_index: None,
+            last_found_count: 0,
+        },
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -548,18 +672,24 @@ fn row_matches_explicit_bound(
     bound: &PartitionBoundSpec,
     row: &[Value],
 ) -> Result<bool, ExecError> {
+    let keys = key_values(relation, spec, row)?;
+    row_matches_explicit_bound_with_keys(spec, bound, &keys)
+}
+
+fn row_matches_explicit_bound_with_keys(
+    spec: &LoweredPartitionSpec,
+    bound: &PartitionBoundSpec,
+    keys: &[Value],
+) -> Result<bool, ExecError> {
     match bound {
         PartitionBoundSpec::List { values, .. } => {
-            let key = key_values(relation, spec, row)?
-                .into_iter()
-                .next()
-                .unwrap_or(Value::Null);
+            let key = keys.first().unwrap_or(&Value::Null);
             values.iter().try_fold(false, |matched, value| {
                 if matched {
                     return Ok(true);
                 }
                 Ok(compare_order_values(
-                    &key,
+                    key,
                     &partition_value_to_value(value),
                     spec.partcollation.first().copied().filter(|oid| *oid != 0),
                     None,
@@ -568,24 +698,53 @@ fn row_matches_explicit_bound(
             })
         }
         PartitionBoundSpec::Range { from, to, .. } => {
-            let keys = key_values(relation, spec, row)?;
             if keys.iter().any(|value| matches!(value, Value::Null)) {
                 return Ok(false);
             }
             Ok(
-                compare_partition_key_to_bound(&keys, from, &spec.partcollation)? != Ordering::Less
-                    && compare_partition_key_to_bound(&keys, to, &spec.partcollation)?
+                compare_partition_key_to_bound(keys, from, &spec.partcollation)? != Ordering::Less
+                    && compare_partition_key_to_bound(keys, to, &spec.partcollation)?
                         == Ordering::Less,
             )
         }
-        PartitionBoundSpec::Hash { modulus, remainder } => {
-            let keys = key_values(relation, spec, row)?;
-            Ok(
-                partition_hash_value(&keys, &spec.partclass)? % (*modulus as u64)
-                    == *remainder as u64,
-            )
+        PartitionBoundSpec::Hash { modulus, remainder } => Ok(partition_hash_value(
+            keys,
+            &spec.partclass,
+        )? % (*modulus as u64)
+            == *remainder as u64),
+    }
+}
+
+fn get_partition_for_tuple(
+    dispatch: &mut PartitionDispatch,
+    row: &[Value],
+) -> Result<Option<usize>, ExecError> {
+    let keys = key_values(&dispatch.reldesc, &dispatch.key, row)?;
+    if matches!(
+        dispatch.key.strategy,
+        PartitionStrategy::List | PartitionStrategy::Range
+    ) && let Some(part_index) = dispatch.partdesc.cached_partition_index()
+    {
+        let child = &dispatch.partdesc.children[part_index];
+        if row_matches_explicit_bound_with_keys(&dispatch.key, &child.bound, &keys)? {
+            return Ok(Some(part_index));
         }
     }
+
+    let mut matched_index = None;
+    for &part_index in &dispatch.partdesc.boundinfo.indexes {
+        let child = &dispatch.partdesc.children[part_index];
+        if row_matches_explicit_bound_with_keys(&dispatch.key, &child.bound, &keys)? {
+            matched_index = Some(part_index);
+            break;
+        }
+    }
+    if let Some(part_index) = matched_index {
+        dispatch.partdesc.record_partition_match(part_index);
+        return Ok(Some(part_index));
+    }
+
+    Ok(dispatch.partdesc.boundinfo.default_index)
 }
 
 fn find_explicit_partition_match(
@@ -604,7 +763,7 @@ fn find_explicit_partition_match(
             continue;
         }
         if row_matches_explicit_bound(parent, &spec, &bound, row)? {
-            return Ok(Some(child));
+            return Ok(Some(child.clone()));
         }
     }
     Ok(None)
@@ -620,7 +779,7 @@ fn default_partition(
             continue;
         }
         if child_partition_bound(&child)?.is_default() {
-            return Ok(Some(child));
+            return Ok(Some(child.clone()));
         }
     }
     Ok(None)
@@ -928,15 +1087,22 @@ pub(crate) fn route_partition_target(
     row: &[Value],
     datetime_config: &DateTimeConfig,
 ) -> Result<BoundRelation, ExecError> {
+    let mut proute = exec_setup_partition_tuple_routing(catalog, target)?;
+    exec_find_partition(catalog, &mut proute, target, row, datetime_config)
+}
+
+pub(crate) fn exec_find_partition(
+    catalog: &dyn CatalogLookup,
+    proute: &mut PartitionTupleRouting,
+    target: &BoundRelation,
+    row: &[Value],
+    datetime_config: &DateTimeConfig,
+) -> Result<BoundRelation, ExecError> {
     if target.relispartition
         && let Some(parent) = declarative_parent(catalog, target)?
     {
         let selected =
-            if let Some(explicit) = find_explicit_partition_match(catalog, &parent, row, None)? {
-                Some(explicit)
-            } else {
-                default_partition(catalog, &parent, None)?
-            };
+            find_partition_child(catalog, proute, &parent, row)?.map(|lookup| lookup.reldesc);
         if selected
             .as_ref()
             .is_none_or(|relation| relation.relation_oid != target.relation_oid)
@@ -949,20 +1115,44 @@ pub(crate) fn route_partition_target(
         }
     }
 
-    if target.relkind != 'p' {
-        return Ok(target.clone());
-    }
+    let mut current = target.clone();
+    loop {
+        if current.relkind != 'p' {
+            return Ok(current);
+        }
 
-    if let Some(explicit) = find_explicit_partition_match(catalog, target, row, None)? {
-        return route_partition_target(catalog, &explicit, row, datetime_config);
+        let Some(selected) = find_partition_child(catalog, proute, &current, row)? else {
+            let dispatch = proute.dispatch_info_for_relation(catalog, &current)?;
+            return Err(no_partition_for_row(
+                &relation_name_for_oid(catalog, current.relation_oid),
+                no_partition_detail(&current, &dispatch.key, row, datetime_config)?,
+            ));
+        };
+        if selected.is_leaf {
+            return Ok(selected.reldesc);
+        }
+        current = selected.reldesc;
     }
-    if let Some(default_child) = default_partition(catalog, target, None)? {
-        return route_partition_target(catalog, &default_child, row, datetime_config);
-    }
+}
 
-    let spec = relation_partition_spec(target).map_err(ExecError::Parse)?;
-    Err(no_partition_for_row(
-        &relation_name_for_oid(catalog, target.relation_oid),
-        no_partition_detail(target, &spec, row, datetime_config)?,
-    ))
+struct PartitionLookup {
+    reldesc: BoundRelation,
+    is_leaf: bool,
+}
+
+fn find_partition_child(
+    catalog: &dyn CatalogLookup,
+    proute: &mut PartitionTupleRouting,
+    relation: &BoundRelation,
+    row: &[Value],
+) -> Result<Option<PartitionLookup>, ExecError> {
+    let dispatch = proute.dispatch_info_for_relation(catalog, relation)?;
+    let Some(part_index) = get_partition_for_tuple(dispatch, row)? else {
+        return Ok(None);
+    };
+    let child = &dispatch.partdesc.children[part_index];
+    Ok(Some(PartitionLookup {
+        reldesc: child.reldesc.clone(),
+        is_leaf: child.is_leaf,
+    }))
 }
