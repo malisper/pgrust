@@ -18605,7 +18605,7 @@ fn create_function_accepts_bpchar_argument_types() {
         .unwrap()
     {
         StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Text("W".into())]]);
+            assert_eq!(rows, vec![vec![Value::Text("WS".into())]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }
