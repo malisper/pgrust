@@ -24,13 +24,16 @@ use std::thread;
 
 use std::time::{Duration, Instant};
 
-const TEST_TIMEOUT: Duration = Duration::from_secs(5);
-const CONTENTION_TEST_TIMEOUT: Duration = Duration::from_secs(15);
-const HEAVY_CONTENTION_TEST_TIMEOUT: Duration = Duration::from_secs(30);
+// These are deadlock watchdogs, not latency expectations. Full `cargo test`
+// runs several storage/concurrency tests at once, so leave enough headroom for
+// slow CI workers and parallel local agent workspaces.
+const TEST_TIMEOUT: Duration = Duration::from_secs(30);
+const CONTENTION_TEST_TIMEOUT: Duration = Duration::from_secs(60);
+const HEAVY_CONTENTION_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 const STRESS_TEST_TIMEOUT: Duration = Duration::from_secs(60);
 const PIN_LEAK_CONTENTION_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 const SAME_ROW_UPDATE_TEST_TIMEOUT: Duration = Duration::from_secs(20);
-const PGBENCH_STYLE_TEST_TIMEOUT: Duration = Duration::from_secs(20);
+const PGBENCH_STYLE_TEST_TIMEOUT: Duration = Duration::from_secs(60);
 const SAME_ROW_UPDATE_FULL_SUITE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Start a background thread that periodically checks for deadlocks
@@ -10104,22 +10107,23 @@ fn alter_statistics_updates_in_memory_statistics_target() {
     db.execute(1, "alter statistics ab1_a_b_stats set statistics 0")
         .unwrap();
 
-    let stats = db.statistics_objects.read();
-    let entry = stats
-        .values()
-        .find(|entry| entry.name.ends_with(".ab1_a_b_stats") || entry.name == "ab1_a_b_stats")
+    let catcache = db.backend_catcache(1, None).unwrap();
+    let entry = catcache
+        .statistic_ext_rows()
+        .into_iter()
+        .find(|entry| entry.stxname == "ab1_a_b_stats")
         .unwrap();
-    assert_eq!(entry.statistics_target, 0);
+    assert_eq!(entry.stxstattarget, Some(0));
 
-    drop(stats);
     db.execute(1, "alter statistics ab1_a_b_stats set statistics -1")
         .unwrap();
-    let stats = db.statistics_objects.read();
-    let entry = stats
-        .values()
-        .find(|entry| entry.name.ends_with(".ab1_a_b_stats") || entry.name == "ab1_a_b_stats")
+    let catcache = db.backend_catcache(1, None).unwrap();
+    let entry = catcache
+        .statistic_ext_rows()
+        .into_iter()
+        .find(|entry| entry.stxname == "ab1_a_b_stats")
         .unwrap();
-    assert_eq!(entry.statistics_target, -1);
+    assert_eq!(entry.stxstattarget, None);
 }
 
 #[test]

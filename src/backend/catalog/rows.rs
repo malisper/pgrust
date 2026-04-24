@@ -9,9 +9,9 @@ use crate::include::catalog::{
     PgConstraintRow, PgDatabaseRow, PgDependRow, PgDescriptionRow, PgForeignDataWrapperRow,
     PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
     PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgPublicationNamespaceRow,
-    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticRow, PgTablespaceRow,
-    PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow,
-    PgTypeRow, composite_array_type_row, composite_type_row,
+    PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow,
+    PgStatisticRow, PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow,
+    PgTsParserRow, PgTsTemplateRow, PgTypeRow, composite_array_type_row, composite_type_row,
 };
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -32,6 +32,8 @@ pub(crate) struct PhysicalCatalogRows {
     pub publications: Vec<PgPublicationRow>,
     pub publication_rels: Vec<PgPublicationRelRow>,
     pub publication_namespaces: Vec<PgPublicationNamespaceRow>,
+    pub statistics_ext: Vec<PgStatisticExtRow>,
+    pub statistics_ext_data: Vec<PgStatisticExtDataRow>,
     pub ams: Vec<PgAmRow>,
     pub amops: Vec<PgAmopRow>,
     pub amprocs: Vec<PgAmprocRow>,
@@ -176,6 +178,10 @@ pub(crate) fn extend_physical_catalog_rows(
     target
         .publication_namespaces
         .extend(source.publication_namespaces);
+    target.statistics_ext.extend(source.statistics_ext);
+    target
+        .statistics_ext_data
+        .extend(source.statistics_ext_data);
     target.ams.extend(source.ams);
     target.amops.extend(source.amops);
     target.amprocs.extend(source.amprocs);
@@ -219,6 +225,8 @@ pub(crate) fn physical_catalog_rows_from_catcache(catcache: &CatCache) -> Physic
         publications: catcache.publication_rows(),
         publication_rels: catcache.publication_rel_rows(),
         publication_namespaces: catcache.publication_namespace_rows(),
+        statistics_ext: catcache.statistic_ext_rows(),
+        statistics_ext_data: catcache.statistic_ext_data_rows(),
         ams: catcache.am_rows(),
         amops: catcache.amop_rows(),
         amprocs: catcache.amproc_rows(),

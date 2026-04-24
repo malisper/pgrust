@@ -1034,20 +1034,40 @@ impl Session {
                 )
             }
             Statement::CreateStatistics(ref create_stmt) => {
-                let search_path = self.configured_search_path();
-                db.execute_create_statistics_stmt_with_search_path(
-                    self.client_id,
-                    create_stmt,
-                    search_path.as_deref(),
-                )
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_create_statistics_stmt_with_search_path(
+                        self.client_id,
+                        create_stmt,
+                        search_path.as_deref(),
+                    )
+                }
             }
             Statement::AlterStatistics(ref alter_stmt) => {
-                let search_path = self.configured_search_path();
-                db.execute_alter_statistics_stmt_with_search_path(
-                    self.client_id,
-                    alter_stmt,
-                    search_path.as_deref(),
-                )
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_alter_statistics_stmt_with_search_path(
+                        self.client_id,
+                        alter_stmt,
+                        search_path.as_deref(),
+                    )
+                }
             }
             Statement::DropTrigger(ref drop_stmt) => {
                 let search_path = self.configured_search_path();
@@ -1064,6 +1084,24 @@ impl Session {
                     drop_stmt,
                     search_path.as_deref(),
                 )
+            }
+            Statement::DropStatistics(ref drop_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_drop_statistics_stmt_with_search_path(
+                        self.client_id,
+                        drop_stmt,
+                        search_path.as_deref(),
+                    )
+                }
             }
             Statement::CreateIndex(ref create_stmt) => {
                 let search_path = self.configured_search_path();
@@ -2002,6 +2040,24 @@ impl Session {
                     )
                 }
             }
+            Statement::CommentOnStatistics(ref comment_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_comment_on_statistics_stmt_with_search_path(
+                        self.client_id,
+                        comment_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
             Statement::Merge(ref merge_stmt) => {
                 let _ = merge_stmt;
                 let search_path = self.configured_search_path();
@@ -2293,6 +2349,18 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
+            Statement::CommentOnStatistics(ref comment_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_comment_on_statistics_stmt_in_transaction_with_search_path(
+                    client_id,
+                    comment_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::CopyFrom(ref copy_stmt) => self.execute_copy_from_file(db, copy_stmt),
             Statement::CreateDomain(ref create_stmt) => {
                 let search_path = self.configured_search_path();
@@ -2411,14 +2479,15 @@ impl Session {
             }
             Statement::CreateStatistics(ref create_stmt) => {
                 let search_path = self.configured_search_path();
-                let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                let txn = self.active_txn.as_mut().unwrap();
                 db.execute_create_statistics_stmt_in_transaction_with_search_path(
                     client_id,
                     create_stmt,
                     xid,
                     cid,
                     search_path.as_deref(),
-                    catalog_effects,
+                    &mut txn.catalog_effects,
+                    &mut txn.temp_effects,
                 )
             }
             Statement::AlterStatistics(ref alter_stmt) => {
@@ -3250,6 +3319,18 @@ impl Session {
                 let search_path = self.configured_search_path();
                 let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
                 db.execute_drop_publication_stmt_in_transaction_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    catalog_effects,
+                )
+            }
+            Statement::DropStatistics(ref drop_stmt) => {
+                let search_path = self.configured_search_path();
+                let catalog_effects = &mut self.active_txn.as_mut().unwrap().catalog_effects;
+                db.execute_drop_statistics_stmt_in_transaction_with_search_path(
                     client_id,
                     drop_stmt,
                     xid,

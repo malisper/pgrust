@@ -541,6 +541,7 @@ fn array_element_layout(
         | SqlTypeKind::RegClass
         | SqlTypeKind::RegType
         | SqlTypeKind::RegRole
+        | SqlTypeKind::RegNamespace
         | SqlTypeKind::RegOperator
         | SqlTypeKind::RegProcedure
         | SqlTypeKind::Xid
@@ -866,6 +867,7 @@ fn decode_array_element_value(
         | SqlTypeKind::RegClass
         | SqlTypeKind::RegType
         | SqlTypeKind::RegRole
+        | SqlTypeKind::RegNamespace
         | SqlTypeKind::RegOperator
         | SqlTypeKind::RegProcedure
         | SqlTypeKind::Xid

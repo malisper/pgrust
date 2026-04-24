@@ -3,6 +3,7 @@ use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::catalog::bootstrap_pg_cast_rows;
 use crate::include::catalog::{
     builtin_multirange_name_for_sql_type, builtin_range_name_for_sql_type,
+    builtin_type_name_for_oid,
 };
 
 pub(super) fn coerce_bound_expr(expr: Expr, from: SqlType, to: SqlType) -> Expr {
@@ -141,8 +142,8 @@ pub(super) fn resolve_numeric_binary_type(
     if matches!(left.kind, Int8) || matches!(right.kind, Int8) {
         return Ok(SqlType::new(Int8));
     }
-    if matches!(left.kind, Int4 | Oid | RegType | RegRole)
-        || matches!(right.kind, Int4 | Oid | RegType | RegRole)
+    if matches!(left.kind, Int4 | Oid | RegType | RegRole | RegNamespace)
+        || matches!(right.kind, Int4 | Oid | RegType | RegRole | RegNamespace)
     {
         return Ok(SqlType::new(Int4));
     }
@@ -175,6 +176,8 @@ pub(super) fn sql_type_name(ty: SqlType) -> String {
         builtin_range_name_for_sql_type(ty).unwrap_or("range")
     } else if ty.is_multirange() {
         builtin_multirange_name_for_sql_type(ty).unwrap_or("multirange")
+    } else if !ty.is_array && ty.type_oid != 0 {
+        return builtin_type_name_for_oid(ty.type_oid).unwrap_or_else(|| ty.type_oid.to_string());
     } else {
         match ty.kind {
             SqlTypeKind::AnyElement => "anyelement",
@@ -200,6 +203,7 @@ pub(super) fn sql_type_name(ty: SqlType) -> String {
             SqlTypeKind::RegClass => "regclass",
             SqlTypeKind::RegType => "regtype",
             SqlTypeKind::RegRole => "regrole",
+            SqlTypeKind::RegNamespace => "regnamespace",
             SqlTypeKind::RegOperator => "regoperator",
             SqlTypeKind::RegProcedure => "regprocedure",
             SqlTypeKind::Tid => "tid",
@@ -269,6 +273,7 @@ pub(super) fn is_numeric_family(ty: SqlType) -> bool {
                 | SqlTypeKind::RegClass
                 | SqlTypeKind::RegType
                 | SqlTypeKind::RegRole
+                | SqlTypeKind::RegNamespace
                 | SqlTypeKind::RegOperator
                 | SqlTypeKind::RegProcedure
                 | SqlTypeKind::RegConfig
@@ -290,6 +295,7 @@ pub(super) fn is_integer_family(ty: SqlType) -> bool {
                 | SqlTypeKind::RegClass
                 | SqlTypeKind::RegType
                 | SqlTypeKind::RegRole
+                | SqlTypeKind::RegNamespace
                 | SqlTypeKind::RegOperator
                 | SqlTypeKind::RegProcedure
                 | SqlTypeKind::RegConfig
@@ -363,6 +369,7 @@ pub(super) fn coerce_unknown_string_literal_type(
             SqlTypeKind::RegClass => return SqlType::new(SqlTypeKind::RegClass),
             SqlTypeKind::RegType => return SqlType::new(SqlTypeKind::RegType),
             SqlTypeKind::RegRole => return SqlType::new(SqlTypeKind::RegRole),
+            SqlTypeKind::RegNamespace => return SqlType::new(SqlTypeKind::RegNamespace),
             SqlTypeKind::RegOperator => return SqlType::new(SqlTypeKind::RegOperator),
             SqlTypeKind::RegProcedure => return SqlType::new(SqlTypeKind::RegProcedure),
             SqlTypeKind::RegConfig => return SqlType::new(SqlTypeKind::RegConfig),
@@ -389,6 +396,9 @@ pub(super) fn coerce_unknown_string_literal_type(
                 }
                 SqlTypeKind::RegRole => {
                     return SqlType::array_of(SqlType::new(SqlTypeKind::RegRole));
+                }
+                SqlTypeKind::RegNamespace => {
+                    return SqlType::array_of(SqlType::new(SqlTypeKind::RegNamespace));
                 }
                 SqlTypeKind::RegOperator => {
                     return SqlType::array_of(SqlType::new(SqlTypeKind::RegOperator));
