@@ -18,7 +18,7 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::datum::ArrayValue;
 use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, PlannerInfo, RestrictInfo};
-use crate::include::nodes::plannodes::PlanEstimate;
+use crate::include::nodes::plannodes::{IndexScanKey, IndexScanKeyArgument, PlanEstimate};
 use crate::include::nodes::primnodes::SetReturningCall;
 use crate::include::nodes::primnodes::{
     BoolExprType, BuiltinScalarFunction, Expr, JoinType, OpExprKind, OrderByEntry,
@@ -26,7 +26,7 @@ use crate::include::nodes::primnodes::{
     set_returning_call_exprs,
 };
 
-use super::super::pathnodes::slot_output_target;
+use super::super::pathnodes::{expr_sql_type, slot_output_target};
 use super::super::{
     AccessCandidate, CPU_INDEX_TUPLE_COST, CPU_OPERATOR_COST, CPU_TUPLE_COST, DEFAULT_BOOL_SEL,
     DEFAULT_EQ_SEL, DEFAULT_INEQ_SEL, DEFAULT_NUM_PAGES, DEFAULT_NUM_ROWS, HashJoinClauses,
@@ -2774,6 +2774,45 @@ fn value_type_oid(value: &Value) -> Option<u32> {
     value.sql_type_hint().map(sql_type_oid)
 }
 
+fn index_argument_type_oid(argument: &IndexScanKeyArgument) -> Option<u32> {
+    match argument {
+        IndexScanKeyArgument::Const(value) => value_type_oid(value),
+        IndexScanKeyArgument::Runtime(expr) => Some(sql_type_oid(expr_sql_type(expr))),
+    }
+}
+
+fn index_key_argument(expr: &Expr) -> Option<IndexScanKeyArgument> {
+    if let Some(value) = const_argument(expr) {
+        return Some(IndexScanKeyArgument::Const(value));
+    }
+    (runtime_index_argument_expr(expr) && expr_contains_runtime_input(expr))
+        .then(|| IndexScanKeyArgument::Runtime(expr.clone()))
+}
+
+fn runtime_index_argument_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Const(_) | Expr::Param(_) => true,
+        Expr::Var(var) => var.varlevelsup > 0,
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            runtime_index_argument_expr(inner)
+        }
+        Expr::Op(op) => op.args.iter().all(runtime_index_argument_expr),
+        _ => false,
+    }
+}
+
+fn expr_contains_runtime_input(expr: &Expr) -> bool {
+    match expr {
+        Expr::Var(var) => var.varlevelsup > 0,
+        Expr::Param(_) => true,
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            expr_contains_runtime_input(inner)
+        }
+        Expr::Op(op) => op.args.iter().any(expr_contains_runtime_input),
+        _ => false,
+    }
+}
+
 fn gist_ordering_operator_oid(
     operator_proc_oid: u32,
     left_type_oid: u32,
@@ -2831,10 +2870,16 @@ fn qual_strategy(
     index_pos: usize,
     qual: &IndexableQual,
 ) -> Option<u16> {
+    if is_gist_like_am(index.index_meta.am_oid)
+        && !matches!(qual.argument, IndexScanKeyArgument::Const(_))
+    {
+        return None;
+    }
+    let argument_type_oid = index_argument_type_oid(&qual.argument);
     match qual.lookup {
         super::super::IndexStrategyLookup::Operator { oid, kind } => index
             .index_meta
-            .amop_strategy_for_operator(&index.desc, index_pos, oid, value_type_oid(&qual.argument))
+            .amop_strategy_for_operator(&index.desc, index_pos, oid, argument_type_oid)
             .or_else(|| {
                 (index.index_meta.am_oid == BTREE_AM_OID || index.index_meta.am_oid == BRIN_AM_OID)
                     .then(|| btree_builtin_strategy(kind))
@@ -2842,15 +2887,11 @@ fn qual_strategy(
             }),
         super::super::IndexStrategyLookup::Proc(proc_oid) => index
             .index_meta
-            .amop_strategy_for_proc(
-                &index.desc,
-                index_pos,
-                proc_oid,
-                value_type_oid(&qual.argument),
-            )
+            .amop_strategy_for_proc(&index.desc, index_pos, proc_oid, argument_type_oid)
             .or_else(|| {
+                let argument = qual.argument.as_const()?;
                 (index.index_meta.am_oid == GIST_AM_OID)
-                    .then(|| gist_builtin_strategy(proc_oid, &qual.argument))
+                    .then(|| gist_builtin_strategy(proc_oid, argument))
                     .flatten()
             }),
     }
@@ -2859,11 +2900,7 @@ fn qual_strategy(
 fn build_btree_index_keys(
     index: &BoundIndexRelation,
     parsed_quals: &[IndexableQual],
-) -> (
-    Vec<crate::include::access::scankey::ScanKeyData>,
-    Vec<usize>,
-    usize,
-) {
+) -> (Vec<IndexScanKey>, Vec<usize>, usize) {
     let mut used = vec![false; parsed_quals.len()];
     let mut used_qual_indexes = Vec::new();
     let mut keys = Vec::new();
@@ -2885,11 +2922,11 @@ fn build_btree_index_keys(
             used[qual_idx] = true;
             used_qual_indexes.push(qual_idx);
             equality_prefix += 1;
-            keys.push(crate::include::access::scankey::ScanKeyData {
-                attribute_number: (index_pos + 1) as i16,
+            keys.push(IndexScanKey::new(
+                (index_pos + 1) as i16,
                 strategy,
                 argument,
-            });
+            ));
             continue;
         }
         if let Some((qual_idx, strategy, argument)) =
@@ -2903,11 +2940,11 @@ fn build_btree_index_keys(
         {
             used[qual_idx] = true;
             used_qual_indexes.push(qual_idx);
-            keys.push(crate::include::access::scankey::ScanKeyData {
-                attribute_number: (index_pos + 1) as i16,
+            keys.push(IndexScanKey::new(
+                (index_pos + 1) as i16,
                 strategy,
                 argument,
-            });
+            ));
         }
         break;
     }
@@ -2918,10 +2955,7 @@ fn build_btree_index_keys(
 fn build_gist_index_keys(
     index: &BoundIndexRelation,
     parsed_quals: &[IndexableQual],
-) -> (
-    Vec<crate::include::access::scankey::ScanKeyData>,
-    Vec<usize>,
-) {
+) -> (Vec<IndexScanKey>, Vec<usize>) {
     let mut used_qual_indexes = Vec::new();
     let keys = parsed_quals
         .iter()
@@ -2935,11 +2969,11 @@ fn build_gist_index_keys(
                         .map(|strategy| (index_pos, strategy))
                 })?;
             used_qual_indexes.push(qual_idx);
-            Some(crate::include::access::scankey::ScanKeyData {
-                attribute_number: (index_pos + 1) as i16,
+            Some(IndexScanKey::new(
+                (index_pos + 1) as i16,
                 strategy,
-                argument: qual.argument.clone(),
-            })
+                qual.argument.clone(),
+            ))
         })
         .collect();
     (keys, used_qual_indexes)
@@ -2948,10 +2982,7 @@ fn build_gist_index_keys(
 fn build_brin_index_keys(
     index: &BoundIndexRelation,
     parsed_quals: &[IndexableQual],
-) -> (
-    Vec<crate::include::access::scankey::ScanKeyData>,
-    Vec<usize>,
-) {
+) -> (Vec<IndexScanKey>, Vec<usize>) {
     let mut used_qual_indexes = Vec::new();
     let keys = parsed_quals
         .iter()
@@ -2965,11 +2996,11 @@ fn build_brin_index_keys(
                         .map(|strategy| (index_pos, strategy))
                 })?;
             used_qual_indexes.push(qual_idx);
-            Some(crate::include::access::scankey::ScanKeyData {
-                attribute_number: (index_pos + 1) as i16,
+            Some(IndexScanKey::new(
+                (index_pos + 1) as i16,
                 strategy,
-                argument: qual.argument.clone(),
-            })
+                qual.argument.clone(),
+            ))
         })
         .collect();
     (keys, used_qual_indexes)
@@ -2979,7 +3010,7 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
     fn mk(
         column: usize,
         lookup: super::super::IndexStrategyLookup,
-        argument: Value,
+        argument: IndexScanKeyArgument,
         expr: &Expr,
     ) -> Option<IndexableQual> {
         Some(IndexableQual {
@@ -2994,19 +3025,21 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
         Expr::Op(op) if op.args.len() == 2 => {
             let left = strip_casts(&op.args[0]);
             let right = &op.args[1];
-            if let (Some(column), Some(value)) = (expr_column_index(left), const_argument(right)) {
+            if let (Some(column), Some(argument)) =
+                (expr_column_index(left), index_key_argument(right))
+            {
                 return mk(
                     column,
                     super::super::IndexStrategyLookup::Operator {
                         oid: op.opno,
                         kind: op.op,
                     },
-                    value,
+                    argument,
                     expr,
                 );
             }
-            if let (Some(value), Some(column)) = (
-                const_argument(&op.args[0]),
+            if let (Some(argument), Some(column)) = (
+                index_key_argument(&op.args[0]),
                 expr_column_index(strip_casts(&op.args[1])),
             ) {
                 return mk(
@@ -3015,7 +3048,7 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
                         oid: operator_commutator_oid(op.opno).unwrap_or(0),
                         kind: commuted_op_expr_kind(op.op)?,
                     },
-                    value,
+                    argument,
                     expr,
                 );
             }
@@ -3024,16 +3057,18 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
         Expr::Func(func) if func.args.len() == 2 => {
             let left = strip_casts(&func.args[0]);
             let right = &func.args[1];
-            if let (Some(column), Some(value)) = (expr_column_index(left), const_argument(right)) {
+            if let (Some(column), Some(argument)) =
+                (expr_column_index(left), index_key_argument(right))
+            {
                 return mk(
                     column,
                     super::super::IndexStrategyLookup::Proc(func.funcid),
-                    value,
+                    argument,
                     expr,
                 );
             }
-            if let (Some(value), Some(column)) = (
-                const_argument(&func.args[0]),
+            if let (Some(argument), Some(column)) = (
+                index_key_argument(&func.args[0]),
                 expr_column_index(strip_casts(&func.args[1])),
             ) {
                 return mk(
@@ -3041,7 +3076,7 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
                     super::super::IndexStrategyLookup::Proc(commuted_function_proc_oid(
                         func.funcid,
                     )?),
-                    value,
+                    argument,
                     expr,
                 );
             }
@@ -3103,7 +3138,7 @@ fn gist_order_match(
     items: &[OrderByEntry],
     index: &BoundIndexRelation,
 ) -> (
-    Vec<crate::include::access::scankey::ScanKeyData>,
+    Vec<IndexScanKey>,
     Option<(usize, crate::include::access::relscan::ScanDirection)>,
 ) {
     if items.is_empty() || !is_gist_like_am(index.index_meta.am_oid) {
@@ -3162,11 +3197,11 @@ fn gist_order_match(
         else {
             return (Vec::new(), None);
         };
-        keys.push(crate::include::access::scankey::ScanKeyData {
-            attribute_number: (index_pos + 1) as i16,
+        keys.push(IndexScanKey::const_value(
+            (index_pos + 1) as i16,
             strategy,
             argument,
-        });
+        ));
     }
     (
         keys,

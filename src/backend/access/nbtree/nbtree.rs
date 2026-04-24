@@ -1007,6 +1007,60 @@ fn scan_positioning_prefix(keys: &[ScanKeyData], direction: ScanDirection) -> Ve
     prefix
 }
 
+fn exact_equality_prefix(keys: &[ScanKeyData], indoption: &[i16]) -> Vec<Value> {
+    let mut prefix = Vec::new();
+    let mut expected_attno = 1i16;
+    for key in preprocess_scan_keys(keys) {
+        if key.strategy != 3 || key.attribute_number != expected_attno {
+            return Vec::new();
+        }
+        let index = key.attribute_number.saturating_sub(1) as usize;
+        if indoption
+            .get(index)
+            .is_some_and(|option| option & BT_DESC_FLAG != 0)
+        {
+            return Vec::new();
+        }
+        prefix.push(key.argument);
+        expected_attno += 1;
+    }
+    prefix
+}
+
+fn tuple_prefix_cmp(
+    desc: &RelationDesc,
+    tuple: &IndexTupleData,
+    target: &[Value],
+) -> Result<Ordering, CatalogError> {
+    let values = tuple_key_values(desc, tuple)?;
+    let prefix_len = target.len().min(values.len());
+    Ok(compare_key_arrays(&values[..prefix_len], target))
+}
+
+fn empty_leaf_exhausts_exact_equality_scan(
+    scan: &IndexScanDesc,
+    items: &[IndexTupleData],
+) -> Result<bool, CatalogError> {
+    let target = exact_equality_prefix(&scan.key_data, &scan.indoption);
+    if target.is_empty() || items.is_empty() {
+        return Ok(false);
+    }
+    match scan.direction {
+        ScanDirection::Forward => {
+            let last = items
+                .last()
+                .expect("items is not empty when checking equality scan bounds");
+            Ok(tuple_prefix_cmp(&scan.index_desc, last, &target)? != Ordering::Less)
+        }
+        ScanDirection::Backward => {
+            let first = items
+                .first()
+                .expect("items is not empty when checking equality scan bounds");
+            Ok(tuple_prefix_cmp(&scan.index_desc, first, &target)? != Ordering::Greater)
+        }
+    }
+}
+
 fn read_page_items(
     pool: &crate::BufferPool<crate::SmgrStorageBackend>,
     rel: RelFileLocator,
@@ -1465,6 +1519,7 @@ fn load_leaf_items(scan: &mut IndexScanDesc) -> Result<bool, CatalogError> {
     let items = bt_page_data_items(&guard)
         .map_err(|err| CatalogError::Io(format!("btree page parse failed: {err:?}")))?;
     drop(guard);
+    let stop_after_empty = empty_leaf_exhausts_exact_equality_scan(scan, &items)?;
     let filtered = items
         .into_iter()
         .filter(|tuple| {
@@ -1485,9 +1540,13 @@ fn load_leaf_items(scan: &mut IndexScanDesc) -> Result<bool, CatalogError> {
     };
     if state.current_items.is_empty() {
         state.current_pin = None;
-        state.current_block = match scan.direction {
-            ScanDirection::Forward => state.page_next,
-            ScanDirection::Backward => state.page_prev,
+        state.current_block = if stop_after_empty {
+            None
+        } else {
+            match scan.direction {
+                ScanDirection::Forward => state.page_next,
+                ScanDirection::Backward => state.page_prev,
+            }
         };
     }
     Ok(true)

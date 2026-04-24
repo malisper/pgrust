@@ -5,9 +5,8 @@ use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::htup::{AttributeDesc, HeapTuple, ItemPointerData};
 use crate::include::access::relscan::IndexScanDesc;
 use crate::include::access::relscan::ScanDirection;
-use crate::include::access::scankey::ScanKeyData;
 use crate::include::access::tidbitmap::TidBitmap;
-use crate::include::nodes::plannodes::PlanEstimate;
+use crate::include::nodes::plannodes::{IndexScanKey, PlanEstimate};
 use crate::include::storage::buf_internals::BufferUsageStats;
 use crate::{BufferPool, ClientId, OwnedBufferPin, RelFileLocator, SmgrStorageBackend};
 use parking_lot::RwLock;
@@ -350,10 +349,11 @@ pub struct IndexScanState {
     pub(crate) index_desc: Rc<RelationDesc>,
     pub(crate) attr_descs: Rc<[AttributeDesc]>,
     pub(crate) index_meta: IndexRelCacheEntry,
-    pub(crate) keys: Vec<ScanKeyData>,
-    pub(crate) order_by_keys: Vec<ScanKeyData>,
+    pub(crate) keys: Vec<IndexScanKey>,
+    pub(crate) order_by_keys: Vec<IndexScanKey>,
     pub(crate) direction: ScanDirection,
     pub(crate) scan: Option<IndexScanDesc>,
+    pub(crate) scan_exhausted: bool,
     pub(crate) slot: TupleSlot,
     pub(crate) source_id: usize,
     pub(crate) relation_oid: u32,
@@ -381,7 +381,7 @@ pub struct BitmapIndexScanState {
     pub(crate) column_names: Vec<String>,
     pub(crate) index_desc: Rc<RelationDesc>,
     pub(crate) index_meta: IndexRelCacheEntry,
-    pub(crate) keys: Vec<ScanKeyData>,
+    pub(crate) keys: Vec<IndexScanKey>,
     pub(crate) index_quals: Vec<Expr>,
     pub(crate) bitmap: TidBitmap,
     pub(crate) executed: bool,
