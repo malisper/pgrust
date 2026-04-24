@@ -19974,6 +19974,47 @@ fn temp_tables_are_removed_on_client_cleanup() {
 }
 
 #[test]
+fn recovery_skips_stale_temp_sequence_state_until_namespace_cleanup() {
+    let base = temp_dir("temp_sequence_recovery_cleanup");
+    {
+        let db = Database::open(&base, 16).unwrap();
+        db.execute(1, "create temp sequence ts1").unwrap();
+        assert_eq!(
+            query_rows(
+                &db,
+                1,
+                "select count(*) from pg_class where relname = 'ts1' and relkind = 'S' and relpersistence = 't'",
+            ),
+            vec![vec![Value::Int64(1)]]
+        );
+    }
+
+    let db = Database::open(&base, 16).unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_class where relname = 'ts1' and relkind = 'S' and relpersistence = 't'",
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    db.execute(1, "create temp sequence ts2").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relname from pg_class where relkind = 'S' and relpersistence = 't' order by relname",
+        ),
+        vec![vec![Value::Text("ts2".into())]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select nextval('ts2')"),
+        vec![vec![Value::Int64(1)]]
+    );
+}
+
+#[test]
 fn temp_cleanup_keeps_namespace_rows_and_permanent_catalogs_visible() {
     let base = temp_dir("temp_cleanup_keeps_namespace");
     let db = Database::open(&base, 16).unwrap();
