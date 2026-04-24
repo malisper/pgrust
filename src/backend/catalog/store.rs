@@ -250,6 +250,7 @@ mod tests {
             pool,
             txns,
             txn_waiter: None,
+            lock_status_provider: None,
             sequences: Some(Arc::new(
                 crate::pgrust::database::SequenceRuntime::new_ephemeral(),
             )),

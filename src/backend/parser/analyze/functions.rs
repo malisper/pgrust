@@ -30,6 +30,7 @@ pub(super) enum ResolvedSrfImpl {
     Unnest,
     PartitionTree,
     PartitionAncestors,
+    PgLockStatus,
     JsonTable(JsonTableFunction),
     RegexTable(RegexTableFunction),
     StringTable(StringTableFunction),
@@ -260,6 +261,7 @@ fn builtin_srf_impl_for_proc_row(row: &PgProcRow) -> Option<ResolvedSrfImpl> {
         "unnest" => Some(ResolvedSrfImpl::Unnest),
         "pg_partition_tree" => Some(ResolvedSrfImpl::PartitionTree),
         "pg_partition_ancestors" => Some(ResolvedSrfImpl::PartitionAncestors),
+        "pg_lock_status" => Some(ResolvedSrfImpl::PgLockStatus),
         other => resolve_json_table_function(other)
             .map(ResolvedSrfImpl::JsonTable)
             .or_else(|| resolve_regex_table_function(other).map(ResolvedSrfImpl::RegexTable))

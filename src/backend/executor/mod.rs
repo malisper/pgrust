@@ -182,6 +182,10 @@ impl DeferredForeignKeyTracker {
     }
 }
 
+pub trait LockStatusProvider: Send + Sync {
+    fn pg_lock_status_rows(&self, current_client_id: ClientId) -> Vec<Vec<Value>>;
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SessionReplicationRole {
     #[default]
@@ -194,6 +198,7 @@ pub struct ExecutorContext {
     pub pool: std::sync::Arc<BufferPool<SmgrStorageBackend>>,
     pub txns: std::sync::Arc<parking_lot::RwLock<TransactionManager>>,
     pub txn_waiter: Option<std::sync::Arc<TransactionWaiter>>,
+    pub lock_status_provider: Option<std::sync::Arc<dyn LockStatusProvider>>,
     pub sequences: Option<std::sync::Arc<SequenceRuntime>>,
     pub large_objects: Option<std::sync::Arc<LargeObjectRuntime>>,
     pub async_notify_runtime: Option<std::sync::Arc<AsyncNotifyRuntime>>,
@@ -279,6 +284,9 @@ impl ExecutorContext {
             None => {
                 let xid = self.txns.write().begin();
                 state.xid = Some(xid);
+                if let Some(waiter) = &self.txn_waiter {
+                    waiter.register_holder(xid, self.client_id);
+                }
                 xid
             }
         };

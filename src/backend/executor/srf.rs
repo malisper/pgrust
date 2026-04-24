@@ -56,6 +56,7 @@ pub(crate) fn eval_set_returning_call(
         SetReturningCall::PartitionAncestors { relid, .. } => {
             eval_partition_ancestors(relid, slot, ctx)
         }
+        SetReturningCall::PgLockStatus { .. } => eval_pg_lock_status(ctx),
         SetReturningCall::TextSearchTableFunction { .. } => Err(ExecError::Parse(
             crate::backend::parser::ParseError::UnexpectedToken {
                 expected: "implemented text search table function",
@@ -157,6 +158,7 @@ pub(crate) fn set_returning_call_label(call: &SetReturningCall) -> &'static str 
         },
         SetReturningCall::PartitionTree { .. } => "pg_partition_tree",
         SetReturningCall::PartitionAncestors { .. } => "pg_partition_ancestors",
+        SetReturningCall::PgLockStatus { .. } => "pg_lock_status",
         SetReturningCall::TextSearchTableFunction { kind, .. } => match kind {
             crate::include::nodes::primnodes::TextSearchTableFunction::TokenType => "ts_token_type",
             crate::include::nodes::primnodes::TextSearchTableFunction::Parse => "ts_parse",
@@ -164,6 +166,17 @@ pub(crate) fn set_returning_call_label(call: &SetReturningCall) -> &'static str 
         },
         SetReturningCall::UserDefined { .. } => "user_defined_srf",
     }
+}
+
+fn eval_pg_lock_status(ctx: &ExecutorContext) -> Result<Vec<TupleSlot>, ExecError> {
+    Ok(ctx
+        .lock_status_provider
+        .as_ref()
+        .map(|provider| provider.pg_lock_status_rows(ctx.client_id))
+        .unwrap_or_default()
+        .into_iter()
+        .map(TupleSlot::virtual_row)
+        .collect())
 }
 
 fn eval_regex_table_function(

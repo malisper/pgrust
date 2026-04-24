@@ -688,6 +688,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         pool: test_pool(base),
         txns: std::sync::Arc::new(parking_lot::RwLock::new(txns)),
         txn_waiter: None,
+        lock_status_provider: None,
         sequences: Some(std::sync::Arc::new(
             crate::pgrust::database::SequenceRuntime::new_ephemeral(),
         )),
@@ -752,6 +753,7 @@ fn run_plan(
         pool,
         txns: txns_arc,
         txn_waiter: None,
+        lock_status_provider: None,
         sequences: Some(std::sync::Arc::new(
             crate::pgrust::database::SequenceRuntime::new_ephemeral(),
         )),
@@ -854,6 +856,7 @@ fn run_sql_with_catalog(
             pool,
             txns: txns_arc,
             txn_waiter: None,
+            lock_status_provider: None,
             sequences: Some(std::sync::Arc::new(
                 crate::pgrust::database::SequenceRuntime::new_ephemeral(),
             )),
@@ -7914,6 +7917,7 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         pool,
         txns: txns_arc,
         txn_waiter: None,
+        lock_status_provider: None,
         sequences: Some(std::sync::Arc::new(
             crate::pgrust::database::SequenceRuntime::new_ephemeral(),
         )),
@@ -18360,6 +18364,7 @@ fn large_object_metadata_tracks_create_and_unlink() {
             pool,
             txns: txns_arc,
             txn_waiter: None,
+            lock_status_provider: None,
             sequences: Some(std::sync::Arc::new(
                 crate::pgrust::database::SequenceRuntime::new_ephemeral(),
             )),

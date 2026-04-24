@@ -209,6 +209,7 @@ pub(crate) fn validate_deferred_foreign_key_constraints(
         pool: db.pool.clone(),
         txns: db.txns.clone(),
         txn_waiter: Some(db.txn_waiter.clone()),
+        lock_status_provider: Some(Arc::new(db.clone())),
         sequences: Some(db.sequences.clone()),
         large_objects: Some(db.large_objects.clone()),
         async_notify_runtime: Some(db.async_notify_runtime.clone()),

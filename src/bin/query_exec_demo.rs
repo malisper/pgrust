@@ -205,6 +205,7 @@ fn main() -> Result<(), ExecError> {
         pool: std::sync::Arc::clone(&pool),
         txns: txns.clone(),
         txn_waiter: None,
+        lock_status_provider: None,
         sequences: None,
         large_objects: None,
         async_notify_runtime: None,

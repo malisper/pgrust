@@ -120,6 +120,7 @@ fn toast_executor_context(
         pool: db.pool.clone(),
         txns: db.txns.clone(),
         txn_waiter: Some(db.txn_waiter.clone()),
+        lock_status_provider: Some(std::sync::Arc::new(db.clone())),
         sequences: Some(db.sequences.clone()),
         large_objects: Some(db.large_objects.clone()),
         async_notify_runtime: Some(db.async_notify_runtime.clone()),

@@ -1895,6 +1895,7 @@ fn set_returning_call_uses_immediate_outer_columns(call: &SetReturningCall) -> b
         | SetReturningCall::PartitionAncestors { relid, .. } => {
             expr_uses_immediate_outer_columns(relid)
         }
+        SetReturningCall::PgLockStatus { .. } => false,
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }
