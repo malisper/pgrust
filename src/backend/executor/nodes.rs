@@ -25,6 +25,7 @@ use crate::backend::storage::smgr::ForkNumber;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::time::date::format_date_text;
 use crate::backend::utils::time::instant::Instant;
+use crate::include::access::scankey::ScanKeyData;
 use crate::include::catalog::PG_LARGEOBJECT_METADATA_RELATION_OID;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
@@ -35,9 +36,10 @@ use crate::include::nodes::execnodes::{
     SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot, ValuesState, WindowAggState,
     WorkTableScanState,
 };
+use crate::include::nodes::plannodes::{IndexScanKey, IndexScanKeyArgument};
 use crate::include::nodes::primnodes::{
-    BuiltinScalarFunction, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR, RelationDesc,
-    ScalarFunctionImpl, Var, attrno_index,
+    BuiltinScalarFunction, Expr, FuncExpr, INDEX_VAR, INNER_VAR, JoinType, OUTER_VAR, ParamKind,
+    RelationDesc, ScalarFunctionImpl, Var, attrno_index,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashSet};
@@ -318,6 +320,38 @@ fn bitmap_am_error(operation: &'static str, err: impl std::fmt::Debug) -> ExecEr
         expected: operation,
         actual: format!("{err:?}"),
     })
+}
+
+fn eval_index_scan_key_argument(
+    argument: &IndexScanKeyArgument,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    let value = match argument {
+        IndexScanKeyArgument::Const(value) => value.clone(),
+        IndexScanKeyArgument::Runtime(expr) => eval_expr(expr, slot, ctx)?,
+    };
+    Ok(value.to_owned_value())
+}
+
+fn eval_index_scan_keys(
+    keys: &[IndexScanKey],
+    ctx: &mut ExecutorContext,
+    null_short_circuits: bool,
+) -> Result<Option<Vec<ScanKeyData>>, ExecError> {
+    let mut slot = TupleSlot::empty(0);
+    let mut scan_keys = Vec::with_capacity(keys.len());
+    for key in keys {
+        let argument = eval_index_scan_key_argument(&key.argument, &mut slot, ctx)?;
+        if null_short_circuits
+            && matches!(key.argument, IndexScanKeyArgument::Runtime(_))
+            && matches!(argument, Value::Null)
+        {
+            return Ok(None);
+        }
+        scan_keys.push(key.to_scan_key(argument));
+    }
+    Ok(Some(scan_keys))
 }
 
 fn collect_visible_page_offsets(
@@ -803,7 +837,23 @@ impl PlanNode for IndexScanState {
         &'a mut self,
         ctx: &mut ExecutorContext,
     ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        if self.scan_exhausted {
+            finish_eof(&mut self.stats, start, ctx);
+            return Ok(None);
+        }
         if self.scan.is_none() {
+            let Some(key_data) = eval_index_scan_keys(&self.keys, ctx, true)? else {
+                self.scan_exhausted = true;
+                finish_eof(&mut self.stats, start, ctx);
+                return Ok(None);
+            };
+            let order_by_data =
+                eval_index_scan_keys(&self.order_by_keys, ctx, false)?.unwrap_or_default();
             let begin = crate::include::access::amapi::IndexBeginScanContext {
                 pool: ctx.pool.clone(),
                 client_id: ctx.client_id,
@@ -812,8 +862,8 @@ impl PlanNode for IndexScanState {
                 index_relation: self.index_rel,
                 index_desc: (*self.index_desc).clone(),
                 index_meta: self.index_meta.clone(),
-                key_data: self.keys.clone(),
-                order_by_data: self.order_by_keys.clone(),
+                key_data,
+                order_by_data,
                 direction: self.direction,
                 want_itup: false,
             };
@@ -829,12 +879,6 @@ impl PlanNode for IndexScanState {
             session_stats.note_relation_scan(self.index_meta.indexrelid);
             session_stats.note_io_read("client backend", "relation", "normal", 8192);
         }
-
-        let start = if ctx.timed {
-            Some(Instant::now())
-        } else {
-            None
-        };
 
         loop {
             ctx.check_for_interrupts()?;
@@ -856,6 +900,7 @@ impl PlanNode for IndexScanState {
                         })
                     })?;
                 }
+                self.scan_exhausted = true;
                 finish_eof(&mut self.stats, start, ctx);
                 return Ok(None);
             }
@@ -970,7 +1015,7 @@ impl PlanNode for IndexScanState {
 }
 
 fn render_index_scan_key(
-    key: &crate::include::access::scankey::ScanKeyData,
+    key: &IndexScanKey,
     desc: &RelationDesc,
     index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
 ) -> Option<String> {
@@ -979,10 +1024,15 @@ fn render_index_scan_key(
         .ok()?
         .checked_sub(1)?;
     let column_name = desc.columns.get(heap_attno)?.name.clone();
-    let right_type_oid = key
-        .argument
-        .sql_type_hint()
-        .map(crate::backend::utils::cache::catcache::sql_type_oid);
+    let right_type_oid = match &key.argument {
+        IndexScanKeyArgument::Const(value) => value
+            .sql_type_hint()
+            .map(crate::backend::utils::cache::catcache::sql_type_oid),
+        IndexScanKeyArgument::Runtime(expr) => {
+            crate::include::nodes::primnodes::expr_sql_type_hint(expr)
+                .map(crate::backend::utils::cache::catcache::sql_type_oid)
+        }
+    };
     let operator = index_meta
         .amop_entries
         .get(index_attno)?
@@ -1009,16 +1059,19 @@ fn render_index_scan_key(
         .find(|row| row.oid == operator.operator_oid)
         .map(|row| row.oprname)
         .unwrap_or_else(|| format!("op{}", operator.operator_oid));
-    let value_sql = match right_type_oid {
-        Some(_type_oid) => {
-            let sql_type = key.argument.sql_type_hint()?;
-            format!(
-                "{}::{}",
-                render_explain_literal(&key.argument),
-                render_explain_sql_type_name(sql_type)
-            )
-        }
-        None => render_explain_literal(&key.argument),
+    let value_sql = match &key.argument {
+        IndexScanKeyArgument::Const(value) => match right_type_oid {
+            Some(_type_oid) => {
+                let sql_type = value.sql_type_hint()?;
+                format!(
+                    "{}::{}",
+                    render_explain_literal(value),
+                    render_explain_sql_type_name(sql_type)
+                )
+            }
+            None => render_explain_literal(value),
+        },
+        IndexScanKeyArgument::Runtime(expr) => render_explain_expr(expr, &[]),
     };
     Some(format!("{column_name} {operator_name} {value_sql}"))
 }
@@ -1036,6 +1089,12 @@ impl BitmapIndexScanState {
         };
         begin_node(&mut self.stats, ctx);
 
+        let Some(key_data) = eval_index_scan_keys(&self.keys, ctx, true)? else {
+            self.executed = true;
+            self.stats.rows = 0;
+            finish_eof(&mut self.stats, start, ctx);
+            return Ok(());
+        };
         let begin = crate::include::access::amapi::IndexBeginScanContext {
             pool: ctx.pool.clone(),
             client_id: ctx.client_id,
@@ -1044,7 +1103,7 @@ impl BitmapIndexScanState {
             index_relation: self.index_rel,
             index_desc: (*self.index_desc).clone(),
             index_meta: self.index_meta.clone(),
-            key_data: self.keys.clone(),
+            key_data,
             order_by_data: Vec::new(),
             direction: crate::include::access::relscan::ScanDirection::Forward,
             want_itup: false,
@@ -1415,6 +1474,9 @@ fn render_explain_expr_inner_with_qualifier(
                 None => name,
             })
             .unwrap_or_else(|| format!("{expr:?}")),
+        Expr::Param(param) if param.paramkind == ParamKind::Exec => {
+            format!("${}", param.paramid)
+        }
         Expr::Const(value) => render_explain_const(value),
         Expr::Cast(inner, ty) => render_explain_cast(inner, *ty, qualifier, column_names),
         Expr::Op(op) => match op.op {

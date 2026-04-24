@@ -1,10 +1,9 @@
 use crate::RelFileLocator;
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::relscan::ScanDirection;
-use crate::include::access::scankey::ScanKeyData;
 use crate::include::nodes::parsenodes::SetOperator;
 use crate::include::nodes::parsenodes::{Query, QueryRowMark, RangeTblEntry, RangeTblEntryKind};
-use crate::include::nodes::plannodes::PlanEstimate;
+use crate::include::nodes::plannodes::{IndexScanKey, PlanEstimate};
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, JoinType, OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc,
     SetReturningCall, SortGroupClause, TargetEntry, ToastRelationRef, Var, WindowClause,
@@ -379,8 +378,8 @@ pub enum Path {
         desc: RelationDesc,
         index_desc: RelationDesc,
         index_meta: IndexRelCacheEntry,
-        keys: Vec<ScanKeyData>,
-        order_by_keys: Vec<ScanKeyData>,
+        keys: Vec<IndexScanKey>,
+        order_by_keys: Vec<IndexScanKey>,
         direction: ScanDirection,
         pathkeys: Vec<PathKey>,
     },
@@ -395,7 +394,7 @@ pub enum Path {
         desc: RelationDesc,
         index_desc: RelationDesc,
         index_meta: IndexRelCacheEntry,
-        keys: Vec<ScanKeyData>,
+        keys: Vec<IndexScanKey>,
         index_quals: Vec<Expr>,
     },
     BitmapHeapScan {

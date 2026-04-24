@@ -10,7 +10,7 @@ use crate::include::nodes::datum::Value;
 use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerInfo, RelOptInfo, RelOptKind,
 };
-use crate::include::nodes::plannodes::{Plan, PlanEstimate};
+use crate::include::nodes::plannodes::{IndexScanKeyArgument, Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     Aggref, AttrNumber, Expr, INNER_VAR, JoinType, OUTER_VAR, OpExpr, OpExprKind, OrderByEntry,
     Param, ParamKind, QueryColumn, RelationDesc, TargetEntry, Var, WindowFrameBound, user_attrno,
@@ -1489,6 +1489,43 @@ fn planner_rewrites_correlated_min_with_index_subplan() {
         plan_contains(subplan, |plan| matches!(plan, Plan::Limit { .. }))
             && plan_contains(subplan, |plan| matches!(plan, Plan::IndexScan { .. }))
     }));
+}
+
+#[test]
+fn planner_uses_runtime_index_key_for_correlated_limit_subplan() {
+    fn contains_exec_param(expr: &Expr) -> bool {
+        match expr {
+            Expr::Param(Param {
+                paramkind: ParamKind::Exec,
+                ..
+            }) => true,
+            Expr::Op(op) => op.args.iter().any(contains_exec_param),
+            Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => contains_exec_param(inner),
+            _ => false,
+        }
+    }
+
+    let catalog = catalog_with_indexed_items();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select o.id, (select i.id from items i where i.id = o.id + 1 limit 1) from items o",
+        &catalog,
+    );
+
+    assert!(planned.subplans.iter().any(|subplan| {
+        plan_contains(subplan, |plan| matches!(plan, Plan::Limit { .. }))
+            && plan_contains(subplan, |plan| match plan {
+                Plan::IndexScan { keys, .. } => keys.iter().any(|key| {
+                    matches!(
+                        &key.argument,
+                        IndexScanKeyArgument::Runtime(expr) if contains_exec_param(expr)
+                    )
+                }),
+                _ => false,
+            })
+    }));
+    for subplan in &planned.subplans {
+        super::setrefs::validate_executable_plan_for_tests(subplan);
+    }
 }
 
 #[test]

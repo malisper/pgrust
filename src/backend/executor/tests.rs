@@ -16924,6 +16924,87 @@ fn scalar_subquery_multiple_rows_errors() {
 }
 
 #[test]
+fn correlated_scalar_subquery_runtime_index_key_matches_seqscan_semantics() {
+    let mut harness = SeededSqlHarness::new(
+        "correlated_scalar_subquery_runtime_index_key",
+        Catalog::default(),
+    );
+    harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "create table outer_runtime (id int4, lookup int4)",
+        )
+        .unwrap();
+    harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "create table inner_runtime (id int4, payload int4)",
+        )
+        .unwrap();
+
+    let xid = harness.txns.begin();
+    harness
+        .execute(
+            xid,
+            "insert into outer_runtime values (1, 1), (2, null), (3, 5)",
+        )
+        .unwrap();
+    harness
+        .execute(xid, "insert into inner_runtime values (2, 20), (4, 40)")
+        .unwrap();
+    harness.txns.commit(xid).unwrap();
+    harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "create index inner_runtime_id_idx on inner_runtime (id)",
+        )
+        .unwrap();
+
+    let indexed_rows = match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select o.id,
+                        (select i.payload
+                           from inner_runtime i
+                          where i.id = o.lookup + 1
+                          limit 1)
+                   from outer_runtime o
+                  order by o.id",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => rows,
+        other => panic!("expected indexed query result, got {:?}", other),
+    };
+    let seq_rows = match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "select o.id,
+                        (select i.payload
+                           from inner_runtime i
+                          where i.id + 0 = o.lookup + 1
+                          limit 1)
+                   from outer_runtime o
+                  order by o.id",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => rows,
+        other => panic!("expected seq-scan query result, got {:?}", other),
+    };
+
+    assert_eq!(indexed_rows, seq_rows);
+    assert_eq!(
+        indexed_rows,
+        vec![
+            vec![Value::Int32(1), Value::Int32(20)],
+            vec![Value::Int32(2), Value::Null],
+            vec![Value::Int32(3), Value::Null],
+        ]
+    );
+}
+
+#[test]
 fn exists_and_not_exists_are_correlated_per_row() {
     let mut harness = seed_people_and_pets("exists_correlated_per_row");
     assert_query_rows(
