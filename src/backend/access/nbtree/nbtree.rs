@@ -1504,6 +1504,7 @@ impl IndexScanOpaqueExt for IndexScanOpaque {
             IndexScanOpaque::Gist(_) => None,
             IndexScanOpaque::Spgist(_) => None,
             IndexScanOpaque::Brin(_) => None,
+            IndexScanOpaque::Gin(_) => None,
             IndexScanOpaque::None => None,
         }
     }
@@ -1548,6 +1549,7 @@ fn btgettuple(scan: &mut IndexScanDesc) -> Result<bool, CatalogError> {
             IndexScanOpaque::Gist(_) => true,
             IndexScanOpaque::Spgist(_) => true,
             IndexScanOpaque::Brin(_) => true,
+            IndexScanOpaque::Gin(_) => true,
             IndexScanOpaque::None => true,
         };
         if needs_load {

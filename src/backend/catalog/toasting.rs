@@ -244,6 +244,7 @@ pub fn new_relation_create_toast_table(
             indnullsnotdistinct: false,
             indisexclusion: false,
             brin_options: None,
+            gin_options: None,
         },
     )?;
     let (_index_name, _old_index, index_entry) =

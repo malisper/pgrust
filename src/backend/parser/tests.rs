@@ -750,6 +750,7 @@ fn catalog_with_people_id_index() -> Catalog {
                 indexprs: None,
                 indpred: None,
                 brin_options: None,
+                gin_options: None,
             }),
         },
     );
@@ -811,6 +812,7 @@ fn catalog_with_people_primary_key_opclass(opclass_oid: u32) -> Catalog {
                 indexprs: None,
                 indpred: None,
                 brin_options: None,
+                gin_options: None,
             }),
         },
     );
@@ -901,6 +903,7 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
                 indexprs: None,
                 indpred: Some("(id > 0)".into()),
                 brin_options: None,
+                gin_options: None,
             }),
         },
     );
@@ -959,6 +962,7 @@ fn catalog_with_people_ctid_partial_unique_index() -> Catalog {
                 indexprs: None,
                 indpred: Some("ctid >= '(1000,0)'".into()),
                 brin_options: None,
+                gin_options: None,
             }),
         },
     );
@@ -1017,6 +1021,7 @@ fn catalog_with_people_expression_unique_index() -> Catalog {
                 indexprs: Some(serde_json::to_string(&vec!["lower(name)"]).unwrap()),
                 indpred: None,
                 brin_options: None,
+                gin_options: None,
             }),
         },
     );
@@ -1190,6 +1195,7 @@ fn bind_expression_index_metadata_does_not_discover_heap_indexes() {
                 indexprs: Some(serde_json::to_string(&vec!["a * a"]).unwrap()),
                 indpred: None,
                 brin_options: None,
+                gin_options: None,
             }),
         },
     );
@@ -1256,6 +1262,7 @@ fn catalog_with_people_name_c_collation_index() -> Catalog {
                 indexprs: None,
                 indpred: None,
                 brin_options: None,
+                gin_options: None,
             }),
         },
     );
@@ -1322,6 +1329,7 @@ fn catalog_with_text_parent_primary_key() -> Catalog {
                 indexprs: None,
                 indpred: None,
                 brin_options: None,
+                gin_options: None,
             }),
         },
     );

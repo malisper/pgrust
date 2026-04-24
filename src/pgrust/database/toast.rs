@@ -45,6 +45,7 @@ fn toast_index_relation_from_changes(changes: &ToastCatalogChanges) -> Option<Bo
             rd_indexprs: None,
             rd_indpred: None,
             brin_options: meta.brin_options.clone(),
+            gin_options: meta.gin_options.clone(),
         },
         index_exprs: Vec::new(),
         index_predicate: None,

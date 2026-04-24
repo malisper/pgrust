@@ -11173,6 +11173,96 @@ fn create_brin_index_explain_uses_bitmap_scan_and_recheck() {
 }
 
 #[test]
+fn create_gin_jsonb_index_uses_bitmap_scan_and_rechecks() {
+    let base = temp_dir("gin_jsonb_bitmap_scan");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table docs (id int4 not null, j jsonb)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into docs \
+         select i, \
+                case \
+                  when i % 10 = 0 then '{\"a\":1,\"b\":true}'::jsonb \
+                  when i % 10 = 1 then '{\"a\":1}'::jsonb \
+                  else '{\"c\":2}'::jsonb \
+                end \
+         from generate_series(1, 2000) i",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index docs_j_gin on docs using gin (j) \
+         with (fastupdate = on, gin_pending_list_limit = 64)",
+    )
+    .unwrap();
+    db.execute(1, "analyze docs").unwrap();
+
+    let relfilenode = relfilenode_for(&db, 1, "docs_j_gin");
+    let lines = explain_lines(&db, 1, "select id from docs where j @> '{\"a\":1}'::jsonb");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Bitmap Heap Scan on docs")),
+        "expected Bitmap Heap Scan in EXPLAIN, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains(&format!("Bitmap Index Scan using rel {relfilenode} "))),
+        "expected Bitmap Index Scan on docs_j_gin, got {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line.contains("Recheck Cond:")),
+        "expected GIN Recheck Cond in EXPLAIN, got {lines:?}"
+    );
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from docs where j @> '{\"a\":1}'::jsonb",
+        ),
+        vec![vec![Value::Int64(400)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from docs where j ? 'a'"),
+        vec![vec![Value::Int64(400)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from docs where j ?| array['b','missing']::text[]",
+        ),
+        vec![vec![Value::Int64(200)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from docs where j ?& array['a','b']::text[]",
+        ),
+        vec![vec![Value::Int64(200)]]
+    );
+
+    db.execute(
+        1,
+        "insert into docs values (2001, '{\"a\":1,\"b\":true}'::jsonb)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from docs where j ?& array['a','b']::text[]",
+        ),
+        vec![vec![Value::Int64(201)]]
+    );
+}
+
+#[test]
 fn reopen_brin_index_preserves_pages_per_range_in_catalog() {
     let base = temp_dir("brin_reopen_catalog_options");
 

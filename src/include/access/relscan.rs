@@ -121,6 +121,11 @@ pub struct BrinIndexScanOpaque {
     pub scan_started: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GinIndexScanOpaque {
+    pub scan_started: bool,
+}
+
 #[derive(Debug, Clone)]
 pub enum IndexScanOpaque {
     None,
@@ -128,6 +133,7 @@ pub enum IndexScanOpaque {
     Gist(GistIndexScanOpaque),
     Spgist(SpgistIndexScanOpaque),
     Brin(BrinIndexScanOpaque),
+    Gin(GinIndexScanOpaque),
 }
 
 #[derive(Clone)]
