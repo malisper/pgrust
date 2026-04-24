@@ -11,6 +11,7 @@ cd "$REPO_ROOT"
 # Each git worktree has its own config, so this needs to run once per worktree too.
 git config --local core.hooksPath .githooks
 echo "Set core.hooksPath -> .githooks (pre-commit hook now active for this clone)."
-echo "  - Hook runs 'cargo fmt -- --check' on every commit."
+echo "  - Hook runs 'cargo fmt -- --check' and a content-hygiene check"
+echo "    against scripts/internal/redactions.txt on every commit."
 echo "  - Bypass once: git commit --no-verify"
 echo "  - Opt out:     git config --unset core.hooksPath"
