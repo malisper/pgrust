@@ -7,8 +7,8 @@ use crate::backend::parser::{ParseError, SqlExpr, SqlType, parse_expr, parse_typ
 use crate::include::catalog::RECORD_TYPE_OID;
 
 use super::ast::{
-    AliasDecl, AssignTarget, Block, Decl, ForQuerySource, ForTarget, RaiseLevel, ReturnQueryKind,
-    Stmt, VarDecl,
+    AliasDecl, AliasTarget, AssignTarget, Block, Decl, ForQuerySource, ForTarget, RaiseLevel,
+    ReturnQueryKind, Stmt, VarDecl,
 };
 
 #[derive(Parser)]
@@ -228,29 +228,45 @@ fn build_var_decl(pair: Pair<'_, Rule>) -> Result<VarDecl, ParseError> {
 
 fn build_alias_decl(pair: Pair<'_, Rule>) -> Result<AliasDecl, ParseError> {
     let mut name = None;
-    let mut param_index = None;
+    let mut target = None;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::ident => name = Some(build_ident(part)),
-            Rule::positional_param => {
-                let raw = part.as_str();
-                param_index =
-                    Some(
-                        raw[1..]
-                            .parse::<usize>()
-                            .map_err(|_| ParseError::UnexpectedToken {
-                                expected: "valid positional parameter reference",
-                                actual: raw.into(),
-                            })?,
-                    );
-            }
+            Rule::alias_target => target = Some(build_alias_target(part)?),
             _ => {}
         }
     }
     Ok(AliasDecl {
         name: name.ok_or(ParseError::UnexpectedEof)?,
-        param_index: param_index.ok_or(ParseError::UnexpectedEof)?,
+        target: target.ok_or(ParseError::UnexpectedEof)?,
     })
+}
+
+fn build_alias_target(pair: Pair<'_, Rule>) -> Result<AliasTarget, ParseError> {
+    let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
+    match inner.as_rule() {
+        Rule::positional_param => {
+            let raw = inner.as_str();
+            Ok(AliasTarget::Parameter(raw[1..].parse::<usize>().map_err(
+                |_| ParseError::UnexpectedToken {
+                    expected: "valid positional parameter reference",
+                    actual: raw.into(),
+                },
+            )?))
+        }
+        Rule::ident => match build_ident(inner).as_str() {
+            target if target.eq_ignore_ascii_case("new") => Ok(AliasTarget::New),
+            target if target.eq_ignore_ascii_case("old") => Ok(AliasTarget::Old),
+            target => Err(ParseError::UnexpectedToken {
+                expected: "ALIAS FOR target $n, NEW, or OLD",
+                actual: target.into(),
+            }),
+        },
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "PL/pgSQL alias target",
+            actual: inner.as_str().into(),
+        }),
+    }
 }
 
 fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
@@ -979,6 +995,40 @@ mod tests {
     }
 
     #[test]
+    fn parse_raise_accepts_dollar_quoted_message() {
+        let block = parse_block(
+            r#"
+            begin
+                raise exception $$Patchfield "%" does not exist$$, ps.pfname;
+                raise exception $q$system "%" does not exist$q$, new.sysname;
+            end
+            "#,
+        )
+        .unwrap();
+
+        let Stmt::Raise {
+            level,
+            message,
+            params,
+        } = &block.statements[0]
+        else {
+            panic!("expected first RAISE statement");
+        };
+        assert!(matches!(level, RaiseLevel::Exception));
+        assert_eq!(message, "Patchfield \"%\" does not exist");
+        assert_eq!(params, &vec!["ps.pfname".to_string()]);
+
+        let Stmt::Raise {
+            message, params, ..
+        } = &block.statements[1]
+        else {
+            panic!("expected second RAISE statement");
+        };
+        assert_eq!(message, "system \"%\" does not exist");
+        assert_eq!(params, &vec!["new.sysname".to_string()]);
+    }
+
+    #[test]
     fn parse_while_stmt() {
         let block = parse_block(
             "
@@ -1090,6 +1140,35 @@ mod tests {
         assert!(matches!(block.statements[0], Stmt::ExecSql { .. }));
         assert!(matches!(block.statements[1], Stmt::ExecSql { .. }));
         assert!(matches!(block.statements[2], Stmt::Perform { .. }));
+    }
+
+    #[test]
+    fn parse_alias_for_trigger_rows() {
+        let block = parse_block(
+            "
+            declare
+                ps alias for new;
+                prior alias for old;
+            begin
+                return ps;
+            end
+            ",
+        )
+        .unwrap();
+
+        assert_eq!(
+            block.declarations,
+            vec![
+                Decl::Alias(AliasDecl {
+                    name: "ps".into(),
+                    target: AliasTarget::New,
+                }),
+                Decl::Alias(AliasDecl {
+                    name: "prior".into(),
+                    target: AliasTarget::Old,
+                }),
+            ]
+        );
     }
 
     #[test]

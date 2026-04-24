@@ -258,36 +258,36 @@ impl CatalogLookup for VisibleCatalog {
         &self,
         relation_oid: u32,
     ) -> Vec<crate::backend::parser::BoundIndexRelation> {
+        let mut seen = BTreeSet::new();
         self.relcache
             .entries()
             .filter_map(|(name, entry)| {
                 let index_meta = entry.index.as_ref()?;
-                (index_meta.indrelid == relation_oid).then(|| {
-                    crate::backend::parser::BoundIndexRelation {
-                        name: name.rsplit('.').next().unwrap_or(name).to_string(),
-                        rel: entry.rel,
-                        relation_oid: entry.relation_oid,
-                        desc: entry.desc.clone(),
-                        index_meta: index_meta.clone(),
-                        index_exprs: self
-                            .relation_by_oid(index_meta.indrelid)
-                            .and_then(|heap| {
-                                crate::backend::parser::analyze::bind_index_exprs(
-                                    index_meta, &heap.desc, self,
-                                )
-                                .ok()
-                            })
-                            .unwrap_or_default(),
-                        index_predicate: self.relation_by_oid(index_meta.indrelid).and_then(
-                            |heap| {
-                                crate::backend::parser::analyze::bind_index_predicate(
-                                    index_meta, &heap.desc, self,
-                                )
-                                .ok()
-                                .flatten()
-                            },
-                        ),
-                    }
+                if index_meta.indrelid != relation_oid || !seen.insert(entry.relation_oid) {
+                    return None;
+                }
+                Some(crate::backend::parser::BoundIndexRelation {
+                    name: name.rsplit('.').next().unwrap_or(name).to_string(),
+                    rel: entry.rel,
+                    relation_oid: entry.relation_oid,
+                    desc: entry.desc.clone(),
+                    index_meta: index_meta.clone(),
+                    index_exprs: self
+                        .relation_by_oid(index_meta.indrelid)
+                        .and_then(|heap| {
+                            crate::backend::parser::analyze::bind_index_exprs(
+                                index_meta, &heap.desc, self,
+                            )
+                            .ok()
+                        })
+                        .unwrap_or_default(),
+                    index_predicate: self.relation_by_oid(index_meta.indrelid).and_then(|heap| {
+                        crate::backend::parser::analyze::bind_index_predicate(
+                            index_meta, &heap.desc, self,
+                        )
+                        .ok()
+                        .flatten()
+                    }),
                 })
             })
             .collect()

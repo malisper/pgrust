@@ -12066,7 +12066,7 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
                 .expect("char length");
             match len {
                 Some(len) => RawTypeName::Builtin(SqlType::with_char_len(SqlTypeKind::Char, len)),
-                None => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Char)),
+                None => RawTypeName::Builtin(SqlType::with_char_len(SqlTypeKind::Char, 1)),
             }
         }
         Rule::varchar_type | Rule::character_varying_type => {

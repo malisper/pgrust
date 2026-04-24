@@ -1037,9 +1037,11 @@ fn exec_function_insert(
     })?;
     ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
     let xid = ctx.ensure_write_xid()?;
-    let result = execute_insert(stmt.clone(), &catalog, ctx, xid, ctx.next_command_id);
+    let cid = ctx.next_command_id;
+    let result = execute_insert(stmt.clone(), &catalog, ctx, xid, cid);
     ctx.expr_bindings.outer_tuple = None;
     let result = result?;
+    advance_plpgsql_command_id(ctx);
     state.values[compiled.found_slot] = Value::Bool(statement_result_changed_rows(&result));
     Ok(())
 }
@@ -1060,7 +1062,8 @@ fn exec_function_insert_into(
     })?;
     ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
     let xid = ctx.ensure_write_xid()?;
-    let result = execute_insert(stmt.clone(), &catalog, ctx, xid, ctx.next_command_id);
+    let cid = ctx.next_command_id;
+    let result = execute_insert(stmt.clone(), &catalog, ctx, xid, cid);
     ctx.expr_bindings.outer_tuple = None;
     let StatementResult::Query { columns, rows, .. } = result? else {
         return Err(function_runtime_error(
@@ -1069,6 +1072,7 @@ fn exec_function_insert_into(
             "XX000",
         ));
     };
+    advance_plpgsql_command_id(ctx);
     assign_query_rows_into_targets(&rows, &columns, targets, compiled, state)
 }
 
@@ -1087,9 +1091,11 @@ fn exec_function_update(
     })?;
     ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
     let xid = ctx.ensure_write_xid()?;
-    let result = execute_update(stmt.clone(), &catalog, ctx, xid, ctx.next_command_id);
+    let cid = ctx.next_command_id;
+    let result = execute_update(stmt.clone(), &catalog, ctx, xid, cid);
     ctx.expr_bindings.outer_tuple = None;
     let result = result?;
+    advance_plpgsql_command_id(ctx);
     state.values[compiled.found_slot] = Value::Bool(statement_result_changed_rows(&result));
     Ok(())
 }
@@ -1110,7 +1116,8 @@ fn exec_function_update_into(
     })?;
     ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
     let xid = ctx.ensure_write_xid()?;
-    let result = execute_update(stmt.clone(), &catalog, ctx, xid, ctx.next_command_id);
+    let cid = ctx.next_command_id;
+    let result = execute_update(stmt.clone(), &catalog, ctx, xid, cid);
     ctx.expr_bindings.outer_tuple = None;
     let StatementResult::Query { columns, rows, .. } = result? else {
         return Err(function_runtime_error(
@@ -1119,6 +1126,7 @@ fn exec_function_update_into(
             "XX000",
         ));
     };
+    advance_plpgsql_command_id(ctx);
     assign_query_rows_into_targets(&rows, &columns, targets, compiled, state)
 }
 
@@ -1140,6 +1148,7 @@ fn exec_function_delete(
     let result = execute_delete(stmt.clone(), &catalog, ctx, xid);
     ctx.expr_bindings.outer_tuple = None;
     let result = result?;
+    advance_plpgsql_command_id(ctx);
     state.values[compiled.found_slot] = Value::Bool(statement_result_changed_rows(&result));
     Ok(())
 }
@@ -1169,7 +1178,13 @@ fn exec_function_delete_into(
             "XX000",
         ));
     };
+    advance_plpgsql_command_id(ctx);
     assign_query_rows_into_targets(&rows, &columns, targets, compiled, state)
+}
+
+fn advance_plpgsql_command_id(ctx: &mut ExecutorContext) {
+    ctx.next_command_id = ctx.next_command_id.saturating_add(1);
+    ctx.snapshot.current_cid = ctx.snapshot.current_cid.max(ctx.next_command_id);
 }
 
 fn execute_function_query_result(

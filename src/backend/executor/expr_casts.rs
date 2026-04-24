@@ -3142,7 +3142,10 @@ pub(super) fn cast_numeric_value(
 fn coerce_character_string(text: &str, ty: SqlType, explicit: bool) -> Result<String, ExecError> {
     let max_chars = match ty.kind {
         SqlTypeKind::Name => return Ok(text.to_string()),
-        SqlTypeKind::Char => ty.char_len().unwrap_or(1),
+        SqlTypeKind::Char => match ty.char_len() {
+            Some(max_chars) => max_chars,
+            None => return Ok(text.to_string()),
+        },
         SqlTypeKind::Varchar => match ty.char_len() {
             Some(max_chars) => max_chars,
             None => return Ok(text.to_string()),
@@ -3624,6 +3627,26 @@ mod tests {
                 ])
                 .with_element_type_oid(crate::include::catalog::INTERVAL_TYPE_OID),
             )
+        );
+    }
+
+    #[test]
+    fn bpchar_without_typmod_preserves_text_width() {
+        assert_eq!(
+            cast_value(
+                Value::Text("WS.002.1a".into()),
+                SqlType::new(SqlTypeKind::Char)
+            )
+            .unwrap(),
+            Value::Text("WS.002.1a".into())
+        );
+        assert_eq!(
+            cast_value(
+                Value::Text("WS.002.1a".into()),
+                SqlType::with_char_len(SqlTypeKind::Char, 2)
+            )
+            .unwrap(),
+            Value::Text("WS".into())
         );
     }
 

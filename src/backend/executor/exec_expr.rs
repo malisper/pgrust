@@ -56,9 +56,9 @@ use super::expr_numeric::{
 use super::expr_ops::compare_order_values;
 use super::expr_ops::{
     add_values, bitwise_and_values, bitwise_not_value, bitwise_or_values, bitwise_xor_values,
-    compare_values, concat_values, div_values, eval_and, eval_or, mod_values, mul_values,
-    negate_value, not_equal_values, order_values, shift_left_values, shift_right_values,
-    sub_values, values_are_distinct,
+    compare_values, compare_values_with_type, concat_values, div_values, eval_and, eval_or,
+    mod_values, mul_values, negate_value, not_equal_values, not_equal_values_with_type,
+    order_values, shift_left_values, shift_right_values, sub_values, values_are_distinct,
 };
 pub(crate) use super::expr_ops::{compare_order_by_keys, parse_numeric_text};
 use super::expr_range::eval_range_function;
@@ -2421,15 +2421,19 @@ fn eval_op_expr(
         (OpExprKind::Concat, [left, right]) => {
             concat_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
         }
-        (OpExprKind::Eq, [left, right]) => compare_values(
+        (OpExprKind::Eq, [left, right]) => compare_values_with_type(
             "=",
             eval_expr(left, slot, ctx)?,
+            expr_sql_type_hint(left),
             eval_expr(right, slot, ctx)?,
+            expr_sql_type_hint(right),
             op.collation_oid,
         ),
-        (OpExprKind::NotEq, [left, right]) => not_equal_values(
+        (OpExprKind::NotEq, [left, right]) => not_equal_values_with_type(
             eval_expr(left, slot, ctx)?,
+            expr_sql_type_hint(left),
             eval_expr(right, slot, ctx)?,
+            expr_sql_type_hint(right),
             op.collation_oid,
         ),
         (OpExprKind::Lt, [left, right]) => order_values(
@@ -3025,15 +3029,19 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
                 eval_plpgsql_expr(left, slot)?,
                 eval_plpgsql_expr(right, slot)?,
             ),
-            (OpExprKind::Eq, [left, right]) => compare_values(
+            (OpExprKind::Eq, [left, right]) => compare_values_with_type(
                 "=",
                 eval_plpgsql_expr(left, slot)?,
+                expr_sql_type_hint(left),
                 eval_plpgsql_expr(right, slot)?,
+                expr_sql_type_hint(right),
                 op.collation_oid,
             ),
-            (OpExprKind::NotEq, [left, right]) => not_equal_values(
+            (OpExprKind::NotEq, [left, right]) => not_equal_values_with_type(
                 eval_plpgsql_expr(left, slot)?,
+                expr_sql_type_hint(left),
                 eval_plpgsql_expr(right, slot)?,
+                expr_sql_type_hint(right),
                 op.collation_oid,
             ),
             (OpExprKind::Lt, [left, right]) => order_values(

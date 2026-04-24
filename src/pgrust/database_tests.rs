@@ -16316,6 +16316,219 @@ fn unique_index_update_same_key_succeeds_without_self_conflict() {
 }
 
 #[test]
+fn indexed_bpchar_repeated_update_keeps_one_visible_row() {
+    let base = temp_dir("indexed_bpchar_repeated_update_one_visible");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table slots (slotname char(20), backlink char(20))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index slots_name_idx on slots using btree (slotname bpchar_ops)",
+    )
+    .unwrap();
+    db.execute(1, "insert into slots values ('PS.base.a1', '')")
+        .unwrap();
+    db.execute(
+        1,
+        "update slots set backlink = 'WS.001.1a' where slotname = 'PS.base.a1'::bpchar",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "update slots set backlink = 'WS.001.1a' where slotname = 'PS.base.a1'::bpchar",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select slotname, backlink from slots order by slotname"
+        ),
+        vec![vec![
+            Value::Text("PS.base.a1          ".into()),
+            Value::Text("WS.001.1a           ".into())
+        ]]
+    );
+}
+
+#[test]
+fn reciprocal_bpchar_after_triggers_keep_one_visible_row() {
+    let base = temp_dir("reciprocal_bpchar_after_triggers_one_visible");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table left_slots (slotname char(20), backlink char(20))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table right_slots (slotname char(20), backlink char(20))",
+    )
+    .unwrap();
+    db.execute(1, "insert into right_slots values ('R1', '')")
+        .unwrap();
+    db.execute(
+        1,
+        "create function set_right(myname bpchar, blname bpchar) returns int4 language plpgsql as $$ declare rec record; begin select into rec * from right_slots where slotname = myname; if not found then raise exception '% missing', myname; end if; if rec.backlink != blname then update right_slots set backlink = blname where slotname = myname; end if; return 0; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function set_left(myname bpchar, blname bpchar) returns int4 language plpgsql as $$ declare rec record; begin select into rec * from left_slots where slotname = myname; if not found then raise exception '% missing', myname; end if; if rec.backlink != blname then update left_slots set backlink = blname where slotname = myname; end if; return 0; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function left_after() returns trigger language plpgsql as $$ declare dummy int4; begin if new.backlink != '' then dummy := set_right(new.backlink, new.slotname); end if; return new; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function right_after() returns trigger language plpgsql as $$ declare dummy int4; begin if new.backlink != '' then dummy := set_left(new.backlink, new.slotname); end if; return new; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function left_before_update() returns trigger language plpgsql as $$ begin if new.slotname != old.slotname then delete from left_slots where slotname = old.slotname; insert into left_slots values (new.slotname, new.backlink); return null; end if; return new; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function right_before_update() returns trigger language plpgsql as $$ begin if new.slotname != old.slotname then delete from right_slots where slotname = old.slotname; insert into right_slots values (new.slotname, new.backlink); return null; end if; return new; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger left_before_update before update on left_slots for each row execute function left_before_update()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger right_before_update before update on right_slots for each row execute function right_before_update()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger left_after after insert or update on left_slots for each row execute function left_after()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger right_after after insert or update on right_slots for each row execute function right_after()",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into left_slots values ('L1', 'R1')")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select slotname, backlink from left_slots order by slotname"
+        ),
+        vec![vec![
+            Value::Text("L1                  ".into()),
+            Value::Text("R1                  ".into())
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select slotname, backlink from right_slots order by slotname"
+        ),
+        vec![vec![
+            Value::Text("R1                  ".into()),
+            Value::Text("L1                  ".into())
+        ]]
+    );
+}
+
+#[test]
+fn bpchar_before_update_trigger_does_not_treat_unchanged_key_as_renamed() {
+    let base = temp_dir("bpchar_before_update_same_key_not_renamed");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table slots (slotname char(20), backlink char(20))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function slots_bu() returns trigger language plpgsql as $$ begin if new.slotname != old.slotname then delete from slots where slotname = old.slotname; insert into slots values (new.slotname, new.backlink); return null; end if; return new; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger slots_bu before update on slots for each row execute function slots_bu()",
+    )
+    .unwrap();
+    db.execute(1, "insert into slots values ('S1', '')")
+        .unwrap();
+    db.execute(1, "update slots set backlink = 'B1' where slotname = 'S1'")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select slotname, backlink from slots order by slotname"
+        ),
+        vec![vec![
+            Value::Text("S1                  ".into()),
+            Value::Text("B1                  ".into())
+        ]]
+    );
+}
+
+#[test]
+fn plpgsql_update_maintains_each_visible_index_once() {
+    let base = temp_dir("plpgsql_update_maintains_index_once");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table slots (slotname char(20), backlink char(20))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create unique index slots_name_idx on slots using btree (slotname bpchar_ops)",
+    )
+    .unwrap();
+    db.execute(1, "insert into slots values ('WS.001.1a', '')")
+        .unwrap();
+    db.execute(
+        1,
+        "create function set_backlink(myname bpchar, blname bpchar) returns int4 language plpgsql as $$ begin update slots set backlink = blname where slotname = myname; return 0; end $$",
+    )
+    .unwrap();
+    db.execute(1, "select set_backlink('WS.001.1a', 'PS.base.a1')")
+        .unwrap();
+
+    let rows = query_rows(
+        &db,
+        1,
+        "select slotname, backlink from slots order by slotname",
+    );
+    assert_eq!(
+        rows,
+        vec![vec![
+            Value::Text("WS.001.1a           ".into()),
+            Value::Text("PS.base.a1          ".into())
+        ]],
+    );
+}
+
+#[test]
 fn unique_index_delete_then_reinsert_same_key_succeeds() {
     let base = temp_dir("unique_index_delete_then_reinsert_same_key");
     let db = Database::open(&base, 16).unwrap();
@@ -18392,7 +18605,7 @@ fn create_function_accepts_bpchar_argument_types() {
         .unwrap()
     {
         StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Text("W".into())]]);
+            assert_eq!(rows, vec![vec![Value::Text("WS".into())]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }
@@ -23314,6 +23527,37 @@ fn plpgsql_alias_record_select_into_and_update_work() {
             "select backlink from slots where slotname = 'PS.base.a1'"
         ),
         vec![vec![Value::Text("WS.001.1a".into())]]
+    );
+}
+
+#[test]
+fn after_insert_trigger_nested_sql_sees_inserted_row() {
+    let dir = temp_dir("after_insert_trigger_nested_sql_sees_row");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table slots (slotname text, backlink text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function require_slot(text) returns int4 language plpgsql as $$ declare rec record; begin select into rec * from slots where slotname = $1; if not found then raise exception '% missing', $1; end if; return 0; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function slots_after_insert() returns trigger language plpgsql as $$ declare dummy int4; begin dummy := require_slot(new.slotname); return new; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger slots_after_insert after insert on slots for each row execute function slots_after_insert()",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into slots values ('PS.base.b1', '')")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select slotname from slots"),
+        vec![vec![Value::Text("PS.base.b1".into())]]
     );
 }
 

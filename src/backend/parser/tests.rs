@@ -4902,6 +4902,10 @@ fn parse_standalone_type_names() {
         SqlType::new(SqlTypeKind::Char)
     );
     assert_eq!(
+        parse_type_name("char").unwrap(),
+        SqlType::with_char_len(SqlTypeKind::Char, 1)
+    );
+    assert_eq!(
         parse_type_name("bytea").unwrap(),
         SqlType::new(SqlTypeKind::Bytea)
     );

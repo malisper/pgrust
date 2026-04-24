@@ -242,6 +242,29 @@ pub(crate) fn compare_values(
     }
 }
 
+pub(crate) fn compare_values_with_type(
+    op: &'static str,
+    left: Value,
+    left_type: Option<SqlType>,
+    right: Value,
+    right_type: Option<SqlType>,
+    collation_oid: Option<u32>,
+) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    if let (Some(left_text), Some(right_text)) = (left.as_text(), right.as_text())
+        && (is_bpchar_type(left_type) || is_bpchar_type(right_type))
+    {
+        ensure_builtin_collation_supported(collation_oid)?;
+        return Ok(Value::Bool(
+            bpchar_comparison_text(left_text, left_type)
+                == bpchar_comparison_text(right_text, right_type),
+        ));
+    }
+    compare_values(op, left, right, collation_oid)
+}
+
 pub(crate) fn not_equal_values(
     left: Value,
     right: Value,
@@ -253,6 +276,34 @@ pub(crate) fn not_equal_values(
     match compare_values("=", left.clone(), right.clone(), collation_oid)? {
         Value::Bool(value) => Ok(Value::Bool(!value)),
         other => Err(ExecError::NonBoolQual(other)),
+    }
+}
+
+pub(crate) fn not_equal_values_with_type(
+    left: Value,
+    left_type: Option<SqlType>,
+    right: Value,
+    right_type: Option<SqlType>,
+    collation_oid: Option<u32>,
+) -> Result<Value, ExecError> {
+    if matches!(left, Value::Null) || matches!(right, Value::Null) {
+        return Ok(Value::Null);
+    }
+    match compare_values_with_type("=", left, left_type, right, right_type, collation_oid)? {
+        Value::Bool(value) => Ok(Value::Bool(!value)),
+        other => Err(ExecError::NonBoolQual(other)),
+    }
+}
+
+fn is_bpchar_type(ty: Option<SqlType>) -> bool {
+    ty.is_some_and(|ty| !ty.is_array && matches!(ty.kind, SqlTypeKind::Char))
+}
+
+fn bpchar_comparison_text(text: &str, ty: Option<SqlType>) -> &str {
+    if is_bpchar_type(ty) {
+        text.trim_end_matches(' ')
+    } else {
+        text
     }
 }
 
