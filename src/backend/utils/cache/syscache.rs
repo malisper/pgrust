@@ -1,16 +1,94 @@
 use crate::ClientId;
 use crate::backend::access::transam::xact::{CommandId, TransactionId};
 use crate::backend::catalog::CatalogError;
+use crate::backend::catalog::indexing::probe_system_catalog_rows_visible_in_db;
+use crate::backend::catalog::rowcodec::{pg_class_row_from_values, pg_type_row_from_values};
+use crate::backend::catalog::store::{CatalogStore, CatalogWriteContext};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::inval::CatalogInvalidation;
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::time::snapmgr::{Snapshot, get_catalog_snapshot};
+use crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER;
+use crate::include::access::scankey::ScanKeyData;
 use crate::include::catalog::{
     PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow, PgAttributeRow, PgClassRow, PgCollationRow,
     PgConstraintRow, PgDependRow, PgIndexRow, PgInheritsRow, PgNamespaceRow, PgOpclassRow,
     PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticRow, PgTypeRow,
+    bootstrap_composite_type_rows, builtin_type_rows,
 };
+use crate::include::nodes::datum::Value;
 use crate::pgrust::database::Database;
+
+const PG_CLASS_OID_INDEX_OID: u32 = 2662;
+const PG_CLASS_RELNAME_NSP_INDEX_OID: u32 = 2663;
+const PG_TYPE_OID_INDEX_OID: u32 = 2703;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SysCacheId {
+    // PostgreSQL syscache name: RELOID.
+    RelOid,
+    // PostgreSQL syscache name: RELNAMENSP.
+    RelNameNsp,
+    // PostgreSQL syscache name: TYPEOID.
+    TypeOid,
+}
+
+impl SysCacheId {
+    fn index_oid(self) -> u32 {
+        match self {
+            Self::RelOid => PG_CLASS_OID_INDEX_OID,
+            Self::RelNameNsp => PG_CLASS_RELNAME_NSP_INDEX_OID,
+            Self::TypeOid => PG_TYPE_OID_INDEX_OID,
+        }
+    }
+
+    fn expected_keys(self) -> usize {
+        match self {
+            Self::RelOid | Self::TypeOid => 1,
+            Self::RelNameNsp => 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SysCacheTuple {
+    Class(PgClassRow),
+    Type(PgTypeRow),
+}
+
+fn oid_key(oid: u32) -> Value {
+    Value::Int64(i64::from(oid))
+}
+
+fn equality_scan_keys(keys: &[Value]) -> Vec<ScanKeyData> {
+    keys.iter()
+        .enumerate()
+        .map(|(index, value)| ScanKeyData {
+            attribute_number: index.saturating_add(1) as i16,
+            strategy: BT_EQUAL_STRATEGY_NUMBER,
+            argument: value.to_owned_value(),
+        })
+        .collect()
+}
+
+fn bootstrap_sys_cache_tuple(cache_id: SysCacheId, keys: &[Value]) -> Option<SysCacheTuple> {
+    let SysCacheId::TypeOid = cache_id else {
+        return None;
+    };
+    let [key] = keys else {
+        return None;
+    };
+    let oid = match key {
+        Value::Int32(value) => u32::try_from(*value).ok()?,
+        Value::Int64(value) => u32::try_from(*value).ok()?,
+        _ => return None,
+    };
+    builtin_type_rows()
+        .into_iter()
+        .chain(bootstrap_composite_type_rows())
+        .find(|row| row.oid == oid)
+        .map(SysCacheTuple::Type)
+}
 
 fn merge_catcaches(shared: CatCache, local: CatCache) -> CatCache {
     CatCache::from_rows(
@@ -84,6 +162,86 @@ pub struct BackendCacheState {
 
 pub fn invalidate_backend_cache_state(db: &Database, client_id: ClientId) {
     db.backend_cache_states.write().remove(&client_id);
+}
+
+impl CatalogStore {
+    pub(crate) fn search_sys_cache(
+        &self,
+        ctx: &CatalogWriteContext,
+        cache_id: SysCacheId,
+        keys: Vec<Value>,
+    ) -> Result<Vec<SysCacheTuple>, CatalogError> {
+        if keys.len() != cache_id.expected_keys() {
+            return Err(CatalogError::Corrupt("syscache key count mismatch"));
+        }
+
+        if let Some(tuple) = bootstrap_sys_cache_tuple(cache_id, &keys) {
+            return Ok(vec![tuple]);
+        }
+
+        let snapshot = ctx
+            .txns
+            .read()
+            .snapshot_for_command(ctx.xid, ctx.cid)
+            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+        let rows = probe_system_catalog_rows_visible_in_db(
+            &ctx.pool,
+            &ctx.txns,
+            &snapshot,
+            ctx.client_id,
+            self.scope_db_oid(),
+            cache_id.index_oid(),
+            equality_scan_keys(&keys),
+        )?;
+
+        rows.into_iter()
+            .map(|values| match cache_id {
+                SysCacheId::RelOid | SysCacheId::RelNameNsp => {
+                    pg_class_row_from_values(values).map(SysCacheTuple::Class)
+                }
+                SysCacheId::TypeOid => pg_type_row_from_values(values).map(SysCacheTuple::Type),
+            })
+            .collect()
+    }
+
+    pub(crate) fn search_sys_cache1(
+        &self,
+        ctx: &CatalogWriteContext,
+        cache_id: SysCacheId,
+        key1: Value,
+    ) -> Result<Vec<SysCacheTuple>, CatalogError> {
+        self.search_sys_cache(ctx, cache_id, vec![key1])
+    }
+
+    pub(crate) fn search_sys_cache2(
+        &self,
+        ctx: &CatalogWriteContext,
+        cache_id: SysCacheId,
+        key1: Value,
+        key2: Value,
+    ) -> Result<Vec<SysCacheTuple>, CatalogError> {
+        self.search_sys_cache(ctx, cache_id, vec![key1, key2])
+    }
+
+    pub(crate) fn get_relname_relid(
+        &self,
+        ctx: &CatalogWriteContext,
+        relname: &str,
+        relnamespace: u32,
+    ) -> Result<Option<u32>, CatalogError> {
+        self.search_sys_cache2(
+            ctx,
+            SysCacheId::RelNameNsp,
+            Value::Text(relname.to_ascii_lowercase().into()),
+            oid_key(relnamespace),
+        )
+        .map(|tuples| {
+            tuples.into_iter().find_map(|tuple| match tuple {
+                SysCacheTuple::Class(row) => Some(row.oid),
+                _ => None,
+            })
+        })
+    }
 }
 
 pub fn backend_catcache(

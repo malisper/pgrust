@@ -34,6 +34,7 @@ use crate::backend::catalog::toasting::{
 use crate::backend::executor::{ColumnDesc, RelationDesc};
 use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name, sql_type_oid};
 use crate::backend::utils::cache::relcache::{RelCache, RelCacheEntry};
+use crate::backend::utils::cache::syscache::{SysCacheId, SysCacheTuple};
 use crate::include::catalog::{
     BootstrapCatalogKind, CONSTRAINT_CHECK, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
     CONSTRAINT_UNIQUE, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_AM_RELATION_OID,
@@ -74,15 +75,16 @@ impl CatalogStore {
         ctx: &CatalogWriteContext,
     ) -> Result<(CatalogEntry, CatalogMutationEffect), CatalogError> {
         let name = name.into();
-        let (catcache, relcache) = visible_catalog_caches_for_ctx(self, ctx)?;
-        if relcache.get_by_name(&name).is_some() {
+        if self
+            .get_relname_relid(ctx, &syscache_relname(&name), namespace_oid)?
+            .is_some()
+        {
             return Err(CatalogError::TableAlreadyExists(
                 normalize_catalog_name(&name).to_ascii_lowercase(),
             ));
         }
         let mut control = self.control_state()?;
         let entry = build_relation_entry(
-            &catcache,
             name.clone(),
             desc,
             namespace_oid,
@@ -94,7 +96,10 @@ impl CatalogStore {
         )?;
         let kinds = create_table_sync_kinds(&entry);
         self.persist_control_values(control.next_oid, control.next_rel_number)?;
-        let rows = rows_for_new_relation_entry(&catcache, &name, &entry)?;
+        let rows = {
+            let type_lookup = CatalogStoreTypeLookup { store: &*self, ctx };
+            rows_for_new_relation_entry(&type_lookup, &name, &entry)?
+        };
         insert_catalog_rows_subset_mvcc(ctx, &rows, 1, &kinds)?;
         self.control = control;
 
@@ -301,7 +306,6 @@ impl CatalogStore {
 
             let mut control = self.control_state()?;
             let entry = build_relation_entry(
-                &catcache,
                 name.clone(),
                 desc,
                 crate::include::catalog::PUBLIC_NAMESPACE_OID,
@@ -312,7 +316,6 @@ impl CatalogStore {
                 &mut control,
             )?;
             let toast = build_toast_catalog_changes(
-                &catcache,
                 &name,
                 &entry,
                 PG_TOAST_NAMESPACE,
@@ -768,15 +771,16 @@ impl CatalogStore {
         ctx: &CatalogWriteContext,
     ) -> Result<(CreateTableResult, CatalogMutationEffect), CatalogError> {
         let name = name.into();
-        let (catcache, relcache) = visible_catalog_caches_for_ctx(self, ctx)?;
-        if relcache.get_by_name(&name).is_some() {
+        if self
+            .get_relname_relid(ctx, &syscache_relname(&name), namespace_oid)?
+            .is_some()
+        {
             return Err(CatalogError::TableAlreadyExists(
                 normalize_catalog_name(&name).to_ascii_lowercase(),
             ));
         }
         let mut control = self.control_state()?;
         let entry = build_relation_entry(
-            &catcache,
             name.clone(),
             desc,
             namespace_oid,
@@ -787,7 +791,6 @@ impl CatalogStore {
             &mut control,
         )?;
         let toast = build_toast_catalog_changes(
-            &catcache,
             &name,
             &entry,
             toast_namespace_name,
@@ -800,16 +803,30 @@ impl CatalogStore {
             .unwrap_or(entry);
         let mut kinds = create_table_sync_kinds(&entry);
         self.persist_control_values(control.next_oid, control.next_rel_number)?;
-        let mut rows = rows_for_new_relation_entry(&catcache, &name, &entry)?;
+        let mut rows = {
+            let type_lookup = CatalogStoreTypeLookup { store: &*self, ctx };
+            let mut rows = rows_for_new_relation_entry(&type_lookup, &name, &entry)?;
+            if let Some(toast) = &toast {
+                extend_physical_catalog_rows(
+                    &mut rows,
+                    rows_for_new_relation_entry(
+                        &type_lookup,
+                        &toast.toast_name,
+                        &toast.toast_entry,
+                    )?,
+                );
+                extend_physical_catalog_rows(
+                    &mut rows,
+                    rows_for_new_relation_entry(
+                        &type_lookup,
+                        &toast.index_name,
+                        &toast.index_entry,
+                    )?,
+                );
+            }
+            rows
+        };
         if let Some(toast) = &toast {
-            extend_physical_catalog_rows(
-                &mut rows,
-                rows_for_new_relation_entry(&catcache, &toast.toast_name, &toast.toast_entry)?,
-            );
-            extend_physical_catalog_rows(
-                &mut rows,
-                rows_for_new_relation_entry(&catcache, &toast.index_name, &toast.index_entry)?,
-            );
             rows.depends.push(PgDependRow {
                 classid: PG_CLASS_RELATION_OID,
                 objid: toast.toast_entry.relation_oid,
@@ -2724,7 +2741,6 @@ impl CatalogStore {
         }
         let mut control = self.control_state()?;
         let entry = build_relation_entry(
-            &catcache,
             name.clone(),
             desc,
             namespace_oid,
@@ -2852,7 +2868,6 @@ impl CatalogStore {
         }
         let mut control = self.control_state()?;
         let entry = build_relation_entry(
-            &catcache,
             name.clone(),
             desc,
             namespace_oid,
@@ -5070,8 +5085,43 @@ fn visible_catalog_caches_for_ctx(
     Ok((catcache, relcache))
 }
 
+trait PgTypeLookup {
+    fn type_by_oid(&self, oid: u32) -> Result<Option<PgTypeRow>, CatalogError>;
+}
+
+impl PgTypeLookup for CatCache {
+    fn type_by_oid(&self, oid: u32) -> Result<Option<PgTypeRow>, CatalogError> {
+        Ok(CatCache::type_by_oid(self, oid).cloned())
+    }
+}
+
+struct CatalogStoreTypeLookup<'a> {
+    store: &'a CatalogStore,
+    ctx: &'a CatalogWriteContext,
+}
+
+impl PgTypeLookup for CatalogStoreTypeLookup<'_> {
+    fn type_by_oid(&self, oid: u32) -> Result<Option<PgTypeRow>, CatalogError> {
+        Ok(self
+            .store
+            .search_sys_cache1(self.ctx, SysCacheId::TypeOid, Value::Int64(i64::from(oid)))?
+            .into_iter()
+            .find_map(|tuple| match tuple {
+                SysCacheTuple::Type(row) => Some(row),
+                _ => None,
+            }))
+    }
+}
+
+fn syscache_relname(name: &str) -> String {
+    normalize_catalog_name(name)
+        .rsplit_once('.')
+        .map(|(_, relname)| relname)
+        .unwrap_or_else(|| normalize_catalog_name(name))
+        .to_ascii_lowercase()
+}
+
 fn build_relation_entry(
-    _catcache: &CatCache,
     _name: String,
     mut desc: RelationDesc,
     namespace_oid: u32,
@@ -5348,7 +5398,6 @@ fn build_index_entry_with_relkind(
 }
 
 fn build_toast_catalog_changes(
-    catcache: &CatCache,
     parent_name: &str,
     parent: &CatalogEntry,
     toast_namespace_name: &str,
@@ -5369,7 +5418,6 @@ fn build_toast_catalog_changes(
         toast_relation_name(parent.relation_oid)
     );
     let toast_entry = build_relation_entry(
-        catcache,
         toast_name.clone(),
         toast_relation_desc(),
         toast_namespace_oid,
@@ -5385,8 +5433,9 @@ fn build_toast_catalog_changes(
         "{toast_namespace_name}.{}",
         toast_index_name(parent.relation_oid)
     );
+    let catcache = CatCache::default();
     let mut index_entry = build_index_entry(
-        catcache,
+        &catcache,
         index_name.clone(),
         &toast_entry,
         true,
@@ -5441,7 +5490,7 @@ fn default_index_build_options_for_relation(
             .iter()
             .find(|column| column.name.eq_ignore_ascii_case(&column_name.name))
             .ok_or_else(|| CatalogError::UnknownColumn(column_name.name.clone()))?;
-        let type_oid = resolved_sql_type_oid(catcache, table, column.sql_type);
+        let type_oid = resolved_sql_type_oid(catcache, table, column.sql_type)?;
         let opclass_oid = crate::include::catalog::default_btree_opclass_oid(type_oid)
             .ok_or_else(|| CatalogError::UnknownType("index column type".into()))?;
         indclass.push(opclass_oid);
@@ -5714,7 +5763,7 @@ fn dropped_column_name_visible(attnum: usize) -> String {
 }
 
 fn rows_for_new_relation_entry(
-    catcache: &CatCache,
+    type_lookup: &impl PgTypeLookup,
     relation_name: &str,
     entry: &CatalogEntry,
 ) -> Result<PhysicalCatalogRows, CatalogError> {
@@ -5724,30 +5773,37 @@ fn rows_for_new_relation_entry(
     rows.types
         .extend(type_rows_for_relation_name(relation_name, entry));
 
-    rows.attributes
-        .extend(entry.desc.columns.iter().enumerate().map(|(idx, column)| {
-            PgAttributeRow {
-                attrelid: entry.relation_oid,
-                attname: column.name.clone(),
-                atttypid: resolved_sql_type_oid(catcache, entry, column.sql_type),
-                attlen: column.storage.attlen,
-                attnum: idx.saturating_add(1) as i16,
-                attnotnull: !column.storage.nullable,
-                attisdropped: column.dropped,
-                atttypmod: column.sql_type.typmod,
-                attalign: column.storage.attalign,
-                attstorage: column.storage.attstorage,
-                attcompression: column.storage.attcompression,
-                attstattarget: column.attstattarget,
-                attinhcount: column.attinhcount,
-                attislocal: column.attislocal,
-                attgenerated: column
-                    .generated
-                    .map(|kind| kind.catalog_char())
-                    .unwrap_or('\0'),
-                sql_type: column.sql_type,
-            }
-        }));
+    rows.attributes.extend(
+        entry
+            .desc
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(idx, column)| {
+                Ok(PgAttributeRow {
+                    attrelid: entry.relation_oid,
+                    attname: column.name.clone(),
+                    atttypid: resolved_sql_type_oid(type_lookup, entry, column.sql_type)?,
+                    attlen: column.storage.attlen,
+                    attnum: idx.saturating_add(1) as i16,
+                    attnotnull: !column.storage.nullable,
+                    attisdropped: column.dropped,
+                    atttypmod: column.sql_type.typmod,
+                    attalign: column.storage.attalign,
+                    attstorage: column.storage.attstorage,
+                    attcompression: column.storage.attcompression,
+                    attstattarget: column.attstattarget,
+                    attinhcount: column.attinhcount,
+                    attislocal: column.attislocal,
+                    attgenerated: column
+                        .generated
+                        .map(|kind| kind.catalog_char())
+                        .unwrap_or('\0'),
+                    sql_type: column.sql_type,
+                })
+            })
+            .collect::<Result<Vec<_>, CatalogError>>()?,
+    );
     rows.attrdefs.extend(
         entry
             .desc
@@ -6158,10 +6214,10 @@ fn catalog_entry_from_visible_relation(
 }
 
 fn resolved_sql_type_oid(
-    catcache: &CatCache,
+    type_lookup: &impl PgTypeLookup,
     entry: &CatalogEntry,
     sql_type: crate::backend::parser::SqlType,
-) -> u32 {
+) -> Result<u32, CatalogError> {
     if sql_type.is_array
         && matches!(
             sql_type.kind,
@@ -6171,15 +6227,15 @@ fn resolved_sql_type_oid(
         && sql_type.type_oid != 0
     {
         if sql_type.type_oid == entry.row_type_oid && entry.array_type_oid != 0 {
-            return entry.array_type_oid;
+            return Ok(entry.array_type_oid);
         }
-        if let Some(row) = catcache.type_by_oid(sql_type.type_oid)
+        if let Some(row) = type_lookup.type_by_oid(sql_type.type_oid)?
             && row.typarray != 0
         {
-            return row.typarray;
+            return Ok(row.typarray);
         }
     }
-    sql_type_oid(sql_type)
+    Ok(sql_type_oid(sql_type))
 }
 
 fn relkind_is_droppable_table(relkind: char) -> bool {
