@@ -49,6 +49,7 @@ pub(super) enum ResolvedFunctionRowShape {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ResolvedFunctionCall {
     pub proc_oid: u32,
+    pub proname: String,
     pub prokind: char,
     pub proretset: bool,
     pub result_type: SqlType,
@@ -112,6 +113,7 @@ pub(super) fn resolve_function_call(
 
         let resolved = ResolvedFunctionCall {
             proc_oid: row.oid,
+            proname: row.proname.clone(),
             prokind: row.prokind,
             proretset: row.proretset,
             result_type,
