@@ -428,6 +428,16 @@ fn try_parse_partition_statement(
         };
     }
 
+    if lowered.starts_with("alter table ") && lowered.contains(" detach partition ") {
+        return match build_alter_table_detach_partition_statement(trimmed) {
+            Ok(stmt) => Ok(Some(Statement::AlterTableDetachPartition(stmt))),
+            Err(PartitionStatementParseError::Unsupported) => Ok(Some(
+                unsupported_partition_statement(trimmed, "ALTER TABLE form"),
+            )),
+            Err(PartitionStatementParseError::Parse(err)) => Err(err),
+        };
+    }
+
     Ok(None)
 }
 
@@ -733,6 +743,65 @@ fn build_alter_table_attach_partition_statement(
         parent_table: parent_parts.join("."),
         partition_table: partition_parts.join("."),
         bound,
+    })
+}
+
+fn build_alter_table_detach_partition_statement(
+    sql: &str,
+) -> Result<AlterTableDetachPartitionStatement, PartitionStatementParseError> {
+    let mut rest = consume_keyword(sql.trim_start(), "alter").trim_start();
+    rest = consume_keyword(rest, "table").trim_start();
+    let mut if_exists = false;
+    let mut only = false;
+    if keyword_at_start(rest, "if") {
+        rest = consume_keyword(rest, "if").trim_start();
+        rest = consume_keyword(rest, "exists").trim_start();
+        if_exists = true;
+    }
+    if keyword_at_start(rest, "only") {
+        rest = consume_keyword(rest, "only").trim_start();
+        only = true;
+    }
+    let (parent_parts, next) = parse_qualified_identifier_parts(rest)?;
+    rest = next.trim_start();
+    if !keyword_at_start(rest, "detach") {
+        return Err(PartitionStatementParseError::Unsupported);
+    }
+    rest = consume_keyword(rest, "detach").trim_start();
+    if !keyword_at_start(rest, "partition") {
+        return Err(PartitionStatementParseError::Unsupported);
+    }
+    rest = consume_keyword(rest, "partition").trim_start();
+    let (partition_parts, next) = parse_qualified_identifier_parts(rest)?;
+    rest = next.trim_start();
+    let mode = if rest.is_empty() {
+        DetachPartitionMode::Immediate
+    } else if keyword_at_start(rest, "concurrently") {
+        rest = consume_keyword(rest, "concurrently").trim_start();
+        DetachPartitionMode::Concurrently
+    } else if keyword_at_start(rest, "finalize") {
+        rest = consume_keyword(rest, "finalize").trim_start();
+        DetachPartitionMode::Finalize
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "CONCURRENTLY, FINALIZE, or end of statement",
+            actual: rest.into(),
+        }
+        .into());
+    };
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of statement",
+            actual: rest.trim().into(),
+        }
+        .into());
+    }
+    Ok(AlterTableDetachPartitionStatement {
+        if_exists,
+        only,
+        parent_table: parent_parts.join("."),
+        partition_table: partition_parts.join("."),
+        mode,
     })
 }
 

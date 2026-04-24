@@ -146,6 +146,7 @@ impl<'a> PartitionedKeyInstaller<'a> {
         let parent_oid = catalog
             .inheritance_parents(relation.relation_oid)
             .into_iter()
+            .filter(|row| !row.inhdetachpending)
             .find_map(|row| {
                 catalog
                     .relation_by_oid(row.inhparent)
@@ -179,6 +180,7 @@ impl<'a> PartitionedKeyInstaller<'a> {
         inherits.sort_by_key(|row| (row.inhseqno, row.inhrelid));
         inherits
             .into_iter()
+            .filter(|row| !row.inhdetachpending)
             .filter_map(|row| {
                 catalog
                     .relation_by_oid(row.inhrelid)

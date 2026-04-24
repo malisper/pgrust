@@ -337,6 +337,7 @@ pub enum Statement {
     AlterTableInherit(AlterTableInheritStatement),
     AlterTableNoInherit(AlterTableNoInheritStatement),
     AlterTableAttachPartition(AlterTableAttachPartitionStatement),
+    AlterTableDetachPartition(AlterTableDetachPartitionStatement),
     AlterTableTriggerState(AlterTableTriggerStateStatement),
     AlterPublication(AlterPublicationStatement),
     AlterOperator(AlterOperatorStatement),
@@ -1810,6 +1811,22 @@ pub struct AlterTableAttachPartitionStatement {
     pub parent_table: String,
     pub partition_table: String,
     pub bound: RawPartitionBoundSpec,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetachPartitionMode {
+    Immediate,
+    Concurrently,
+    Finalize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableDetachPartitionStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub parent_table: String,
+    pub partition_table: String,
+    pub mode: DetachPartitionMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
