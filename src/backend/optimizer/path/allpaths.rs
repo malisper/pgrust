@@ -80,10 +80,7 @@ pub(super) fn residual_where_qual(root: &PlannerInfo) -> Option<Expr> {
     let clauses = flatten_and_conjuncts(where_qual)
         .into_iter()
         .map(|clause| expand_join_rte_vars(root, clause))
-        .filter(|clause| {
-            let relids = expr_relids(clause);
-            has_outer_joins(root) || !is_pushable_base_clause(root, &relids)
-        })
+        .filter(|clause| !is_pushable_base_clause(root, &expr_relids(clause)))
         .collect();
     and_exprs(clauses)
 }
@@ -112,9 +109,7 @@ fn assign_base_restrictinfo(root: &mut PlannerInfo) {
                 .map(joininfo::make_restrict_info),
         );
     }
-    if !has_outer_joins(root)
-        && let Some(where_qual) = root.parse.where_qual.as_ref()
-    {
+    if let Some(where_qual) = root.parse.where_qual.as_ref() {
         for clause in flatten_and_conjuncts(where_qual) {
             let restrict = joininfo::make_restrict_info(expand_join_rte_vars(root, clause));
             if !is_pushable_base_clause(root, &restrict.required_relids) {
@@ -895,6 +890,7 @@ fn set_base_rel_pathlists(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) {
 }
 
 fn build_join_restrict_clauses(
+    root: &PlannerInfo,
     kind: JoinType,
     explicit_qual: Option<Expr>,
     left_relids: &[usize],
@@ -904,6 +900,7 @@ fn build_join_restrict_clauses(
     let join_relids = relids_union(left_relids, right_relids);
     let mut clauses = Vec::new();
     if let Some(explicit_qual) = explicit_qual {
+        let explicit_qual = expand_join_rte_vars(root, explicit_qual);
         clauses.extend(
             flatten_and_conjuncts(&explicit_qual)
                 .into_iter()
@@ -1176,18 +1173,23 @@ fn make_join_rel(
         } else {
             (left_rel, right_rel)
         };
+        let logical_kind = if spec.reversed {
+            reverse_join_type(spec.kind)
+        } else {
+            spec.kind
+        };
         let reltarget = join_reltarget(
             root,
             &relids,
             logical_left_rel,
             logical_right_rel,
-            spec.kind,
+            logical_kind,
         );
         let mut output_columns = logical_left_rel
             .cheapest_total_path()
             .map(Path::columns)
             .unwrap_or_default();
-        if !matches!(spec.kind, JoinType::Semi | JoinType::Anti) {
+        if !matches!(logical_kind, JoinType::Semi | JoinType::Anti) {
             output_columns.extend(
                 logical_right_rel
                     .cheapest_total_path()
@@ -1196,19 +1198,15 @@ fn make_join_rel(
             );
         }
         let join_restrict_clauses = build_join_restrict_clauses(
-            spec.kind,
+            root,
+            logical_kind,
             spec.explicit_qual.clone(),
             &logical_left_rel.relids,
             &logical_right_rel.relids,
             &root.inner_join_clauses,
         );
         let mut candidate_paths = Vec::new();
-        let (path_left_rel, path_right_rel) =
-            if matches!(spec.kind, JoinType::Semi | JoinType::Anti) && spec.reversed {
-                (right_rel, left_rel)
-            } else {
-                (left_rel, right_rel)
-            };
+        let (path_left_rel, path_right_rel) = (logical_left_rel, logical_right_rel);
         for left_path in &path_left_rel.pathlist {
             for right_path in &path_right_rel.pathlist {
                 let paths = build_join_paths_with_root(
@@ -1217,7 +1215,7 @@ fn make_join_rel(
                     right_path.clone(),
                     &path_left_rel.relids,
                     &path_right_rel.relids,
-                    spec.kind,
+                    logical_kind,
                     join_restrict_clauses.clone(),
                     reltarget.clone(),
                     output_columns.clone(),

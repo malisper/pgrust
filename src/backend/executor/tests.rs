@@ -16944,6 +16944,52 @@ fn exists_and_not_exists_are_correlated_per_row() {
 }
 
 #[test]
+fn in_subquery_where_qual_uses_semi_join() {
+    let mut harness = seed_people_and_pets("in_subquery_where_qual_uses_semi_join");
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select p.id
+                 from people p
+                 where p.id in (select q.owner_id from pets q)
+                 order by p.id",
+            )
+            .unwrap(),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]],
+    );
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "explain (costs off)
+             select p.id
+             from people p
+             where p.id in (select q.owner_id from pets q)",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered.iter().any(|line| line.contains("Semi Join")),
+                "expected IN pull-up to use a semi join, got {rendered:?}"
+            );
+            assert!(
+                rendered.iter().all(|line| !line.contains("SubPlan")),
+                "expected pulled-up IN plan without SubPlan, got {rendered:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn explain_exists_where_qual_uses_semi_join() {
     let mut harness = seed_people_and_pets("explain_exists_semi_join");
     match harness

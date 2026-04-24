@@ -1474,7 +1474,7 @@ fn build_join_paths_internal(
     }
 
     if !lateral_orientation_locked
-        && !matches!(kind, JoinType::Cross | JoinType::Semi)
+        && !matches!(kind, JoinType::Cross)
         && let Some(hash_join) =
             extract_hash_join_clauses(&restrict_clauses, left_relids, right_relids)
     {
