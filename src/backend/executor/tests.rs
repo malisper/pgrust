@@ -8530,6 +8530,83 @@ fn lateral_values_can_reference_left_columns() {
 }
 
 #[test]
+fn lateral_values_can_reference_zero_column_whole_row() {
+    let base = temp_dir("lateral_values_zero_column_whole_row");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(1, "create temp table nocols()").unwrap();
+    db.execute(1, "insert into nocols default values").unwrap();
+    match db
+        .execute(1, "select * from nocols n, lateral (values(n.*)) v")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Record(
+                    crate::include::nodes::datum::RecordValue::from_descriptor(
+                        crate::backend::utils::record::assign_anonymous_record_descriptor(vec![]),
+                        vec![],
+                    )
+                )]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn nested_lateral_whole_row_explain_lowers_without_setrefs_panic() {
+    let base = temp_dir("nested_lateral_whole_row_explain");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(1, "create table text_tbl(f1 text)").unwrap();
+    db.execute(1, "create table int8_tbl(q1 int8, q2 int8)")
+        .unwrap();
+    db.execute(1, "insert into text_tbl values ('doh!')")
+        .unwrap();
+    db.execute(1, "insert into int8_tbl values (4567890123456789, 123)")
+        .unwrap();
+
+    match db
+        .execute(
+            1,
+            "explain (verbose, costs off)
+             select * from
+               text_tbl t1
+               left join int8_tbl i8
+               on i8.q2 = 123,
+               lateral (select i8.q1, t2.f1 from text_tbl t2 limit 1) as ss1,
+               lateral (select ss1.* from text_tbl t3 limit 1) as ss2
+             where t1.f1 = ss2.f1",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert!(!rows.is_empty());
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn xmlcomment_has_proc_oid_mapping() {
+    let base = temp_dir("xmlcomment_proc_oid");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select xmlcomment('test')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Xml("<!--test-->".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn numeric_nan_division_by_zero_returns_nan() {
     let base = temp_dir("numeric_nan_division_by_zero");
     let txns = TransactionManager::new_durable(&base).unwrap();

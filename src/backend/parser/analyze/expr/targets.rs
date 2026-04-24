@@ -265,13 +265,21 @@ fn expand_named_star_targets(
         Ok(entries) => Ok(entries),
         Err(ParseError::UnknownColumn(_)) => outer_scopes
             .iter()
-            .find_map(
-                |outer_scope| match expand_star_targets(outer_scope, Some(relation)) {
-                    Ok(entries) => Some(Ok(entries)),
+            .enumerate()
+            .find_map(|(depth, outer_scope)| {
+                match expand_star_targets(outer_scope, Some(relation)) {
+                    Ok(entries) => Some(Ok(entries
+                        .into_iter()
+                        .map(|entry| TargetEntry {
+                            expr: raise_expr_varlevels(entry.expr, depth + 1),
+                            input_resno: None,
+                            ..entry
+                        })
+                        .collect())),
                     Err(ParseError::UnknownColumn(_)) => None,
                     Err(err) => Some(Err(err)),
-                },
-            )
+                }
+            })
             .unwrap_or_else(|| Err(ParseError::UnknownColumn(format!("{relation}.*")))),
         Err(err) => Err(err),
     }
