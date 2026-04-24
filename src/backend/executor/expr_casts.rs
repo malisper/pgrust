@@ -30,9 +30,10 @@ use crate::backend::utils::time::date::{
 use crate::backend::utils::time::datetime::DateTimeParseError;
 use crate::backend::utils::time::timestamp::{parse_timestamp_text, parse_timestamptz_text};
 use crate::include::catalog::{
-    INT2_TYPE_OID, TEXT_TYPE_OID, bootstrap_pg_cast_rows, builtin_type_rows,
+    INT2_TYPE_OID, OID_TYPE_OID, TEXT_TYPE_OID, bootstrap_pg_cast_rows, builtin_type_rows,
     multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
+use crate::include::nodes::datum::ArrayDimension;
 use crate::pgrust::compact_string::CompactString;
 use num_integer::Integer;
 use num_traits::{Signed, Zero};
@@ -1624,10 +1625,12 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             }
             other => match other.as_text() {
                 Some(text) => {
-                    if matches!(ty.element_type().kind, SqlTypeKind::Int2)
-                        && !text.trim_start().starts_with('{')
-                    {
-                        parse_int2vector_array_text(text)
+                    if !text.trim_start().starts_with('{') {
+                        match ty.element_type().kind {
+                            SqlTypeKind::Int2 => parse_int2vector_array_text(text),
+                            SqlTypeKind::Oid => parse_oidvector_array_text(text),
+                            _ => parse_text_array_literal(text, ty.element_type()),
+                        }
                     } else {
                         parse_text_array_literal(text, ty.element_type())
                     }
@@ -2779,6 +2782,23 @@ fn parse_int2vector_array_text(text: &str) -> Result<Value, ExecError> {
     }
     Ok(Value::PgArray(
         ArrayValue::from_1d(items).with_element_type_oid(INT2_TYPE_OID),
+    ))
+}
+
+fn parse_oidvector_array_text(text: &str) -> Result<Value, ExecError> {
+    let mut items = Vec::new();
+    for item in text.split_ascii_whitespace() {
+        items.push(cast_text_to_oid(item)?);
+    }
+    Ok(Value::PgArray(
+        ArrayValue::from_dimensions(
+            vec![ArrayDimension {
+                lower_bound: 0,
+                length: items.len(),
+            }],
+            items,
+        )
+        .with_element_type_oid(OID_TYPE_OID),
     ))
 }
 

@@ -11832,47 +11832,50 @@ fn build_alter_table_target(pair: Pair<'_, Rule>) -> Result<(bool, bool, String)
     ))
 }
 
-fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
-    fn add_array_bounds(ty: RawTypeName, bounds: usize) -> RawTypeName {
-        let mut ty = ty;
-        for _ in 0..bounds {
-            ty = match ty {
-                RawTypeName::Builtin(inner_ty) => RawTypeName::Builtin(SqlType::array_of(inner_ty)),
-                RawTypeName::Named { name, array_bounds } => RawTypeName::Named {
-                    name,
-                    array_bounds: array_bounds.saturating_add(1),
-                },
-                other => other,
-            };
-        }
-        ty
+fn add_array_bounds(ty: RawTypeName, bounds: usize) -> RawTypeName {
+    let mut ty = ty;
+    for _ in 0..bounds {
+        ty = match ty {
+            RawTypeName::Builtin(inner_ty) => RawTypeName::Builtin(SqlType::array_of(inner_ty)),
+            RawTypeName::Named { name, array_bounds } => RawTypeName::Named {
+                name,
+                array_bounds: array_bounds.saturating_add(1),
+            },
+            other => other,
+        };
     }
+    ty
+}
 
+fn type_array_suffix_bounds(suffix: Pair<'_, Rule>) -> usize {
+    match suffix.as_rule() {
+        Rule::type_array_suffix => suffix
+            .into_inner()
+            .map(|part| match part.as_rule() {
+                Rule::array_suffix => 1usize,
+                Rule::array_decl_suffix => part
+                    .into_inner()
+                    .filter(|inner| inner.as_rule() == Rule::array_suffix)
+                    .count(),
+                _ => 0,
+            })
+            .sum(),
+        Rule::array_suffix => 1,
+        Rule::array_decl_suffix => suffix
+            .into_inner()
+            .filter(|inner| inner.as_rule() == Rule::array_suffix)
+            .count(),
+        _ => 0,
+    }
+}
+
+fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
     match pair.as_rule() {
         Rule::type_name | Rule::known_type_name => {
             let mut inner = pair.into_inner();
             let mut ty = build_type_name(inner.next().expect("type_name base"));
             for suffix in inner {
-                let bounds = match suffix.as_rule() {
-                    Rule::type_array_suffix => suffix
-                        .into_inner()
-                        .map(|part| match part.as_rule() {
-                            Rule::array_suffix => 1usize,
-                            Rule::array_decl_suffix => part
-                                .into_inner()
-                                .filter(|inner| inner.as_rule() == Rule::array_suffix)
-                                .count(),
-                            _ => 0,
-                        })
-                        .sum(),
-                    Rule::array_suffix => 1,
-                    Rule::array_decl_suffix => suffix
-                        .into_inner()
-                        .filter(|inner| inner.as_rule() == Rule::array_suffix)
-                        .count(),
-                    _ => 0,
-                };
-                ty = add_array_bounds(ty, bounds);
+                ty = add_array_bounds(ty, type_array_suffix_bounds(suffix));
             }
             ty
         }
@@ -12033,6 +12036,19 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
                     .unwrap_or_else(|| SqlType::new(kind)),
             )
         }
+        Rule::interval_type | Rule::kw_interval | Rule::kw_interval_atom => {
+            let precision = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::integer)
+                .map(build_type_len)
+                .transpose()
+                .expect("interval precision");
+            RawTypeName::Builtin(
+                precision
+                    .map(|precision| SqlType::new(SqlTypeKind::Interval).with_typmod(precision))
+                    .unwrap_or_else(|| SqlType::new(SqlTypeKind::Interval)),
+            )
+        }
         Rule::kw_point => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Point)),
         Rule::kw_lseg => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Lseg)),
         Rule::kw_path => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Path)),
@@ -12079,6 +12095,35 @@ fn build_type_len(pair: Pair<'_, Rule>) -> Result<i32, ParseError> {
     pair.as_str()
         .parse::<i32>()
         .map_err(|_| ParseError::InvalidInteger(pair.as_str().to_string()))
+}
+
+fn build_cast_type_name(pair: Pair<'_, Rule>) -> Result<RawTypeName, ParseError> {
+    let mut inner = pair.into_inner();
+    let first = inner.next().ok_or(ParseError::UnexpectedEof)?;
+    let mut ty = build_type_name(first);
+    for part in inner {
+        match part.as_rule() {
+            Rule::interval_field_clause => {
+                if let Some(precision) = interval_field_clause_precision(part)? {
+                    ty = RawTypeName::Builtin(
+                        SqlType::new(SqlTypeKind::Interval).with_typmod(precision),
+                    );
+                }
+            }
+            Rule::type_array_suffix | Rule::array_suffix | Rule::array_decl_suffix => {
+                ty = add_array_bounds(ty, type_array_suffix_bounds(part));
+            }
+            _ => {}
+        }
+    }
+    Ok(ty)
+}
+
+fn interval_field_clause_precision(pair: Pair<'_, Rule>) -> Result<Option<i32>, ParseError> {
+    pair.into_inner()
+        .find(|inner| inner.as_rule() == Rule::integer)
+        .map(build_type_len)
+        .transpose()
 }
 
 fn build_numeric_typemod_component(pair: Pair<'_, Rule>) -> Result<i32, ParseError> {
@@ -12149,12 +12194,12 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             for suffix in inner {
                 match suffix.as_rule() {
                     Rule::cast_suffix => {
-                        let ty = build_type_name(
+                        let ty = build_cast_type_name(
                             suffix
                                 .into_inner()
-                                .find(|part| part.as_rule() == Rule::type_name)
+                                .find(|part| part.as_rule() == Rule::cast_type_name)
                                 .ok_or(ParseError::UnexpectedEof)?,
-                        );
+                        )?;
                         expr = SqlExpr::Cast(Box::new(expr), ty);
                     }
                     Rule::subscript_suffix => {
@@ -12564,7 +12609,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             for part in pair.into_inner() {
                 match part.as_rule() {
                     Rule::expr => expr = Some(build_expr(part)?),
-                    Rule::type_name => ty = Some(build_type_name(part)),
+                    Rule::cast_type_name => ty = Some(build_cast_type_name(part)?),
                     _ => {}
                 }
             }
@@ -12772,13 +12817,18 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::xml_serialize_expr => build_xml_serialize_expr(pair),
         Rule::typed_string_literal => {
             let mut inner = pair.into_inner();
-            let ty = build_type_name(inner.next().ok_or(ParseError::UnexpectedEof)?);
-            let literal =
-                decode_string_literal_pair(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
-            Ok(SqlExpr::Cast(
-                Box::new(SqlExpr::Const(Value::Text(literal.into()))),
-                ty,
-            ))
+            let first = inner.next().ok_or(ParseError::UnexpectedEof)?;
+            if first.as_rule() == Rule::interval_string_literal {
+                build_interval_string_literal(first)
+            } else {
+                let ty = build_type_name(first);
+                let literal =
+                    decode_string_literal_pair(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
+                Ok(SqlExpr::Cast(
+                    Box::new(SqlExpr::Const(Value::Text(literal.into()))),
+                    ty,
+                ))
+            }
         }
         Rule::bit_string_literal | Rule::binary_bit_literal | Rule::hex_bit_literal => Ok(
             SqlExpr::Const(Value::Bit(parse_bit_string_literal(pair.as_str())?)),
@@ -12844,6 +12894,35 @@ fn build_array_literal(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         .transpose()?
         .unwrap_or_default();
     Ok(SqlExpr::ArrayLiteral(elements))
+}
+
+fn build_interval_string_literal(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let mut ty = RawTypeName::Builtin(SqlType::new(SqlTypeKind::Interval));
+    let mut literal = None;
+    let mut trailing_precision = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::interval_type => ty = build_type_name(part),
+            Rule::quoted_string_literal
+            | Rule::string_literal
+            | Rule::unicode_string_literal
+            | Rule::escape_string_literal
+            | Rule::dollar_string_literal => literal = Some(decode_string_literal_pair(part)?),
+            Rule::interval_field_clause => {
+                trailing_precision = interval_field_clause_precision(part)?;
+            }
+            _ => {}
+        }
+    }
+    if let Some(precision) = trailing_precision {
+        ty = RawTypeName::Builtin(SqlType::new(SqlTypeKind::Interval).with_typmod(precision));
+    }
+    Ok(SqlExpr::Cast(
+        Box::new(SqlExpr::Const(Value::Text(
+            literal.ok_or(ParseError::UnexpectedEof)?.into(),
+        ))),
+        ty,
+    ))
 }
 
 fn build_select_like_subquery(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseError> {
