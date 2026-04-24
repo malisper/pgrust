@@ -307,9 +307,23 @@ fn policy_rows_for_relation(
     txn_ctx: Option<(TransactionId, CommandId)>,
     relation_oid: u32,
 ) -> Vec<crate::include::catalog::PgPolicyRow> {
-    visible_catcache(db, client_id, txn_ctx)
-        .map(|catcache| catcache.policy_rows_for_relation(relation_oid))
-        .unwrap_or_default()
+    search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::PolicyPolrelidPolname,
+        oid_key(relation_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Policy(row) => Some(row),
+                _ => None,
+            })
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 fn type_row_by_oid(
@@ -341,10 +355,13 @@ fn proc_row_by_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     oid: u32,
 ) -> Option<PgProcRow> {
-    backend_catcache(db, client_id, txn_ctx)
+    search_sys_cache1_db(db, client_id, txn_ctx, SysCacheId::ProcOid, oid_key(oid))
         .ok()?
-        .proc_by_oid(oid)
-        .cloned()
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Proc(row) => Some(row),
+            _ => None,
+        })
 }
 
 fn proc_rows_by_name(
@@ -385,10 +402,19 @@ fn aggregate_row_by_fnoid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     aggfnoid: u32,
 ) -> Option<PgAggregateRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .ok()?
-        .aggregate_by_fnoid(aggfnoid)
-        .cloned()
+    search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::AggFnoid,
+        oid_key(aggfnoid),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Aggregate(row) => Some(row),
+        _ => None,
+    })
 }
 
 fn language_row_by_oid(
@@ -397,11 +423,13 @@ fn language_row_by_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     oid: u32,
 ) -> Option<PgLanguageRow> {
-    backend_catcache(db, client_id, txn_ctx)
+    search_sys_cache1_db(db, client_id, txn_ctx, SysCacheId::LangOid, oid_key(oid))
         .ok()?
-        .language_rows()
         .into_iter()
-        .find(|row| row.oid == oid)
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Language(row) => Some(row),
+            _ => None,
+        })
 }
 
 fn language_rows(
@@ -420,12 +448,19 @@ fn language_row_by_name(
     txn_ctx: Option<(TransactionId, CommandId)>,
     name: &str,
 ) -> Option<PgLanguageRow> {
-    let normalized = normalize_catalog_name(name);
-    backend_catcache(db, client_id, txn_ctx)
-        .ok()?
-        .language_rows()
-        .into_iter()
-        .find(|row| row.lanname.eq_ignore_ascii_case(normalized))
+    search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::LangName,
+        Value::Text(normalize_catalog_name(name).to_ascii_lowercase().into()),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Language(row) => Some(row),
+        _ => None,
+    })
 }
 
 fn opclass_row_by_oid(
@@ -605,11 +640,19 @@ pub fn collation_row_by_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     collation_oid: u32,
 ) -> Option<PgCollationRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .ok()?
-        .collation_rows()
-        .into_iter()
-        .find(|row| row.oid == collation_oid)
+    search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::CollOid,
+        oid_key(collation_oid),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Collation(row) => Some(row),
+        _ => None,
+    })
 }
 
 pub fn amop_rows_for_family(
