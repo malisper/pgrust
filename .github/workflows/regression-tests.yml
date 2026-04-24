@@ -23,6 +23,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
+  REGRESS_RESULTS_DIR: ${{ github.workspace }}/regress-results
+  REGRESS_COMMAND_TIMEOUT: 210m
   # Pin to the PG18 SHA the project currently develops against. Bump when the
   # team decides to track a newer upstream — fixtures (.out files) are tied to
   # this revision.
@@ -73,41 +75,63 @@ jobs:
 
       - name: Run regression tests
         id: regress
+        continue-on-error: true
         working-directory: pgrust
         env:
           PGRUST_REGRESS_USER: postgres
         run: |
-          set +e
-          mkdir -p "$GITHUB_WORKSPACE/regress-results"
-          scripts/run_regression.sh \
+          status=0
+          mkdir -p "$REGRESS_RESULTS_DIR"
+          timeout --signal=TERM --kill-after=30s "$REGRESS_COMMAND_TIMEOUT" \
+            scripts/run_regression.sh \
             --skip-build \
-            --results-dir "$GITHUB_WORKSPACE/regress-results"
-          status=$?
-          set -e
+            --results-dir "$REGRESS_RESULTS_DIR" || status=$?
+          printf '%s\n' "$status" > "$REGRESS_RESULTS_DIR/exit_code.txt"
+          if [[ ! -f "$REGRESS_RESULTS_DIR/summary.json" ]]; then
+            cat > "$REGRESS_RESULTS_DIR/summary.json" <<EOF
+          {
+            "status": "aborted",
+            "tests": {
+              "planned": 0,
+              "total": 0,
+              "passed": 0,
+              "failed": 0,
+              "errored": 0,
+              "pass_rate_pct": 0
+            },
+            "queries": {
+              "total": 0,
+              "matched": 0,
+              "mismatched": 0,
+              "match_rate_pct": 0
+            }
+          }
+          EOF
+          fi
           echo "exit_code=$status" >> "$GITHUB_OUTPUT"
-          echo "results_dir=$GITHUB_WORKSPACE/regress-results" >> "$GITHUB_OUTPUT"
-          if [[ -f "$GITHUB_WORKSPACE/regress-results/summary.json" ]]; then
+          if [[ -f "$REGRESS_RESULTS_DIR/summary.json" ]]; then
             echo "## Regression summary" >> "$GITHUB_STEP_SUMMARY"
             echo '```json' >> "$GITHUB_STEP_SUMMARY"
-            cat "$GITHUB_WORKSPACE/regress-results/summary.json" >> "$GITHUB_STEP_SUMMARY"
+            cat "$REGRESS_RESULTS_DIR/summary.json" >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
           fi
+          exit 0
 
       - name: Upload regression artifacts (workflow run)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: regression-results
-          path: ${{ steps.regress.outputs.results_dir }}
+          path: ${{ env.REGRESS_RESULTS_DIR }}
           if-no-files-found: warn
           retention-days: 90
 
       - name: Publish results to regression-history
         id: publish
-        if: always() && steps.regress.outputs.results_dir != ''
+        if: always()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RESULTS_DIR: ${{ steps.regress.outputs.results_dir }}
+          RESULTS_DIR: ${{ env.REGRESS_RESULTS_DIR }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           RUN_SHA: ${{ github.sha }}
@@ -121,7 +145,7 @@ jobs:
         if: always() && steps.publish.outputs.run_dir_name != ''
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          RESULTS_DIR: ${{ steps.regress.outputs.results_dir }}
+          RESULTS_DIR: ${{ env.REGRESS_RESULTS_DIR }}
           RUN_DIR_NAME: ${{ steps.publish.outputs.run_dir_name }}
           PREV_DIR_NAME: ${{ steps.publish.outputs.prev_dir_name }}
           PREV_TESTS_PASSED: ${{ steps.publish.outputs.prev_tests_passed }}
@@ -131,3 +155,17 @@ jobs:
           REPO_FULL_NAME: ${{ github.repository }}
         working-directory: pgrust
         run: scripts/github/notify_slack_regression.sh
+
+      - name: Mark workflow failed when regressions fail
+        if: always()
+        run: |
+          status=0
+          if [[ -f "$REGRESS_RESULTS_DIR/exit_code.txt" ]]; then
+            status="$(cat "$REGRESS_RESULTS_DIR/exit_code.txt")"
+          elif [[ "${{ steps.regress.outcome }}" != "success" ]]; then
+            status=1
+          fi
+          echo "Regression exit code: $status"
+          if [[ "$status" != "0" ]]; then
+            exit "$status"
+          fi
