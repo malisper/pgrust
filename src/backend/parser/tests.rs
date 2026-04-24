@@ -10506,6 +10506,189 @@ limit 1"#,
 }
 
 #[test]
+fn recursive_cte_allows_lisp_expr_frame_branches() {
+    let stmt = parse_select(
+        r#"with recursive frames as (
+  select '{"type":"expr","env":{"x":9},"expr":1}'::jsonb as frame
+  union all
+  select '{"type":"expr","env":{"x":9},"expr":"x"}'::jsonb
+  union all
+  select '{"type":"expr","env":{},"expr":["if",true,1,0]}'::jsonb
+  union all
+  select '{"type":"expr","env":{},"expr":["lambda",["x"],["+", "x", 1]]}'::jsonb
+  union all
+  select '{"type":"expr","env":{},"expr":["call",1,2]}'::jsonb
+)
+select
+  case
+    when jsonb_typeof(expr) = 'number'
+    then jsonb_build_object('result', expr)
+    when jsonb_typeof(expr) = 'string'
+    then jsonb_build_object('result', env -> expr_string)
+    when op_string = 'if'
+    then jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'eval_if', 'expr', expr, 'env', env)))
+    when op_string = 'lambda'
+    then jsonb_build_object('result', jsonb_build_object('args', arg1, 'body', arg2, 'env', env))
+    else jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'eval_args', 'left', expr, 'done', '[]'::jsonb, 'env', env)))
+  end
+from (
+  select
+    frame -> 'expr' as expr,
+    frame ->> 'expr' as expr_string,
+    frame -> 'expr' ->> 0 as op_string,
+    frame -> 'expr' -> 1 as arg1,
+    frame -> 'expr' -> 2 as arg2,
+    frame -> 'env' as env
+  from frames
+) sub"#,
+    )
+    .unwrap();
+    assert!(build_plan(&stmt, &catalog()).is_ok());
+}
+
+#[test]
+fn recursive_cte_allows_lisp_eval_args_frame_branches() {
+    let stmt = parse_select(
+        r#"with recursive frames as (
+  select '{"type":"eval_args","left":[],"done":[1,2],"env":{}}'::jsonb as frame, null::jsonb as result
+  union all
+  select '{"type":"eval_args","left":[1,2],"done":[],"env":{}}'::jsonb, null::jsonb
+  union all
+  select '{"type":"eval_args","left":[2],"done":[1],"env":{}}'::jsonb, '9'::jsonb
+)
+select
+  case
+    when result is null and jsonb_array_length(args_left) = 0
+    then jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'eval_call', 'expr', args_done, 'env', env)))
+    when result is null
+    then jsonb_build_object(
+      'stack',
+      jsonb_build_array(
+        jsonb_build_object('type', 'expr', 'expr', args_left -> 0, 'env', env),
+        jsonb_build_object('type', 'eval_args', 'left', args_left - 0, 'done', args_done, 'env', env)
+      )
+    )
+    else jsonb_build_object('stack', jsonb_build_array(jsonb_build_object('type', 'eval_args', 'left', args_left, 'done', args_done || jsonb_build_array(result), 'env', env)))
+  end
+from (
+  select
+    frame -> 'left' as args_left,
+    frame -> 'done' as args_done,
+    frame -> 'env' as env,
+    result
+  from frames
+) sub"#,
+    )
+    .unwrap();
+    assert!(build_plan(&stmt, &catalog()).is_ok());
+}
+
+fn assert_lisp_eval_call_branch_plan(frames: &str, case_arms: &str) {
+    let sql = format!(
+        r#"with recursive frames as (
+{frames}
+)
+select
+  case
+{case_arms}
+  end
+from (
+  select
+    expr -> 0 as op,
+    expr ->> 0 as op_string,
+    expr -> 1 as arg1,
+    expr -> 2 as arg2
+  from frames
+) sub"#
+    );
+    let stmt = parse_select(&sql).unwrap();
+    assert!(build_plan(&stmt, &catalog()).is_ok());
+}
+
+#[test]
+fn recursive_cte_allows_lisp_eval_call_arithmetic_branches() {
+    assert_lisp_eval_call_branch_plan(
+        r#"  select '["+",1,2]'::jsonb as expr
+  union all select '["*",2,3]'::jsonb
+  union all select '["-",3,1]'::jsonb
+  union all select '["/",4,2]'::jsonb"#,
+        r#"    when op_string = '+'
+    then jsonb_build_object('result', arg1::text::bigint + arg2::text::bigint)
+    when op_string = '*'
+    then jsonb_build_object('result', arg1::text::bigint * arg2::text::bigint)
+    when op_string = '-'
+    then jsonb_build_object('result', arg1::text::bigint - arg2::text::bigint)
+    else jsonb_build_object('result', arg1::text::bigint / arg2::text::bigint)
+"#,
+    );
+}
+
+#[test]
+fn recursive_cte_allows_lisp_eval_call_comparison_branches() {
+    assert_lisp_eval_call_branch_plan(
+        r#"  select '[">",3,2]'::jsonb as expr
+  union all select '["<",2,3]'::jsonb
+  union all select '["=",2,2]'::jsonb"#,
+        r#"    when op_string = '>'
+    then jsonb_build_object('result', arg1::text::bigint > arg2::text::bigint)
+    when op_string = '<'
+    then jsonb_build_object('result', arg1::text::bigint < arg2::text::bigint)
+    else jsonb_build_object('result', arg1 = arg2)
+"#,
+    );
+}
+
+#[test]
+fn recursive_cte_allows_lisp_eval_call_list_branches() {
+    assert_lisp_eval_call_branch_plan(
+        r#"  select '["head",[1,2]]'::jsonb as expr
+  union all select '["tail",[1,2]]'::jsonb
+  union all select '["cons",1,[2,3]]'::jsonb
+  union all select '["empty"]'::jsonb"#,
+        r#"    when op_string = 'head'
+    then jsonb_build_object('result', arg1 -> 0)
+    when op_string = 'tail'
+    then jsonb_build_object('result', arg1 - 0)
+    when op_string = 'cons'
+    then jsonb_build_object('result', jsonb_build_array(arg1) || arg2)
+    else jsonb_build_object('result', '[]'::jsonb)
+"#,
+    );
+}
+
+#[test]
+fn recursive_cte_allows_lisp_eval_call_user_function_branch() {
+    let stmt = parse_select(
+        r#"with recursive frames as (
+  select '[{"args":["x","y"],"body":["+", "x", "y"],"env":{"z":0}},1,2]'::jsonb as expr
+)
+select
+  jsonb_build_object(
+      'stack',
+      jsonb_build_array(
+        jsonb_build_object(
+          'type', 'expr',
+          'expr', op -> 'body',
+          'env', (op -> 'env') || jsonb_build_object(
+            coalesce(op -> 'args' ->> 0, 'null'), arg1,
+            coalesce(op -> 'args' ->> 1, 'null'), arg2
+          )
+        )
+      )
+    )
+from (
+  select
+    expr -> 0 as op,
+    expr -> 1 as arg1,
+    expr -> 2 as arg2
+  from frames
+) sub"#,
+    )
+    .unwrap();
+    assert!(build_plan(&stmt, &catalog()).is_ok());
+}
+
+#[test]
 fn window_function_rejected_in_where_group_by_and_having() {
     for sql in [
         "select name from people where row_number() over () > 1",

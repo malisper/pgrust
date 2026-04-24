@@ -9708,7 +9708,7 @@ fn numeric_transcendentals_match_postgres_reference_values() {
 }
 
 #[test]
-fn numeric_exp_underflow_matches_postgres_zero_semantics() {
+fn numeric_exp_underflow_zero_semantics() {
     let base = temp_dir("numeric_exp_underflow");
     let txns = TransactionManager::new_durable(&base).unwrap();
     assert_query_rows(
@@ -9716,15 +9716,17 @@ fn numeric_exp_underflow_matches_postgres_zero_semantics() {
             &base,
             &txns,
             INVALID_TRANSACTION_ID,
-            "select \
-                exp(-5000::numeric) = 0, \
-                scale(exp(-5000::numeric)), \
-                exp(-10000::numeric) = 0, \
-                scale(exp(-10000::numeric)), \
-                coalesce(nullif(exp(-5000::numeric), 0), 0), \
-                coalesce(nullif(exp(-10000::numeric), 0), 0), \
-                exp(32.999::numeric), \
-                exp(-32.999::numeric)",
+            "with values as ( \
+                select exp(-5000::numeric) as exp_5000, exp(-10000::numeric) as exp_10000 \
+             ) \
+             select \
+                exp_5000 = 0, \
+                scale(exp_5000), \
+                exp_10000 = 0, \
+                scale(exp_10000), \
+                coalesce(nullif(exp_5000, 0), 0), \
+                coalesce(nullif(exp_10000, 0), 0) \
+             from values",
         )
         .unwrap(),
         vec![vec![
@@ -9734,6 +9736,25 @@ fn numeric_exp_underflow_matches_postgres_zero_semantics() {
             Value::Int32(1000),
             Value::Numeric("0".into()),
             Value::Numeric("0".into()),
+        ]],
+    );
+}
+
+#[test]
+fn numeric_exp_boundary_values_match_postgres() {
+    let base = temp_dir("numeric_exp_boundary_values");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select \
+                exp(32.999::numeric), \
+                exp(-32.999::numeric)",
+        )
+        .unwrap(),
+        vec![vec![
             Value::Numeric("214429043492155.053".into()),
             Value::Numeric("0.000000000000004663547361468248".into()),
         ]],
@@ -17691,7 +17712,7 @@ fn range_finite_accessor_semantics() {
 }
 
 #[test]
-fn range_infinite_bound_semantics() {
+fn range_infinite_accessor_semantics() {
     let base = temp_dir("range_accessor_infinite");
     let txns = TransactionManager::new_durable(&base).unwrap();
     assert_query_rows(
@@ -17701,17 +17722,28 @@ fn range_infinite_bound_semantics() {
             INVALID_TRANSACTION_ID,
             "select \
                 lower(int4range(null, 10))::text, \
-                upper(int4range(1, null))::text, \
+                upper(int4range(1, null))::text",
+        )
+        .unwrap(),
+        vec![vec![Value::Null, Value::Null]],
+    );
+}
+
+#[test]
+fn range_infinite_flag_semantics() {
+    let base = temp_dir("range_accessor_infinite_flags");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select \
                 lower_inf(int4range(null, 10)), \
                 upper_inf(int4range(1, null))",
         )
         .unwrap(),
-        vec![vec![
-            Value::Null,
-            Value::Null,
-            Value::Bool(true),
-            Value::Bool(true),
-        ]],
+        vec![vec![Value::Bool(true), Value::Bool(true)]],
     );
 }
 
@@ -17734,7 +17766,7 @@ fn empty_range_flag_semantics() {
 }
 
 #[test]
-fn range_set_operators_work() {
+fn range_union_and_intersection_work() {
     let base = temp_dir("range_set_operators");
     let txns = TransactionManager::new_durable(&base).unwrap();
     assert_query_rows(
@@ -17744,14 +17776,31 @@ fn range_set_operators_work() {
             INVALID_TRANSACTION_ID,
             "select \
                 (int4range(1, 5) + int4range(5, 10))::text, \
-                (int4range(1, 10) * int4range(5, 20))::text, \
-                (int4range(1, 10) - int4range(5, 20))::text, \
-                range_merge(int4range(1, 5), int4range(10, 15))::text",
+                (int4range(1, 10) * int4range(5, 20))::text",
         )
         .unwrap(),
         vec![vec![
             Value::Text("[1,10)".into()),
             Value::Text("[5,10)".into()),
+        ]],
+    );
+}
+
+#[test]
+fn range_difference_and_merge_work() {
+    let base = temp_dir("range_set_operators_diff_merge");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select \
+                (int4range(1, 10) - int4range(5, 20))::text, \
+                range_merge(int4range(1, 5), int4range(10, 15))::text",
+        )
+        .unwrap(),
+        vec![vec![
             Value::Text("[1,5)".into()),
             Value::Text("[1,15)".into()),
         ]],
@@ -18996,7 +19045,7 @@ with recursive iterations as (
   select 'FX' as path, 0 as iteration
   union all
   select replace(replace(replace(path, 'X', 'X+ZF+'), 'Y', '-FX-Y'), 'Z', 'Y'), iteration + 1
-  from iterations where iteration < 2
+  from iterations where iteration < 3
 ), segments as (
   select
     0 as start_row,
@@ -19059,7 +19108,9 @@ with recursive iterations as (
 "#;
     assert_query_rows(
         run_sql(&base, &txns, INVALID_TRANSACTION_ID, sql).unwrap(),
-        vec![vec![Value::Text("*  \n|  \n*-*\n  |\n*-*".into())]],
+        vec![vec![Value::Text(
+            "* *-*  \n| | |  \n*-* *-*\n      |\n    *-*".into(),
+        )]],
     );
 }
 
