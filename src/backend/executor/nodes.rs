@@ -1623,6 +1623,13 @@ fn render_explain_func_expr(
     qualifier: Option<&str>,
     column_names: &[String],
 ) -> String {
+    if matches!(
+        func.implementation,
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::BpcharToText)
+    ) && func.args.len() == 1
+    {
+        return render_explain_expr_inner_with_qualifier(&func.args[0], qualifier, column_names);
+    }
     if let Some(operator) = builtin_scalar_function_infix_operator(func.implementation) {
         if let [left, right] = func.args.as_slice() {
             return format!(

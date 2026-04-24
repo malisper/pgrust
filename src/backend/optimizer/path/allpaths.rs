@@ -18,6 +18,7 @@ use super::super::inherit::{
 };
 use super::super::joininfo;
 use super::super::optimize_path;
+use super::super::partition_prune::partition_may_satisfy_filter;
 use super::super::pathnodes::{next_synthetic_slot_id, rte_slot_id, slot_output_target};
 use super::super::plan::grouping_planner;
 use super::super::util::{
@@ -665,6 +666,22 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             ));
         }
         for child_rtindex in child_rtindexes {
+            let child_relation_oid = root
+                .parse
+                .rtable
+                .get(child_rtindex.saturating_sub(1))
+                .and_then(|child_rte| {
+                    if let RangeTblEntryKind::Relation { relation_oid, .. } = child_rte.kind {
+                        Some(relation_oid)
+                    } else {
+                        None
+                    }
+                });
+            if let Some(child_oid) = child_relation_oid
+                && !partition_may_satisfy_filter(catalog, relation_oid, child_oid, filter.as_ref())
+            {
+                continue;
+            }
             set_base_rel_pathlist(root, child_rtindex, catalog);
             let Some(child_path) = root
                 .simple_rel_array
