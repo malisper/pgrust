@@ -17,6 +17,10 @@ on:
         description: 'Regression command timeout, e.g. 210m for normal runs or 2m for abort-path smoke tests'
         required: false
         default: '210m'
+      jobs:
+        description: 'Number of isolated concurrent regression test workers'
+        required: false
+        default: '4'
 
 permissions:
   contents: write   # required to push to the regression-history branch
@@ -30,6 +34,7 @@ env:
   RUST_BACKTRACE: "1"
   REGRESS_RESULTS_DIR: ${{ github.workspace }}/regress-results
   REGRESS_COMMAND_TIMEOUT: ${{ inputs.command_timeout || '210m' }}
+  REGRESS_JOBS: ${{ inputs.jobs || '4' }}
   # Pin to the PG18 SHA the project currently develops against. Bump when the
   # team decides to track a newer upstream — fixtures (.out files) are tied to
   # this revision.
@@ -90,6 +95,7 @@ jobs:
           timeout --signal=TERM --kill-after=30s "$REGRESS_COMMAND_TIMEOUT" \
             scripts/run_regression.sh \
             --skip-build \
+            --jobs "$REGRESS_JOBS" \
             --results-dir "$REGRESS_RESULTS_DIR" || status=$?
           printf '%s\n' "$status" > "$REGRESS_RESULTS_DIR/exit_code.txt"
           if [[ ! -f "$REGRESS_RESULTS_DIR/summary.json" ]]; then
