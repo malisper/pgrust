@@ -24,8 +24,9 @@ use crate::backend::parser::{
     BoundRelationConstraints, BoundUpdateStatement, BoundUpdateTarget, Catalog, CatalogLookup,
     DropTableStatement, ExplainStatement, ForeignKeyAction, MaintenanceTarget, MergeStatement,
     ParseError, SelectStatement, SqlType, SqlTypeKind, Statement, TruncateTableStatement,
-    UpdateStatement, VacuumStatement, bind_create_table, bind_referenced_by_foreign_keys,
-    bind_relation_constraints, bind_scalar_expr_in_scope, bind_update,
+    UpdateStatement, VacuumStatement, bind_create_table, bind_generated_expr,
+    bind_referenced_by_foreign_keys, bind_relation_constraints, bind_scalar_expr_in_scope,
+    bind_update,
 };
 use crate::backend::rewrite::RlsWriteCheck;
 use crate::backend::rewrite::pg_rewrite_query;
@@ -1070,6 +1071,8 @@ pub(crate) fn write_updated_row(
         &crate::backend::utils::misc::interrupts::InterruptState,
     )>,
 ) -> Result<WriteUpdatedRowResult, ExecError> {
+    let mut current_values = current_values.to_vec();
+    materialize_generated_columns(desc, &mut current_values, ctx)?;
     let old_tuple = if toast.is_some() {
         Some(heap_fetch(&*ctx.pool, ctx.client_id, rel, current_tid)?)
     } else {
@@ -1079,35 +1082,35 @@ pub(crate) fn write_updated_row(
         relation_name,
         desc,
         rls_write_checks,
-        current_values,
+        &current_values,
         ctx,
     )?;
     crate::backend::executor::enforce_relation_constraints(
         relation_name,
         desc,
         relation_constraints,
-        current_values,
+        &current_values,
         ctx,
     )?;
     crate::backend::executor::enforce_outbound_foreign_keys(
         relation_name,
         &relation_constraints.foreign_keys,
         Some(current_old_values),
-        current_values,
+        &current_values,
         ctx,
     )?;
     let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_update(
         relation_name,
         referenced_by_foreign_keys,
         current_old_values,
-        current_values,
+        &current_values,
         ctx,
         xid,
         cid,
         waiter,
     )?;
     let (replacement, toasted) =
-        toast_tuple_for_write(desc, current_values, toast, toast_index, ctx, xid, cid)?;
+        toast_tuple_for_write(desc, &current_values, toast, toast_index, ctx, xid, cid)?;
     match heap_update_with_waiter(
         &*ctx.pool,
         ctx.client_id,
@@ -1123,7 +1126,7 @@ pub(crate) fn write_updated_row(
             if let (Some(toast), Some(old_tuple)) = (toast, old_tuple.as_ref()) {
                 delete_external_from_tuple(ctx, toast, desc, old_tuple, xid)?;
             }
-            maintain_indexes_for_row(rel, desc, indexes, current_values, new_tid, ctx)?;
+            maintain_indexes_for_row(rel, desc, indexes, &current_values, new_tid, ctx)?;
             validate_pending_set_default_rechecks(pending_set_default_rechecks, ctx)?;
             Ok(WriteUpdatedRowResult::Updated(new_tid))
         }
@@ -1480,6 +1483,61 @@ fn evaluate_default_value(
     let (bound, _) = bind_scalar_expr_in_scope(&parsed, &[], catalog).map_err(ExecError::Parse)?;
     let mut slot = TupleSlot::virtual_row(vec![Value::Null; desc.columns.len()]);
     eval_expr(&bound, &mut slot, ctx)
+}
+
+pub(super) fn materialize_generated_columns(
+    desc: &RelationDesc,
+    values: &mut [Value],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    if !desc.columns.iter().any(|column| column.generated.is_some()) {
+        return Ok(());
+    }
+    let generated_exprs = {
+        let catalog = ctx
+            .catalog
+            .as_ref()
+            .ok_or_else(|| ExecError::DetailedError {
+                message: "generated column evaluation failed".into(),
+                detail: Some("executor context missing visible catalog".into()),
+                hint: None,
+                sqlstate: "XX000",
+            })?;
+        desc.columns
+            .iter()
+            .enumerate()
+            .filter_map(|(column_index, column)| match column.generated {
+                Some(crate::backend::parser::ColumnGeneratedKind::Stored) => Some(
+                    bind_generated_expr(desc, column_index, catalog)
+                        .map_err(ExecError::Parse)
+                        .and_then(|expr| {
+                            expr.ok_or_else(|| {
+                                ExecError::Parse(ParseError::InvalidTableDefinition(format!(
+                                    "generation expression missing for column \"{}\"",
+                                    column.name
+                                )))
+                            })
+                        })
+                        .map(|expr| (column_index, expr)),
+                ),
+                _ => None,
+            })
+            .collect::<Result<Vec<_>, ExecError>>()?
+    };
+    let mut slot = TupleSlot::virtual_row(values.to_vec());
+    for (column_index, expr) in generated_exprs {
+        values[column_index] = eval_expr(&expr, &mut slot, ctx)?.to_owned_value();
+    }
+    for (column_index, column) in desc.columns.iter().enumerate() {
+        match column.generated {
+            Some(crate::backend::parser::ColumnGeneratedKind::Virtual) => {
+                values[column_index] = Value::Null;
+            }
+            Some(crate::backend::parser::ColumnGeneratedKind::Stored) => {}
+            None => {}
+        }
+    }
+    Ok(())
 }
 
 struct AppliedSetDefaultAction {
@@ -2510,6 +2568,7 @@ fn execute_merge_update_row(
             ctx,
         )?;
     }
+    materialize_generated_columns(&stmt.desc, &mut updated_values, ctx)?;
     let old_tuple = heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, target_tid)?;
     crate::backend::executor::enforce_relation_constraints(
         &stmt.relation_name,
@@ -3971,12 +4030,13 @@ pub(crate) fn execute_insert_rows(
 
     let mut inserted_rows = Vec::new();
     for values in rows {
-        let Some(values) = (match &triggers {
+        let Some(mut values) = (match &triggers {
             Some(triggers) => triggers.before_row_insert(values.clone(), ctx)?,
             None => Some(values.clone()),
         }) else {
             continue;
         };
+        materialize_generated_columns(desc, &mut values, ctx)?;
         let heap_tid = write_insert_heap_row(
             relation_name,
             rel,
@@ -4104,7 +4164,7 @@ pub fn execute_prepared_insert_row(
     for (column_index, param) in prepared.target_columns.iter().zip(params.iter()) {
         values[*column_index] = param.clone();
     }
-    let Some(values) = (match &triggers {
+    let Some(mut values) = (match &triggers {
         Some(triggers) => triggers.before_row_insert(values, ctx)?,
         None => Some(values),
     }) else {
@@ -4117,6 +4177,7 @@ pub fn execute_prepared_insert_row(
         }
         return Ok(());
     };
+    materialize_generated_columns(&prepared.desc, &mut values, ctx)?;
     let heap_tid = write_insert_heap_row(
         &prepared.relation_name,
         prepared.rel,
@@ -4263,7 +4324,7 @@ pub fn execute_update_with_waiter(
                 let mut current_values = values;
                 loop {
                     ctx.check_for_interrupts()?;
-                    let Some(triggered_values) = (match &triggers {
+                    let Some(mut triggered_values) = (match &triggers {
                         Some(triggers) => triggers.before_row_update(
                             &current_old_values,
                             current_values.clone(),
@@ -4273,6 +4334,7 @@ pub fn execute_update_with_waiter(
                     }) else {
                         break;
                     };
+                    materialize_generated_columns(&target.desc, &mut triggered_values, ctx)?;
                     match write_updated_row(
                         &target.relation_name,
                         target.rel,
@@ -4619,7 +4681,7 @@ fn execute_update_from_joined_input(
 
             loop {
                 ctx.check_for_interrupts()?;
-                let Some(triggered_values) = (match triggers[target_index].as_ref() {
+                let Some(mut triggered_values) = (match triggers[target_index].as_ref() {
                     Some(trigger) => trigger.before_row_update(
                         &current_old_values,
                         current_values.clone(),
@@ -4629,6 +4691,7 @@ fn execute_update_from_joined_input(
                 }) else {
                     break;
                 };
+                materialize_generated_columns(&target.desc, &mut triggered_values, ctx)?;
                 match write_updated_row(
                     &target.relation_name,
                     target.rel,
@@ -5104,6 +5167,7 @@ pub(crate) fn apply_base_update_row(
     let mut current_values = new_values;
     loop {
         ctx.check_for_interrupts()?;
+        materialize_generated_columns(&target.desc, &mut current_values, ctx)?;
         let old_tuple = heap_fetch(&*ctx.pool, ctx.client_id, target.rel, current_tid)?;
         crate::backend::executor::enforce_row_security_write_checks(
             &target.relation_name,

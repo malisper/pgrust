@@ -509,6 +509,7 @@ fn run_statement(
         | Statement::AlterIndexAttachPartition(_)
         | Statement::AlterTableAlterColumnStorage(_)
         | Statement::AlterTableAlterColumnDefault(_)
+        | Statement::AlterTableAlterColumnExpression(_)
         | Statement::AlterTableSetNotNull(_)
         | Statement::AlterTableDropNotNull(_)
         | Statement::AlterTableValidateConstraint(_)

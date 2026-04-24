@@ -381,7 +381,7 @@ fn bind_merge_when_clause(
                 .iter()
                 .map(|assignment| {
                     let column_index = resolve_column(target_scope, &assignment.target.column)?;
-                    Ok(BoundAssignment {
+                    let target = BoundAssignmentTarget {
                         column_index,
                         subscripts: bind_assignment_subscripts(
                             &assignment.target.subscripts,
@@ -397,14 +397,31 @@ fn bind_merge_when_clause(
                             &assignment.target.field_path,
                             catalog,
                         )?,
-                        expr: bind_expr_with_outer_and_ctes(
-                            &assignment.expr,
-                            action_scope,
-                            catalog,
-                            &[],
-                            None,
-                            local_ctes,
-                        )?,
+                    };
+                    ensure_generated_assignment_allowed(
+                        target_desc,
+                        &target,
+                        Some(&assignment.expr),
+                    )?;
+                    Ok(BoundAssignment {
+                        column_index,
+                        subscripts: target.subscripts,
+                        field_path: target.field_path,
+                        target_sql_type: target.target_sql_type,
+                        expr: if matches!(assignment.expr, SqlExpr::Default)
+                            && target_desc.columns[column_index].generated.is_some()
+                        {
+                            Expr::Const(Value::Null)
+                        } else {
+                            bind_expr_with_outer_and_ctes(
+                                &assignment.expr,
+                                action_scope,
+                                catalog,
+                                &[],
+                                None,
+                                local_ctes,
+                            )?
+                        },
                     })
                 })
                 .collect::<Result<Vec<_>, ParseError>>()?;
@@ -442,15 +459,27 @@ fn bind_merge_when_clause(
                     Some(
                         values
                             .iter()
-                            .map(|expr| {
-                                bind_expr_with_outer_and_ctes(
-                                    expr,
-                                    action_scope,
-                                    catalog,
-                                    &[],
-                                    None,
-                                    local_ctes,
-                                )
+                            .zip(target_columns.iter())
+                            .map(|(expr, target)| {
+                                ensure_generated_assignment_allowed(
+                                    target_desc,
+                                    target,
+                                    Some(expr),
+                                )?;
+                                if matches!(expr, SqlExpr::Default)
+                                    && target_desc.columns[target.column_index].generated.is_some()
+                                {
+                                    Ok(Expr::Const(Value::Null))
+                                } else {
+                                    bind_expr_with_outer_and_ctes(
+                                        expr,
+                                        action_scope,
+                                        catalog,
+                                        &[],
+                                        None,
+                                        local_ctes,
+                                    )
+                                }
                             })
                             .collect::<Result<Vec<_>, ParseError>>()?,
                     )
@@ -687,7 +716,7 @@ pub fn plan_merge(
     let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, &local_ctes)?;
     let target_relation_name = merge_target_relation_name(stmt);
     let explain_target_name = merge_explain_target_name(stmt);
-    let target_base = AnalyzedFrom::relation(
+    let mut target_base = AnalyzedFrom::relation(
         target_relation_name.clone(),
         entry.rel,
         entry.relation_oid,
@@ -696,8 +725,10 @@ pub fn plan_merge(
         !stmt.target_only,
         entry.desc.clone(),
     );
+    target_base.output_exprs = generated_relation_output_exprs(&entry.desc, catalog)?;
     let (target_from, target_visible_count) = with_merge_target_ctid(target_base, &entry.desc);
-    let target_scope = scope_for_base_relation(&target_relation_name, &entry.desc);
+    let target_scope =
+        scope_for_base_relation_with_generated(&target_relation_name, &entry.desc, catalog)?;
     let (source_base, source_scope_raw) =
         bind_from_item_with_ctes(&stmt.source, catalog, &[], None, &local_ctes, &[])?;
     let (source_from, source_visible_count) = with_merge_source_present(source_base);
@@ -910,18 +941,19 @@ fn inheritance_translation_indexes(
 fn inheritance_translation_exprs(
     child_desc: &RelationDesc,
     indexes: &[Option<usize>],
-) -> Vec<Expr> {
-    let child_output_exprs = scope_for_relation(None, child_desc).output_exprs;
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<Expr>, ParseError> {
+    let child_output_exprs = generated_relation_output_exprs(child_desc, catalog)?;
     indexes
         .iter()
         .map(|index| match index {
-            Some(index) => child_output_exprs.get(*index).cloned().unwrap_or_else(|| {
+            Some(index) => Ok(child_output_exprs.get(*index).cloned().unwrap_or_else(|| {
                 panic!(
                     "missing inherited child output expr for column {}",
                     index + 1
                 )
-            }),
-            None => Expr::Const(Value::Null),
+            })),
+            None => Ok(Expr::Const(Value::Null)),
         })
         .collect()
 }
@@ -955,7 +987,8 @@ fn build_update_target(
 ) -> Result<BoundUpdateTarget, ParseError> {
     let relation_name = relation_display_name(catalog, child.relation_oid, base_relation_name);
     let translation_indexes = inheritance_translation_indexes(parent_desc, &child.desc);
-    let translation_exprs = inheritance_translation_exprs(&child.desc, &translation_indexes);
+    let translation_exprs =
+        inheritance_translation_exprs(&child.desc, &translation_indexes, catalog)?;
     let indexes = catalog.index_relations_for_heap(child.relation_oid);
     let predicate = parent_predicate
         .map(|expr| rewrite_local_vars_for_output_exprs(expr.clone(), 1, &translation_exprs));
@@ -1030,7 +1063,8 @@ fn build_update_target_from_joined_input(
 ) -> Result<BoundUpdateTarget, ParseError> {
     let relation_name = relation_display_name(catalog, child.relation_oid, base_relation_name);
     let translation_indexes = inheritance_translation_indexes(parent_desc, &child.desc);
-    let parent_visible_exprs = inheritance_translation_exprs(&child.desc, &translation_indexes);
+    let parent_visible_exprs =
+        inheritance_translation_exprs(&child.desc, &translation_indexes, catalog)?;
     let indexes = catalog.index_relations_for_heap(child.relation_oid);
     let assignments = parent_assignments
         .iter()
@@ -1481,7 +1515,8 @@ fn build_delete_target(
     let translation_exprs = inheritance_translation_exprs(
         &child.desc,
         &inheritance_translation_indexes(parent_desc, &child.desc),
-    );
+        catalog,
+    )?;
     let predicate = parent_predicate
         .map(|expr| rewrite_local_vars_for_output_exprs(expr.clone(), 1, &translation_exprs));
     let indexes = catalog.index_relations_for_heap(child.relation_oid);
@@ -1511,6 +1546,9 @@ fn bind_insert_column_defaults(
     desc.columns
         .iter()
         .map(|column| {
+            if column.generated.is_some() {
+                return Ok(Expr::Const(Value::Null));
+            }
             if let Some(sequence_oid) = column.default_sequence_oid {
                 let expr = Expr::builtin_func(
                     BuiltinScalarFunction::NextVal,
@@ -1560,6 +1598,44 @@ fn visible_assignment_targets(desc: &RelationDesc) -> Vec<BoundAssignmentTarget>
         .collect()
 }
 
+pub(super) fn ensure_generated_assignment_allowed(
+    desc: &RelationDesc,
+    target: &BoundAssignmentTarget,
+    expr: Option<&SqlExpr>,
+) -> Result<(), ParseError> {
+    let Some(column) = desc.columns.get(target.column_index) else {
+        return Ok(());
+    };
+    if column.generated.is_none() {
+        return Ok(());
+    }
+    if !target.subscripts.is_empty() || !target.field_path.is_empty() {
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "column \"{}\" of relation is a generated column",
+                column.name
+            ),
+            detail: Some(
+                "Generated columns cannot be assigned through fields or subscripts.".into(),
+            ),
+            hint: None,
+            sqlstate: "428C9",
+        });
+    }
+    if expr.is_some_and(|expr| !matches!(expr, SqlExpr::Default)) {
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "column \"{}\" of relation is a generated column",
+                column.name
+            ),
+            detail: Some("Generated columns can only be assigned DEFAULT.".into()),
+            hint: None,
+            sqlstate: "428C9",
+        });
+    }
+    Ok(())
+}
+
 pub fn bind_insert_prepared(
     table_name: &str,
     columns: Option<&[String]>,
@@ -1574,10 +1650,25 @@ pub fn bind_insert_prepared(
 
     let target_columns = if let Some(columns) = columns {
         let scope = scope_for_relation(Some(table_name), &entry.desc);
-        columns
+        let target_columns = columns
             .iter()
             .map(|column| resolve_column(&scope, column))
-            .collect::<Result<Vec<_>, _>>()?
+            .collect::<Result<Vec<_>, _>>()?;
+        for column_index in &target_columns {
+            if entry.desc.columns[*column_index].generated.is_some() {
+                ensure_generated_assignment_allowed(
+                    &entry.desc,
+                    &BoundAssignmentTarget {
+                        column_index: *column_index,
+                        subscripts: Vec::new(),
+                        field_path: Vec::new(),
+                        target_sql_type: entry.desc.columns[*column_index].sql_type,
+                    },
+                    Some(&SqlExpr::Const(Value::Null)),
+                )?;
+            }
+        }
+        target_columns
     } else {
         let visible_indexes = entry.desc.visible_column_indexes();
         if num_params > visible_indexes.len() {
@@ -1588,6 +1679,21 @@ pub fn bind_insert_prepared(
         }
         visible_indexes.into_iter().take(num_params).collect()
     };
+
+    for column_index in &target_columns {
+        if entry.desc.columns[*column_index].generated.is_some() {
+            ensure_generated_assignment_allowed(
+                &entry.desc,
+                &BoundAssignmentTarget {
+                    column_index: *column_index,
+                    subscripts: Vec::new(),
+                    field_path: Vec::new(),
+                    target_sql_type: entry.desc.columns[*column_index].sql_type,
+                },
+                Some(&SqlExpr::Const(Value::Null)),
+            )?;
+        }
+    }
 
     if target_columns.len() != num_params {
         return Err(ParseError::InvalidInsertTargetCount {
@@ -1663,7 +1769,8 @@ pub(crate) fn bind_insert_with_outer_scopes(
         catalog,
     )?;
     let visible_target_name = stmt.table_alias.as_deref().unwrap_or(&stmt.table_name);
-    let target_scope = scope_for_relation(Some(visible_target_name), &entry.desc);
+    let target_scope =
+        scope_for_relation_with_generated(Some(visible_target_name), &entry.desc, catalog)?;
     let expr_scope = empty_scope();
     let returning = bind_returning_targets(
         &stmt.returning,
@@ -1706,16 +1813,21 @@ pub(crate) fn bind_insert_with_outer_scopes(
                 .map(|row| {
                     row.iter()
                         .zip(target_columns.iter())
-                        .map(|(expr, target)| match expr {
-                            SqlExpr::Default => Ok(column_defaults[target.column_index].clone()),
-                            _ => bind_expr_with_outer_and_ctes(
-                                expr,
-                                &expr_scope,
-                                catalog,
-                                outer_scopes,
-                                None,
-                                &local_ctes,
-                            ),
+                        .map(|(expr, target)| {
+                            ensure_generated_assignment_allowed(&entry.desc, target, Some(expr))?;
+                            match expr {
+                                SqlExpr::Default => {
+                                    Ok(column_defaults[target.column_index].clone())
+                                }
+                                _ => bind_expr_with_outer_and_ctes(
+                                    expr,
+                                    &expr_scope,
+                                    catalog,
+                                    outer_scopes,
+                                    None,
+                                    &local_ctes,
+                                ),
+                            }
                         })
                         .collect::<Result<Vec<_>, _>>()
                 })
@@ -1766,6 +1878,15 @@ pub(crate) fn bind_insert_with_outer_scopes(
                     expected: target_columns.len(),
                     actual,
                 });
+            }
+            for target in &target_columns {
+                if entry.desc.columns[target.column_index].generated.is_some() {
+                    ensure_generated_assignment_allowed(
+                        &entry.desc,
+                        target,
+                        Some(&SqlExpr::Const(Value::Null)),
+                    )?;
+                }
             }
             (target_columns, BoundInsertSource::Select(Box::new(query)))
         }
@@ -1866,7 +1987,8 @@ fn bind_simple_update(
 ) -> Result<BoundUpdateStatement, ParseError> {
     let target_relation_name = update_target_relation_name(stmt);
     let explain_target_name = update_explain_target_name(stmt);
-    let scope = scope_for_base_relation(&target_relation_name, &entry.desc);
+    let scope =
+        scope_for_base_relation_with_generated(&target_relation_name, &entry.desc, catalog)?;
     let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, local_ctes)?;
     let predicate = stmt
         .where_clause
@@ -1899,7 +2021,7 @@ fn bind_simple_update(
         .iter()
         .map(|assignment| {
             let column_index = resolve_column(&scope, &assignment.target.column)?;
-            Ok(BoundAssignment {
+            let target = BoundAssignmentTarget {
                 column_index,
                 subscripts: bind_assignment_subscripts(
                     &assignment.target.subscripts,
@@ -1915,6 +2037,13 @@ fn bind_simple_update(
                     &assignment.target.field_path,
                     catalog,
                 )?,
+            };
+            ensure_generated_assignment_allowed(&entry.desc, &target, Some(&assignment.expr))?;
+            Ok(BoundAssignment {
+                column_index,
+                subscripts: target.subscripts,
+                field_path: target.field_path,
+                target_sql_type: target.target_sql_type,
                 expr: if matches!(assignment.expr, SqlExpr::Default) {
                     column_defaults[column_index].clone()
                 } else {
@@ -1972,7 +2101,8 @@ fn bind_update_from(
 ) -> Result<BoundUpdateStatement, ParseError> {
     let target_relation_name = update_target_relation_name(stmt);
     let explain_target_name = update_explain_target_name(stmt);
-    let target_scope = scope_for_base_relation(&target_relation_name, &entry.desc);
+    let target_scope =
+        scope_for_base_relation_with_generated(&target_relation_name, &entry.desc, catalog)?;
     let column_defaults = bind_insert_column_defaults(&entry.desc, catalog, local_ctes)?;
     let source_stmt = stmt.from.as_ref().expect("checked above");
     let (source_from, source_scope_raw) =
@@ -1986,7 +2116,7 @@ fn bind_update_from(
         return Err(ParseError::DuplicateTableName(target_relation_name));
     }
 
-    let target_base = AnalyzedFrom::relation(
+    let mut target_base = AnalyzedFrom::relation(
         target_relation_name.clone(),
         entry.rel,
         entry.relation_oid,
@@ -1995,6 +2125,7 @@ fn bind_update_from(
         !stmt.only && entry.relkind == 'r',
         entry.desc.clone(),
     );
+    target_base.output_exprs = generated_relation_output_exprs(&entry.desc, catalog)?;
     let (target_from, _, _) = with_update_target_identity(target_base, &entry.desc);
     let source_scope = shift_scope_rtindexes(source_scope_raw, target_from.rtable.len());
     let source_visible_count = source_scope.desc.columns.len();
@@ -2047,7 +2178,7 @@ fn bind_update_from(
         .iter()
         .map(|assignment| {
             let column_index = resolve_column(&target_scope, &assignment.target.column)?;
-            Ok(BoundAssignment {
+            let target = BoundAssignmentTarget {
                 column_index,
                 subscripts: bind_assignment_subscripts(
                     &assignment.target.subscripts,
@@ -2063,6 +2194,13 @@ fn bind_update_from(
                     &assignment.target.field_path,
                     catalog,
                 )?,
+            };
+            ensure_generated_assignment_allowed(&entry.desc, &target, Some(&assignment.expr))?;
+            Ok(BoundAssignment {
+                column_index,
+                subscripts: target.subscripts,
+                field_path: target.field_path,
+                target_sql_type: target.target_sql_type,
                 expr: if matches!(assignment.expr, SqlExpr::Default) {
                     column_defaults[column_index].clone()
                 } else {
@@ -2218,7 +2356,7 @@ pub(crate) fn bind_delete_with_outer_scopes(
         &[],
     )?;
     let entry = lookup_modify_relation(catalog, &stmt.table_name)?;
-    let scope = scope_for_relation(Some(&stmt.table_name), &entry.desc);
+    let scope = scope_for_relation_with_generated(Some(&stmt.table_name), &entry.desc, catalog)?;
     let predicate = stmt
         .where_clause
         .as_ref()
