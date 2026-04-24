@@ -3,11 +3,12 @@ use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{
     Aggref, BoolExpr, BoolExprType, CaseExpr, CaseWhen, Expr, ExprArraySubscript, FuncExpr,
-    JoinType, OpExpr, OrderByEntry, RelationDesc, ScalarArrayOpExpr, SubLink, SubLinkType, Var,
-    WindowFuncExpr, WindowFuncKind, XmlExpr, user_attrno,
+    JoinType, OpExpr, OpExprKind, OrderByEntry, RelationDesc, ScalarArrayOpExpr, SubLink,
+    SubLinkType, Var, WindowFuncExpr, WindowFuncKind, XmlExpr, user_attrno,
 };
 
 use super::{and_exprs, expr_relids, flatten_and_conjuncts, joininfo, relids_subset};
+use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
 
 pub(super) fn pull_up_sublinks(mut query: Query) -> Query {
     hoist_inner_join_sublinks_to_where(&mut query);
@@ -70,7 +71,10 @@ fn hoist_inner_join_sublinks_recurse(
 
     let mut remaining_quals = Vec::new();
     for qual in flatten_and_conjuncts(quals) {
-        if exists_sublink(qual.clone()).is_some() || not_exists_sublink(qual.clone()).is_some() {
+        if any_sublink(qual.clone()).is_some()
+            || exists_sublink(qual.clone()).is_some()
+            || not_exists_sublink(qual.clone()).is_some()
+        {
             hoisted_quals.push(qual);
         } else {
             remaining_quals.push(qual);
@@ -80,6 +84,9 @@ fn hoist_inner_join_sublinks_recurse(
 }
 
 fn pull_up_sublinks_qual_recurse(query: &mut Query, qual: Expr, levels_to_parent: usize) -> bool {
+    if let Some(sublink) = any_sublink(qual.clone()) {
+        return convert_any_sublink_to_join(query, sublink, levels_to_parent);
+    }
     if let Some(sublink) = exists_sublink(qual.clone()) {
         return convert_exists_sublink_to_join(query, sublink, false, levels_to_parent);
     }
@@ -100,6 +107,17 @@ fn exists_sublink(expr: Expr) -> Option<SubLink> {
     }
 }
 
+fn any_sublink(expr: Expr) -> Option<SubLink> {
+    let Expr::SubLink(sublink) = expr else {
+        return None;
+    };
+    if matches!(sublink.sublink_type, SubLinkType::AnySubLink(_)) && sublink.testexpr.is_some() {
+        Some(*sublink)
+    } else {
+        None
+    }
+}
+
 fn not_exists_sublink(expr: Expr) -> Option<SubLink> {
     let Expr::Bool(bool_expr) = expr else {
         return None;
@@ -108,6 +126,99 @@ fn not_exists_sublink(expr: Expr) -> Option<SubLink> {
         return None;
     }
     exists_sublink(bool_expr.args.into_iter().next().unwrap())
+}
+
+fn convert_any_sublink_to_join(
+    query: &mut Query,
+    sublink: SubLink,
+    levels_to_parent: usize,
+) -> bool {
+    let SubLinkType::AnySubLink(op) = sublink.sublink_type else {
+        return false;
+    };
+    let Some(testexpr) = sublink.testexpr else {
+        return false;
+    };
+    let Some(op_kind) = subquery_comparison_op_expr_kind(op) else {
+        return false;
+    };
+    let mut subquery = *sublink.subselect;
+    if !simple_any_query(&subquery) {
+        return false;
+    }
+    if levels_to_parent != 0 || expr_contains_outer_var(&testexpr) {
+        return false;
+    }
+
+    let Some(subquery_target) = subquery
+        .target_list
+        .first()
+        .map(|target| target.expr.clone())
+    else {
+        return false;
+    };
+    let mut working = query.clone();
+    if let Some(where_qual) = subquery.where_qual.take() {
+        let mut remaining = Vec::new();
+        for qual in flatten_and_conjuncts(&where_qual) {
+            if pull_up_sublinks_qual_recurse(&mut working, qual.clone(), levels_to_parent + 1) {
+                continue;
+            }
+            remaining.push(qual);
+        }
+        subquery.where_qual = and_exprs(remaining);
+    }
+
+    if subquery
+        .where_qual
+        .as_ref()
+        .is_some_and(expr_contains_sublink)
+    {
+        return false;
+    }
+
+    let offset = working.rtable.len();
+    let Some(pulled_up_target) = adjust_expr_for_pullup(subquery_target, offset, levels_to_parent)
+    else {
+        return false;
+    };
+    let Some(right_tree) = append_pulled_up_subquery(&mut working, subquery, levels_to_parent)
+    else {
+        return false;
+    };
+    let comparison_qual = Expr::op(
+        op_kind,
+        SqlType::new(SqlTypeKind::Bool),
+        vec![*testexpr, pulled_up_target],
+    );
+    let mut join_quals = working.where_qual.take().into_iter().collect::<Vec<_>>();
+    join_quals.push(comparison_qual);
+    let Some(join_quals) = and_exprs(join_quals) else {
+        return false;
+    };
+    if !attach_pulled_up_join(&mut working, right_tree, JoinType::Semi, join_quals) {
+        return false;
+    }
+    *query = working;
+    true
+}
+
+fn subquery_comparison_op_expr_kind(op: SubqueryComparisonOp) -> Option<OpExprKind> {
+    Some(match op {
+        SubqueryComparisonOp::Eq => OpExprKind::Eq,
+        SubqueryComparisonOp::NotEq => OpExprKind::NotEq,
+        SubqueryComparisonOp::Lt => OpExprKind::Lt,
+        SubqueryComparisonOp::LtEq => OpExprKind::LtEq,
+        SubqueryComparisonOp::Gt => OpExprKind::Gt,
+        SubqueryComparisonOp::GtEq => OpExprKind::GtEq,
+        SubqueryComparisonOp::Match
+        | SubqueryComparisonOp::Like
+        | SubqueryComparisonOp::NotLike
+        | SubqueryComparisonOp::ILike
+        | SubqueryComparisonOp::NotILike
+        | SubqueryComparisonOp::Similar
+        | SubqueryComparisonOp::NotSimilar => return None,
+    })
 }
 
 fn convert_exists_sublink_to_join(
@@ -178,6 +289,13 @@ fn simple_exists_query(query: &Query) -> bool {
         && query.set_operation.is_none()
         && query.jointree.is_some()
         && query.rtable.iter().all(supported_pulled_up_rte)
+}
+
+fn simple_any_query(query: &Query) -> bool {
+    simple_exists_query(query)
+        && query.target_list.len() == 1
+        && !query.target_list[0].resjunk
+        && !expr_contains_sublink(&query.target_list[0].expr)
 }
 
 fn supported_pulled_up_rte(rte: &RangeTblEntry) -> bool {

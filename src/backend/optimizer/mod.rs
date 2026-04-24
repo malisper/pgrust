@@ -129,6 +129,28 @@ fn has_outer_joins(root: &PlannerInfo) -> bool {
     })
 }
 
+fn nullable_relids_by_outer_joins(root: &PlannerInfo) -> Vec<usize> {
+    let mut relids = Vec::new();
+    for sjinfo in &root.join_info_list {
+        match sjinfo.jointype {
+            JoinType::Left => relids.extend(sjinfo.syn_righthand.iter().copied()),
+            JoinType::Right => relids.extend(sjinfo.syn_lefthand.iter().copied()),
+            JoinType::Full => {
+                relids.extend(sjinfo.syn_lefthand.iter().copied());
+                relids.extend(sjinfo.syn_righthand.iter().copied());
+            }
+            JoinType::Inner | JoinType::Cross | JoinType::Semi | JoinType::Anti => {}
+        }
+    }
+    relids.sort_unstable();
+    relids.dedup();
+    relids
+}
+
+fn base_rel_is_nullable_by_outer_join(root: &PlannerInfo, relid: usize) -> bool {
+    nullable_relids_by_outer_joins(root).contains(&relid)
+}
+
 fn has_grouping(root: &PlannerInfo) -> bool {
     !root.parse.group_by.is_empty()
         || !root.parse.accumulators.is_empty()
@@ -152,8 +174,8 @@ fn relids_disjoint(left: &[usize], right: &[usize]) -> bool {
 }
 
 fn is_pushable_base_clause(root: &PlannerInfo, relids: &[usize]) -> bool {
-    !has_outer_joins(root)
-        && relids.len() == 1
+    relids.len() == 1
+        && !base_rel_is_nullable_by_outer_join(root, relids[0])
         && root
             .simple_rel_array
             .get(relids[0])
