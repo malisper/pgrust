@@ -19,11 +19,12 @@ use crate::include::nodes::datum::{RecordDescriptor, RecordValue};
 use crate::include::nodes::primnodes::QueryColumn;
 use crate::pgrust::session::ByteaOutputFormat;
 
-use super::ast::RaiseLevel;
+use super::ast::{ExceptionCondition, RaiseLevel};
 use super::compile::{
-    CompiledBlock, CompiledExpr, CompiledForQuerySource, CompiledForQueryTarget, CompiledFunction,
-    CompiledSelectIntoTarget, CompiledStmt, FunctionReturnContract, QueryCompareOp,
-    TriggerReturnedRow, compile_function_from_proc, compile_trigger_function_from_proc,
+    CompiledBlock, CompiledExceptionHandler, CompiledExpr, CompiledForQuerySource,
+    CompiledForQueryTarget, CompiledFunction, CompiledSelectIntoTarget, CompiledStmt,
+    FunctionReturnContract, QueryCompareOp, TriggerReturnedRow, compile_function_from_proc,
+    compile_trigger_function_from_proc,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -480,9 +481,31 @@ fn exec_do_block(block: &CompiledBlock, values: &mut [Value]) -> Result<(), Exec
         };
     }
     for stmt in &block.statements {
-        exec_do_stmt(stmt, values)?;
+        if let Err(err) = exec_do_stmt(stmt, values) {
+            return match exec_do_exception_handlers(&block.exception_handlers, &err, values)? {
+                Some(()) => Ok(()),
+                None => Err(err),
+            };
+        }
     }
     Ok(())
+}
+
+fn exec_do_exception_handlers(
+    handlers: &[CompiledExceptionHandler],
+    err: &ExecError,
+    values: &mut [Value],
+) -> Result<Option<()>, ExecError> {
+    let Some(handler) = handlers
+        .iter()
+        .find(|handler| handler_matches(handler, err))
+    else {
+        return Ok(None);
+    };
+    for stmt in &handler.statements {
+        exec_do_stmt(stmt, values)?;
+    }
+    Ok(Some(()))
 }
 
 fn exec_do_stmt(stmt: &CompiledStmt, values: &mut [Value]) -> Result<(), ExecError> {
@@ -574,6 +597,17 @@ fn exec_do_stmt(stmt: &CompiledStmt, values: &mut [Value]) -> Result<(), ExecErr
                 .collect::<Result<Vec<_>, _>>()?;
             finish_raise(level, message, &param_values)
         }
+        CompiledStmt::Assert { condition, message } => {
+            let ok = eval_plpgsql_condition(&eval_do_expr(condition, values)?)?;
+            if ok {
+                return Ok(());
+            }
+            let message = match message {
+                Some(expr) => render_assert_message(eval_do_expr(expr, values)?)?,
+                None => "assertion failed".into(),
+            };
+            Err(assert_failure(message))
+        }
         CompiledStmt::Return { .. }
         | CompiledStmt::ReturnNext { .. }
         | CompiledStmt::ReturnTriggerRow { .. }
@@ -582,6 +616,7 @@ fn exec_do_stmt(stmt: &CompiledStmt, values: &mut [Value]) -> Result<(), ExecErr
         | CompiledStmt::ForQuery { .. }
         | CompiledStmt::ReturnQuery { .. }
         | CompiledStmt::Perform { .. }
+        | CompiledStmt::DynamicExecute { .. }
         | CompiledStmt::SelectInto { .. }
         | CompiledStmt::ExecInsertInto { .. }
         | CompiledStmt::ExecInsert { .. }
@@ -610,14 +645,49 @@ fn exec_function_block(
         };
     }
     for stmt in &block.statements {
-        if matches!(
-            exec_function_stmt(stmt, compiled, expected_record_shape, state, ctx)?,
-            FunctionControl::Return
-        ) {
-            return Ok(FunctionControl::Return);
+        match exec_function_stmt(stmt, compiled, expected_record_shape, state, ctx) {
+            Ok(FunctionControl::Continue) => {}
+            Ok(FunctionControl::Return) => return Ok(FunctionControl::Return),
+            Err(err) => {
+                return match exec_function_exception_handlers(
+                    &block.exception_handlers,
+                    &err,
+                    compiled,
+                    expected_record_shape,
+                    state,
+                    ctx,
+                )? {
+                    Some(control) => Ok(control),
+                    None => Err(err),
+                };
+            }
         }
     }
     Ok(FunctionControl::Continue)
+}
+
+fn exec_function_exception_handlers(
+    handlers: &[CompiledExceptionHandler],
+    err: &ExecError,
+    compiled: &CompiledFunction,
+    expected_record_shape: Option<&[QueryColumn]>,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<Option<FunctionControl>, ExecError> {
+    let Some(handler) = handlers
+        .iter()
+        .find(|handler| handler_matches(handler, err))
+    else {
+        return Ok(None);
+    };
+    exec_function_stmt_list(
+        &handler.statements,
+        compiled,
+        expected_record_shape,
+        state,
+        ctx,
+    )
+    .map(Some)
 }
 
 fn exec_function_stmt(
@@ -737,6 +807,17 @@ fn exec_function_stmt(
             finish_raise(level, message, &param_values)?;
             Ok(FunctionControl::Continue)
         }
+        CompiledStmt::Assert { condition, message } => {
+            let ok = eval_plpgsql_condition(&eval_function_expr(condition, &state.values, ctx)?)?;
+            if ok {
+                return Ok(FunctionControl::Continue);
+            }
+            let message = match message {
+                Some(expr) => render_assert_message(eval_function_expr(expr, &state.values, ctx)?)?,
+                None => "assertion failed".into(),
+            };
+            Err(assert_failure(message))
+        }
         CompiledStmt::Return { expr } => exec_function_return(expr.as_ref(), compiled, state, ctx),
         CompiledStmt::ReturnNext { expr } => {
             exec_function_return_next(expr.as_ref(), compiled, state, ctx)?;
@@ -760,6 +841,21 @@ fn exec_function_stmt(
         }
         CompiledStmt::Perform { plan } => {
             exec_function_perform(plan, compiled, state, ctx)?;
+            Ok(FunctionControl::Continue)
+        }
+        CompiledStmt::DynamicExecute {
+            sql_expr,
+            into_targets,
+            using_exprs,
+        } => {
+            exec_function_dynamic_execute(
+                sql_expr,
+                into_targets,
+                using_exprs,
+                compiled,
+                state,
+                ctx,
+            )?;
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::SelectInto { plan, targets } => {
@@ -1208,6 +1304,39 @@ fn execute_dynamic_for_query(
     state: &mut FunctionState,
     ctx: &mut ExecutorContext,
 ) -> Result<FunctionQueryResult, ExecError> {
+    let result = execute_dynamic_statement(sql_expr, using_exprs, compiled, state, ctx)?;
+    statement_result_to_query_result(result, "PL/pgSQL EXECUTE did not produce rows")
+}
+
+fn exec_function_dynamic_execute(
+    sql_expr: &CompiledExpr,
+    into_targets: &[CompiledSelectIntoTarget],
+    using_exprs: &[CompiledExpr],
+    compiled: &CompiledFunction,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let result = execute_dynamic_statement(sql_expr, using_exprs, compiled, state, ctx)?;
+    if !into_targets.is_empty() {
+        let StatementResult::Query { columns, rows, .. } = result else {
+            return Err(function_runtime_error(
+                "EXECUTE INTO did not produce rows",
+                None,
+                "XX000",
+            ));
+        };
+        return assign_query_rows_into_targets(&rows, &columns, into_targets, compiled, state);
+    }
+    Ok(())
+}
+
+fn execute_dynamic_statement(
+    sql_expr: &CompiledExpr,
+    using_exprs: &[CompiledExpr],
+    compiled: &CompiledFunction,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<StatementResult, ExecError> {
     let sql_value = eval_function_expr(sql_expr, &state.values, ctx)?;
     if matches!(sql_value, Value::Null) {
         return Err(function_runtime_error(
@@ -1247,7 +1376,7 @@ fn execute_dynamic_for_query(
 
     execute_function_query_with_bindings(compiled, state, ctx, false, |ctx| {
         let stmt = parse_statement(&sql).map_err(ExecError::Parse)?;
-        let result = match stmt {
+        match stmt {
             crate::backend::parser::Statement::Select(stmt) => execute_planned_stmt(
                 pg_plan_query_with_outer_scopes_and_ctes(
                     &stmt,
@@ -1257,7 +1386,7 @@ fn execute_dynamic_for_query(
                 )
                 .map_err(ExecError::Parse)?,
                 ctx,
-            )?,
+            ),
             crate::backend::parser::Statement::Values(stmt) => execute_planned_stmt(
                 pg_plan_values_query_with_outer_scopes_and_ctes(
                     &stmt,
@@ -1267,10 +1396,44 @@ fn execute_dynamic_for_query(
                 )
                 .map_err(ExecError::Parse)?,
                 ctx,
-            )?,
-            other => execute_readonly_statement(other, &catalog, ctx)?,
-        };
-        statement_result_to_query_result(result, "PL/pgSQL EXECUTE did not produce rows")
+            ),
+            crate::backend::parser::Statement::Insert(stmt) => {
+                let xid = ctx.ensure_write_xid()?;
+                let cid = ctx.next_command_id;
+                let stmt =
+                    crate::backend::parser::bind_insert_with_outer_scopes(&stmt, &catalog, &[])
+                        .map_err(ExecError::Parse)?;
+                let result = execute_insert(stmt, &catalog, ctx, xid, cid);
+                if result.is_ok() {
+                    advance_plpgsql_command_id(ctx);
+                }
+                result
+            }
+            crate::backend::parser::Statement::Update(stmt) => {
+                let xid = ctx.ensure_write_xid()?;
+                let cid = ctx.next_command_id;
+                let stmt =
+                    crate::backend::parser::bind_update_with_outer_scopes(&stmt, &catalog, &[])
+                        .map_err(ExecError::Parse)?;
+                let result = execute_update(stmt, &catalog, ctx, xid, cid);
+                if result.is_ok() {
+                    advance_plpgsql_command_id(ctx);
+                }
+                result
+            }
+            crate::backend::parser::Statement::Delete(stmt) => {
+                let xid = ctx.ensure_write_xid()?;
+                let stmt =
+                    crate::backend::parser::bind_delete_with_outer_scopes(&stmt, &catalog, &[])
+                        .map_err(ExecError::Parse)?;
+                let result = execute_delete(stmt, &catalog, ctx, xid);
+                if result.is_ok() {
+                    advance_plpgsql_command_id(ctx);
+                }
+                result
+            }
+            other => execute_readonly_statement(other, &catalog, ctx),
+        }
     })
 }
 
@@ -1975,6 +2138,84 @@ fn eval_plpgsql_condition(value: &Value) -> Result<bool, ExecError> {
         Value::Bool(true) => Ok(true),
         Value::Bool(false) | Value::Null => Ok(false),
         other => Err(ExecError::NonBoolQual(other.clone())),
+    }
+}
+
+fn handler_matches(handler: &CompiledExceptionHandler, err: &ExecError) -> bool {
+    handler
+        .conditions
+        .iter()
+        .any(|condition| exception_condition_matches(condition, err))
+}
+
+fn exception_condition_matches(condition: &ExceptionCondition, err: &ExecError) -> bool {
+    match condition {
+        ExceptionCondition::Others => !matches!(exec_error_sqlstate(err), "57014"),
+        ExceptionCondition::SqlState(sqlstate) => exec_error_sqlstate(err) == sqlstate,
+        ExceptionCondition::ConditionName(name) => exception_condition_name_sqlstate(name)
+            .is_some_and(|sqlstate| sqlstate == exec_error_sqlstate(err)),
+    }
+}
+
+fn exception_condition_name_sqlstate(name: &str) -> Option<&'static str> {
+    match name.to_ascii_lowercase().as_str() {
+        "assert_failure" => Some("P0004"),
+        "division_by_zero" => Some("22012"),
+        "raise_exception" => Some("P0001"),
+        "no_data_found" => Some("P0002"),
+        "too_many_rows" => Some("P0003"),
+        "unique_violation" => Some("23505"),
+        "not_null_violation" => Some("23502"),
+        "check_violation" => Some("23514"),
+        "foreign_key_violation" => Some("23503"),
+        "invalid_parameter_value" => Some("22023"),
+        "null_value_not_allowed" => Some("22004"),
+        "syntax_error" => Some("42601"),
+        "feature_not_supported" => Some("0A000"),
+        _ => None,
+    }
+}
+
+fn exec_error_sqlstate(err: &ExecError) -> &'static str {
+    match err {
+        ExecError::RaiseException(_) => "P0001",
+        ExecError::DivisionByZero(_) => "22012",
+        ExecError::DetailedError { sqlstate, .. } => sqlstate,
+        ExecError::Parse(ParseError::DetailedError { sqlstate, .. }) => sqlstate,
+        ExecError::Parse(ParseError::FeatureNotSupported(_))
+        | ExecError::Parse(ParseError::FeatureNotSupportedMessage(_))
+        | ExecError::Parse(ParseError::OuterLevelAggregateNestedCte(_)) => "0A000",
+        ExecError::Parse(_) => "42601",
+        ExecError::UniqueViolation { .. } => "23505",
+        ExecError::NotNullViolation { .. } => "23502",
+        ExecError::CheckViolation { .. } => "23514",
+        ExecError::ForeignKeyViolation { .. } => "23503",
+        ExecError::StringDataRightTruncation { .. } => "22001",
+        ExecError::CardinalityViolation { .. } => "21000",
+        ExecError::GenerateSeriesInvalidArg(_, _) => "22023",
+        ExecError::Interrupted(reason) => reason.sqlstate(),
+        ExecError::JsonInput { sqlstate, .. }
+        | ExecError::XmlInput { sqlstate, .. }
+        | ExecError::ArrayInput { sqlstate, .. } => sqlstate,
+        _ => "XX000",
+    }
+}
+
+fn assert_failure(message: String) -> ExecError {
+    ExecError::DetailedError {
+        message,
+        detail: None,
+        hint: None,
+        sqlstate: "P0004",
+    }
+}
+
+fn render_assert_message(value: Value) -> Result<String, ExecError> {
+    match cast_value(value, SqlType::new(SqlTypeKind::Text))? {
+        Value::Text(text) => Ok(text.to_string()),
+        Value::TextRef(_, _) => Ok(String::new()),
+        Value::Null => Ok("assertion failed".into()),
+        other => Ok(render_raise_value(&other)),
     }
 }
 
