@@ -2,6 +2,7 @@ use crate::backend::parser::SqlType;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
+    pub label: Option<String>,
     pub declarations: Vec<Decl>,
     pub statements: Vec<Stmt>,
 }
@@ -9,6 +10,7 @@ pub struct Block {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VarDecl {
     pub name: String,
+    pub type_name: String,
     pub ty: SqlType,
     pub default_expr: Option<String>,
 }
