@@ -53,6 +53,7 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         ExecError::Parse(p) => p.to_string(),
         ExecError::Regex(err) => err.message.clone(),
         ExecError::JsonInput { message, .. } => message.clone(),
+        ExecError::XmlInput { message, .. } => message.clone(),
         ExecError::DetailedError { message, .. } => message.clone(),
         ExecError::RaiseException(message) => message.clone(),
         ExecError::InvalidRegex(message) => message.clone(),

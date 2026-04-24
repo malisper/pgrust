@@ -1600,11 +1600,13 @@ fn truncate_numeric_to_i32(value: &NumericValue) -> Result<i32, ExecError> {
             } else {
                 coeff / num_bigint::BigInt::from(10u8).pow(*scale)
             };
-            truncated
-                .try_into()
-                .map_err(|_| exec_jsonpath_error("jsonpath subscript is out of range"))
+            truncated.try_into().map_err(|_| {
+                exec_jsonpath_error("jsonpath array subscript is out of integer range")
+            })
         }
-        _ => Err(exec_jsonpath_error("jsonpath subscript is out of range")),
+        _ => Err(exec_jsonpath_error(
+            "jsonpath array subscript is out of integer range",
+        )),
     }
 }
 
@@ -2622,7 +2624,7 @@ impl<'a> Parser<'a> {
             .ok_or_else(|| exec_jsonpath_error("expected integer jsonpath subscript"))?;
         let mut value = digits
             .parse::<i32>()
-            .map_err(|_| exec_jsonpath_error("jsonpath subscript is out of range"))?;
+            .map_err(|_| exec_jsonpath_error("jsonpath array subscript is out of integer range"))?;
         if negative {
             value = -value;
         }

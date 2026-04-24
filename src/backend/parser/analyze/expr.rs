@@ -100,6 +100,23 @@ fn fixed_length_array_slice_error() -> ParseError {
     }
 }
 
+fn point_coordinate_subscript(
+    subscripts: &[crate::include::nodes::parsenodes::ArraySubscript],
+) -> Option<i32> {
+    let [subscript] = subscripts else {
+        return None;
+    };
+    if subscript.is_slice || subscript.upper.is_some() {
+        return None;
+    }
+    match subscript.lower.as_deref()? {
+        SqlExpr::IntegerLiteral(value) => value.parse::<i32>().ok(),
+        SqlExpr::Const(Value::Int16(value)) => Some(i32::from(*value)),
+        SqlExpr::Const(Value::Int32(value)) => Some(*value),
+        _ => None,
+    }
+}
+
 #[allow(dead_code)]
 pub(crate) fn bind_expr(expr: &SqlExpr, scope: &BoundScope) -> Result<Expr, ParseError> {
     bind_expr_with_outer(expr, scope, &Catalog::default(), &[], None)
@@ -2337,6 +2354,20 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 return bind_jsonb_subscript_expr(
                     array,
                     subscripts,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                );
+            }
+            if array_type.kind == SqlTypeKind::Point
+                && !array_type.is_array
+                && let Some(index) = point_coordinate_subscript(subscripts)
+            {
+                return bind_geometry_subscript(
+                    array,
+                    index,
                     scope,
                     catalog,
                     outer_scopes,
