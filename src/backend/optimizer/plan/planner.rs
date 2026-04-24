@@ -20,7 +20,7 @@ use super::super::util::{
     pathkeys_to_order_items, projection_is_identity, required_query_pathkeys_for_path,
     required_query_pathkeys_for_rel,
 };
-use super::super::{expand_join_rte_vars, optimize_path};
+use super::super::{expand_join_rte_vars, optimize_path, pull_up_sublinks};
 
 pub(super) fn make_pathtarget_projection_rel(
     root: &PlannerInfo,
@@ -754,6 +754,7 @@ fn standard_planner_with_param_base(
 ) -> Result<(PlannedStmt, usize), crate::backend::parser::ParseError> {
     let mut glob = PlannerGlobal::new();
     let query = root::prepare_query_for_planning(root::prepare_query_for_locking(query)?);
+    let query = pull_up_sublinks(query);
     let mut root = PlannerInfo::new(query);
     let command_type = root.parse.command_type;
     let scanjoin_rel = query_planner(&mut root, catalog);

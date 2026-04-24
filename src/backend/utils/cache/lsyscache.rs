@@ -8,9 +8,12 @@ use crate::backend::storage::smgr::{BLCKSZ, ForkNumber, StorageManager};
 use crate::backend::utils::cache::catcache::normalize_catalog_name;
 use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
-    backend_catcache, backend_relcache, ensure_am_rows, ensure_attribute_rows, ensure_class_rows,
-    ensure_constraint_rows, ensure_index_rows, ensure_inherit_rows, ensure_namespace_rows,
-    ensure_proc_rows, ensure_rewrite_rows, ensure_statistic_rows, ensure_type_rows,
+    SysCacheId, SysCacheTuple, backend_catcache, backend_relcache, ensure_am_rows,
+    ensure_attribute_rows, ensure_class_rows, ensure_constraint_rows, ensure_index_rows,
+    ensure_namespace_rows, ensure_proc_rows, ensure_rewrite_rows, ensure_statistic_rows,
+    ensure_type_rows, relation_id_get_relation_db, search_sys_cache_list1_db,
+    search_sys_cache_list2_db, search_sys_cache_list3_db, search_sys_cache1_db,
+    search_sys_cache2_db,
 };
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_policies_rows, build_pg_rules_rows,
@@ -22,15 +25,25 @@ use crate::include::access::brin_page::{
     BRIN_PAGE_CONTENT_OFFSET, BrinMetaPageData, brin_is_meta_page,
 };
 use crate::include::catalog::{
-    PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow,
-    PgCollationRow, PgConstraintRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
-    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticExtDataRow,
+    CONSTRAINT_FOREIGN, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PgAggregateRow, PgAmRow,
+    PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow, PgCollationRow,
+    PgConstraintRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
+    PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticExtDataRow,
     PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTypeRow,
 };
 use crate::include::nodes::datum::Value;
+use crate::include::nodes::parsenodes::SqlType;
 use crate::pgrust::database::{
     Database, DatabaseStatsStore, TempNamespace, default_pg_stat_io_keys,
 };
+
+fn oid_key(oid: u32) -> Value {
+    Value::Int64(i64::from(oid))
+}
+
+fn catalog_name_key(name: &str) -> Value {
+    Value::Text(normalize_catalog_name(name).to_ascii_lowercase().into())
+}
 
 fn namespace_row_by_name(
     db: &Database,
@@ -38,10 +51,19 @@ fn namespace_row_by_name(
     txn_ctx: Option<(TransactionId, CommandId)>,
     name: &str,
 ) -> Option<crate::include::catalog::PgNamespaceRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .ok()?
-        .namespace_by_name(name)
-        .cloned()
+    search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::NamespaceName,
+        catalog_name_key(name),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Namespace(row) => Some(row),
+        _ => None,
+    })
 }
 
 fn namespace_row_by_oid(
@@ -50,10 +72,19 @@ fn namespace_row_by_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     oid: u32,
 ) -> Option<crate::include::catalog::PgNamespaceRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .ok()?
-        .namespace_by_oid(oid)
-        .cloned()
+    search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::NamespaceOid,
+        oid_key(oid),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Namespace(row) => Some(row),
+        _ => None,
+    })
 }
 
 fn class_row_by_oid(
@@ -62,10 +93,13 @@ fn class_row_by_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     oid: u32,
 ) -> Option<crate::include::catalog::PgClassRow> {
-    backend_catcache(db, client_id, txn_ctx)
+    search_sys_cache1_db(db, client_id, txn_ctx, SysCacheId::RelOid, oid_key(oid))
         .ok()?
-        .class_by_oid(oid)
-        .cloned()
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Class(row) => Some(row),
+            _ => None,
+        })
 }
 
 fn class_row_by_name_namespace(
@@ -75,15 +109,24 @@ fn class_row_by_name_namespace(
     relname: &str,
     namespace_oid: u32,
 ) -> Option<crate::include::catalog::PgClassRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .ok()?
-        .class_rows()
-        .into_iter()
-        .find(|row| {
-            row.relnamespace == namespace_oid
-                && row.relname.eq_ignore_ascii_case(relname)
-                && !db.other_session_temp_namespace_oid(client_id, row.relnamespace)
-        })
+    search_sys_cache2_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::RelNameNsp,
+        Value::Text(relname.to_ascii_lowercase().into()),
+        oid_key(namespace_oid),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Class(row)
+            if !db.other_session_temp_namespace_oid(client_id, row.relnamespace) =>
+        {
+            Some(row)
+        }
+        _ => None,
+    })
 }
 
 fn attribute_rows_for_relation(
@@ -92,15 +135,220 @@ fn attribute_rows_for_relation(
     txn_ctx: Option<(TransactionId, CommandId)>,
     relation_oid: u32,
 ) -> Vec<crate::include::catalog::PgAttributeRow> {
-    let mut rows = backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| {
-            catcache
-                .attributes_by_relid(relation_oid)
-                .unwrap_or(&[])
-                .to_vec()
-        })
-        .unwrap_or_default();
+    let mut rows = search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::AttrNum,
+        oid_key(relation_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Attribute(row) => Some(row),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
     rows.sort_by_key(|row| row.attnum);
+    rows
+}
+
+fn inheritance_parent_rows(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relation_oid: u32,
+) -> Vec<PgInheritsRow> {
+    let mut rows = search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::InheritsRelIdSeqNo,
+        oid_key(relation_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Inherits(row) => Some(row),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+    rows.sort_by_key(|row| (row.inhseqno, row.inhparent));
+    rows
+}
+
+fn inheritance_child_rows(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relation_oid: u32,
+) -> Vec<PgInheritsRow> {
+    let mut rows = search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::InheritsParent,
+        oid_key(relation_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Inherits(row) => Some(row),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+    rows.sort_by_key(|row| (row.inhseqno, row.inhrelid));
+    rows
+}
+
+fn partitioned_table_row_by_relid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relation_oid: u32,
+) -> Option<crate::include::catalog::PgPartitionedTableRow> {
+    search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::PartRelId,
+        oid_key(relation_oid),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::PartitionedTable(row) => Some(row),
+        _ => None,
+    })
+}
+
+fn constraint_rows_for_relation_syscache(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relation_oid: u32,
+) -> Vec<PgConstraintRow> {
+    search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::ConstraintRelId,
+        oid_key(relation_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Constraint(row) => Some(row),
+                _ => None,
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+fn constraint_row_by_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    oid: u32,
+) -> Option<PgConstraintRow> {
+    search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::ConstraintOid,
+        oid_key(oid),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Constraint(row) => Some(row),
+        _ => None,
+    })
+}
+
+fn constraint_rows_referencing_class_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    referenced_oid: u32,
+) -> Vec<PgConstraintRow> {
+    let mut seen = BTreeSet::new();
+    let mut rows = search_sys_cache_list2_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::DependReference,
+        oid_key(PG_CLASS_RELATION_OID),
+        oid_key(referenced_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Depend(row)
+                    if row.classid == PG_CONSTRAINT_RELATION_OID && seen.insert(row.objid) =>
+                {
+                    constraint_row_by_oid(db, client_id, txn_ctx, row.objid)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+    crate::backend::catalog::pg_constraint::sort_pg_constraint_rows(&mut rows);
+    rows
+}
+
+fn constraint_rows_for_index(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    index_oid: u32,
+) -> Vec<PgConstraintRow> {
+    let mut rows = constraint_rows_referencing_class_oid(db, client_id, txn_ctx, index_oid)
+        .into_iter()
+        .filter(|row| row.conindid == index_oid)
+        .collect::<Vec<_>>();
+    crate::backend::catalog::pg_constraint::sort_pg_constraint_rows(&mut rows);
+    rows
+}
+
+fn foreign_key_constraint_rows_referencing_relation(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relation_oid: u32,
+) -> Vec<PgConstraintRow> {
+    let mut rows = constraint_rows_referencing_class_oid(db, client_id, txn_ctx, relation_oid)
+        .into_iter()
+        .filter(|row| row.contype == CONSTRAINT_FOREIGN && row.confrelid == relation_oid)
+        .collect::<Vec<_>>();
+    crate::backend::catalog::pg_constraint::sort_pg_constraint_rows(&mut rows);
+    rows
+}
+
+fn foreign_key_constraint_rows_referencing_index(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    index_oid: u32,
+) -> Vec<PgConstraintRow> {
+    let mut rows = constraint_rows_for_index(db, client_id, txn_ctx, index_oid)
+        .into_iter()
+        .filter(|row| row.contype == CONSTRAINT_FOREIGN)
+        .collect::<Vec<_>>();
+    crate::backend::catalog::pg_constraint::sort_pg_constraint_rows(&mut rows);
     rows
 }
 
@@ -110,15 +358,23 @@ fn attrdef_rows_for_relation(
     txn_ctx: Option<(TransactionId, CommandId)>,
     relation_oid: u32,
 ) -> Vec<crate::include::catalog::PgAttrdefRow> {
-    let mut rows: Vec<_> = backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| {
-            catcache
-                .attrdef_rows()
-                .into_iter()
-                .filter(|row| row.adrelid == relation_oid)
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut rows = search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::AttrDefault,
+        oid_key(relation_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Attrdef(row) => Some(row),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
     rows.sort_by_key(|row| row.adnum);
     rows
 }
@@ -129,9 +385,23 @@ fn trigger_rows_for_relation(
     txn_ctx: Option<(TransactionId, CommandId)>,
     relation_oid: u32,
 ) -> Vec<PgTriggerRow> {
-    visible_catcache(db, client_id, txn_ctx)
-        .map(|catcache| catcache.trigger_rows_for_relation(relation_oid))
-        .unwrap_or_default()
+    search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::TriggerRelidName,
+        oid_key(relation_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Trigger(row) => Some(row),
+                _ => None,
+            })
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 fn policy_rows_for_relation(
@@ -140,9 +410,23 @@ fn policy_rows_for_relation(
     txn_ctx: Option<(TransactionId, CommandId)>,
     relation_oid: u32,
 ) -> Vec<crate::include::catalog::PgPolicyRow> {
-    visible_catcache(db, client_id, txn_ctx)
-        .map(|catcache| catcache.policy_rows_for_relation(relation_oid))
-        .unwrap_or_default()
+    search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::PolicyPolrelidPolname,
+        oid_key(relation_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Policy(row) => Some(row),
+                _ => None,
+            })
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 fn type_row_by_oid(
@@ -151,10 +435,198 @@ fn type_row_by_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     oid: u32,
 ) -> Option<PgTypeRow> {
-    backend_catcache(db, client_id, txn_ctx)
+    search_sys_cache1_db(db, client_id, txn_ctx, SysCacheId::TypeOid, oid_key(oid))
         .ok()?
-        .type_by_oid(oid)
-        .cloned()
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Type(row) => Some(row),
+            _ => None,
+        })
+}
+
+fn type_row_by_name_namespace(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    name: &str,
+    namespace_oid: u32,
+) -> Option<PgTypeRow> {
+    search_sys_cache2_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::TypeNameNsp,
+        catalog_name_key(name),
+        oid_key(namespace_oid),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Type(row)
+            if !db.other_session_temp_namespace_oid(client_id, row.typnamespace) =>
+        {
+            Some(row)
+        }
+        _ => None,
+    })
+}
+
+fn dynamic_type_rows_for_search_path(db: &Database, search_path: &[String]) -> Vec<PgTypeRow> {
+    let mut rows = db.domain_type_rows_for_search_path(search_path);
+    rows.extend(db.enum_type_rows_for_search_path(search_path));
+    rows.extend(db.range_type_rows_for_search_path(search_path));
+    rows
+}
+
+fn range_proc_type_rows(db: &Database, search_path: &[String]) -> Vec<PgTypeRow> {
+    let mut rows = crate::include::catalog::builtin_type_rows();
+    rows.extend(db.range_type_rows_for_search_path(search_path));
+    rows
+}
+
+fn is_visible_range_proc_name(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    search_path: &[String],
+    name: &str,
+) -> bool {
+    crate::include::catalog::is_synthetic_range_proc_name(name)
+        || visible_type_row_by_name(db, client_id, txn_ctx, search_path, name)
+            .is_some_and(|row| row.sql_type.is_range() || row.sql_type.is_multirange())
+}
+
+fn dynamic_type_row_by_oid(db: &Database, search_path: &[String], oid: u32) -> Option<PgTypeRow> {
+    dynamic_type_rows_for_search_path(db, search_path)
+        .into_iter()
+        .find(|row| row.oid == oid)
+}
+
+fn dynamic_type_row_by_name(
+    db: &Database,
+    search_path: &[String],
+    name: &str,
+) -> Option<PgTypeRow> {
+    let normalized = crate::backend::parser::analyze::normalize_catalog_lookup_name(name);
+    dynamic_type_rows_for_search_path(db, search_path)
+        .into_iter()
+        .find(|row| row.typname.eq_ignore_ascii_case(normalized))
+}
+
+fn dynamic_type_row_by_name_namespace(
+    db: &Database,
+    search_path: &[String],
+    name: &str,
+    namespace_oid: u32,
+) -> Option<PgTypeRow> {
+    let normalized = crate::backend::parser::analyze::normalize_catalog_lookup_name(name);
+    dynamic_type_rows_for_search_path(db, search_path)
+        .into_iter()
+        .find(|row| {
+            row.typnamespace == namespace_oid && row.typname.eq_ignore_ascii_case(normalized)
+        })
+}
+
+fn visible_type_row_by_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    search_path: &[String],
+    oid: u32,
+) -> Option<PgTypeRow> {
+    type_row_by_oid(db, client_id, txn_ctx, oid)
+        .filter(|row| !db.other_session_temp_namespace_oid(client_id, row.typnamespace))
+        .or_else(|| dynamic_type_row_by_oid(db, search_path, oid))
+}
+
+fn visible_type_row_by_name(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    search_path: &[String],
+    name: &str,
+) -> Option<PgTypeRow> {
+    let lowered = name.to_ascii_lowercase();
+    if let Some((schema, typname)) = lowered.split_once('.') {
+        let namespace_oid = namespace_row_by_name(db, client_id, txn_ctx, schema)?.oid;
+        return type_row_by_name_namespace(db, client_id, txn_ctx, typname, namespace_oid).or_else(
+            || dynamic_type_row_by_name_namespace(db, search_path, typname, namespace_oid),
+        );
+    }
+
+    let normalized = crate::backend::parser::analyze::normalize_catalog_lookup_name(name);
+    for schema in search_path {
+        let Some(namespace) = namespace_row_by_name(db, client_id, txn_ctx, schema) else {
+            continue;
+        };
+        if let Some(row) =
+            type_row_by_name_namespace(db, client_id, txn_ctx, normalized, namespace.oid)
+        {
+            return Some(row);
+        }
+    }
+    dynamic_type_row_by_name(db, search_path, normalized)
+}
+
+fn visible_type_row_for_sql_type(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    search_path: &[String],
+    sql_type: SqlType,
+) -> Option<PgTypeRow> {
+    if !sql_type.is_array && sql_type.type_oid != 0 {
+        return visible_type_row_by_oid(db, client_id, txn_ctx, search_path, sql_type.type_oid);
+    }
+    crate::include::catalog::builtin_type_rows()
+        .into_iter()
+        .find(|row| row.sql_type == sql_type)
+        .or_else(|| {
+            dynamic_type_rows_for_search_path(db, search_path)
+                .into_iter()
+                .find(|row| row.sql_type == sql_type)
+        })
+}
+
+fn visible_type_oid_for_sql_type(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    search_path: &[String],
+    sql_type: SqlType,
+) -> Option<u32> {
+    if sql_type.is_array {
+        let element = sql_type.element_type();
+        let element_oid = if element.type_oid != 0 {
+            element.type_oid
+        } else {
+            visible_type_row_for_sql_type(db, client_id, txn_ctx, search_path, element)?.oid
+        };
+        return visible_type_row_by_oid(db, client_id, txn_ctx, search_path, element_oid)
+            .and_then(|row| (row.typarray != 0).then_some(row.typarray));
+    }
+    if let Some(range_type) = crate::include::catalog::range_type_ref_for_sql_type(sql_type) {
+        return Some(range_type.type_oid());
+    }
+    if let Some(multirange_type) =
+        crate::include::catalog::multirange_type_ref_for_sql_type(sql_type)
+    {
+        return Some(multirange_type.type_oid());
+    }
+    if sql_type.type_oid != 0 {
+        return Some(sql_type.type_oid);
+    }
+    if let Some(row) = visible_type_row_for_sql_type(db, client_id, txn_ctx, search_path, sql_type)
+    {
+        return Some(row.oid);
+    }
+    crate::include::catalog::builtin_type_rows()
+        .into_iter()
+        .chain(dynamic_type_rows_for_search_path(db, search_path))
+        .find(|row| {
+            row.sql_type.kind == sql_type.kind && row.sql_type.is_array == sql_type.is_array
+        })
+        .map(|row| row.oid)
 }
 
 fn visible_catcache(
@@ -171,10 +643,13 @@ fn proc_row_by_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     oid: u32,
 ) -> Option<PgProcRow> {
-    backend_catcache(db, client_id, txn_ctx)
+    search_sys_cache1_db(db, client_id, txn_ctx, SysCacheId::ProcOid, oid_key(oid))
         .ok()?
-        .proc_by_oid(oid)
-        .cloned()
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Proc(row) => Some(row),
+            _ => None,
+        })
 }
 
 fn proc_rows_by_name(
@@ -183,18 +658,177 @@ fn proc_rows_by_name(
     txn_ctx: Option<(TransactionId, CommandId)>,
     name: &str,
 ) -> Vec<PgProcRow> {
-    visible_catcache(db, client_id, txn_ctx)
-        .into_iter()
-        .flat_map(|catcache| {
-            catcache
-                .proc_rows_by_name(name)
-                .into_iter()
-                .cloned()
-                .collect::<Vec<_>>()
-        })
-        .collect()
+    let normalized = crate::backend::parser::analyze::normalize_catalog_lookup_name(name);
+    let mut rows = search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::ProcNameArgsNsp,
+        catalog_name_key(normalized),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Proc(row) => Some(row),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+    crate::backend::catalog::pg_proc::sort_pg_proc_rows(&mut rows);
+    rows
 }
 
+fn operator_row_by_name_left_right(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    name: &str,
+    left_type_oid: u32,
+    right_type_oid: u32,
+) -> Option<PgOperatorRow> {
+    let normalized = crate::backend::parser::analyze::normalize_catalog_lookup_name(name);
+    let mut rows = search_sys_cache_list3_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::OperNameNsp,
+        catalog_name_key(normalized),
+        oid_key(left_type_oid),
+        oid_key(right_type_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Operator(row) => Some(row),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+    crate::backend::catalog::pg_operator::sort_pg_operator_rows(&mut rows);
+    rows.into_iter().find(|row| {
+        row.oprname.eq_ignore_ascii_case(normalized)
+            && row.oprleft == left_type_oid
+            && row.oprright == right_type_oid
+    })
+}
+
+fn statistic_rows_for_relation(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relation_oid: u32,
+) -> Vec<PgStatisticRow> {
+    let mut rows = search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::StatRelAttInh,
+        oid_key(relation_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Statistic(row) => Some(row),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+    rows.sort_by_key(|row| (row.staattnum, row.stainherit));
+    rows
+}
+
+fn statistic_ext_row_by_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    oid: u32,
+) -> Option<PgStatisticExtRow> {
+    search_sys_cache1_db(db, client_id, txn_ctx, SysCacheId::StatExtOid, oid_key(oid))
+        .ok()?
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::StatisticExt(row) => Some(row),
+            _ => None,
+        })
+}
+
+fn statistic_ext_row_by_name_namespace(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    name: &str,
+    namespace_oid: u32,
+) -> Option<PgStatisticExtRow> {
+    let normalized = crate::backend::parser::analyze::normalize_catalog_lookup_name(name);
+    search_sys_cache2_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::StatExtNameNsp,
+        catalog_name_key(normalized),
+        oid_key(namespace_oid),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::StatisticExt(row) => Some(row),
+        _ => None,
+    })
+}
+
+fn statistic_ext_rows_for_relation(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relation_oid: u32,
+) -> Vec<PgStatisticExtRow> {
+    search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::StatisticExtRelId,
+        oid_key(relation_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::StatisticExt(row) => Some(row),
+                _ => None,
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+fn statistic_ext_data_row(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    stxoid: u32,
+    stxdinherit: bool,
+) -> Option<PgStatisticExtDataRow> {
+    search_sys_cache2_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::StatisticExtDataStxoidInh,
+        oid_key(stxoid),
+        Value::Bool(stxdinherit),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::StatisticExtData(row) => Some(row),
+        _ => None,
+    })
+}
 fn dedup_proc_rows(rows: &mut Vec<PgProcRow>) {
     let mut seen = BTreeSet::new();
     rows.retain(|row| {
@@ -215,10 +849,19 @@ fn aggregate_row_by_fnoid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     aggfnoid: u32,
 ) -> Option<PgAggregateRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .ok()?
-        .aggregate_by_fnoid(aggfnoid)
-        .cloned()
+    search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::AggFnoid,
+        oid_key(aggfnoid),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Aggregate(row) => Some(row),
+        _ => None,
+    })
 }
 
 fn language_row_by_oid(
@@ -227,11 +870,13 @@ fn language_row_by_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     oid: u32,
 ) -> Option<PgLanguageRow> {
-    backend_catcache(db, client_id, txn_ctx)
+    search_sys_cache1_db(db, client_id, txn_ctx, SysCacheId::LangOid, oid_key(oid))
         .ok()?
-        .language_rows()
         .into_iter()
-        .find(|row| row.oid == oid)
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Language(row) => Some(row),
+            _ => None,
+        })
 }
 
 fn language_rows(
@@ -250,12 +895,19 @@ fn language_row_by_name(
     txn_ctx: Option<(TransactionId, CommandId)>,
     name: &str,
 ) -> Option<PgLanguageRow> {
-    let normalized = normalize_catalog_name(name);
-    backend_catcache(db, client_id, txn_ctx)
-        .ok()?
-        .language_rows()
-        .into_iter()
-        .find(|row| row.lanname.eq_ignore_ascii_case(normalized))
+    search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::LangName,
+        Value::Text(normalize_catalog_name(name).to_ascii_lowercase().into()),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Language(row) => Some(row),
+        _ => None,
+    })
 }
 
 fn opclass_row_by_oid(
@@ -264,11 +916,13 @@ fn opclass_row_by_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     oid: u32,
 ) -> Option<PgOpclassRow> {
-    backend_catcache(db, client_id, txn_ctx)
+    search_sys_cache1_db(db, client_id, txn_ctx, SysCacheId::OpclassOid, oid_key(oid))
         .ok()?
-        .opclass_rows()
         .into_iter()
-        .find(|row| row.oid == oid)
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Opclass(row) => Some(row),
+            _ => None,
+        })
 }
 
 fn opclass_rows_for_am(
@@ -277,15 +931,23 @@ fn opclass_rows_for_am(
     txn_ctx: Option<(TransactionId, CommandId)>,
     am_oid: u32,
 ) -> Vec<PgOpclassRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| {
-            catcache
-                .opclass_rows()
-                .into_iter()
-                .filter(|row| row.opcmethod == am_oid)
-                .collect()
-        })
-        .unwrap_or_default()
+    search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::ClaAmNameNsp,
+        oid_key(am_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Opclass(row) => Some(row),
+                _ => None,
+            })
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 pub struct LazyCatalogLookup<'a> {
@@ -326,11 +988,19 @@ pub fn access_method_row_by_name(
     txn_ctx: Option<(TransactionId, CommandId)>,
     amname: &str,
 ) -> Option<PgAmRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .ok()?
-        .am_rows()
-        .into_iter()
-        .find(|row| row.amname.eq_ignore_ascii_case(amname))
+    search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::AmName,
+        Value::Text(normalize_catalog_name(amname).to_ascii_lowercase().into()),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Am(row) => Some(row),
+        _ => None,
+    })
 }
 
 pub fn access_method_row_by_oid(
@@ -339,11 +1009,13 @@ pub fn access_method_row_by_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     am_oid: u32,
 ) -> Option<PgAmRow> {
-    backend_catcache(db, client_id, txn_ctx)
+    search_sys_cache1_db(db, client_id, txn_ctx, SysCacheId::AmOid, oid_key(am_oid))
         .ok()?
-        .am_rows()
         .into_iter()
-        .find(|row| row.oid == am_oid)
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Am(row) => Some(row),
+            _ => None,
+        })
 }
 
 pub fn default_opclass_for_am_and_type(
@@ -394,11 +1066,19 @@ pub fn opfamily_row_by_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     family_oid: u32,
 ) -> Option<PgOpfamilyRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .ok()?
-        .opfamily_rows()
-        .into_iter()
-        .find(|row| row.oid == family_oid)
+    search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::OpfamilyOid,
+        oid_key(family_oid),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Opfamily(row) => Some(row),
+        _ => None,
+    })
 }
 
 pub fn collation_row_by_oid(
@@ -407,11 +1087,19 @@ pub fn collation_row_by_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     collation_oid: u32,
 ) -> Option<PgCollationRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .ok()?
-        .collation_rows()
-        .into_iter()
-        .find(|row| row.oid == collation_oid)
+    search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::CollOid,
+        oid_key(collation_oid),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Collation(row) => Some(row),
+        _ => None,
+    })
 }
 
 pub fn amop_rows_for_family(
@@ -420,15 +1108,23 @@ pub fn amop_rows_for_family(
     txn_ctx: Option<(TransactionId, CommandId)>,
     family_oid: u32,
 ) -> Vec<PgAmopRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| {
-            catcache
-                .amop_rows()
-                .into_iter()
-                .filter(|row| row.amopfamily == family_oid)
-                .collect()
-        })
-        .unwrap_or_default()
+    search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::AmopStrategy,
+        oid_key(family_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Amop(row) => Some(row),
+                _ => None,
+            })
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 pub fn amproc_rows_for_family(
@@ -437,15 +1133,23 @@ pub fn amproc_rows_for_family(
     txn_ctx: Option<(TransactionId, CommandId)>,
     family_oid: u32,
 ) -> Vec<PgAmprocRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| {
-            catcache
-                .amproc_rows()
-                .into_iter()
-                .filter(|row| row.amprocfamily == family_oid)
-                .collect()
-        })
-        .unwrap_or_default()
+    search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::AmprocNum,
+        oid_key(family_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Amproc(row) => Some(row),
+                _ => None,
+            })
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 pub fn index_row_by_indexrelid(
@@ -454,11 +1158,58 @@ pub fn index_row_by_indexrelid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     relation_oid: u32,
 ) -> Option<PgIndexRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .ok()?
-        .index_rows()
+    search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::IndexRelId,
+        oid_key(relation_oid),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Index(row) => Some(row),
+        _ => None,
+    })
+}
+
+fn index_rows_for_heap(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relation_oid: u32,
+) -> Vec<PgIndexRow> {
+    search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::IndexIndRelId,
+        oid_key(relation_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Index(row) => Some(row),
+                _ => None,
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+pub fn relation_get_index_list(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relation_oid: u32,
+) -> Vec<u32> {
+    index_rows_for_heap(db, client_id, txn_ctx, relation_oid)
         .into_iter()
-        .find(|row| row.indexrelid == relation_oid)
+        .map(|row| row.indexrelid)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 pub fn index_relation_oids_for_heap(
@@ -467,18 +1218,7 @@ pub fn index_relation_oids_for_heap(
     txn_ctx: Option<(TransactionId, CommandId)>,
     relation_oid: u32,
 ) -> Vec<u32> {
-    backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| {
-            catcache
-                .index_rows()
-                .into_iter()
-                .filter(|row| row.indrelid == relation_oid)
-                .map(|row| row.indexrelid)
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect()
-        })
-        .unwrap_or_default()
+    relation_get_index_list(db, client_id, txn_ctx, relation_oid)
 }
 
 pub fn relation_entry_by_oid(
@@ -500,6 +1240,11 @@ pub fn relation_entry_by_oid(
         })
     {
         return Some(entry);
+    }
+
+    if let Ok(Some(entry)) = relation_id_get_relation_db(db, client_id, txn_ctx, relation_oid) {
+        return (!db.other_session_temp_namespace_oid(client_id, entry.namespace_oid))
+            .then_some(entry);
     }
 
     let entry = backend_relcache(db, client_id, txn_ctx)
@@ -692,7 +1437,7 @@ pub fn has_index_on_relation(
     txn_ctx: Option<(TransactionId, CommandId)>,
     relation_oid: u32,
 ) -> bool {
-    !index_relation_oids_for_heap(db, client_id, txn_ctx, relation_oid).is_empty()
+    !relation_get_index_list(db, client_id, txn_ctx, relation_oid).is_empty()
 }
 
 pub fn access_method_name_for_relation(
@@ -717,37 +1462,14 @@ pub fn constraint_rows_for_relation(
     txn_ctx: Option<(TransactionId, CommandId)>,
     relation_oid: u32,
 ) -> Vec<PgConstraintRow> {
-    if let Ok(catcache) = backend_catcache(db, client_id, txn_ctx) {
-        let rows = catcache.constraint_rows_for_relation(relation_oid);
-        if !rows.is_empty() {
-            return rows;
-        }
+    let rows = constraint_rows_for_relation_syscache(db, client_id, txn_ctx, relation_oid);
+    if !rows.is_empty() {
+        return rows;
     }
-    if let Ok(relcache) = backend_relcache(db, client_id, txn_ctx)
-        && let Some(entry) = relcache.get_by_oid(relation_oid)
-        && let Some(class) = class_row_by_oid(db, client_id, txn_ctx, relation_oid)
-    {
-        return derived_pg_constraint_rows(
-            relation_oid,
-            &class.relname,
-            entry.namespace_oid,
-            &entry.desc,
-        );
-    }
-    let constraint_rows = ensure_constraint_rows(db, client_id, txn_ctx)
-        .into_iter()
-        .filter(|row| row.conrelid == relation_oid)
-        .collect::<Vec<_>>();
-    if !constraint_rows.is_empty() {
-        return constraint_rows;
-    }
-    let Some(class) = ensure_class_rows(db, client_id, txn_ctx)
-        .into_iter()
-        .find(|row| row.oid == relation_oid)
-    else {
+    let Some(entry) = relation_entry_by_oid(db, client_id, txn_ctx, relation_oid) else {
         return Vec::new();
     };
-    let Some(entry) = relation_entry_by_oid(db, client_id, txn_ctx, relation_oid) else {
+    let Some(class) = class_row_by_oid(db, client_id, txn_ctx, relation_oid) else {
         return Vec::new();
     };
     derived_pg_constraint_rows(
@@ -796,24 +1518,30 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         left_type_oid: u32,
         right_type_oid: u32,
     ) -> Option<PgOperatorRow> {
-        let normalized = crate::backend::parser::analyze::normalize_catalog_lookup_name(name);
-        backend_catcache(self.db, self.client_id, self.txn_ctx)
-            .ok()?
-            .operator_rows()
-            .into_iter()
-            .find(|row| {
-                row.oprname.eq_ignore_ascii_case(normalized)
-                    && row.oprleft == left_type_oid
-                    && row.oprright == right_type_oid
-            })
+        operator_row_by_name_left_right(
+            self.db,
+            self.client_id,
+            self.txn_ctx,
+            name,
+            left_type_oid,
+            right_type_oid,
+        )
     }
 
     fn operator_by_oid(&self, oid: u32) -> Option<PgOperatorRow> {
-        backend_catcache(self.db, self.client_id, self.txn_ctx)
-            .ok()?
-            .operator_rows()
-            .into_iter()
-            .find(|row| row.oid == oid)
+        search_sys_cache1_db(
+            self.db,
+            self.client_id,
+            self.txn_ctx,
+            SysCacheId::OperOid,
+            oid_key(oid),
+        )
+        .ok()?
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Operator(row) => Some(row),
+            _ => None,
+        })
     }
 
     fn current_user_oid(&self) -> u32 {
@@ -891,17 +1619,57 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         constraint_rows_for_relation(self.db, self.client_id, self.txn_ctx, relation_oid)
     }
 
+    fn constraint_row_by_oid(&self, oid: u32) -> Option<PgConstraintRow> {
+        constraint_row_by_oid(self.db, self.client_id, self.txn_ctx, oid)
+    }
+
+    fn constraint_rows_for_index(&self, index_oid: u32) -> Vec<PgConstraintRow> {
+        constraint_rows_for_index(self.db, self.client_id, self.txn_ctx, index_oid)
+    }
+
+    fn foreign_key_constraint_rows_referencing_relation(
+        &self,
+        relation_oid: u32,
+    ) -> Vec<PgConstraintRow> {
+        foreign_key_constraint_rows_referencing_relation(
+            self.db,
+            self.client_id,
+            self.txn_ctx,
+            relation_oid,
+        )
+    }
+
+    fn foreign_key_constraint_rows_referencing_index(
+        &self,
+        index_oid: u32,
+    ) -> Vec<PgConstraintRow> {
+        foreign_key_constraint_rows_referencing_index(
+            self.db,
+            self.client_id,
+            self.txn_ctx,
+            index_oid,
+        )
+    }
+
     fn constraint_rows(&self) -> Vec<PgConstraintRow> {
         ensure_constraint_rows(self.db, self.client_id, self.txn_ctx)
     }
 
     fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
         let mut rows = proc_rows_by_name(self.db, self.client_id, self.txn_ctx, name);
-        rows.extend(crate::include::catalog::synthetic_range_proc_rows_by_name(
+        if is_visible_range_proc_name(
+            self.db,
+            self.client_id,
+            self.txn_ctx,
+            &self.search_path,
             name,
-            &self.type_rows(),
-            &self.range_rows(),
-        ));
+        ) {
+            rows.extend(crate::include::catalog::synthetic_range_proc_rows_by_name(
+                name,
+                &range_proc_type_rows(self.db, &self.search_path),
+                &self.range_rows(),
+            ));
+        }
         dedup_proc_rows(&mut rows);
         rows
     }
@@ -910,7 +1678,7 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         proc_row_by_oid(self.db, self.client_id, self.txn_ctx, oid).or_else(|| {
             crate::include::catalog::synthetic_range_proc_row_by_oid(
                 oid,
-                &self.type_rows(),
+                &range_proc_type_rows(self.db, &self.search_path),
                 &self.range_rows(),
             )
         })
@@ -926,6 +1694,36 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         rows.extend(self.db.enum_type_rows_for_search_path(&self.search_path));
         rows.extend(self.db.range_type_rows_for_search_path(&self.search_path));
         rows
+    }
+
+    fn type_by_oid(&self, oid: u32) -> Option<PgTypeRow> {
+        visible_type_row_by_oid(
+            self.db,
+            self.client_id,
+            self.txn_ctx,
+            &self.search_path,
+            oid,
+        )
+    }
+
+    fn type_by_name(&self, name: &str) -> Option<PgTypeRow> {
+        visible_type_row_by_name(
+            self.db,
+            self.client_id,
+            self.txn_ctx,
+            &self.search_path,
+            name,
+        )
+    }
+
+    fn type_oid_for_sql_type(&self, sql_type: SqlType) -> Option<u32> {
+        visible_type_oid_for_sql_type(
+            self.db,
+            self.client_id,
+            self.txn_ctx,
+            &self.search_path,
+            sql_type,
+        )
     }
 
     fn range_rows(&self) -> Vec<crate::include::catalog::PgRangeRow> {
@@ -947,10 +1745,23 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
     }
 
     fn rewrite_rows_for_relation(&self, relation_oid: u32) -> Vec<PgRewriteRow> {
-        ensure_rewrite_rows(self.db, self.client_id, self.txn_ctx)
-            .into_iter()
-            .filter(|row| row.ev_class == relation_oid)
-            .collect()
+        search_sys_cache_list1_db(
+            self.db,
+            self.client_id,
+            self.txn_ctx,
+            SysCacheId::RuleRelName,
+            oid_key(relation_oid),
+        )
+        .map(|tuples| {
+            tuples
+                .into_iter()
+                .filter_map(|tuple| match tuple {
+                    SysCacheTuple::Rewrite(row) => Some(row),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
     }
 
     fn trigger_rows_for_relation(&self, relation_oid: u32) -> Vec<PgTriggerRow> {
@@ -968,25 +1779,45 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         class_row_by_oid(self.db, self.client_id, self.txn_ctx, relation_oid)
     }
 
+    fn partitioned_table_row(
+        &self,
+        relation_oid: u32,
+    ) -> Option<crate::include::catalog::PgPartitionedTableRow> {
+        partitioned_table_row_by_relid(self.db, self.client_id, self.txn_ctx, relation_oid)
+    }
+
     fn inheritance_parents(&self, relation_oid: u32) -> Vec<PgInheritsRow> {
-        ensure_inherit_rows(self.db, self.client_id, self.txn_ctx)
-            .into_iter()
-            .filter(|row| row.inhrelid == relation_oid)
-            .collect()
+        inheritance_parent_rows(self.db, self.client_id, self.txn_ctx, relation_oid)
     }
 
     fn inheritance_children(&self, relation_oid: u32) -> Vec<PgInheritsRow> {
-        ensure_inherit_rows(self.db, self.client_id, self.txn_ctx)
-            .into_iter()
-            .filter(|row| row.inhparent == relation_oid)
-            .collect()
+        inheritance_child_rows(self.db, self.client_id, self.txn_ctx, relation_oid)
     }
 
     fn statistic_rows_for_relation(&self, relation_oid: u32) -> Vec<PgStatisticRow> {
-        ensure_statistic_rows(self.db, self.client_id, self.txn_ctx)
-            .into_iter()
-            .filter(|row| row.starelid == relation_oid)
-            .collect()
+        statistic_rows_for_relation(self.db, self.client_id, self.txn_ctx, relation_oid)
+    }
+
+    fn statistic_ext_row_by_oid(&self, oid: u32) -> Option<PgStatisticExtRow> {
+        statistic_ext_row_by_oid(self.db, self.client_id, self.txn_ctx, oid)
+    }
+
+    fn statistic_ext_row_by_name_namespace(
+        &self,
+        name: &str,
+        namespace_oid: u32,
+    ) -> Option<PgStatisticExtRow> {
+        statistic_ext_row_by_name_namespace(
+            self.db,
+            self.client_id,
+            self.txn_ctx,
+            name,
+            namespace_oid,
+        )
+    }
+
+    fn statistic_ext_rows_for_relation(&self, relation_oid: u32) -> Vec<PgStatisticExtRow> {
+        statistic_ext_rows_for_relation(self.db, self.client_id, self.txn_ctx, relation_oid)
     }
 
     fn statistic_ext_rows(&self) -> Vec<PgStatisticExtRow> {
@@ -999,6 +1830,14 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         backend_catcache(self.db, self.client_id, self.txn_ctx)
             .map(|catcache| catcache.statistic_ext_data_rows())
             .unwrap_or_default()
+    }
+
+    fn statistic_ext_data_row(
+        &self,
+        stxoid: u32,
+        stxdinherit: bool,
+    ) -> Option<PgStatisticExtDataRow> {
+        statistic_ext_data_row(self.db, self.client_id, self.txn_ctx, stxoid, stxdinherit)
     }
 
     fn pg_views_rows(&self) -> Vec<Vec<Value>> {
@@ -1149,40 +1988,44 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         &self,
         relation_oid: u32,
     ) -> Vec<crate::backend::parser::BoundIndexRelation> {
-        index_relation_oids_for_heap(self.db, self.client_id, self.txn_ctx, relation_oid)
+        relation_get_index_list(self.db, self.client_id, self.txn_ctx, relation_oid)
             .into_iter()
             .filter_map(|index_oid| {
                 let entry =
                     relation_entry_by_oid(self.db, self.client_id, self.txn_ctx, index_oid)?;
-                let index_meta = entry.index.as_ref()?.clone();
+                let mut index_meta = entry.index.as_ref()?.clone();
                 let class =
                     class_row_by_oid(self.db, self.client_id, self.txn_ctx, entry.relation_oid)?;
+                let (index_exprs, index_predicate) = relation_entry_by_oid(
+                    self.db,
+                    self.client_id,
+                    self.txn_ctx,
+                    index_meta.indrelid,
+                )
+                .map(|heap| {
+                    let index_exprs = crate::backend::parser::relation_get_index_expressions(
+                        &mut index_meta,
+                        &heap.desc,
+                        self,
+                    )
+                    .unwrap_or_default();
+                    let index_predicate = crate::backend::parser::relation_get_index_predicate(
+                        &mut index_meta,
+                        &heap.desc,
+                        self,
+                    )
+                    .ok()
+                    .flatten();
+                    (index_exprs, index_predicate)
+                })
+                .unwrap_or_default();
                 Some(crate::backend::parser::BoundIndexRelation {
                     name: class.relname,
                     rel: entry.rel,
                     relation_oid: entry.relation_oid,
                     desc: entry.desc,
-                    index_exprs: relation_entry_by_oid(
-                        self.db,
-                        self.client_id,
-                        self.txn_ctx,
-                        index_meta.indrelid,
-                    )
-                    .and_then(|heap| {
-                        crate::backend::parser::bind_index_exprs(&index_meta, &heap.desc, self).ok()
-                    })
-                    .unwrap_or_default(),
-                    index_predicate: relation_entry_by_oid(
-                        self.db,
-                        self.client_id,
-                        self.txn_ctx,
-                        index_meta.indrelid,
-                    )
-                    .and_then(|heap| {
-                        crate::backend::parser::bind_index_predicate(&index_meta, &heap.desc, self)
-                            .ok()
-                            .flatten()
-                    }),
+                    index_exprs,
+                    index_predicate,
                     index_meta,
                 })
             })

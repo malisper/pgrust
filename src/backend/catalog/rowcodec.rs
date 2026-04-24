@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
 use crate::backend::catalog::catalog::CatalogError;
 use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::executor::RelationDesc;
@@ -1714,15 +1717,19 @@ fn pg_opfamily_row_values(row: PgOpfamilyRow) -> Vec<Value> {
 }
 
 fn decode_builtin_sql_type(oid: u32) -> Option<SqlType> {
-    for row in builtin_type_rows()
-        .into_iter()
-        .chain(bootstrap_composite_type_rows())
-    {
-        if row.oid == oid {
-            return Some(row.sql_type);
-        }
-    }
-    None
+    builtin_sql_type_by_oid().get(&oid).copied()
+}
+
+fn builtin_sql_type_by_oid() -> &'static HashMap<u32, SqlType> {
+    static BUILTIN_SQL_TYPE_BY_OID: OnceLock<HashMap<u32, SqlType>> = OnceLock::new();
+
+    BUILTIN_SQL_TYPE_BY_OID.get_or_init(|| {
+        builtin_type_rows()
+            .into_iter()
+            .chain(bootstrap_composite_type_rows())
+            .map(|row| (row.oid, row.sql_type))
+            .collect()
+    })
 }
 
 fn expect_oid(value: &Value) -> Result<u32, CatalogError> {
