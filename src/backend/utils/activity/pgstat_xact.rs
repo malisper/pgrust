@@ -50,9 +50,23 @@ impl SessionStatsState {
                     tuples_deleted: current.tuples_deleted,
                     live_tuples: current.live_tuples - base.live_tuples,
                     dead_tuples: current.dead_tuples - base.dead_tuples,
+                    mod_since_analyze: current.mod_since_analyze,
+                    ins_since_vacuum: current.ins_since_vacuum,
                     blocks_fetched: current.blocks_fetched,
                     blocks_hit: current.blocks_hit,
                     lastscan: current.lastscan,
+                    last_vacuum: current.last_vacuum,
+                    last_autovacuum: current.last_autovacuum,
+                    last_analyze: current.last_analyze,
+                    last_autoanalyze: current.last_autoanalyze,
+                    vacuum_count: current.vacuum_count,
+                    autovacuum_count: current.autovacuum_count,
+                    analyze_count: current.analyze_count,
+                    autoanalyze_count: current.autoanalyze_count,
+                    total_vacuum_time_micros: current.total_vacuum_time_micros,
+                    total_autovacuum_time_micros: current.total_autovacuum_time_micros,
+                    total_analyze_time_micros: current.total_analyze_time_micros,
+                    total_autoanalyze_time_micros: current.total_autoanalyze_time_micros,
                 }
             } else {
                 state.current

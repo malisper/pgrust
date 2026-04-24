@@ -2807,6 +2807,58 @@ fn analyze_populates_pg_statistic_and_pg_class_stats() {
 }
 
 #[test]
+fn analyze_in_explicit_transaction_reports_stats_only_on_commit() {
+    let dir = temp_dir("analyze_xact_stats_commit");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table analyze_xact_t(a int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into analyze_xact_t values (1), (2), (3)")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select pg_stat_force_next_flush()"),
+        vec![vec![Value::Null]]
+    );
+
+    session.execute(&db, "begin").unwrap();
+    session.execute(&db, "analyze analyze_xact_t").unwrap();
+    session.execute(&db, "rollback").unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select analyze_count, last_analyze is null, n_mod_since_analyze
+             from pg_stat_user_tables
+             where relname = 'analyze_xact_t'",
+        ),
+        vec![vec![Value::Int64(0), Value::Bool(true), Value::Int64(3)]]
+    );
+
+    session.execute(&db, "begin").unwrap();
+    session.execute(&db, "analyze analyze_xact_t").unwrap();
+    session.execute(&db, "commit").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select pg_stat_force_next_flush()"),
+        vec![vec![Value::Null]]
+    );
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select analyze_count, last_analyze is not null, n_mod_since_analyze
+             from pg_stat_user_tables
+             where relname = 'analyze_xact_t'",
+        ),
+        vec![vec![Value::Int64(1), Value::Bool(true), Value::Int64(0)]]
+    );
+}
+
+#[test]
 fn vacuum_populates_pg_class_visibility_stats() {
     let dir = temp_dir("vacuum_populates_visibility_stats");
     let db = Database::open(&dir, 128).unwrap();
@@ -2889,6 +2941,163 @@ fn vacuum_analyze_updates_visibility_and_analyze_stats() {
          where starelid = (select oid from pg_class where relname = 'vac_analyze_t')",
     );
     assert_eq!(statistic_count, vec![vec![Value::Int64(2)]]);
+}
+
+fn autovacuum_test_config() -> AutovacuumConfig {
+    AutovacuumConfig {
+        enabled: false,
+        naptime: Duration::from_secs(3600),
+        vacuum_threshold: 1,
+        vacuum_max_threshold: 1_000,
+        vacuum_scale_factor: 0.0,
+        vacuum_insert_threshold: 1_000_000,
+        vacuum_insert_scale_factor: 0.0,
+        analyze_threshold: 1_000_000,
+        analyze_scale_factor: 0.0,
+        freeze_max_age: 200_000_000,
+    }
+}
+
+#[test]
+fn autovacuum_once_vacuums_dead_user_table() {
+    let dir = temp_dir("autovacuum_once_vacuum");
+    let db = Database::open_with_options(
+        &dir,
+        DatabaseOpenOptions::for_tests(128).with_autovacuum_config(autovacuum_test_config()),
+    )
+    .unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table av_items(id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into av_items values (1), (2), (3), (4), (5)")
+        .unwrap();
+    session
+        .execute(&db, "delete from av_items where id <= 3")
+        .unwrap();
+
+    db.run_autovacuum_once().unwrap();
+
+    let stats = query_rows(
+        &db,
+        1,
+        "select autovacuum_count, last_autovacuum is not null, n_dead_tup, n_ins_since_vacuum
+         from pg_stat_user_tables
+         where relname = 'av_items'",
+    );
+    assert_eq!(stats.len(), 1);
+    assert_eq!(stats[0][0], Value::Int64(1));
+    assert_eq!(stats[0][1], Value::Bool(true));
+    assert_eq!(stats[0][2], Value::Int64(0));
+    assert_eq!(stats[0][3], Value::Int64(0));
+
+    let rel_stats = query_rows(
+        &db,
+        1,
+        "select relallvisible, relallfrozen
+         from pg_class
+         where relname = 'av_items'",
+    );
+    assert_eq!(rel_stats.len(), 1);
+    assert!(int_value(&rel_stats[0][0]) >= 1);
+    assert!(int_value(&rel_stats[0][1]) >= 1);
+}
+
+#[test]
+fn autovacuum_once_autoanalyzes_modified_user_table() {
+    let dir = temp_dir("autovacuum_once_analyze");
+    let mut config = autovacuum_test_config();
+    config.vacuum_threshold = 1_000_000;
+    config.analyze_threshold = 1;
+    let db = Database::open_with_options(
+        &dir,
+        DatabaseOpenOptions::for_tests(128).with_autovacuum_config(config),
+    )
+    .unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table av_analyze_items(id int4, note text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into av_analyze_items values
+             (1, 'one'),
+             (2, 'two'),
+             (3, 'three')",
+        )
+        .unwrap();
+
+    db.run_autovacuum_once().unwrap();
+
+    let stats = query_rows(
+        &db,
+        1,
+        "select autoanalyze_count, last_autoanalyze is not null, n_mod_since_analyze
+         from pg_stat_user_tables
+         where relname = 'av_analyze_items'",
+    );
+    assert_eq!(stats.len(), 1);
+    assert_eq!(stats[0][0], Value::Int64(1));
+    assert_eq!(stats[0][1], Value::Bool(true));
+    assert_eq!(stats[0][2], Value::Int64(0));
+
+    let statistic_count = query_rows(
+        &db,
+        1,
+        "select count(*)
+         from pg_statistic
+         where starelid = (select oid from pg_class where relname = 'av_analyze_items')",
+    );
+    assert_eq!(statistic_count, vec![vec![Value::Int64(2)]]);
+}
+
+#[test]
+fn autovacuum_once_skips_locked_table_without_blocking() {
+    let dir = temp_dir("autovacuum_skip_locked");
+    let db = Database::open_with_options(
+        &dir,
+        DatabaseOpenOptions::for_tests(128).with_autovacuum_config(autovacuum_test_config()),
+    )
+    .unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table av_locked_items(id int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into av_locked_items values (1), (2), (3), (4), (5)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "delete from av_locked_items where id <= 3")
+        .unwrap();
+
+    let rel = relation_locator_for(&db, 1, "av_locked_items");
+    db.table_locks.lock_table(
+        rel,
+        crate::backend::storage::lmgr::TableLockMode::RowExclusive,
+        99,
+    );
+    let result = db.run_autovacuum_once();
+    db.table_locks.unlock_table(rel, 99);
+    result.unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select autovacuum_count, n_dead_tup
+             from pg_stat_user_tables
+             where relname = 'av_locked_items'",
+        ),
+        vec![vec![Value::Int64(0), Value::Int64(3)]]
+    );
 }
 
 #[test]
@@ -17637,6 +17846,47 @@ fn checkpoint_gucs_show_defaults_and_reject_runtime_set() {
             assert_eq!(name, "checkpoint_timeout");
         }
         other => panic!("expected checkpoint_timeout reset error, got {other:?}"),
+    }
+}
+
+#[test]
+fn autovacuum_gucs_show_defaults_and_reject_runtime_set() {
+    assert!(AutovacuumConfig::production_default().enabled);
+    assert!(!DatabaseOpenOptions::for_tests(16).autovacuum.enabled);
+
+    let base = temp_dir("autovacuum_gucs");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    match session.execute(&db, "show autovacuum").unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("off".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match session
+        .execute(&db, "show autovacuum_vacuum_threshold")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("50".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match session.execute(&db, "set autovacuum = off") {
+        Err(ExecError::Parse(ParseError::CantChangeRuntimeParam(name))) => {
+            assert_eq!(name, "autovacuum");
+        }
+        other => panic!("expected autovacuum runtime change error, got {other:?}"),
+    }
+
+    match session.execute(&db, "reset autovacuum_vacuum_threshold") {
+        Err(ExecError::Parse(ParseError::CantChangeRuntimeParam(name))) => {
+            assert_eq!(name, "autovacuum_vacuum_threshold");
+        }
+        other => panic!("expected autovacuum reset error, got {other:?}"),
     }
 }
 

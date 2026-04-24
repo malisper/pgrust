@@ -28,6 +28,7 @@ use super::visibilitymap::{
 pub struct VacuumScanState {
     pub dead_tids: BTreeSet<ItemPointerData>,
     pub blocks_to_scan: Vec<u32>,
+    removable_dead_tuples: i64,
     relpages: i32,
     skipped_all_visible: i32,
     skipped_all_frozen: i32,
@@ -41,6 +42,8 @@ pub struct VacuumRelationStats {
     pub relallvisible: i32,
     pub relallfrozen: i32,
     pub relfrozenxid: TransactionId,
+    pub removed_dead_tuples: i64,
+    pub remaining_dead_tuples: i64,
 }
 
 pub fn vacuum_relation_scan(
@@ -55,6 +58,7 @@ pub fn vacuum_relation_scan(
     let freeze_cutoff_xid = oldest_xmin.max(FROZEN_TRANSACTION_ID);
     let mut dead_tids = BTreeSet::new();
     let mut blocks_to_scan = Vec::new();
+    let mut removable_dead_tuples = 0i64;
     let mut vmbuf = None;
     let mut skipped_all_visible = 0;
     let mut skipped_all_frozen = 0;
@@ -85,11 +89,13 @@ pub fn vacuum_relation_scan(
             });
         }
         blocks_to_scan.push(block);
+        removable_dead_tuples += result.removable_offsets.len() as i64;
     }
 
     Ok(VacuumScanState {
         dead_tids,
         blocks_to_scan,
+        removable_dead_tuples,
         relpages: nblocks as i32,
         skipped_all_visible,
         skipped_all_frozen,
@@ -113,6 +119,7 @@ pub fn vacuum_relation_pages(
     let mut relallvisible = scan.skipped_all_visible;
     let mut relallfrozen = scan.skipped_all_frozen;
     let mut relfrozenxid_candidate = None;
+    let mut remaining_dead_tuples = 0i64;
     let mut vmbuf = None;
 
     for &block in &scan.blocks_to_scan {
@@ -168,6 +175,7 @@ pub fn vacuum_relation_pages(
                     .unwrap_or(candidate),
             );
         }
+        remaining_dead_tuples += final_result.nonremovable_dead_tuples as i64;
     }
 
     // :HACK: pgrust does not implement multixacts yet, so relfrozenxid is the
@@ -185,6 +193,8 @@ pub fn vacuum_relation_pages(
         relallvisible,
         relallfrozen,
         relfrozenxid,
+        removed_dead_tuples: scan.removable_dead_tuples,
+        remaining_dead_tuples,
     })
 }
 
