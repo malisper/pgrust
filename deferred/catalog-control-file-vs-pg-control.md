@@ -27,7 +27,7 @@ Remaining differences from PostgreSQL:
   - `pgrust` cache warming still depends on scanning the physical core catalogs; there are no physical system-catalog indexes yet.
 - Cache publication/coherency:
   - PostgreSQL keeps syscache/relcache entries per backend and propagates precise invalidation messages at command end and commit, so other backends can drop or rebuild only the affected metadata.
-  - `pgrust` currently keeps one process-wide committed visible cache in [src/pgrust/database.rs](src/pgrust/database.rs:81) and invalidates it with a single `catalog_cache_epoch` bump in [src/pgrust/database.rs](src/pgrust/database.rs:236). The next non-transactional, non-temp lookup lazily rebuilds the full committed `RelCache`/`CatCache` snapshot instead of consuming targeted object-level invalidations.
+  - `pgrust` currently keeps one process-wide committed visible cache in [src/pgrust/database.rs](/src/pgrust/database.rs:81) and invalidates it with a single `catalog_cache_epoch` bump in [src/pgrust/database.rs](/src/pgrust/database.rs:236). The next non-transactional, non-temp lookup lazily rebuilds the full committed `RelCache`/`CatCache` snapshot instead of consuming targeted object-level invalidations.
 - Temp catalog visibility:
   - PostgreSQL integrates temp namespaces and temp catalog visibility directly into its namespace/catalog machinery.
   - `pgrust` projects temp catalog rows into session-specific core catalog heaps so catalog queries see them, which is simpler and more ad hoc.

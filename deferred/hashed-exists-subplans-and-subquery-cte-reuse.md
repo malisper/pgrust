@@ -13,9 +13,9 @@ rebuilt for many outer `points p` rows.
 
 Relevant local code paths:
 
-- [src/backend/executor/exec_expr/subquery.rs](src/backend/executor/exec_expr/subquery.rs:46)
-- [src/backend/executor/exec_expr/subquery.rs](src/backend/executor/exec_expr/subquery.rs:131)
-- [src/backend/executor/nodes.rs](src/backend/executor/nodes.rs:2399)
+- [src/backend/executor/exec_expr/subquery.rs](/src/backend/executor/exec_expr/subquery.rs:46)
+- [src/backend/executor/exec_expr/subquery.rs](/src/backend/executor/exec_expr/subquery.rs:131)
+- [src/backend/executor/nodes.rs](/src/backend/executor/nodes.rs:2399)
 
 Today `eval_exists_subquery` starts a fresh executor state for the subplan, and
 `with_scoped_subquery_runtime` snapshots/restores `ctx.cte_tables`,
@@ -40,16 +40,16 @@ plan for the same Mandelbrot query shows:
 Relevant upstream implementation points:
 
 - planner rewrite / hashing eligibility:
-  [../postgres/src/backend/optimizer/plan/subselect.c](~/postgres/src/backend/optimizer/plan/subselect.c:243)
+  [../postgres/src/backend/optimizer/plan/subselect.c](../postgres/src/backend/optimizer/plan/subselect.c:243)
 - hashed subplan flag:
-  [../postgres/src/backend/optimizer/plan/subselect.c](~/postgres/src/backend/optimizer/plan/subselect.c:518)
+  [../postgres/src/backend/optimizer/plan/subselect.c](../postgres/src/backend/optimizer/plan/subselect.c:518)
 - executor hashed subplan path:
-  [../postgres/src/backend/executor/nodeSubplan.c](~/postgres/src/backend/executor/nodeSubplan.c:62)
+  [../postgres/src/backend/executor/nodeSubplan.c](../postgres/src/backend/executor/nodeSubplan.c:62)
 - hash-table build:
-  [../postgres/src/backend/executor/nodeSubplan.c](~/postgres/src/backend/executor/nodeSubplan.c:477)
+  [../postgres/src/backend/executor/nodeSubplan.c](../postgres/src/backend/executor/nodeSubplan.c:477)
 - shared CTE tuplestore behavior:
-  [../postgres/src/backend/executor/nodeCtescan.c](~/postgres/src/backend/executor/nodeCtescan.c:30)
-  [../postgres/src/backend/executor/nodeCtescan.c](~/postgres/src/backend/executor/nodeCtescan.c:220)
+  [../postgres/src/backend/executor/nodeCtescan.c](../postgres/src/backend/executor/nodeCtescan.c:30)
+  [../postgres/src/backend/executor/nodeCtescan.c](../postgres/src/backend/executor/nodeCtescan.c:220)
 
 ## Likely Approaches
 
@@ -65,7 +65,7 @@ Relevant upstream implementation points:
 There is already at least one correctness-sensitive case where a subquery-local
 CTE captures an outer value and should not be blindly reused:
 
-- [src/backend/executor/tests.rs](src/backend/executor/tests.rs:13571)
+- [src/backend/executor/tests.rs](/src/backend/executor/tests.rs:13571)
 
 So "just keep `cte_tables` alive longer" is likely wrong as a general fix.
 

@@ -3,7 +3,7 @@
 Permanent runtime DDL now goes through the MVCC catalog path in
 `CatalogStore::{create_table_mvcc, create_index_for_relation_mvcc, drop_relation_by_oid_mvcc}`.
 
-The older non-MVCC helpers in [src/backend/catalog/store.rs](src/backend/catalog/store.rs:213)
+The older non-MVCC helpers in [src/backend/catalog/store.rs](/src/backend/catalog/store.rs:213)
 still exist:
 
 - `create_table`
