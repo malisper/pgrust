@@ -8,7 +8,7 @@ use crate::include::catalog::{
     proc_oid_for_builtin_scalar_function, proc_oid_for_builtin_window_function,
 };
 use crate::include::nodes::datum::{MultirangeTypeRef, RangeTypeRef, RecordDescriptor, Value};
-use crate::include::nodes::parsenodes::Query;
+use crate::include::nodes::parsenodes::{ColumnGeneratedKind, Query};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScalarType {
@@ -69,6 +69,7 @@ pub struct ColumnDesc {
     pub attrdef_oid: Option<u32>,
     pub default_expr: Option<String>,
     pub default_sequence_oid: Option<u32>,
+    pub generated: Option<ColumnGeneratedKind>,
     pub missing_default_value: Option<Value>,
 }
 

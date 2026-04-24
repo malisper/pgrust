@@ -65,14 +65,25 @@ pub(super) fn bind_on_conflict_clause(
                         catalog,
                         local_ctes,
                     )?;
-                    let expr = bind_expr_with_outer_and_ctes(
-                        &assignment.expr,
-                        &raw_scope,
-                        catalog,
-                        &[],
-                        None,
-                        local_ctes,
+                    super::modify::ensure_generated_assignment_allowed(
+                        desc,
+                        &target,
+                        Some(&assignment.expr),
                     )?;
+                    let expr = if matches!(assignment.expr, SqlExpr::Default)
+                        && desc.columns[target.column_index].generated.is_some()
+                    {
+                        Expr::Const(Value::Null)
+                    } else {
+                        bind_expr_with_outer_and_ctes(
+                            &assignment.expr,
+                            &raw_scope,
+                            catalog,
+                            &[],
+                            None,
+                            local_ctes,
+                        )?
+                    };
                     let expr = rewrite_local_vars_for_output_exprs(expr, 1, &outer_output_exprs);
                     let expr = rewrite_local_vars_for_output_exprs(expr, 2, &inner_output_exprs);
                     Ok(BoundAssignment {

@@ -543,6 +543,14 @@ fn lower_partition_spec(
         else {
             return Err(ParseError::UnknownColumn(name.clone()));
         };
+        if column.generated.is_some() {
+            return Err(ParseError::DetailedError {
+                message: "cannot use generated column in partition key".into(),
+                detail: Some(format!("Column \"{}\" is a generated column.", column.name)),
+                hint: None,
+                sqlstate: "42P17",
+            });
+        }
         let type_oid = sql_type_oid(column.sql_type);
         let opclass =
             default_opclass_for_partition_strategy(spec.strategy, type_oid, column.sql_type)
