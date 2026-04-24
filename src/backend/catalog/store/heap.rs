@@ -3997,11 +3997,12 @@ impl CatalogStore {
         indisvalid: bool,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
-        let (catcache, relcache) = visible_catalog_caches_for_ctx(self, ctx)?;
-        let relation = relcache
-            .get_by_oid(relation_oid)
+        let relation = self
+            .relation_id_get_relation(ctx, relation_oid)?
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        let old_entry = catalog_entry_from_visible_relation(&catcache, relation)?;
+        let class_row = class_row_by_oid_mvcc(self, ctx, relation_oid)?
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let old_entry = catalog_entry_from_relation_row(&class_row, &relation);
         if !matches!(old_entry.relkind, 'i' | 'I') {
             return Err(CatalogError::UnknownTable(relation_oid.to_string()));
         }
@@ -5528,22 +5529,26 @@ where
         &mut CatalogControl,
     ) -> Result<(T, Vec<BootstrapCatalogKind>), CatalogError>,
 {
-    let (catcache, relcache) = visible_catalog_caches_for_ctx(store, ctx)?;
-    let relation = relcache
-        .get_by_oid(relation_oid)
+    let relation = store
+        .relation_id_get_relation(ctx, relation_oid)?
         .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-    let relation_name = catcache
-        .class_by_oid(relation_oid)
-        .map(|row| row.relname.clone())
+    let class_row = class_row_by_oid_mvcc(store, ctx, relation_oid)?
         .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-    let old_entry = catalog_entry_from_visible_relation(&catcache, relation)?;
+    let relation_name = class_row.relname.clone();
+    let old_entry = catalog_entry_from_relation_row(&class_row, &relation);
     let mut new_entry = old_entry.clone();
     let mut control = store.control_state()?;
     let (extra, kinds) = mutator(&mut new_entry, &mut control)?;
     store.persist_control_values(control.next_oid, control.next_rel_number)?;
-    let old_rows = rows_for_existing_relation(&catcache, &old_entry)?;
-    let mut new_rows = rows_for_new_relation_entry(&catcache, &relation_name, &new_entry)?;
-    preserve_non_derived_relation_rows(&catcache, &old_entry, &kinds, &mut new_rows);
+    let old_rows = rows_for_existing_relation_mvcc(store, ctx, &old_entry)?;
+    let mut new_rows = {
+        let type_lookup = CatalogStoreTypeLookup {
+            store: &*store,
+            ctx,
+        };
+        rows_for_new_relation_entry(&type_lookup, &relation_name, &new_entry)?
+    };
+    preserve_non_derived_relation_rows_mvcc(store, ctx, &old_entry, &kinds, &mut new_rows)?;
     delete_catalog_rows_subset_mvcc(ctx, &old_rows, store.scope_db_oid(), &kinds)?;
     insert_catalog_rows_subset_mvcc(ctx, &new_rows, store.scope_db_oid(), &kinds)?;
     store.control = control;
@@ -5782,6 +5787,40 @@ fn preserve_non_derived_relation_rows(
         );
         sort_pg_depend_rows(&mut new_rows.depends);
     }
+}
+
+fn preserve_non_derived_relation_rows_mvcc(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    entry: &CatalogEntry,
+    kinds: &[BootstrapCatalogKind],
+    new_rows: &mut PhysicalCatalogRows,
+) -> Result<(), CatalogError> {
+    if !matches!(entry.relkind, 'r' | 'p') {
+        return Ok(());
+    }
+
+    let preserved_constraints = relation_constraints_mvcc(store, ctx, entry.relation_oid)?
+        .into_iter()
+        .filter(|row| row.contype != crate::include::catalog::CONSTRAINT_NOTNULL)
+        .collect::<Vec<_>>();
+
+    if kinds.contains(&BootstrapCatalogKind::PgConstraint) {
+        new_rows.constraints.extend(preserved_constraints.clone());
+    }
+    if kinds.contains(&BootstrapCatalogKind::PgDepend) {
+        for row in &preserved_constraints {
+            new_rows.depends.extend(depend_rows_for_object_mvcc(
+                store,
+                ctx,
+                PG_CONSTRAINT_RELATION_OID,
+                row.oid,
+            )?);
+        }
+        sort_pg_depend_rows(&mut new_rows.depends);
+    }
+
+    Ok(())
 }
 
 fn dropped_column_name_visible(attnum: usize) -> String {
