@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run PostgreSQL regression tests against pgrust and report pass/fail statistics.
 #
-# Usage: scripts/run_regression.sh [--port PORT] [--skip-build] [--skip-server] [--timeout SECS] [--test TESTNAME] [--upstream-setup]
+# Usage: scripts/run_regression.sh [--port PORT] [--skip-build] [--skip-server] [--timeout SECS] [--jobs N] [--schedule FILE] [--test TESTNAME] [--upstream-setup]
 #
 # By default, this script:
 #   1. Builds pgrust_server in release mode, or dev mode for --test
@@ -15,6 +15,8 @@
 #   --skip-build      Don't rebuild pgrust_server
 #   --skip-server     Assume server is already running (don't start/stop it)
 #   --timeout SECS    Per-test timeout in seconds (default: 60)
+#   --jobs N          Run tests from the same schedule line in parallel, up to N jobs (default: 4)
+#   --schedule FILE   Use an alternate PostgreSQL-style schedule file
 #   --test TESTNAME   Run only this test (without .sql extension)
 #   --results-dir DIR Directory for results (default: unique temp dir)
 #   --data-dir DIR    Directory for the pgrust cluster (default: unique temp dir)
@@ -48,6 +50,7 @@ SQL_DIR="$PG_REGRESS/sql"
 EXPECTED_DIR="$PG_REGRESS/expected"
 PG_REGRESS_ABS="$(cd "$PG_REGRESS" && pwd)"
 SCHEDULE_FILE="$PG_REGRESS/parallel_schedule"
+SCHEDULE_OVERRIDE=false
 WORKTREE_NAME="$(basename "$PGRUST_DIR")"
 TABLESPACE_VERSION_DIRECTORY="PG_18_202406281"
 REGRESS_TABLESPACE_DIR=""
@@ -223,6 +226,68 @@ build_ordered_test_files() {
     printf '%s\n' "${ordered_files[@]}"
 }
 
+build_scheduled_test_groups() {
+    local sql_dir="$1"
+    local schedule_file="$2"
+    local include_setup="$3"
+    local include_unscheduled="$4"
+    local -a seen_files=()
+
+    already_seen_group_file() {
+        local needle="$1"
+        local existing
+        for existing in "${seen_files[@]}"; do
+            [[ "$existing" == "$needle" ]] && return 0
+        done
+        return 1
+    }
+
+    if [[ -f "$schedule_file" ]]; then
+        while IFS= read -r schedule_line; do
+            local -a group_files=()
+            local test_name=""
+            local sql_file=""
+
+            [[ -n "$schedule_line" ]] || continue
+            for test_name in $schedule_line; do
+                if [[ "$include_setup" != true && "$test_name" == "test_setup" ]]; then
+                    continue
+                fi
+
+                sql_file="$sql_dir/${test_name}.sql"
+                if [[ -f "$sql_file" ]] && ! already_seen_group_file "$sql_file"; then
+                    group_files+=("$sql_file")
+                    seen_files+=("$sql_file")
+                fi
+            done
+
+            if [[ ${#group_files[@]} -gt 0 ]]; then
+                printf '%s\n' "${group_files[*]}"
+            fi
+        done < <(
+            awk '
+                /^test:[[:space:]]*/ {
+                    sub(/^test:[[:space:]]*/, "");
+                    print;
+                }
+            ' "$schedule_file"
+        )
+    fi
+
+    if [[ "$include_unscheduled" == true ]]; then
+        while IFS= read -r sql_file; do
+            [[ -n "$sql_file" ]] || continue
+            if [[ "$include_setup" != true && "$(basename "$sql_file")" == "test_setup.sql" ]]; then
+                continue
+            fi
+            if ! already_seen_group_file "$sql_file"; then
+                seen_files+=("$sql_file")
+                printf '%s\n' "$sql_file"
+            fi
+        done < <(find "$sql_dir" -maxdepth 1 -type f -name '*.sql' | sort)
+    fi
+}
+
 add_aggregate_dependencies() {
     local -a expanded_files=()
     local saw_create_aggregate=false
@@ -253,6 +318,7 @@ PORT=5433
 SKIP_BUILD=false
 SKIP_SERVER=false
 TIMEOUT=60
+JOBS=4
 SINGLE_TEST=""
 RESULTS_DIR=""
 DATA_DIR=""
@@ -270,6 +336,8 @@ while [[ $# -gt 0 ]]; do
         --skip-build) SKIP_BUILD=true; shift ;;
         --skip-server) SKIP_SERVER=true; shift ;;
         --timeout) TIMEOUT="$2"; shift 2 ;;
+        --jobs|--max-connections) JOBS="$2"; shift 2 ;;
+        --schedule) SCHEDULE_FILE="$2"; SCHEDULE_OVERRIDE=true; shift 2 ;;
         --test) SINGLE_TEST="$2"; shift 2 ;;
         --results-dir) RESULTS_DIR="$2"; shift 2 ;;
         --data-dir) DATA_DIR="$2"; shift 2 ;;
@@ -278,6 +346,11 @@ while [[ $# -gt 0 ]]; do
         *) echo "Unknown flag: $1"; exit 1 ;;
     esac
 done
+
+if ! [[ "$JOBS" =~ ^[0-9]+$ ]] || [[ "$JOBS" -lt 1 ]]; then
+    echo "ERROR: --jobs must be a positive integer"
+    exit 1
+fi
 
 SERVER_PROFILE=release
 SERVER_PROFILE_DIR=release
@@ -468,6 +541,7 @@ fi
 
 # Set up results directory
 mkdir -p "$RESULTS_DIR/output" "$RESULTS_DIR/diff"
+mkdir -p "$RESULTS_DIR/status"
 echo "Regression results dir: $RESULTS_DIR"
 echo "Regression data dir: $DATA_DIR"
 echo "Regression user: $REGRESS_USER"
@@ -537,6 +611,7 @@ if ! run_bootstrap_setup; then
 fi
 
 # Collect test files
+TEST_GROUPS=()
 if [[ -n "$SINGLE_TEST" ]]; then
     TEST_FILES=("$SQL_DIR/${SINGLE_TEST}.sql")
     if [[ ! -f "${TEST_FILES[0]}" ]]; then
@@ -546,39 +621,30 @@ if [[ -n "$SINGLE_TEST" ]]; then
 else
     TEST_FILES=()
     while IFS= read -r sql_file; do
-        [[ -n "$sql_file" ]] && TEST_FILES+=("$sql_file")
+        [[ -n "$sql_file" ]] && TEST_GROUPS+=("$sql_file")
     done < <(
-        build_ordered_test_files \
+        build_scheduled_test_groups \
             "$SQL_DIR" \
             "$SCHEDULE_FILE" \
-            "$([[ "$USE_PGRUST_SETUP" == false ]] && echo true || echo false)"
+            "$([[ "$USE_PGRUST_SETUP" == false ]] && echo true || echo false)" \
+            "$([[ "$SCHEDULE_OVERRIDE" == true ]] && echo false || echo true)"
     )
-fi
 
-if [[ "$USE_PGRUST_SETUP" == true ]]; then
-    filtered_test_files=()
-    for sql_file in "${TEST_FILES[@]}"; do
-        if [[ "$(basename "$sql_file")" == "test_setup.sql" ]]; then
-            continue
-        fi
-        filtered_test_files+=("$sql_file")
-    done
-    TEST_FILES=("${filtered_test_files[@]}")
-else
-    TEST_SETUP_FILE="$SQL_DIR/test_setup.sql"
-    if [[ -f "$TEST_SETUP_FILE" ]]; then
-        ordered_test_files=("$TEST_SETUP_FILE")
-        for sql_file in "${TEST_FILES[@]}"; do
-            if [[ "$sql_file" == "$TEST_SETUP_FILE" ]]; then
-                continue
-            fi
-            ordered_test_files+=("$sql_file")
+    for group in "${TEST_GROUPS[@]}"; do
+        for sql_file in $group; do
+            TEST_FILES+=("$sql_file")
         done
-        TEST_FILES=("${ordered_test_files[@]}")
-    fi
+    done
 fi
 
 add_aggregate_dependencies
+
+if [[ -n "$SINGLE_TEST" ]]; then
+    TEST_GROUPS=()
+    for sql_file in "${TEST_FILES[@]}"; do
+        TEST_GROUPS+=("$sql_file")
+    done
+fi
 
 TOTAL=0
 PASSED=0
@@ -711,6 +777,9 @@ print_summary() {
 
 echo ""
 echo "Running ${#TEST_FILES[@]} regression tests..."
+if [[ "$JOBS" -gt 1 ]]; then
+    echo "Parallel jobs: $JOBS"
+fi
 echo "=============================================="
 echo ""
 
@@ -852,19 +921,44 @@ count_matching_queries() {
     ' "$expected_path" "$actual_path" "$sql_path"
 }
 
-for sql_file in "${TEST_FILES[@]}"; do
-    test_name="$(basename "$sql_file" .sql)"
-    expected_file="$EXPECTED_DIR/${test_name}.out"
-    output_file="$RESULTS_DIR/output/${test_name}.out"
-    diff_file="$RESULTS_DIR/diff/${test_name}.diff"
+write_test_status() {
+    local status_file="$1"
+    local status="$2"
+    local test_name="$3"
+    local q_matched="$4"
+    local q_mismatched="$5"
+    local q_total="$6"
+    local diff_lines="$7"
 
-    TOTAL=$((TOTAL + 1))
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$status" "$test_name" "$q_matched" "$q_mismatched" "$q_total" "$diff_lines" \
+        > "$status_file"
+}
+
+run_one_regression_test() {
+    local sql_file="$1"
+    local test_name="$(basename "$sql_file" .sql)"
+    local expected_file="$EXPECTED_DIR/${test_name}.out"
+    local output_file="$RESULTS_DIR/output/${test_name}.out"
+    local diff_file="$RESULTS_DIR/diff/${test_name}.diff"
+    local status_file="$RESULTS_DIR/status/${test_name}.status"
+    local exit_code=0
+    local matched=false
+    local best_diff_lines=999999
+    local query_expected_file="$expected_file"
+    local q_matched=0
+    local q_mismatched=0
+    local q_total=0
+    local candidate=""
+    local diff_lines=0
+    local -a candidates=()
+
+    rm -f "$status_file"
 
     # Check if expected output exists
     if [[ ! -f "$expected_file" ]]; then
-        printf "%-40s SKIP (no expected output)\n" "$test_name"
-        TOTAL=$((TOTAL - 1))
-        continue
+        write_test_status "$status_file" "skip" "$test_name" 0 0 0 0
+        return 0
     fi
 
     prepare_test_fixture "$sql_file" "$expected_file" "$test_name"
@@ -879,10 +973,6 @@ for sql_file in "${TEST_FILES[@]}"; do
         exit_code=$?
         if [[ $exit_code -eq 124 ]]; then
             echo "TIMEOUT" >> "$output_file"
-            if [[ "$SKIP_SERVER" == false ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
-                kill "$SERVER_PID" 2>/dev/null || true
-                wait "$SERVER_PID" 2>/dev/null || true
-            fi
         fi
     fi
 
@@ -890,8 +980,6 @@ for sql_file in "${TEST_FILES[@]}"; do
     # Some tests have multiple expected outputs (e.g., boolean.out, boolean_1.out).
     # Restrict alternates to numbered variants for the same test so we do not
     # accidentally match unrelated siblings like psql_crosstab.out for psql.out.
-    matched=false
-    best_diff_lines=999999
     query_expected_file="$expected_file"
 
     candidates=("$expected_file")
@@ -930,47 +1018,163 @@ for sql_file in "${TEST_FILES[@]}"; do
         q_matched="$q_total"
         q_mismatched=0
     fi
+
+    if [[ "$matched" == true ]]; then
+        rm -f "$diff_file"
+        write_test_status "$status_file" "pass" "$test_name" "$q_matched" "$q_mismatched" "$q_total" "$best_diff_lines"
+    else
+        # Check if it timed out, crashed/disconnected, or just produced wrong output.
+        if grep -q "TIMEOUT" "$output_file" 2>/dev/null; then
+            write_test_status "$status_file" "timeout" "$test_name" "$q_matched" "$q_mismatched" "$q_total" "$best_diff_lines"
+        elif grep -q "connection refused\|could not connect\|server closed the connection unexpectedly" "$output_file" 2>/dev/null; then
+            write_test_status "$status_file" "error" "$test_name" "$q_matched" "$q_mismatched" "$q_total" "$best_diff_lines"
+        else
+            write_test_status "$status_file" "fail" "$test_name" "$q_matched" "$q_mismatched" "$q_total" "$best_diff_lines"
+        fi
+    fi
+}
+
+collect_test_status() {
+    local sql_file="$1"
+    local test_name="$(basename "$sql_file" .sql)"
+    local status_file="$RESULTS_DIR/status/${test_name}.status"
+    local status=""
+    local q_matched=0
+    local q_mismatched=0
+    local q_total=0
+    local diff_lines=0
+
+    if [[ ! -f "$status_file" ]]; then
+        printf "%-40s ERROR (no status file)\n" "$test_name"
+        TOTAL=$((TOTAL + 1))
+        ERRORED=$((ERRORED + 1))
+        error_list+=("$test_name")
+        return 1
+    fi
+
+    IFS=$'\t' read -r status test_name q_matched q_mismatched q_total diff_lines < "$status_file"
+
+    if [[ "$status" == "skip" ]]; then
+        printf "%-40s SKIP (no expected output)\n" "$test_name"
+        return 0
+    fi
+
+    TOTAL=$((TOTAL + 1))
     TOTAL_QUERIES=$((TOTAL_QUERIES + q_total))
     QUERIES_MATCHED=$((QUERIES_MATCHED + q_matched))
     QUERIES_MISMATCHED=$((QUERIES_MISMATCHED + q_mismatched))
 
-    if [[ "$matched" == true ]]; then
-        printf "%-40s PASS  (%d queries)\n" "$test_name" "$q_total"
-        PASSED=$((PASSED + 1))
-        pass_list+=("$test_name")
-        rm -f "$diff_file"
-    else
-        # Check if it timed out, crashed/disconnected, or just produced wrong output.
-        if grep -q "TIMEOUT" "$output_file" 2>/dev/null; then
+    case "$status" in
+        pass)
+            printf "%-40s PASS  (%d queries)\n" "$test_name" "$q_total"
+            PASSED=$((PASSED + 1))
+            pass_list+=("$test_name")
+            ;;
+        timeout)
             printf "%-40s TIMEOUT (%d/%d queries matched)\n" "$test_name" "$q_matched" "$q_total"
             TIMED_OUT=$((TIMED_OUT + 1))
             timeout_list+=("$test_name")
-
-            # A hard psql timeout may leave the server busy with the timed-out
-            # query. Restart it without reporting that as a crash.
-            if [[ "$SKIP_SERVER" == false ]] && ! kill -0 "$SERVER_PID" 2>/dev/null; then
-                if ! restart_server "Timed out; restarting server to clear active query..."; then
-                    RUN_STATUS="aborted"
-                    break
-                fi
-            fi
-        elif grep -q "connection refused\|could not connect\|server closed the connection unexpectedly" "$output_file" 2>/dev/null; then
+            return 2
+            ;;
+        error)
             printf "%-40s ERROR (%d/%d queries matched)\n" "$test_name" "$q_matched" "$q_total"
             ERRORED=$((ERRORED + 1))
             error_list+=("$test_name")
-
-            # If server crashed, try to restart it
-            if [[ "$SKIP_SERVER" == false ]] && ! kill -0 "$SERVER_PID" 2>/dev/null; then
-                if ! restart_server "Server crashed, restarting..."; then
-                    RUN_STATUS="aborted"
-                    break
-                fi
-            fi
-        else
-            printf "%-40s FAIL  (%d/%d queries matched, %d diff lines)\n" "$test_name" "$q_matched" "$q_total" "$best_diff_lines"
+            return 1
+            ;;
+        fail)
+            printf "%-40s FAIL  (%d/%d queries matched, %d diff lines)\n" "$test_name" "$q_matched" "$q_total" "$diff_lines"
             FAILED=$((FAILED + 1))
             fail_list+=("$test_name")
+            ;;
+        *)
+            printf "%-40s ERROR (bad status: %s)\n" "$test_name" "$status"
+            ERRORED=$((ERRORED + 1))
+            error_list+=("$test_name")
+            return 1
+            ;;
+    esac
+
+    return 0
+}
+
+run_test_batch() {
+    local -a batch=("$@")
+    local -a pids=()
+    local sql_file=""
+    local pid=""
+    local collect_rc=0
+    local batch_needs_restart=false
+
+    for sql_file in "${batch[@]}"; do
+        run_one_regression_test "$sql_file" &
+        pids+=("$!")
+    done
+
+    for pid in "${pids[@]}"; do
+        wait "$pid" || true
+    done
+
+    for sql_file in "${batch[@]}"; do
+        collect_rc=0
+        collect_test_status "$sql_file" || collect_rc=$?
+        if [[ "$collect_rc" -eq 1 ]]; then
+            if [[ "$SKIP_SERVER" == false ]] && ! kill -0 "$SERVER_PID" 2>/dev/null; then
+                batch_needs_restart=true
+            fi
+        elif [[ "$collect_rc" -eq 2 ]]; then
+            if [[ "$SKIP_SERVER" == false ]]; then
+                batch_needs_restart=true
+            fi
         fi
+    done
+
+    if [[ "$batch_needs_restart" == true ]]; then
+        if ! restart_server "Restarting after failed parallel batch..."; then
+            RUN_STATUS="aborted"
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+run_schedule_group() {
+    local group="$1"
+    local -a group_files=()
+    local -a batch=()
+    local sql_file=""
+
+    for sql_file in $group; do
+        group_files+=("$sql_file")
+    done
+
+    if [[ ${#group_files[@]} -gt 1 && "$JOBS" -gt 1 ]]; then
+        echo "parallel group (${#group_files[@]} tests):"
+    fi
+
+    for sql_file in "${group_files[@]}"; do
+        batch+=("$sql_file")
+        if [[ ${#batch[@]} -ge "$JOBS" ]]; then
+            if ! run_test_batch "${batch[@]}"; then
+                return 1
+            fi
+            batch=()
+        fi
+    done
+
+    if [[ ${#batch[@]} -gt 0 ]]; then
+        if ! run_test_batch "${batch[@]}"; then
+            return 1
+        fi
+    fi
+
+    return 0
+}
+
+for group in "${TEST_GROUPS[@]}"; do
+    if ! run_schedule_group "$group"; then
+        break
     fi
 done
 
