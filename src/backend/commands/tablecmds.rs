@@ -3231,6 +3231,7 @@ fn sql_type_display_name(ty: SqlType) -> String {
         SqlTypeKind::RegClass => "regclass",
         SqlTypeKind::RegType => "regtype",
         SqlTypeKind::RegRole => "regrole",
+        SqlTypeKind::RegNamespace => "regnamespace",
         SqlTypeKind::RegOperator => "regoperator",
         SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::Tid => "tid",

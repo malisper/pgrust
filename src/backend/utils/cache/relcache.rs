@@ -1076,6 +1076,8 @@ mod tests {
             rows.publications,
             rows.publication_rels,
             rows.publication_namespaces,
+            rows.statistics_ext,
+            rows.statistics_ext_data,
             rows.ams,
             rows.amops,
             rows.amprocs,

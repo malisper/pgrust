@@ -25,17 +25,22 @@ use crate::include::catalog::{
     OID_TYPE_OID, OIDVECTOR_TYPE_OID, PATH_TYPE_OID, PG_ATTRIBUTE_RELATION_OID,
     PG_ATTRIBUTE_ROWTYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID,
     PG_CLASS_ROWTYPE_OID, PG_DATABASE_RELATION_OID, PG_DATABASE_ROWTYPE_OID,
-    PG_NAMESPACE_RELATION_OID, PG_NAMESPACE_ROWTYPE_OID, PG_NODE_TREE_TYPE_OID,
-    PG_PROC_RELATION_OID, PG_PROC_ROWTYPE_OID, PG_TYPE_RELATION_OID, PG_TYPE_ROWTYPE_OID,
+    PG_DEPENDENCIES_TYPE_OID, PG_MCV_LIST_TYPE_OID, PG_NAMESPACE_RELATION_OID,
+    PG_NAMESPACE_ROWTYPE_OID, PG_NDISTINCT_TYPE_OID, PG_NODE_TREE_TYPE_OID, PG_PROC_RELATION_OID,
+    PG_PROC_ROWTYPE_OID, PG_STATISTIC_ARRAY_TYPE_OID, PG_STATISTIC_EXT_ARRAY_TYPE_OID,
+    PG_STATISTIC_EXT_DATA_ARRAY_TYPE_OID, PG_STATISTIC_EXT_DATA_RELATION_OID,
+    PG_STATISTIC_EXT_DATA_ROWTYPE_OID, PG_STATISTIC_EXT_RELATION_OID, PG_STATISTIC_EXT_ROWTYPE_OID,
+    PG_STATISTIC_RELATION_OID, PG_STATISTIC_ROWTYPE_OID, PG_TYPE_RELATION_OID, PG_TYPE_ROWTYPE_OID,
     POINT_TYPE_OID, POLYGON_TYPE_OID, RECORD_ARRAY_TYPE_OID, RECORD_TYPE_OID,
     REGCLASS_ARRAY_TYPE_OID, REGCLASS_TYPE_OID, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID,
-    REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, REGOPERATOR_ARRAY_TYPE_OID,
-    REGOPERATOR_TYPE_OID, REGPROCEDURE_ARRAY_TYPE_OID, REGPROCEDURE_TYPE_OID, REGROLE_TYPE_OID,
-    REGTYPE_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TID_ARRAY_TYPE_OID, TID_TYPE_OID,
-    TIME_ARRAY_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
-    TIMESTAMPTZ_ARRAY_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TIMETZ_ARRAY_TYPE_OID, TIMETZ_TYPE_OID,
-    TRIGGER_TYPE_OID, TSMULTIRANGE_ARRAY_TYPE_OID, TSMULTIRANGE_TYPE_OID, TSQUERY_ARRAY_TYPE_OID,
-    TSQUERY_TYPE_OID, TSRANGE_ARRAY_TYPE_OID, TSRANGE_TYPE_OID, TSTZMULTIRANGE_ARRAY_TYPE_OID,
+    REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, REGNAMESPACE_ARRAY_TYPE_OID,
+    REGNAMESPACE_TYPE_OID, REGOPERATOR_ARRAY_TYPE_OID, REGOPERATOR_TYPE_OID,
+    REGPROCEDURE_ARRAY_TYPE_OID, REGPROCEDURE_TYPE_OID, REGROLE_TYPE_OID, REGTYPE_TYPE_OID,
+    TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIME_ARRAY_TYPE_OID,
+    TIME_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_ARRAY_TYPE_OID,
+    TIMESTAMPTZ_TYPE_OID, TIMETZ_ARRAY_TYPE_OID, TIMETZ_TYPE_OID, TRIGGER_TYPE_OID,
+    TSMULTIRANGE_ARRAY_TYPE_OID, TSMULTIRANGE_TYPE_OID, TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID,
+    TSRANGE_ARRAY_TYPE_OID, TSRANGE_TYPE_OID, TSTZMULTIRANGE_ARRAY_TYPE_OID,
     TSTZMULTIRANGE_TYPE_OID, TSTZRANGE_ARRAY_TYPE_OID, TSTZRANGE_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID,
     TSVECTOR_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID,
     VARCHAR_TYPE_OID, VOID_TYPE_OID, XID_ARRAY_TYPE_OID, XID_TYPE_OID, XML_ARRAY_TYPE_OID,
@@ -218,6 +223,11 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             SqlType::new(SqlTypeKind::RegRole),
         ),
         builtin_type_row(
+            "regnamespace",
+            REGNAMESPACE_TYPE_OID,
+            SqlType::new(SqlTypeKind::RegNamespace),
+        ),
+        builtin_type_row(
             "regprocedure",
             REGPROCEDURE_TYPE_OID,
             SqlType::new(SqlTypeKind::RegProcedure),
@@ -253,6 +263,11 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             "_regclass",
             REGCLASS_ARRAY_TYPE_OID,
             SqlType::array_of(SqlType::new(SqlTypeKind::RegClass)),
+        ),
+        builtin_type_row(
+            "_regnamespace",
+            REGNAMESPACE_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::RegNamespace)),
         ),
         builtin_type_row(
             "_regprocedure",
@@ -532,6 +547,21 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             SqlType::new(SqlTypeKind::PgNodeTree),
         ),
         builtin_type_row(
+            "pg_ndistinct",
+            PG_NDISTINCT_TYPE_OID,
+            SqlType::new(SqlTypeKind::Bytea).with_identity(PG_NDISTINCT_TYPE_OID, 0),
+        ),
+        builtin_type_row(
+            "pg_dependencies",
+            PG_DEPENDENCIES_TYPE_OID,
+            SqlType::new(SqlTypeKind::Bytea).with_identity(PG_DEPENDENCIES_TYPE_OID, 0),
+        ),
+        builtin_type_row(
+            "pg_mcv_list",
+            PG_MCV_LIST_TYPE_OID,
+            SqlType::new(SqlTypeKind::Bytea).with_identity(PG_MCV_LIST_TYPE_OID, 0),
+        ),
+        builtin_type_row(
             "_jsonpath",
             JSONPATH_ARRAY_TYPE_OID,
             SqlType::array_of(SqlType::new(SqlTypeKind::JsonPath)),
@@ -663,8 +693,15 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
     rows
 }
 
+pub fn builtin_type_name_for_oid(oid: u32) -> Option<String> {
+    builtin_type_rows()
+        .into_iter()
+        .find(|row| row.oid == oid)
+        .map(|row| row.typname)
+}
+
 pub fn bootstrap_composite_type_rows() -> Vec<PgTypeRow> {
-    vec![
+    let mut rows = vec![
         composite_type_row(
             "pg_namespace",
             PG_NAMESPACE_ROWTYPE_OID,
@@ -707,7 +744,51 @@ pub fn bootstrap_composite_type_rows() -> Vec<PgTypeRow> {
             PG_DATABASE_RELATION_OID,
             0,
         ),
-    ]
+        composite_type_row(
+            "pg_statistic",
+            PG_STATISTIC_ROWTYPE_OID,
+            PG_CATALOG_NAMESPACE_OID,
+            PG_STATISTIC_RELATION_OID,
+            PG_STATISTIC_ARRAY_TYPE_OID,
+        ),
+        composite_type_row(
+            "pg_statistic_ext",
+            PG_STATISTIC_EXT_ROWTYPE_OID,
+            PG_CATALOG_NAMESPACE_OID,
+            PG_STATISTIC_EXT_RELATION_OID,
+            PG_STATISTIC_EXT_ARRAY_TYPE_OID,
+        ),
+        composite_type_row(
+            "pg_statistic_ext_data",
+            PG_STATISTIC_EXT_DATA_ROWTYPE_OID,
+            PG_CATALOG_NAMESPACE_OID,
+            PG_STATISTIC_EXT_DATA_RELATION_OID,
+            PG_STATISTIC_EXT_DATA_ARRAY_TYPE_OID,
+        ),
+        composite_array_type_row(
+            "pg_statistic",
+            PG_STATISTIC_ARRAY_TYPE_OID,
+            PG_CATALOG_NAMESPACE_OID,
+            PG_STATISTIC_ROWTYPE_OID,
+            PG_STATISTIC_RELATION_OID,
+        ),
+        composite_array_type_row(
+            "pg_statistic_ext",
+            PG_STATISTIC_EXT_ARRAY_TYPE_OID,
+            PG_CATALOG_NAMESPACE_OID,
+            PG_STATISTIC_EXT_ROWTYPE_OID,
+            PG_STATISTIC_EXT_RELATION_OID,
+        ),
+        composite_array_type_row(
+            "pg_statistic_ext_data",
+            PG_STATISTIC_EXT_DATA_ARRAY_TYPE_OID,
+            PG_CATALOG_NAMESPACE_OID,
+            PG_STATISTIC_EXT_DATA_ROWTYPE_OID,
+            PG_STATISTIC_EXT_DATA_RELATION_OID,
+        ),
+    ];
+    annotate_array_type_links(&mut rows);
+    rows
 }
 
 fn builtin_type_row(name: &str, oid: u32, sql_type: SqlType) -> PgTypeRow {
@@ -856,12 +937,21 @@ mod tests {
                 "pg_attribute",
                 "pg_class",
                 "pg_database",
+                "pg_statistic",
+                "pg_statistic_ext",
+                "pg_statistic_ext_data",
+                "_pg_statistic",
+                "_pg_statistic_ext",
+                "_pg_statistic_ext_data",
             ]
         );
         assert_eq!(rows[0].oid, PG_NAMESPACE_ROWTYPE_OID);
         assert_eq!(rows[2].oid, PG_PROC_ROWTYPE_OID);
         assert_eq!(rows[4].oid, PG_CLASS_ROWTYPE_OID);
         assert_eq!(rows[5].oid, PG_DATABASE_ROWTYPE_OID);
+        assert_eq!(rows[6].oid, PG_STATISTIC_ROWTYPE_OID);
+        assert_eq!(rows[7].oid, PG_STATISTIC_EXT_ROWTYPE_OID);
+        assert_eq!(rows[8].oid, PG_STATISTIC_EXT_DATA_ROWTYPE_OID);
     }
 
     #[test]
@@ -871,6 +961,21 @@ mod tests {
                 && row.typname == "pg_node_tree"
                 && row.sql_type == SqlType::new(SqlTypeKind::PgNodeTree)
         }));
+    }
+
+    #[test]
+    fn builtin_types_include_statistics_payload_types() {
+        for (oid, name) in [
+            (PG_NDISTINCT_TYPE_OID, "pg_ndistinct"),
+            (PG_DEPENDENCIES_TYPE_OID, "pg_dependencies"),
+            (PG_MCV_LIST_TYPE_OID, "pg_mcv_list"),
+        ] {
+            assert!(builtin_type_rows().iter().any(|row| {
+                row.oid == oid
+                    && row.typname == name
+                    && row.sql_type == SqlType::new(SqlTypeKind::Bytea).with_identity(oid, 0)
+            }));
+        }
     }
 
     #[test]
