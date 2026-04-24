@@ -495,6 +495,7 @@ impl CatalogStore {
             indcollation: Vec::new(),
             indoption: Vec::new(),
             indnullsnotdistinct: false,
+            indisexclusion: false,
             brin_options: None,
         };
         self.create_index_for_relation_with_options(
@@ -2909,6 +2910,7 @@ impl CatalogStore {
             indcollation: Vec::new(),
             indoption: Vec::new(),
             indnullsnotdistinct: false,
+            indisexclusion: false,
             brin_options: None,
         };
         self.create_index_for_relation_mvcc_with_options(
@@ -3031,7 +3033,31 @@ impl CatalogStore {
         primary_key_owned_not_null_oids: &[u32],
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
-        self.create_index_backed_constraint_mvcc_with_inheritance(
+        self.create_index_backed_constraint_mvcc_with_period(
+            relation_oid,
+            index_oid,
+            conname,
+            contype,
+            primary_key_owned_not_null_oids,
+            false,
+            None,
+            ctx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_index_backed_constraint_mvcc_with_period(
+        &mut self,
+        relation_oid: u32,
+        index_oid: u32,
+        conname: impl Into<String>,
+        contype: char,
+        primary_key_owned_not_null_oids: &[u32],
+        conperiod: bool,
+        conexclop: Option<Vec<u32>>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        self.create_index_backed_constraint_mvcc_with_inheritance_and_period(
             relation_oid,
             index_oid,
             conname,
@@ -3041,6 +3067,8 @@ impl CatalogStore {
             true,
             0,
             false,
+            conperiod,
+            conexclop,
             ctx,
         )
         .map(|(_, effect)| effect)
@@ -3058,6 +3086,38 @@ impl CatalogStore {
         conislocal: bool,
         coninhcount: i16,
         connoinherit: bool,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(PgConstraintRow, CatalogMutationEffect), CatalogError> {
+        self.create_index_backed_constraint_mvcc_with_inheritance_and_period(
+            relation_oid,
+            index_oid,
+            conname,
+            contype,
+            primary_key_owned_not_null_oids,
+            conparentid,
+            conislocal,
+            coninhcount,
+            connoinherit,
+            false,
+            None,
+            ctx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_index_backed_constraint_mvcc_with_inheritance_and_period(
+        &mut self,
+        relation_oid: u32,
+        index_oid: u32,
+        conname: impl Into<String>,
+        contype: char,
+        primary_key_owned_not_null_oids: &[u32],
+        conparentid: u32,
+        conislocal: bool,
+        coninhcount: i16,
+        connoinherit: bool,
+        conperiod: bool,
+        conexclop: Option<Vec<u32>>,
         ctx: &CatalogWriteContext,
     ) -> Result<(PgConstraintRow, CatalogMutationEffect), CatalogError> {
         let conname = conname.into();
@@ -3106,12 +3166,12 @@ impl CatalogStore {
             conppeqop: None,
             conffeqop: None,
             confdelsetcols: None,
-            conexclop: None,
+            conexclop,
             conbin: None,
             conislocal,
             coninhcount,
             connoinherit,
-            conperiod: false,
+            conperiod,
         };
         control.next_oid = control.next_oid.saturating_add(1);
 
@@ -5262,6 +5322,7 @@ fn build_index_entry_with_relkind(
             indisunique: unique,
             indnullsnotdistinct: resolved_options.indnullsnotdistinct,
             indisprimary: primary,
+            indisexclusion: resolved_options.indisexclusion,
             indisvalid,
             indisready,
             indislive: true,
@@ -5343,6 +5404,7 @@ fn build_toast_catalog_changes(
             indcollation: vec![0, 0],
             indoption: vec![0, 0],
             indnullsnotdistinct: false,
+            indisexclusion: false,
             brin_options: None,
         },
         None,
@@ -5399,6 +5461,7 @@ fn default_index_build_options_for_relation(
         indcollation,
         indoption,
         indnullsnotdistinct: false,
+        indisexclusion: false,
         brin_options: None,
     })
 }
@@ -5935,7 +5998,7 @@ fn index_row_for_entry(entry: &CatalogEntry) -> Option<crate::include::catalog::
         indisunique: index_meta.indisunique,
         indnullsnotdistinct: index_meta.indnullsnotdistinct,
         indisprimary: index_meta.indisprimary,
-        indisexclusion: false,
+        indisexclusion: index_meta.indisexclusion,
         indimmediate: true,
         indisclustered: false,
         indisvalid: index_meta.indisvalid,
@@ -6080,6 +6143,7 @@ fn catalog_entry_from_visible_relation(
             indisunique: index.indisunique,
             indnullsnotdistinct: index.indnullsnotdistinct,
             indisprimary: index.indisprimary,
+            indisexclusion: index.indisexclusion,
             indisvalid: index.indisvalid,
             indisready: index.indisready,
             indislive: index.indislive,

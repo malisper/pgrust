@@ -1290,8 +1290,8 @@ pub(super) fn validate_alter_table_alter_column_type(
                 "record".into(),
             )));
         }
-        RawTypeName::Named { name, .. } => {
-            return Err(ExecError::Parse(ParseError::UnsupportedType(name.clone())));
+        RawTypeName::Named { .. } => {
+            resolve_raw_type_name(ty, catalog).map_err(ExecError::Parse)?
         }
     };
 

@@ -21,12 +21,12 @@ use crate::backend::parser::{
     BoundDeleteStatement, BoundDeleteTarget, BoundForeignKeyConstraint, BoundIndexRelation,
     BoundInsertSource, BoundInsertStatement, BoundMergeAction, BoundMergeStatement,
     BoundMergeWhenClause, BoundModifyRowSource, BoundOnConflictAction, BoundReferencedByForeignKey,
-    BoundRelationConstraints, BoundUpdateStatement, BoundUpdateTarget, Catalog, CatalogLookup,
-    DropTableStatement, ExplainStatement, ForeignKeyAction, MaintenanceTarget, MergeStatement,
-    ParseError, SelectStatement, SqlType, SqlTypeKind, Statement, TruncateTableStatement,
-    UpdateStatement, VacuumStatement, bind_create_table, bind_generated_expr,
-    bind_referenced_by_foreign_keys, bind_relation_constraints, bind_scalar_expr_in_scope,
-    bind_update,
+    BoundRelationConstraints, BoundTemporalConstraint, BoundUpdateStatement, BoundUpdateTarget,
+    Catalog, CatalogLookup, DropTableStatement, ExplainStatement, ForeignKeyAction,
+    MaintenanceTarget, MergeStatement, ParseError, SelectStatement, SqlType, SqlTypeKind,
+    Statement, TruncateTableStatement, UpdateStatement, VacuumStatement, bind_create_table,
+    bind_generated_expr, bind_referenced_by_foreign_keys, bind_relation_constraints,
+    bind_scalar_expr_in_scope, bind_update,
 };
 use crate::backend::rewrite::RlsWriteCheck;
 use crate::backend::rewrite::pg_rewrite_query;
@@ -93,6 +93,7 @@ fn finalize_bound_insert(
         stmt.on_conflict
             .map(|clause| crate::backend::parser::BoundOnConflictClause {
                 arbiter_indexes: clause.arbiter_indexes,
+                arbiter_temporal_constraints: clause.arbiter_temporal_constraints,
                 action: match clause.action {
                     BoundOnConflictAction::Nothing => BoundOnConflictAction::Nothing,
                     BoundOnConflictAction::Update {
@@ -866,10 +867,11 @@ pub(crate) fn maintain_indexes_for_row(
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || {
-        for index in indexes
-            .iter()
-            .filter(|index| index.index_meta.indisvalid && index.index_meta.indisready)
-        {
+        for index in indexes.iter().filter(|index| {
+            index.index_meta.indisvalid
+                && index.index_meta.indisready
+                && !index.index_meta.indisexclusion
+        }) {
             insert_index_entry_for_row(heap_rel, heap_desc, index, values, heap_tid, ctx)?;
         }
         Ok(())
@@ -1004,6 +1006,16 @@ pub(crate) fn write_insert_heap_row(
         values,
         ctx,
     )?;
+    enforce_temporal_constraints_for_write(
+        relation_name,
+        rel,
+        toast,
+        desc,
+        relation_constraints,
+        values,
+        None,
+        ctx,
+    )?;
     crate::backend::executor::enforce_outbound_foreign_keys(
         relation_name,
         &relation_constraints.foreign_keys,
@@ -1090,6 +1102,16 @@ pub(crate) fn write_updated_row(
         desc,
         relation_constraints,
         &current_values,
+        ctx,
+    )?;
+    enforce_temporal_constraints_for_write(
+        relation_name,
+        rel,
+        toast,
+        desc,
+        relation_constraints,
+        &current_values,
+        Some(current_tid),
         ctx,
     )?;
     crate::backend::executor::enforce_outbound_foreign_keys(
@@ -1242,6 +1264,246 @@ pub(crate) fn collect_matching_rows_heap(
 
     heap_scan_end::<ExecError>(&*ctx.pool, ctx.client_id, &mut scan)?;
     Ok(rows)
+}
+
+pub(crate) fn temporal_arbiter_conflicts_with_existing_row(
+    relation_name: &str,
+    rel: crate::backend::storage::smgr::RelFileLocator,
+    toast: Option<ToastRelationRef>,
+    desc: &RelationDesc,
+    constraint: &BoundTemporalConstraint,
+    values: &[Value],
+    excluded_tid: Option<ItemPointerData>,
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    validate_temporal_period_value(relation_name, desc, constraint, values)?;
+    if temporal_constraint_skips_conflict_check(constraint, values) {
+        return Ok(false);
+    }
+    let rows = collect_matching_rows_heap(rel, desc, toast, None, ctx)?;
+    for (tid, existing) in rows {
+        if excluded_tid.is_some_and(|excluded| excluded == tid) {
+            continue;
+        }
+        if temporal_rows_conflict(constraint, values, &existing)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub(crate) fn enforce_temporal_constraints_for_write(
+    relation_name: &str,
+    rel: crate::backend::storage::smgr::RelFileLocator,
+    toast: Option<ToastRelationRef>,
+    desc: &RelationDesc,
+    constraints: &BoundRelationConstraints,
+    values: &[Value],
+    excluded_tid: Option<ItemPointerData>,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for constraint in &constraints.temporal {
+        if !constraint.enforced {
+            continue;
+        }
+        validate_temporal_period_value(relation_name, desc, constraint, values)?;
+        if temporal_constraint_skips_conflict_check(constraint, values) {
+            continue;
+        }
+        let rows = collect_matching_rows_heap(rel, desc, toast, None, ctx)?;
+        for (tid, existing) in rows {
+            if excluded_tid.is_some_and(|excluded| excluded == tid) {
+                continue;
+            }
+            if temporal_rows_conflict(constraint, values, &existing)? {
+                return Err(temporal_exclusion_violation(
+                    desc,
+                    relation_name,
+                    constraint,
+                    values,
+                    &existing,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_temporal_constraint_existing_rows(
+    relation_name: &str,
+    desc: &RelationDesc,
+    constraint: &BoundTemporalConstraint,
+    rows: &[(ItemPointerData, Vec<Value>)],
+    _ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for (left_pos, (_, left_values)) in rows.iter().enumerate() {
+        validate_temporal_period_value(relation_name, desc, constraint, left_values)?;
+        if temporal_constraint_skips_conflict_check(constraint, left_values) {
+            continue;
+        }
+        for (_, right_values) in rows.iter().skip(left_pos + 1) {
+            if temporal_constraint_skips_conflict_check(constraint, right_values) {
+                continue;
+            }
+            if temporal_rows_conflict(constraint, left_values, right_values)? {
+                let left_key = constraint_key_values(constraint, left_values);
+                let right_key = constraint_key_values(constraint, right_values);
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "could not create exclusion constraint \"{}\"",
+                        constraint.constraint_name
+                    ),
+                    detail: Some(
+                        crate::backend::executor::value_io::format_exclusion_create_key_detail(
+                            &constraint_columns(desc, constraint),
+                            &left_key,
+                            &right_key,
+                        ),
+                    ),
+                    hint: None,
+                    sqlstate: "23P01",
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_temporal_period_value(
+    relation_name: &str,
+    desc: &RelationDesc,
+    constraint: &BoundTemporalConstraint,
+    values: &[Value],
+) -> Result<(), ExecError> {
+    let period_value = values
+        .get(constraint.period_column_index)
+        .unwrap_or(&Value::Null);
+    let empty = match period_value {
+        Value::Range(range) => range.empty,
+        Value::Multirange(multirange) => multirange.ranges.is_empty(),
+        _ => false,
+    };
+    if empty {
+        let column_name = desc
+            .columns
+            .get(constraint.period_column_index)
+            .map(|column| column.name.as_str())
+            .unwrap_or("?");
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "empty WITHOUT OVERLAPS value found in column \"{}\" in relation \"{}\"",
+                column_name, relation_name
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "23P01",
+        });
+    }
+    Ok(())
+}
+
+fn temporal_constraint_skips_conflict_check(
+    constraint: &BoundTemporalConstraint,
+    values: &[Value],
+) -> bool {
+    !constraint.primary
+        && constraint
+            .column_indexes
+            .iter()
+            .any(|index| matches!(values.get(*index), Some(Value::Null) | None))
+}
+
+fn temporal_rows_conflict(
+    constraint: &BoundTemporalConstraint,
+    proposed: &[Value],
+    existing: &[Value],
+) -> Result<bool, ExecError> {
+    for index in &constraint.column_indexes {
+        if *index == constraint.period_column_index {
+            continue;
+        }
+        let left = proposed.get(*index).unwrap_or(&Value::Null);
+        let right = existing.get(*index).unwrap_or(&Value::Null);
+        if matches!(left, Value::Null) || matches!(right, Value::Null) {
+            return Ok(false);
+        }
+        if compare_order_values(left, right, None, None, false)? != std::cmp::Ordering::Equal {
+            return Ok(false);
+        }
+    }
+    Ok(temporal_periods_overlap(
+        proposed
+            .get(constraint.period_column_index)
+            .unwrap_or(&Value::Null),
+        existing
+            .get(constraint.period_column_index)
+            .unwrap_or(&Value::Null),
+    ))
+}
+
+fn temporal_periods_overlap(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Range(left), Value::Range(right)) => {
+            crate::backend::executor::expr_range::range_overlap(left, right)
+        }
+        (Value::Multirange(left), Value::Range(right)) => {
+            crate::backend::executor::expr_multirange::multirange_overlaps_range(left, right)
+        }
+        (Value::Range(left), Value::Multirange(right)) => {
+            crate::backend::executor::expr_multirange::multirange_overlaps_range(right, left)
+        }
+        (Value::Multirange(left), Value::Multirange(right)) => {
+            crate::backend::executor::expr_multirange::multirange_overlaps_multirange(left, right)
+        }
+        _ => false,
+    }
+}
+
+fn temporal_exclusion_violation(
+    desc: &RelationDesc,
+    _relation_name: &str,
+    constraint: &BoundTemporalConstraint,
+    proposed: &[Value],
+    existing: &[Value],
+) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "conflicting key value violates exclusion constraint \"{}\"",
+            constraint.constraint_name
+        ),
+        detail: {
+            let proposed_key = constraint_key_values(constraint, proposed);
+            let existing_key = constraint_key_values(constraint, existing);
+            Some(
+                crate::backend::executor::value_io::format_exclusion_key_detail(
+                    &constraint_columns(desc, constraint),
+                    &proposed_key,
+                    &existing_key,
+                ),
+            )
+        },
+        hint: None,
+        sqlstate: "23P01",
+    }
+}
+
+fn constraint_key_values(constraint: &BoundTemporalConstraint, values: &[Value]) -> Vec<Value> {
+    constraint
+        .column_indexes
+        .iter()
+        .map(|index| values.get(*index).cloned().unwrap_or(Value::Null))
+        .collect()
+}
+
+fn constraint_columns(
+    desc: &RelationDesc,
+    constraint: &BoundTemporalConstraint,
+) -> Vec<crate::backend::executor::ColumnDesc> {
+    constraint
+        .column_indexes
+        .iter()
+        .filter_map(|index| desc.columns.get(*index).cloned())
+        .collect()
 }
 
 fn collect_matching_rows_index(
@@ -1415,6 +1677,7 @@ fn relation_write_state_for_foreign_key(
             .collect(),
         checks: Vec::new(),
         foreign_keys: Vec::new(),
+        temporal: Vec::new(),
     };
     let referenced_by = bind_referenced_by_foreign_keys(
         constraint.child_relation_oid,
@@ -2575,6 +2838,16 @@ fn execute_merge_update_row(
         &stmt.desc,
         &stmt.relation_constraints,
         &updated_values,
+        ctx,
+    )?;
+    enforce_temporal_constraints_for_write(
+        &stmt.relation_name,
+        stmt.rel,
+        stmt.toast,
+        &stmt.desc,
+        &stmt.relation_constraints,
+        &updated_values,
+        Some(target_tid),
         ctx,
     )?;
     crate::backend::executor::enforce_outbound_foreign_keys(
@@ -5181,6 +5454,16 @@ pub(crate) fn apply_base_update_row(
             &target.desc,
             &target.relation_constraints,
             &current_values,
+            ctx,
+        )?;
+        enforce_temporal_constraints_for_write(
+            &target.relation_name,
+            target.rel,
+            target.toast,
+            &target.desc,
+            &target.relation_constraints,
+            &current_values,
+            Some(current_tid),
             ctx,
         )?;
         crate::backend::executor::enforce_outbound_foreign_keys(

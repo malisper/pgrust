@@ -16,8 +16,8 @@ use crate::pl::plpgsql::TriggerOperation;
 use super::tablecmds::{
     WriteUpdatedRowResult, apply_assignment_target, build_index_insert_context,
     index_key_values_for_row, insert_index_entry_for_row, materialize_generated_columns,
-    rollback_inserted_row, row_matches_index_predicate, slot_toast_context, write_insert_heap_row,
-    write_updated_row,
+    rollback_inserted_row, row_matches_index_predicate, slot_toast_context,
+    temporal_arbiter_conflicts_with_existing_row, write_insert_heap_row, write_updated_row,
 };
 use super::trigger::{RuntimeTriggers, TriggerTransitionCapture};
 
@@ -179,6 +179,29 @@ fn probe_arbiter_conflict(
         }
     }
     Ok(None)
+}
+
+fn probe_temporal_arbiter_conflict(
+    stmt: &BoundInsertStatement,
+    on_conflict: &BoundOnConflictClause,
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    for constraint in &on_conflict.arbiter_temporal_constraints {
+        if temporal_arbiter_conflicts_with_existing_row(
+            &stmt.relation_name,
+            stmt.rel,
+            stmt.toast,
+            &stmt.desc,
+            constraint,
+            values,
+            None,
+            ctx,
+        )? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn run_conflict_update(
@@ -445,6 +468,7 @@ pub(crate) fn execute_insert_on_conflict_rows(
         .filter(|index| {
             index.index_meta.indisvalid
                 && index.index_meta.indisready
+                && !index.index_meta.indisexclusion
                 && !arbiter_index_oids.contains(&index.relation_oid)
         })
         .collect::<Vec<_>>();
@@ -524,6 +548,11 @@ pub(crate) fn execute_insert_on_conflict_rows(
         materialize_generated_columns(&stmt.desc, &mut values, ctx)?;
         loop {
             ctx.check_for_interrupts()?;
+            if matches!(on_conflict.action, BoundOnConflictAction::Nothing)
+                && probe_temporal_arbiter_conflict(stmt, on_conflict, &values, ctx)?
+            {
+                break;
+            }
             if let Some(conflict) = probe_arbiter_conflict(stmt, &arbiter_indexes, &values, ctx)? {
                 match &on_conflict.action {
                     BoundOnConflictAction::Nothing => break,

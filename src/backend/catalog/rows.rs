@@ -416,7 +416,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
             indisunique: index_meta.indisunique,
             indnullsnotdistinct: index_meta.indnullsnotdistinct,
             indisprimary: index_meta.indisprimary,
-            indisexclusion: false,
+            indisexclusion: index_meta.indisexclusion,
             indimmediate: true,
             indisclustered: false,
             indisvalid: index_meta.indisvalid,

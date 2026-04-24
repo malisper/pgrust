@@ -9,8 +9,11 @@ use super::{
 use crate::backend::executor::{Value, cast_value};
 use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::catalog::{
-    PgPartitionedTableRow, default_btree_opclass_oid, default_hash_opclass_oid,
+    PgPartitionedTableRow, RANGE_GIST_OPCLASS_OID, builtin_range_spec_by_multirange_oid,
+    builtin_range_spec_by_oid, default_btree_opclass_oid, default_hash_opclass_oid,
+    range_type_ref_for_sql_type,
 };
+use crate::include::nodes::datum::{MultirangeTypeRef, MultirangeValue, RangeBound, RangeValue};
 use crate::include::nodes::primnodes::Expr;
 use crate::include::nodes::primnodes::RelationDesc;
 
@@ -52,6 +55,28 @@ pub enum SerializedPartitionValue {
     TimeTz { time: i64, offset_seconds: i32 },
     Timestamp(i64),
     TimestampTz(i64),
+    Range(Box<SerializedPartitionRangeValue>),
+    Multirange(Box<SerializedPartitionMultirangeValue>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SerializedPartitionRangeBound {
+    pub value: SerializedPartitionValue,
+    pub inclusive: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SerializedPartitionRangeValue {
+    pub range_type_oid: u32,
+    pub empty: bool,
+    pub lower: Option<SerializedPartitionRangeBound>,
+    pub upper: Option<SerializedPartitionRangeBound>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SerializedPartitionMultirangeValue {
+    pub multirange_type_oid: u32,
+    pub ranges: Vec<SerializedPartitionRangeValue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -330,6 +355,10 @@ pub(crate) fn partition_value_to_value(value: &SerializedPartitionValue) -> Valu
         SerializedPartitionValue::TimestampTz(v) => {
             Value::TimestampTz(crate::include::nodes::datetime::TimestampTzADT(*v))
         }
+        SerializedPartitionValue::Range(range) => deserialize_partition_range_value(range),
+        SerializedPartitionValue::Multirange(multirange) => {
+            deserialize_partition_multirange_value(multirange)
+        }
     }
 }
 
@@ -363,6 +392,12 @@ pub(crate) fn value_to_partition_value(
         },
         Value::Timestamp(v) => SerializedPartitionValue::Timestamp(v.0),
         Value::TimestampTz(v) => SerializedPartitionValue::TimestampTz(v.0),
+        Value::Range(range) => {
+            SerializedPartitionValue::Range(Box::new(serialize_partition_range_value(range)?))
+        }
+        Value::Multirange(multirange) => SerializedPartitionValue::Multirange(Box::new(
+            serialize_partition_multirange_value(multirange)?,
+        )),
         other => {
             return Err(ParseError::FeatureNotSupported(format!(
                 "partition key type {:?}",
@@ -371,6 +406,101 @@ pub(crate) fn value_to_partition_value(
                     .unwrap_or(SqlType::new(crate::backend::parser::SqlTypeKind::Text))
             )));
         }
+    })
+}
+
+fn serialize_partition_range_bound(
+    bound: &RangeBound,
+) -> Result<SerializedPartitionRangeBound, ParseError> {
+    Ok(SerializedPartitionRangeBound {
+        value: value_to_partition_value(&bound.value)?,
+        inclusive: bound.inclusive,
+    })
+}
+
+fn serialize_partition_range_value(
+    range: &RangeValue,
+) -> Result<SerializedPartitionRangeValue, ParseError> {
+    if builtin_range_spec_by_oid(range.range_type.type_oid()).is_none() {
+        return Err(ParseError::FeatureNotSupported(
+            "partition key type custom range".into(),
+        ));
+    }
+    Ok(SerializedPartitionRangeValue {
+        range_type_oid: range.range_type.type_oid(),
+        empty: range.empty,
+        lower: range
+            .lower
+            .as_ref()
+            .map(serialize_partition_range_bound)
+            .transpose()?,
+        upper: range
+            .upper
+            .as_ref()
+            .map(serialize_partition_range_bound)
+            .transpose()?,
+    })
+}
+
+fn serialize_partition_multirange_value(
+    multirange: &MultirangeValue,
+) -> Result<SerializedPartitionMultirangeValue, ParseError> {
+    if builtin_range_spec_by_multirange_oid(multirange.multirange_type.type_oid()).is_none() {
+        return Err(ParseError::FeatureNotSupported(
+            "partition key type custom multirange".into(),
+        ));
+    }
+    Ok(SerializedPartitionMultirangeValue {
+        multirange_type_oid: multirange.multirange_type.type_oid(),
+        ranges: multirange
+            .ranges
+            .iter()
+            .map(serialize_partition_range_value)
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn deserialize_partition_range_bound(bound: &SerializedPartitionRangeBound) -> RangeBound {
+    RangeBound {
+        value: Box::new(partition_value_to_value(&bound.value)),
+        inclusive: bound.inclusive,
+    }
+}
+
+fn deserialize_partition_range_value(range: &SerializedPartitionRangeValue) -> Value {
+    let Some(spec) = builtin_range_spec_by_oid(range.range_type_oid) else {
+        return Value::Null;
+    };
+    Value::Range(RangeValue {
+        range_type: spec.range_type,
+        empty: range.empty,
+        lower: range.lower.as_ref().map(deserialize_partition_range_bound),
+        upper: range.upper.as_ref().map(deserialize_partition_range_bound),
+    })
+}
+
+fn deserialize_partition_multirange_value(
+    multirange: &SerializedPartitionMultirangeValue,
+) -> Value {
+    let Some(spec) = builtin_range_spec_by_multirange_oid(multirange.multirange_type_oid) else {
+        return Value::Null;
+    };
+    let multirange_type = MultirangeTypeRef {
+        sql_type: SqlType::multirange(spec.multirange_oid, spec.oid)
+            .with_identity(spec.multirange_oid, 0),
+        range_type: spec.range_type,
+    };
+    let ranges = multirange
+        .ranges
+        .iter()
+        .filter_map(|range| match deserialize_partition_range_value(range) {
+            Value::Range(range) => Some(range),
+            _ => None,
+        })
+        .collect();
+    Value::Multirange(MultirangeValue {
+        multirange_type,
+        ranges,
     })
 }
 
@@ -423,12 +553,13 @@ fn lower_partition_spec(
         }
         let type_oid = sql_type_oid(column.sql_type);
         let opclass =
-            default_opclass_for_partition_strategy(spec.strategy, type_oid).ok_or_else(|| {
-                ParseError::FeatureNotSupported(format!(
-                    "partition key type {}",
-                    sql_type_name(column.sql_type)
-                ))
-            })?;
+            default_opclass_for_partition_strategy(spec.strategy, type_oid, column.sql_type)
+                .ok_or_else(|| {
+                    ParseError::FeatureNotSupported(format!(
+                        "partition key type {}",
+                        sql_type_name(column.sql_type)
+                    ))
+                })?;
         key_columns.push(column.name.clone());
         partattrs.push(index as i16 + 1);
         partclass.push(opclass);
@@ -525,9 +656,11 @@ fn lower_partition_bound(
 fn default_opclass_for_partition_strategy(
     strategy: PartitionStrategy,
     type_oid: u32,
+    sql_type: SqlType,
 ) -> Option<u32> {
     match strategy {
-        PartitionStrategy::List | PartitionStrategy::Range => default_btree_opclass_oid(type_oid),
+        PartitionStrategy::List | PartitionStrategy::Range => default_btree_opclass_oid(type_oid)
+            .or_else(|| range_type_ref_for_sql_type(sql_type).map(|_| RANGE_GIST_OPCLASS_OID)),
         PartitionStrategy::Hash => default_hash_opclass_oid(type_oid),
     }
 }

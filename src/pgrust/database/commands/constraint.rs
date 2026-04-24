@@ -1,8 +1,10 @@
 use super::super::*;
 use crate::backend::commands::tablecmds::collect_matching_rows_heap;
+use crate::backend::executor::value_io::format_failing_row_detail;
 use crate::backend::executor::{ExecutorContext, eval_expr};
 use crate::backend::parser::{
-    BoundCheckConstraint, BoundForeignKeyConstraint, ForeignKeyConstraintAction,
+    BoundCheckConstraint, BoundForeignKeyConstraint, BoundTemporalConstraint,
+    ForeignKeyConstraintAction,
 };
 use crate::include::catalog::{
     CONSTRAINT_CHECK, CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
@@ -110,6 +112,7 @@ pub(super) fn validate_not_null_rows(
                 relation: relation_name.to_string(),
                 column: column_name,
                 constraint: constraint_name.to_string(),
+                detail: Some(format_failing_row_detail(&values, &ctx.datetime_config)),
             });
         }
     }
@@ -167,6 +170,74 @@ pub(super) fn validate_check_rows(
         }
     }
     Ok(())
+}
+
+fn bound_temporal_constraint_from_action(
+    relation: &crate::backend::parser::BoundRelation,
+    action: &crate::backend::parser::IndexBackedConstraintAction,
+) -> Result<BoundTemporalConstraint, ExecError> {
+    let period_column = action.without_overlaps.as_deref().ok_or_else(|| {
+        ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "WITHOUT OVERLAPS column",
+            actual: "missing WITHOUT OVERLAPS column".into(),
+        })
+    })?;
+    let mut column_names = Vec::with_capacity(action.columns.len());
+    let mut column_indexes = Vec::with_capacity(action.columns.len());
+    for column_name in &action.columns {
+        let index = relation
+            .desc
+            .columns
+            .iter()
+            .enumerate()
+            .find_map(|(index, column)| {
+                (!column.dropped && column.name.eq_ignore_ascii_case(column_name)).then_some(index)
+            })
+            .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.clone())))?;
+        column_names.push(relation.desc.columns[index].name.clone());
+        column_indexes.push(index);
+    }
+    let period_column_index = column_names
+        .iter()
+        .position(|column| column.eq_ignore_ascii_case(period_column))
+        .and_then(|index| column_indexes.get(index).copied())
+        .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(period_column.to_string())))?;
+    Ok(BoundTemporalConstraint {
+        constraint_oid: 0,
+        constraint_name: action
+            .constraint_name
+            .clone()
+            .expect("normalized key constraint name"),
+        column_names,
+        column_indexes,
+        period_column_index,
+        primary: action.primary,
+        enforced: true,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_temporal_constraint_rows(
+    db: &Database,
+    relation: &crate::backend::parser::BoundRelation,
+    relation_name: &str,
+    constraint: &BoundTemporalConstraint,
+    catalog: &dyn CatalogLookup,
+    client_id: ClientId,
+    xid: TransactionId,
+    cid: CommandId,
+    interrupts: std::sync::Arc<crate::backend::utils::misc::interrupts::InterruptState>,
+) -> Result<(), ExecError> {
+    let mut ctx = ddl_executor_context(db, catalog, client_id, xid, cid, interrupts)?;
+    let rows =
+        collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, &mut ctx)?;
+    crate::backend::commands::tablecmds::validate_temporal_constraint_existing_rows(
+        relation_name,
+        &relation.desc,
+        constraint,
+        &rows,
+        &mut ctx,
+    )
 }
 
 fn foreign_key_action_code(action: ForeignKeyAction) -> char {
@@ -757,7 +828,6 @@ impl Database {
             &catalog,
         )
         .map_err(ExecError::Parse)?;
-
         match normalized {
             crate::backend::parser::NormalizedAlterTableConstraint::NotNull(action) => {
                 let column_index = relation
@@ -955,14 +1025,37 @@ impl Database {
                     .cloned()
                     .map(crate::backend::parser::IndexColumnDef::from)
                     .collect::<Vec<_>>();
-                let build_options = self.resolve_simple_index_build_options(
-                    client_id,
-                    Some((xid, index_cid)),
-                    "btree",
-                    &relation,
-                    &index_columns,
-                    &[],
-                )?;
+                if action.without_overlaps.is_some() {
+                    let temporal = bound_temporal_constraint_from_action(&relation, &action)?;
+                    validate_temporal_constraint_rows(
+                        self,
+                        &relation,
+                        &table_name,
+                        &temporal,
+                        &catalog,
+                        client_id,
+                        xid,
+                        index_cid,
+                        std::sync::Arc::clone(&interrupts),
+                    )?;
+                }
+                let build_options = if action.without_overlaps.is_some() {
+                    self.resolve_temporal_index_build_options(
+                        client_id,
+                        Some((xid, index_cid)),
+                        &relation,
+                        &index_columns,
+                    )?
+                } else {
+                    self.resolve_simple_index_build_options(
+                        client_id,
+                        Some((xid, index_cid)),
+                        "btree",
+                        &relation,
+                        &index_columns,
+                        &[],
+                    )?
+                };
                 let index_entry = self.build_simple_index_in_transaction(
                     client_id,
                     &relation,
@@ -990,10 +1083,20 @@ impl Database {
                     waiter: None,
                     interrupts,
                 };
+                let conexclop = if action.without_overlaps.is_some() {
+                    Some(self.temporal_constraint_operator_oids_for_desc(
+                        &relation.desc,
+                        &action.columns,
+                        action.without_overlaps.as_deref(),
+                        &catalog,
+                    )?)
+                } else {
+                    None
+                };
                 let effect = self
                     .catalog
                     .write()
-                    .create_index_backed_constraint_mvcc(
+                    .create_index_backed_constraint_mvcc_with_period(
                         relation.relation_oid,
                         index_entry.relation_oid,
                         constraint_name,
@@ -1003,6 +1106,8 @@ impl Database {
                             CONSTRAINT_UNIQUE
                         },
                         &primary_key_owned_not_null_oids,
+                        action.without_overlaps.is_some(),
+                        conexclop,
                         &constraint_ctx,
                     )
                     .map_err(map_catalog_error)?;
@@ -1546,6 +1651,15 @@ impl Database {
         let attnum = (column_index + 1) as i16;
         let existing_constraints = catalog.constraint_rows_for_relation(relation.relation_oid);
         if let Some(primary) = primary_constraint_for_attnum(&existing_constraints, attnum) {
+            if primary.conperiod {
+                return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "droppable NOT NULL column",
+                    actual: format!(
+                        "column \"{}\" is in a primary key",
+                        relation.desc.columns[column_index].name
+                    ),
+                }));
+            }
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "droppable NOT NULL column",
                 actual: format!(

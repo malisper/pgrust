@@ -642,6 +642,8 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::ObjDescription => args.len() == 2,
             BuiltinScalarFunction::PgDescribeObject => args.len() == 3,
             BuiltinScalarFunction::PgGetExpr => matches!(args.len(), 2 | 3),
+            BuiltinScalarFunction::PgGetConstraintDef => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::PgGetIndexDef => matches!(args.len(), 1 | 3),
             BuiltinScalarFunction::PgGetViewDef => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgGetStatisticsObjDef
             | BuiltinScalarFunction::PgGetStatisticsObjDefColumns
@@ -1346,6 +1348,16 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("cashlarger", BuiltinScalarFunction::CashLarger),
         ("cashsmaller", BuiltinScalarFunction::CashSmaller),
         ("cash_words", BuiltinScalarFunction::CashWords),
+        (
+            "pg_get_constraintdef",
+            BuiltinScalarFunction::PgGetConstraintDef,
+        ),
+        (
+            "pg_get_constraintdef_ext",
+            BuiltinScalarFunction::PgGetConstraintDef,
+        ),
+        ("pg_get_indexdef", BuiltinScalarFunction::PgGetIndexDef),
+        ("pg_get_indexdef_ext", BuiltinScalarFunction::PgGetIndexDef),
         ("pg_get_triggerdef", BuiltinScalarFunction::PgGetTriggerDef),
         ("pg_trigger_depth", BuiltinScalarFunction::PgTriggerDepth),
         ("now", BuiltinScalarFunction::Now),
@@ -2136,6 +2148,8 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
             BuiltinScalarFunction::ObjDescription,
             BuiltinScalarFunction::PgDescribeObject,
             BuiltinScalarFunction::PgGetExpr,
+            BuiltinScalarFunction::PgGetConstraintDef,
+            BuiltinScalarFunction::PgGetIndexDef,
             BuiltinScalarFunction::PgGetViewDef,
             BuiltinScalarFunction::PgGetStatisticsObjDef,
             BuiltinScalarFunction::PgGetStatisticsObjDefColumns,
@@ -2285,6 +2299,8 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::ObjDescription
             | BuiltinScalarFunction::PgDescribeObject
             | BuiltinScalarFunction::PgGetExpr
+            | BuiltinScalarFunction::PgGetConstraintDef
+            | BuiltinScalarFunction::PgGetIndexDef
             | BuiltinScalarFunction::PgGetViewDef
             | BuiltinScalarFunction::PgGetStatisticsObjDef
             | BuiltinScalarFunction::PgGetStatisticsObjDefColumns
