@@ -5811,7 +5811,7 @@ fn analyze_timestamptz_typed_string_literal_keeps_timestamp_tz_type() {
 fn analyze_interval_typed_string_literal_keeps_interval_type() {
     let stmt = parse_select("select interval '1 day'").unwrap();
     let (query, _) =
-        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, &[], &[]).unwrap();
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
     assert!(matches!(
         &query.target_list[0].expr,
         Expr::Cast(inner, ty)
