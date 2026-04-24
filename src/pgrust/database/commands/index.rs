@@ -1247,9 +1247,18 @@ impl Database {
                 &index_columns,
                 &create_stmt.options,
             )?;
-        if access_method_oid == SPGIST_AM_OID && index_columns.len() != 1 {
+        let am_routine = crate::backend::access::index::amapi::index_am_handler(access_method_oid)
+            .ok_or_else(|| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "supported index access method",
+                    actual: format!("unknown access method oid {access_method_oid}"),
+                })
+            })?;
+        if index_columns.len() > 1 && !am_routine.amcanmulticol {
             return Err(ExecError::DetailedError {
-                message: "access method \"spgist\" does not support multicolumn indexes".into(),
+                message: format!(
+                    "access method \"{access_method_name}\" does not support multicolumn indexes"
+                ),
                 detail: None,
                 hint: None,
                 sqlstate: "0A000",
@@ -1265,13 +1274,6 @@ impl Database {
                 sqlstate: "0A000",
             });
         }
-        let am_routine = crate::backend::access::index::amapi::index_am_handler(access_method_oid)
-            .ok_or_else(|| {
-                ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "supported index access method",
-                    actual: format!("unknown access method oid {access_method_oid}"),
-                })
-            })?;
         if create_stmt.unique && !am_routine.amcanunique {
             return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
                 "access method \"{}\" does not support unique indexes",
