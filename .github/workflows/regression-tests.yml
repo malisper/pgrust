@@ -1,0 +1,133 @@
+name: regression-tests
+
+# Twice-daily scheduled run of the full PostgreSQL regression suite against
+# pgrust_server. Results (summary + per-test output + diffs) are pushed to the
+# `regression-history` orphan branch and a summary is posted to Slack.
+#
+# Cron times are UTC. With a 30-minute build/test head start, results land
+# around 1:00pm and 8:15pm Pacific (during PDT). Times will drift by 1 hour
+# around DST transitions; bump the cron then.
+on:
+  schedule:
+    - cron: '30 19 * * *'   # ~12:30 PDT start -> ~1:00pm PDT finish
+    - cron: '45 2 * * *'    # ~7:45pm PDT start -> ~8:15pm PDT finish
+  workflow_dispatch:
+
+permissions:
+  contents: write   # required to push to the regression-history branch
+
+concurrency:
+  group: regression-tests
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  # Pin to the PG18 SHA the project currently develops against. Bump when the
+  # team decides to track a newer upstream — fixtures (.out files) are tied to
+  # this revision.
+  POSTGRES_REF: 4b2aa4b39cbac71d9795ff760af3991a681eae00
+
+jobs:
+  regression:
+    name: regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Checkout pgrust
+        uses: actions/checkout@v4
+        with:
+          path: pgrust
+
+      - name: Checkout postgres source
+        uses: actions/checkout@v4
+        with:
+          repository: postgres/postgres
+          ref: ${{ env.POSTGRES_REF }}
+          path: postgres
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.1
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pgrust
+
+      - name: Install postgresql-client-18
+        run: |
+          set -euo pipefail
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-18 lsof
+
+      - name: Build pgrust_server (release)
+        working-directory: pgrust
+        run: cargo build --release --locked --bin pgrust_server
+
+      - name: Run regression tests
+        id: regress
+        working-directory: pgrust
+        env:
+          PGRUST_REGRESS_USER: postgres
+        run: |
+          set +e
+          mkdir -p "$GITHUB_WORKSPACE/regress-results"
+          scripts/run_regression.sh \
+            --skip-build \
+            --results-dir "$GITHUB_WORKSPACE/regress-results"
+          status=$?
+          set -e
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          echo "results_dir=$GITHUB_WORKSPACE/regress-results" >> "$GITHUB_OUTPUT"
+          if [[ -f "$GITHUB_WORKSPACE/regress-results/summary.json" ]]; then
+            echo "## Regression summary" >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat "$GITHUB_WORKSPACE/regress-results/summary.json" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload regression artifacts (workflow run)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-results
+          path: ${{ steps.regress.outputs.results_dir }}
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Publish results to regression-history
+        id: publish
+        if: always() && steps.regress.outputs.results_dir != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RESULTS_DIR: ${{ steps.regress.outputs.results_dir }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_SHA: ${{ github.sha }}
+          RUN_REF: ${{ github.ref }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REGRESS_EXIT_CODE: ${{ steps.regress.outputs.exit_code }}
+        working-directory: pgrust
+        run: scripts/github/publish_regression_history.sh
+
+      - name: Notify Slack
+        if: always() && steps.publish.outputs.run_dir_name != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RESULTS_DIR: ${{ steps.regress.outputs.results_dir }}
+          RUN_DIR_NAME: ${{ steps.publish.outputs.run_dir_name }}
+          PREV_DIR_NAME: ${{ steps.publish.outputs.prev_dir_name }}
+          PREV_TESTS_PASSED: ${{ steps.publish.outputs.prev_tests_passed }}
+          PREV_QUERIES_MATCHED: ${{ steps.publish.outputs.prev_queries_matched }}
+          RUN_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPO_FULL_NAME: ${{ github.repository }}
+        working-directory: pgrust
+        run: scripts/github/notify_slack_regression.sh
