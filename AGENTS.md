@@ -196,11 +196,13 @@ If a change is about SQL semantics, planning, or execution, it usually belongs u
 For structural refactors, the default verification loop is:
 
 - `cargo check`
-- `cargo test --lib --quiet`
+- `cargo test --lib --quiet` (only tests relevant to the changed module, not the full suite)
 
 If a change affects SQL behavior more broadly, run the regression harness afterward.
 
 When rerunning an individual regression file, copy the resulting `.diff` artifact into `/tmp/diffs` so it is easy to inspect outside the results directory.
+
+**Testing guidance for agents:** Run only the specialized tests directly related to your change (e.g., tests in the module you modified, integration tests for the feature you're working on). Do not run the full `cargo test` suite unless specifically asked. The full test suite runs in CI, so focus your effort on validating that your specific change works correctly. This keeps iteration fast and avoids redundant testing.
 
 ## Finish
 

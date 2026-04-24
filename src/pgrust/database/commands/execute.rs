@@ -1553,6 +1553,13 @@ impl Database {
             Statement::Begin | Statement::Commit | Statement::Rollback => {
                 Ok(StatementResult::AffectedRows(0))
             }
+            Statement::DeclareCursor(_)
+            | Statement::Fetch(_)
+            | Statement::Move(_)
+            | Statement::ClosePortal(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "portal command handled by session layer",
+                actual: "portal command".into(),
+            })),
         }
     }
 
@@ -1561,7 +1568,7 @@ impl Database {
         client_id: ClientId,
         select_stmt: &crate::backend::parser::SelectStatement,
         txn_ctx: Option<(TransactionId, CommandId)>,
-    ) -> Result<SelectGuard<'_>, ExecError> {
+    ) -> Result<SelectGuard, ExecError> {
         self.execute_streaming_with_search_path_and_datetime_config(
             client_id,
             select_stmt,
@@ -1579,7 +1586,7 @@ impl Database {
         select_stmt: &crate::backend::parser::SelectStatement,
         txn_ctx: Option<(TransactionId, CommandId)>,
         configured_search_path: Option<&[String]>,
-    ) -> Result<SelectGuard<'_>, ExecError> {
+    ) -> Result<SelectGuard, ExecError> {
         self.execute_streaming_with_search_path_and_datetime_config(
             client_id,
             select_stmt,
@@ -1600,7 +1607,7 @@ impl Database {
         transaction_lock_scope_id: Option<u64>,
         configured_search_path: Option<&[String]>,
         datetime_config: &DateTimeConfig,
-    ) -> Result<SelectGuard<'_>, ExecError> {
+    ) -> Result<SelectGuard, ExecError> {
         use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
         use crate::backend::executor::executor_start;
 
@@ -1675,7 +1682,7 @@ impl Database {
             columns,
             column_names,
             rels,
-            table_locks: &self.table_locks,
+            table_locks: std::sync::Arc::clone(&self.table_locks),
             client_id,
             advisory_locks: std::sync::Arc::clone(&self.advisory_locks),
             row_locks: std::sync::Arc::clone(&self.row_locks),

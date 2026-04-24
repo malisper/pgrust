@@ -37,6 +37,7 @@ use crate::backend::utils::misc::interrupts::{InterruptState, StatementInterrupt
 use crate::include::catalog::PG_CHECKPOINT_OID;
 use crate::include::nodes::execnodes::ScalarType;
 use crate::pgrust::auth::AuthState;
+use crate::pgrust::autovacuum::is_autovacuum_guc;
 use crate::pgrust::database::{
     AsyncListenAction, AsyncListenOp, Database, PendingNotification, SequenceMutationEffect,
     SessionStatsState, StatsFetchConsistency, TempMutationEffect, TrackFunctionsSetting,
@@ -47,17 +48,21 @@ use crate::pgrust::database::{
     reject_relation_with_referencing_foreign_keys, relation_foreign_key_lock_requests,
     update_foreign_key_lock_requests, validate_deferred_foreign_key_constraints,
 };
+use crate::pgrust::portal::{
+    CursorOptions, CursorViewRow, Portal, PortalFetchDirection, PortalFetchLimit, PortalManager,
+    PortalRunResult,
+};
 use crate::pl::plpgsql::execute_do;
 use crate::{ClientId, RelFileLocator};
 use parking_lot::RwLock;
 
-pub struct SelectGuard<'a> {
+pub struct SelectGuard {
     pub state: crate::include::nodes::execnodes::PlanState,
     pub ctx: ExecutorContext,
     pub columns: Vec<crate::backend::executor::QueryColumn>,
     pub column_names: Vec<String>,
     pub(crate) rels: Vec<RelFileLocator>,
-    pub(crate) table_locks: &'a TableLockManager,
+    pub(crate) table_locks: Arc<TableLockManager>,
     pub(crate) client_id: ClientId,
     pub(crate) advisory_locks: Arc<crate::backend::storage::lmgr::AdvisoryLockManager>,
     pub(crate) row_locks: Arc<crate::backend::storage::lmgr::RowLockManager>,
@@ -65,9 +70,15 @@ pub struct SelectGuard<'a> {
     pub(crate) interrupt_guard: Option<StatementInterruptGuard>,
 }
 
-impl Drop for SelectGuard<'_> {
+// SAFETY: A SelectGuard is owned by one Session and is never shared for
+// concurrent access. Existing server/test code may move an idle Session between
+// threads; moving the owned guard with that Session does not create cross-thread
+// aliases to its executor Rc state.
+unsafe impl Send for SelectGuard {}
+
+impl Drop for SelectGuard {
     fn drop(&mut self) {
-        unlock_relations(self.table_locks, self.client_id, &self.rels);
+        unlock_relations(&self.table_locks, self.client_id, &self.rels);
         if let Some(scope_id) = self.statement_lock_scope_id {
             self.advisory_locks
                 .unlock_all_statement(self.client_id, scope_id);
@@ -141,6 +152,7 @@ pub struct Session {
     interrupts: Arc<InterruptState>,
     auth: AuthState,
     stats_state: Arc<RwLock<SessionStatsState>>,
+    portals: PortalManager,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,6 +194,59 @@ fn invalid_default_toast_compression_value(value: &str) -> ExecError {
     }
 }
 
+fn undefined_cursor(name: &str) -> ExecError {
+    ExecError::Parse(ParseError::DetailedError {
+        message: format!("cursor \"{name}\" does not exist"),
+        detail: None,
+        hint: None,
+        sqlstate: "34000",
+    })
+}
+
+fn cursor_options_from_declare(
+    stmt: &crate::backend::parser::DeclareCursorStatement,
+) -> CursorOptions {
+    let scroll = matches!(
+        stmt.scroll,
+        crate::backend::parser::CursorScrollOption::Scroll
+    );
+    let no_scroll = matches!(
+        stmt.scroll,
+        crate::backend::parser::CursorScrollOption::NoScroll
+    );
+    CursorOptions {
+        holdable: stmt.hold,
+        binary: stmt.binary,
+        scroll,
+        no_scroll,
+        visible: true,
+    }
+}
+
+fn portal_direction_from_fetch(
+    direction: &crate::backend::parser::FetchDirection,
+) -> PortalFetchDirection {
+    use crate::backend::parser::FetchDirection;
+    match direction {
+        FetchDirection::Next => PortalFetchDirection::Next,
+        FetchDirection::Prior => PortalFetchDirection::Prior,
+        FetchDirection::First => PortalFetchDirection::First,
+        FetchDirection::Last => PortalFetchDirection::Last,
+        FetchDirection::Absolute(value) => PortalFetchDirection::Absolute(*value),
+        FetchDirection::Relative(value) => PortalFetchDirection::Relative(*value),
+        FetchDirection::Forward(count) => PortalFetchDirection::Forward(fetch_limit(*count)),
+        FetchDirection::Backward(count) => PortalFetchDirection::Backward(fetch_limit(*count)),
+    }
+}
+
+fn fetch_limit(count: Option<i64>) -> PortalFetchLimit {
+    match count {
+        None => PortalFetchLimit::All,
+        Some(value) if value <= 0 => PortalFetchLimit::Count(0),
+        Some(value) => PortalFetchLimit::Count(value as usize),
+    }
+}
+
 fn parse_default_toast_compression_guc_value(value: &str) -> Result<&'static str, ExecError> {
     match value.trim().to_ascii_lowercase().as_str() {
         "pglz" => Ok("pglz"),
@@ -211,6 +276,7 @@ impl Session {
             interrupts: Arc::new(InterruptState::new()),
             auth: AuthState::default(),
             stats_state: Arc::new(RwLock::new(SessionStatsState::default())),
+            portals: PortalManager::default(),
         }
     }
 
@@ -220,6 +286,12 @@ impl Session {
 
     pub fn transaction_failed(&self) -> bool {
         self.active_txn.as_ref().is_some_and(|t| t.failed)
+    }
+
+    pub(crate) fn mark_transaction_failed(&mut self) {
+        if let Some(ref mut txn) = self.active_txn {
+            txn.failed = true;
+        }
     }
 
     pub fn ready_status(&self) -> u8 {
@@ -520,6 +592,10 @@ impl Session {
                 | Statement::ResetSessionAuthorization(_)
                 | Statement::SetRole(_)
                 | Statement::ResetRole(_)
+                | Statement::DeclareCursor(_)
+                | Statement::Fetch(_)
+                | Statement::Move(_)
+                | Statement::ClosePortal(_)
                 | Statement::Begin
                 | Statement::Commit
                 | Statement::Rollback
@@ -805,13 +881,24 @@ impl Session {
             if matches!(stmt, Statement::Vacuum(_)) {
                 return Err(ExecError::Parse(ParseError::ActiveSqlTransaction("VACUUM")));
             }
-            let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
-            if result.is_err() {
-                if let Some(ref mut txn) = self.active_txn {
-                    txn.failed = true;
+            if matches!(
+                stmt,
+                Statement::DeclareCursor(_)
+                    | Statement::Fetch(_)
+                    | Statement::Move(_)
+                    | Statement::ClosePortal(_)
+            ) {
+                // Portal commands are session-level operations that may own executor state
+                // across statements, so route them through the outer session command match.
+            } else {
+                let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                if result.is_err() {
+                    if let Some(ref mut txn) = self.active_txn {
+                        txn.failed = true;
+                    }
                 }
+                return result;
             }
-            return result;
         }
 
         match stmt {
@@ -2090,6 +2177,58 @@ impl Session {
                 let search_path = self.configured_search_path();
                 db.execute_statement_with_search_path(self.client_id, stmt, search_path.as_deref())
             }
+            Statement::DeclareCursor(ref declare_stmt) => {
+                let options = cursor_options_from_declare(declare_stmt);
+                let result = self.declare_cursor(
+                    db,
+                    &declare_stmt.name,
+                    sql.trim().trim_end_matches(';').to_string(),
+                    &declare_stmt.query,
+                    options,
+                );
+                if result.is_err() {
+                    self.mark_transaction_failed();
+                }
+                result.map(|_| StatementResult::AffectedRows(0))
+            }
+            Statement::Fetch(ref fetch_stmt) => {
+                let result = self.fetch_cursor(
+                    &fetch_stmt.cursor_name,
+                    portal_direction_from_fetch(&fetch_stmt.direction),
+                    false,
+                );
+                if result.is_err() {
+                    self.mark_transaction_failed();
+                }
+                result.map(|result| StatementResult::Query {
+                    columns: result.columns,
+                    column_names: result.column_names,
+                    rows: result.rows,
+                })
+            }
+            Statement::Move(ref fetch_stmt) => {
+                let result = self.fetch_cursor(
+                    &fetch_stmt.cursor_name,
+                    portal_direction_from_fetch(&fetch_stmt.direction),
+                    true,
+                );
+                if result.is_err() {
+                    self.mark_transaction_failed();
+                }
+                result.map(|result| StatementResult::AffectedRows(result.processed))
+            }
+            Statement::ClosePortal(ref close_stmt) => {
+                let result = if let Some(name) = &close_stmt.name {
+                    self.close_portal(name)
+                } else {
+                    self.close_all_cursors();
+                    Ok(())
+                };
+                if result.is_err() {
+                    self.mark_transaction_failed();
+                }
+                result.map(|_| StatementResult::AffectedRows(0))
+            }
             Statement::Begin => {
                 if self.active_txn.is_some() {
                     return Err(ExecError::Parse(ParseError::UnexpectedToken {
@@ -2109,7 +2248,13 @@ impl Session {
                     .validate_deferred_foreign_keys_for_active_txn(db)
                     .map(|_| StatementResult::AffectedRows(0));
                 let txn = self.active_txn.take().unwrap();
-                self.finalize_taken_transaction(db, txn, result)
+                let result = self.finalize_taken_transaction(db, txn, result);
+                if result.is_ok() {
+                    self.portals.drop_transaction_portals(true);
+                } else {
+                    self.portals.drop_transaction_portals(false);
+                }
+                result
             }
             Statement::Rollback => {
                 let txn = match self.active_txn.take() {
@@ -2121,6 +2266,7 @@ impl Session {
                 for rel in held_locks {
                     db.table_locks.unlock_table(rel, self.client_id);
                 }
+                self.portals.drop_transaction_portals(false);
                 Ok(StatementResult::AffectedRows(0))
             }
             _ => {
@@ -2197,6 +2343,7 @@ impl Session {
     }
 
     pub(crate) fn cleanup_on_disconnect(&mut self, db: &Database) {
+        self.portals.clear();
         if let Some(txn) = self.active_txn.take() {
             if let Some(xid) = txn.xid {
                 let _ = db.txns.write().abort(xid);
@@ -2279,11 +2426,11 @@ impl Session {
         Ok(())
     }
 
-    pub fn execute_streaming<'a>(
+    pub fn execute_streaming(
         &mut self,
-        db: &'a Database,
+        db: &Database,
         select_stmt: &SelectStatement,
-    ) -> Result<SelectGuard<'a>, ExecError> {
+    ) -> Result<SelectGuard, ExecError> {
         db.install_auth_state(self.client_id, self.auth.clone());
         db.install_session_replication_role(self.client_id, self.session_replication_role());
         db.install_temp_backend_id(self.client_id, self.temp_backend_id);
@@ -2310,6 +2457,238 @@ impl Session {
         )?;
         guard.interrupt_guard = Some(self.statement_interrupt_guard()?);
         Ok(guard)
+    }
+
+    pub(crate) fn bind_protocol_portal(
+        &mut self,
+        db: &Database,
+        name: &str,
+        prep_stmt_name: Option<String>,
+        sql: &str,
+        result_formats: Vec<i16>,
+    ) -> Result<(), ExecError> {
+        let portal = self.build_portal_from_sql(
+            db,
+            name.to_string(),
+            prep_stmt_name,
+            sql.to_string(),
+            result_formats,
+            CursorOptions::protocol(),
+        )?;
+        self.portals.insert(portal, name.is_empty(), true)
+    }
+
+    pub(crate) fn declare_cursor(
+        &mut self,
+        db: &Database,
+        name: &str,
+        source_text: String,
+        query: &SelectStatement,
+        options: CursorOptions,
+    ) -> Result<(), ExecError> {
+        if self.active_txn.is_none() {
+            return Err(ExecError::Parse(ParseError::DetailedError {
+                message: "DECLARE CURSOR can only be used in transaction blocks".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "25P01",
+            }));
+        }
+        let guard = self.execute_streaming(db, query)?;
+        let mut portal = Portal::streaming_select(
+            name.to_string(),
+            source_text,
+            None,
+            Vec::new(),
+            options,
+            true,
+            guard,
+        );
+        if portal.options.scroll || portal.options.holdable {
+            portal.materialize_all()?;
+        }
+        self.portals.insert(portal, false, false)
+    }
+
+    pub(crate) fn execute_portal_forward(
+        &mut self,
+        db: &Database,
+        name: &str,
+        limit: PortalFetchLimit,
+    ) -> Result<PortalRunResult, ExecError> {
+        let mut portal = self.take_portal(name)?;
+        let result = if let crate::pgrust::portal::PortalExecution::PendingSql { sql, .. } =
+            &portal.execution
+        {
+            let sql = sql.clone();
+            match self.execute(db, &sql)? {
+                StatementResult::Query {
+                    columns,
+                    column_names,
+                    rows,
+                } => {
+                    portal.execution = crate::pgrust::portal::PortalExecution::Materialized {
+                        columns,
+                        column_names,
+                        rows,
+                        pos: 0,
+                    };
+                    portal.fetch_forward(limit)?
+                }
+                StatementResult::AffectedRows(n) => {
+                    let tag = crate::backend::libpq::pqformat::infer_command_tag(&sql, n);
+                    portal.command_tag = tag.clone();
+                    portal.execution = crate::pgrust::portal::PortalExecution::CommandDone;
+                    PortalRunResult {
+                        columns: Vec::new(),
+                        column_names: Vec::new(),
+                        rows: Vec::new(),
+                        processed: n,
+                        completed: true,
+                        command_tag: Some(tag),
+                    }
+                }
+            }
+        } else {
+            portal.fetch_forward(limit)?
+        };
+        self.portals.put(portal);
+        Ok(result)
+    }
+
+    pub(crate) fn fetch_cursor(
+        &mut self,
+        name: &str,
+        direction: PortalFetchDirection,
+        move_only: bool,
+    ) -> Result<PortalRunResult, ExecError> {
+        let mut portal = self.take_portal(name)?;
+        if !portal.options.visible {
+            self.portals.put(portal);
+            return Err(undefined_cursor(name));
+        }
+        let result = portal.fetch_direction(direction, move_only);
+        self.portals.put(portal);
+        result
+    }
+
+    pub(crate) fn close_portal(&mut self, name: &str) -> Result<(), ExecError> {
+        if self.portals.contains(name) {
+            self.portals.remove(name);
+            Ok(())
+        } else {
+            Err(undefined_cursor(name))
+        }
+    }
+
+    pub(crate) fn close_all_cursors(&mut self) {
+        self.portals.close_all_visible();
+    }
+
+    pub(crate) fn portal_columns(
+        &self,
+        name: &str,
+    ) -> Option<Vec<crate::backend::executor::QueryColumn>> {
+        self.portals.get(name).and_then(Portal::columns)
+    }
+
+    pub(crate) fn portal_result_formats(&self, name: &str) -> Option<Vec<i16>> {
+        self.portals
+            .get(name)
+            .map(|portal| portal.result_formats.clone())
+    }
+
+    pub(crate) fn cursor_view_rows(&self) -> Vec<CursorViewRow> {
+        self.portals.cursor_view_rows()
+    }
+
+    fn take_portal(&mut self, name: &str) -> Result<Portal, ExecError> {
+        self.portals
+            .take(name)
+            .ok_or_else(|| undefined_cursor(name))
+    }
+
+    fn build_portal_from_sql(
+        &mut self,
+        db: &Database,
+        name: String,
+        prep_stmt_name: Option<String>,
+        source_text: String,
+        result_formats: Vec<i16>,
+        options: CursorOptions,
+    ) -> Result<Portal, ExecError> {
+        let stmt = if self.standard_conforming_strings() {
+            db.plan_cache.get_statement(&source_text)?
+        } else {
+            crate::backend::parser::parse_statement_with_options(
+                &source_text,
+                ParseOptions {
+                    standard_conforming_strings: false,
+                },
+            )?
+        };
+        let created_in_transaction = self.active_txn.is_some();
+        match stmt {
+            Statement::Select(select_stmt) => {
+                let guard = self.execute_streaming(db, &select_stmt)?;
+                let mut portal = Portal::streaming_select(
+                    name,
+                    source_text,
+                    prep_stmt_name,
+                    result_formats,
+                    options,
+                    created_in_transaction,
+                    guard,
+                );
+                if portal.options.scroll || portal.options.holdable {
+                    portal.materialize_all()?;
+                }
+                Ok(portal)
+            }
+            Statement::Values(_) | Statement::Show(_) | Statement::Explain(_) => {
+                match self.execute(db, &source_text)? {
+                    StatementResult::Query {
+                        columns,
+                        column_names,
+                        rows,
+                    } => Ok(Portal::materialized_select(
+                        name,
+                        source_text,
+                        prep_stmt_name,
+                        result_formats,
+                        options,
+                        created_in_transaction,
+                        columns,
+                        column_names,
+                        rows,
+                    )),
+                    StatementResult::AffectedRows(n) => {
+                        let mut portal = Portal::pending_sql(
+                            name,
+                            source_text.clone(),
+                            prep_stmt_name,
+                            result_formats,
+                            options,
+                            created_in_transaction,
+                            None,
+                        );
+                        portal.command_tag =
+                            crate::backend::libpq::pqformat::infer_command_tag(&source_text, n);
+                        portal.execution = crate::pgrust::portal::PortalExecution::CommandDone;
+                        Ok(portal)
+                    }
+                }
+            }
+            _ => Ok(Portal::pending_sql(
+                name,
+                source_text,
+                prep_stmt_name,
+                result_formats,
+                options,
+                created_in_transaction,
+                None,
+            )),
+        }
     }
 
     fn execute_in_transaction(
@@ -3680,6 +4059,7 @@ impl Session {
                     xid,
                     cid,
                     search_path.as_deref(),
+                    false,
                     &mut txn.catalog_effects,
                 )
             }
@@ -4270,6 +4650,12 @@ impl Session {
             Statement::Begin | Statement::Commit | Statement::Rollback => {
                 unreachable!("handled in Session::execute")
             }
+            Statement::DeclareCursor(_)
+            | Statement::Fetch(_)
+            | Statement::Move(_)
+            | Statement::ClosePortal(_) => {
+                unreachable!("portal commands are handled in Session::execute")
+            }
         };
 
         if result.is_ok() {
@@ -4291,7 +4677,7 @@ impl Session {
                 name,
             )));
         }
-        if is_checkpoint_guc(&name) {
+        if is_checkpoint_guc(&name) || is_autovacuum_guc(&name) {
             return Err(ExecError::Parse(ParseError::CantChangeRuntimeParam(name)));
         }
         self.apply_guc_value(&stmt.name, &stmt.value)?;
@@ -4317,7 +4703,7 @@ impl Session {
                     normalized,
                 )));
             }
-            if is_checkpoint_guc(&normalized) {
+            if is_checkpoint_guc(&normalized) || is_autovacuum_guc(&normalized) {
                 return Err(ExecError::Parse(ParseError::CantChangeRuntimeParam(
                     normalized,
                 )));
@@ -4415,6 +4801,11 @@ impl Session {
                 db.checkpoint_config_value(&name)
                     .unwrap_or_else(|| "default".to_string()),
             ),
+            _ if is_autovacuum_guc(&name) => (
+                stmt.name.clone(),
+                db.autovacuum_config_value(&name)
+                    .unwrap_or_else(|| "default".to_string()),
+            ),
             _ => (
                 stmt.name.clone(),
                 self.gucs.get(&name).cloned().unwrap_or_else(fallback_value),
@@ -4476,6 +4867,11 @@ impl Session {
         let normalized = normalize_guc_name(name);
         if !is_postgres_guc(&normalized) {
             return Err(ExecError::Parse(ParseError::UnknownConfigurationParameter(
+                normalized,
+            )));
+        }
+        if is_checkpoint_guc(&normalized) || is_autovacuum_guc(&normalized) {
+            return Err(ExecError::Parse(ParseError::CantChangeRuntimeParam(
                 normalized,
             )));
         }

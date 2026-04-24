@@ -5,7 +5,9 @@ use crate::backend::access::heap::heapam::heap_update_with_waiter;
 use crate::backend::commands::tablecmds::{collect_matching_rows_heap, maintain_indexes_for_row};
 use crate::backend::executor::value_io::{coerce_assignment_value, tuple_from_values};
 use crate::backend::executor::{ExecutorContext, RelationDesc};
-use crate::backend::parser::{CatalogLookup, parse_type_name, resolve_raw_type_name};
+use crate::backend::parser::{
+    BoundRelation, CatalogLookup, parse_type_name, resolve_raw_type_name,
+};
 use crate::backend::utils::misc::notices::push_notice;
 use crate::include::catalog::{PG_CATALOG_NAMESPACE_OID, relkind_is_analyzable};
 use crate::include::nodes::datum::Value;
@@ -13,16 +15,44 @@ use crate::include::nodes::parsenodes::{
     CommentOnAggregateStatement, CommentOnFunctionStatement, CommentOnIndexStatement,
     MaintenanceTarget, VacuumStatement,
 };
+use crate::pgrust::auth::AuthState;
+use crate::pgrust::autovacuum::{AutovacuumRelationInput, relation_needs_vacanalyze};
 use crate::pgrust::database::ddl::{
     lookup_analyzable_relation_for_ddl, lookup_heap_relation_for_alter_table,
     lookup_heap_relation_for_ddl, lookup_index_relation_for_alter_index,
 };
+use crate::{ClientId, RelFileLocator};
+use parking_lot::RwLock;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+use std::time::Instant;
 
 struct AddColumnTarget {
-    relation: crate::backend::parser::BoundRelation,
+    relation: BoundRelation,
     column: crate::backend::executor::ColumnDesc,
     new_desc: RelationDesc,
+}
+
+const AUTOVACUUM_CLIENT_ID_BASE: ClientId = 0xFF00_0000;
+
+#[derive(Debug, Clone)]
+struct AutovacuumTarget {
+    relation_oid: u32,
+    rel: RelFileLocator,
+    vacuum: bool,
+    analyze: bool,
+}
+
+fn autovacuum_client_id(database_oid: u32) -> ClientId {
+    AUTOVACUUM_CLIENT_ID_BASE | (database_oid & 0x0000_FFFF)
+}
+
+fn autovacuum_namespace_allowed(namespace_name: &str) -> bool {
+    namespace_name != "pg_catalog"
+        && namespace_name != "information_schema"
+        && !namespace_name.starts_with("pg_toast")
+        && !namespace_name.starts_with("pg_temp_")
+        && !namespace_name.starts_with("pg_toast_temp_")
 }
 
 fn relation_basename(name: &str) -> &str {
@@ -415,6 +445,321 @@ impl Database {
             configured_search_path,
             vacuum_stmt,
         )
+    }
+
+    pub fn run_autovacuum_once(&self) -> Result<(), ExecError> {
+        let client_id = autovacuum_client_id(self.database_oid);
+        let stats_state = Arc::new(RwLock::new(SessionStatsState::default()));
+        self.install_auth_state(client_id, AuthState::default());
+        self.install_row_security_enabled(client_id, true);
+        self.install_session_replication_role(client_id, SessionReplicationRole::Origin);
+        self.install_temp_backend_id(client_id, client_id);
+        self.install_stats_state(client_id, Arc::clone(&stats_state));
+
+        let result = (|| {
+            self.flush_inactive_session_stats();
+            let targets = self.autovacuum_targets(client_id)?;
+            for target in targets {
+                if !self.table_locks.try_lock_table(
+                    target.rel,
+                    TableLockMode::ShareUpdateExclusive,
+                    client_id,
+                ) {
+                    continue;
+                }
+                let result = self.execute_autovacuum_target(client_id, &target);
+                self.table_locks.unlock_table(target.rel, client_id);
+                result?;
+            }
+            Ok(())
+        })();
+
+        self.clear_stats_state(client_id);
+        self.clear_temp_backend_id(client_id);
+        self.clear_session_replication_role(client_id);
+        self.clear_row_security_enabled(client_id);
+        self.clear_auth_state(client_id);
+        self.clear_interrupt_state(client_id);
+        result
+    }
+
+    fn flush_inactive_session_stats(&self) {
+        let states = self
+            .session_stats_states
+            .read()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for state in states {
+            let mut state = state.write();
+            if !state.xact_active {
+                state.flush_pending(&self.stats);
+            }
+        }
+    }
+
+    fn autovacuum_targets(&self, client_id: ClientId) -> Result<Vec<AutovacuumTarget>, ExecError> {
+        let catcache = self
+            .backend_catcache(client_id, None)
+            .map_err(map_catalog_error)?;
+        let namespace_names = catcache
+            .namespace_rows()
+            .into_iter()
+            .map(|row| (row.oid, row.nspname))
+            .collect::<BTreeMap<_, _>>();
+        let class_rows = catcache.class_rows();
+        let stats = self.stats.read().clone();
+        let next_xid = self.txns.read().next_xid();
+        let catalog = self.lazy_catalog_lookup(client_id, None, None);
+
+        let mut targets = Vec::new();
+        for class in class_rows {
+            if class.relkind != 'r' || class.relpersistence != 'p' || class.relispartition {
+                continue;
+            }
+            let Some(namespace_name) = namespace_names.get(&class.relnamespace) else {
+                continue;
+            };
+            if !autovacuum_namespace_allowed(namespace_name) {
+                continue;
+            }
+            let rel_stats = stats.relations.get(&class.oid).cloned().unwrap_or_default();
+            let decision = relation_needs_vacanalyze(
+                AutovacuumRelationInput {
+                    reltuples: class.reltuples,
+                    relpages: class.relpages,
+                    relallfrozen: class.relallfrozen,
+                    relfrozenxid: class.relfrozenxid,
+                    next_xid,
+                    dead_tuples: rel_stats.dead_tuples,
+                    mod_since_analyze: rel_stats.mod_since_analyze,
+                    ins_since_vacuum: rel_stats.ins_since_vacuum,
+                },
+                self.autovacuum_config,
+            );
+            if !decision.vacuum && !decision.analyze {
+                continue;
+            }
+            let Some(relation) = catalog.relation_by_oid(class.oid) else {
+                continue;
+            };
+            targets.push(AutovacuumTarget {
+                relation_oid: class.oid,
+                rel: relation.rel,
+                vacuum: decision.vacuum,
+                analyze: decision.analyze,
+            });
+        }
+        Ok(targets)
+    }
+
+    fn execute_autovacuum_target(
+        &self,
+        client_id: ClientId,
+        target: &AutovacuumTarget,
+    ) -> Result<(), ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_autovacuum_target_in_transaction(
+            client_id,
+            target,
+            xid,
+            0,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result.map(|_| ())
+    }
+
+    fn execute_autovacuum_target_in_transaction(
+        &self,
+        client_id: ClientId,
+        target: &AutovacuumTarget,
+        xid: TransactionId,
+        cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let interrupts = self.interrupt_state(client_id);
+        let snapshot = self.txns.read().snapshot_for_command(xid, cid)?;
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), None);
+        let Some(relation) = catalog.relation_by_oid(target.relation_oid) else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
+        let Some(namespace) = catalog.namespace_row_by_oid(relation.namespace_oid) else {
+            return Ok(StatementResult::AffectedRows(0));
+        };
+        if relation.rel != target.rel
+            || relation.relkind != 'r'
+            || relation.relpersistence != 'p'
+            || relation.relispartition
+            || !autovacuum_namespace_allowed(&namespace.nspname)
+        {
+            return Ok(StatementResult::AffectedRows(0));
+        }
+        let relations = [relation];
+        let mut ctx = ExecutorContext {
+            pool: Arc::clone(&self.pool),
+            txns: self.txns.clone(),
+            txn_waiter: Some(self.txn_waiter.clone()),
+            sequences: Some(self.sequences.clone()),
+            large_objects: Some(self.large_objects.clone()),
+            async_notify_runtime: Some(self.async_notify_runtime.clone()),
+            advisory_locks: Arc::clone(&self.advisory_locks),
+            row_locks: Arc::clone(&self.row_locks),
+            checkpoint_stats: self.checkpoint_stats_snapshot(),
+            datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            interrupts: Arc::clone(&interrupts),
+            stats: Arc::clone(&self.stats),
+            session_stats: self.session_stats_state(client_id),
+            snapshot,
+            transaction_state: None,
+            client_id,
+            current_database_name: self.current_database_name(),
+            session_user_oid: self.auth_state(client_id).session_user_oid(),
+            current_user_oid: self.auth_state(client_id).current_user_oid(),
+            active_role_oid: self.auth_state(client_id).active_role_oid(),
+            session_replication_role: self.session_replication_role(client_id),
+            statement_lock_scope_id: None,
+            transaction_lock_scope_id: None,
+            next_command_id: cid,
+            default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+            timed: false,
+            allow_side_effects: false,
+            expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
+            case_test_values: Vec::new(),
+            system_bindings: Vec::new(),
+            subplans: Vec::new(),
+            pending_async_notifications: Vec::new(),
+            catalog: catalog.materialize_visible_catalog(),
+            compiled_functions: std::collections::HashMap::new(),
+            cte_tables: std::collections::HashMap::new(),
+            cte_producers: std::collections::HashMap::new(),
+            recursive_worktables: std::collections::HashMap::new(),
+            deferred_foreign_keys: None,
+            trigger_depth: 0,
+        };
+        if !ctx.session_stats.read().xact_active {
+            ctx.session_stats.write().flush_pending(&ctx.stats);
+        }
+        let vacuum_started = Instant::now();
+        let vacuumed = if target.vacuum {
+            crate::backend::commands::tablecmds::collect_vacuum_stats_for_relations(
+                &relations, &catalog, &mut ctx,
+            )?
+        } else {
+            Vec::new()
+        };
+        let vacuum_elapsed = vacuum_started.elapsed();
+        let analyzed = if target.analyze {
+            let analyze_started = Instant::now();
+            crate::backend::commands::analyze::collect_analyze_stats_for_relations(
+                &relations, &catalog, &mut ctx,
+            )?
+            .into_iter()
+            .map(|result| (result, analyze_started.elapsed()))
+            .collect()
+        } else {
+            Vec::new()
+        };
+        let session_stats = Arc::clone(&ctx.session_stats);
+        drop(ctx);
+
+        let write_ctx = CatalogWriteContext {
+            pool: Arc::clone(&self.pool),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: Some(self.txn_waiter.clone()),
+            interrupts: Arc::clone(&interrupts),
+        };
+        let mut store = self.catalog.write();
+        let mut analyzed_by_oid = analyzed
+            .into_iter()
+            .map(|(result, elapsed)| (result.relation_oid, (result, elapsed)))
+            .collect::<BTreeMap<_, _>>();
+        for result in vacuumed {
+            self.stats.write().report_relation_vacuum(
+                result.relation_oid,
+                true,
+                vacuum_elapsed,
+                result.removed_dead_tuples,
+                result.remaining_dead_tuples,
+            );
+            let effect = if let Some((analyze_result, analyze_elapsed)) =
+                analyzed_by_oid.remove(&result.relation_oid)
+            {
+                let effect = store
+                    .set_relation_maintenance_stats_mvcc(
+                        result.relation_oid,
+                        analyze_result.relpages,
+                        analyze_result.reltuples,
+                        result.relallvisible,
+                        result.relallfrozen,
+                        result.relfrozenxid,
+                        &write_ctx,
+                    )
+                    .map_err(ExecError::from)?;
+                catalog_effects.push(effect);
+                let effect = store
+                    .replace_relation_statistics_mvcc(
+                        analyze_result.relation_oid,
+                        analyze_result.statistics.clone(),
+                        &write_ctx,
+                    )
+                    .map_err(ExecError::from)?;
+                catalog_effects.push(effect);
+                session_stats.write().report_relation_analyze(
+                    &self.stats,
+                    analyze_result.relation_oid,
+                    true,
+                    analyze_elapsed,
+                    analyze_result.reltuples,
+                );
+                continue;
+            } else {
+                store
+                    .set_relation_vacuum_stats_mvcc(
+                        result.relation_oid,
+                        result.relpages,
+                        result.relallvisible,
+                        result.relallfrozen,
+                        result.relfrozenxid,
+                        &write_ctx,
+                    )
+                    .map_err(ExecError::from)?
+            };
+            catalog_effects.push(effect);
+        }
+        for (result, analyze_elapsed) in analyzed_by_oid.into_values() {
+            let effect = store
+                .set_relation_analyze_stats_mvcc(
+                    result.relation_oid,
+                    result.relpages,
+                    result.reltuples,
+                    &write_ctx,
+                )
+                .map_err(ExecError::from)?;
+            catalog_effects.push(effect);
+            let effect = store
+                .replace_relation_statistics_mvcc(
+                    result.relation_oid,
+                    result.statistics.clone(),
+                    &write_ctx,
+                )
+                .map_err(ExecError::from)?;
+            catalog_effects.push(effect);
+            session_stats.write().report_relation_analyze(
+                &self.stats,
+                result.relation_oid,
+                true,
+                analyze_elapsed,
+                result.reltuples,
+            );
+        }
+        Ok(StatementResult::AffectedRows(0))
     }
 
     pub(crate) fn execute_comment_on_domain_stmt_with_search_path(
@@ -831,6 +1176,7 @@ impl Database {
             xid,
             0,
             configured_search_path,
+            false,
             &mut catalog_effects,
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
@@ -882,6 +1228,7 @@ impl Database {
             xid,
             0,
             configured_search_path,
+            false,
             &mut catalog_effects,
         );
         let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
@@ -899,6 +1246,7 @@ impl Database {
         xid: TransactionId,
         cid: CommandId,
         configured_search_path: Option<&[String]>,
+        auto: bool,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
@@ -945,7 +1293,13 @@ impl Database {
             deferred_foreign_keys: None,
             trigger_depth: 0,
         };
+        if !ctx.session_stats.read().xact_active {
+            ctx.session_stats.write().flush_pending(&ctx.stats);
+        }
+        let analyze_started = Instant::now();
         let analyzed = collect_analyze_stats(targets, &catalog, &mut ctx)?;
+        let analyze_elapsed = analyze_started.elapsed();
+        let session_stats = Arc::clone(&ctx.session_stats);
         drop(ctx);
 
         let write_ctx = CatalogWriteContext {
@@ -971,11 +1325,18 @@ impl Database {
             let effect = store
                 .replace_relation_statistics_mvcc(
                     result.relation_oid,
-                    result.statistics,
+                    result.statistics.clone(),
                     &write_ctx,
                 )
                 .map_err(ExecError::from)?;
             catalog_effects.push(effect);
+            session_stats.write().report_relation_analyze(
+                &self.stats,
+                result.relation_oid,
+                auto,
+                analyze_elapsed,
+                result.reltuples,
+            );
         }
         Ok(StatementResult::AffectedRows(0))
     }
@@ -988,6 +1349,7 @@ impl Database {
         xid: TransactionId,
         cid: CommandId,
         configured_search_path: Option<&[String]>,
+        auto: bool,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
@@ -1034,13 +1396,23 @@ impl Database {
             deferred_foreign_keys: None,
             trigger_depth: 0,
         };
+        if !ctx.session_stats.read().xact_active {
+            ctx.session_stats.write().flush_pending(&ctx.stats);
+        }
+        let vacuum_started = Instant::now();
         let vacuumed =
             crate::backend::commands::tablecmds::collect_vacuum_stats(targets, &catalog, &mut ctx)?;
+        let vacuum_elapsed = vacuum_started.elapsed();
         let analyzed = if analyze {
+            let analyze_started = Instant::now();
             crate::backend::commands::analyze::collect_analyze_stats(targets, &catalog, &mut ctx)?
+                .into_iter()
+                .map(|result| (result, analyze_started.elapsed()))
+                .collect()
         } else {
             Vec::new()
         };
+        let session_stats = Arc::clone(&ctx.session_stats);
         drop(ctx);
 
         let write_ctx = CatalogWriteContext {
@@ -1055,10 +1427,18 @@ impl Database {
         let mut store = self.catalog.write();
         let mut analyzed_by_oid = analyzed
             .into_iter()
-            .map(|result| (result.relation_oid, result))
+            .map(|(result, elapsed)| (result.relation_oid, (result, elapsed)))
             .collect::<BTreeMap<_, _>>();
         for result in vacuumed {
-            let effect = if let Some(analyze_result) = analyzed_by_oid.remove(&result.relation_oid)
+            self.stats.write().report_relation_vacuum(
+                result.relation_oid,
+                auto,
+                vacuum_elapsed,
+                result.removed_dead_tuples,
+                result.remaining_dead_tuples,
+            );
+            let effect = if let Some((analyze_result, analyze_elapsed)) =
+                analyzed_by_oid.remove(&result.relation_oid)
             {
                 let effect = store
                     .set_relation_maintenance_stats_mvcc(
@@ -1075,11 +1455,18 @@ impl Database {
                 let effect = store
                     .replace_relation_statistics_mvcc(
                         analyze_result.relation_oid,
-                        analyze_result.statistics,
+                        analyze_result.statistics.clone(),
                         &write_ctx,
                     )
                     .map_err(ExecError::from)?;
                 catalog_effects.push(effect);
+                session_stats.write().report_relation_analyze(
+                    &self.stats,
+                    analyze_result.relation_oid,
+                    auto,
+                    analyze_elapsed,
+                    analyze_result.reltuples,
+                );
                 continue;
             } else {
                 store
@@ -1095,7 +1482,7 @@ impl Database {
             };
             catalog_effects.push(effect);
         }
-        for result in analyzed_by_oid.into_values() {
+        for (result, analyze_elapsed) in analyzed_by_oid.into_values() {
             let effect = store
                 .set_relation_analyze_stats_mvcc(
                     result.relation_oid,
@@ -1108,11 +1495,18 @@ impl Database {
             let effect = store
                 .replace_relation_statistics_mvcc(
                     result.relation_oid,
-                    result.statistics,
+                    result.statistics.clone(),
                     &write_ctx,
                 )
                 .map_err(ExecError::from)?;
             catalog_effects.push(effect);
+            session_stats.write().report_relation_analyze(
+                &self.stats,
+                result.relation_oid,
+                auto,
+                analyze_elapsed,
+                result.reltuples,
+            );
         }
         Ok(StatementResult::AffectedRows(0))
     }
