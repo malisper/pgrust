@@ -3,7 +3,7 @@ use super::expr::{raise_expr_varlevels, resolve_bound_field_select_type};
 use super::*;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::nodes::primnodes::expr_sql_type_hint;
-use crate::include::nodes::primnodes::{OpExprKind, WindowFuncKind};
+use crate::include::nodes::primnodes::{OpExprKind, WindowFuncKind, set_returning_call_exprs};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -167,6 +167,9 @@ fn expr_references_local_cte(expr: &Expr, local_ctes: &HashMap<usize, String>) -
         Expr::Func(func) => func
             .args
             .iter()
+            .find_map(|arg| expr_references_local_cte(arg, local_ctes)),
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
             .find_map(|arg| expr_references_local_cte(arg, local_ctes)),
         Expr::SubLink(sublink) => sublink
             .testexpr
@@ -375,33 +378,6 @@ fn query_references_local_cte(
         .iter()
         .find_map(|item| expr_references_local_cte(&item.expr, local_ctes))
     {
-        return Some(name);
-    }
-    if let Some(name) = query.project_set.as_ref().and_then(|targets| {
-        targets.iter().find_map(|target| match target {
-            ProjectSetTarget::Scalar(target) => expr_references_local_cte(&target.expr, local_ctes),
-            ProjectSetTarget::Set { call, .. } => match call {
-                SetReturningCall::GenerateSeries {
-                    start, stop, step, ..
-                } => expr_references_local_cte(start, local_ctes)
-                    .or_else(|| expr_references_local_cte(stop, local_ctes))
-                    .or_else(|| expr_references_local_cte(step, local_ctes)),
-                SetReturningCall::PartitionTree { relid, .. }
-                | SetReturningCall::PartitionAncestors { relid, .. } => {
-                    expr_references_local_cte(relid, local_ctes)
-                }
-                SetReturningCall::Unnest { args, .. }
-                | SetReturningCall::JsonTableFunction { args, .. }
-                | SetReturningCall::JsonRecordFunction { args, .. }
-                | SetReturningCall::RegexTableFunction { args, .. }
-                | SetReturningCall::StringTableFunction { args, .. }
-                | SetReturningCall::TextSearchTableFunction { args, .. }
-                | SetReturningCall::UserDefined { args, .. } => args
-                    .iter()
-                    .find_map(|expr| expr_references_local_cte(expr, local_ctes)),
-            },
-        })
-    }) {
         return Some(name);
     }
     if let Some(recursive_union) = &query.recursive_union {
@@ -1153,6 +1129,21 @@ pub(super) fn bind_agg_output_expr_in_clause(
                     args.args(),
                     *func_variadic,
                     raw_over,
+                    group_by_exprs,
+                    group_key_exprs,
+                    input_scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    agg_list,
+                    n_keys,
+                )
+            } else if name.eq_ignore_ascii_case("generate_series") {
+                bind_grouped_generate_series_srf(
+                    name,
+                    args.args(),
+                    *func_variadic,
+                    &clause,
                     group_by_exprs,
                     group_key_exprs,
                     input_scope,
@@ -2882,6 +2873,139 @@ pub(super) fn bind_agg_output_expr_in_clause(
             precision: *precision,
         }),
     }
+}
+
+fn bind_grouped_generate_series_srf(
+    name: &str,
+    args: &[SqlFunctionArg],
+    func_variadic: bool,
+    clause: &UngroupedColumnClause,
+    group_by_exprs: &[SqlExpr],
+    group_key_exprs: &[Expr],
+    input_scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    agg_list: &[CollectedAggregate],
+    n_keys: usize,
+) -> Result<Expr, ParseError> {
+    if args.len() < 2 || args.len() > 3 || args.iter().any(|arg| arg.name.is_some()) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "generate_series(start, stop[, step])",
+            actual: format!("generate_series with {} arguments", args.len()),
+        });
+    }
+    let start_type = grouped_infer_sql_expr_type(
+        &args[0].value,
+        input_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+    );
+    let stop_type = grouped_infer_sql_expr_type(
+        &args[1].value,
+        input_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+    );
+    let step_type = if args.len() == 3 {
+        Some(grouped_infer_sql_expr_type(
+            &args[2].value,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+        ))
+    } else {
+        None
+    };
+    let common = resolve_generate_series_common_type(start_type, stop_type, step_type)?;
+    let start = bind_agg_output_expr_in_clause(
+        &args[0].value,
+        clause.clone(),
+        group_by_exprs,
+        group_key_exprs,
+        input_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        agg_list,
+        n_keys,
+    )?;
+    let stop = bind_agg_output_expr_in_clause(
+        &args[1].value,
+        clause.clone(),
+        group_by_exprs,
+        group_key_exprs,
+        input_scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        agg_list,
+        n_keys,
+    )?;
+    let step = if args.len() == 3 {
+        coerce_bound_expr(
+            bind_agg_output_expr_in_clause(
+                &args[2].value,
+                clause.clone(),
+                group_by_exprs,
+                group_key_exprs,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                agg_list,
+                n_keys,
+            )?,
+            step_type.expect("generate_series step type"),
+            common,
+        )
+    } else {
+        match common.kind {
+            SqlTypeKind::Int8 => Expr::Const(Value::Int64(1)),
+            SqlTypeKind::Numeric => Expr::Const(Value::Numeric(
+                crate::include::nodes::datum::NumericValue::from_i64(1),
+            )),
+            _ => Expr::Const(Value::Int32(1)),
+        }
+    };
+    let actual_types = args
+        .iter()
+        .map(|arg| {
+            grouped_infer_sql_expr_type(
+                &arg.value,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+            )
+        })
+        .collect::<Vec<_>>();
+    let resolved = resolve_function_call(catalog, name, &actual_types, func_variadic).ok();
+    let call = SetReturningCall::GenerateSeries {
+        func_oid: resolved.as_ref().map(|call| call.proc_oid).unwrap_or(0),
+        func_variadic: resolved
+            .as_ref()
+            .map(|call| call.func_variadic)
+            .unwrap_or(func_variadic),
+        start: coerce_bound_expr(start, start_type, common),
+        stop: coerce_bound_expr(stop, stop_type, common),
+        step,
+        output_columns: vec![QueryColumn {
+            name: "generate_series".into(),
+            sql_type: common,
+            wire_type_oid: None,
+        }],
+        with_ordinality: false,
+    };
+    Ok(Expr::set_returning(
+        name.to_ascii_lowercase(),
+        call,
+        common,
+        1,
+    ))
 }
 
 fn bind_grouped_array_membership_expr(

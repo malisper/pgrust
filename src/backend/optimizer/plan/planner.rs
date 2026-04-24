@@ -6,7 +6,10 @@ use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerGlobal, PlannerInfo, RelOptInfo, RelOptKind, UpperRelKind,
 };
 use crate::include::nodes::plannodes::{PlanEstimate, PlannedStmt};
-use crate::include::nodes::primnodes::{Expr, ProjectSetTarget, TargetEntry, WindowClause};
+use crate::include::nodes::primnodes::{
+    Expr, ProjectSetTarget, TargetEntry, WindowClause, expr_contains_set_returning,
+    set_returning_call_exprs,
+};
 
 use super::super::bestpath;
 use super::super::create_plan_with_param_base;
@@ -299,7 +302,7 @@ fn make_window_rel(
     let mut rel = RelOptInfo::new(input_rel.relids.clone(), RelOptKind::UpperRel, reltarget);
     let mut ordered_input_paths = Vec::new();
     if !has_grouping(root)
-        && root.parse.project_set.is_none()
+        && !root.parse.has_target_srfs
         && input_rel.reltarget == root.window_input_target
         && !input_rel
             .pathlist
@@ -407,74 +410,360 @@ fn make_project_set_rel(
     rel
 }
 
-fn project_set_targets_for_target_list(
-    query: &Query,
-    target_list: &[TargetEntry],
-) -> Vec<ProjectSetTarget> {
-    let Some(project_set) = query.project_set.as_ref() else {
-        return target_list
-            .iter()
-            .cloned()
-            .map(ProjectSetTarget::Scalar)
-            .collect();
-    };
-    let base_width = root::project_set_base_width(project_set);
-    target_list
-        .iter()
-        .cloned()
-        .map(|target| {
-            match target
-                .input_resno
-                .and_then(|input_resno| input_resno.checked_sub(1))
-                .filter(|index| *index >= base_width)
-            {
-                Some(index) => project_set
-                    .get(index)
-                    .cloned()
-                    .map(|project_target| match project_target {
-                        ProjectSetTarget::Set {
-                            call,
-                            sql_type,
-                            column_index,
-                            ..
-                        } => ProjectSetTarget::Set {
-                            name: target.name.clone(),
-                            call,
-                            sql_type,
-                            column_index,
-                        },
-                        ProjectSetTarget::Scalar(_) => ProjectSetTarget::Scalar(target.clone()),
-                    })
-                    .unwrap_or(ProjectSetTarget::Scalar(target)),
-                None => ProjectSetTarget::Scalar(target),
-            }
-        })
-        .collect()
-}
-
 fn query_has_postponed_srfs(root: &PlannerInfo) -> bool {
-    let Some(project_set) = root.parse.project_set.as_ref() else {
-        return false;
-    };
-    if root.parse.sort_clause.is_empty() {
+    if !root.parse.has_target_srfs || root.parse.sort_clause.is_empty() {
         return false;
     }
-    let base_width = root::project_set_base_width(project_set);
-    !root.processed_tlist.iter().any(|target| {
-        target.ressortgroupref != 0
-            && root::target_references_project_set_output(target, base_width)
-    })
+    !root
+        .processed_tlist
+        .iter()
+        .any(|target| target.ressortgroupref != 0 && expr_contains_set_returning(&target.expr))
+}
+
+fn project_set_pathtarget_for_targets(targets: &[ProjectSetTarget]) -> PathTarget {
+    PathTarget::with_sortgrouprefs(
+        targets
+            .iter()
+            .map(|target| match target {
+                ProjectSetTarget::Scalar(entry) => entry.expr.clone(),
+                ProjectSetTarget::Set { source_expr, .. } => source_expr.clone(),
+            })
+            .collect(),
+        targets
+            .iter()
+            .map(|target| match target {
+                ProjectSetTarget::Scalar(entry) => entry.ressortgroupref,
+                ProjectSetTarget::Set { .. } => 0,
+            })
+            .collect(),
+    )
+}
+
+fn expr_srf_depth(expr: &Expr) -> usize {
+    match expr {
+        Expr::SetReturning(srf) => {
+            1 + set_returning_call_exprs(&srf.call)
+                .into_iter()
+                .map(expr_srf_depth)
+                .max()
+                .unwrap_or(0)
+        }
+        Expr::Aggref(aggref) => aggref
+            .args
+            .iter()
+            .map(expr_srf_depth)
+            .chain(
+                aggref
+                    .aggorder
+                    .iter()
+                    .map(|entry| expr_srf_depth(&entry.expr)),
+            )
+            .chain(aggref.aggfilter.as_ref().map(expr_srf_depth))
+            .max()
+            .unwrap_or(0),
+        Expr::WindowFunc(window_func) => window_func
+            .args
+            .iter()
+            .map(expr_srf_depth)
+            .max()
+            .unwrap_or(0),
+        Expr::Op(op) => op.args.iter().map(expr_srf_depth).max().unwrap_or(0),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().map(expr_srf_depth).max().unwrap_or(0),
+        Expr::Case(case_expr) => case_expr
+            .arg
+            .as_deref()
+            .map(expr_srf_depth)
+            .into_iter()
+            .chain(
+                case_expr
+                    .args
+                    .iter()
+                    .flat_map(|arm| [expr_srf_depth(&arm.expr), expr_srf_depth(&arm.result)]),
+            )
+            .chain(std::iter::once(expr_srf_depth(&case_expr.defresult)))
+            .max()
+            .unwrap_or(0),
+        Expr::Func(func) => func.args.iter().map(expr_srf_depth).max().unwrap_or(0),
+        Expr::SubLink(sublink) => sublink.testexpr.as_deref().map(expr_srf_depth).unwrap_or(0),
+        Expr::SubPlan(subplan) => subplan
+            .testexpr
+            .as_deref()
+            .map(expr_srf_depth)
+            .into_iter()
+            .chain(subplan.args.iter().map(expr_srf_depth))
+            .max()
+            .unwrap_or(0),
+        Expr::ScalarArrayOp(saop) => expr_srf_depth(&saop.left).max(expr_srf_depth(&saop.right)),
+        Expr::Xml(xml) => xml.child_exprs().map(expr_srf_depth).max().unwrap_or(0),
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => expr_srf_depth(inner),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => [expr_srf_depth(expr), expr_srf_depth(pattern)]
+            .into_iter()
+            .chain(escape.as_deref().map(expr_srf_depth))
+            .max()
+            .unwrap_or(0),
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => expr_srf_depth(left).max(expr_srf_depth(right)),
+        Expr::ArrayLiteral { elements, .. } => {
+            elements.iter().map(expr_srf_depth).max().unwrap_or(0)
+        }
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .map(|(_, expr)| expr_srf_depth(expr))
+            .max()
+            .unwrap_or(0),
+        Expr::ArraySubscript { array, subscripts } => std::iter::once(expr_srf_depth(array))
+            .chain(subscripts.iter().flat_map(|subscript| {
+                subscript
+                    .lower
+                    .as_ref()
+                    .map(expr_srf_depth)
+                    .into_iter()
+                    .chain(subscript.upper.as_ref().map(expr_srf_depth))
+            }))
+            .max()
+            .unwrap_or(0),
+        Expr::Var(_)
+        | Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => 0,
+    }
+}
+
+fn collect_srfs_at_depth(expr: &Expr, depth: usize, out: &mut Vec<Expr>) {
+    if let Expr::SetReturning(srf) = expr {
+        if expr_srf_depth(expr) == depth && !out.iter().any(|candidate| candidate == expr) {
+            out.push(expr.clone());
+        }
+        for arg in set_returning_call_exprs(&srf.call) {
+            collect_srfs_at_depth(arg, depth, out);
+        }
+        return;
+    }
+    match expr {
+        Expr::Aggref(aggref) => {
+            for arg in &aggref.args {
+                collect_srfs_at_depth(arg, depth, out);
+            }
+            for entry in &aggref.aggorder {
+                collect_srfs_at_depth(&entry.expr, depth, out);
+            }
+            if let Some(filter) = &aggref.aggfilter {
+                collect_srfs_at_depth(filter, depth, out);
+            }
+        }
+        Expr::WindowFunc(window_func) => {
+            for arg in &window_func.args {
+                collect_srfs_at_depth(arg, depth, out);
+            }
+        }
+        Expr::Op(op) => {
+            for arg in &op.args {
+                collect_srfs_at_depth(arg, depth, out);
+            }
+        }
+        Expr::Bool(bool_expr) => {
+            for arg in &bool_expr.args {
+                collect_srfs_at_depth(arg, depth, out);
+            }
+        }
+        Expr::Case(case_expr) => {
+            if let Some(arg) = &case_expr.arg {
+                collect_srfs_at_depth(arg, depth, out);
+            }
+            for arm in &case_expr.args {
+                collect_srfs_at_depth(&arm.expr, depth, out);
+                collect_srfs_at_depth(&arm.result, depth, out);
+            }
+            collect_srfs_at_depth(&case_expr.defresult, depth, out);
+        }
+        Expr::Func(func) => {
+            for arg in &func.args {
+                collect_srfs_at_depth(arg, depth, out);
+            }
+        }
+        Expr::SubLink(sublink) => {
+            if let Some(testexpr) = &sublink.testexpr {
+                collect_srfs_at_depth(testexpr, depth, out);
+            }
+        }
+        Expr::SubPlan(subplan) => {
+            if let Some(testexpr) = &subplan.testexpr {
+                collect_srfs_at_depth(testexpr, depth, out);
+            }
+            for arg in &subplan.args {
+                collect_srfs_at_depth(arg, depth, out);
+            }
+        }
+        Expr::ScalarArrayOp(saop) => {
+            collect_srfs_at_depth(&saop.left, depth, out);
+            collect_srfs_at_depth(&saop.right, depth, out);
+        }
+        Expr::Xml(xml) => {
+            for child in xml.child_exprs() {
+                collect_srfs_at_depth(child, depth, out);
+            }
+        }
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::FieldSelect { expr: inner, .. } => collect_srfs_at_depth(inner, depth, out),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            collect_srfs_at_depth(expr, depth, out);
+            collect_srfs_at_depth(pattern, depth, out);
+            if let Some(escape) = escape {
+                collect_srfs_at_depth(escape, depth, out);
+            }
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            collect_srfs_at_depth(left, depth, out);
+            collect_srfs_at_depth(right, depth, out);
+        }
+        Expr::ArrayLiteral { elements, .. } => {
+            for element in elements {
+                collect_srfs_at_depth(element, depth, out);
+            }
+        }
+        Expr::Row { fields, .. } => {
+            for (_, expr) in fields {
+                collect_srfs_at_depth(expr, depth, out);
+            }
+        }
+        Expr::ArraySubscript { array, subscripts } => {
+            collect_srfs_at_depth(array, depth, out);
+            for subscript in subscripts {
+                if let Some(lower) = &subscript.lower {
+                    collect_srfs_at_depth(lower, depth, out);
+                }
+                if let Some(upper) = &subscript.upper {
+                    collect_srfs_at_depth(upper, depth, out);
+                }
+            }
+        }
+        Expr::Var(_)
+        | Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => {}
+        Expr::SetReturning(_) => unreachable!("handled before recursive match"),
+    }
+}
+
+fn project_set_targets_for_srf_level(
+    input_target: &PathTarget,
+    target_list: &[TargetEntry],
+    level: usize,
+) -> Vec<ProjectSetTarget> {
+    let mut targets = root::build_projection_targets_for_pathtarget(input_target)
+        .into_iter()
+        .map(ProjectSetTarget::Scalar)
+        .collect::<Vec<_>>();
+    for target in target_list {
+        if !expr_contains_set_returning(&target.expr)
+            && !targets.iter().any(|candidate| {
+                matches!(candidate, ProjectSetTarget::Scalar(entry) if entry.expr == target.expr)
+            })
+        {
+            targets.push(ProjectSetTarget::Scalar(target.clone()));
+        }
+    }
+    let mut srfs = Vec::new();
+    for target in target_list {
+        collect_srfs_at_depth(&target.expr, level, &mut srfs);
+    }
+    for expr in srfs {
+        let Expr::SetReturning(srf) = expr.clone() else {
+            unreachable!("SRF collector only returns Expr::SetReturning")
+        };
+        targets.push(ProjectSetTarget::Set {
+            name: srf.name.clone(),
+            source_expr: expr,
+            call: srf.call.clone(),
+            sql_type: srf.sql_type,
+            column_index: srf.column_index,
+        });
+    }
+    targets
+}
+
+fn adjust_paths_for_target_srfs(
+    root: &mut PlannerInfo,
+    input_rel: RelOptInfo,
+    target_list: &[TargetEntry],
+    catalog: &dyn CatalogLookup,
+) -> RelOptInfo {
+    let max_depth = target_list
+        .iter()
+        .map(|target| expr_srf_depth(&target.expr))
+        .max()
+        .unwrap_or(0);
+    let mut current_rel = input_rel;
+    for level in 1..=max_depth {
+        let targets = project_set_targets_for_srf_level(&current_rel.reltarget, target_list, level);
+        if targets
+            .iter()
+            .any(|target| matches!(target, ProjectSetTarget::Set { .. }))
+        {
+            let reltarget = project_set_pathtarget_for_targets(&targets);
+            current_rel = make_project_set_rel(root, current_rel, reltarget, &targets, catalog);
+        }
+    }
+    current_rel
 }
 
 fn adjust_paths_for_srfs(
     root: &mut PlannerInfo,
     input_rel: RelOptInfo,
     target_list: &[TargetEntry],
-    reltarget: PathTarget,
     catalog: &dyn CatalogLookup,
 ) -> RelOptInfo {
-    let project_set_targets = project_set_targets_for_target_list(&root.parse, target_list);
-    make_project_set_rel(root, input_rel, reltarget, &project_set_targets, catalog)
+    adjust_paths_for_target_srfs(root, input_rel, target_list, catalog)
 }
 
 fn make_ordered_rel(
@@ -656,41 +945,10 @@ pub(super) fn grouping_planner(
     let mut projection_done = false;
     let final_targets = root.parse.target_list.clone();
     let processed_tlist = root.processed_tlist.clone();
-    let processed_target = PathTarget::from_target_list(&processed_tlist);
+    let has_target_srfs = root.parse.has_target_srfs;
     let postponed_srfs = query_has_postponed_srfs(root);
     if has_grouping {
         current_rel = make_aggregate_rel(root, current_rel, catalog);
-    } else if root.parse.project_set.is_some() {
-        if postponed_srfs {
-            if current_rel.reltarget != root.sort_input_target {
-                current_rel = make_pathtarget_projection_rel(
-                    root,
-                    current_rel,
-                    &root.sort_input_target,
-                    catalog,
-                    false,
-                );
-            }
-        } else {
-            let project_set_target = if root.query_pathkeys.is_empty() {
-                root.final_target.clone()
-            } else {
-                processed_target.clone()
-            };
-            let project_set_tlist = if root.query_pathkeys.is_empty() {
-                final_targets.as_slice()
-            } else {
-                processed_tlist.as_slice()
-            };
-            current_rel = adjust_paths_for_srfs(
-                root,
-                current_rel,
-                project_set_tlist,
-                project_set_target,
-                catalog,
-            );
-            projection_done = root.query_pathkeys.is_empty();
-        }
     }
 
     if has_windowing(root) {
@@ -708,19 +966,23 @@ pub(super) fn grouping_planner(
         }
     }
 
+    if has_target_srfs && !postponed_srfs {
+        let project_set_tlist = if root.query_pathkeys.is_empty() {
+            final_targets.as_slice()
+        } else {
+            processed_tlist.as_slice()
+        };
+        current_rel = adjust_paths_for_srfs(root, current_rel, project_set_tlist, catalog);
+        projection_done = current_rel.reltarget == root.final_target;
+    }
+
     if !root.query_pathkeys.is_empty() {
         current_rel = make_ordered_rel(root, current_rel, catalog);
     }
 
-    if root.parse.project_set.is_some() && postponed_srfs {
-        current_rel = adjust_paths_for_srfs(
-            root,
-            current_rel,
-            &final_targets,
-            root.final_target.clone(),
-            catalog,
-        );
-        projection_done = true;
+    if has_target_srfs && postponed_srfs {
+        current_rel = adjust_paths_for_srfs(root, current_rel, &final_targets, catalog);
+        projection_done = current_rel.reltarget == root.final_target;
     }
 
     if !root.parse.row_marks.is_empty() {

@@ -2700,6 +2700,15 @@ pub fn eval_expr(
             .cloned()
             .ok_or_else(|| malformed_expr_error("CASE test")),
         Expr::Func(func) => eval_func_expr(func, slot, ctx),
+        Expr::SetReturning(_) => Err(ExecError::DetailedError {
+            message: "set-returning function reached scalar expression evaluation".into(),
+            detail: Some(
+                "the planner should have lowered set-returning expressions into ProjectSet before execution"
+                    .into(),
+            ),
+            hint: None,
+            sqlstate: "XX000",
+        }),
         Expr::Aggref(_) => Err(ExecError::DetailedError {
             message: "aggregate reference reached executor outside aggregate lowering".into(),
             detail: Some("the planner should have lowered Aggref nodes to aggregate output references before execution".into()),

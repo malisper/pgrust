@@ -4,7 +4,9 @@ use crate::backend::parser::{
 use crate::include::nodes::parsenodes::{
     JoinTreeNode, Query, RangeTblEntryKind, SelectStatement, ViewCheckOption,
 };
-use crate::include::nodes::primnodes::{Expr, RelationDesc, attrno_index, is_system_attr};
+use crate::include::nodes::primnodes::{
+    Expr, RelationDesc, attrno_index, is_system_attr, set_returning_call_exprs,
+};
 
 use super::views::{load_view_return_query, load_view_return_select};
 
@@ -358,7 +360,7 @@ fn analyze_simple_view_query(
     if !query.window_clauses.is_empty() {
         return Err(unsupported(WINDOW_DETAIL));
     }
-    if query.project_set.is_some() {
+    if query.has_target_srfs {
         return Err(unsupported(PROJECT_SET_DETAIL));
     }
 
@@ -435,6 +437,9 @@ fn expr_contains_sublink(expr: &Expr) -> bool {
         Expr::Op(op) => op.args.iter().any(expr_contains_sublink),
         Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_sublink),
         Expr::Func(func) => func.args.iter().any(expr_contains_sublink),
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
+            .any(expr_contains_sublink),
         Expr::Aggref(aggref) => {
             aggref.args.iter().any(expr_contains_sublink)
                 || aggref

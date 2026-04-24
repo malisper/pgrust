@@ -2,8 +2,8 @@ use crate::include::catalog::PolicyCommand;
 use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::{
-    AggAccum, Expr, JoinType, ProjectSetTarget, QueryColumn, RelationDesc, SetReturningCall,
-    SortGroupClause, TargetEntry, ToastRelationRef, WindowClause,
+    AggAccum, Expr, JoinType, QueryColumn, RelationDesc, SetReturningCall, SortGroupClause,
+    TargetEntry, ToastRelationRef, WindowClause,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -429,7 +429,7 @@ pub struct Query {
     pub limit_offset: usize,
     pub locking_clause: Option<SelectLockingClause>,
     pub row_marks: Vec<QueryRowMark>,
-    pub project_set: Option<Vec<ProjectSetTarget>>,
+    pub has_target_srfs: bool,
     pub recursive_union: Option<Box<RecursiveUnionQuery>>,
     pub set_operation: Option<Box<SetOperationQuery>>,
 }

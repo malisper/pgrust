@@ -2120,6 +2120,9 @@ fn reject_unsupported_check_expr(expr: &Expr) -> Result<(), ParseError> {
         Expr::WindowFunc(_) => Err(ParseError::FeatureNotSupported(
             "window functions in CHECK constraints".into(),
         )),
+        Expr::SetReturning(_) => Err(ParseError::FeatureNotSupported(
+            "set-returning functions in CHECK constraints".into(),
+        )),
         Expr::SubLink(_) | Expr::SubPlan(_) => Err(ParseError::FeatureNotSupported(
             "subqueries in CHECK constraints".into(),
         )),

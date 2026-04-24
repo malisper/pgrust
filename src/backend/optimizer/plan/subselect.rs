@@ -162,6 +162,12 @@ pub(super) fn finalize_expr_subqueries(
                 .collect(),
             ..*func
         })),
+        Expr::SetReturning(srf) => Expr::SetReturning(Box::new(
+            crate::include::nodes::primnodes::SetReturningExpr {
+                call: finalize_set_returning_call(srf.call, catalog, subplans),
+                ..*srf
+            },
+        )),
         Expr::SubLink(sublink) => lower_sublink_to_subplan(*sublink, catalog, subplans),
         Expr::SubPlan(subplan) => Expr::SubPlan(Box::new(SubPlan {
             testexpr: subplan
@@ -595,6 +601,12 @@ fn rebase_expr_subplan_ids(expr: Expr, base: usize) -> Expr {
                 .collect(),
             ..*func
         })),
+        Expr::SetReturning(srf) => Expr::SetReturning(Box::new(
+            crate::include::nodes::primnodes::SetReturningExpr {
+                call: rebase_set_returning_call_subplan_ids(srf.call, base),
+                ..*srf
+            },
+        )),
         Expr::SubLink(sublink) => Expr::SubLink(Box::new(SubLink {
             testexpr: sublink
                 .testexpr
@@ -1325,11 +1337,13 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                     }
                     ProjectSetTarget::Set {
                         name,
+                        source_expr,
                         call,
                         sql_type,
                         column_index,
                     } => ProjectSetTarget::Set {
                         name,
+                        source_expr: rebase_expr_subplan_ids(source_expr, base),
                         call: rebase_set_returning_call_subplan_ids(call, base),
                         sql_type,
                         column_index,
@@ -1722,11 +1736,13 @@ pub(super) fn finalize_plan_subqueries(
                     }
                     ProjectSetTarget::Set {
                         name,
+                        source_expr,
                         call,
                         sql_type,
                         column_index,
                     } => ProjectSetTarget::Set {
                         name,
+                        source_expr: finalize_expr_subqueries(source_expr, catalog, subplans),
                         call: finalize_set_returning_call(call, catalog, subplans),
                         sql_type,
                         column_index,

@@ -23,6 +23,7 @@ use crate::include::nodes::primnodes::SetReturningCall;
 use crate::include::nodes::primnodes::{
     BoolExprType, BuiltinScalarFunction, Expr, JoinType, OpExprKind, OrderByEntry,
     ProjectSetTarget, QueryColumn, RelationDesc, ToastRelationRef, attrno_index,
+    set_returning_call_exprs,
 };
 
 use super::super::pathnodes::slot_output_target;
@@ -1669,6 +1670,9 @@ fn expr_uses_immediate_outer_columns(expr: &Expr) -> bool {
         }
         Expr::CaseTest(_) => false,
         Expr::Func(func) => func.args.iter().any(expr_uses_immediate_outer_columns),
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
+            .any(expr_uses_immediate_outer_columns),
         Expr::SubLink(sublink) => sublink
             .testexpr
             .as_deref()

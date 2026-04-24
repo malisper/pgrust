@@ -501,6 +501,9 @@ fn project_set_output_match(
             expr,
             ressortgroupref,
         ),
+        ProjectSetTarget::Set { source_expr, .. } if source_expr == expr => {
+            Some(source_expr.clone())
+        }
         ProjectSetTarget::Set { .. } => None,
     })
 }
@@ -648,7 +651,7 @@ fn project_set_output_target(targets: &[ProjectSetTarget]) -> PathTarget {
             .iter()
             .map(|target| match target {
                 ProjectSetTarget::Scalar(entry) => entry.expr.clone(),
-                ProjectSetTarget::Set { .. } => Expr::Const(Value::Null),
+                ProjectSetTarget::Set { source_expr, .. } => source_expr.clone(),
             })
             .collect(),
         targets
@@ -861,6 +864,7 @@ pub(super) fn expr_sql_type(expr: &Expr) -> SqlType {
         Expr::Func(func) => func
             .funcresulttype
             .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+        Expr::SetReturning(srf) => srf.sql_type,
         Expr::Bool(_)
         | Expr::IsNull(_)
         | Expr::IsNotNull(_)

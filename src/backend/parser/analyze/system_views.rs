@@ -6,7 +6,7 @@ use crate::backend::utils::cache::system_view_registry::{
 };
 use crate::backend::utils::trigger::format_trigger_definition;
 use crate::include::nodes::parsenodes::{JoinTreeNode, RangeTblEntryKind};
-use crate::include::nodes::primnodes::{attrno_index, is_system_attr};
+use crate::include::nodes::primnodes::{attrno_index, is_system_attr, set_returning_call_exprs};
 
 const INFO_SCHEMA_NAME: &str = "information_schema";
 const REGRESSION_DATABASE_NAME: &str = "regression";
@@ -414,7 +414,7 @@ fn describe_auto_updatable_view_shape(
         || query.limit_offset != 0
         || !query.accumulators.is_empty()
         || !query.window_clauses.is_empty()
-        || query.project_set.is_some()
+        || query.has_target_srfs
         || query.where_qual.as_ref().is_some_and(expr_contains_sublink)
     {
         return result;
@@ -563,6 +563,9 @@ fn expr_contains_sublink(expr: &Expr) -> bool {
         Expr::Op(op) => op.args.iter().any(expr_contains_sublink),
         Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_sublink),
         Expr::Func(func) => func.args.iter().any(expr_contains_sublink),
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
+            .any(expr_contains_sublink),
         Expr::Aggref(aggref) => {
             aggref.args.iter().any(expr_contains_sublink)
                 || aggref

@@ -1,7 +1,7 @@
 use super::*;
 use crate::include::nodes::primnodes::{
     ExprArraySubscript, ScalarArrayOpExpr, SubLinkType, TABLE_OID_ATTR_NO, WindowFuncKind,
-    attrno_index,
+    attrno_index, set_returning_call_exprs,
 };
 
 pub(crate) fn validate_generated_columns(
@@ -166,6 +166,9 @@ fn validate_generated_expr_inner(
         Expr::SubLink(_) | Expr::SubPlan(_) => Err(generation_error(
             "cannot use subquery in column generation expression",
         )),
+        Expr::SetReturning(_) => Err(generation_error(
+            "set-returning functions are not allowed in column generation expressions",
+        )),
         Expr::Random
         | Expr::CurrentUser
         | Expr::SessionUser
@@ -323,6 +326,9 @@ fn expr_references_column_inner(expr: &Expr, column_index: usize) -> bool {
         Expr::Func(func) => func
             .args
             .iter()
+            .any(|expr| expr_references_column_inner(expr, column_index)),
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
             .any(|expr| expr_references_column_inner(expr, column_index)),
         Expr::Cast(inner, _)
         | Expr::Collate { expr: inner, .. }

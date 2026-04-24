@@ -874,6 +874,149 @@ impl SetReturningCall {
             | SetReturningCall::PartitionAncestors { .. } => false,
         }
     }
+
+    pub fn map_exprs(self, mut map: impl FnMut(Expr) -> Expr) -> Self {
+        match self {
+            SetReturningCall::GenerateSeries {
+                func_oid,
+                func_variadic,
+                start,
+                stop,
+                step,
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::GenerateSeries {
+                func_oid,
+                func_variadic,
+                start: map(start),
+                stop: map(stop),
+                step: map(step),
+                output_columns,
+                with_ordinality,
+            },
+            SetReturningCall::PartitionTree {
+                func_oid,
+                func_variadic,
+                relid,
+                output_columns,
+            } => SetReturningCall::PartitionTree {
+                func_oid,
+                func_variadic,
+                relid: map(relid),
+                output_columns,
+            },
+            SetReturningCall::PartitionAncestors {
+                func_oid,
+                func_variadic,
+                relid,
+                output_columns,
+            } => SetReturningCall::PartitionAncestors {
+                func_oid,
+                func_variadic,
+                relid: map(relid),
+                output_columns,
+            },
+            SetReturningCall::Unnest {
+                func_oid,
+                func_variadic,
+                args,
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::Unnest {
+                func_oid,
+                func_variadic,
+                args: args.into_iter().map(map).collect(),
+                output_columns,
+                with_ordinality,
+            },
+            SetReturningCall::JsonTableFunction {
+                func_oid,
+                func_variadic,
+                kind,
+                args,
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::JsonTableFunction {
+                func_oid,
+                func_variadic,
+                kind,
+                args: args.into_iter().map(map).collect(),
+                output_columns,
+                with_ordinality,
+            },
+            SetReturningCall::JsonRecordFunction {
+                func_oid,
+                func_variadic,
+                kind,
+                args,
+                output_columns,
+                record_type,
+                with_ordinality,
+            } => SetReturningCall::JsonRecordFunction {
+                func_oid,
+                func_variadic,
+                kind,
+                args: args.into_iter().map(map).collect(),
+                output_columns,
+                record_type,
+                with_ordinality,
+            },
+            SetReturningCall::RegexTableFunction {
+                func_oid,
+                func_variadic,
+                kind,
+                args,
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::RegexTableFunction {
+                func_oid,
+                func_variadic,
+                kind,
+                args: args.into_iter().map(map).collect(),
+                output_columns,
+                with_ordinality,
+            },
+            SetReturningCall::StringTableFunction {
+                func_oid,
+                func_variadic,
+                kind,
+                args,
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::StringTableFunction {
+                func_oid,
+                func_variadic,
+                kind,
+                args: args.into_iter().map(map).collect(),
+                output_columns,
+                with_ordinality,
+            },
+            SetReturningCall::TextSearchTableFunction {
+                kind,
+                args,
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::TextSearchTableFunction {
+                kind,
+                args: args.into_iter().map(map).collect(),
+                output_columns,
+                with_ordinality,
+            },
+            SetReturningCall::UserDefined {
+                proc_oid,
+                func_variadic,
+                args,
+                output_columns,
+                with_ordinality,
+            } => SetReturningCall::UserDefined {
+                proc_oid,
+                func_variadic,
+                args: args.into_iter().map(map).collect(),
+                output_columns,
+                with_ordinality,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -881,6 +1024,7 @@ pub enum ProjectSetTarget {
     Scalar(TargetEntry),
     Set {
         name: String,
+        source_expr: Expr,
         call: SetReturningCall,
         sql_type: SqlType,
         column_index: usize,
@@ -1192,6 +1336,14 @@ impl XmlExpr {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetReturningExpr {
+    pub name: String,
+    pub call: SetReturningCall,
+    pub sql_type: SqlType,
+    pub column_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     Var(Var),
     Param(Param),
@@ -1203,6 +1355,7 @@ pub enum Expr {
     Case(Box<CaseExpr>),
     CaseTest(Box<CaseTestExpr>),
     Func(Box<FuncExpr>),
+    SetReturning(Box<SetReturningExpr>),
     SubLink(Box<SubLink>),
     SubPlan(Box<SubPlan>),
     ScalarArrayOp(Box<ScalarArrayOpExpr>),
@@ -1375,6 +1528,20 @@ impl Expr {
             funcvariadic,
             implementation,
             args,
+        }))
+    }
+
+    pub fn set_returning(
+        name: String,
+        call: SetReturningCall,
+        sql_type: SqlType,
+        column_index: usize,
+    ) -> Self {
+        Expr::SetReturning(Box::new(SetReturningExpr {
+            name,
+            call,
+            sql_type,
+            column_index,
         }))
     }
 
@@ -1571,6 +1738,7 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
         Expr::CaseTest(case_test) => Some(case_test.type_id),
         Expr::Op(op) => Some(op.opresulttype),
         Expr::Func(func) => func.funcresulttype,
+        Expr::SetReturning(srf) => Some(srf.sql_type),
         Expr::ScalarArrayOp(_) => Some(SqlType::new(SqlTypeKind::Bool)),
         Expr::Bool(_)
         | Expr::IsNull(_)
@@ -1633,6 +1801,125 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. } => None,
     }
+}
+
+pub fn set_returning_call_exprs(call: &SetReturningCall) -> Vec<&Expr> {
+    match call {
+        SetReturningCall::GenerateSeries {
+            start, stop, step, ..
+        } => vec![start, stop, step],
+        SetReturningCall::PartitionTree { relid, .. }
+        | SetReturningCall::PartitionAncestors { relid, .. } => vec![relid],
+        SetReturningCall::Unnest { args, .. }
+        | SetReturningCall::JsonTableFunction { args, .. }
+        | SetReturningCall::JsonRecordFunction { args, .. }
+        | SetReturningCall::RegexTableFunction { args, .. }
+        | SetReturningCall::StringTableFunction { args, .. }
+        | SetReturningCall::TextSearchTableFunction { args, .. }
+        | SetReturningCall::UserDefined { args, .. } => args.iter().collect(),
+    }
+}
+
+pub fn expr_contains_set_returning(expr: &Expr) -> bool {
+    match expr {
+        Expr::SetReturning(_) => true,
+        Expr::Aggref(aggref) => {
+            aggref.args.iter().any(expr_contains_set_returning)
+                || aggref
+                    .aggorder
+                    .iter()
+                    .any(|entry| expr_contains_set_returning(&entry.expr))
+                || aggref
+                    .aggfilter
+                    .as_ref()
+                    .is_some_and(expr_contains_set_returning)
+        }
+        Expr::WindowFunc(window_func) => window_func.args.iter().any(expr_contains_set_returning),
+        Expr::Op(op) => op.args.iter().any(expr_contains_set_returning),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_set_returning),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_ref()
+                .is_some_and(|arg| expr_contains_set_returning(arg))
+                || case_expr.args.iter().any(|arm| {
+                    expr_contains_set_returning(&arm.expr)
+                        || expr_contains_set_returning(&arm.result)
+                })
+                || expr_contains_set_returning(&case_expr.defresult)
+        }
+        Expr::Func(func) => func.args.iter().any(expr_contains_set_returning),
+        Expr::ScalarArrayOp(op) => {
+            expr_contains_set_returning(&op.left) || expr_contains_set_returning(&op.right)
+        }
+        Expr::Xml(xml) => xml.child_exprs().any(expr_contains_set_returning),
+        Expr::Cast(inner, _) => expr_contains_set_returning(inner),
+        Expr::Collate { expr, .. } => expr_contains_set_returning(expr),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_contains_set_returning(expr)
+                || expr_contains_set_returning(pattern)
+                || escape
+                    .as_ref()
+                    .is_some_and(|escape| expr_contains_set_returning(escape))
+        }
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => expr_contains_set_returning(inner),
+        Expr::IsDistinctFrom(left, right) | Expr::IsNotDistinctFrom(left, right) => {
+            expr_contains_set_returning(left) || expr_contains_set_returning(right)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements.iter().any(expr_contains_set_returning),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, field)| expr_contains_set_returning(field)),
+        Expr::FieldSelect { expr, .. } => expr_contains_set_returning(expr),
+        Expr::Coalesce(left, right) => {
+            expr_contains_set_returning(left) || expr_contains_set_returning(right)
+        }
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_contains_set_returning(array)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(expr_contains_set_returning)
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(expr_contains_set_returning)
+                })
+        }
+        Expr::SubLink(_)
+        | Expr::SubPlan(_)
+        | Expr::Var(_)
+        | Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+    }
+}
+
+pub fn set_returning_call_contains_set_returning(call: &SetReturningCall) -> bool {
+    set_returning_call_exprs(call)
+        .into_iter()
+        .any(expr_contains_set_returning)
 }
 
 fn value_sql_type_hint(value: &Value) -> Option<SqlType> {
