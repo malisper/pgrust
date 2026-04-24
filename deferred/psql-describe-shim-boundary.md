@@ -1,7 +1,7 @@
 ## Context
 
 `pgrust` now answers more `psql` `\d` describe queries from visible catalog
-state, but [src/backend/tcop/postgres.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/tcop/postgres.rs:528)
+state, but [src/backend/tcop/postgres.rs](/src/backend/tcop/postgres.rs:528)
 still contains a narrow describe shim for catalog-heavy query shapes.
 
 The remaining shim exists because the main SQL engine still does not natively

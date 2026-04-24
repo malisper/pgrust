@@ -4,13 +4,13 @@ This document explains how PostgreSQL's shared buffer manager works today, what 
 
 ## Covered Source Areas
 
-- [`bufmgr.c`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/backend/storage/buffer/bufmgr.c)
-- [`freelist.c`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/backend/storage/buffer/freelist.c)
-- [`buf_table.c`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/backend/storage/buffer/buf_table.c)
-- [`buf_init.c`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/backend/storage/buffer/buf_init.c)
-- [`buf_internals.h`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/include/storage/buf_internals.h)
-- [`smgr.c`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/backend/storage/smgr/smgr.c)
-- [`smgr.h`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/include/storage/smgr.h)
+- [`bufmgr.c`](../postgres/src/backend/storage/buffer/bufmgr.c)
+- [`freelist.c`](../postgres/src/backend/storage/buffer/freelist.c)
+- [`buf_table.c`](../postgres/src/backend/storage/buffer/buf_table.c)
+- [`buf_init.c`](../postgres/src/backend/storage/buffer/buf_init.c)
+- [`buf_internals.h`](../postgres/src/include/storage/buf_internals.h)
+- [`smgr.c`](../postgres/src/backend/storage/smgr/smgr.c)
+- [`smgr.h`](../postgres/src/include/storage/smgr.h)
 
 ## Purpose
 
@@ -30,7 +30,7 @@ The storage manager (`smgr`) sits below the buffer manager. It presents a relati
 
 ### BufferTag
 
-Defined in [`buf_internals.h`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/include/storage/buf_internals.h), `BufferTag` is the stable identity for a page:
+Defined in [`buf_internals.h`](../postgres/src/include/storage/buf_internals.h), `BufferTag` is the stable identity for a page:
 
 - `spcOid`
 - `dbOid`
@@ -42,7 +42,7 @@ This is the key for the shared buffer hash table.
 
 ### BufferDesc
 
-Also defined in [`buf_internals.h`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/include/storage/buf_internals.h), `BufferDesc` is the per-buffer descriptor. The important fields are:
+Also defined in [`buf_internals.h`](../postgres/src/include/storage/buf_internals.h), `BufferDesc` is the per-buffer descriptor. The important fields are:
 
 - `tag`
 - `buf_id`
@@ -98,7 +98,7 @@ The v1 Rust rewrite does not cover:
 
 ### SMgrRelation
 
-Defined in [`smgr.h`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/include/storage/smgr.h), `SMgrRelation` is the low-level relation file handle object used by `smgr`.
+Defined in [`smgr.h`](../postgres/src/include/storage/smgr.h), `SMgrRelation` is the low-level relation file handle object used by `smgr`.
 
 The important distinction is:
 

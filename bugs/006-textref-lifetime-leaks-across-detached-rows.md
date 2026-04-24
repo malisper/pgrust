@@ -28,7 +28,7 @@ table layout.
 ## Root cause
 
 `Value::TextRef` in
-[src/include/nodes/datum.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/include/nodes/datum.rs:295)
+[src/include/nodes/datum.rs](/src/include/nodes/datum.rs:295)
 does not own the underlying bytes or the buffer pin that protects them.
 
 That is safe only while the value stays inside the original heap-backed slot.
@@ -38,14 +38,14 @@ materializing borrowed text into owned `Value::Text`.
 Affected paths:
 
 - join row caches in
-  [src/backend/executor/nodes.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/executor/nodes.rs)
+  [src/backend/executor/nodes.rs](/src/backend/executor/nodes.rs)
 - sort buffered rows in the same file
 - `ProjectSet` cached input rows in the same file
 - correlated-subquery `outer_rows` in
-  [src/backend/executor/exec_expr.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/executor/exec_expr.rs)
+  [src/backend/executor/exec_expr.rs](/src/backend/executor/exec_expr.rs)
 - scalar subquery result extraction in the same file
 - select-list SRF scalar output extraction in
-  [src/backend/executor/srf.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/executor/srf.rs)
+  [src/backend/executor/srf.rs](/src/backend/executor/srf.rs)
 
 ## Fix
 

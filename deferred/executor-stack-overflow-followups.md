@@ -2,7 +2,7 @@
 
 The catalog work is in good shape, but full `cargo test --lib --quiet` is still
 blocked by unrelated executor stack overflows in
-[src/backend/executor/tests.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/executor/tests.rs:2311):
+[src/backend/executor/tests.rs](/src/backend/executor/tests.rs:2311):
 
 - `float_math_builtins_cover_common_operations`
 - `float_math_domain_errors_are_explicit`

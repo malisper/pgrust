@@ -18,8 +18,8 @@ Accept any of:
 
 If the user names only the test, default to:
 
-- SQL: `/Users/malisper/workspace/work/postgres-rewrite/postgres/src/test/regress/sql/<name>.sql`
-- expected: `/Users/malisper/workspace/work/postgres-rewrite/postgres/src/test/regress/expected/<name>.out`
+- SQL: `../postgres/src/test/regress/sql/<name>.sql`
+- expected: `../postgres/src/test/regress/expected/<name>.out`
 - actual: `/tmp/pgrust_regress/output/<name>.out`
 - diff: `/tmp/pgrust_regress/diff/<name>.diff`
 

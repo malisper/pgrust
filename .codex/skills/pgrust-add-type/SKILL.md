@@ -49,34 +49,34 @@ Do not widen scope accidentally. If the regression only needs `pg_input_is_valid
 
 Usually required for a first-class type:
 
-- [src/include/nodes/parsenodes.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/include/nodes/parsenodes.rs)
+- [src/include/nodes/parsenodes.rs](/src/include/nodes/parsenodes.rs)
   Add `SqlTypeKind`.
 
-- [src/include/nodes/datum.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/include/nodes/datum.rs)
+- [src/include/nodes/datum.rs](/src/include/nodes/datum.rs)
   Add `Value` variant and update `to_owned_value`, equality, hashing, and other exhaustive matches.
 
-- [src/include/nodes/plannodes.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/include/nodes/plannodes.rs)
+- [src/include/nodes/plannodes.rs](/src/include/nodes/plannodes.rs)
   Add `ScalarType` if the type is physically stored.
   Add builtin ids if the new type needs dedicated functions.
 
 ### 2. Parser and type names
 
-- [src/backend/parser/gram.pest](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/parser/gram.pest)
+- [src/backend/parser/gram.pest](/src/backend/parser/gram.pest)
   Add keywords or exact type-name syntax.
 
-- [src/backend/parser/gram.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/parser/gram.rs)
+- [src/backend/parser/gram.rs](/src/backend/parser/gram.rs)
   Map grammar to `SqlType`.
   Update type-name rendering helpers.
 
-- [src/backend/parser/analyze/functions.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/parser/analyze/functions.rs)
+- [src/backend/parser/analyze/functions.rs](/src/backend/parser/analyze/functions.rs)
   If function-style casts or type-name resolution need to accept the new type.
 
-- [src/backend/parser/mod.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/parser/mod.rs)
+- [src/backend/parser/mod.rs](/src/backend/parser/mod.rs)
   If standalone `parse_type_name(...)` support matters for `pg_input_*`.
 
 ### 3. Catalog and storage metadata
 
-- [src/backend/catalog/catalog.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/catalog/catalog.rs)
+- [src/backend/catalog/catalog.rs](/src/backend/catalog/catalog.rs)
   Add `SqlTypeKind -> ScalarType` mapping and storage layout metadata.
 
 Questions:
@@ -86,13 +86,13 @@ Questions:
 
 ### 4. Type inference and binder support
 
-- [src/backend/parser/analyze/infer.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/parser/analyze/infer.rs)
+- [src/backend/parser/analyze/infer.rs](/src/backend/parser/analyze/infer.rs)
   Infer the type for new literals or builtin results.
 
-- [src/backend/parser/analyze/coerce.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/parser/analyze/coerce.rs)
+- [src/backend/parser/analyze/coerce.rs](/src/backend/parser/analyze/coerce.rs)
   Add SQL-visible type names and any binder-time special-cast lowering.
 
-- [src/backend/parser/analyze/expr.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/parser/analyze/expr.rs)
+- [src/backend/parser/analyze/expr.rs](/src/backend/parser/analyze/expr.rs)
   Bind new builtins or special syntax if the type needs them.
 
 Important:
@@ -102,7 +102,7 @@ Important:
 
 ### 5. Runtime casts, input, and soft input helpers
 
-- [src/backend/executor/expr_casts.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/executor/expr_casts.rs)
+- [src/backend/executor/expr_casts.rs](/src/backend/executor/expr_casts.rs)
   This is the main place for:
   - text input parser
   - `cast_text_value`
@@ -123,21 +123,21 @@ For input semantics, decide explicitly:
 
 ### 6. Tuple encoding and storage round-trip
 
-- [src/backend/executor/value_io.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/executor/value_io.rs)
+- [src/backend/executor/value_io.rs](/src/backend/executor/value_io.rs)
   Add tuple encode/decode, assignment coercion, array element encode/decode, and text formatting helpers.
 
-- [src/backend/executor/exec_tuples.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/executor/exec_tuples.rs)
+- [src/backend/executor/exec_tuples.rs](/src/backend/executor/exec_tuples.rs)
   Add compiled tuple decoding branches.
 
-- [src/pgrust/session.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/pgrust/session.rs)
+- [src/pgrust/session.rs](/src/pgrust/session.rs)
   COPY text-path parsing often needs a new branch for stored scalar types.
 
-- [src/backend/commands/copyfrom.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/commands/copyfrom.rs)
+- [src/backend/commands/copyfrom.rs](/src/backend/commands/copyfrom.rs)
   Array text parsing may need the new element type.
 
 ### 7. Operators, ordering, equality
 
-- [src/backend/executor/expr_ops.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/executor/expr_ops.rs)
+- [src/backend/executor/expr_ops.rs](/src/backend/executor/expr_ops.rs)
   Add equality, distinctness, comparison, and ordering semantics when the type is comparable.
 
 If the type has special ordering semantics, implement them here rather than faking output.
@@ -146,16 +146,16 @@ If the type has special ordering semantics, implement them here rather than faki
 
 If the target regression uses builtins:
 
-- [src/include/nodes/plannodes.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/include/nodes/plannodes.rs)
+- [src/include/nodes/plannodes.rs](/src/include/nodes/plannodes.rs)
   Add `BuiltinScalarFunction` or aggregate ids.
 
-- [src/backend/parser/analyze/functions.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/parser/analyze/functions.rs)
+- [src/backend/parser/analyze/functions.rs](/src/backend/parser/analyze/functions.rs)
   Resolve names and validate arity.
 
-- [src/backend/parser/analyze/infer.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/parser/analyze/infer.rs)
+- [src/backend/parser/analyze/infer.rs](/src/backend/parser/analyze/infer.rs)
   Infer return type.
 
-- [src/backend/executor/exec_expr.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/executor/exec_expr.rs)
+- [src/backend/executor/exec_expr.rs](/src/backend/executor/exec_expr.rs)
   Add dispatch.
 
 - A focused executor helper module
@@ -163,10 +163,10 @@ If the target regression uses builtins:
 
 ### 9. Protocol output and error shaping
 
-- [src/backend/libpq/pqformat.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/libpq/pqformat.rs)
+- [src/backend/libpq/pqformat.rs](/src/backend/libpq/pqformat.rs)
   Add row rendering, wire type OIDs, output formatting, and error text where needed.
 
-- [src/backend/tcop/postgres.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/tcop/postgres.rs)
+- [src/backend/tcop/postgres.rs](/src/backend/tcop/postgres.rs)
   Add SQLSTATE mapping and caret-position extraction for new input errors.
 
 If output has a session-controlled format, thread it through `Session` and `FloatFormatOptions`-style render options instead of hardcoding it in one call site.
