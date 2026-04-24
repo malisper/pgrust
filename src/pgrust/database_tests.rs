@@ -1196,6 +1196,93 @@ fn session_query_rows(session: &mut Session, db: &Database, sql: &str) -> Vec<Ve
 }
 
 #[test]
+fn sql_cursor_fetch_move_close_and_cleanup() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+    session
+        .execute(&db, "create table cursor_items (id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into cursor_items values (1), (2), (3)")
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "declare c scroll cursor for select id from cursor_items order by id",
+        )
+        .unwrap();
+
+    let cursors = session.cursor_view_rows();
+    assert_eq!(cursors.len(), 1);
+    assert_eq!(cursors[0].name, "c");
+    assert!(cursors[0].is_scrollable);
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch forward 2 from c"),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]
+    );
+    assert_eq!(
+        session.execute(&db, "move forward from c").unwrap(),
+        StatementResult::AffectedRows(1)
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch prior from c"),
+        vec![vec![Value::Int32(3)]]
+    );
+
+    session.execute(&db, "close c").unwrap();
+    assert!(session.cursor_view_rows().is_empty());
+    session.execute(&db, "commit").unwrap();
+}
+
+#[test]
+fn holdable_cursor_survives_commit_but_normal_cursor_does_not() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+    session
+        .execute(&db, "create table hold_cursor_items (id int4)")
+        .unwrap();
+    session
+        .execute(&db, "insert into hold_cursor_items values (1), (2)")
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "declare hold_c cursor with hold for select id from hold_cursor_items order by id",
+        )
+        .unwrap();
+    session.execute(&db, "commit").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "fetch all from hold_c"),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]]
+    );
+    session.execute(&db, "close hold_c").unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(
+            &db,
+            "declare no_hold_c cursor for select id from hold_cursor_items order by id",
+        )
+        .unwrap();
+    session.execute(&db, "commit").unwrap();
+    let err = session
+        .execute(&db, "fetch all from no_hold_c")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::DetailedError {
+            sqlstate: "34000",
+            ..
+        })
+    ));
+}
+
+#[test]
 fn standalone_listen_and_unlisten_update_subscriptions_immediately() {
     let db = Database::open_ephemeral(32).unwrap();
 

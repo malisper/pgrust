@@ -11655,6 +11655,62 @@ fn parse_insert_alias_and_begin_isolation_level() {
 }
 
 #[test]
+fn parse_cursor_statements() {
+    match parse_statement(
+        "declare c binary insensitive scroll cursor with hold for select id from people",
+    )
+    .unwrap()
+    {
+        Statement::DeclareCursor(stmt) => {
+            assert_eq!(stmt.name, "c");
+            assert!(stmt.binary);
+            assert!(stmt.insensitive);
+            assert_eq!(stmt.scroll, CursorScrollOption::Scroll);
+            assert!(stmt.hold);
+            assert_eq!(stmt.query.targets[0].output_name, "id");
+        }
+        other => panic!("expected DECLARE CURSOR, got {:?}", other),
+    }
+
+    assert!(matches!(
+        parse_statement("fetch from c").unwrap(),
+        Statement::Fetch(FetchStatement {
+            cursor_name,
+            direction: FetchDirection::Next,
+        }) if cursor_name == "c"
+    ));
+    assert!(matches!(
+        parse_statement("fetch forward c").unwrap(),
+        Statement::Fetch(FetchStatement {
+            cursor_name,
+            direction: FetchDirection::Forward(Some(1)),
+        }) if cursor_name == "c"
+    ));
+    assert!(matches!(
+        parse_statement("fetch all c").unwrap(),
+        Statement::Fetch(FetchStatement {
+            cursor_name,
+            direction: FetchDirection::Forward(None),
+        }) if cursor_name == "c"
+    ));
+    assert!(matches!(
+        parse_statement("move backward 3 from c").unwrap(),
+        Statement::Move(FetchStatement {
+            cursor_name,
+            direction: FetchDirection::Backward(Some(3)),
+        }) if cursor_name == "c"
+    ));
+    assert!(matches!(
+        parse_statement("close all").unwrap(),
+        Statement::ClosePortal(ClosePortalStatement { name: None })
+    ));
+    assert!(matches!(
+        parse_statement("close c").unwrap(),
+        Statement::ClosePortal(ClosePortalStatement { name: Some(name) }) if name == "c"
+    ));
+}
+
+#[test]
 fn parse_dml_returning_targets() {
     assert!(matches!(
         parse_statement("insert into people (id) values (1) returning *").unwrap(),

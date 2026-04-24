@@ -1261,7 +1261,13 @@ fn run_statement(
                 }
             }
         }
-        Statement::Begin | Statement::Commit | Statement::Rollback => {
+        Statement::DeclareCursor(_)
+        | Statement::Fetch(_)
+        | Statement::Move(_)
+        | Statement::ClosePortal(_)
+        | Statement::Begin
+        | Statement::Commit
+        | Statement::Rollback => {
             Ok(StatementResult::AffectedRows(0))
         }
     };
