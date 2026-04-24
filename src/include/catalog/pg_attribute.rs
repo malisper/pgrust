@@ -59,6 +59,7 @@ pub struct PgAttributeRow {
     pub attstattarget: i16,
     pub attinhcount: i16,
     pub attislocal: bool,
+    pub attidentity: char,
     pub attgenerated: char,
     pub sql_type: SqlType,
 }
@@ -84,6 +85,11 @@ pub fn pg_attribute_desc() -> RelationDesc {
             column_desc("attstattarget", SqlType::new(SqlTypeKind::Int2), false),
             column_desc("attinhcount", SqlType::new(SqlTypeKind::Int2), false),
             column_desc("attislocal", SqlType::new(SqlTypeKind::Bool), false),
+            column_desc(
+                "attidentity",
+                SqlType::new(SqlTypeKind::InternalChar),
+                false,
+            ),
             column_desc(
                 "attgenerated",
                 SqlType::new(SqlTypeKind::InternalChar),
@@ -238,6 +244,10 @@ fn attribute_rows_for_desc(relid: u32, desc: &RelationDesc) -> Vec<PgAttributeRo
             attstattarget: column.attstattarget,
             attinhcount: column.attinhcount,
             attislocal: column.attislocal,
+            attidentity: column
+                .identity
+                .map(|kind| kind.catalog_char())
+                .unwrap_or('\0'),
             attgenerated: column
                 .generated
                 .map(|kind| kind.catalog_char())

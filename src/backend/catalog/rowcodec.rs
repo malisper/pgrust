@@ -765,8 +765,16 @@ pub(crate) fn pg_attribute_row_from_values(
         Value::Text(text) if text.is_empty() => '\0',
         other => expect_char(other, "attcompression")?,
     };
-    let attgenerated = values
+    let attidentity = values
         .get(14)
+        .map(|value| match value {
+            Value::Text(text) if text.is_empty() => Ok('\0'),
+            other => expect_char(other, "attidentity"),
+        })
+        .transpose()?
+        .unwrap_or('\0');
+    let attgenerated = values
+        .get(15)
         .map(|value| match value {
             Value::Text(text) if text.is_empty() => Ok('\0'),
             other => expect_char(other, "attgenerated"),
@@ -791,6 +799,7 @@ pub(crate) fn pg_attribute_row_from_values(
         attstattarget: expect_int16(&values[11])?,
         attinhcount: expect_int16(&values[12])?,
         attislocal: expect_bool(&values[13])?,
+        attidentity,
         attgenerated,
         sql_type: SqlType::new(SqlTypeKind::Text),
     })
@@ -1442,6 +1451,7 @@ fn pg_attribute_row_values(row: PgAttributeRow) -> Vec<Value> {
         Value::Int16(row.attstattarget),
         Value::Int16(row.attinhcount),
         Value::Bool(row.attislocal),
+        Value::InternalChar(row.attidentity as u8),
         Value::InternalChar(row.attgenerated as u8),
     ]
 }
@@ -2000,6 +2010,8 @@ fn expect_char(value: &Value, label: &'static str) -> Result<char, CatalogError>
                 "attalign" => "empty attalign",
                 "attstorage" => "empty attstorage",
                 "attcompression" => "empty attcompression",
+                "attidentity" => "empty attidentity",
+                "attgenerated" => "empty attgenerated",
                 _ => "empty char value",
             })),
         Value::InternalChar(byte) => Ok(char::from(*byte)),
@@ -2022,6 +2034,8 @@ fn expect_char(value: &Value, label: &'static str) -> Result<char, CatalogError>
             "attalign" => "expected attalign text",
             "attstorage" => "expected attstorage text",
             "attcompression" => "expected attcompression text",
+            "attidentity" => "expected attidentity text",
+            "attgenerated" => "expected attgenerated text",
             _ => "expected text char value",
         })),
     }
