@@ -44,10 +44,19 @@ fn namespace_row_by_name(
     txn_ctx: Option<(TransactionId, CommandId)>,
     name: &str,
 ) -> Option<crate::include::catalog::PgNamespaceRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .ok()?
-        .namespace_by_name(name)
-        .cloned()
+    search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::NamespaceName,
+        Value::Text(normalize_catalog_name(name).to_ascii_lowercase().into()),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Namespace(row) => Some(row),
+        _ => None,
+    })
 }
 
 fn namespace_row_by_oid(
@@ -56,10 +65,19 @@ fn namespace_row_by_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     oid: u32,
 ) -> Option<crate::include::catalog::PgNamespaceRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .ok()?
-        .namespace_by_oid(oid)
-        .cloned()
+    search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::NamespaceOid,
+        oid_key(oid),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Namespace(row) => Some(row),
+        _ => None,
+    })
 }
 
 fn class_row_by_oid(
@@ -416,11 +434,13 @@ fn opclass_row_by_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     oid: u32,
 ) -> Option<PgOpclassRow> {
-    backend_catcache(db, client_id, txn_ctx)
+    search_sys_cache1_db(db, client_id, txn_ctx, SysCacheId::OpclassOid, oid_key(oid))
         .ok()?
-        .opclass_rows()
         .into_iter()
-        .find(|row| row.oid == oid)
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Opclass(row) => Some(row),
+            _ => None,
+        })
 }
 
 fn opclass_rows_for_am(
@@ -429,15 +449,23 @@ fn opclass_rows_for_am(
     txn_ctx: Option<(TransactionId, CommandId)>,
     am_oid: u32,
 ) -> Vec<PgOpclassRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| {
-            catcache
-                .opclass_rows()
-                .into_iter()
-                .filter(|row| row.opcmethod == am_oid)
-                .collect()
-        })
-        .unwrap_or_default()
+    search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::ClaAmNameNsp,
+        oid_key(am_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Opclass(row) => Some(row),
+                _ => None,
+            })
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 pub struct LazyCatalogLookup<'a> {
@@ -478,11 +506,19 @@ pub fn access_method_row_by_name(
     txn_ctx: Option<(TransactionId, CommandId)>,
     amname: &str,
 ) -> Option<PgAmRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .ok()?
-        .am_rows()
-        .into_iter()
-        .find(|row| row.amname.eq_ignore_ascii_case(amname))
+    search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::AmName,
+        Value::Text(normalize_catalog_name(amname).to_ascii_lowercase().into()),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Am(row) => Some(row),
+        _ => None,
+    })
 }
 
 pub fn access_method_row_by_oid(
@@ -491,11 +527,13 @@ pub fn access_method_row_by_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     am_oid: u32,
 ) -> Option<PgAmRow> {
-    backend_catcache(db, client_id, txn_ctx)
+    search_sys_cache1_db(db, client_id, txn_ctx, SysCacheId::AmOid, oid_key(am_oid))
         .ok()?
-        .am_rows()
         .into_iter()
-        .find(|row| row.oid == am_oid)
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Am(row) => Some(row),
+            _ => None,
+        })
 }
 
 pub fn default_opclass_for_am_and_type(
@@ -546,11 +584,19 @@ pub fn opfamily_row_by_oid(
     txn_ctx: Option<(TransactionId, CommandId)>,
     family_oid: u32,
 ) -> Option<PgOpfamilyRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .ok()?
-        .opfamily_rows()
-        .into_iter()
-        .find(|row| row.oid == family_oid)
+    search_sys_cache1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::OpfamilyOid,
+        oid_key(family_oid),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::Opfamily(row) => Some(row),
+        _ => None,
+    })
 }
 
 pub fn collation_row_by_oid(
@@ -572,15 +618,23 @@ pub fn amop_rows_for_family(
     txn_ctx: Option<(TransactionId, CommandId)>,
     family_oid: u32,
 ) -> Vec<PgAmopRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| {
-            catcache
-                .amop_rows()
-                .into_iter()
-                .filter(|row| row.amopfamily == family_oid)
-                .collect()
-        })
-        .unwrap_or_default()
+    search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::AmopStrategy,
+        oid_key(family_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Amop(row) => Some(row),
+                _ => None,
+            })
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 pub fn amproc_rows_for_family(
@@ -589,15 +643,23 @@ pub fn amproc_rows_for_family(
     txn_ctx: Option<(TransactionId, CommandId)>,
     family_oid: u32,
 ) -> Vec<PgAmprocRow> {
-    backend_catcache(db, client_id, txn_ctx)
-        .map(|catcache| {
-            catcache
-                .amproc_rows()
-                .into_iter()
-                .filter(|row| row.amprocfamily == family_oid)
-                .collect()
-        })
-        .unwrap_or_default()
+    search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::AmprocNum,
+        oid_key(family_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Amproc(row) => Some(row),
+                _ => None,
+            })
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 pub fn index_row_by_indexrelid(
@@ -991,11 +1053,19 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
     }
 
     fn operator_by_oid(&self, oid: u32) -> Option<PgOperatorRow> {
-        backend_catcache(self.db, self.client_id, self.txn_ctx)
-            .ok()?
-            .operator_rows()
-            .into_iter()
-            .find(|row| row.oid == oid)
+        search_sys_cache1_db(
+            self.db,
+            self.client_id,
+            self.txn_ctx,
+            SysCacheId::OperOid,
+            oid_key(oid),
+        )
+        .ok()?
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::Operator(row) => Some(row),
+            _ => None,
+        })
     }
 
     fn current_user_oid(&self) -> u32 {
