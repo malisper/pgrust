@@ -11,6 +11,7 @@ use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::access::itup::IndexTuple;
 use crate::include::access::scankey::ScanKeyData;
+use crate::include::nodes::datum::Value;
 use crate::{BufferPool, ClientId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,6 +127,15 @@ pub struct GinIndexScanOpaque {
     pub scan_started: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct HashIndexScanOpaque {
+    pub scan_hash: Option<u32>,
+    pub scan_key: Option<Value>,
+    pub current_block: Option<u32>,
+    pub current_items: Vec<IndexTuple>,
+    pub next_offset: usize,
+}
+
 #[derive(Debug, Clone)]
 pub enum IndexScanOpaque {
     None,
@@ -134,6 +144,7 @@ pub enum IndexScanOpaque {
     Spgist(SpgistIndexScanOpaque),
     Brin(BrinIndexScanOpaque),
     Gin(GinIndexScanOpaque),
+    Hash(HashIndexScanOpaque),
 }
 
 #[derive(Clone)]

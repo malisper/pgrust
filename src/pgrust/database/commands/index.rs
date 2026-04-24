@@ -10,9 +10,10 @@ use crate::include::access::amapi::{
 };
 use crate::include::access::brin::BrinOptions;
 use crate::include::access::gin::GinOptions;
+use crate::include::access::hash::HashOptions;
 use crate::include::catalog::{
-    BRIN_AM_OID, GIN_AM_OID, GIST_AM_OID, GIST_RANGE_FAMILY_OID, SPGIST_AM_OID, builtin_range_rows,
-    multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+    BRIN_AM_OID, GIN_AM_OID, GIST_AM_OID, GIST_RANGE_FAMILY_OID, HASH_AM_OID, SPGIST_AM_OID,
+    builtin_range_rows, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::parsenodes::RelOption;
 use std::collections::BTreeSet;
@@ -127,6 +128,7 @@ impl Database {
             rd_indpred: None,
             brin_options: meta.brin_options.clone(),
             gin_options: meta.gin_options.clone(),
+            hash_options: meta.hash_options,
         })
     }
 
@@ -200,6 +202,34 @@ impl Database {
 
             return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
                 "GIN option \"{}\"",
+                option.name
+            ))));
+        }
+        Ok(resolved)
+    }
+
+    fn resolve_hash_options(&self, options: &[RelOption]) -> Result<HashOptions, ExecError> {
+        let mut resolved = HashOptions::default();
+        for option in options {
+            if option.name.eq_ignore_ascii_case("fillfactor") {
+                let fillfactor = option.value.parse::<u16>().map_err(|_| {
+                    ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "integer fillfactor between 10 and 100",
+                        actual: option.value.clone(),
+                    })
+                })?;
+                if !(10..=100).contains(&fillfactor) {
+                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "integer fillfactor between 10 and 100",
+                        actual: option.value.clone(),
+                    }));
+                }
+                resolved.fillfactor = fillfactor;
+                continue;
+            }
+
+            return Err(ExecError::Parse(ParseError::FeatureNotSupported(format!(
+                "hash index option \"{}\"",
                 option.name
             ))));
         }
@@ -446,21 +476,19 @@ impl Database {
             indoption.push(option);
         }
 
-        let brin_options = if access_method.oid == BRIN_AM_OID {
-            Some(self.resolve_brin_options(options)?)
-        } else {
-            if !options.is_empty() && access_method.oid != GIN_AM_OID {
-                return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "simple index definition",
-                    actual: "unsupported CREATE INDEX feature".into(),
-                }));
+        let (brin_options, gin_options, hash_options) = match access_method.oid {
+            BRIN_AM_OID => (Some(self.resolve_brin_options(options)?), None, None),
+            GIN_AM_OID => (None, Some(self.resolve_gin_options(options)?), None),
+            HASH_AM_OID => (None, None, Some(self.resolve_hash_options(options)?)),
+            _ => {
+                if !options.is_empty() {
+                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "simple index definition",
+                        actual: "unsupported CREATE INDEX feature".into(),
+                    }));
+                }
+                (None, None, None)
             }
-            None
-        };
-        let gin_options = if access_method.oid == GIN_AM_OID {
-            Some(self.resolve_gin_options(options)?)
-        } else {
-            None
         };
 
         Ok((
@@ -475,6 +503,7 @@ impl Database {
                 indisexclusion: false,
                 brin_options,
                 gin_options,
+                hash_options,
             },
         ))
     }
@@ -536,6 +565,7 @@ impl Database {
                 indisexclusion: true,
                 brin_options: None,
                 gin_options: None,
+                hash_options: None,
             },
         ))
     }

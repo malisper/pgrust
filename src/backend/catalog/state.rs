@@ -22,6 +22,7 @@ use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::backend::utils::misc::interrupts::InterruptReason;
 use crate::include::access::brin::BrinOptions;
 use crate::include::access::gin::GinOptions;
+use crate::include::access::hash::HashOptions;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE,
     DEPENDENCY_INTERNAL, PG_CONSTRAINT_RELATION_OID, PUBLIC_NAMESPACE_OID, PgAuthIdRow,
@@ -153,6 +154,7 @@ fn build_catalog_index_entry(
                 .map(str::to_string),
             brin_options: options.brin_options.clone(),
             gin_options: options.gin_options.clone(),
+            hash_options: options.hash_options,
         }),
     })
 }
@@ -175,6 +177,7 @@ pub struct CatalogIndexMeta {
     pub indpred: Option<String>,
     pub brin_options: Option<BrinOptions>,
     pub gin_options: Option<GinOptions>,
+    pub hash_options: Option<HashOptions>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -187,6 +190,7 @@ pub struct CatalogIndexBuildOptions {
     pub indisexclusion: bool,
     pub brin_options: Option<BrinOptions>,
     pub gin_options: Option<GinOptions>,
+    pub hash_options: Option<HashOptions>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1487,6 +1491,7 @@ impl Catalog {
             indisexclusion: false,
             brin_options: None,
             gin_options: None,
+            hash_options: None,
         })
     }
 
