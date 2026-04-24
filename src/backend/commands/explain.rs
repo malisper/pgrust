@@ -6,8 +6,9 @@ use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::*;
 use crate::include::nodes::plannodes::{Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
-    AggAccum, Expr, ParamKind, ProjectSetTarget, SetReturningCall, SubPlan, TargetEntry,
-    WindowClause, WindowFrameBound, WindowFuncKind, set_returning_call_exprs,
+    AggAccum, BuiltinScalarFunction, Expr, ParamKind, ProjectSetTarget, ScalarFunctionImpl,
+    SetReturningCall, SubPlan, TargetEntry, WindowClause, WindowFrameBound, WindowFuncKind,
+    set_returning_call_exprs,
 };
 use crate::include::storage::buf_internals::BufferUsageStats;
 
@@ -763,6 +764,14 @@ fn render_verbose_expr(
         Expr::Cast(inner, ty) => {
             let inner = render_verbose_expr(inner, column_names, ctx);
             format!("({inner})::{}", render_type_name(*ty))
+        }
+        Expr::Func(func)
+            if matches!(
+                func.implementation,
+                ScalarFunctionImpl::Builtin(BuiltinScalarFunction::BpcharToText)
+            ) && func.args.len() == 1 =>
+        {
+            render_verbose_expr(&func.args[0], column_names, ctx)
         }
         Expr::Op(op) => {
             let [left, right] = op.args.as_slice() else {
