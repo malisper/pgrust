@@ -932,7 +932,7 @@ pub fn serve(addr: &str, cluster: Cluster) -> io::Result<()> {
         let stream = stream?;
         let peer = stream.peer_addr().ok();
         let cluster = cluster.clone();
-        thread::spawn(move || {
+        let connection = move || {
             let client_id = NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed);
             cluster
                 .shared()
@@ -955,7 +955,14 @@ pub fn serve(addr: &str, cluster: Cluster) -> io::Result<()> {
                 .shared()
                 .pool
                 .with_storage_mut(|s| s.smgr.release_external_fd());
-        });
+        };
+        #[cfg(debug_assertions)]
+        thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(connection)
+            .map_err(|err| io::Error::other(format!("failed to spawn client thread: {err}")))?;
+        #[cfg(not(debug_assertions))]
+        thread::spawn(connection);
     }
     Ok(())
 }
