@@ -14,3 +14,21 @@ override.tf
 override.tf.json
 *_override.tf
 *_override.tf.json
+
+# Beads issue store — local-only, scrubbed from public on 2026-04-24.
+# publish-public.sh also drops it via filter-repo, but gitignore is the
+# first line of defense.
+issues.jsonl
+
+# Env files and credentials — never commit. Scripts reading these should
+# load them from $HOME or a vault, not from the repo.
+.env
+.env.*
+.aws/
+credentials
+credentials.json
+*.pem
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
