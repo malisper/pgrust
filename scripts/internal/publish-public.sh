@@ -105,11 +105,17 @@ git log -1 --oneline
 # 3. filter-repo: drop private paths, strip scripts/internal, replace strings
 # ---------------------------------------------------------------------------
 echo ">>> 3. filter-repo: drop private paths (including this folder)"
+# .github/workflows/{auto-queue-pr,merge-queue-tests}.yml are private CI
+# (Pager-Free merge queue). They reference perf-optimization as the trigger
+# branch and don't run on the public main branch — drop them so public
+# users don't see dead CI infra.
 git filter-repo --force \
   --path scripts/internal --invert-paths \
   --path issues.jsonl --invert-paths \
   --path domains --invert-paths \
-  --path docs/shipments-query-gaps.md --invert-paths
+  --path docs/shipments-query-gaps.md --invert-paths \
+  --path .github/workflows/auto-queue-pr.yml --invert-paths \
+  --path .github/workflows/merge-queue-tests.yml --invert-paths
 
 echo ">>> 4. filter-repo: string replacements (contents AND commit messages)"
 # Copy redactions into the scrubbed clone so filter-repo can find the file
