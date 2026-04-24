@@ -18,6 +18,7 @@ pub struct IndexBackedConstraintAction {
     pub columns: Vec<String>,
     pub primary: bool,
     pub nulls_not_distinct: bool,
+    pub without_overlaps: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +63,7 @@ pub struct BoundRelationConstraints {
     pub not_nulls: Vec<BoundNotNullConstraint>,
     pub checks: Vec<BoundCheckConstraint>,
     pub foreign_keys: Vec<BoundForeignKeyConstraint>,
+    pub temporal: Vec<BoundTemporalConstraint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +95,17 @@ pub struct BoundForeignKeyConstraint {
     pub referenced_index: super::BoundIndexRelation,
     pub deferrable: bool,
     pub initially_deferred: bool,
+    pub enforced: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundTemporalConstraint {
+    pub constraint_oid: u32,
+    pub constraint_name: String,
+    pub column_names: Vec<String>,
+    pub column_indexes: Vec<usize>,
+    pub period_column_index: usize,
+    pub primary: bool,
     pub enforced: bool,
 }
 
@@ -146,6 +159,7 @@ struct PendingIndexConstraint {
     columns: Vec<String>,
     primary: bool,
     nulls_not_distinct: bool,
+    without_overlaps: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -269,6 +283,7 @@ pub fn normalize_create_table_constraints(
                         columns: vec![column.name.clone()],
                         primary: true,
                         nulls_not_distinct: false,
+                        without_overlaps: None,
                     });
                 }
                 ColumnConstraint::Unique { attributes } => {
@@ -279,6 +294,7 @@ pub fn normalize_create_table_constraints(
                         columns: vec![column.name.clone()],
                         primary: false,
                         nulls_not_distinct: attributes.nulls_not_distinct,
+                        without_overlaps: None,
                     });
                 }
                 ColumnConstraint::References {
@@ -345,28 +361,57 @@ pub fn normalize_create_table_constraints(
             TableConstraint::PrimaryKey {
                 attributes,
                 columns: key_columns,
+                without_overlaps,
             } => {
                 validate_key_attributes(attributes, "PRIMARY KEY")?;
+                let resolved = resolve_index_constraint_columns(
+                    key_columns,
+                    without_overlaps.as_deref(),
+                    &columns,
+                    &column_lookup,
+                )?;
+                validate_without_overlaps_column(
+                    &resolved,
+                    without_overlaps.as_deref(),
+                    &columns,
+                    &column_lookup,
+                    catalog,
+                )?;
                 index_constraints.push(PendingIndexConstraint {
                     explicit_name: attributes.name.clone(),
                     generated_base: format!("{}_pkey", stmt.table_name),
-                    columns: resolve_constraint_columns(key_columns, &columns, &column_lookup)?,
+                    columns: resolved,
                     primary: true,
                     nulls_not_distinct: false,
+                    without_overlaps: without_overlaps.clone(),
                 });
             }
             TableConstraint::Unique {
                 attributes,
                 columns: key_columns,
+                without_overlaps,
             } => {
                 validate_key_attributes(attributes, "UNIQUE")?;
-                let resolved = resolve_constraint_columns(key_columns, &columns, &column_lookup)?;
+                let resolved = resolve_index_constraint_columns(
+                    key_columns,
+                    without_overlaps.as_deref(),
+                    &columns,
+                    &column_lookup,
+                )?;
+                validate_without_overlaps_column(
+                    &resolved,
+                    without_overlaps.as_deref(),
+                    &columns,
+                    &column_lookup,
+                    catalog,
+                )?;
                 index_constraints.push(PendingIndexConstraint {
                     explicit_name: attributes.name.clone(),
                     generated_base: format!("{}_{}_key", stmt.table_name, resolved.join("_")),
                     columns: resolved,
                     primary: false,
                     nulls_not_distinct: attributes.nulls_not_distinct,
+                    without_overlaps: without_overlaps.clone(),
                 });
             }
             TableConstraint::ForeignKey {
@@ -495,6 +540,7 @@ pub fn normalize_create_table_constraints(
             columns: constraint.columns,
             primary: constraint.primary,
             nulls_not_distinct: constraint.nulls_not_distinct,
+            without_overlaps: constraint.without_overlaps,
         })
         .collect();
 
@@ -596,6 +642,7 @@ pub fn bind_relation_constraints(
     let mut not_nulls = Vec::new();
     let mut checks = Vec::new();
     let mut foreign_keys = Vec::new();
+    let mut temporal = Vec::new();
 
     for row in rows {
         match row.contype {
@@ -632,6 +679,12 @@ pub fn bind_relation_constraints(
                     catalog,
                 )?);
             }
+            crate::include::catalog::CONSTRAINT_PRIMARY
+            | crate::include::catalog::CONSTRAINT_UNIQUE
+                if row.conperiod =>
+            {
+                temporal.push(bind_temporal_constraint(row, desc)?);
+            }
             _ => {}
         }
     }
@@ -640,6 +693,62 @@ pub fn bind_relation_constraints(
         not_nulls,
         checks,
         foreign_keys,
+        temporal,
+    })
+}
+
+pub(crate) fn bind_temporal_constraint(
+    row: PgConstraintRow,
+    desc: &RelationDesc,
+) -> Result<BoundTemporalConstraint, ParseError> {
+    let conkey = row
+        .conkey
+        .clone()
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "temporal constraint columns",
+            actual: format!("missing conkey for constraint {}", row.conname),
+        })?;
+    let mut column_names = Vec::with_capacity(conkey.len());
+    let mut column_indexes = Vec::with_capacity(conkey.len());
+    for attnum in &conkey {
+        let index = usize::try_from(*attnum)
+            .ok()
+            .and_then(|attnum| attnum.checked_sub(1))
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "positive temporal constraint attnum",
+                actual: format!("invalid attnum {attnum}"),
+            })?;
+        let column = desc
+            .columns
+            .get(index)
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "temporal constraint column",
+                actual: format!("attnum {attnum} out of range"),
+            })?;
+        if column.dropped {
+            return Err(ParseError::UnexpectedToken {
+                expected: "live temporal constraint column",
+                actual: format!("constraint {} references dropped column", row.conname),
+            });
+        }
+        column_names.push(column.name.clone());
+        column_indexes.push(index);
+    }
+    let period_column_index =
+        *column_indexes
+            .last()
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "temporal constraint period column",
+                actual: format!("constraint {} has no key columns", row.conname),
+            })?;
+    Ok(BoundTemporalConstraint {
+        constraint_oid: row.oid,
+        constraint_name: row.conname,
+        column_names,
+        column_indexes,
+        period_column_index,
+        primary: row.contype == crate::include::catalog::CONSTRAINT_PRIMARY,
+        enforced: row.conenforced,
     })
 }
 
@@ -740,6 +849,7 @@ pub fn normalize_alter_table_add_constraint(
         TableConstraint::PrimaryKey {
             attributes,
             columns,
+            without_overlaps,
         } => {
             validate_key_attributes(attributes, "PRIMARY KEY")?;
             if existing_constraints
@@ -756,21 +866,46 @@ pub fn normalize_alter_table_add_constraint(
                 format!("{table_name}_pkey"),
                 &mut used_names,
             )?;
+            let resolved = resolve_relation_index_constraint_columns(
+                columns,
+                without_overlaps.as_deref(),
+                desc,
+                &column_lookup,
+            )?;
+            validate_without_overlaps_relation_column(
+                &resolved,
+                without_overlaps.as_deref(),
+                desc,
+                &column_lookup,
+            )?;
             Ok(NormalizedAlterTableConstraint::IndexBacked(
                 IndexBackedConstraintAction {
                     constraint_name: Some(constraint_name),
-                    columns: resolve_relation_constraint_columns(columns, desc, &column_lookup)?,
+                    columns: resolved,
                     primary: true,
                     nulls_not_distinct: false,
+                    without_overlaps: without_overlaps.clone(),
                 },
             ))
         }
         TableConstraint::Unique {
             attributes,
             columns,
+            without_overlaps,
         } => {
             validate_key_attributes(attributes, "UNIQUE")?;
-            let resolved = resolve_relation_constraint_columns(columns, desc, &column_lookup)?;
+            let resolved = resolve_relation_index_constraint_columns(
+                columns,
+                without_overlaps.as_deref(),
+                desc,
+                &column_lookup,
+            )?;
+            validate_without_overlaps_relation_column(
+                &resolved,
+                without_overlaps.as_deref(),
+                desc,
+                &column_lookup,
+            )?;
             let constraint_name = assign_constraint_name(
                 attributes.name.clone(),
                 format!("{table_name}_{}_key", resolved.join("_")),
@@ -782,6 +917,7 @@ pub fn normalize_alter_table_add_constraint(
                     columns: resolved,
                     primary: false,
                     nulls_not_distinct: attributes.nulls_not_distinct,
+                    without_overlaps: without_overlaps.clone(),
                 },
             ))
         }
@@ -1621,6 +1757,110 @@ fn resolve_constraint_columns(
     Ok(resolved)
 }
 
+fn resolve_index_constraint_columns(
+    referenced: &[String],
+    without_overlaps: Option<&str>,
+    columns: &[crate::backend::parser::ColumnDef],
+    column_lookup: &BTreeMap<String, usize>,
+) -> Result<Vec<String>, ParseError> {
+    resolve_constraint_columns(referenced, columns, column_lookup).map_err(|err| {
+        match (&err, without_overlaps) {
+            (ParseError::UnknownColumn(column), Some(period_column))
+                if column.eq_ignore_ascii_case(period_column) =>
+            {
+                ParseError::MissingKeyColumn(column.clone())
+            }
+            _ => err,
+        }
+    })
+}
+
+fn validate_without_overlaps_column(
+    columns: &[String],
+    without_overlaps: Option<&str>,
+    column_defs: &[crate::backend::parser::ColumnDef],
+    column_lookup: &BTreeMap<String, usize>,
+    catalog: &dyn super::CatalogLookup,
+) -> Result<(), ParseError> {
+    let Some(period_column) = without_overlaps else {
+        return Ok(());
+    };
+    validate_without_overlaps_shape(columns, period_column)?;
+    let index = *column_lookup
+        .get(&period_column.to_ascii_lowercase())
+        .ok_or_else(|| ParseError::MissingKeyColumn(period_column.to_string()))?;
+    let sql_type = super::resolve_raw_type_name(&column_defs[index].ty, catalog)?;
+    if !sql_type.is_range() && !sql_type.is_multirange() {
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "column \"{}\" in WITHOUT OVERLAPS is not a range or multirange type",
+                column_defs[index].name
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42804",
+        });
+    }
+    Ok(())
+}
+
+fn validate_without_overlaps_relation_column(
+    columns: &[String],
+    without_overlaps: Option<&str>,
+    desc: &RelationDesc,
+    column_lookup: &BTreeMap<String, usize>,
+) -> Result<(), ParseError> {
+    let Some(period_column) = without_overlaps else {
+        return Ok(());
+    };
+    validate_without_overlaps_shape(columns, period_column)?;
+    let index = *column_lookup
+        .get(&period_column.to_ascii_lowercase())
+        .ok_or_else(|| ParseError::MissingKeyColumn(period_column.to_string()))?;
+    let column = &desc.columns[index];
+    if column.dropped {
+        return Err(ParseError::MissingKeyColumn(period_column.to_string()));
+    }
+    if !column.sql_type.is_range() && !column.sql_type.is_multirange() {
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "column \"{}\" in WITHOUT OVERLAPS is not a range or multirange type",
+                column.name
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "42804",
+        });
+    }
+    Ok(())
+}
+
+fn validate_without_overlaps_shape(
+    columns: &[String],
+    period_column: &str,
+) -> Result<(), ParseError> {
+    if columns.len() < 2 {
+        return Err(ParseError::DetailedError {
+            message: "constraint using WITHOUT OVERLAPS needs at least two columns".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
+    }
+    let Some(last) = columns.last() else {
+        return Err(ParseError::UnexpectedEof);
+    };
+    if !last.eq_ignore_ascii_case(period_column) {
+        return Err(ParseError::DetailedError {
+            message: "WITHOUT OVERLAPS column must be the last column in the constraint".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
+    }
+    Ok(())
+}
+
 fn resolve_relation_constraint_columns(
     referenced: &[String],
     desc: &RelationDesc,
@@ -1646,6 +1886,24 @@ fn resolve_relation_constraint_columns(
         resolved.push(desc_column.name.clone());
     }
     Ok(resolved)
+}
+
+fn resolve_relation_index_constraint_columns(
+    referenced: &[String],
+    without_overlaps: Option<&str>,
+    desc: &RelationDesc,
+    column_lookup: &BTreeMap<String, usize>,
+) -> Result<Vec<String>, ParseError> {
+    resolve_relation_constraint_columns(referenced, desc, column_lookup).map_err(|err| {
+        match (&err, without_overlaps) {
+            (ParseError::UnknownColumn(column), Some(period_column))
+                if column.eq_ignore_ascii_case(period_column) =>
+            {
+                ParseError::MissingKeyColumn(column.clone())
+            }
+            _ => err,
+        }
+    })
 }
 
 fn relation_column_lookup(desc: &RelationDesc) -> BTreeMap<String, usize> {

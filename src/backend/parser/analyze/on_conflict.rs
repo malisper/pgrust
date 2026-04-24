@@ -8,6 +8,7 @@ use std::collections::{BTreeSet, HashSet};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundOnConflictClause {
     pub arbiter_indexes: Vec<BoundIndexRelation>,
+    pub arbiter_temporal_constraints: Vec<BoundTemporalConstraint>,
     pub action: BoundOnConflictAction,
 }
 
@@ -28,11 +29,19 @@ pub(super) fn bind_on_conflict_clause(
     catalog: &dyn CatalogLookup,
     local_ctes: &[BoundCte],
 ) -> Result<BoundOnConflictClause, ParseError> {
-    let arbiter_indexes =
-        resolve_arbiter_indexes(clause, relation_name, relation_oid, desc, catalog)?;
+    let arbiters = resolve_arbiters(clause, relation_name, relation_oid, desc, catalog)?;
     let action = match clause.action {
         OnConflictAction::Nothing => BoundOnConflictAction::Nothing,
         OnConflictAction::Update => {
+            if !arbiters.temporal_constraints.is_empty() {
+                return Err(ParseError::DetailedError {
+                    message: "ON CONFLICT DO UPDATE not supported with exclusion constraints"
+                        .into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "0A000",
+                });
+            }
             if clause.target.is_none() {
                 return Err(ParseError::UnexpectedToken {
                     expected: "ON CONFLICT inference specification or constraint name",
@@ -113,23 +122,34 @@ pub(super) fn bind_on_conflict_clause(
         }
     };
     Ok(BoundOnConflictClause {
-        arbiter_indexes,
+        arbiter_indexes: arbiters.indexes,
+        arbiter_temporal_constraints: arbiters.temporal_constraints,
         action,
     })
 }
 
-fn resolve_arbiter_indexes(
+struct BoundOnConflictArbiters {
+    indexes: Vec<BoundIndexRelation>,
+    temporal_constraints: Vec<BoundTemporalConstraint>,
+}
+
+fn resolve_arbiters(
     clause: &OnConflictClause,
     relation_name: &str,
     relation_oid: u32,
     desc: &RelationDesc,
     catalog: &dyn CatalogLookup,
-) -> Result<Vec<BoundIndexRelation>, ParseError> {
+) -> Result<BoundOnConflictArbiters, ParseError> {
     match clause.target.as_ref() {
         None => {
             let indexes = inferable_unique_indexes(&catalog.index_relations_for_heap(relation_oid));
             reject_unsupported_arbiter_indexes(&indexes)?;
-            Ok(indexes)
+            let temporal_constraints =
+                temporal_constraints_for_relation(relation_oid, desc, catalog)?;
+            Ok(BoundOnConflictArbiters {
+                indexes,
+                temporal_constraints,
+            })
         }
         Some(OnConflictTarget::Inference(spec)) => {
             let scope = scope_for_relation(Some(relation_name), desc);
@@ -170,7 +190,10 @@ fn resolve_arbiter_indexes(
                 });
             }
             reject_unsupported_arbiter_indexes(&matches)?;
-            Ok(matches)
+            Ok(BoundOnConflictArbiters {
+                indexes: matches,
+                temporal_constraints: Vec::new(),
+            })
         }
         Some(OnConflictTarget::Constraint(name)) => {
             let row = catalog
@@ -190,6 +213,14 @@ fn resolve_arbiter_indexes(
                     actual: "constraint in ON CONFLICT clause has no associated index".into(),
                 });
             }
+            if row.conperiod {
+                return Ok(BoundOnConflictArbiters {
+                    indexes: Vec::new(),
+                    temporal_constraints: vec![super::constraints::bind_temporal_constraint(
+                        row, desc,
+                    )?],
+                });
+            }
             let index = inferable_unique_indexes(&catalog.index_relations_for_heap(relation_oid))
                 .into_iter()
                 .find(|index| index.relation_oid == row.conindid)
@@ -198,11 +229,34 @@ fn resolve_arbiter_indexes(
                     actual:
                         "there is no unique or exclusion constraint matching the ON CONFLICT specification"
                             .into(),
-                })?;
+            })?;
             reject_unsupported_arbiter_indexes(std::slice::from_ref(&index))?;
-            Ok(vec![index])
+            Ok(BoundOnConflictArbiters {
+                indexes: vec![index],
+                temporal_constraints: Vec::new(),
+            })
         }
     }
+}
+
+fn temporal_constraints_for_relation(
+    relation_oid: u32,
+    desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<BoundTemporalConstraint>, ParseError> {
+    catalog
+        .constraint_rows_for_relation(relation_oid)
+        .into_iter()
+        .filter(|row| {
+            row.conperiod
+                && matches!(
+                    row.contype,
+                    crate::include::catalog::CONSTRAINT_PRIMARY
+                        | crate::include::catalog::CONSTRAINT_UNIQUE
+                )
+        })
+        .map(|row| super::constraints::bind_temporal_constraint(row, desc))
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
