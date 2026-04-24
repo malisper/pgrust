@@ -16,9 +16,9 @@ use crate::backend::libpq::pqformat::{
     send_close_complete, send_command_complete, send_copy_in_response, send_empty_query,
     send_error, send_error_with_fields, send_error_with_hint, send_no_data, send_notice,
     send_notice_with_severity, send_notification_response, send_parameter_description,
-    send_parameter_status, send_parse_complete, send_query_result, send_ready_for_query,
-    send_row_description, send_row_description_with_formats, send_typed_data_row,
-    validate_binary_result_formats,
+    send_parameter_status, send_parse_complete, send_portal_suspended, send_query_result,
+    send_ready_for_query, send_row_description, send_row_description_with_formats,
+    send_typed_data_row, validate_binary_result_formats,
 };
 use crate::backend::parser::UngroupedColumnClause;
 use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
@@ -869,6 +869,7 @@ use crate::ClientId;
 use crate::backend::parser::parse_statement;
 use crate::pgrust::cluster::Cluster;
 use crate::pgrust::database::Database;
+use crate::pgrust::portal::{CursorOptions, PortalFetchDirection, PortalFetchLimit};
 use crate::pgrust::session::Session;
 
 const SSL_REQUEST_CODE: i32 = 80877103;
@@ -889,17 +890,10 @@ enum BoundParam {
     SqlExpression(String),
 }
 
-#[derive(Default)]
-struct BoundPortal {
-    sql: String,
-    params: Vec<BoundParam>,
-    result_formats: Vec<i16>,
-}
-
 struct ConnectionState {
     session: Session,
     prepared: HashMap<String, PreparedStatement>,
-    portals: HashMap<String, BoundPortal>,
+    portals: HashMap<String, ()>,
     copy_in: Option<CopyInState>,
 }
 
@@ -1259,6 +1253,201 @@ enum QueryStatementFlow {
     CopyInStarted,
 }
 
+fn handle_portal_statement(
+    stream: &mut impl Write,
+    db: &Database,
+    state: &mut ConnectionState,
+    sql: &str,
+    stmt: &Statement,
+) -> io::Result<Option<QueryStatementFlow>> {
+    match stmt {
+        Statement::DeclareCursor(declare_stmt) => {
+            let options = CursorOptions {
+                holdable: declare_stmt.hold,
+                binary: declare_stmt.binary,
+                scroll: matches!(
+                    declare_stmt.scroll,
+                    crate::backend::parser::CursorScrollOption::Scroll
+                ),
+                no_scroll: matches!(
+                    declare_stmt.scroll,
+                    crate::backend::parser::CursorScrollOption::NoScroll
+                ),
+                visible: true,
+            };
+            match state.session.declare_cursor(
+                db,
+                &declare_stmt.name,
+                sql.trim().trim_end_matches(';').to_string(),
+                &declare_stmt.query,
+                options,
+            ) {
+                Ok(()) => send_command_complete(stream, "DECLARE CURSOR")?,
+                Err(e) => {
+                    state.session.mark_transaction_failed();
+                    send_exec_error(stream, sql, &e)?;
+                    return Ok(Some(QueryStatementFlow::Stop));
+                }
+            }
+            Ok(Some(QueryStatementFlow::Continue))
+        }
+        Statement::Fetch(fetch_stmt) | Statement::Move(fetch_stmt) => {
+            let move_only = matches!(stmt, Statement::Move(_));
+            match state.session.fetch_cursor(
+                &fetch_stmt.cursor_name,
+                protocol_direction_from_fetch(&fetch_stmt.direction),
+                move_only,
+            ) {
+                Ok(mut result) => {
+                    if move_only {
+                        send_command_complete(stream, &format!("MOVE {}", result.processed))?;
+                    } else {
+                        let catalog = state.session.catalog_lookup(db);
+                        annotate_query_columns_with_wire_type_oids(&mut result.columns, &catalog);
+                        send_query_result(
+                            stream,
+                            &result.columns,
+                            &result.rows,
+                            &format!("FETCH {}", result.processed),
+                            FloatFormatOptions {
+                                extra_float_digits: state.session.extra_float_digits(),
+                                bytea_output: state.session.bytea_output(),
+                                datetime_config: state.session.datetime_config().clone(),
+                            },
+                            None,
+                            None,
+                            None,
+                            None,
+                        )?;
+                    }
+                }
+                Err(e) => {
+                    state.session.mark_transaction_failed();
+                    send_exec_error(stream, sql, &e)?;
+                    return Ok(Some(QueryStatementFlow::Stop));
+                }
+            }
+            Ok(Some(QueryStatementFlow::Continue))
+        }
+        Statement::ClosePortal(close_stmt) => {
+            let result = if let Some(name) = &close_stmt.name {
+                state.session.close_portal(name)
+            } else {
+                state.session.close_all_cursors();
+                Ok(())
+            };
+            match result {
+                Ok(()) => send_command_complete(stream, "CLOSE CURSOR")?,
+                Err(e) => {
+                    state.session.mark_transaction_failed();
+                    send_exec_error(stream, sql, &e)?;
+                    return Ok(Some(QueryStatementFlow::Stop));
+                }
+            }
+            Ok(Some(QueryStatementFlow::Continue))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn protocol_direction_from_fetch(
+    direction: &crate::backend::parser::FetchDirection,
+) -> PortalFetchDirection {
+    use crate::backend::parser::FetchDirection;
+    match direction {
+        FetchDirection::Next => PortalFetchDirection::Next,
+        FetchDirection::Prior => PortalFetchDirection::Prior,
+        FetchDirection::First => PortalFetchDirection::First,
+        FetchDirection::Last => PortalFetchDirection::Last,
+        FetchDirection::Absolute(value) => PortalFetchDirection::Absolute(*value),
+        FetchDirection::Relative(value) => PortalFetchDirection::Relative(*value),
+        FetchDirection::Forward(count) => {
+            PortalFetchDirection::Forward(fetch_limit_from_i64(*count))
+        }
+        FetchDirection::Backward(count) => {
+            PortalFetchDirection::Backward(fetch_limit_from_i64(*count))
+        }
+    }
+}
+
+fn fetch_limit_from_i64(count: Option<i64>) -> PortalFetchLimit {
+    match count {
+        None => PortalFetchLimit::All,
+        Some(value) if value <= 0 => PortalFetchLimit::Count(0),
+        Some(value) => PortalFetchLimit::Count(value as usize),
+    }
+}
+
+fn try_handle_pg_cursors_query(
+    stream: &mut impl Write,
+    state: &ConnectionState,
+    sql: &str,
+) -> io::Result<bool> {
+    let normalized = sql.to_ascii_lowercase();
+    if !normalized.contains("from pg_cursors") && !normalized.contains("from pg_catalog.pg_cursors")
+    {
+        return Ok(false);
+    }
+    let name_only = normalized.trim_start().starts_with("select name ");
+    let columns = if name_only {
+        vec![QueryColumn::text("name")]
+    } else {
+        vec![
+            QueryColumn::text("name"),
+            QueryColumn::text("statement"),
+            QueryColumn {
+                name: "is_holdable".into(),
+                sql_type: SqlType::new(SqlTypeKind::Bool),
+                wire_type_oid: None,
+            },
+            QueryColumn {
+                name: "is_binary".into(),
+                sql_type: SqlType::new(SqlTypeKind::Bool),
+                wire_type_oid: None,
+            },
+            QueryColumn {
+                name: "is_scrollable".into(),
+                sql_type: SqlType::new(SqlTypeKind::Bool),
+                wire_type_oid: None,
+            },
+        ]
+    };
+    let rows = state
+        .session
+        .cursor_view_rows()
+        .into_iter()
+        .map(|row| {
+            if name_only {
+                vec![Value::Text(row.name.into())]
+            } else {
+                vec![
+                    Value::Text(row.name.into()),
+                    Value::Text(row.statement.into()),
+                    Value::Bool(row.is_holdable),
+                    Value::Bool(row.is_binary),
+                    Value::Bool(row.is_scrollable),
+                ]
+            }
+        })
+        .collect::<Vec<_>>();
+    send_query_result(
+        stream,
+        &columns,
+        &rows,
+        &format!("SELECT {}", rows.len()),
+        FloatFormatOptions {
+            extra_float_digits: state.session.extra_float_digits(),
+            bytea_output: state.session.bytea_output(),
+            datetime_config: state.session.datetime_config().clone(),
+        },
+        None,
+        None,
+        None,
+        None,
+    )?;
+    Ok(true)
+}
+
 fn execute_query_statement(
     stream: &mut impl Write,
     db: &Database,
@@ -1306,6 +1495,14 @@ fn execute_query_statement(
         )
         .map_err(|e| io::Error::other(format!("{e:?}")))
     };
+    if let Ok(stmt) = parsed.as_ref()
+        && let Some(flow) = handle_portal_statement(stream, db, state, sql.as_ref(), stmt)?
+    {
+        return Ok(flow);
+    }
+    if try_handle_pg_cursors_query(stream, state, sql.as_ref())? {
+        return Ok(QueryStatementFlow::Continue);
+    }
     if let Ok(Statement::Select(ref select_stmt)) = parsed
         && !raw_select_contains_pg_notify(select_stmt)
     {
@@ -3563,9 +3760,22 @@ fn handle_bind(
             None,
             None,
         )?;
+        state.session.mark_transaction_failed();
         return Ok(());
     }
     let nparams = read_i16_bytes(body, &mut offset)? as usize;
+    if !(param_formats.is_empty() || param_formats.len() == 1 || param_formats.len() == nparams) {
+        send_error(
+            stream,
+            "08P01",
+            "bind message has invalid parameter format code count",
+            None,
+            None,
+            None,
+        )?;
+        state.session.mark_transaction_failed();
+        return Ok(());
+    }
     let mut raw_params = Vec::with_capacity(nparams);
     for _ in 0..nparams {
         let len = read_i32_bytes(body, &mut offset)?;
@@ -3592,6 +3802,7 @@ fn handle_bind(
             None,
             None,
         )?;
+        state.session.mark_transaction_failed();
         return Ok(());
     }
 
@@ -3604,8 +3815,29 @@ fn handle_bind(
             None,
             None,
         )?;
+        state.session.mark_transaction_failed();
         return Ok(());
     };
+    let required_params = required_bind_param_count(stmt);
+    if nparams != required_params {
+        let name = if statement_name.is_empty() {
+            "<unnamed>"
+        } else {
+            &statement_name
+        };
+        send_error(
+            stream,
+            "08P01",
+            &format!(
+                "bind message supplies {nparams} parameters, but prepared statement \"{name}\" requires {required_params}"
+            ),
+            None,
+            None,
+            None,
+        )?;
+        state.session.mark_transaction_failed();
+        return Ok(());
+    }
     let catalog = state.session.catalog_lookup(db);
     let mut params = Vec::with_capacity(nparams);
     for (index, raw) in raw_params.iter().enumerate() {
@@ -3628,19 +3860,56 @@ fn handle_bind(
                     hint.as_deref(),
                     None,
                 )?;
+                state.session.mark_transaction_failed();
                 return Ok(());
             }
         }
     }
-    state.portals.insert(
-        portal_name,
-        BoundPortal {
-            sql: stmt.sql.clone(),
-            params,
-            result_formats,
-        },
-    );
-    send_bind_complete(stream)
+    let sql = substitute_params(&stmt.sql, &params, &catalog);
+    let prep_stmt_name = (!statement_name.is_empty()).then_some(statement_name);
+    match state.session.bind_protocol_portal(
+        db,
+        &portal_name,
+        prep_stmt_name,
+        &sql,
+        result_formats.clone(),
+    ) {
+        Ok(()) => {
+            if let Some(cols) = state.session.portal_columns(&portal_name)
+                && result_formats.len() > 1
+                && result_formats.len() != cols.len()
+            {
+                send_error(
+                    stream,
+                    "08P01",
+                    &format!(
+                        "bind message has {} result formats but query has {} columns",
+                        result_formats.len(),
+                        cols.len()
+                    ),
+                    None,
+                    None,
+                    None,
+                )?;
+                state.session.close_portal(&portal_name).ok();
+                state.session.mark_transaction_failed();
+                return Ok(());
+            }
+            send_bind_complete(stream)
+        }
+        Err(e) => {
+            let message = format_exec_error(&e);
+            let hint = format_exec_error_hint(&e);
+            state.session.mark_transaction_failed();
+            send_error_with_hint(
+                stream,
+                exec_error_sqlstate(&e),
+                &message,
+                hint.as_deref(),
+                None,
+            )
+        }
+    }
 }
 
 fn handle_describe(
@@ -3672,16 +3941,15 @@ fn handle_describe(
             }
             None => send_no_data(stream),
         },
-        b'P' => match state
-            .portals
-            .get(&name)
-            .and_then(|portal| describe_sql(db, &state.session, &portal.sql, &portal.params))
-        {
+        b'P' => match state.session.portal_columns(&name) {
             Some(cols) => {
-                let portal = state.portals.get(&name).expect("portal still exists");
-                send_row_description_with_formats(stream, &cols, &portal.result_formats)
+                let formats = state
+                    .session
+                    .portal_result_formats(&name)
+                    .unwrap_or_default();
+                send_row_description_with_formats(stream, &cols, &formats)
             }
-            None => send_no_data(stream),
+            None => send_error(stream, "34000", "portal does not exist", None, None, None),
         },
         _ => send_no_data(stream),
     }
@@ -3695,12 +3963,86 @@ fn handle_execute(
 ) -> io::Result<()> {
     let mut offset = 0;
     let portal_name = read_cstr(body, &mut offset)?;
-    let _max_rows = read_i32_bytes(body, &mut offset)?;
-    let Some(portal) = state.portals.get(&portal_name) else {
-        send_error(stream, "26000", "unknown portal", None, None, None)?;
-        return Ok(());
+    let max_rows = read_i32_bytes(body, &mut offset)?;
+    let limit = if max_rows <= 0 {
+        PortalFetchLimit::All
+    } else {
+        PortalFetchLimit::Count(max_rows as usize)
     };
-    execute_portal(stream, db, &mut state.session, portal)
+    match state
+        .session
+        .execute_portal_forward(db, &portal_name, limit)
+    {
+        Ok(mut result) => {
+            let catalog = state.session.catalog_lookup(db);
+            annotate_query_columns_with_wire_type_oids(&mut result.columns, &catalog);
+            if !result.columns.is_empty() {
+                let formats = state
+                    .session
+                    .portal_result_formats(&portal_name)
+                    .unwrap_or_default();
+                if let Err(e) =
+                    validate_binary_result_formats(&result.rows, &result.columns, &formats)
+                {
+                    let message = format_exec_error(&e);
+                    let hint = format_exec_error_hint(&e);
+                    send_error_with_hint(
+                        stream,
+                        exec_error_sqlstate(&e),
+                        &message,
+                        hint.as_deref(),
+                        None,
+                    )?;
+                    return Ok(());
+                }
+                let role_names = role_name_map(&catalog);
+                let relation_names = relation_name_map(&catalog);
+                let proc_names = proc_name_map(&catalog);
+                let namespace_names = namespace_name_map(&catalog);
+                let mut row_buf = Vec::new();
+                for row in &result.rows {
+                    send_typed_data_row(
+                        stream,
+                        row,
+                        &result.columns,
+                        &formats,
+                        &mut row_buf,
+                        FloatFormatOptions {
+                            extra_float_digits: state.session.extra_float_digits(),
+                            bytea_output: state.session.bytea_output(),
+                            datetime_config: state.session.datetime_config().clone(),
+                        },
+                        Some(&role_names),
+                        Some(&relation_names),
+                        Some(&proc_names),
+                        Some(&namespace_names),
+                    )?;
+                }
+                if result.completed {
+                    send_command_complete(stream, &format!("SELECT {}", result.processed))
+                } else {
+                    send_portal_suspended(stream)
+                }
+            } else {
+                let tag = result
+                    .command_tag
+                    .unwrap_or_else(|| format!("SELECT {}", result.processed));
+                send_command_complete(stream, &tag)
+            }
+        }
+        Err(e) => {
+            let message = format_exec_error(&e);
+            let hint = format_exec_error_hint(&e);
+            state.session.mark_transaction_failed();
+            send_error_with_hint(
+                stream,
+                exec_error_sqlstate(&e),
+                &message,
+                hint.as_deref(),
+                None,
+            )
+        }
+    }
 }
 
 fn handle_close(
@@ -3720,91 +4062,11 @@ fn handle_close(
             state.prepared.remove(&name);
         }
         b'P' => {
-            state.portals.remove(&name);
+            let _ = state.session.close_portal(&name);
         }
         _ => {}
     }
     send_close_complete(stream)
-}
-
-fn execute_portal(
-    stream: &mut impl Write,
-    db: &Database,
-    session: &mut Session,
-    portal: &BoundPortal,
-) -> io::Result<()> {
-    let mut row_buf = Vec::new();
-    let _activity_guard = SessionActivityGuard::new(db, session.client_id, &portal.sql);
-    if try_handle_float_shell_ddl(stream, &portal.sql)? {
-        return Ok(());
-    }
-    let catalog = session.catalog_lookup(db);
-    let sql = rewrite_regression_sql(&substitute_params(&portal.sql, &portal.params, &catalog))
-        .into_owned();
-    clear_backend_notices();
-    clear_notices();
-    match session.execute(db, &sql) {
-        Ok(StatementResult::Query {
-            rows, mut columns, ..
-        }) => {
-            annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
-            let role_names = role_name_map(&catalog);
-            let relation_names = relation_name_map(&catalog);
-            let proc_names = proc_name_map(&catalog);
-            let namespace_names = namespace_name_map(&catalog);
-            if let Err(e) = validate_binary_result_formats(&rows, &columns, &portal.result_formats)
-            {
-                send_queued_notices(stream)?;
-                let message = format_exec_error(&e);
-                let hint = format_exec_error_hint(&e);
-                send_error_with_hint(
-                    stream,
-                    exec_error_sqlstate(&e),
-                    &message,
-                    hint.as_deref(),
-                    None,
-                )?;
-                return Ok(());
-            }
-            flush_pending_backend_messages(stream, db, session)?;
-            for row in &rows {
-                send_typed_data_row(
-                    stream,
-                    row,
-                    &columns,
-                    &portal.result_formats,
-                    &mut row_buf,
-                    FloatFormatOptions {
-                        extra_float_digits: session.extra_float_digits(),
-                        bytea_output: session.bytea_output(),
-                        datetime_config: session.datetime_config().clone(),
-                    },
-                    Some(&role_names),
-                    Some(&relation_names),
-                    Some(&proc_names),
-                    Some(&namespace_names),
-                )?;
-            }
-            send_command_complete(stream, &format!("SELECT {}", rows.len()))?;
-        }
-        Ok(StatementResult::AffectedRows(n)) => {
-            flush_pending_backend_messages(stream, db, session)?;
-            send_command_complete(stream, &infer_command_tag(&sql, n))?;
-        }
-        Err(e) => {
-            send_queued_notices(stream)?;
-            let message = format_exec_error(&e);
-            let hint = format_exec_error_hint(&e);
-            send_error_with_hint(
-                stream,
-                exec_error_sqlstate(&e),
-                &message,
-                hint.as_deref(),
-                exec_error_position(&sql, &e),
-            )?;
-        }
-    }
-    Ok(())
 }
 
 fn send_plpgsql_notices(stream: &mut impl Write, notices: &[PlpgsqlNotice]) -> io::Result<()> {
@@ -4394,6 +4656,38 @@ fn parameter_format_code(format_codes: &[i16], index: usize) -> i16 {
         [single] => *single,
         many => many.get(index).copied().unwrap_or(0),
     }
+}
+
+fn required_bind_param_count(stmt: &PreparedStatement) -> usize {
+    stmt.param_type_oids
+        .len()
+        .max(highest_sql_parameter_ref(&stmt.sql))
+}
+
+fn highest_sql_parameter_ref(sql: &str) -> usize {
+    let bytes = sql.as_bytes();
+    let mut highest = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] != b'$' {
+            index += 1;
+            continue;
+        }
+        let start = index + 1;
+        let mut end = start;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        if end > start {
+            if let Ok(param) = sql[start..end].parse::<usize>() {
+                highest = highest.max(param);
+            }
+            index = end;
+        } else {
+            index += 1;
+        }
+    }
+    highest
 }
 
 fn feature_not_supported_error(feature: impl Into<String>) -> ExecError {
@@ -5983,6 +6277,26 @@ mod tests {
                 "select relkind from pg_catalog.pg_class where oid={}",
                 entry.relation_oid
             )
+        );
+    }
+
+    #[test]
+    fn bind_param_count_uses_highest_sql_parameter_ref() {
+        assert_eq!(highest_sql_parameter_ref("select 1"), 0);
+        assert_eq!(highest_sql_parameter_ref("select $2, $10, $1"), 10);
+        assert_eq!(
+            required_bind_param_count(&PreparedStatement {
+                sql: "select $2".into(),
+                param_type_oids: vec![],
+            }),
+            2
+        );
+        assert_eq!(
+            required_bind_param_count(&PreparedStatement {
+                sql: "select 1".into(),
+                param_type_oids: vec![23, 25],
+            }),
+            2
         );
     }
 

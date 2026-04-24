@@ -159,6 +159,13 @@ fn execute_statement_with_source(
             }
             Ok(StatementResult::AffectedRows(0))
         }
+        Statement::DeclareCursor(_)
+        | Statement::Fetch(_)
+        | Statement::Move(_)
+        | Statement::ClosePortal(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "portal command handled by session layer",
+            actual: "portal command".into(),
+        })),
         Statement::Show(_)
         | Statement::Checkpoint(_)
         | Statement::Set(_)
