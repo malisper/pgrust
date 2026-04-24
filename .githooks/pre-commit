@@ -1,16 +1,96 @@
-#!/bin/sh
-# Versioned project pre-commit hook. Activated automatically the first
-# time you run any cargo command in this clone (see build.rs at the repo
-# root, which sets core.hooksPath to .githooks).
+#!/usr/bin/env bash
+# Versioned project pre-commit hook. Activated by: bash scripts/setup-dev.sh
 #
-# To bypass once: git commit --no-verify
-# To fix a rejection: run `cargo fmt`, re-stage, re-commit.
+# Checks:
+#   1. cargo fmt -- --check
+#   2. Redactions check (via scripts/internal/redactions.txt):
+#      - Staged content must not introduce any redacted pattern.
+#      - Staged new-file paths must not match dropped paths.
+#      Warn-only until $WARN_UNTIL below, blocks after.
+#
+# To bypass once: git commit --no-verify  (prefer fixing the underlying issue)
+# To fix a formatting rejection: run `cargo fmt`, re-stage, re-commit.
 
-set -eu
+set -euo pipefail
 
+# ---------- 1. rustfmt ----------
 if ! cargo fmt -- --check; then
     echo
     echo "ERROR: pre-commit: rustfmt found unformatted files." >&2
     echo "Run 'cargo fmt' and stage the changes before committing." >&2
     exit 1
 fi
+
+# ---------- 2. redactions ----------
+REDACTIONS="scripts/internal/redactions.txt"
+if [[ ! -f "$REDACTIONS" ]]; then
+    # File absent — nothing to check.
+    exit 0
+fi
+
+# Warn-only until this date, then block. Enforces the 7-day tuning window
+# decided when this hook landed (2026-04-24).
+WARN_UNTIL="2026-05-01"
+TODAY="$(date -u +%Y-%m-%d)"
+if [[ "$TODAY" < "$WARN_UNTIL" ]]; then
+    MODE="warn"
+else
+    MODE="block"
+fi
+
+# Dropped-path prefixes: new files under these paths are rejected because
+# publish-public.sh drops them from public history. (scripts/internal/ is
+# also dropped but intentionally stays in private, so it's not in this list.)
+DROP_PATHS=("issues.jsonl" "domains/" "docs/shipments-query-gaps.md")
+
+# Staged additions: only the + lines of the content diff. Exclude
+# scripts/internal/ (dropped from every publish) and .githooks/ (this file
+# references drop paths literally, which would trigger the check on itself).
+STAGED_ADDITIONS="$(git diff --cached --unified=0 --no-color -- ':(exclude)scripts/internal' ':(exclude).githooks' 2>/dev/null | grep -E '^\+[^+]' || true)"
+STAGED_ADDED_FILES="$(git diff --cached --name-only --diff-filter=A -- ':(exclude)scripts/internal' ':(exclude).githooks' 2>/dev/null || true)"
+
+hits=()
+
+# Content patterns from redactions.txt (LHS of `==>`).
+while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    [[ "${line:0:1}" == "#" ]] && continue
+    pattern="${line%%==>*}"
+    [[ -z "$pattern" ]] && continue
+    if [[ -n "$STAGED_ADDITIONS" ]] && printf '%s\n' "$STAGED_ADDITIONS" | grep -qF -- "$pattern"; then
+        hits+=("content: $pattern")
+    fi
+done < "$REDACTIONS"
+
+# New files under dropped paths.
+if [[ -n "$STAGED_ADDED_FILES" ]]; then
+    for drop in "${DROP_PATHS[@]}"; do
+        prefix="${drop%/}"
+        if printf '%s\n' "$STAGED_ADDED_FILES" | grep -qE "^${prefix}(\$|/)"; then
+            hits+=("new file at dropped path: $drop")
+        fi
+    done
+fi
+
+if [[ ${#hits[@]} -gt 0 ]]; then
+    echo >&2
+    echo "pre-commit: redactions check found ${#hits[@]} hit(s):" >&2
+    for h in "${hits[@]}"; do
+        echo "  - $h" >&2
+    done
+    echo >&2
+    echo "These patterns are rewritten or dropped by scripts/internal/publish-public.sh." >&2
+    echo "Landing them on perf-optimization means the next --republish rewrites" >&2
+    echo "old SHAs (force-push) instead of fast-forwarding public main." >&2
+    echo >&2
+    if [[ "$MODE" == "warn" ]]; then
+        echo "MODE: WARN-ONLY — commit allowed. Switches to BLOCK on $WARN_UNTIL." >&2
+        echo "Fix now if you can; or bypass with: git commit --no-verify" >&2
+    else
+        echo "MODE: BLOCK (since $WARN_UNTIL)." >&2
+        echo "Fix the staged content or bypass with: git commit --no-verify" >&2
+        exit 1
+    fi
+fi
+
+exit 0
