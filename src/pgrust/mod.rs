@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod autovacuum;
 pub mod cluster;
 pub mod compact_string;
 pub mod database;

@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use parking_lot::RwLock;
 
@@ -169,6 +170,35 @@ impl DatabaseStatsStore {
 
     pub(crate) fn remove_function(&mut self, oid: u32) {
         self.functions.remove(&oid);
+    }
+
+    pub(crate) fn report_relation_vacuum(
+        &mut self,
+        oid: u32,
+        auto: bool,
+        elapsed: Duration,
+        removed_dead_tuples: i64,
+        remaining_dead_tuples: i64,
+    ) {
+        self.relations.entry(oid).or_default().report_vacuum(
+            auto,
+            elapsed,
+            removed_dead_tuples,
+            remaining_dead_tuples,
+        );
+    }
+
+    pub(crate) fn report_relation_analyze(
+        &mut self,
+        oid: u32,
+        auto: bool,
+        elapsed: Duration,
+        reltuples: f64,
+    ) {
+        self.relations
+            .entry(oid)
+            .or_default()
+            .report_analyze(auto, elapsed, reltuples);
     }
 }
 

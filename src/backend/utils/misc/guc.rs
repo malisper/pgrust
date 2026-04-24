@@ -38,6 +38,6 @@ mod tests {
 
     #[test]
     fn loads_checked_in_postgres_guc_list() {
-        assert_eq!(postgres_gucs().len(), 402);
+        assert_eq!(postgres_gucs().len(), 403);
     }
 }
