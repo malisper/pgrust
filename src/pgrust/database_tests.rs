@@ -24528,6 +24528,40 @@ fn plpgsql_dynamic_execute_query_for_loop_supports_using() {
 }
 
 #[test]
+fn plpgsql_dynamic_execute_statement_supports_into_and_using() {
+    let dir = temp_dir("plpgsql_dynamic_execute_into_using");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function dynamic_execute_value(x int4) returns int4 language plpgsql as $$ declare v int4; begin execute 'select $1 + 2' into v using x; return v; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select dynamic_execute_value(5)"),
+        vec![vec![Value::Int32(7)]]
+    );
+}
+
+#[test]
+fn plpgsql_exception_block_handles_named_condition() {
+    let dir = temp_dir("plpgsql_exception_named_condition");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function catch_assert() returns text language plpgsql as $$ begin assert false, 'bad'; return 'missed'; exception when assert_failure then return 'handled'; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select catch_assert()"),
+        vec![vec![Value::Text("handled".into())]]
+    );
+}
+
+#[test]
 fn plpgsql_query_for_loop_sets_found_false_when_empty() {
     let dir = temp_dir("plpgsql_query_loop_found_false");
     let db = Database::open(&dir, 64).unwrap();
