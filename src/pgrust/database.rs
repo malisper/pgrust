@@ -89,6 +89,7 @@ use crate::include::catalog::{
     PgRangeRow, PgTypeRow, RangeCanonicalization, system_catalog_indexes,
 };
 use crate::pgrust::auth::{AuthCatalog, AuthState};
+pub use crate::pgrust::autovacuum::AutovacuumConfig;
 use crate::pgrust::cluster::{Cluster, ClusterShared, SessionActivityEntry, SessionActivityState};
 use crate::pl::plpgsql::execute_do;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
@@ -149,25 +150,37 @@ pub(crate) use foreign_keys::{
     validate_deferred_foreign_key_constraints,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DatabaseOpenOptions {
     pub pool_size: usize,
     pub durable_shutdown: bool,
+    pub autovacuum: AutovacuumConfig,
 }
 
 impl DatabaseOpenOptions {
-    pub const fn new(pool_size: usize) -> Self {
+    pub fn new(pool_size: usize) -> Self {
         Self {
             pool_size,
             durable_shutdown: true,
+            autovacuum: if cfg!(test) {
+                AutovacuumConfig::test_default()
+            } else {
+                AutovacuumConfig::production_default()
+            },
         }
     }
 
-    pub const fn for_tests(pool_size: usize) -> Self {
+    pub fn for_tests(pool_size: usize) -> Self {
         Self {
             pool_size,
             durable_shutdown: false,
+            autovacuum: AutovacuumConfig::test_default(),
         }
+    }
+
+    pub fn with_autovacuum_config(mut self, autovacuum: AutovacuumConfig) -> Self {
+        self.autovacuum = autovacuum;
+        self
     }
 }
 
@@ -177,6 +190,7 @@ pub struct Database {
     pub database_oid: u32,
     pub pool: Arc<BufferPool<SmgrStorageBackend>>,
     pub wal: Option<Arc<WalWriter>>,
+    pub autovacuum_config: AutovacuumConfig,
     pub checkpoint_config: Arc<CheckpointConfig>,
     pub checkpoint_stats: Arc<RwLock<CheckpointStatsSnapshot>>,
     pub checkpoint_commit_barrier: Arc<CheckpointCommitBarrier>,
@@ -998,6 +1012,10 @@ impl Database {
 
     pub(crate) fn checkpoint_config_value(&self, name: &str) -> Option<String> {
         self.checkpoint_config.value_for_show(name)
+    }
+
+    pub(crate) fn autovacuum_config_value(&self, name: &str) -> Option<String> {
+        self.autovacuum_config.value_for_show(name)
     }
 
     pub(crate) fn checkpoint_stats_snapshot(&self) -> CheckpointStatsSnapshot {

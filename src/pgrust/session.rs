@@ -37,6 +37,7 @@ use crate::backend::utils::misc::interrupts::{InterruptState, StatementInterrupt
 use crate::include::catalog::PG_CHECKPOINT_OID;
 use crate::include::nodes::execnodes::ScalarType;
 use crate::pgrust::auth::AuthState;
+use crate::pgrust::autovacuum::is_autovacuum_guc;
 use crate::pgrust::database::{
     AsyncListenAction, AsyncListenOp, Database, PendingNotification, SequenceMutationEffect,
     SessionStatsState, StatsFetchConsistency, TempMutationEffect, TrackFunctionsSetting,
@@ -3680,6 +3681,7 @@ impl Session {
                     xid,
                     cid,
                     search_path.as_deref(),
+                    false,
                     &mut txn.catalog_effects,
                 )
             }
@@ -4256,7 +4258,7 @@ impl Session {
                 name,
             )));
         }
-        if is_checkpoint_guc(&name) {
+        if is_checkpoint_guc(&name) || is_autovacuum_guc(&name) {
             return Err(ExecError::Parse(ParseError::CantChangeRuntimeParam(name)));
         }
         self.apply_guc_value(&stmt.name, &stmt.value)?;
@@ -4282,7 +4284,7 @@ impl Session {
                     normalized,
                 )));
             }
-            if is_checkpoint_guc(&normalized) {
+            if is_checkpoint_guc(&normalized) || is_autovacuum_guc(&normalized) {
                 return Err(ExecError::Parse(ParseError::CantChangeRuntimeParam(
                     normalized,
                 )));
@@ -4380,6 +4382,11 @@ impl Session {
                 db.checkpoint_config_value(&name)
                     .unwrap_or_else(|| "default".to_string()),
             ),
+            _ if is_autovacuum_guc(&name) => (
+                stmt.name.clone(),
+                db.autovacuum_config_value(&name)
+                    .unwrap_or_else(|| "default".to_string()),
+            ),
             _ => (
                 stmt.name.clone(),
                 self.gucs.get(&name).cloned().unwrap_or_else(fallback_value),
@@ -4441,6 +4448,11 @@ impl Session {
         let normalized = normalize_guc_name(name);
         if !is_postgres_guc(&normalized) {
             return Err(ExecError::Parse(ParseError::UnknownConfigurationParameter(
+                normalized,
+            )));
+        }
+        if is_checkpoint_guc(&normalized) || is_autovacuum_guc(&normalized) {
+            return Err(ExecError::Parse(ParseError::CantChangeRuntimeParam(
                 normalized,
             )));
         }
