@@ -175,12 +175,12 @@ pub(super) fn resolve_function_cast_type(
     name: &str,
 ) -> Option<SqlType> {
     let normalized = normalize_builtin_function_name(name);
-    for row in catalog.type_rows() {
-        if row.typrelid != 0 || !row.typname.eq_ignore_ascii_case(normalized) {
-            continue;
+    if let Some(row) = catalog.type_by_name(normalized) {
+        if row.typrelid != 0 {
+            return None;
         }
         if row.oid != TEXT_TYPE_OID && !catalog_text_input_cast_exists(catalog, row.oid) {
-            continue;
+            return None;
         }
         return Some(match row.typname.as_str() {
             "bit" => SqlType::with_bit_len(SqlTypeKind::Bit, 1),

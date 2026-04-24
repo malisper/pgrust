@@ -12,6 +12,7 @@ mod plan;
 mod rewrite;
 mod root;
 mod setrefs;
+mod sublink_pullup;
 #[cfg(test)]
 mod tests;
 mod upperrels;
@@ -120,7 +121,34 @@ fn create_plan_with_param_base(
 }
 
 fn has_outer_joins(root: &PlannerInfo) -> bool {
-    !root.join_info_list.is_empty()
+    root.join_info_list.iter().any(|sjinfo| {
+        matches!(
+            sjinfo.jointype,
+            JoinType::Left | JoinType::Right | JoinType::Full
+        )
+    })
+}
+
+fn nullable_relids_by_outer_joins(root: &PlannerInfo) -> Vec<usize> {
+    let mut relids = Vec::new();
+    for sjinfo in &root.join_info_list {
+        match sjinfo.jointype {
+            JoinType::Left => relids.extend(sjinfo.syn_righthand.iter().copied()),
+            JoinType::Right => relids.extend(sjinfo.syn_lefthand.iter().copied()),
+            JoinType::Full => {
+                relids.extend(sjinfo.syn_lefthand.iter().copied());
+                relids.extend(sjinfo.syn_righthand.iter().copied());
+            }
+            JoinType::Inner | JoinType::Cross | JoinType::Semi | JoinType::Anti => {}
+        }
+    }
+    relids.sort_unstable();
+    relids.dedup();
+    relids
+}
+
+fn base_rel_is_nullable_by_outer_join(root: &PlannerInfo, relid: usize) -> bool {
+    nullable_relids_by_outer_joins(root).contains(&relid)
 }
 
 fn has_grouping(root: &PlannerInfo) -> bool {
@@ -146,8 +174,8 @@ fn relids_disjoint(left: &[usize], right: &[usize]) -> bool {
 }
 
 fn is_pushable_base_clause(root: &PlannerInfo, relids: &[usize]) -> bool {
-    !has_outer_joins(root)
-        && relids.len() == 1
+    relids.len() == 1
+        && !base_rel_is_nullable_by_outer_join(root, relids[0])
         && root
             .simple_rel_array
             .get(relids[0])
@@ -195,6 +223,7 @@ fn reverse_join_type(kind: JoinType) -> JoinType {
     match kind {
         JoinType::Left => JoinType::Right,
         JoinType::Right => JoinType::Left,
+        JoinType::Semi | JoinType::Anti => kind,
         other => other,
     }
 }
@@ -264,6 +293,10 @@ fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
     path::optimize_path(plan, catalog)
 }
 
+fn pull_up_sublinks(query: Query) -> Query {
+    sublink_pullup::pull_up_sublinks(query)
+}
+
 fn flatten_and_conjuncts(expr: &Expr) -> Vec<Expr> {
     path::flatten_and_conjuncts(expr)
 }
@@ -293,11 +326,15 @@ fn build_join_paths(
     restrict_clauses: Vec<RestrictInfo>,
 ) -> Vec<Path> {
     let mut output_columns = left.columns();
-    output_columns.extend(right.columns());
+    if !matches!(kind, JoinType::Semi | JoinType::Anti) {
+        output_columns.extend(right.columns());
+    }
     let mut exprs = left.semantic_output_target().exprs;
-    exprs.extend(right.semantic_output_target().exprs);
     let mut sortgrouprefs = left.semantic_output_target().sortgrouprefs;
-    sortgrouprefs.extend(right.semantic_output_target().sortgrouprefs);
+    if !matches!(kind, JoinType::Semi | JoinType::Anti) {
+        exprs.extend(right.semantic_output_target().exprs);
+        sortgrouprefs.extend(right.semantic_output_target().sortgrouprefs);
+    }
     path::build_join_paths(
         left,
         right,

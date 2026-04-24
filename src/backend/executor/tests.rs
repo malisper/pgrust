@@ -1501,6 +1501,106 @@ fn manual_hash_join_full_emits_unmatched_rows_from_both_sides() {
 }
 
 #[test]
+fn manual_hash_join_semi_returns_each_matching_outer_row_once() {
+    let harness = seed_people_and_pets("manual_hash_join_semi");
+
+    let plan = Plan::Projection {
+        plan_info: PlanEstimate::default(),
+        input: Box::new(people_pets_hash_join_plan(JoinType::Semi, vec![], vec![])),
+        targets: vec![TargetEntry::new(
+            "person_id",
+            local_var(0),
+            crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+            1,
+        )],
+    };
+
+    let rows = run_plan(&harness.base, &harness.txns, plan).unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (vec!["person_id".into()], vec![Value::Int32(1)]),
+            (vec!["person_id".into()], vec![Value::Int32(2)]),
+        ]
+    );
+}
+
+#[test]
+fn manual_hash_join_anti_returns_only_unmatched_outer_rows() {
+    let harness = seed_people_and_pets("manual_hash_join_anti");
+
+    let plan = Plan::Projection {
+        plan_info: PlanEstimate::default(),
+        input: Box::new(people_pets_hash_join_plan(JoinType::Anti, vec![], vec![])),
+        targets: vec![TargetEntry::new(
+            "person_id",
+            local_var(0),
+            crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+            1,
+        )],
+    };
+
+    let rows = run_plan(&harness.base, &harness.txns, plan).unwrap();
+    assert_eq!(
+        rows,
+        vec![(vec!["person_id".into()], vec![Value::Int32(3)])]
+    );
+}
+
+#[test]
+fn manual_hash_join_semi_false_join_qual_does_not_match() {
+    let harness = seed_people_and_pets("manual_hash_join_semi_false_join_qual");
+
+    let plan = Plan::Projection {
+        plan_info: PlanEstimate::default(),
+        input: Box::new(people_pets_hash_join_plan(
+            JoinType::Semi,
+            vec![Expr::Const(Value::Bool(false))],
+            vec![],
+        )),
+        targets: vec![TargetEntry::new(
+            "person_id",
+            local_var(0),
+            crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+            1,
+        )],
+    };
+
+    let rows = run_plan(&harness.base, &harness.txns, plan).unwrap();
+    assert_eq!(rows, Vec::<(Vec<String>, Vec<Value>)>::new());
+}
+
+#[test]
+fn manual_hash_join_anti_null_join_qual_does_not_match() {
+    let harness = seed_people_and_pets("manual_hash_join_anti_null_join_qual");
+
+    let plan = Plan::Projection {
+        plan_info: PlanEstimate::default(),
+        input: Box::new(people_pets_hash_join_plan(
+            JoinType::Anti,
+            vec![Expr::Const(Value::Null)],
+            vec![],
+        )),
+        targets: vec![TargetEntry::new(
+            "person_id",
+            local_var(0),
+            crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4),
+            1,
+        )],
+    };
+
+    let rows = run_plan(&harness.base, &harness.txns, plan).unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (vec!["person_id".into()], vec![Value::Int32(1)]),
+            (vec!["person_id".into()], vec![Value::Int32(2)]),
+            (vec!["person_id".into()], vec![Value::Int32(3)]),
+        ]
+    );
+}
+
+#[test]
 fn manual_hash_join_null_hash_keys_do_not_match_each_other() {
     let base = temp_dir("manual_hash_join_null_keys");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -12670,7 +12770,7 @@ fn row_to_json_supports_qualified_star_inside_row_constructor() {
 #[test]
 fn jsonb_agg_supports_whole_row_alias_arguments() {
     let base = temp_dir("jsonb_agg_whole_row_alias");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let txns = TransactionManager::new_durable(&base).unwrap();
 
     match run_sql(
         &base,
@@ -16373,8 +16473,8 @@ fn insert_sql_numeric_round_trips_through_storage() {
 fn scalar_subquery_target_list_returns_per_row_counts() {
     let mut harness = seed_people_and_pets("scalar_subquery_target_list");
     assert_query_rows(
-            harness
-                .execute(
+        harness
+            .execute(
                     INVALID_TRANSACTION_ID,
                     "select p.name, (select count(*) from pets q where q.owner_id = p.id) from people p order by p.id",
                 )
@@ -16383,8 +16483,25 @@ fn scalar_subquery_target_list_returns_per_row_counts() {
                 vec![Value::Text("alice".into()), Value::Int64(2)],
                 vec![Value::Text("bob".into()), Value::Int64(1)],
                 vec![Value::Text("carol".into()), Value::Int64(0)],
-            ],
-        );
+        ],
+    );
+}
+
+#[test]
+fn scalar_subquery_can_cast_outer_whole_row_to_text() {
+    let base = temp_dir("scalar_subquery_outer_whole_row_text");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select (select (a.*)::text) from (values (42)) a(id)",
+        )
+        .unwrap(),
+        vec![vec![Value::Text("(42)".into())]],
+    );
 }
 
 #[test]
@@ -16824,6 +16941,249 @@ fn exists_and_not_exists_are_correlated_per_row() {
                 .unwrap(),
             vec![vec![Value::Int32(3)]],
         );
+}
+
+#[test]
+fn in_subquery_where_qual_uses_semi_join() {
+    let mut harness = seed_people_and_pets("in_subquery_where_qual_uses_semi_join");
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select p.id
+                 from people p
+                 where p.id in (select q.owner_id from pets q)
+                 order by p.id",
+            )
+            .unwrap(),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(2)]],
+    );
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "explain (costs off)
+             select p.id
+             from people p
+             where p.id in (select q.owner_id from pets q)",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered.iter().any(|line| line.contains("Semi Join")),
+                "expected IN pull-up to use a semi join, got {rendered:?}"
+            );
+            assert!(
+                rendered.iter().all(|line| !line.contains("SubPlan")),
+                "expected pulled-up IN plan without SubPlan, got {rendered:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn explain_exists_where_qual_uses_semi_join() {
+    let mut harness = seed_people_and_pets("explain_exists_semi_join");
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "explain (costs off)
+             select p.id
+             from people p
+             where exists (select 1 from pets q where q.owner_id = p.id)",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered.iter().any(|line| line.contains("Semi Join")),
+                "expected pulled-up semi join, got {rendered:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn explain_not_exists_where_qual_uses_anti_join() {
+    let mut harness = seed_people_and_pets("explain_not_exists_anti_join");
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "explain (costs off)
+             select p.id
+             from people p
+             where not exists (select 1 from pets q where q.owner_id = p.id)",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered.iter().any(|line| line.contains("Anti Join")),
+                "expected pulled-up anti join, got {rendered:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn explain_exists_join_qual_uses_semi_join() {
+    let mut harness = seed_people_and_pets("explain_exists_join_qual_semi_join");
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "explain (costs off)
+             select p.id
+             from people p join pets b
+               on p.id = b.owner_id
+              and exists (select 1 from pets q where q.owner_id = p.id)",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered.iter().any(|line| line.contains("Semi Join")),
+                "expected pulled-up semi join, got {rendered:?}"
+            );
+            assert!(
+                rendered.iter().all(|line| !line.contains("SubPlan")),
+                "expected pulled-up plan without SubPlan, got {rendered:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn explain_nested_exists_not_exists_pulls_up_semi_and_anti_joins() {
+    let mut harness = seed_people_and_pets("explain_nested_exists_not_exists_pullup");
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "explain (costs off)
+             select p.id
+             from people p, pets b
+             where p.id = b.owner_id
+               and exists (
+                 select 1
+                 from pets c
+                 where b.owner_id = c.owner_id
+                   and not exists (
+                     select 1
+                     from pets d
+                     where p.id = d.owner_id and d.id = 999
+                   )
+               )",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered.iter().any(|line| line.contains("Semi Join")),
+                "expected pulled-up semi join, got {rendered:?}"
+            );
+            assert!(
+                rendered.iter().any(|line| line.contains("Anti Join")),
+                "expected pulled-up anti join, got {rendered:?}"
+            );
+            assert!(
+                rendered.iter().all(|line| !line.contains("SubPlan")),
+                "expected pulled-up plan without SubPlan, got {rendered:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn nested_exists_not_exists_uses_pulled_up_anti_join_semantics() {
+    let mut harness = seed_people_and_pets("nested_exists_not_exists_anti_semantics");
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select p.id
+                 from people p, pets b
+                 where p.id = b.owner_id
+                   and exists (
+                     select 1
+                     from pets c
+                     where b.owner_id = c.owner_id
+                       and not exists (
+                         select 1
+                         from pets d
+                         where p.id = d.owner_id
+                       )
+                   )",
+            )
+            .unwrap(),
+        Vec::new(),
+    );
+}
+
+#[test]
+fn nested_exists_not_exists_inside_derived_table_keeps_outer_levels_correct() {
+    let mut harness = seed_people_and_pets("nested_exists_not_exists_derived_table");
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select count(*) from (
+                   select p.id
+                   from people p, pets b
+                   where p.id = b.owner_id
+                     and exists (
+                       select 1
+                       from pets c
+                       where b.owner_id = c.owner_id
+                         and not exists (
+                           select 1
+                           from pets d
+                           where p.id = d.owner_id
+                         )
+                     )
+                 ) s",
+            )
+            .unwrap(),
+        vec![vec![Value::Int64(0)]],
+    );
 }
 
 #[test]

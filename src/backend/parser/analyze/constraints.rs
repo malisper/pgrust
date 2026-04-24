@@ -758,12 +758,8 @@ pub fn bind_referenced_by_foreign_keys(
     catalog: &dyn super::CatalogLookup,
 ) -> Result<Vec<BoundReferencedByForeignKey>, ParseError> {
     catalog
-        .constraint_rows()
+        .foreign_key_constraint_rows_referencing_relation(relation_oid)
         .into_iter()
-        .filter(|row| {
-            row.contype == crate::include::catalog::CONSTRAINT_FOREIGN
-                && row.confrelid == relation_oid
-        })
         .map(|row| bind_inbound_foreign_key_constraint(relation_oid, desc, row, catalog))
         .collect()
 }

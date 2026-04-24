@@ -29,6 +29,34 @@ pub(super) fn infer_sql_expr_type(
     infer_sql_expr_type_with_ctes(expr, scope, catalog, outer_scopes, grouped_outer, &[])
 }
 
+fn child_outer_scopes(scope: &BoundScope, outer_scopes: &[BoundScope]) -> Vec<BoundScope> {
+    let mut child_outer = Vec::with_capacity(outer_scopes.len() + 1);
+    child_outer.push(scope.clone());
+    child_outer.extend_from_slice(outer_scopes);
+    child_outer
+}
+
+fn infer_relation_row_expr_type(
+    scope: &BoundScope,
+    outer_scopes: &[BoundScope],
+    name: &str,
+) -> Option<SqlType> {
+    resolve_relation_row_expr_with_outer(scope, outer_scopes, name).map(|fields| {
+        assign_anonymous_record_descriptor(
+            fields
+                .iter()
+                .map(|(field_name, field_expr)| {
+                    (
+                        field_name.clone(),
+                        expr_sql_type_hint(field_expr).unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                    )
+                })
+                .collect(),
+        )
+        .sql_type()
+    })
+}
+
 fn infer_visible_outer_aggregate_type(
     name: &str,
     args: &SqlCallArgs,
@@ -114,15 +142,9 @@ pub(super) fn infer_sql_expr_type_with_ctes(
 
     match expr {
         SqlExpr::Column(name) => {
-            if name.ends_with(".*") {
-                infer_sql_row_expr_type(
-                    std::slice::from_ref(expr),
-                    scope,
-                    catalog,
-                    outer_scopes,
-                    grouped_outer,
-                    ctes,
-                )
+            if let Some(relation_name) = name.strip_suffix(".*") {
+                infer_relation_row_expr_type(scope, outer_scopes, relation_name)
+                    .unwrap_or(SqlType::new(SqlTypeKind::Text))
             } else {
                 resolve_system_column_with_outer(scope, outer_scopes, name)
                     .ok()
@@ -137,24 +159,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                                 .get(depth)
                                 .and_then(|s| s.desc.columns.get(index).map(|c| c.sql_type)),
                             Err(ParseError::UnknownColumn(_)) => {
-                                resolve_relation_row_expr_with_outer(scope, outer_scopes, name).map(
-                                    |fields| {
-                                        assign_anonymous_record_descriptor(
-                                            fields
-                                                .iter()
-                                                .map(|(field_name, field_expr)| {
-                                                    (
-                                                        field_name.clone(),
-                                                        expr_sql_type_hint(field_expr).unwrap_or(
-                                                            SqlType::new(SqlTypeKind::Text),
-                                                        ),
-                                                    )
-                                                })
-                                                .collect(),
-                                        )
-                                        .sql_type()
-                                    },
-                                )
+                                infer_relation_row_expr_type(scope, outer_scopes, name)
                             }
                             Err(_) => None,
                         }
@@ -425,30 +430,12 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             ctes,
         )
         .unwrap_or(SqlType::array_of(SqlType::new(SqlTypeKind::Text))),
-        SqlExpr::ScalarSubquery(select) => bind_select_query_with_outer(
-            select,
-            catalog,
-            outer_scopes,
-            grouped_outer.cloned(),
-            None,
-            ctes,
-            &[],
-        )
-        .ok()
-        .and_then(|(plan, _)| {
-            let cols = plan.columns();
-            if cols.len() == 1 {
-                Some(cols[0].sql_type)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(SqlType::new(SqlTypeKind::Text)),
-        SqlExpr::ArraySubquery(select) => SqlType::array_of(
+        SqlExpr::ScalarSubquery(select) => {
+            let child_outer = child_outer_scopes(scope, outer_scopes);
             bind_select_query_with_outer(
                 select,
                 catalog,
-                outer_scopes,
+                &child_outer,
                 grouped_outer.cloned(),
                 None,
                 ctes,
@@ -463,8 +450,32 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     None
                 }
             })
-            .unwrap_or(SqlType::new(SqlTypeKind::Text)),
-        ),
+            .unwrap_or(SqlType::new(SqlTypeKind::Text))
+        }
+        SqlExpr::ArraySubquery(select) => {
+            let child_outer = child_outer_scopes(scope, outer_scopes);
+            SqlType::array_of(
+                bind_select_query_with_outer(
+                    select,
+                    catalog,
+                    &child_outer,
+                    grouped_outer.cloned(),
+                    None,
+                    ctes,
+                    &[],
+                )
+                .ok()
+                .and_then(|(plan, _)| {
+                    let cols = plan.columns();
+                    if cols.len() == 1 {
+                        Some(cols[0].sql_type)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(SqlType::new(SqlTypeKind::Text)),
+            )
+        }
         SqlExpr::Exists(_) | SqlExpr::InSubquery { .. } | SqlExpr::QuantifiedSubquery { .. } => {
             SqlType::new(SqlTypeKind::Bool)
         }
@@ -1138,14 +1149,19 @@ fn infer_sql_row_expr_type(
     for item in items {
         if let SqlExpr::Column(name) = item
             && let Some(relation_name) = name.strip_suffix(".*")
-            && let Some(relation_fields) =
-                resolve_relation_row_expr_with_outer(scope, outer_scopes, relation_name)
         {
-            for (_, expr) in relation_fields {
-                fields.push((
-                    format!("f{next_index}"),
-                    expr_sql_type_hint(&expr).unwrap_or(SqlType::new(SqlTypeKind::Text)),
-                ));
+            if let Some(relation_fields) =
+                resolve_relation_row_expr_with_outer(scope, outer_scopes, relation_name)
+            {
+                for (_, expr) in relation_fields {
+                    fields.push((
+                        format!("f{next_index}"),
+                        expr_sql_type_hint(&expr).unwrap_or(SqlType::new(SqlTypeKind::Text)),
+                    ));
+                    next_index += 1;
+                }
+            } else {
+                fields.push((format!("f{next_index}"), SqlType::new(SqlTypeKind::Text)));
                 next_index += 1;
             }
             continue;

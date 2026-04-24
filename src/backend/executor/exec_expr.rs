@@ -1707,11 +1707,7 @@ fn eval_pg_get_constraintdef(values: &[Value], ctx: &ExecutorContext) -> Result<
         }
     };
     let catalog = executor_catalog(ctx)?;
-    let Some(row) = catalog
-        .constraint_rows()
-        .into_iter()
-        .find(|row| row.oid == constraint_oid)
-    else {
+    let Some(row) = catalog.constraint_row_by_oid(constraint_oid) else {
         return Ok(Value::Null);
     };
     Ok(format_constraintdef_for_catalog(catalog, &row)
@@ -1829,9 +1825,9 @@ fn index_relation_for_oid(
     crate::backend::parser::BoundIndexRelation,
 )> {
     catalog
-        .constraint_rows()
+        .constraint_rows_for_index(index_oid)
         .into_iter()
-        .find(|row| row.conindid == index_oid)
+        .next()
         .and_then(|row| {
             let relation = catalog.lookup_relation_by_oid(row.conrelid)?;
             let index = catalog

@@ -129,7 +129,8 @@ pub(super) fn build_special_join_info(query: &Query) -> Vec<SpecialJoinInfo> {
                         for other in joins.iter() {
                             if relids_overlap(&left_relids, &other.syn_righthand)
                                 && relids_overlap(&clause_relids, &other.syn_righthand)
-                                && !relids_overlap(&strict_relids, &other.min_righthand)
+                                && (matches!(kind, JoinType::Semi | JoinType::Anti)
+                                    || !relids_overlap(&strict_relids, &other.min_righthand))
                             {
                                 min_lefthand = relids_union(&min_lefthand, &other.syn_lefthand);
                                 min_lefthand = relids_union(&min_lefthand, &other.syn_righthand);
@@ -138,6 +139,8 @@ pub(super) fn build_special_join_info(query: &Query) -> Vec<SpecialJoinInfo> {
                             if relids_overlap(&right_relids, &other.syn_righthand)
                                 && (relids_overlap(&clause_relids, &other.syn_righthand)
                                     || !relids_overlap(&clause_relids, &other.min_lefthand)
+                                    || matches!(kind, JoinType::Semi | JoinType::Anti)
+                                    || matches!(other.jointype, JoinType::Semi | JoinType::Anti)
                                     || !other.lhs_strict)
                             {
                                 min_righthand = relids_union(&min_righthand, &other.syn_lefthand);

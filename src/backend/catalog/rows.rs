@@ -131,9 +131,13 @@ pub(crate) fn drop_relation_sync_kinds() -> Vec<BootstrapCatalogKind> {
         BootstrapCatalogKind::PgIndex,
         BootstrapCatalogKind::PgRewrite,
         BootstrapCatalogKind::PgTrigger,
+        BootstrapCatalogKind::PgPolicy,
         BootstrapCatalogKind::PgPublication,
         BootstrapCatalogKind::PgPublicationRel,
         BootstrapCatalogKind::PgPublicationNamespace,
+        BootstrapCatalogKind::PgStatistic,
+        BootstrapCatalogKind::PgStatisticExt,
+        BootstrapCatalogKind::PgStatisticExtData,
     ]
 }
 
@@ -150,8 +154,12 @@ pub(crate) fn drop_relation_delete_kinds() -> Vec<BootstrapCatalogKind> {
         BootstrapCatalogKind::PgDescription,
         BootstrapCatalogKind::PgRewrite,
         BootstrapCatalogKind::PgTrigger,
+        BootstrapCatalogKind::PgPolicy,
         BootstrapCatalogKind::PgPublicationRel,
         BootstrapCatalogKind::PgPublicationNamespace,
+        BootstrapCatalogKind::PgStatistic,
+        BootstrapCatalogKind::PgStatisticExt,
+        BootstrapCatalogKind::PgStatisticExtData,
     ]
 }
 
