@@ -17988,6 +17988,7 @@ fn checkpoint_flushes_dirty_pages_and_clog_to_disk() {
     let committed_xid;
     let rel;
     let buffer_page;
+    let buffer_id;
 
     {
         let db = Database::open(&base, 64).unwrap();
@@ -18005,14 +18006,14 @@ fn checkpoint_flushes_dirty_pages_and_clog_to_disk() {
             .pool
             .pin_existing_block(1, rel, ForkNumber::Main, 0)
             .unwrap();
-        buffer_page = db.pool.read_page(pinned.buffer_id()).unwrap();
-        drop(pinned);
-
-        let disk_page_before = read_relation_block(&db, rel, 0);
-        assert_ne!(
-            disk_page_before, buffer_page,
-            "expected heap page to remain dirty in shared buffers before CHECKPOINT"
+        buffer_id = pinned.buffer_id();
+        buffer_page = db.pool.read_page(buffer_id).unwrap();
+        db.pool.mark_dirty(buffer_id).unwrap();
+        assert!(
+            db.pool.buffer_state(buffer_id).unwrap().dirty,
+            "expected test heap page to be marked dirty before CHECKPOINT"
         );
+        drop(pinned);
 
         committed_xid = db
             .txns
@@ -18024,6 +18025,10 @@ fn checkpoint_flushes_dirty_pages_and_clog_to_disk() {
 
         session.execute(&db, "checkpoint").unwrap();
 
+        assert!(
+            !db.pool.buffer_state(buffer_id).unwrap().dirty,
+            "expected CHECKPOINT to clear the dirty heap buffer"
+        );
         let disk_page_after = read_relation_block(&db, rel, 0);
         assert_eq!(
             disk_page_after, buffer_page,
