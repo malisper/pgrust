@@ -3,6 +3,7 @@ use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::executor::execdesc::CommandType;
+use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{SelectLockingClause, SetOperator};
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, JoinType, OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc,
@@ -49,6 +50,54 @@ impl PlanEstimate {
 pub struct ExecParamSource {
     pub paramid: usize,
     pub expr: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexScanKeyArgument {
+    Const(Value),
+    Runtime(Expr),
+}
+
+impl IndexScanKeyArgument {
+    pub fn as_const(&self) -> Option<&Value> {
+        match self {
+            IndexScanKeyArgument::Const(value) => Some(value),
+            IndexScanKeyArgument::Runtime(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexScanKey {
+    pub attribute_number: i16,
+    pub strategy: u16,
+    pub argument: IndexScanKeyArgument,
+}
+
+impl IndexScanKey {
+    pub fn new(attribute_number: i16, strategy: u16, argument: IndexScanKeyArgument) -> Self {
+        Self {
+            attribute_number,
+            strategy,
+            argument,
+        }
+    }
+
+    pub fn const_value(attribute_number: i16, strategy: u16, argument: Value) -> Self {
+        Self::new(
+            attribute_number,
+            strategy,
+            IndexScanKeyArgument::Const(argument),
+        )
+    }
+
+    pub fn to_scan_key(&self, argument: Value) -> ScanKeyData {
+        ScanKeyData {
+            attribute_number: self.attribute_number,
+            strategy: self.strategy,
+            argument,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,8 +162,8 @@ pub enum Plan {
         desc: RelationDesc,
         index_desc: RelationDesc,
         index_meta: IndexRelCacheEntry,
-        keys: Vec<ScanKeyData>,
-        order_by_keys: Vec<ScanKeyData>,
+        keys: Vec<IndexScanKey>,
+        order_by_keys: Vec<IndexScanKey>,
         direction: ScanDirection,
     },
     BitmapIndexScan {
@@ -127,7 +176,7 @@ pub enum Plan {
         desc: RelationDesc,
         index_desc: RelationDesc,
         index_meta: IndexRelCacheEntry,
-        keys: Vec<ScanKeyData>,
+        keys: Vec<IndexScanKey>,
         index_quals: Vec<Expr>,
     },
     BitmapHeapScan {

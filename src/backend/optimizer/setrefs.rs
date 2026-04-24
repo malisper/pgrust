@@ -8,7 +8,9 @@ use super::{expand_join_rte_vars, flatten_join_alias_vars, planner_with_param_ba
 use crate::backend::parser::CatalogLookup;
 use crate::include::nodes::parsenodes::{Query, QueryRowMark, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{Path, PlannerInfo, PlannerSubroot, RestrictInfo};
-use crate::include::nodes::plannodes::{ExecParamSource, Plan, PlanEstimate, PlanRowMark};
+use crate::include::nodes::plannodes::{
+    ExecParamSource, IndexScanKey, IndexScanKeyArgument, Plan, PlanEstimate, PlanRowMark,
+};
 use crate::include::nodes::primnodes::{
     AggAccum, Aggref, BoolExpr, Expr, ExprArraySubscript, FuncExpr, INNER_VAR, OUTER_VAR, OpExpr,
     OrderByEntry, Param, ParamKind, QueryColumn, ScalarArrayOpExpr, SubPlan, TargetEntry, Var,
@@ -2319,6 +2321,42 @@ fn lower_expr(ctx: &mut SetRefsContext<'_>, expr: Expr, mode: LowerMode<'_>) -> 
     }
 }
 
+fn lower_index_scan_key(
+    ctx: &mut SetRefsContext<'_>,
+    key: IndexScanKey,
+    mode: LowerMode<'_>,
+) -> IndexScanKey {
+    let argument = match key.argument {
+        IndexScanKeyArgument::Const(value) => IndexScanKeyArgument::Const(value),
+        IndexScanKeyArgument::Runtime(expr) => {
+            IndexScanKeyArgument::Runtime(lower_expr(ctx, expr, mode))
+        }
+    };
+    IndexScanKey {
+        attribute_number: key.attribute_number,
+        strategy: key.strategy,
+        argument,
+    }
+}
+
+fn lower_index_scan_keys(
+    ctx: &mut SetRefsContext<'_>,
+    keys: Vec<IndexScanKey>,
+    mode: LowerMode<'_>,
+) -> Vec<IndexScanKey> {
+    keys.into_iter()
+        .map(|key| lower_index_scan_key(ctx, key, mode))
+        .collect()
+}
+
+fn validate_executable_index_scan_keys(keys: &[IndexScanKey], plan_node: &str, field: &str) {
+    for key in keys {
+        if let IndexScanKeyArgument::Runtime(expr) = &key.argument {
+            validate_executable_expr(expr, plan_node, field);
+        }
+    }
+}
+
 fn validate_executable_expr(expr: &Expr, plan_node: &str, field: &str) {
     match expr {
         Expr::Var(var) if var.varlevelsup > 0 => {
@@ -2479,13 +2517,23 @@ fn validate_agg_accum(
 
 fn validate_executable_plan(plan: &Plan) {
     match plan {
-        Plan::Result { .. } | Plan::SeqScan { .. } | Plan::BitmapIndexScan { .. } => {}
+        Plan::Result { .. } | Plan::SeqScan { .. } => {}
         Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
             for child in children {
                 validate_executable_plan(child);
             }
         }
-        Plan::IndexScan { .. } => {}
+        Plan::IndexScan {
+            keys,
+            order_by_keys,
+            ..
+        } => {
+            validate_executable_index_scan_keys(keys, "IndexScan", "keys");
+            validate_executable_index_scan_keys(order_by_keys, "IndexScan", "order_by_keys");
+        }
+        Plan::BitmapIndexScan { keys, .. } => {
+            validate_executable_index_scan_keys(keys, "BitmapIndexScan", "keys");
+        }
         Plan::BitmapHeapScan {
             bitmapqual,
             recheck_qual,
@@ -2820,12 +2868,28 @@ fn validate_planner_agg_accum(
         .for_each(|arg| validate_planner_expr(arg, path_node, field));
 }
 
+fn validate_planner_index_scan_keys(keys: &[IndexScanKey], path_node: &str, field: &str) {
+    for key in keys {
+        if let IndexScanKeyArgument::Runtime(expr) = &key.argument {
+            validate_planner_expr(expr, path_node, field);
+        }
+    }
+}
+
 fn validate_planner_path(path: &Path) {
     match path {
-        Path::Result { .. }
-        | Path::SeqScan { .. }
-        | Path::IndexScan { .. }
-        | Path::BitmapIndexScan { .. } => {}
+        Path::Result { .. } | Path::SeqScan { .. } => {}
+        Path::IndexScan {
+            keys,
+            order_by_keys,
+            ..
+        } => {
+            validate_planner_index_scan_keys(keys, "IndexScan", "keys");
+            validate_planner_index_scan_keys(order_by_keys, "IndexScan", "order_by_keys");
+        }
+        Path::BitmapIndexScan { keys, .. } => {
+            validate_planner_index_scan_keys(keys, "BitmapIndexScan", "keys");
+        }
         Path::Append { children, .. } | Path::SetOp { children, .. } => {
             for child in children {
                 validate_planner_path(child);
@@ -3081,6 +3145,7 @@ fn set_seq_scan_references(
 
 #[allow(clippy::too_many_arguments)]
 fn set_index_scan_references(
+    ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
     source_id: usize,
     rel: crate::RelFileLocator,
@@ -3093,10 +3158,12 @@ fn set_index_scan_references(
     desc: crate::include::nodes::primnodes::RelationDesc,
     index_desc: crate::include::nodes::primnodes::RelationDesc,
     index_meta: crate::backend::utils::cache::relcache::IndexRelCacheEntry,
-    keys: Vec<crate::include::access::scankey::ScanKeyData>,
-    order_by_keys: Vec<crate::include::access::scankey::ScanKeyData>,
+    keys: Vec<IndexScanKey>,
+    order_by_keys: Vec<IndexScanKey>,
     direction: crate::include::access::relscan::ScanDirection,
 ) -> Plan {
+    let keys = lower_index_scan_keys(ctx, keys, LowerMode::Scalar);
+    let order_by_keys = lower_index_scan_keys(ctx, order_by_keys, LowerMode::Scalar);
     Plan::IndexScan {
         plan_info,
         source_id,
@@ -3128,9 +3195,10 @@ fn set_bitmap_index_scan_references(
     desc: crate::include::nodes::primnodes::RelationDesc,
     index_desc: crate::include::nodes::primnodes::RelationDesc,
     index_meta: crate::backend::utils::cache::relcache::IndexRelCacheEntry,
-    keys: Vec<crate::include::access::scankey::ScanKeyData>,
+    keys: Vec<IndexScanKey>,
     index_quals: Vec<Expr>,
 ) -> Plan {
+    let keys = lower_index_scan_keys(ctx, keys, LowerMode::Scalar);
     let scan_tlist = build_simple_tlist_from_exprs(
         &slot_output_target(source_id, &desc.columns, |column| column.sql_type).exprs,
     );
@@ -3925,6 +3993,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             pathkeys: _,
             ..
         } => set_index_scan_references(
+            ctx,
             plan_info,
             source_id,
             rel,

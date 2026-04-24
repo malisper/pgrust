@@ -18,12 +18,11 @@ mod tests;
 mod upperrels;
 mod util;
 
-use crate::backend::executor::Value;
 use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType};
 use crate::include::catalog::PgStatisticRow;
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query};
 use crate::include::nodes::pathnodes::{Path, PlannerInfo, RestrictInfo};
-use crate::include::nodes::plannodes::{Plan, PlannedStmt};
+use crate::include::nodes::plannodes::{IndexScanKey, IndexScanKeyArgument, Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{Expr, JoinType, OpExprKind};
 
 const DEFAULT_EQ_SEL: f64 = 0.005;
@@ -60,15 +59,15 @@ enum IndexStrategyLookup {
 struct IndexableQual {
     column: usize,
     lookup: IndexStrategyLookup,
-    argument: Value,
+    argument: IndexScanKeyArgument,
     expr: Expr,
 }
 
 #[derive(Debug, Clone)]
 struct IndexPathSpec {
     index: BoundIndexRelation,
-    keys: Vec<crate::include::access::scankey::ScanKeyData>,
-    order_by_keys: Vec<crate::include::access::scankey::ScanKeyData>,
+    keys: Vec<IndexScanKey>,
+    order_by_keys: Vec<IndexScanKey>,
     residual: Option<Expr>,
     used_quals: Vec<Expr>,
     direction: crate::include::access::relscan::ScanDirection,
