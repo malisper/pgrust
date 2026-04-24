@@ -982,11 +982,14 @@ fn join_reltarget(
     _relids: &[usize],
     left_rel: &RelOptInfo,
     right_rel: &RelOptInfo,
+    kind: JoinType,
 ) -> PathTarget {
     let mut exprs = left_rel.reltarget.exprs.clone();
-    exprs.extend(right_rel.reltarget.exprs.clone());
     let mut sortgrouprefs = left_rel.reltarget.sortgrouprefs.clone();
-    sortgrouprefs.extend(right_rel.reltarget.sortgrouprefs.clone());
+    if !matches!(kind, JoinType::Semi | JoinType::Anti) {
+        exprs.extend(right_rel.reltarget.exprs.clone());
+        sortgrouprefs.extend(right_rel.reltarget.sortgrouprefs.clone());
+    }
     PathTarget::with_sortgrouprefs(exprs, sortgrouprefs)
 }
 
@@ -1112,6 +1115,9 @@ fn join_is_legal(
         if let Some(reversed) =
             rel_matches_special_join(sjinfo, &left_rel.relids, &right_rel.relids)
         {
+            if reversed && matches!(sjinfo.jointype, JoinType::Semi | JoinType::Anti) {
+                return None;
+            }
             if matched_sj.is_some() {
                 return None;
             }
@@ -1173,17 +1179,25 @@ fn make_join_rel(
         } else {
             (left_rel, right_rel)
         };
-        let reltarget = join_reltarget(root, &relids, logical_left_rel, logical_right_rel);
+        let reltarget = join_reltarget(
+            root,
+            &relids,
+            logical_left_rel,
+            logical_right_rel,
+            spec.kind,
+        );
         let mut output_columns = logical_left_rel
             .cheapest_total_path()
             .map(Path::columns)
             .unwrap_or_default();
-        output_columns.extend(
-            logical_right_rel
-                .cheapest_total_path()
-                .map(Path::columns)
-                .unwrap_or_default(),
-        );
+        if !matches!(spec.kind, JoinType::Semi | JoinType::Anti) {
+            output_columns.extend(
+                logical_right_rel
+                    .cheapest_total_path()
+                    .map(Path::columns)
+                    .unwrap_or_default(),
+            );
+        }
         let join_restrict_clauses = build_join_restrict_clauses(
             spec.kind,
             spec.explicit_qual.clone(),

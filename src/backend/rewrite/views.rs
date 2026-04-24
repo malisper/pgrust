@@ -454,6 +454,8 @@ fn render_join_type(kind: JoinType) -> &'static str {
         JoinType::Left => "LEFT",
         JoinType::Right => "RIGHT",
         JoinType::Full => "FULL",
+        JoinType::Semi => "SEMI",
+        JoinType::Anti => "ANTI",
     }
 }
 
@@ -526,8 +528,10 @@ fn join_using_var_needs_cast(var: &Var, sql_type: SqlType, query: &Query) -> boo
             joinmergedcols,
             ..
         } => {
-            matches!(jointype, JoinType::Left | JoinType::Right | JoinType::Full)
-                && column_index < *joinmergedcols
+            matches!(
+                jointype,
+                JoinType::Left | JoinType::Right | JoinType::Full | JoinType::Semi | JoinType::Anti
+            ) && column_index < *joinmergedcols
                 && var.vartype == sql_type
         }
         _ => false,

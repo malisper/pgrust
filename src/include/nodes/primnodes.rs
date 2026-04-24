@@ -1016,6 +1016,8 @@ pub enum JoinType {
     Left,
     Right,
     Full,
+    Semi,
+    Anti,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

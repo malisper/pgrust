@@ -1474,7 +1474,7 @@ fn build_join_paths_internal(
     }
 
     if !lateral_orientation_locked
-        && !matches!(kind, JoinType::Cross)
+        && !matches!(kind, JoinType::Cross | JoinType::Semi)
         && let Some(hash_join) =
             extract_hash_join_clauses(&restrict_clauses, left_relids, right_relids)
     {
@@ -1924,7 +1924,11 @@ fn estimate_nested_loop_join_internal(
             left_info.startup_cost.as_f64() + right_info.startup_cost.as_f64(),
             total,
             rows,
-            left_info.plan_width + right_info.plan_width,
+            if matches!(kind, JoinType::Semi | JoinType::Anti) {
+                left_info.plan_width
+            } else {
+                left_info.plan_width + right_info.plan_width
+            },
         ),
         pathtarget,
         output_columns,
@@ -1992,6 +1996,8 @@ fn estimate_join_rows(left_rows: f64, right_rows: f64, kind: JoinType, join_sel:
         JoinType::Left => inner_rows.max(left_rows),
         JoinType::Right => inner_rows.max(right_rows),
         JoinType::Full => inner_rows.max(left_rows).max(right_rows),
+        JoinType::Semi => inner_rows.min(left_rows),
+        JoinType::Anti => (left_rows - inner_rows.min(left_rows)).max(1.0),
     }
 }
 
@@ -2070,7 +2076,11 @@ fn estimate_hash_join_internal(
             startup,
             total,
             rows,
-            left_info.plan_width + right_info.plan_width,
+            if matches!(kind, JoinType::Semi | JoinType::Anti) {
+                left_info.plan_width
+            } else {
+                left_info.plan_width + right_info.plan_width
+            },
         ),
         pathtarget,
         output_columns,
