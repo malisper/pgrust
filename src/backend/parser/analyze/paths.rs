@@ -3,7 +3,7 @@ use super::*;
 use crate::backend::executor::cast_value;
 use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::catalog::{
-    BTREE_AM_OID, GIST_AM_OID, SPGIST_AM_OID, bootstrap_pg_operator_rows,
+    BTREE_AM_OID, GIST_AM_OID, HASH_AM_OID, SPGIST_AM_OID, bootstrap_pg_operator_rows,
     builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
 };
 use crate::include::nodes::primnodes::{BuiltinScalarFunction, OpExprKind, expr_sql_type_hint};
@@ -25,7 +25,8 @@ enum IndexStrategyLookup {
 
 #[derive(Debug, Clone)]
 struct IndexableQual {
-    column: usize,
+    column: Option<usize>,
+    key_expr: Expr,
     lookup: IndexStrategyLookup,
     argument: Value,
 }
@@ -74,6 +75,38 @@ fn const_argument(expr: &Expr) -> Option<Value> {
 fn simple_index_column(index: &BoundIndexRelation, index_pos: usize) -> Option<usize> {
     let attnum = *index.index_meta.indkey.get(index_pos)?;
     (attnum > 0).then_some((attnum - 1) as usize)
+}
+
+fn index_expression_position(index: &BoundIndexRelation, index_pos: usize) -> Option<usize> {
+    if *index.index_meta.indkey.get(index_pos)? != 0 {
+        return None;
+    }
+    Some(
+        index
+            .index_meta
+            .indkey
+            .iter()
+            .take(index_pos)
+            .filter(|attnum| **attnum == 0)
+            .count(),
+    )
+}
+
+fn index_key_matches_qual(
+    index: &BoundIndexRelation,
+    index_pos: usize,
+    qual: &IndexableQual,
+) -> bool {
+    if let Some(column) = simple_index_column(index, index_pos) {
+        return qual.column == Some(column);
+    }
+    let Some(expr_pos) = index_expression_position(index, index_pos) else {
+        return false;
+    };
+    index
+        .index_exprs
+        .get(expr_pos)
+        .is_some_and(|index_expr| strip_casts(index_expr) == strip_casts(&qual.key_expr))
 }
 
 fn value_type_oid(value: &Value) -> Option<u32> {
@@ -187,6 +220,10 @@ fn qual_strategy(
                 (index.index_meta.am_oid == BTREE_AM_OID)
                     .then(|| btree_builtin_strategy(kind))
                     .flatten()
+                    .or_else(|| {
+                        (index.index_meta.am_oid == HASH_AM_OID && kind == OpExprKind::Eq)
+                            .then_some(1)
+                    })
             }),
         IndexStrategyLookup::Proc(proc_oid) => index
             .index_meta
@@ -218,7 +255,7 @@ fn build_btree_scan_keys(
         };
         if let Some((qual_idx, strategy, argument)) =
             parsed_quals.iter().enumerate().find_map(|(idx, qual)| {
-                if used[idx] || qual.column != column {
+                if used[idx] || qual.column != Some(column) {
                     return None;
                 }
                 let strategy = qual_strategy(index, index_pos, qual)?;
@@ -236,7 +273,7 @@ fn build_btree_scan_keys(
         }
         if let Some((qual_idx, strategy, argument)) =
             parsed_quals.iter().enumerate().find_map(|(idx, qual)| {
-                if used[idx] || qual.column != column {
+                if used[idx] || qual.column != Some(column) {
                     return None;
                 }
                 let strategy = qual_strategy(index, index_pos, qual)?;
@@ -265,7 +302,7 @@ fn build_gist_scan_keys(
         .filter_map(|qual| {
             let (index_pos, strategy) =
                 (0..index.index_meta.indkey.len()).find_map(|index_pos| {
-                    (simple_index_column(index, index_pos) == Some(qual.column))
+                    (index_key_matches_qual(index, index_pos, qual))
                         .then(|| qual_strategy(index, index_pos, qual))
                         .flatten()
                         .map(|strategy| (index_pos, strategy))
@@ -276,6 +313,30 @@ fn build_gist_scan_keys(
                 argument: qual.argument.clone(),
             })
         })
+        .collect()
+}
+
+fn build_hash_scan_keys(
+    index: &BoundIndexRelation,
+    parsed_quals: &[IndexableQual],
+) -> Vec<crate::include::access::scankey::ScanKeyData> {
+    if index.index_meta.indkey.len() != 1 {
+        return Vec::new();
+    }
+    parsed_quals
+        .iter()
+        .find_map(|qual| {
+            if !index_key_matches_qual(index, 0, qual) {
+                return None;
+            }
+            let strategy = qual_strategy(index, 0, qual)?;
+            (strategy == 1).then_some(crate::include::access::scankey::ScanKeyData {
+                attribute_number: 1,
+                strategy,
+                argument: qual.argument.clone(),
+            })
+        })
+        .into_iter()
         .collect()
 }
 
@@ -307,6 +368,7 @@ fn choose_index_path(
                 (keys, equality_prefix, removes_order)
             }
             GIST_AM_OID | SPGIST_AM_OID => (build_gist_scan_keys(index, &parsed_quals), 0, false),
+            HASH_AM_OID => (build_hash_scan_keys(index, &parsed_quals), 0, false),
             _ => continue,
         };
 
@@ -419,9 +481,10 @@ fn flatten_and_conjuncts(expr: &Expr) -> Vec<Expr> {
 }
 
 fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
-    fn mk(column: usize, lookup: IndexStrategyLookup, argument: Value) -> Option<IndexableQual> {
+    fn mk(key_expr: &Expr, lookup: IndexStrategyLookup, argument: Value) -> Option<IndexableQual> {
         Some(IndexableQual {
-            column,
+            column: simple_column_index(key_expr),
+            key_expr: strip_casts(key_expr).clone(),
             lookup,
             argument,
         })
@@ -431,10 +494,9 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
         Expr::Op(op) if op.args.len() == 2 => {
             let left = strip_casts(&op.args[0]);
             let right = &op.args[1];
-            if let (Some(column), Some(value)) = (simple_column_index(left), const_argument(right))
-            {
+            if let Some(value) = const_argument(right) {
                 return mk(
-                    column,
+                    left,
                     IndexStrategyLookup::Operator {
                         oid: op.opno,
                         kind: op.op,
@@ -442,12 +504,9 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
                     value,
                 );
             }
-            if let (Some(value), Some(column)) = (
-                const_argument(&op.args[0]),
-                simple_column_index(strip_casts(&op.args[1])),
-            ) {
+            if let Some(value) = const_argument(&op.args[0]) {
                 return mk(
-                    column,
+                    strip_casts(&op.args[1]),
                     IndexStrategyLookup::Operator {
                         oid: operator_commutator_oid(op.opno).unwrap_or(0),
                         kind: commuted_op_expr_kind(op.op)?,
@@ -460,16 +519,12 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
         Expr::Func(func) if func.args.len() == 2 => {
             let left = strip_casts(&func.args[0]);
             let right = &func.args[1];
-            if let (Some(column), Some(value)) = (simple_column_index(left), const_argument(right))
-            {
-                return mk(column, IndexStrategyLookup::Proc(func.funcid), value);
+            if let Some(value) = const_argument(right) {
+                return mk(left, IndexStrategyLookup::Proc(func.funcid), value);
             }
-            if let (Some(value), Some(column)) = (
-                const_argument(&func.args[0]),
-                simple_column_index(strip_casts(&func.args[1])),
-            ) {
+            if let Some(value) = const_argument(&func.args[0]) {
                 return mk(
-                    column,
+                    strip_casts(&func.args[1]),
                     IndexStrategyLookup::Proc(commuted_function_proc_oid(func.funcid)?),
                     value,
                 );

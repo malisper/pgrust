@@ -609,6 +609,7 @@ fn index_relcache_entry_from_index_row(
         rd_indpred: None,
         brin_options: None,
         gin_options: None,
+        hash_options: None,
     }
 }
 

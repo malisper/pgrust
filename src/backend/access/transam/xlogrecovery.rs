@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::BLCKSZ;
 use crate::backend::access::gist::wal::gist_redo;
+use crate::backend::access::hash::wal::hash_redo;
 use crate::backend::access::nbtree::nbtxlog::btree_redo;
 use crate::backend::access::transam::xact::TransactionManager;
 use crate::backend::storage::page::bufpage::page_add_item;
@@ -13,8 +14,8 @@ use crate::backend::storage::smgr::md::MdStorageManager;
 use crate::backend::storage::smgr::{ForkNumber, StorageManager};
 
 use super::{
-    INVALID_LSN, Lsn, RM_BTREE_ID, RM_GIST_ID, RM_HEAP_ID, RM_HEAP2_ID, RM_XACT_ID, RM_XLOG_ID,
-    WalError, WalReader, XLOG_CHECKPOINT_ONLINE, XLOG_CHECKPOINT_SHUTDOWN, XLOG_FPI,
+    INVALID_LSN, Lsn, RM_BTREE_ID, RM_GIST_ID, RM_HASH_ID, RM_HEAP_ID, RM_HEAP2_ID, RM_XACT_ID,
+    RM_XLOG_ID, WalError, WalReader, XLOG_CHECKPOINT_ONLINE, XLOG_CHECKPOINT_SHUTDOWN, XLOG_FPI,
     XLOG_HEAP_INSERT, XLOG_XACT_COMMIT,
 };
 use crate::include::access::heapam_xlog::XLOG_HEAP2_VISIBLE;
@@ -100,6 +101,14 @@ pub fn perform_wal_recovery_from(
                     .filter(|block| block.image.is_some())
                     .count() as u64;
                 gist_redo(smgr, record_lsn, &record)?;
+            }
+            (RM_HASH_ID, _) => {
+                stats.fpis += record
+                    .blocks
+                    .iter()
+                    .filter(|block| block.image.is_some())
+                    .count() as u64;
+                hash_redo(smgr, record_lsn, &record)?;
             }
             (RM_HEAP_ID, XLOG_HEAP_INSERT) => {
                 let block = record
