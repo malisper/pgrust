@@ -506,7 +506,7 @@ fn string_to_table_values(
 
 fn split_text_values(input: &str, delimiter: Option<&str>, null_text: Option<&str>) -> Vec<Value> {
     let parts: Vec<String> = match delimiter {
-        Some(delimiter) if input.is_empty() => Vec::new(),
+        Some(_) if input.is_empty() => Vec::new(),
         Some(delimiter) if delimiter.is_empty() => vec![input.to_string()],
         Some(delimiter) => input
             .split(delimiter)

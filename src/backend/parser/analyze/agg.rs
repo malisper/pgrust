@@ -684,7 +684,6 @@ pub(super) fn aggregate_sql_type(func: AggFunc, arg_type: Option<SqlType>) -> Sq
         AggFunc::BitAnd | AggFunc::BitOr | AggFunc::BitXor => {
             arg_type.unwrap_or(SqlType::new(Int4))
         }
-        AggFunc::AnyValue => arg_type.unwrap_or(SqlType::new(Text)),
         AggFunc::ArrayAgg => arg_type
             .map(|ty| {
                 if ty.is_array {

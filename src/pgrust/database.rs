@@ -137,10 +137,8 @@ impl From<ControlFileError> for DatabaseError {
 pub use crate::backend::storage::lmgr::TransactionWaiter;
 pub use crate::pgrust::session::{SelectGuard, Session};
 pub(crate) use async_notify::{
-    ASYNC_NOTIFY_CHANNEL_MAX_LEN, ASYNC_NOTIFY_PAYLOAD_MAX_LEN, ASYNC_NOTIFY_QUEUE_CAPACITY_BYTES,
-    AsyncListenAction, AsyncListenOp, AsyncNotifyRuntime, DeliveredNotification,
-    PendingNotification, merge_pending_notifications, queue_pending_notification,
-    validate_pending_notification,
+    AsyncListenAction, AsyncListenOp, AsyncNotifyRuntime, PendingNotification,
+    merge_pending_notifications, queue_pending_notification,
 };
 pub(crate) use ddl::reject_relation_with_referencing_foreign_keys;
 pub(crate) use foreign_keys::{
