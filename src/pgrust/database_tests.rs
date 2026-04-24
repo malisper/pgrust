@@ -6385,7 +6385,8 @@ fn table_only_commands_reject_views() {
     ] {
         match session.execute(&db, sql) {
             Err(ExecError::Parse(ParseError::WrongObjectType { name, expected }))
-                if name == "item_view" && expected == "table" => {}
+                if name == "item_view"
+                    && (expected == "table" || expected == "table or materialized view") => {}
             other => panic!("expected wrong-object-type error for `{sql}`, got {other:?}"),
         }
     }
@@ -7190,7 +7191,9 @@ fn create_index_and_alter_table_set_are_noops() {
             if name == "num_exp_add_idx" => {}
         Err(ExecError::Parse(ParseError::WrongObjectType { name, expected }))
             if name == "num_exp_add_idx"
-                && (expected == "table" || expected == "table, view, or sequence") => {}
+                && (expected == "table"
+                    || expected == "table, view, or sequence"
+                    || expected == "table, view, materialized view, or sequence") => {}
         other => panic!("expected missing-table or wrong-object-type error, got {other:?}"),
     }
 
