@@ -105,6 +105,7 @@ impl IndexBuildKeyProjector {
                 pool: ctx.pool.clone(),
                 txns: ctx.txns.clone(),
                 txn_waiter: expr_ctx.txn_waiter.clone(),
+                lock_status_provider: None,
                 sequences: expr_ctx.sequences.clone(),
                 large_objects: expr_ctx.large_objects.clone(),
                 async_notify_runtime: None,

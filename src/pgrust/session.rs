@@ -12,13 +12,13 @@ use crate::backend::executor::expr_bool::parse_pg_bool_text;
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
     DeferredForeignKeyTracker, ExecError, ExecutorContext, ExecutorTransactionState,
-    SessionReplicationRole, StatementResult, Value, cast_value, execute_readonly_statement,
-    parse_bytea_text,
+    SessionReplicationRole, StatementResult, Value, cast_value, execute_planned_stmt,
+    execute_readonly_statement, parse_bytea_text,
 };
 use crate::backend::parser::{
     CatalogLookup, CopyFromStatement, CopySource, DetachPartitionMode, ParseError, ParseOptions,
     PreparedInsert, SelectStatement, Statement, bind_delete, bind_insert, bind_insert_prepared,
-    bind_update, plan_merge,
+    bind_update, pg_plan_query, plan_merge,
 };
 use crate::backend::rewrite::relation_has_row_security;
 use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_relations};
@@ -494,6 +494,7 @@ impl Session {
             pool: Arc::clone(&db.pool),
             txns: db.txns.clone(),
             txn_waiter: Some(db.txn_waiter.clone()),
+            lock_status_provider: Some(Arc::new(db.clone())),
             sequences: Some(db.sequences.clone()),
             large_objects: Some(db.large_objects.clone()),
             async_notify_runtime: Some(db.async_notify_runtime.clone()),
@@ -562,6 +563,7 @@ impl Session {
         }
         let xid = db.txns.write().begin();
         txn.xid = Some(xid);
+        db.txn_waiter.register_holder(xid, self.client_id);
         xid
     }
 
@@ -709,6 +711,7 @@ impl Session {
                                 e,
                             ))
                         })?;
+                        db.txn_waiter.unregister_holder(xid);
                         db.txn_waiter.notify();
                     } else {
                         debug_assert!(txn.catalog_effects.is_empty());
@@ -749,6 +752,7 @@ impl Session {
     fn abort_taken_transaction(&mut self, db: &Database, txn: &ActiveTransaction) {
         if let Some(xid) = txn.xid {
             let _ = db.txns.write().abort(xid);
+            db.txn_waiter.unregister_holder(xid);
             db.txn_waiter.notify();
         } else {
             debug_assert!(txn.catalog_effects.is_empty());
@@ -2356,6 +2360,7 @@ impl Session {
         if let Some(txn) = self.active_txn.take() {
             if let Some(xid) = txn.xid {
                 let _ = db.txns.write().abort(xid);
+                db.txn_waiter.unregister_holder(xid);
                 db.txn_waiter.notify();
             } else {
                 debug_assert!(txn.catalog_effects.is_empty());
@@ -4137,7 +4142,12 @@ impl Session {
                     Some(deferred_foreign_keys),
                     None,
                 );
-                let result = execute_readonly_statement(stmt, &catalog, &mut ctx);
+                let result = match stmt {
+                    Statement::Select(select) if select.locking_clause.is_some() => {
+                        execute_planned_stmt(pg_plan_query(&select, &catalog)?, &mut ctx)
+                    }
+                    other => execute_readonly_statement(other, &catalog, &mut ctx),
+                };
                 if let Some(xid) = ctx.transaction_xid()
                     && let Some(txn) = self.active_txn.as_mut()
                 {

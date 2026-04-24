@@ -36,7 +36,7 @@ use crate::backend::catalog::{
 };
 use crate::backend::commands::analyze::collect_analyze_stats;
 use crate::backend::executor::{
-    ExecError, ExecutorContext, SessionReplicationRole, StatementResult, Value,
+    ExecError, ExecutorContext, LockStatusProvider, SessionReplicationRole, StatementResult, Value,
     execute_readonly_statement,
 };
 use crate::backend::parser::Statement;
@@ -53,8 +53,9 @@ use crate::backend::parser::{
 };
 use crate::backend::storage::lmgr::{
     AdvisoryLockKey, AdvisoryLockManager, AdvisoryLockSnapshotRow, RowLockManager,
-    TableLockManager, TableLockMode, TableLockSnapshotRow, lock_relations_interruptible,
-    lock_tables_interruptible, unlock_relations,
+    RowLockSnapshotRow, TableLockManager, TableLockMode, TableLockSnapshotRow,
+    TransactionLockSnapshotRow, lock_relations_interruptible, lock_tables_interruptible,
+    unlock_relations,
 };
 use crate::backend::storage::smgr::{RelFileLocator, StorageManager};
 pub use crate::backend::utils::activity::{DatabaseStatsStore, SessionStatsState};
@@ -863,6 +864,10 @@ impl Database {
     }
 
     pub(crate) fn pg_locks_rows(&self) -> Vec<Vec<Value>> {
+        self.pg_lock_status_rows_for_client(0)
+    }
+
+    fn pg_lock_status_rows_for_client(&self, current_client_id: ClientId) -> Vec<Vec<Value>> {
         let mut rows = Vec::new();
 
         for row in self.table_locks.snapshot() {
@@ -909,6 +914,57 @@ impl Database {
                     advisory_lock_row_to_values(db_oid, row),
                 ));
             }
+            for row in state.row_locks.snapshot() {
+                rows.push((
+                    format!(
+                        "tuple/{db_oid}/{}/{}/{}/{}/{}",
+                        row.tag.relation_oid,
+                        row.tag.tid.block_number,
+                        row.tag.tid.offset_number,
+                        row.owner.client_id,
+                        row.granted
+                    ),
+                    row_lock_row_to_values(db_oid, row),
+                ));
+            }
+        }
+
+        for row in self.txn_waiter.snapshot() {
+            rows.push((
+                format!(
+                    "transactionid/{}/{}/{}",
+                    row.xid, row.client_id, row.granted
+                ),
+                transaction_lock_row_to_values(row),
+            ));
+        }
+
+        let mut virtual_clients = self
+            .cluster
+            .open_databases
+            .read()
+            .values()
+            .flat_map(|state| {
+                let mut client_ids = state
+                    .session_auth_states
+                    .read()
+                    .keys()
+                    .copied()
+                    .collect::<Vec<_>>();
+                client_ids.extend(state.session_interrupt_states.read().keys().copied());
+                client_ids
+            })
+            .collect::<Vec<_>>();
+        if current_client_id != 0 {
+            virtual_clients.push(current_client_id);
+        }
+        virtual_clients.sort_unstable();
+        virtual_clients.dedup();
+        for client_id in virtual_clients {
+            rows.push((
+                format!("virtualxid/{client_id}"),
+                virtualxid_lock_row_to_values(client_id),
+            ));
         }
 
         rows.sort_by(|left, right| left.0.cmp(&right.0));
@@ -1083,6 +1139,12 @@ impl Database {
     }
 }
 
+impl LockStatusProvider for Database {
+    fn pg_lock_status_rows(&self, current_client_id: ClientId) -> Vec<Vec<Value>> {
+        self.pg_lock_status_rows_for_client(current_client_id)
+    }
+}
+
 fn relation_lock_row_to_values(
     database_oid: u32,
     relation_oid: Option<u32>,
@@ -1128,6 +1190,91 @@ fn advisory_lock_row_to_values(database_oid: u32, row: AdvisoryLockSnapshotRow) 
         Value::Bool(false),
         row.waitstart.map(Value::TimestampTz).unwrap_or(Value::Null),
     ]
+}
+
+fn row_lock_row_to_values(database_oid: u32, row: RowLockSnapshotRow) -> Vec<Value> {
+    vec![
+        Value::Text("tuple".into()),
+        oid_value(database_oid),
+        oid_value(row.tag.relation_oid),
+        Value::Int32(row.tag.tid.block_number as i32),
+        Value::Int16(row.tag.tid.offset_number as i16),
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Text(row_lock_virtualtransaction(row.owner).into()),
+        Value::Int32(row.owner.client_id as i32),
+        Value::Text(row.mode.pg_lock_mode_name().into()),
+        Value::Bool(row.granted),
+        Value::Bool(false),
+        row.waitstart.map(Value::TimestampTz).unwrap_or(Value::Null),
+    ]
+}
+
+fn transaction_lock_row_to_values(row: TransactionLockSnapshotRow) -> Vec<Value> {
+    vec![
+        Value::Text("transactionid".into()),
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        oid_value(row.xid),
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Text(format!("{}/xact:{}", row.client_id, row.xid).into()),
+        Value::Int32(row.client_id as i32),
+        Value::Text(
+            if row.granted {
+                "ExclusiveLock"
+            } else {
+                "ShareLock"
+            }
+            .into(),
+        ),
+        Value::Bool(row.granted),
+        Value::Bool(false),
+        row.waitstart.map(Value::TimestampTz).unwrap_or(Value::Null),
+    ]
+}
+
+fn virtualxid_lock_row_to_values(client_id: ClientId) -> Vec<Value> {
+    let virtualtransaction = format!("{client_id}/session");
+    vec![
+        Value::Text("virtualxid".into()),
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Text(virtualtransaction.clone().into()),
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Null,
+        Value::Text(virtualtransaction.into()),
+        Value::Int32(client_id as i32),
+        Value::Text("ExclusiveLock".into()),
+        Value::Bool(true),
+        Value::Bool(false),
+        Value::Null,
+    ]
+}
+
+fn row_lock_virtualtransaction(owner: crate::backend::storage::lmgr::RowLockOwner) -> String {
+    match owner.scope {
+        crate::backend::storage::lmgr::RowLockScope::Session => {
+            format!("{}/session", owner.client_id)
+        }
+        crate::backend::storage::lmgr::RowLockScope::Transaction(scope_id) => {
+            format!("{}/xact:{scope_id}", owner.client_id)
+        }
+        crate::backend::storage::lmgr::RowLockScope::Statement(scope_id) => {
+            format!("{}/stmt:{scope_id}", owner.client_id)
+        }
+    }
 }
 
 fn advisory_lock_key_fields(key: AdvisoryLockKey) -> (u32, u32, i16) {

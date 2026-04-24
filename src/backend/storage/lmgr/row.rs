@@ -77,6 +77,15 @@ impl RowLockMode {
         }
     }
 
+    pub fn pg_lock_mode_name(self) -> &'static str {
+        match self {
+            Self::KeyShare => "AccessShareLock",
+            Self::Share => "RowShareLock",
+            Self::NoKeyExclusive => "ExclusiveLock",
+            Self::Exclusive => "AccessExclusiveLock",
+        }
+    }
+
     fn conflicts_with(self, other: RowLockMode) -> bool {
         matches!(
             (self, other),
@@ -99,6 +108,15 @@ pub struct RowLockTag {
 pub enum RowLockError {
     DeadlockTimeout,
     Interrupted(InterruptReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RowLockSnapshotRow {
+    pub tag: RowLockTag,
+    pub owner: RowLockOwner,
+    pub mode: RowLockMode,
+    pub granted: bool,
+    pub waitstart: Option<TimestampTzADT>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,6 +224,42 @@ impl RowLockManager {
 
     pub fn unlock_all_statement(&self, client_id: ClientId, scope_id: u64) {
         self.unlock_matching(|owner| owner == RowLockOwner::statement(client_id, scope_id));
+    }
+
+    pub fn snapshot(&self) -> Vec<RowLockSnapshotRow> {
+        let state = self.state.lock();
+        let mut rows = Vec::new();
+        for (tag, tag_state) in &state.tags {
+            for entry in &tag_state.granted {
+                rows.push(RowLockSnapshotRow {
+                    tag: *tag,
+                    owner: entry.owner,
+                    mode: entry.mode,
+                    granted: true,
+                    waitstart: None,
+                });
+            }
+            for entry in &tag_state.waiting {
+                rows.push(RowLockSnapshotRow {
+                    tag: *tag,
+                    owner: entry.owner,
+                    mode: entry.mode,
+                    granted: false,
+                    waitstart: Some(entry.waitstart),
+                });
+            }
+        }
+        rows.sort_by_key(|row| {
+            (
+                row.tag,
+                row.owner.client_id,
+                row.owner.scope,
+                row.mode,
+                !row.granted,
+                row.waitstart,
+            )
+        });
+        rows
     }
 
     fn unlock_matching(&self, predicate: impl Fn(RowLockOwner) -> bool) {

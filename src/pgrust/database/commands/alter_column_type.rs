@@ -340,6 +340,7 @@ impl Database {
             pool: std::sync::Arc::clone(&self.pool),
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
+            lock_status_provider: Some(std::sync::Arc::new(self.clone())),
             sequences: Some(self.sequences.clone()),
             large_objects: Some(self.large_objects.clone()),
             async_notify_runtime: Some(self.async_notify_runtime.clone()),

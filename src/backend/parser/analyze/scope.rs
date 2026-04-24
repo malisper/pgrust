@@ -1347,6 +1347,43 @@ fn bind_function_from_item_with_ctes(
                 if resolved.prokind != 'f' {
                     return Err(ParseError::UnknownTable(other.to_string()));
                 }
+                if matches!(resolved.srf_impl, Some(ResolvedSrfImpl::PgLockStatus)) {
+                    if !args.is_empty() {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "pg_lock_status()",
+                            actual: format!("pg_lock_status with {} arguments", args.len()),
+                        });
+                    }
+                    let mut output_columns = resolved_row_columns.clone().ok_or_else(|| {
+                        ParseError::UnexpectedToken {
+                            expected: "pg_lock_status OUT parameter metadata",
+                            actual: other.to_string(),
+                        }
+                    })?;
+                    let mut desc_columns = output_columns
+                        .iter()
+                        .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+                        .collect::<Vec<_>>();
+                    maybe_append_function_ordinality(
+                        with_ordinality,
+                        &mut output_columns,
+                        &mut desc_columns,
+                    );
+                    let desc = RelationDesc {
+                        columns: desc_columns,
+                    };
+                    let scope = scope_for_relation(Some(name), &desc);
+                    return Ok((
+                        AnalyzedFrom::function(SetReturningCall::PgLockStatus {
+                            func_oid: resolved.proc_oid,
+                            func_variadic: resolved.func_variadic,
+                            output_columns,
+                            with_ordinality,
+                        }),
+                        scope,
+                        false,
+                    ));
+                }
                 if let Some(
                     srf_impl @ (ResolvedSrfImpl::PartitionTree
                     | ResolvedSrfImpl::PartitionAncestors),
