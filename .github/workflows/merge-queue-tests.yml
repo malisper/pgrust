@@ -17,6 +17,12 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_PROFILE_TEST_OPT_LEVEL: "3"
   RUST_BACKTRACE: "1"
+  # .cargo/config.toml sets target-dir = /tmp/pgrust-target so multiple local
+  # worktrees can share build artifacts. In CI that path makes Swatinem/rust-cache
+  # cache an empty ./target directory (it captured 23 MB of registry junk and
+  # zero compiled artifacts). Override here so cargo builds where the cache
+  # action expects.
+  CARGO_TARGET_DIR: target
 
 jobs:
   changes:
@@ -85,6 +91,13 @@ jobs:
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
+        with:
+          # Default save-if only fires when github.ref matches the default branch.
+          # Merge_group runs are on ephemeral gh-readonly-queue/* branches, so the
+          # default never matches and the cache is never saved. Save additionally
+          # on workflow_dispatch (manual benchmarks) so we can populate the cache
+          # for future merge_group runs to restore from.
+          save-if: ${{ github.ref == 'refs/heads/perf-optimization' || github.event_name == 'workflow_dispatch' }}
 
       - name: Run cargo tests
         run: |
