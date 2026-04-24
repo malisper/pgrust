@@ -26,10 +26,11 @@ use crate::backend::catalog::rowcodec::{
     pg_opclass_row_from_values, pg_operator_row_from_values, pg_opfamily_row_from_values,
     pg_partitioned_table_row_from_values, pg_policy_row_from_values, pg_proc_row_from_values,
     pg_publication_namespace_row_from_values, pg_publication_rel_row_from_values,
-    pg_publication_row_from_values, pg_rewrite_row_from_values, pg_statistic_row_from_values,
-    pg_tablespace_row_from_values, pg_trigger_row_from_values, pg_ts_config_map_row_from_values,
-    pg_ts_config_row_from_values, pg_ts_dict_row_from_values, pg_ts_parser_row_from_values,
-    pg_ts_template_row_from_values, pg_type_row_from_values,
+    pg_publication_row_from_values, pg_rewrite_row_from_values,
+    pg_statistic_ext_data_row_from_values, pg_statistic_ext_row_from_values,
+    pg_statistic_row_from_values, pg_tablespace_row_from_values, pg_trigger_row_from_values,
+    pg_ts_config_map_row_from_values, pg_ts_config_row_from_values, pg_ts_dict_row_from_values,
+    pg_ts_parser_row_from_values, pg_ts_template_row_from_values, pg_type_row_from_values,
 };
 use crate::backend::catalog::rows::PhysicalCatalogRows;
 use crate::backend::executor::RelationDesc;
@@ -134,6 +135,8 @@ pub(crate) fn catalog_from_physical_rows_scoped(
     let publication_rows = rows.publications;
     let publication_rel_rows = rows.publication_rels;
     let publication_namespace_rows = rows.publication_namespaces;
+    let statistic_ext_rows = rows.statistics_ext;
+    let statistic_ext_data_rows = rows.statistics_ext_data;
     let index_rows = rows.indexes;
     let partitioned_table_rows = rows.partitioned_tables;
     let _description_rows = rows.descriptions;
@@ -297,6 +300,13 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                 .fold(DEFAULT_FIRST_USER_OID, |next_oid, row| {
                     next_oid.max(row.oid.saturating_add(1))
                 }),
+        )
+        .max(
+            statistic_ext_rows
+                .iter()
+                .fold(DEFAULT_FIRST_USER_OID, |next_oid, row| {
+                    next_oid.max(row.oid.saturating_add(1))
+                }),
         );
     let mut catalog = Catalog {
         tables: BTreeMap::new(),
@@ -310,6 +320,8 @@ pub(crate) fn catalog_from_physical_rows_scoped(
         publications: publication_rows,
         publication_rels: publication_rel_rows,
         publication_namespaces: publication_namespace_rows,
+        statistics_ext: statistic_ext_rows,
+        statistics_ext_data: statistic_ext_data_rows,
         authids: authid_rows,
         auth_members: auth_members_rows,
         databases: database_rows,
@@ -343,6 +355,10 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                 desc.attstattarget = attr.attstattarget;
                 desc.attinhcount = attr.attinhcount;
                 desc.attislocal = attr.attislocal;
+                desc.generated =
+                    crate::include::nodes::parsenodes::ColumnGeneratedKind::from_catalog_char(
+                        attr.attgenerated,
+                    );
                 desc.dropped = attr.attisdropped;
                 if let Some(attrdef) = attrdefs_by_key.get(&(row.oid, attr.attnum)) {
                     desc.attrdef_oid = Some(attrdef.oid);
@@ -419,6 +435,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                         indisunique: index.indisunique,
                         indnullsnotdistinct: index.indnullsnotdistinct,
                         indisprimary: index.indisprimary,
+                        indisexclusion: index.indisexclusion,
                         indisvalid: index.indisvalid,
                         indisready: index.indisready,
                         indislive: index.indislive,
@@ -470,6 +487,8 @@ pub(crate) fn catalog_from_physical_rows_scoped(
     crate::include::catalog::sort_pg_trigger_rows(&mut catalog.triggers);
     catalog.policies = policy_rows.clone();
     crate::include::catalog::sort_pg_policy_rows(&mut catalog.policies);
+    crate::backend::catalog::sort_pg_statistic_ext_rows(&mut catalog.statistics_ext);
+    crate::backend::catalog::sort_pg_statistic_ext_data_rows(&mut catalog.statistics_ext_data);
     Ok(catalog)
 }
 
@@ -880,6 +899,18 @@ fn append_catalog_kind_rows(
                 .map(pg_statistic_row_from_values)
                 .collect::<Result<Vec<_>, _>>()?;
         }
+        BootstrapCatalogKind::PgStatisticExt => {
+            rows.statistics_ext = values
+                .into_iter()
+                .map(pg_statistic_ext_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        BootstrapCatalogKind::PgStatisticExtData => {
+            rows.statistics_ext_data = values
+                .into_iter()
+                .map(pg_statistic_ext_data_row_from_values)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
         BootstrapCatalogKind::PgOpclass => {
             rows.opclasses = values
                 .into_iter()
@@ -1014,6 +1045,8 @@ fn load_physical_catalog_rows_legacy(base_dir: &Path) -> Result<PhysicalCatalogR
     let mut missing_inherits = false;
     let mut missing_rewrite = false;
     let mut missing_statistic = false;
+    let mut missing_statistic_ext = false;
+    let mut missing_statistic_ext_data = false;
     for kind in bootstrap_catalog_kinds() {
         let rel = RelFileLocator {
             spc_oid: 0,
@@ -1114,6 +1147,14 @@ fn load_physical_catalog_rows_legacy(base_dir: &Path) -> Result<PhysicalCatalogR
             }
             if kind == BootstrapCatalogKind::PgStatistic {
                 missing_statistic = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgStatisticExt {
+                missing_statistic_ext = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgStatisticExtData {
+                missing_statistic_ext_data = true;
                 continue;
             }
             return Err(CatalogError::Corrupt("missing physical bootstrap catalog"));
@@ -1484,6 +1525,30 @@ fn load_physical_catalog_rows_legacy(base_dir: &Path) -> Result<PhysicalCatalogR
         .map(pg_statistic_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
+    let statistic_ext_rows = if missing_statistic_ext {
+        Vec::new()
+    } else {
+        scan_catalog_relation(
+            &pool,
+            rels[&BootstrapCatalogKind::PgStatisticExt],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgStatisticExt),
+        )?
+        .into_iter()
+        .map(pg_statistic_ext_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let statistic_ext_data_rows = if missing_statistic_ext_data {
+        Vec::new()
+    } else {
+        scan_catalog_relation(
+            &pool,
+            rels[&BootstrapCatalogKind::PgStatisticExtData],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgStatisticExtData),
+        )?
+        .into_iter()
+        .map(pg_statistic_ext_data_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
 
     let mut rows = PhysicalCatalogRows {
         namespaces: namespace_rows,
@@ -1501,6 +1566,8 @@ fn load_physical_catalog_rows_legacy(base_dir: &Path) -> Result<PhysicalCatalogR
         publications: Vec::new(),
         publication_rels: Vec::new(),
         publication_namespaces: Vec::new(),
+        statistics_ext: statistic_ext_rows,
+        statistics_ext_data: statistic_ext_data_rows,
         ams: am_rows,
         amops: amop_rows,
         amprocs: amproc_rows,
@@ -1584,6 +1651,8 @@ fn load_physical_catalog_rows_visible_legacy(
     let mut missing_inherits = false;
     let mut missing_rewrite = false;
     let mut missing_statistic = false;
+    let mut missing_statistic_ext = false;
+    let mut missing_statistic_ext_data = false;
     for kind in bootstrap_catalog_kinds() {
         let rel = RelFileLocator {
             spc_oid: 0,
@@ -1685,6 +1754,14 @@ fn load_physical_catalog_rows_visible_legacy(
             }
             if kind == BootstrapCatalogKind::PgStatistic {
                 missing_statistic = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgStatisticExt {
+                missing_statistic_ext = true;
+                continue;
+            }
+            if kind == BootstrapCatalogKind::PgStatisticExtData {
+                missing_statistic_ext_data = true;
                 continue;
             }
             return Err(CatalogError::Corrupt("missing physical bootstrap catalog"));
@@ -2153,6 +2230,36 @@ fn load_physical_catalog_rows_visible_legacy(
         .map(pg_statistic_row_from_values)
         .collect::<Result<Vec<_>, _>>()?
     };
+    let statistic_ext_rows = if missing_statistic_ext {
+        Vec::new()
+    } else {
+        scan_catalog_relation_visible(
+            pool,
+            txns,
+            snapshot,
+            client_id,
+            rels[&BootstrapCatalogKind::PgStatisticExt],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgStatisticExt),
+        )?
+        .into_iter()
+        .map(pg_statistic_ext_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
+    let statistic_ext_data_rows = if missing_statistic_ext_data {
+        Vec::new()
+    } else {
+        scan_catalog_relation_visible(
+            pool,
+            txns,
+            snapshot,
+            client_id,
+            rels[&BootstrapCatalogKind::PgStatisticExtData],
+            &bootstrap_relation_desc(BootstrapCatalogKind::PgStatisticExtData),
+        )?
+        .into_iter()
+        .map(pg_statistic_ext_data_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?
+    };
 
     let mut rows = PhysicalCatalogRows {
         namespaces: namespace_rows,
@@ -2170,6 +2277,8 @@ fn load_physical_catalog_rows_visible_legacy(
         publications: Vec::new(),
         publication_rels: Vec::new(),
         publication_namespaces: Vec::new(),
+        statistics_ext: statistic_ext_rows,
+        statistics_ext_data: statistic_ext_data_rows,
         ams: am_rows,
         amops: amop_rows,
         amprocs: amproc_rows,

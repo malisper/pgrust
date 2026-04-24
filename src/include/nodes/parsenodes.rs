@@ -26,6 +26,7 @@ pub enum ParseError {
     InvalidNumeric(String),
     UnknownTable(String),
     UnknownColumn(String),
+    MissingKeyColumn(String),
     AmbiguousColumn(String),
     InvalidFromClauseReference(String),
     MissingFromClauseEntry(String),
@@ -110,6 +111,9 @@ impl fmt::Display for ParseError {
                 } else {
                     write!(f, "column \"{name}\" does not exist")
                 }
+            }
+            ParseError::MissingKeyColumn(name) => {
+                write!(f, "column \"{name}\" named in key does not exist")
             }
             ParseError::AmbiguousColumn(name) => {
                 write!(f, "column reference \"{name}\" is ambiguous")
@@ -304,6 +308,7 @@ pub enum Statement {
     AlterSequenceRename(AlterTableRenameStatement),
     AlterIndexRename(AlterTableRenameStatement),
     AlterViewRename(AlterTableRenameStatement),
+    AlterIndexAttachPartition(AlterIndexAttachPartitionStatement),
     AlterIndexAlterColumnStatistics(AlterIndexAlterColumnStatisticsStatement),
     AlterTableAddColumn(AlterTableAddColumnStatement),
     AlterTableAddConstraint(AlterTableAddConstraintStatement),
@@ -313,6 +318,7 @@ pub enum Statement {
     AlterTableRenameConstraint(AlterTableRenameConstraintStatement),
     AlterTableAlterColumnType(AlterTableAlterColumnTypeStatement),
     AlterTableAlterColumnDefault(AlterTableAlterColumnDefaultStatement),
+    AlterTableAlterColumnExpression(AlterTableAlterColumnExpressionStatement),
     AlterTableAlterColumnCompression(AlterTableAlterColumnCompressionStatement),
     AlterTableAlterColumnStorage(AlterTableAlterColumnStorageStatement),
     AlterTableAlterColumnOptions(AlterTableAlterColumnOptionsStatement),
@@ -344,6 +350,7 @@ pub enum Statement {
     CommentOnConversion(CommentOnConversionStatement),
     CommentOnForeignDataWrapper(CommentOnForeignDataWrapperStatement),
     CommentOnPublication(CommentOnPublicationStatement),
+    CommentOnStatistics(CommentOnStatisticsStatement),
     CommentOnAggregate(CommentOnAggregateStatement),
     CommentOnFunction(CommentOnFunctionStatement),
     CreateDomain(CreateDomainStatement),
@@ -359,6 +366,7 @@ pub enum Statement {
     DropConversion(DropConversionStatement),
     DropDatabase(DropDatabaseStatement),
     DropPublication(DropPublicationStatement),
+    DropStatistics(DropStatisticsStatement),
     DropFunction(DropFunctionStatement),
     DropOperator(DropOperatorStatement),
     DropAggregate(DropAggregateStatement),
@@ -1243,6 +1251,7 @@ impl CreateTableStatement {
 pub enum PartitionStrategy {
     List,
     Range,
+    Hash,
 }
 
 impl PartitionStrategy {
@@ -1250,6 +1259,7 @@ impl PartitionStrategy {
         match self {
             PartitionStrategy::List => 'l',
             PartitionStrategy::Range => 'r',
+            PartitionStrategy::Hash => 'h',
         }
     }
 }
@@ -1276,6 +1286,10 @@ pub enum RawPartitionBoundSpec {
         to: Vec<RawPartitionRangeDatum>,
         is_default: bool,
     },
+    Hash {
+        modulus: i32,
+        remainder: i32,
+    },
 }
 
 impl RawPartitionBoundSpec {
@@ -1283,6 +1297,7 @@ impl RawPartitionBoundSpec {
         match self {
             RawPartitionBoundSpec::List { is_default, .. }
             | RawPartitionBoundSpec::Range { is_default, .. } => *is_default,
+            RawPartitionBoundSpec::Hash { .. } => false,
         }
     }
 }
@@ -1398,7 +1413,7 @@ pub struct CreatePolicyStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateStatisticsStatement {
     pub if_not_exists: bool,
-    pub statistics_name: String,
+    pub statistics_name: Option<String>,
     pub kinds: Vec<String>,
     pub targets: Vec<String>,
     pub from_clause: String,
@@ -1408,13 +1423,34 @@ pub struct CreateStatisticsStatement {
 pub struct AlterStatisticsStatement {
     pub if_exists: bool,
     pub statistics_name: String,
-    pub statistics_target: i32,
+    pub action: AlterStatisticsAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterStatisticsAction {
+    Rename { new_name: String },
+    SetStatistics { target: i16 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropStatisticsStatement {
+    pub if_exists: bool,
+    pub statistics_names: Vec<String>,
+    pub cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnStatisticsStatement {
+    pub statistics_name: String,
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateIndexStatement {
     pub unique: bool,
     pub nulls_not_distinct: bool,
+    pub concurrently: bool,
+    pub only: bool,
     pub if_not_exists: bool,
     pub index_name: String,
     pub table_name: String,
@@ -1424,6 +1460,12 @@ pub struct CreateIndexStatement {
     pub predicate: Option<SqlExpr>,
     pub predicate_sql: Option<String>,
     pub options: Vec<RelOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterIndexAttachPartitionStatement {
+    pub parent_index_name: String,
+    pub child_index_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1602,6 +1644,21 @@ pub struct AlterTableAlterColumnDefaultStatement {
     pub column_name: String,
     pub default_expr: Option<SqlExpr>,
     pub default_expr_sql: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterColumnExpressionAction {
+    Set { expr: SqlExpr, expr_sql: String },
+    Drop { missing_ok: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTableAlterColumnExpressionStatement {
+    pub if_exists: bool,
+    pub only: bool,
+    pub table_name: String,
+    pub column_name: String,
+    pub action: AlterColumnExpressionAction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2217,6 +2274,7 @@ pub struct DropTriggerStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DropIndexStatement {
+    pub concurrently: bool,
     pub if_exists: bool,
     pub index_names: Vec<String>,
 }
@@ -2316,6 +2374,7 @@ pub struct ColumnDef {
     pub name: String,
     pub ty: RawTypeName,
     pub default_expr: Option<String>,
+    pub generated: Option<ColumnGeneratedDef>,
     pub compression: Option<crate::include::access::htup::AttributeCompression>,
     pub constraints: Vec<ColumnConstraint>,
 }
@@ -2340,6 +2399,35 @@ impl ColumnDef {
         self.constraints
             .iter()
             .any(|constraint| matches!(constraint, ColumnConstraint::Unique { .. }))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnGeneratedDef {
+    pub expr_sql: String,
+    pub kind: ColumnGeneratedKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ColumnGeneratedKind {
+    Virtual,
+    Stored,
+}
+
+impl ColumnGeneratedKind {
+    pub const fn catalog_char(self) -> char {
+        match self {
+            Self::Virtual => 'v',
+            Self::Stored => 's',
+        }
+    }
+
+    pub const fn from_catalog_char(value: char) -> Option<Self> {
+        match value {
+            'v' => Some(Self::Virtual),
+            's' => Some(Self::Stored),
+            _ => None,
+        }
     }
 }
 
@@ -2466,10 +2554,12 @@ pub enum TableConstraint {
     PrimaryKey {
         attributes: ConstraintAttributes,
         columns: Vec<String>,
+        without_overlaps: Option<String>,
     },
     Unique {
         attributes: ConstraintAttributes,
         columns: Vec<String>,
+        without_overlaps: Option<String>,
     },
     ForeignKey {
         attributes: ConstraintAttributes,
@@ -2519,6 +2609,7 @@ pub enum SqlTypeKind {
     RegClass,
     RegType,
     RegRole,
+    RegNamespace,
     RegOperator,
     RegProcedure,
     Tid,

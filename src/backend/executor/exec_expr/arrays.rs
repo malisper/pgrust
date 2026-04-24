@@ -283,8 +283,29 @@ fn normalize_array_value(value: &Value) -> Option<ArrayValue> {
     match value {
         Value::PgArray(array) => Some(array.clone()),
         Value::Array(items) => Some(ArrayValue::from_1d(items.clone())),
+        Value::Text(text) => parse_vector_array_text(text.as_str()),
+        Value::TextRef(_, _) => parse_vector_array_text(value.as_text()?),
         _ => None,
     }
+}
+
+fn parse_vector_array_text(text: &str) -> Option<ArrayValue> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.starts_with('{') {
+        return None;
+    }
+    let mut items = Vec::new();
+    for item in trimmed.split_whitespace() {
+        let value = item.parse::<u32>().ok()?;
+        items.push(Value::Int64(value as i64));
+    }
+    Some(ArrayValue::from_dimensions(
+        vec![ArrayDimension {
+            lower_bound: 0,
+            length: items.len(),
+        }],
+        items,
+    ))
 }
 
 pub(super) fn eval_array_ndims_function(values: &[Value]) -> Result<Value, ExecError> {

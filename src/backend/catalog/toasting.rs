@@ -82,6 +82,7 @@ fn type_maximum_size(column: &crate::backend::executor::ColumnDesc) -> Option<us
         | crate::backend::parser::SqlTypeKind::RegClass
         | crate::backend::parser::SqlTypeKind::RegType
         | crate::backend::parser::SqlTypeKind::RegRole
+        | crate::backend::parser::SqlTypeKind::RegNamespace
         | crate::backend::parser::SqlTypeKind::RegOperator
         | crate::backend::parser::SqlTypeKind::RegProcedure
         | crate::backend::parser::SqlTypeKind::Xid
@@ -241,6 +242,7 @@ pub fn new_relation_create_toast_table(
             indcollation: vec![0, 0],
             indoption: vec![0, 0],
             indnullsnotdistinct: false,
+            indisexclusion: false,
             brin_options: None,
         },
     )?;

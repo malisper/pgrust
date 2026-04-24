@@ -4695,6 +4695,23 @@ fn interval_array_literals_preserve_interval_array_values() {
 }
 
 #[test]
+fn interval_text_cast_canonicalizes_interval_value() {
+    let base = temp_dir("interval_text_cast");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select '1 day'::interval",
+        )
+        .unwrap(),
+        vec![vec![Value::Text("@ 1 day".into())]],
+    );
+}
+
+#[test]
 fn interval_array_text_casts_render_postgres_interval_style() {
     let base = temp_dir("interval_array_text_casts");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -6548,6 +6565,7 @@ fn index_property_builtins_report_am_and_index_capabilities() {
                 indcollation: vec![0],
                 indoption: vec![0],
                 indnullsnotdistinct: false,
+                indisexclusion: false,
                 brin_options: None,
             },
             None,
@@ -6566,6 +6584,7 @@ fn index_property_builtins_report_am_and_index_capabilities() {
                 indcollation: vec![0],
                 indoption: vec![0],
                 indnullsnotdistinct: false,
+                indisexclusion: false,
                 brin_options: None,
             },
             None,
@@ -6584,6 +6603,7 @@ fn index_property_builtins_report_am_and_index_capabilities() {
                 indcollation: vec![0],
                 indoption: vec![0],
                 indnullsnotdistinct: false,
+                indisexclusion: false,
                 brin_options: None,
             },
             None,
@@ -6649,6 +6669,58 @@ fn int2vector_casts_to_int2_array() {
             ])
             .with_element_type_oid(crate::include::catalog::INT2_TYPE_OID)
         ),
+    );
+}
+
+#[test]
+fn tid_and_xid_text_casts_accept_pg_input() {
+    let base = temp_dir("tid_xid_text_casts");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select '(4294967295,65535)'::tid, '4294967295'::xid",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("(4294967295,65535)".into()),
+            Value::Int64(4_294_967_295),
+        ]],
+    );
+}
+
+#[test]
+fn xml_input_errors_format_primary_message() {
+    let err = ExecError::XmlInput {
+        raw_input: "<wrong".into(),
+        message: "unsupported XML feature".into(),
+        detail: Some(
+            "This functionality requires the server to be built with libxml support.".into(),
+        ),
+        context: None,
+        sqlstate: "0A000",
+    };
+
+    assert_eq!(format_exec_error(&err), "unsupported XML feature");
+}
+
+#[test]
+fn oidvector_text_values_support_array_functions() {
+    let base = temp_dir("oidvector_array_functions");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select array_lower(proargtypes, 1), array_upper(proargtypes, 1), 0::oid = any(proargtypes) from pg_proc where pronargs = 1 limit 1",
+        )
+        .unwrap(),
+        vec![vec![Value::Int32(0), Value::Int32(0), Value::Bool(false)]],
     );
 }
 
@@ -8452,6 +8524,83 @@ fn lateral_values_can_reference_left_columns() {
                     vec![Value::Int32(2), Value::Int32(3)],
                 ]
             );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn lateral_values_can_reference_zero_column_whole_row() {
+    let base = temp_dir("lateral_values_zero_column_whole_row");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(1, "create temp table nocols()").unwrap();
+    db.execute(1, "insert into nocols default values").unwrap();
+    match db
+        .execute(1, "select * from nocols n, lateral (values(n.*)) v")
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Record(
+                    crate::include::nodes::datum::RecordValue::from_descriptor(
+                        crate::backend::utils::record::assign_anonymous_record_descriptor(vec![]),
+                        vec![],
+                    )
+                )]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn nested_lateral_whole_row_explain_lowers_without_setrefs_panic() {
+    let base = temp_dir("nested_lateral_whole_row_explain");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(1, "create table text_tbl(f1 text)").unwrap();
+    db.execute(1, "create table int8_tbl(q1 int8, q2 int8)")
+        .unwrap();
+    db.execute(1, "insert into text_tbl values ('doh!')")
+        .unwrap();
+    db.execute(1, "insert into int8_tbl values (4567890123456789, 123)")
+        .unwrap();
+
+    match db
+        .execute(
+            1,
+            "explain (verbose, costs off)
+             select * from
+               text_tbl t1
+               left join int8_tbl i8
+               on i8.q2 = 123,
+               lateral (select i8.q1, t2.f1 from text_tbl t2 limit 1) as ss1,
+               lateral (select ss1.* from text_tbl t3 limit 1) as ss2
+             where t1.f1 = ss2.f1",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert!(!rows.is_empty());
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn xmlcomment_has_proc_oid_mapping() {
+    let base = temp_dir("xmlcomment_proc_oid");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select xmlcomment('test')",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Xml("<!--test-->".into())]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }
@@ -11114,6 +11263,23 @@ fn point_slice_subscript_uses_fixed_length_array_error() {
 }
 
 #[test]
+fn point_coordinate_subscripts_return_float8_values() {
+    let base = temp_dir("point_coordinate_subscripts");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select ('(1.5,2.5)'::point)[0], ('(1.5,2.5)'::point)[1]",
+        )
+        .unwrap(),
+        vec![vec![Value::Float64(1.5), Value::Float64(2.5)]],
+    );
+}
+
+#[test]
 fn legacy_executor_rejects_drop_table_cascade() {
     let base = temp_dir("legacy_drop_table_cascade_rejected");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -13364,6 +13530,25 @@ fn jsonpath_cast_and_silent_behavior_work() {
     )
     .unwrap_err();
     assert!(matches!(err, ExecError::InvalidStorageValue { column, .. } if column == "jsonpath"));
+}
+
+#[test]
+fn jsonpath_large_subscript_uses_pg_error_text() {
+    let base = temp_dir("jsonpath_large_subscript_error");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select jsonb_path_query('[1]', 'lax $[10000000000000000]')",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::InvalidStorageValue { details, .. }
+            if details == "jsonpath array subscript is out of integer range"
+    ));
 }
 
 #[test]

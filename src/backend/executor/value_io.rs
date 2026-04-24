@@ -203,6 +203,53 @@ pub(crate) fn format_unique_key_detail(columns: &[ColumnDesc], values: &[Value])
     format!("Key ({names})=({body}) already exists.")
 }
 
+pub(crate) fn format_exclusion_key_detail(
+    columns: &[ColumnDesc],
+    proposed: &[Value],
+    existing: &[Value],
+) -> String {
+    format_exclusion_key_detail_with_existing_label(columns, proposed, existing, true)
+}
+
+pub(crate) fn format_exclusion_create_key_detail(
+    columns: &[ColumnDesc],
+    proposed: &[Value],
+    existing: &[Value],
+) -> String {
+    format_exclusion_key_detail_with_existing_label(columns, proposed, existing, false)
+}
+
+fn format_exclusion_key_detail_with_existing_label(
+    columns: &[ColumnDesc],
+    proposed: &[Value],
+    existing: &[Value],
+    existing_label: bool,
+) -> String {
+    let datetime_config = DateTimeConfig::default();
+    let names = columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let proposed = proposed
+        .iter()
+        .take(columns.len())
+        .map(|value| format_failing_row_value(value, &datetime_config))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let existing = existing
+        .iter()
+        .take(columns.len())
+        .map(|value| format_failing_row_value(value, &datetime_config))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if existing_label {
+        format!("Key ({names})=({proposed}) conflicts with existing key ({names})=({existing}).")
+    } else {
+        format!("Key ({names})=({proposed}) conflicts with key ({names})=({existing}).")
+    }
+}
+
 fn format_failing_row_value(value: &Value, datetime_config: &DateTimeConfig) -> String {
     match value {
         Value::Null => "null".to_string(),
@@ -309,6 +356,7 @@ fn sql_type_kind_tag(kind: SqlTypeKind) -> u8 {
         SqlTypeKind::RegClass => 8,
         SqlTypeKind::RegType => 63,
         SqlTypeKind::RegRole => 55,
+        SqlTypeKind::RegNamespace => 8,
         SqlTypeKind::RegOperator => 66,
         SqlTypeKind::RegProcedure => 52,
         SqlTypeKind::Tid => 9,
@@ -1289,6 +1337,7 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
                     | SqlTypeKind::RegClass
                     | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
+                    | SqlTypeKind::RegNamespace
                     | SqlTypeKind::RegOperator
                     | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid
@@ -1672,8 +1721,10 @@ pub(crate) fn decode_value_with_toast(
                     | SqlTypeKind::RegClass
                     | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
+                    | SqlTypeKind::RegNamespace
                     | SqlTypeKind::RegOperator
                     | SqlTypeKind::RegProcedure
+                    | SqlTypeKind::Xid
                     | SqlTypeKind::RegConfig
                     | SqlTypeKind::RegDictionary
             ) {
@@ -2131,6 +2182,9 @@ pub(crate) fn decode_value_with_toast(
 }
 
 pub(crate) fn missing_column_value(column: &ColumnDesc) -> Value {
+    if column.generated.is_some() {
+        return Value::Null;
+    }
     column
         .missing_default_value
         .clone()

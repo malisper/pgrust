@@ -6,10 +6,11 @@ use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{ColumnDesc, ExecError, Expr, RelationDesc};
 use crate::backend::parser::{
-    BoundRelation, CatalogLookup, CheckConstraintAction, ColumnDef, NotNullConstraintAction,
-    OwnedSequenceSpec, ParseError, RawTypeName, SqlExpr, SqlType, SqlTypeKind,
-    bind_scalar_expr_in_scope, derive_literal_default_value,
-    normalize_alter_table_add_column_constraints, raw_type_name_hint, resolve_raw_type_name,
+    AlterColumnExpressionAction, BoundRelation, CatalogLookup, CheckConstraintAction, ColumnDef,
+    NotNullConstraintAction, OwnedSequenceSpec, ParseError, RawTypeName, SqlExpr, SqlType,
+    SqlTypeKind, bind_generated_expr, bind_scalar_expr_in_scope, derive_literal_default_value,
+    expr_references_column, normalize_alter_table_add_column_constraints, raw_type_name_hint,
+    resolve_raw_type_name,
 };
 use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
@@ -20,7 +21,7 @@ use crate::include::catalog::{
     CONSTRAINT_FOREIGN, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_CATALOG_NAMESPACE_OID,
     PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TRIGGER_RELATION_OID,
     PG_TYPE_RELATION_OID, PUBLIC_NAMESPACE_OID, builtin_range_name_for_sql_type,
-    relkind_is_analyzable,
+    builtin_type_name_for_oid, relkind_is_analyzable,
 };
 use crate::include::nodes::primnodes::{Var, user_attrno};
 
@@ -29,6 +30,40 @@ pub(super) fn is_system_column_name(name: &str) -> bool {
         name.to_ascii_lowercase().as_str(),
         "tableoid" | "ctid" | "xmin" | "xmax" | "cmin" | "cmax"
     )
+}
+
+pub(super) fn reject_column_referenced_by_generated_columns(
+    catalog: &dyn CatalogLookup,
+    desc: &RelationDesc,
+    column_index: usize,
+    operation: &str,
+) -> Result<(), ExecError> {
+    for (generated_index, generated_column) in desc.columns.iter().enumerate() {
+        if generated_index == column_index || generated_column.generated.is_none() {
+            continue;
+        }
+        let Some(expr) =
+            bind_generated_expr(desc, generated_index, catalog).map_err(ExecError::Parse)?
+        else {
+            continue;
+        };
+        if expr_references_column(&expr, column_index) {
+            let referenced = &desc.columns[column_index];
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "cannot {operation} column \"{}\" because other objects depend on it",
+                    referenced.name
+                ),
+                detail: Some(format!(
+                    "Column \"{}\" is used by generated column \"{}\".",
+                    referenced.name, generated_column.name
+                )),
+                hint: None,
+                sqlstate: "2BP01",
+            });
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn lookup_heap_relation_for_ddl(
@@ -587,6 +622,24 @@ pub(super) fn validate_alter_table_add_column(
         _ => resolve_raw_type_name(&column.ty, catalog).map_err(ExecError::Parse)?,
     };
     let mut desc = column_desc(column.name.clone(), sql_type, serial_kind.is_none());
+    if column.generated.is_some() && column.default_expr.is_some() {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "generated column without DEFAULT",
+            actual: format!(
+                "both default and generation expression specified for column \"{}\"",
+                column.name
+            ),
+        }));
+    }
+    if serial_kind.is_some() && column.generated.is_some() {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "non-serial generated column",
+            actual: format!(
+                "both serial and generation expression specified for column \"{}\"",
+                column.name
+            ),
+        }));
+    }
     if serial_kind.is_some() && column.default_expr.is_some() {
         return Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "serial column without explicit DEFAULT",
@@ -596,12 +649,19 @@ pub(super) fn validate_alter_table_add_column(
             ),
         }));
     }
-    if serial_kind.is_none() {
+    if let Some(generated) = &column.generated {
+        desc.default_expr = Some(generated.expr_sql.clone());
+        desc.generated = Some(generated.kind);
+    } else if serial_kind.is_none() {
         desc.default_expr = column.default_expr.clone();
         if let Some(sql) = desc.default_expr.as_deref() {
             desc.missing_default_value = Some(derive_literal_default_value(sql, desc.sql_type)?);
         }
     }
+    let mut relation_with_new_column = relation_desc.clone();
+    relation_with_new_column.columns.push(desc.clone());
+    crate::backend::parser::validate_generated_columns(&relation_with_new_column, catalog)
+        .map_err(ExecError::Parse)?;
     let constraint_actions =
         normalize_alter_table_add_column_constraints(table_name, column, existing_constraints)
             .map_err(ExecError::Parse)?;
@@ -687,6 +747,13 @@ pub(super) struct AlterColumnDefaultPlan {
     pub default_sequence_oid: Option<u32>,
 }
 
+pub(super) struct AlterColumnExpressionPlan {
+    pub column_name: String,
+    pub default_expr_sql: Option<String>,
+    pub generated: Option<crate::include::nodes::parsenodes::ColumnGeneratedKind>,
+    pub noop: bool,
+}
+
 fn is_text_like_type(ty: SqlType) -> bool {
     !ty.is_array
         && matches!(
@@ -695,13 +762,22 @@ fn is_text_like_type(ty: SqlType) -> bool {
         )
 }
 
-pub(crate) fn format_sql_type_name(sql_type: SqlType) -> &'static str {
+pub(crate) fn format_sql_type_name(sql_type: SqlType) -> String {
     if sql_type.is_range() {
-        return builtin_range_name_for_sql_type(sql_type).unwrap_or("range");
+        return builtin_range_name_for_sql_type(sql_type)
+            .unwrap_or("range")
+            .to_string();
     }
     if sql_type.is_multirange() {
         return crate::include::catalog::builtin_multirange_name_for_sql_type(sql_type)
-            .unwrap_or("multirange");
+            .unwrap_or("multirange")
+            .to_string();
+    }
+    if !sql_type.is_array
+        && sql_type.type_oid != 0
+        && let Some(name) = builtin_type_name_for_oid(sql_type.type_oid)
+    {
+        return name;
     }
     match sql_type.kind {
         SqlTypeKind::AnyElement => "anyelement",
@@ -728,6 +804,7 @@ pub(crate) fn format_sql_type_name(sql_type: SqlType) -> &'static str {
         SqlTypeKind::RegClass => "regclass",
         SqlTypeKind::RegType => "regtype",
         SqlTypeKind::RegRole => "regrole",
+        SqlTypeKind::RegNamespace => "regnamespace",
         SqlTypeKind::RegOperator => "regoperator",
         SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::OidVector => "oidvector",
@@ -776,6 +853,7 @@ pub(crate) fn format_sql_type_name(sql_type: SqlType) -> &'static str {
         | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
         SqlTypeKind::Multirange => unreachable!("multirange handled above"),
     }
+    .to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -862,6 +940,14 @@ pub(super) fn validate_alter_table_alter_column_default(
         })
         .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.to_string())))?;
     let current_column = &desc.columns[column_index];
+    if current_column.generated.is_some() {
+        return Err(ExecError::DetailedError {
+            message: format!("column \"{}\" is a generated column", current_column.name),
+            detail: None,
+            hint: None,
+            sqlstate: "428C9",
+        });
+    }
 
     if let Some(expr) = default_expr {
         let (_bound, default_type) =
@@ -887,6 +973,85 @@ pub(super) fn validate_alter_table_alter_column_default(
         default_sequence_oid: default_expr_sql
             .and_then(crate::pgrust::database::default_sequence_oid_from_default_expr),
     })
+}
+
+pub(super) fn validate_alter_table_alter_column_expression(
+    catalog: &dyn CatalogLookup,
+    desc: &RelationDesc,
+    column_name: &str,
+    action: &AlterColumnExpressionAction,
+) -> Result<AlterColumnExpressionPlan, ExecError> {
+    if is_system_column_name(column_name) {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "user column name for ALTER COLUMN EXPRESSION",
+            actual: column_name.to_string(),
+        }));
+    }
+    let column_index = desc
+        .columns
+        .iter()
+        .enumerate()
+        .find_map(|(index, column)| {
+            (!column.dropped && column.name.eq_ignore_ascii_case(column_name)).then_some(index)
+        })
+        .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.to_string())))?;
+    let current_column = &desc.columns[column_index];
+
+    match action {
+        AlterColumnExpressionAction::Set { expr_sql, .. } => {
+            let Some(kind) = current_column.generated else {
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "column \"{}\" is not a generated column",
+                        current_column.name
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "428C9",
+                });
+            };
+            let mut desc_with_new_expression = desc.clone();
+            let column = &mut desc_with_new_expression.columns[column_index];
+            column.default_expr = Some(expr_sql.clone());
+            column.default_sequence_oid = None;
+            column.generated = Some(kind);
+            crate::backend::parser::validate_generated_columns(&desc_with_new_expression, catalog)
+                .map_err(ExecError::Parse)?;
+            Ok(AlterColumnExpressionPlan {
+                column_name: current_column.name.clone(),
+                default_expr_sql: Some(expr_sql.clone()),
+                generated: Some(kind),
+                noop: false,
+            })
+        }
+        AlterColumnExpressionAction::Drop { missing_ok } => {
+            if current_column.generated.is_none() {
+                if *missing_ok {
+                    return Ok(AlterColumnExpressionPlan {
+                        column_name: current_column.name.clone(),
+                        default_expr_sql: None,
+                        generated: None,
+                        noop: true,
+                    });
+                }
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "column \"{}\" is not a generated column",
+                        current_column.name
+                    ),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42704",
+                });
+            }
+            Ok(AlterColumnExpressionPlan {
+                column_name: current_column.name.clone(),
+                default_expr_sql: None,
+                generated: None,
+                noop: false,
+            })
+        }
+    }
 }
 
 pub(super) fn validate_alter_table_alter_column_options(
@@ -1102,6 +1267,12 @@ pub(super) fn validate_alter_table_alter_column_type(
         })
         .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column_name.to_string())))?;
     let current_column = &desc.columns[column_index];
+    if current_column.generated.is_some() {
+        return Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "ALTER TABLE ALTER COLUMN TYPE on generated columns".into(),
+        )));
+    }
+    reject_column_referenced_by_generated_columns(catalog, desc, column_index, "alter type of")?;
     let target_sql_type = match ty {
         RawTypeName::Builtin(sql_type) => *sql_type,
         RawTypeName::Serial(kind) => {
@@ -1119,8 +1290,8 @@ pub(super) fn validate_alter_table_alter_column_type(
                 "record".into(),
             )));
         }
-        RawTypeName::Named { name, .. } => {
-            return Err(ExecError::Parse(ParseError::UnsupportedType(name.clone())));
+        RawTypeName::Named { .. } => {
+            resolve_raw_type_name(ty, catalog).map_err(ExecError::Parse)?
         }
     };
 
@@ -1202,6 +1373,7 @@ pub(super) fn validate_alter_table_alter_column_type(
     new_column.not_null_primary_key_owned = current_column.not_null_primary_key_owned;
     new_column.attrdef_oid = current_column.attrdef_oid;
     new_column.default_expr = current_column.default_expr.clone();
+    new_column.generated = current_column.generated;
     new_column.missing_default_value = if current_column.default_sequence_oid.is_some() {
         None
     } else {

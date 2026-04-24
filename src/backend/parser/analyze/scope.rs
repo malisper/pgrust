@@ -494,6 +494,12 @@ fn resolve_relation_row_expr_in_scope(
     scope: &BoundScope,
     name: &str,
 ) -> Option<Vec<(String, Expr)>> {
+    let relation_exists = scope.relations.iter().any(|relation| {
+        relation
+            .relation_names
+            .iter()
+            .any(|relation_name| relation_name.eq_ignore_ascii_case(name))
+    });
     let mut matched = false;
     let fields = scope
         .columns
@@ -512,7 +518,7 @@ fn resolve_relation_row_expr_in_scope(
             Some((column.output_name.clone(), expr.clone()))
         })
         .collect::<Vec<_>>();
-    matched.then_some(fields)
+    (matched || relation_exists).then_some(fields)
 }
 
 fn from_item_is_lateral(item: &FromItem) -> bool {
@@ -595,17 +601,19 @@ pub(super) fn bind_from_item_with_ctes(
                 });
             }
             let desc = entry.desc.clone();
+            let mut plan = AnalyzedFrom::relation(
+                name.clone(),
+                entry.rel,
+                entry.relation_oid,
+                entry.relkind,
+                entry.toast,
+                !*only && matches!(entry.relkind, 'r' | 'p'),
+                desc.clone(),
+            );
+            plan.output_exprs = generated_relation_output_exprs(&desc, catalog)?;
             Ok((
-                AnalyzedFrom::relation(
-                    name.clone(),
-                    entry.rel,
-                    entry.relation_oid,
-                    entry.relkind,
-                    entry.toast,
-                    !*only && matches!(entry.relkind, 'r' | 'p'),
-                    desc.clone(),
-                ),
-                scope_for_base_relation(name, &desc),
+                plan,
+                scope_for_base_relation_with_generated(name, &desc, catalog)?,
             ))
         }
         FromItem::Values { rows } => {

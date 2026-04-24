@@ -5,23 +5,24 @@ use std::collections::HashMap;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::Expr;
 use crate::backend::executor::RelationDesc;
+use crate::backend::optimizer::finalize_expr_subqueries;
 use crate::backend::parser::analyze::scope_for_relation;
 use crate::backend::parser::{
-    BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, CatalogLookup, FromItem,
-    ParseError, SelectStatement, SlotScopeColumn, SqlExpr, SqlType, SqlTypeKind, Statement,
-    bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
+    BoundCte, BoundDeleteStatement, BoundInsertStatement, BoundUpdateStatement, CatalogLookup,
+    FromItem, ParseError, SelectStatement, SlotScopeColumn, SqlExpr, SqlType, SqlTypeKind,
+    Statement, bind_delete_with_outer_scopes, bind_insert_with_outer_scopes,
     bind_scalar_expr_in_named_slot_scope, bind_update_with_outer_scopes, parse_expr,
-    parse_statement, parse_type_name, pg_plan_query_with_outer_scopes,
-    pg_plan_values_query_with_outer_scopes,
+    parse_statement, parse_type_name, pg_plan_query_with_outer_scopes_and_ctes,
+    pg_plan_values_query_with_outer_scopes_and_ctes,
 };
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::{PgProcRow, RECORD_TYPE_OID};
-use crate::include::nodes::plannodes::PlannedStmt;
+use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{QueryColumn, TargetEntry, Var, user_attrno};
 
 use super::ast::{
-    AssignTarget, Block, Decl, ForQuerySource, ForTarget, RaiseLevel, ReturnQueryKind, Stmt,
-    VarDecl,
+    AliasTarget, AssignTarget, Block, Decl, ForQuerySource, ForTarget, RaiseLevel, ReturnQueryKind,
+    Stmt, VarDecl,
 };
 use super::gram::parse_block;
 
@@ -39,6 +40,7 @@ pub struct CompiledFunction {
     pub(crate) body: CompiledBlock,
     pub(crate) return_contract: FunctionReturnContract,
     pub(crate) found_slot: usize,
+    pub(crate) local_ctes: Vec<BoundCte>,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +48,13 @@ pub(crate) struct CompiledFunctionSlot {
     pub(crate) name: String,
     pub(crate) slot: usize,
     pub(crate) ty: SqlType,
+}
+
+#[derive(Debug, Clone)]
+pub struct TriggerTransitionTable {
+    pub name: String,
+    pub desc: RelationDesc,
+    pub rows: Vec<Vec<crate::backend::executor::Value>>,
 }
 
 #[derive(Debug, Clone)]
@@ -64,7 +73,10 @@ pub(crate) struct CompiledVar {
 
 #[derive(Debug, Clone)]
 pub(crate) enum CompiledExpr {
-    Scalar(Expr),
+    Scalar {
+        expr: Expr,
+        subplans: Vec<Plan>,
+    },
     QueryCompare {
         plan: PlannedStmt,
         op: QueryCompareOp,
@@ -241,12 +253,14 @@ struct ScopeVar {
 struct RelationScopeVar {
     name: String,
     columns: Vec<SlotScopeColumn>,
+    trigger_row: Option<TriggerReturnedRow>,
 }
 
 #[derive(Debug, Clone, Default)]
 struct CompileEnv {
     vars: HashMap<String, ScopeVar>,
     relation_scopes: Vec<RelationScopeVar>,
+    local_ctes: Vec<BoundCte>,
     parameter_slots: Vec<ScopeVar>,
     positional_parameter_names: Vec<String>,
     next_slot: usize,
@@ -330,8 +344,47 @@ impl CompileEnv {
         self.relation_scopes.push(RelationScopeVar {
             name: name.to_ascii_lowercase(),
             columns,
+            trigger_row: None,
         });
         CompiledTriggerRelation { slots, field_names }
+    }
+
+    fn define_trigger_relation_scope(
+        &mut self,
+        name: &str,
+        desc: &RelationDesc,
+        trigger_row: TriggerReturnedRow,
+    ) -> CompiledTriggerRelation {
+        let relation = self.define_relation_scope(name, desc);
+        if let Some(scope) = self
+            .relation_scopes
+            .iter_mut()
+            .find(|scope| scope.name.eq_ignore_ascii_case(name))
+        {
+            scope.trigger_row = Some(trigger_row);
+        }
+        relation
+    }
+
+    fn define_relation_alias(&mut self, name: &str, target: TriggerReturnedRow) -> bool {
+        let source_name = match target {
+            TriggerReturnedRow::New => "new",
+            TriggerReturnedRow::Old => "old",
+        };
+        let Some(source) = self
+            .relation_scopes
+            .iter()
+            .find(|scope| scope.name.eq_ignore_ascii_case(source_name))
+            .cloned()
+        else {
+            return false;
+        };
+        self.relation_scopes.push(RelationScopeVar {
+            name: name.to_ascii_lowercase(),
+            columns: source.columns,
+            trigger_row: Some(target),
+        });
+        true
     }
 
     fn get_relation_field(&self, relation: &str, field: &str) -> Option<&SlotScopeColumn> {
@@ -344,6 +397,13 @@ impl CompileEnv {
                     .iter()
                     .find(|column| !column.hidden && column.name.eq_ignore_ascii_case(field))
             })
+    }
+
+    fn trigger_relation_return_row(&self, relation: &str) -> Option<TriggerReturnedRow> {
+        self.relation_scopes
+            .iter()
+            .find(|scope| scope.name.eq_ignore_ascii_case(relation))
+            .and_then(|scope| scope.trigger_row)
     }
 
     fn visible_columns(&self) -> Vec<(String, SqlType)> {
@@ -505,16 +565,28 @@ pub(crate) fn compile_function_from_proc(
         body,
         return_contract,
         found_slot,
+        local_ctes: Vec::new(),
     })
 }
 
 pub(crate) fn compile_trigger_function_from_proc(
     row: &PgProcRow,
     relation_desc: &RelationDesc,
+    transition_tables: &[TriggerTransitionTable],
     catalog: &dyn CatalogLookup,
 ) -> Result<CompiledFunction, ParseError> {
     let block = parse_block(&row.prosrc)?;
     let mut env = CompileEnv::default();
+    env.local_ctes = transition_tables
+        .iter()
+        .map(|table| {
+            crate::backend::parser::bound_cte_from_materialized_rows(
+                table.name.clone(),
+                &table.desc,
+                &table.rows,
+            )
+        })
+        .collect();
     let bindings = seed_trigger_env(&mut env, relation_desc);
     let found_slot = env.define_var("found", SqlType::new(SqlTypeKind::Bool));
     let return_contract = FunctionReturnContract::Trigger { bindings };
@@ -525,6 +597,7 @@ pub(crate) fn compile_trigger_function_from_proc(
         body,
         return_contract,
         found_slot,
+        local_ctes: env.local_ctes.clone(),
     })
 }
 
@@ -653,14 +726,34 @@ fn compile_alias_decl(
     decl: &super::ast::AliasDecl,
     env: &mut CompileEnv,
 ) -> Result<(), ParseError> {
-    let parameter = env
-        .get_parameter(decl.param_index)
-        .cloned()
-        .ok_or_else(|| ParseError::UnexpectedToken {
-            expected: "function parameter referenced by ALIAS FOR",
-            actual: format!("${}", decl.param_index),
-        })?;
-    env.define_alias(&decl.name, parameter.slot, parameter.ty);
+    match decl.target {
+        AliasTarget::Parameter(index) => {
+            let parameter =
+                env.get_parameter(index)
+                    .cloned()
+                    .ok_or_else(|| ParseError::UnexpectedToken {
+                        expected: "function parameter referenced by ALIAS FOR",
+                        actual: format!("${index}"),
+                    })?;
+            env.define_alias(&decl.name, parameter.slot, parameter.ty);
+        }
+        AliasTarget::New => {
+            if !env.define_relation_alias(&decl.name, TriggerReturnedRow::New) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "trigger NEW row available for ALIAS FOR",
+                    actual: "NEW".into(),
+                });
+            }
+        }
+        AliasTarget::Old => {
+            if !env.define_relation_alias(&decl.name, TriggerReturnedRow::Old) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "trigger OLD row available for ALIAS FOR",
+                    actual: "OLD".into(),
+                });
+            }
+        }
+    }
     Ok(())
 }
 
@@ -775,17 +868,12 @@ fn compile_return_stmt(
     };
     match (contract, expr) {
         (FunctionReturnContract::Trigger { .. }, Some(expr))
-            if expr.trim().eq_ignore_ascii_case("new") =>
+            if env.trigger_relation_return_row(expr.trim()).is_some() =>
         {
             Ok(CompiledStmt::ReturnTriggerRow {
-                row: TriggerReturnedRow::New,
-            })
-        }
-        (FunctionReturnContract::Trigger { .. }, Some(expr))
-            if expr.trim().eq_ignore_ascii_case("old") =>
-        {
-            Ok(CompiledStmt::ReturnTriggerRow {
-                row: TriggerReturnedRow::Old,
+                row: env
+                    .trigger_relation_return_row(expr.trim())
+                    .ok_or(ParseError::UnexpectedEof)?,
             })
         }
         (FunctionReturnContract::Trigger { .. }, Some(expr))
@@ -857,6 +945,32 @@ fn compile_return_next_stmt(
     }
 }
 
+fn plan_select_for_env(
+    stmt: &crate::backend::parser::SelectStatement,
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+) -> Result<PlannedStmt, ParseError> {
+    pg_plan_query_with_outer_scopes_and_ctes(
+        stmt,
+        catalog,
+        &[outer_scope_for_sql(env)],
+        &env.local_ctes,
+    )
+}
+
+fn plan_values_for_env(
+    stmt: &crate::backend::parser::ValuesStatement,
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+) -> Result<PlannedStmt, ParseError> {
+    pg_plan_values_query_with_outer_scopes_and_ctes(
+        stmt,
+        catalog,
+        &[outer_scope_for_sql(env)],
+        &env.local_ctes,
+    )
+}
+
 fn compile_return_query_stmt(
     sql: &str,
     kind: ReturnQueryKind,
@@ -883,12 +997,8 @@ fn compile_return_query_stmt(
 
     let rewritten_sql = rewrite_plpgsql_sql_text(sql, env)?;
     let planned = match parse_statement(&rewritten_sql)? {
-        Statement::Select(stmt) => {
-            pg_plan_query_with_outer_scopes(&stmt, catalog, &[outer_scope_for_sql(env)])?
-        }
-        Statement::Values(stmt) => {
-            pg_plan_values_query_with_outer_scopes(&stmt, catalog, &[outer_scope_for_sql(env)])?
-        }
+        Statement::Select(stmt) => plan_select_for_env(&stmt, catalog, env)?,
+        Statement::Values(stmt) => plan_values_for_env(&stmt, catalog, env)?,
         other => {
             return Err(ParseError::UnexpectedToken {
                 expected: "RETURN QUERY SELECT ... or RETURN QUERY VALUES (...)",
@@ -908,10 +1018,11 @@ fn compile_perform_stmt(
     env: &CompileEnv,
 ) -> Result<CompiledStmt, ParseError> {
     let rewritten_sql = rewrite_plpgsql_sql_text(sql, env)?;
-    let planned = pg_plan_query_with_outer_scopes(
+    let planned = pg_plan_query_with_outer_scopes_and_ctes(
         &crate::backend::parser::parse_select(&format!("select {rewritten_sql}"))?,
         catalog,
         &[outer_scope_for_sql(env)],
+        &env.local_ctes,
     )?;
     Ok(CompiledStmt::Perform { plan: planned })
 }
@@ -921,6 +1032,17 @@ fn compile_exec_sql_stmt(
     catalog: &dyn CatalogLookup,
     env: &mut CompileEnv,
 ) -> Result<CompiledStmt, ParseError> {
+    if let Some(name) = persistent_object_transition_table_reference(sql, &env.local_ctes) {
+        return Err(ParseError::DetailedError {
+            message: format!(
+                "transition table \"{name}\" cannot be referenced in a persistent object"
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+
     if let Some((target_name, select_sql)) = split_select_into_target(sql) {
         return compile_select_into_stmt(
             &select_sql,
@@ -950,10 +1072,20 @@ fn compile_exec_sql_stmt(
     let outer_scope = outer_scope_for_sql(env);
     match stmt {
         Statement::Select(stmt) => Ok(CompiledStmt::Perform {
-            plan: pg_plan_query_with_outer_scopes(&stmt, catalog, &[outer_scope])?,
+            plan: pg_plan_query_with_outer_scopes_and_ctes(
+                &stmt,
+                catalog,
+                &[outer_scope],
+                &env.local_ctes,
+            )?,
         }),
         Statement::Values(stmt) => Ok(CompiledStmt::Perform {
-            plan: pg_plan_values_query_with_outer_scopes(&stmt, catalog, &[outer_scope])?,
+            plan: pg_plan_values_query_with_outer_scopes_and_ctes(
+                &stmt,
+                catalog,
+                &[outer_scope],
+                &env.local_ctes,
+            )?,
         }),
         Statement::Insert(stmt) => Ok(CompiledStmt::ExecInsert {
             stmt: bind_insert_with_outer_scopes(&stmt, catalog, &[outer_scope])?,
@@ -969,6 +1101,47 @@ fn compile_exec_sql_stmt(
             actual: format!("{other:?}"),
         }),
     }
+}
+
+fn persistent_object_transition_table_reference(
+    sql: &str,
+    local_ctes: &[BoundCte],
+) -> Option<String> {
+    if local_ctes.is_empty() {
+        return None;
+    }
+    let lower = sql.trim_start().to_ascii_lowercase();
+    let is_persistent_create = lower.starts_with("create view ")
+        || lower.starts_with("create materialized view ")
+        || (lower.starts_with("create table ")
+            && !lower.starts_with("create table pg_temp.")
+            && !lower.starts_with("create table temp ")
+            && !lower.starts_with("create table temporary "))
+        || (lower.starts_with("create unlogged table ")
+            && !lower.starts_with("create unlogged table pg_temp."));
+    if !is_persistent_create {
+        return None;
+    }
+    local_ctes
+        .iter()
+        .find(|cte| sql_references_relation_name(&lower, &cte.name))
+        .map(|cte| cte.name.clone())
+}
+
+fn sql_references_relation_name(lower_sql: &str, name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    [
+        format!(" from {name}"),
+        format!(" join {name}"),
+        format!(" update {name}"),
+        format!(" into {name}"),
+        format!(" from \"{name}\""),
+        format!(" join \"{name}\""),
+        format!(" update \"{name}\""),
+        format!(" into \"{name}\""),
+    ]
+    .iter()
+    .any(|needle| lower_sql.contains(needle))
 }
 
 fn outer_scope_for_sql(env: &CompileEnv) -> crate::backend::parser::BoundScope {
@@ -1469,10 +1642,11 @@ fn compile_select_into_stmt(
     env: &mut CompileEnv,
 ) -> Result<CompiledStmt, ParseError> {
     let rewritten_sql = rewrite_plpgsql_sql_text(select_sql, env)?;
-    let planned = pg_plan_query_with_outer_scopes(
+    let planned = pg_plan_query_with_outer_scopes_and_ctes(
         &crate::backend::parser::parse_select(&rewritten_sql)?,
         catalog,
         &[outer_scope_for_sql(env)],
+        &env.local_ctes,
     )?;
     let mut targets = target_refs
         .iter()
@@ -1514,14 +1688,8 @@ fn compile_for_query_stmt(
             let rewritten_sql = rewrite_plpgsql_sql_text(sql, env)?;
             let stmt = parse_statement(&rewritten_sql)?;
             let plan = match stmt {
-                Statement::Select(stmt) => {
-                    pg_plan_query_with_outer_scopes(&stmt, catalog, &[outer_scope_for_sql(env)])?
-                }
-                Statement::Values(stmt) => pg_plan_values_query_with_outer_scopes(
-                    &stmt,
-                    catalog,
-                    &[outer_scope_for_sql(env)],
-                )?,
+                Statement::Select(stmt) => plan_select_for_env(&stmt, catalog, env)?,
+                Statement::Values(stmt) => plan_values_for_env(&stmt, catalog, env)?,
                 other => {
                     return Err(ParseError::UnexpectedToken {
                         expected: "FOR ... IN query LOOP supports SELECT or VALUES; use EXECUTE for dynamic SQL",
@@ -1724,9 +1892,12 @@ fn compile_expr_text(
         &env.relation_slot_scopes(),
         &env.slot_columns(),
         catalog,
+        &env.local_ctes,
     )?;
     let _ = sql_type;
-    Ok(CompiledExpr::Scalar(expr))
+    let mut subplans = Vec::new();
+    let expr = finalize_expr_subqueries(expr, catalog, &mut subplans);
+    Ok(CompiledExpr::Scalar { expr, subplans })
 }
 
 fn compile_condition_text(
@@ -1746,10 +1917,14 @@ fn compile_condition_text(
                     crate::backend::parser::parse_select(&query_sql)?,
                     env,
                 );
-                let plan =
-                    pg_plan_query_with_outer_scopes(&select, catalog, &[outer_scope_for_sql(env)])?;
+                let plan = plan_select_for_env(&select, catalog, env)?;
                 let rhs = match compile_expr_text(condition.right_expr, catalog, env)? {
-                    CompiledExpr::Scalar(expr) => expr,
+                    CompiledExpr::Scalar { expr, subplans } if subplans.is_empty() => expr,
+                    CompiledExpr::Scalar { .. } => {
+                        return Err(ParseError::FeatureNotSupported(
+                            "query-style PL/pgSQL conditions do not support subqueries on the comparison value".into(),
+                        ));
+                    }
                     CompiledExpr::QueryCompare { .. } => {
                         return Err(ParseError::FeatureNotSupported(
                             "query-style PL/pgSQL conditions do not support query comparisons on both sides".into(),
@@ -2237,8 +2412,8 @@ fn normalize_plpgsql_from_item(item: FromItem, env: &CompileEnv) -> FromItem {
 }
 
 fn seed_trigger_env(env: &mut CompileEnv, relation_desc: &RelationDesc) -> CompiledTriggerBindings {
-    let new_row = env.define_relation_scope("new", relation_desc);
-    let old_row = env.define_relation_scope("old", relation_desc);
+    let new_row = env.define_trigger_relation_scope("new", relation_desc, TriggerReturnedRow::New);
+    let old_row = env.define_trigger_relation_scope("old", relation_desc, TriggerReturnedRow::Old);
     let tg_name_slot = env.define_var("tg_name", SqlType::new(SqlTypeKind::Text));
     let tg_op_slot = env.define_var("tg_op", SqlType::new(SqlTypeKind::Text));
     let tg_when_slot = env.define_var("tg_when", SqlType::new(SqlTypeKind::Text));
@@ -2323,7 +2498,16 @@ pub(crate) fn compile_decl_type(type_name: &str) -> Result<SqlType, ParseError> 
 
 #[cfg(test)]
 mod tests {
-    use super::rewrite_plpgsql_query_condition;
+    use super::*;
+    use crate::backend::parser::BoundRelation;
+
+    struct EmptyCatalog;
+
+    impl CatalogLookup for EmptyCatalog {
+        fn lookup_any_relation(&self, _name: &str) -> Option<BoundRelation> {
+            None
+        }
+    }
 
     #[test]
     fn rewrites_plpgsql_count_condition_with_from_clause() {
@@ -2347,5 +2531,34 @@ mod tests {
             rewrite_plpgsql_query_condition("new.slotno < 1 or new.slotno > hubrec.nslots"),
             None
         );
+    }
+
+    #[test]
+    fn aliases_trigger_relation_scope() {
+        let mut env = CompileEnv::default();
+        let desc = RelationDesc {
+            columns: Vec::new(),
+        };
+        let bindings = seed_trigger_env(&mut env, &desc);
+
+        assert!(env.define_relation_alias("ps", TriggerReturnedRow::New));
+        assert_eq!(
+            env.trigger_relation_return_row("ps"),
+            Some(TriggerReturnedRow::New)
+        );
+
+        let stmt = compile_return_stmt(
+            Some("ps"),
+            &EmptyCatalog,
+            &env,
+            Some(&FunctionReturnContract::Trigger { bindings }),
+        )
+        .unwrap();
+        assert!(matches!(
+            stmt,
+            CompiledStmt::ReturnTriggerRow {
+                row: TriggerReturnedRow::New
+            }
+        ));
     }
 }

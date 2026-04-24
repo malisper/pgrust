@@ -26,9 +26,10 @@ use crate::include::catalog::{
     DEPENDENCY_INTERNAL, PG_CONSTRAINT_RELATION_OID, PUBLIC_NAMESPACE_OID, PgAuthIdRow,
     PgAuthMembersRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgInheritsRow,
     PgPartitionedTableRow, PgPolicyRow, PgPublicationNamespaceRow, PgPublicationRelRow,
-    PgPublicationRow, PgRewriteRow, PgTablespaceRow, PgTriggerRow, bootstrap_pg_auth_members_rows,
-    bootstrap_pg_authid_rows, bootstrap_pg_database_rows, bootstrap_pg_tablespace_rows,
-    builtin_range_name_for_sql_type, builtin_type_rows, relkind_has_storage, sort_pg_rewrite_rows,
+    PgPublicationRow, PgRewriteRow, PgStatisticExtDataRow, PgStatisticExtRow, PgTablespaceRow,
+    PgTriggerRow, bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows,
+    bootstrap_pg_database_rows, bootstrap_pg_tablespace_rows, builtin_range_name_for_sql_type,
+    builtin_type_name_for_oid, builtin_type_rows, relkind_has_storage, sort_pg_rewrite_rows,
 };
 
 const DEFAULT_SPC_OID: u32 = 0;
@@ -134,6 +135,7 @@ fn build_catalog_index_entry(
             indisunique: unique,
             indnullsnotdistinct: options.indnullsnotdistinct,
             indisprimary: primary,
+            indisexclusion: options.indisexclusion,
             indisvalid,
             indisready,
             indislive: true,
@@ -160,6 +162,7 @@ pub struct CatalogIndexMeta {
     pub indisunique: bool,
     pub indnullsnotdistinct: bool,
     pub indisprimary: bool,
+    pub indisexclusion: bool,
     pub indisvalid: bool,
     pub indisready: bool,
     pub indislive: bool,
@@ -178,6 +181,7 @@ pub struct CatalogIndexBuildOptions {
     pub indcollation: Vec<u32>,
     pub indoption: Vec<i16>,
     pub indnullsnotdistinct: bool,
+    pub indisexclusion: bool,
     pub brin_options: Option<BrinOptions>,
 }
 
@@ -236,6 +240,8 @@ pub struct Catalog {
     pub(crate) publications: Vec<PgPublicationRow>,
     pub(crate) publication_rels: Vec<PgPublicationRelRow>,
     pub(crate) publication_namespaces: Vec<PgPublicationNamespaceRow>,
+    pub(crate) statistics_ext: Vec<PgStatisticExtRow>,
+    pub(crate) statistics_ext_data: Vec<PgStatisticExtDataRow>,
     pub(crate) authids: Vec<PgAuthIdRow>,
     pub(crate) auth_members: Vec<PgAuthMembersRow>,
     pub(crate) databases: Vec<PgDatabaseRow>,
@@ -258,6 +264,8 @@ impl Default for Catalog {
             publications: Vec::new(),
             publication_rels: Vec::new(),
             publication_namespaces: Vec::new(),
+            statistics_ext: Vec::new(),
+            statistics_ext_data: Vec::new(),
             authids: bootstrap_pg_authid_rows(),
             auth_members: bootstrap_pg_auth_members_rows().into(),
             databases: bootstrap_pg_database_rows().into(),
@@ -457,6 +465,14 @@ impl Catalog {
 
     pub fn publication_namespace_rows(&self) -> &[PgPublicationNamespaceRow] {
         &self.publication_namespaces
+    }
+
+    pub fn statistic_ext_rows(&self) -> &[PgStatisticExtRow] {
+        &self.statistics_ext
+    }
+
+    pub fn statistic_ext_data_rows(&self) -> &[PgStatisticExtDataRow] {
+        &self.statistics_ext_data
     }
 
     pub fn next_oid(&self) -> u32 {
@@ -776,6 +792,36 @@ impl Catalog {
         coninhcount: i16,
         connoinherit: bool,
     ) -> Result<PgConstraintRow, CatalogError> {
+        self.create_index_backed_constraint_with_inheritance_and_period(
+            relation_oid,
+            index_oid,
+            conname,
+            contype,
+            primary_key_owned_not_null_oids,
+            conparentid,
+            conislocal,
+            coninhcount,
+            connoinherit,
+            false,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_index_backed_constraint_with_inheritance_and_period(
+        &mut self,
+        relation_oid: u32,
+        index_oid: u32,
+        conname: impl Into<String>,
+        contype: char,
+        primary_key_owned_not_null_oids: &[u32],
+        conparentid: u32,
+        conislocal: bool,
+        coninhcount: i16,
+        connoinherit: bool,
+        conperiod: bool,
+        conexclop: Option<Vec<u32>>,
+    ) -> Result<PgConstraintRow, CatalogError> {
         let table = self
             .get_by_oid(relation_oid)
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
@@ -822,12 +868,12 @@ impl Catalog {
             conppeqop: None,
             conffeqop: None,
             confdelsetcols: None,
-            conexclop: None,
+            conexclop,
             conbin: None,
             conislocal,
             coninhcount,
             connoinherit,
-            conperiod: false,
+            conperiod,
         };
         self.next_oid = self.next_oid.saturating_add(1);
         self.constraints.push(row.clone());
@@ -1433,6 +1479,7 @@ impl Catalog {
             indcollation,
             indoption,
             indnullsnotdistinct: false,
+            indisexclusion: false,
             brin_options: None,
         })
     }
@@ -1521,6 +1568,54 @@ impl Catalog {
         let column = &mut new_entry.desc.columns[column_index];
         column.default_expr = default_expr;
         column.default_sequence_oid = default_sequence_oid;
+        if column.default_expr.is_some() {
+            if column.attrdef_oid.is_none() {
+                column.attrdef_oid = Some(self.next_oid);
+                self.next_oid = self.next_oid.saturating_add(1);
+            }
+        } else {
+            column.attrdef_oid = None;
+            column.missing_default_value = None;
+        }
+
+        let entry = self
+            .tables
+            .get_mut(&name)
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        *entry = new_entry.clone();
+        self.replace_constraint_rows_for_entry(&name, &new_entry);
+        self.replace_depend_rows_for_entry(&new_entry);
+        Ok((name, old_entry, new_entry))
+    }
+
+    pub fn alter_table_set_column_generation(
+        &mut self,
+        relation_oid: u32,
+        column_name: &str,
+        default_expr: Option<String>,
+        generated: Option<crate::include::nodes::parsenodes::ColumnGeneratedKind>,
+    ) -> Result<(String, CatalogEntry, CatalogEntry), CatalogError> {
+        let name = self
+            .tables
+            .iter()
+            .find(|(_, entry)| entry.relation_oid == relation_oid)
+            .map(|(name, _)| name.clone())
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        let old_entry = self
+            .tables
+            .get(&name)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
+        if old_entry.relkind != 'r' {
+            return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+        }
+        let column_index = relation_column_index(&old_entry.desc, column_name)?;
+
+        let mut new_entry = old_entry.clone();
+        let column = &mut new_entry.desc.columns[column_index];
+        column.default_expr = default_expr;
+        column.default_sequence_oid = None;
+        column.generated = generated;
         if column.default_expr.is_some() {
             if column.attrdef_oid.is_none() {
                 column.attrdef_oid = Some(self.next_oid);
@@ -1669,6 +1764,7 @@ impl Catalog {
         column.not_null_primary_key_owned = false;
         column.attrdef_oid = None;
         column.default_expr = None;
+        column.generated = None;
         column.missing_default_value = None;
 
         let entry = self
@@ -2368,13 +2464,19 @@ pub(crate) fn validate_builtin_type_rows(desc: &RelationDesc) -> Result<(), Cata
     Ok(())
 }
 
-fn format_sql_type_name(sql_type: SqlType) -> &'static str {
+fn format_sql_type_name(sql_type: SqlType) -> String {
+    if !sql_type.is_array
+        && sql_type.type_oid != 0
+        && let Some(name) = builtin_type_name_for_oid(sql_type.type_oid)
+    {
+        return name;
+    }
     if sql_type.is_array {
         if sql_type.element_type().is_range() {
-            return "unsupported array";
+            return "unsupported array".into();
         }
         if sql_type.element_type().is_multirange() {
-            return "unsupported array";
+            return "unsupported array".into();
         }
         return match sql_type.kind {
             SqlTypeKind::AnyElement
@@ -2407,6 +2509,7 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
             SqlTypeKind::RegClass => "_regclass",
             SqlTypeKind::RegType => "unsupported array",
             SqlTypeKind::RegRole => "unsupported array",
+            SqlTypeKind::RegNamespace => "_regnamespace",
             SqlTypeKind::RegOperator => "_regoperator",
             SqlTypeKind::RegProcedure => "_regprocedure",
             SqlTypeKind::Tid => "_tid",
@@ -2449,15 +2552,19 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
             | SqlTypeKind::TimestampRange
             | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
             SqlTypeKind::Multirange => unreachable!("multirange handled above"),
-        };
+        }
+        .into();
     }
 
     if sql_type.is_range() {
-        return builtin_range_name_for_sql_type(sql_type).unwrap_or("range");
+        return builtin_range_name_for_sql_type(sql_type)
+            .unwrap_or("range")
+            .into();
     }
     if sql_type.is_multirange() {
         return crate::include::catalog::builtin_multirange_name_for_sql_type(sql_type)
-            .unwrap_or("multirange");
+            .unwrap_or("multirange")
+            .into();
     }
 
     match sql_type.kind {
@@ -2492,6 +2599,7 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
         SqlTypeKind::RegClass => "regclass",
         SqlTypeKind::RegType => "regtype",
         SqlTypeKind::RegRole => "regrole",
+        SqlTypeKind::RegNamespace => "regnamespace",
         SqlTypeKind::RegOperator => "regoperator",
         SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::Tid => "tid",
@@ -2534,6 +2642,7 @@ fn format_sql_type_name(sql_type: SqlType) -> &'static str {
         | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
         SqlTypeKind::Multirange => unreachable!("multirange handled above"),
     }
+    .into()
 }
 
 #[cfg(test)]

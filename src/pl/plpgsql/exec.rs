@@ -9,6 +9,7 @@ use crate::backend::executor::{
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, TriggerLevel, TriggerTiming, parse_statement,
+    pg_plan_query_with_outer_scopes_and_ctes, pg_plan_values_query_with_outer_scopes_and_ctes,
 };
 use crate::backend::utils::record::{
     assign_anonymous_record_descriptor, lookup_anonymous_record_descriptor,
@@ -51,6 +52,7 @@ pub struct TriggerCallContext {
     pub op: TriggerOperation,
     pub new_row: Option<Vec<Value>>,
     pub old_row: Option<Vec<Value>>,
+    pub transition_tables: Vec<super::compile::TriggerTransitionTable>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -308,8 +310,13 @@ pub fn execute_user_defined_trigger_function(
             "0A000",
         ));
     }
-    let compiled = compile_trigger_function_from_proc(&row, &call.relation_desc, catalog)
-        .map_err(ExecError::Parse)?;
+    let compiled = compile_trigger_function_from_proc(
+        &row,
+        &call.relation_desc,
+        &call.transition_tables,
+        catalog,
+    )
+    .map_err(ExecError::Parse)?;
     let FunctionReturnContract::Trigger { bindings } = &compiled.return_contract else {
         return Err(function_runtime_error(
             "trigger function compiled with a non-trigger return contract",
@@ -1030,9 +1037,11 @@ fn exec_function_insert(
     })?;
     ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
     let xid = ctx.ensure_write_xid()?;
-    let result = execute_insert(stmt.clone(), &catalog, ctx, xid, ctx.next_command_id);
+    let cid = ctx.next_command_id;
+    let result = execute_insert(stmt.clone(), &catalog, ctx, xid, cid);
     ctx.expr_bindings.outer_tuple = None;
     let result = result?;
+    advance_plpgsql_command_id(ctx);
     state.values[compiled.found_slot] = Value::Bool(statement_result_changed_rows(&result));
     Ok(())
 }
@@ -1053,7 +1062,8 @@ fn exec_function_insert_into(
     })?;
     ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
     let xid = ctx.ensure_write_xid()?;
-    let result = execute_insert(stmt.clone(), &catalog, ctx, xid, ctx.next_command_id);
+    let cid = ctx.next_command_id;
+    let result = execute_insert(stmt.clone(), &catalog, ctx, xid, cid);
     ctx.expr_bindings.outer_tuple = None;
     let StatementResult::Query { columns, rows, .. } = result? else {
         return Err(function_runtime_error(
@@ -1062,6 +1072,7 @@ fn exec_function_insert_into(
             "XX000",
         ));
     };
+    advance_plpgsql_command_id(ctx);
     assign_query_rows_into_targets(&rows, &columns, targets, compiled, state)
 }
 
@@ -1080,9 +1091,11 @@ fn exec_function_update(
     })?;
     ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
     let xid = ctx.ensure_write_xid()?;
-    let result = execute_update(stmt.clone(), &catalog, ctx, xid, ctx.next_command_id);
+    let cid = ctx.next_command_id;
+    let result = execute_update(stmt.clone(), &catalog, ctx, xid, cid);
     ctx.expr_bindings.outer_tuple = None;
     let result = result?;
+    advance_plpgsql_command_id(ctx);
     state.values[compiled.found_slot] = Value::Bool(statement_result_changed_rows(&result));
     Ok(())
 }
@@ -1103,7 +1116,8 @@ fn exec_function_update_into(
     })?;
     ctx.expr_bindings.outer_tuple = Some(function_outer_tuple(compiled, state));
     let xid = ctx.ensure_write_xid()?;
-    let result = execute_update(stmt.clone(), &catalog, ctx, xid, ctx.next_command_id);
+    let cid = ctx.next_command_id;
+    let result = execute_update(stmt.clone(), &catalog, ctx, xid, cid);
     ctx.expr_bindings.outer_tuple = None;
     let StatementResult::Query { columns, rows, .. } = result? else {
         return Err(function_runtime_error(
@@ -1112,6 +1126,7 @@ fn exec_function_update_into(
             "XX000",
         ));
     };
+    advance_plpgsql_command_id(ctx);
     assign_query_rows_into_targets(&rows, &columns, targets, compiled, state)
 }
 
@@ -1133,6 +1148,7 @@ fn exec_function_delete(
     let result = execute_delete(stmt.clone(), &catalog, ctx, xid);
     ctx.expr_bindings.outer_tuple = None;
     let result = result?;
+    advance_plpgsql_command_id(ctx);
     state.values[compiled.found_slot] = Value::Bool(statement_result_changed_rows(&result));
     Ok(())
 }
@@ -1162,7 +1178,13 @@ fn exec_function_delete_into(
             "XX000",
         ));
     };
+    advance_plpgsql_command_id(ctx);
     assign_query_rows_into_targets(&rows, &columns, targets, compiled, state)
+}
+
+fn advance_plpgsql_command_id(ctx: &mut ExecutorContext) {
+    ctx.next_command_id = ctx.next_command_id.saturating_add(1);
+    ctx.snapshot.current_cid = ctx.snapshot.current_cid.max(ctx.next_command_id);
 }
 
 fn execute_function_query_result(
@@ -1225,10 +1247,30 @@ fn execute_dynamic_for_query(
 
     execute_function_query_with_bindings(compiled, state, ctx, false, |ctx| {
         let stmt = parse_statement(&sql).map_err(ExecError::Parse)?;
-        statement_result_to_query_result(
-            execute_readonly_statement(stmt, &catalog, ctx)?,
-            "PL/pgSQL EXECUTE did not produce rows",
-        )
+        let result = match stmt {
+            crate::backend::parser::Statement::Select(stmt) => execute_planned_stmt(
+                pg_plan_query_with_outer_scopes_and_ctes(
+                    &stmt,
+                    &catalog,
+                    &[],
+                    &compiled.local_ctes,
+                )
+                .map_err(ExecError::Parse)?,
+                ctx,
+            )?,
+            crate::backend::parser::Statement::Values(stmt) => execute_planned_stmt(
+                pg_plan_values_query_with_outer_scopes_and_ctes(
+                    &stmt,
+                    &catalog,
+                    &[],
+                    &compiled.local_ctes,
+                )
+                .map_err(ExecError::Parse)?,
+                ctx,
+            )?,
+            other => execute_readonly_statement(other, &catalog, ctx)?,
+        };
+        statement_result_to_query_result(result, "PL/pgSQL EXECUTE did not produce rows")
     })
 }
 
@@ -1846,10 +1888,13 @@ fn coerce_row_to_columns(row: Vec<Value>, columns: &[QueryColumn]) -> Result<Tup
 
 fn eval_do_expr(expr: &CompiledExpr, values: &[Value]) -> Result<Value, ExecError> {
     match expr {
-        CompiledExpr::Scalar(expr) => {
+        CompiledExpr::Scalar { expr, subplans } if subplans.is_empty() => {
             let mut slot = TupleSlot::virtual_row(values.to_vec());
             eval_plpgsql_expr(expr, &mut slot)
         }
+        CompiledExpr::Scalar { .. } => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+            "subqueries in DO expression evaluation are not supported".into(),
+        ))),
         CompiledExpr::QueryCompare { .. } => {
             Err(ExecError::Parse(ParseError::FeatureNotSupported(
                 "query-style PL/pgSQL conditions are only supported inside CREATE FUNCTION".into(),
@@ -1864,9 +1909,15 @@ fn eval_function_expr(
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
     match expr {
-        CompiledExpr::Scalar(expr) => {
+        CompiledExpr::Scalar { expr, subplans } => {
             let mut slot = TupleSlot::virtual_row(values.to_vec());
-            eval_expr(expr, &mut slot, ctx)
+            if subplans.is_empty() {
+                return eval_expr(expr, &mut slot, ctx);
+            }
+            let saved_subplans = std::mem::replace(&mut ctx.subplans, subplans.clone());
+            let result = eval_expr(expr, &mut slot, ctx);
+            ctx.subplans = saved_subplans;
+            result
         }
         CompiledExpr::QueryCompare { plan, op, rhs } => {
             ctx.expr_bindings.outer_tuple = Some(values.to_vec());
@@ -2166,6 +2217,7 @@ mod tests {
             op: TriggerOperation::Insert,
             new_row: None,
             old_row: None,
+            transition_tables: Vec::new(),
         };
         let mut state = FunctionState {
             values: vec![Value::Null; 9],
@@ -2225,6 +2277,7 @@ mod tests {
             op: TriggerOperation::Insert,
             new_row: None,
             old_row: None,
+            transition_tables: Vec::new(),
         };
         let mut state = FunctionState {
             values: vec![Value::Null; 9],

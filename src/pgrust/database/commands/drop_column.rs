@@ -2,7 +2,7 @@ use super::super::*;
 use crate::include::catalog::PG_CATALOG_NAMESPACE_OID;
 use crate::pgrust::database::ddl::{
     is_system_column_name, lookup_heap_relation_for_alter_table,
-    reject_column_with_trigger_dependencies,
+    reject_column_referenced_by_generated_columns, reject_column_with_trigger_dependencies,
 };
 
 impl Database {
@@ -95,6 +95,12 @@ impl Database {
             .ok_or_else(|| {
                 ExecError::Parse(ParseError::UnknownColumn(drop_stmt.column_name.clone()))
             })?;
+        reject_column_referenced_by_generated_columns(
+            &catalog,
+            &relation.desc,
+            column_index,
+            "drop",
+        )?;
         reject_relation_with_dependent_views(
             self,
             client_id,
@@ -115,11 +121,20 @@ impl Database {
             &relation.desc.columns[column_index].name,
             (column_index + 1) as i16,
         )?;
+        let mut next_cid = cid;
+        self.drop_statistics_for_column_in_transaction(
+            client_id,
+            relation.relation_oid,
+            (column_index + 1) as i16,
+            xid,
+            &mut next_cid,
+            catalog_effects,
+        )?;
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
             xid,
-            cid,
+            cid: next_cid,
             client_id,
             waiter: None,
             interrupts,

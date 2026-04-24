@@ -263,6 +263,14 @@ fn try_parse_statistics_statement(sql: &str) -> Result<Option<Statement>, ParseE
         return build_alter_statistics_statement(trimmed)
             .map(|stmt| Some(Statement::AlterStatistics(stmt)));
     }
+    if lowered.starts_with("drop statistics ") {
+        return build_drop_statistics_statement(trimmed)
+            .map(|stmt| Some(Statement::DropStatistics(stmt)));
+    }
+    if lowered.starts_with("comment on statistics ") {
+        return build_comment_on_statistics_statement(trimmed)
+            .map(|stmt| Some(Statement::CommentOnStatistics(stmt)));
+    }
     Ok(None)
 }
 
@@ -542,6 +550,9 @@ fn parse_partition_spec_clause(
     } else if keyword_at_start(rest, "range") {
         rest = consume_keyword(rest, "range").trim_start();
         PartitionStrategy::Range
+    } else if keyword_at_start(rest, "hash") {
+        rest = consume_keyword(rest, "hash").trim_start();
+        PartitionStrategy::Hash
     } else {
         return Err(PartitionStatementParseError::Unsupported);
     };
@@ -613,7 +624,58 @@ fn parse_partition_bound_clause(
             rest,
         ));
     }
+    if keyword_at_start(rest, "with") {
+        rest = consume_keyword(rest, "with").trim_start();
+        let (options_sql, rest) = take_parenthesized_segment(rest)?;
+        let (modulus, remainder) = parse_hash_partition_bound_options(&options_sql)?;
+        return Ok((RawPartitionBoundSpec::Hash { modulus, remainder }, rest));
+    }
     Err(PartitionStatementParseError::Unsupported)
+}
+
+fn parse_hash_partition_bound_options(
+    input: &str,
+) -> Result<(i32, i32), PartitionStatementParseError> {
+    let mut modulus = None;
+    let mut remainder = None;
+    for item in split_top_level_items(input, ',')? {
+        let trimmed = item.trim();
+        let (keyword, rest) = parse_unqualified_identifier(trimmed, "hash partition bound option")?;
+        let rest = rest
+            .trim_start()
+            .strip_prefix('=')
+            .unwrap_or(rest)
+            .trim_start();
+        let (value, rest) = parse_signed_i64_token(rest)?;
+        if !rest.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "hash partition bound option",
+                actual: rest.trim().into(),
+            }
+            .into());
+        }
+        let value = i32::try_from(value).map_err(|_| ParseError::InvalidInteger(item.clone()))?;
+        if keyword.eq_ignore_ascii_case("modulus") {
+            modulus = Some(value);
+        } else if keyword.eq_ignore_ascii_case("remainder") {
+            remainder = Some(value);
+        } else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "MODULUS or REMAINDER",
+                actual: keyword,
+            }
+            .into());
+        }
+    }
+    let modulus = modulus.ok_or(ParseError::UnexpectedToken {
+        expected: "MODULUS option",
+        actual: input.into(),
+    })?;
+    let remainder = remainder.ok_or(ParseError::UnexpectedToken {
+        expected: "REMAINDER option",
+        actual: input.into(),
+    })?;
+    Ok((modulus, remainder))
 }
 
 fn parse_partition_range_datums(
@@ -927,13 +989,17 @@ fn build_create_statistics_statement(sql: &str) -> Result<CreateStatisticsStatem
         if_not_exists = true;
         rest = next;
     }
-    let (parts, next) = parse_qualified_identifier_parts(rest)?;
-    let statistics_name = match parts.as_slice() {
-        [name] => name.clone(),
-        [schema, name] => format!("{schema}.{name}"),
-        _ => return Err(ParseError::UnsupportedQualifiedName(parts.join("."))),
-    };
-    rest = next.trim_start();
+    let mut statistics_name = None;
+    if !keyword_at_start(rest, "on") {
+        let (parts, next) = parse_qualified_identifier_parts(rest)?;
+        let parsed_name = match parts.as_slice() {
+            [name] => name.clone(),
+            [schema, name] => format!("{schema}.{name}"),
+            _ => return Err(ParseError::UnsupportedQualifiedName(parts.join("."))),
+        };
+        statistics_name = Some(parsed_name);
+        rest = next.trim_start();
+    }
 
     let mut kinds = Vec::new();
     if rest.starts_with('(') {
@@ -971,7 +1037,10 @@ fn build_create_statistics_statement(sql: &str) -> Result<CreateStatisticsStatem
             actual: "syntax error at or near \"FROM\"".into(),
         });
     }
-    let targets = split_top_level_items(targets_sql, ',')?;
+    let targets = split_top_level_items(targets_sql, ',')?
+        .into_iter()
+        .map(validate_statistics_target_syntax)
+        .collect::<Result<Vec<_>, _>>()?;
     rest = consume_keyword(rest[from_idx..].trim_start(), "from").trim_start();
     if rest.is_empty() {
         return Err(ParseError::UnexpectedToken {
@@ -1005,25 +1074,221 @@ fn build_alter_statistics_statement(sql: &str) -> Result<AlterStatisticsStatemen
         _ => return Err(ParseError::UnsupportedQualifiedName(parts.join("."))),
     };
     rest = next.trim_start();
-    let rest =
-        consume_keywords(rest, &["set", "statistics"]).ok_or(ParseError::UnexpectedToken {
-            expected: "SET STATISTICS signed_integer",
-            actual: rest.into(),
-        })?;
-    let (statistics_target, rest) = parse_signed_i64_token(rest.trim_start())?;
-    let statistics_target =
-        i32::try_from(statistics_target).map_err(|_| ParseError::InvalidInteger(sql.into()))?;
-    if !rest.trim().is_empty() {
+
+    let action = if keyword_at_start(rest, "rename") {
+        let rest = consume_keyword(rest, "rename").trim_start();
+        if !keyword_at_start(rest, "to") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "TO new statistics name",
+                actual: rest.into(),
+            });
+        }
+        let rest = consume_keyword(rest, "to").trim_start();
+        let (parts, trailing) = parse_qualified_identifier_parts(rest)?;
+        let new_name = match parts.as_slice() {
+            [name] => name.clone(),
+            [schema, name] => format!("{schema}.{name}"),
+            _ => return Err(ParseError::UnsupportedQualifiedName(parts.join("."))),
+        };
+        if !trailing.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER STATISTICS",
+                actual: trailing.trim().into(),
+            });
+        }
+        AlterStatisticsAction::Rename { new_name }
+    } else if keyword_at_start(rest, "set") {
+        let rest = consume_keyword(rest, "set").trim_start();
+        if !keyword_at_start(rest, "statistics") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "STATISTICS target",
+                actual: rest.into(),
+            });
+        }
+        let rest = consume_keyword(rest, "statistics").trim_start();
+        let token = rest
+            .split_ascii_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches(';');
+        if token.is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "statistics target",
+                actual: "syntax error at or near \";\"".into(),
+            });
+        }
+        let target = token
+            .parse::<i16>()
+            .map_err(|_| ParseError::UnexpectedToken {
+                expected: "integer statistics target",
+                actual: token.into(),
+            })?;
+        let trailing = rest[token.len()..].trim();
+        if !trailing.is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of ALTER STATISTICS",
+                actual: trailing.into(),
+            });
+        }
+        AlterStatisticsAction::SetStatistics { target }
+    } else {
         return Err(ParseError::UnexpectedToken {
-            expected: "end of ALTER STATISTICS",
-            actual: rest.trim().into(),
+            expected: "RENAME TO or SET STATISTICS",
+            actual: rest.into(),
         });
-    }
+    };
+
     Ok(AlterStatisticsStatement {
         if_exists,
         statistics_name,
-        statistics_target,
+        action,
     })
+}
+
+fn build_drop_statistics_statement(sql: &str) -> Result<DropStatisticsStatement, ParseError> {
+    let mut rest = sql
+        .get("drop statistics".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let mut if_exists = false;
+    if let Some(next) = consume_keywords(rest, &["if", "exists"]) {
+        if_exists = true;
+        rest = next;
+    }
+    let cascade = if let Some(prefix) = rest.strip_suffix(" cascade") {
+        rest = prefix.trim_end();
+        true
+    } else {
+        false
+    };
+    let statistics_names = split_top_level_items(rest, ',')?
+        .into_iter()
+        .map(|item| {
+            let (parts, trailing) = parse_qualified_identifier_parts(&item)?;
+            if !trailing.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "statistics name",
+                    actual: trailing.trim().into(),
+                });
+            }
+            match parts.as_slice() {
+                [name] => Ok(name.clone()),
+                [schema, name] => Ok(format!("{schema}.{name}")),
+                _ => Err(ParseError::UnsupportedQualifiedName(parts.join("."))),
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if statistics_names.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "statistics name",
+            actual: "syntax error at or near \";\"".into(),
+        });
+    }
+    Ok(DropStatisticsStatement {
+        if_exists,
+        statistics_names,
+        cascade,
+    })
+}
+
+fn build_comment_on_statistics_statement(
+    sql: &str,
+) -> Result<CommentOnStatisticsStatement, ParseError> {
+    let rest = sql
+        .get("comment on statistics".len()..)
+        .ok_or(ParseError::UnexpectedEof)?
+        .trim_start();
+    let (parts, mut rest) = parse_qualified_identifier_parts(rest)?;
+    let statistics_name = match parts.as_slice() {
+        [name] => name.clone(),
+        [schema, name] => format!("{schema}.{name}"),
+        _ => return Err(ParseError::UnsupportedQualifiedName(parts.join("."))),
+    };
+    rest = rest.trim_start();
+    if !keyword_at_start(rest, "is") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "IS string literal or NULL",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "is").trim_start();
+    let (comment, rest) = if keyword_at_start(rest, "null") {
+        (None, consume_keyword(rest, "null"))
+    } else {
+        let token_len = scan_string_literal_token_len(rest).ok_or(ParseError::UnexpectedToken {
+            expected: "comment string literal or NULL",
+            actual: rest.into(),
+        })?;
+        (
+            Some(decode_string_literal(&rest[..token_len])?),
+            &rest[token_len..],
+        )
+    };
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of COMMENT ON STATISTICS",
+            actual: rest.trim().into(),
+        });
+    }
+    Ok(CommentOnStatisticsStatement {
+        statistics_name,
+        comment,
+    })
+}
+
+fn validate_statistics_target_syntax(target: String) -> Result<String, ParseError> {
+    let trimmed = target.trim();
+    if trimmed.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "statistics target",
+            actual: "syntax error at or near \",\"".into(),
+        });
+    }
+    if simple_statistics_target(trimmed).is_some() {
+        return Ok(trimmed.to_string());
+    }
+    if !(trimmed.starts_with('(') && trimmed.ends_with(')')) {
+        let token = trimmed
+            .split_ascii_whitespace()
+            .nth(1)
+            .or_else(|| trimmed.split_ascii_whitespace().next())
+            .unwrap_or(trimmed);
+        return Err(ParseError::UnexpectedToken {
+            expected: "parenthesized expression",
+            actual: format!("syntax error at or near \"{token}\""),
+        });
+    }
+    let inner = &trimmed[1..trimmed.len() - 1];
+    if split_top_level_items(inner, ',')?.len() > 1 {
+        return Err(ParseError::UnexpectedToken {
+            expected: "single expression",
+            actual: "syntax error at or near \",\"".into(),
+        });
+    }
+    Ok(trimmed.to_string())
+}
+
+fn simple_statistics_target(target: &str) -> Option<&str> {
+    let inner = if target.starts_with('(') && target.ends_with(')') {
+        target[1..target.len() - 1].trim()
+    } else {
+        target
+    };
+    if inner.is_empty() {
+        return None;
+    }
+    if inner
+        .chars()
+        .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        && inner
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+    {
+        Some(inner)
+    } else {
+        None
+    }
 }
 
 fn build_comment_on_publication_statement(
@@ -1274,11 +1539,12 @@ fn parse_publication_schema_object(
         ));
     }
     if keyword_at_start(trailing, "where") {
-        let after_where = consume_keyword(trailing, "where").trim_start();
-        let _ = take_parenthesized_segment(after_where)?;
-        return Err(ParseError::FeatureNotSupported(
-            "publication row filters".into(),
-        ));
+        return Err(ParseError::DetailedError {
+            message: "WHERE clause not allowed for schema".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "42601",
+        });
     }
     Ok((PublicationSchemaSpec { schema_name }, rest))
 }
@@ -1646,6 +1912,10 @@ fn try_parse_index_statement(sql: &str) -> Result<Option<Statement>, ParseError>
     if lowered.contains(" rename to ") {
         return build_alter_index_rename_statement(trimmed)
             .map(|stmt| Some(Statement::AlterIndexRename(stmt)));
+    }
+    if lowered.contains(" attach partition ") {
+        return build_alter_index_attach_partition_statement(trimmed)
+            .map(|stmt| Some(Statement::AlterIndexAttachPartition(stmt)));
     }
     if lowered.contains(" set statistics ") {
         return build_alter_index_alter_column_statistics_statement(trimmed)
@@ -2989,6 +3259,30 @@ fn build_alter_index_rename_statement(sql: &str) -> Result<AlterTableRenameState
         only: false,
         table_name,
         new_table_name,
+    })
+}
+
+fn build_alter_index_attach_partition_statement(
+    sql: &str,
+) -> Result<AlterIndexAttachPartitionStatement, ParseError> {
+    let mut rest = consume_keyword(sql.trim_start(), "alter").trim_start();
+    rest = consume_keyword(rest, "index").trim_start();
+    let (parent_parts, rest_after_parent) = parse_qualified_identifier_parts(rest)?;
+    let parent_index_name = parent_parts.join(".");
+    let mut rest = rest_after_parent.trim_start();
+    rest = consume_keyword(rest, "attach").trim_start();
+    rest = consume_keyword(rest, "partition").trim_start();
+    let (child_parts, rest_after_child) = parse_qualified_identifier_parts(rest)?;
+    let child_index_name = child_parts.join(".");
+    if !rest_after_child.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of ALTER INDEX ATTACH PARTITION statement",
+            actual: rest_after_child.trim().into(),
+        });
+    }
+    Ok(AlterIndexAttachPartitionStatement {
+        parent_index_name,
+        child_index_name,
     })
 }
 
@@ -6573,6 +6867,11 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::alter_table_alter_column_type_stmt => Ok(Statement::AlterTableAlterColumnType(
             build_alter_table_alter_column_type(inner)?,
         )),
+        Rule::alter_table_alter_column_expression_stmt => {
+            Ok(Statement::AlterTableAlterColumnExpression(
+                build_alter_table_alter_column_expression(inner)?,
+            ))
+        }
         Rule::alter_table_alter_column_default_stmt => Ok(Statement::AlterTableAlterColumnDefault(
             build_alter_table_alter_column_default(inner)?,
         )),
@@ -9055,13 +9354,11 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
                 .into_inner()
                 .find(|part| part.as_rule() == Rule::primary_key_table_constraint_body)
                 .ok_or(ParseError::UnexpectedEof)?;
+            let (columns, without_overlaps) = build_key_column_list(body)?;
             Ok(TableConstraint::PrimaryKey {
                 attributes,
-                columns: body
-                    .into_inner()
-                    .find(|part| part.as_rule() == Rule::ident_list)
-                    .map(|part| part.into_inner().map(build_identifier).collect())
-                    .unwrap_or_default(),
+                columns,
+                without_overlaps,
             })
         }
         Rule::unique_table_constraint => {
@@ -9075,13 +9372,11 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
                 .any(|part| part.as_rule() == Rule::unique_nulls_not_distinct_clause);
             let mut attributes = attributes;
             attributes.nulls_not_distinct = nulls_not_distinct;
+            let (columns, without_overlaps) = build_key_column_list(body)?;
             Ok(TableConstraint::Unique {
                 attributes,
-                columns: body
-                    .into_inner()
-                    .find(|part| part.as_rule() == Rule::ident_list)
-                    .map(|part| part.into_inner().map(build_identifier).collect())
-                    .unwrap_or_default(),
+                columns,
+                without_overlaps,
             })
         }
         Rule::check_table_constraint => {
@@ -9144,6 +9439,41 @@ fn build_table_constraint_inner(pair: Pair<'_, Rule>) -> Result<TableConstraint,
             actual: pair.as_str().to_string(),
         }),
     }
+}
+
+fn build_key_column_list(
+    pair: Pair<'_, Rule>,
+) -> Result<(Vec<String>, Option<String>), ParseError> {
+    let mut columns = Vec::new();
+    let mut without_overlaps = None;
+    for key_column_list in pair
+        .into_inner()
+        .filter(|part| part.as_rule() == Rule::key_column_list)
+    {
+        for key_column in key_column_list
+            .into_inner()
+            .filter(|part| part.as_rule() == Rule::key_column)
+        {
+            let mut column = None;
+            let mut has_without_overlaps = false;
+            for part in key_column.into_inner() {
+                match part.as_rule() {
+                    Rule::identifier => column = Some(build_identifier(part)),
+                    Rule::without_overlaps_clause => has_without_overlaps = true,
+                    _ => {}
+                }
+            }
+            let column = column.ok_or(ParseError::UnexpectedEof)?;
+            if has_without_overlaps && without_overlaps.replace(column.clone()).is_some() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "one WITHOUT OVERLAPS column",
+                    actual: "multiple WITHOUT OVERLAPS columns".into(),
+                });
+            }
+            columns.push(column);
+        }
+    }
+    Ok((columns, without_overlaps))
 }
 
 fn set_enforced_attribute(enforced: &mut Option<bool>, value: bool) -> Result<(), ParseError> {
@@ -9433,8 +9763,12 @@ fn set_column_constraint_name(constraint: &mut ColumnConstraint, name: String) {
 
 fn build_create_index(pair: Pair<'_, Rule>) -> Result<CreateIndexStatement, ParseError> {
     let raw = pair.as_str().to_ascii_lowercase();
-    let unique = raw.starts_with("create unique index");
+    let words = raw.split_ascii_whitespace().collect::<Vec<_>>();
+    let unique = words.get(1) == Some(&"unique");
+    let concurrently_index = if unique { 3 } else { 2 };
+    let concurrently = words.get(concurrently_index) == Some(&"concurrently");
     let mut nulls_not_distinct = false;
+    let mut only = false;
     let mut if_not_exists = false;
     let mut index_name = None;
     let mut table_name = None;
@@ -9447,6 +9781,7 @@ fn build_create_index(pair: Pair<'_, Rule>) -> Result<CreateIndexStatement, Pars
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::if_not_exists_clause => if_not_exists = true,
+            Rule::only_clause => only = true,
             Rule::create_index_name if index_name.is_none() => {
                 index_name = Some(build_identifier(
                     part.into_inner().next().ok_or(ParseError::UnexpectedEof)?,
@@ -9499,6 +9834,8 @@ fn build_create_index(pair: Pair<'_, Rule>) -> Result<CreateIndexStatement, Pars
     Ok(CreateIndexStatement {
         unique,
         nulls_not_distinct,
+        concurrently,
+        only,
         if_not_exists,
         index_name: index_name.unwrap_or_default(),
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
@@ -9917,6 +10254,8 @@ fn build_drop_database(pair: Pair<'_, Rule>) -> Result<DropDatabaseStatement, Pa
 }
 
 fn build_drop_index(pair: Pair<'_, Rule>) -> Result<DropIndexStatement, ParseError> {
+    let raw = pair.as_str().to_ascii_lowercase();
+    let concurrently = raw.split_ascii_whitespace().nth(2) == Some("concurrently");
     let mut if_exists = false;
     let mut index_names = Vec::new();
     for part in pair.into_inner() {
@@ -9931,6 +10270,7 @@ fn build_drop_index(pair: Pair<'_, Rule>) -> Result<DropIndexStatement, ParseErr
         return Err(ParseError::UnexpectedEof);
     }
     Ok(DropIndexStatement {
+        concurrently,
         if_exists,
         index_names,
     })
@@ -10388,6 +10728,7 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::RegClass => "regclass",
         SqlTypeKind::RegType => "regtype",
         SqlTypeKind::RegRole => "regrole",
+        SqlTypeKind::RegNamespace => "regnamespace",
         SqlTypeKind::RegOperator => "regoperator",
         SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::Tid => "tid",
@@ -10570,6 +10911,7 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
         inner.next().ok_or(ParseError::UnexpectedEof)?,
     ))?;
     let mut default_expr = None;
+    let mut generated = None;
     let mut constraints = Vec::new();
     for flag in inner {
         let Some(flag) = (match flag.as_rule() {
@@ -10585,9 +10927,26 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
                     .find(|part| matches!(part.as_rule(), Rule::expr | Rule::b_expr))
                     .map(|expr| expr.as_str().to_string());
             }
+            Rule::column_generated => {
+                set_column_generated(&mut generated, build_column_generated(flag)?, &name)?;
+            }
             Rule::nullable => {}
-            Rule::named_column_constraint
-            | Rule::not_null_column_constraint
+            Rule::named_column_constraint => {
+                let generated_part = flag
+                    .clone()
+                    .into_inner()
+                    .find(|part| part.as_rule() == Rule::column_generated);
+                if let Some(generated_part) = generated_part {
+                    set_column_generated(
+                        &mut generated,
+                        build_column_generated(generated_part)?,
+                        &name,
+                    )?;
+                } else {
+                    constraints.push(build_column_constraint(flag)?)
+                }
+            }
+            Rule::not_null_column_constraint
             | Rule::check_column_constraint
             | Rule::primary_key_column_constraint
             | Rule::unique_column_constraint
@@ -10601,8 +10960,59 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
         name,
         ty,
         default_expr,
+        generated,
         compression: None,
         constraints,
+    })
+}
+
+fn set_column_generated(
+    target: &mut Option<ColumnGeneratedDef>,
+    value: ColumnGeneratedDef,
+    column_name: &str,
+) -> Result<(), ParseError> {
+    if target.is_some() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "single generation clause",
+            actual: format!("multiple generation clauses specified for column \"{column_name}\""),
+        });
+    }
+    *target = Some(value);
+    Ok(())
+}
+
+fn build_column_generated(pair: Pair<'_, Rule>) -> Result<ColumnGeneratedDef, ParseError> {
+    let mut when = None;
+    let mut expr_sql = None;
+    let mut kind = ColumnGeneratedKind::Virtual;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::generated_when => when = Some(part.as_str().trim().to_ascii_lowercase()),
+            Rule::expr => expr_sql = Some(part.as_str().trim().to_string()),
+            Rule::generated_storage => {
+                kind = match part.as_str().trim().to_ascii_lowercase().as_str() {
+                    "stored" => ColumnGeneratedKind::Stored,
+                    "virtual" => ColumnGeneratedKind::Virtual,
+                    other => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "VIRTUAL or STORED",
+                            actual: other.into(),
+                        });
+                    }
+                };
+            }
+            _ => {}
+        }
+    }
+    if when.as_deref() != Some("always") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "GENERATED ALWAYS",
+            actual: "for a generated column, GENERATED ALWAYS must be specified".into(),
+        });
+    }
+    Ok(ColumnGeneratedDef {
+        expr_sql: expr_sql.ok_or(ParseError::UnexpectedEof)?,
+        kind,
     })
 }
 
@@ -10933,6 +11343,60 @@ fn build_alter_table_alter_column_default(
         column_name: column_name.ok_or(ParseError::UnexpectedEof)?,
         default_expr,
         default_expr_sql,
+    })
+}
+
+fn build_alter_table_alter_column_expression(
+    pair: Pair<'_, Rule>,
+) -> Result<AlterTableAlterColumnExpressionStatement, ParseError> {
+    let mut if_exists = false;
+    let mut only = false;
+    let mut table_name = None;
+    let mut column_name = None;
+    let mut action = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::alter_table_target => {
+                let (parsed_if_exists, parsed_only, parsed_table_name) =
+                    build_alter_table_target(part)?;
+                if_exists = parsed_if_exists;
+                only = parsed_only;
+                table_name = Some(parsed_table_name);
+            }
+            Rule::identifier if table_name.is_none() => table_name = Some(build_identifier(part)),
+            Rule::identifier if column_name.is_none() => column_name = Some(build_identifier(part)),
+            Rule::alter_table_column_expression_action => {
+                for inner in part.into_inner() {
+                    match inner.as_rule() {
+                        Rule::alter_table_set_expression_action => {
+                            let expr = inner
+                                .into_inner()
+                                .find(|item| item.as_rule() == Rule::expr)
+                                .ok_or(ParseError::UnexpectedEof)?;
+                            action = Some(AlterColumnExpressionAction::Set {
+                                expr_sql: expr.as_str().trim().to_string(),
+                                expr: build_expr(expr)?,
+                            });
+                        }
+                        Rule::alter_table_drop_expression_action => {
+                            let missing_ok = inner
+                                .into_inner()
+                                .any(|item| item.as_rule() == Rule::if_exists_clause);
+                            action = Some(AlterColumnExpressionAction::Drop { missing_ok });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(AlterTableAlterColumnExpressionStatement {
+        if_exists,
+        only,
+        table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
+        column_name: column_name.ok_or(ParseError::UnexpectedEof)?,
+        action: action.ok_or(ParseError::UnexpectedEof)?,
     })
 }
 
@@ -11368,47 +11832,50 @@ fn build_alter_table_target(pair: Pair<'_, Rule>) -> Result<(bool, bool, String)
     ))
 }
 
-fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
-    fn add_array_bounds(ty: RawTypeName, bounds: usize) -> RawTypeName {
-        let mut ty = ty;
-        for _ in 0..bounds {
-            ty = match ty {
-                RawTypeName::Builtin(inner_ty) => RawTypeName::Builtin(SqlType::array_of(inner_ty)),
-                RawTypeName::Named { name, array_bounds } => RawTypeName::Named {
-                    name,
-                    array_bounds: array_bounds.saturating_add(1),
-                },
-                other => other,
-            };
-        }
-        ty
+fn add_array_bounds(ty: RawTypeName, bounds: usize) -> RawTypeName {
+    let mut ty = ty;
+    for _ in 0..bounds {
+        ty = match ty {
+            RawTypeName::Builtin(inner_ty) => RawTypeName::Builtin(SqlType::array_of(inner_ty)),
+            RawTypeName::Named { name, array_bounds } => RawTypeName::Named {
+                name,
+                array_bounds: array_bounds.saturating_add(1),
+            },
+            other => other,
+        };
     }
+    ty
+}
 
+fn type_array_suffix_bounds(suffix: Pair<'_, Rule>) -> usize {
+    match suffix.as_rule() {
+        Rule::type_array_suffix => suffix
+            .into_inner()
+            .map(|part| match part.as_rule() {
+                Rule::array_suffix => 1usize,
+                Rule::array_decl_suffix => part
+                    .into_inner()
+                    .filter(|inner| inner.as_rule() == Rule::array_suffix)
+                    .count(),
+                _ => 0,
+            })
+            .sum(),
+        Rule::array_suffix => 1,
+        Rule::array_decl_suffix => suffix
+            .into_inner()
+            .filter(|inner| inner.as_rule() == Rule::array_suffix)
+            .count(),
+        _ => 0,
+    }
+}
+
+fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
     match pair.as_rule() {
         Rule::type_name | Rule::known_type_name => {
             let mut inner = pair.into_inner();
             let mut ty = build_type_name(inner.next().expect("type_name base"));
             for suffix in inner {
-                let bounds = match suffix.as_rule() {
-                    Rule::type_array_suffix => suffix
-                        .into_inner()
-                        .map(|part| match part.as_rule() {
-                            Rule::array_suffix => 1usize,
-                            Rule::array_decl_suffix => part
-                                .into_inner()
-                                .filter(|inner| inner.as_rule() == Rule::array_suffix)
-                                .count(),
-                            _ => 0,
-                        })
-                        .sum(),
-                    Rule::array_suffix => 1,
-                    Rule::array_decl_suffix => suffix
-                        .into_inner()
-                        .filter(|inner| inner.as_rule() == Rule::array_suffix)
-                        .count(),
-                    _ => 0,
-                };
-                ty = add_array_bounds(ty, bounds);
+                ty = add_array_bounds(ty, type_array_suffix_bounds(suffix));
             }
             ty
         }
@@ -11569,6 +12036,19 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
                     .unwrap_or_else(|| SqlType::new(kind)),
             )
         }
+        Rule::interval_type | Rule::kw_interval | Rule::kw_interval_atom => {
+            let precision = pair
+                .into_inner()
+                .find(|part| part.as_rule() == Rule::integer)
+                .map(build_type_len)
+                .transpose()
+                .expect("interval precision");
+            RawTypeName::Builtin(
+                precision
+                    .map(|precision| SqlType::new(SqlTypeKind::Interval).with_typmod(precision))
+                    .unwrap_or_else(|| SqlType::new(SqlTypeKind::Interval)),
+            )
+        }
         Rule::kw_point => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Point)),
         Rule::kw_lseg => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Lseg)),
         Rule::kw_path => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Path)),
@@ -11586,7 +12066,7 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
                 .expect("char length");
             match len {
                 Some(len) => RawTypeName::Builtin(SqlType::with_char_len(SqlTypeKind::Char, len)),
-                None => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Char)),
+                None => RawTypeName::Builtin(SqlType::with_char_len(SqlTypeKind::Char, 1)),
             }
         }
         Rule::varchar_type | Rule::character_varying_type => {
@@ -11615,6 +12095,35 @@ fn build_type_len(pair: Pair<'_, Rule>) -> Result<i32, ParseError> {
     pair.as_str()
         .parse::<i32>()
         .map_err(|_| ParseError::InvalidInteger(pair.as_str().to_string()))
+}
+
+fn build_cast_type_name(pair: Pair<'_, Rule>) -> Result<RawTypeName, ParseError> {
+    let mut inner = pair.into_inner();
+    let first = inner.next().ok_or(ParseError::UnexpectedEof)?;
+    let mut ty = build_type_name(first);
+    for part in inner {
+        match part.as_rule() {
+            Rule::interval_field_clause => {
+                if let Some(precision) = interval_field_clause_precision(part)? {
+                    ty = RawTypeName::Builtin(
+                        SqlType::new(SqlTypeKind::Interval).with_typmod(precision),
+                    );
+                }
+            }
+            Rule::type_array_suffix | Rule::array_suffix | Rule::array_decl_suffix => {
+                ty = add_array_bounds(ty, type_array_suffix_bounds(part));
+            }
+            _ => {}
+        }
+    }
+    Ok(ty)
+}
+
+fn interval_field_clause_precision(pair: Pair<'_, Rule>) -> Result<Option<i32>, ParseError> {
+    pair.into_inner()
+        .find(|inner| inner.as_rule() == Rule::integer)
+        .map(build_type_len)
+        .transpose()
 }
 
 fn build_numeric_typemod_component(pair: Pair<'_, Rule>) -> Result<i32, ParseError> {
@@ -11685,12 +12194,12 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             for suffix in inner {
                 match suffix.as_rule() {
                     Rule::cast_suffix => {
-                        let ty = build_type_name(
+                        let ty = build_cast_type_name(
                             suffix
                                 .into_inner()
-                                .find(|part| part.as_rule() == Rule::type_name)
+                                .find(|part| part.as_rule() == Rule::cast_type_name)
                                 .ok_or(ParseError::UnexpectedEof)?,
-                        );
+                        )?;
                         expr = SqlExpr::Cast(Box::new(expr), ty);
                     }
                     Rule::subscript_suffix => {
@@ -12100,7 +12609,7 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
             for part in pair.into_inner() {
                 match part.as_rule() {
                     Rule::expr => expr = Some(build_expr(part)?),
-                    Rule::type_name => ty = Some(build_type_name(part)),
+                    Rule::cast_type_name => ty = Some(build_cast_type_name(part)?),
                     _ => {}
                 }
             }
@@ -12308,13 +12817,18 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::xml_serialize_expr => build_xml_serialize_expr(pair),
         Rule::typed_string_literal => {
             let mut inner = pair.into_inner();
-            let ty = build_type_name(inner.next().ok_or(ParseError::UnexpectedEof)?);
-            let literal =
-                decode_string_literal_pair(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
-            Ok(SqlExpr::Cast(
-                Box::new(SqlExpr::Const(Value::Text(literal.into()))),
-                ty,
-            ))
+            let first = inner.next().ok_or(ParseError::UnexpectedEof)?;
+            if first.as_rule() == Rule::interval_string_literal {
+                build_interval_string_literal(first)
+            } else {
+                let ty = build_type_name(first);
+                let literal =
+                    decode_string_literal_pair(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
+                Ok(SqlExpr::Cast(
+                    Box::new(SqlExpr::Const(Value::Text(literal.into()))),
+                    ty,
+                ))
+            }
         }
         Rule::bit_string_literal | Rule::binary_bit_literal | Rule::hex_bit_literal => Ok(
             SqlExpr::Const(Value::Bit(parse_bit_string_literal(pair.as_str())?)),
@@ -12380,6 +12894,35 @@ fn build_array_literal(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         .transpose()?
         .unwrap_or_default();
     Ok(SqlExpr::ArrayLiteral(elements))
+}
+
+fn build_interval_string_literal(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
+    let mut ty = RawTypeName::Builtin(SqlType::new(SqlTypeKind::Interval));
+    let mut literal = None;
+    let mut trailing_precision = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::interval_type => ty = build_type_name(part),
+            Rule::quoted_string_literal
+            | Rule::string_literal
+            | Rule::unicode_string_literal
+            | Rule::escape_string_literal
+            | Rule::dollar_string_literal => literal = Some(decode_string_literal_pair(part)?),
+            Rule::interval_field_clause => {
+                trailing_precision = interval_field_clause_precision(part)?;
+            }
+            _ => {}
+        }
+    }
+    if let Some(precision) = trailing_precision {
+        ty = RawTypeName::Builtin(SqlType::new(SqlTypeKind::Interval).with_typmod(precision));
+    }
+    Ok(SqlExpr::Cast(
+        Box::new(SqlExpr::Const(Value::Text(
+            literal.ok_or(ParseError::UnexpectedEof)?.into(),
+        ))),
+        ty,
+    ))
 }
 
 fn build_select_like_subquery(pair: Pair<'_, Rule>) -> Result<SelectStatement, ParseError> {

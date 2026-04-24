@@ -56,9 +56,9 @@ use super::expr_numeric::{
 use super::expr_ops::compare_order_values;
 use super::expr_ops::{
     add_values, bitwise_and_values, bitwise_not_value, bitwise_or_values, bitwise_xor_values,
-    compare_values, concat_values, div_values, eval_and, eval_or, mod_values, mul_values,
-    negate_value, not_equal_values, order_values, shift_left_values, shift_right_values,
-    sub_values, values_are_distinct,
+    compare_values, compare_values_with_type, concat_values, div_values, eval_and, eval_or,
+    mod_values, mul_values, negate_value, not_equal_values, not_equal_values_with_type,
+    order_values, shift_left_values, shift_right_values, sub_values, values_are_distinct,
 };
 pub(crate) use super::expr_ops::{compare_order_by_keys, parse_numeric_text};
 use super::expr_range::eval_range_function;
@@ -99,14 +99,20 @@ use crate::backend::parser::{
     CatalogLookup, ParseError, SqlType, SqlTypeKind, SubqueryComparisonOp,
 };
 use crate::backend::rewrite::format_view_definition;
+use crate::backend::statistics::{
+    render_pg_dependencies_text, render_pg_mcv_list_text, render_pg_ndistinct_text,
+};
 use crate::backend::utils::misc::checkpoint::checkpoint_stats_value;
 use crate::backend::utils::misc::guc::normalize_guc_name;
 use crate::include::access::toast_compression::ToastCompressionId;
 use crate::include::catalog::{
-    BOX_SPGIST_OPCLASS_OID, BRIN_AM_OID, BTREE_AM_OID, CURRENT_DATABASE_OID, FLOAT8_TYPE_OID,
-    GIN_AM_OID, GIST_AM_OID, HASH_AM_OID, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID,
-    PG_DATABASE_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_TOAST_NAMESPACE_OID,
-    SPGIST_AM_OID, builtin_scalar_function_for_proc_oid,
+    BOX_SPGIST_OPCLASS_OID, BRIN_AM_OID, BTREE_AM_OID, BYTEA_TYPE_OID, CONSTRAINT_CHECK,
+    CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE,
+    CURRENT_DATABASE_OID, FLOAT8_TYPE_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID,
+    PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_DATABASE_RELATION_OID,
+    PG_DEPENDENCIES_TYPE_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_MCV_LIST_TYPE_OID,
+    PG_NDISTINCT_TYPE_OID, PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID, SPGIST_AM_OID,
+    bootstrap_pg_am_rows, builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid,
 };
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
 use crate::include::nodes::primnodes::{
@@ -702,6 +708,7 @@ fn regproc_type_name(sql_type: SqlType) -> &'static str {
         SqlTypeKind::RegClass => "regclass",
         SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::RegRole => "regrole",
+        SqlTypeKind::RegNamespace => "regnamespace",
         SqlTypeKind::RegOperator => "regoperator",
         SqlTypeKind::Text => "text",
         SqlTypeKind::FdwHandler => "fdw_handler",
@@ -730,7 +737,17 @@ fn sql_type_identity_text(sql_type: SqlType) -> String {
 fn type_identity_text(catalog: &dyn CatalogLookup, type_oid: u32) -> String {
     catalog
         .type_by_oid(type_oid)
-        .map(|row| sql_type_identity_text(row.sql_type))
+        .map(|row| {
+            if !row.sql_type.is_array
+                && row.sql_type.type_oid == row.oid
+                && row.sql_type.kind == SqlTypeKind::Bytea
+                && row.oid != BYTEA_TYPE_OID
+            {
+                row.typname
+            } else {
+                sql_type_identity_text(row.sql_type)
+            }
+        })
         .unwrap_or_else(|| type_oid.to_string())
 }
 
@@ -770,6 +787,190 @@ fn operator_identity_text(
         type_identity_text(catalog, operator_row.oprright)
     };
     format!("operator {}({left},{right})", operator_row.oprname)
+}
+
+fn quote_identifier(identifier: &str) -> String {
+    if !identifier.is_empty()
+        && identifier.chars().enumerate().all(|(idx, ch)| {
+            if idx == 0 {
+                ch == '_' || ch.is_ascii_lowercase()
+            } else {
+                ch == '_' || ch.is_ascii_lowercase() || ch.is_ascii_digit()
+            }
+        })
+    {
+        return identifier.into();
+    }
+    let escaped = identifier.replace('"', "\"\"");
+    format!("\"{escaped}\"")
+}
+
+fn quote_qualified_identifier(schema_name: &str, object_name: &str) -> String {
+    format!(
+        "{}.{}",
+        quote_identifier(schema_name),
+        quote_identifier(object_name)
+    )
+}
+
+fn looks_like_function_call(expr: &str) -> bool {
+    let trimmed = expr.trim();
+    let Some(open_paren) = trimmed.find('(') else {
+        return false;
+    };
+    trimmed.ends_with(')')
+        && trimmed[..open_paren].chars().enumerate().all(|(idx, ch)| {
+            if idx == 0 {
+                ch == '_' || ch.is_ascii_alphabetic()
+            } else {
+                ch == '_' || ch.is_ascii_alphanumeric()
+            }
+        })
+}
+
+fn statistics_expression_texts(
+    statistics: &crate::include::catalog::PgStatisticExtRow,
+) -> Vec<String> {
+    statistics
+        .stxexprs
+        .as_deref()
+        .and_then(|text| serde_json::from_str::<Vec<String>>(text).ok())
+        .unwrap_or_default()
+}
+
+fn statistics_relation_display_name(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+) -> Option<String> {
+    let relation = catalog.relation_by_oid(relation_oid)?;
+    let class_row = catalog.class_row_by_oid(relation_oid)?;
+    if catalog
+        .lookup_any_relation(&class_row.relname)
+        .is_some_and(|entry| entry.relation_oid == relation_oid)
+    {
+        return Some(quote_identifier(&class_row.relname));
+    }
+    let namespace_name = catalog
+        .namespace_row_by_oid(relation.namespace_oid)?
+        .nspname;
+    Some(quote_qualified_identifier(
+        &namespace_name,
+        &class_row.relname,
+    ))
+}
+
+fn statistics_columns_text(
+    statistics: &crate::include::catalog::PgStatisticExtRow,
+    catalog: &dyn CatalogLookup,
+) -> Option<String> {
+    let relation = catalog.relation_by_oid(statistics.stxrelid)?;
+    let mut items = Vec::new();
+    for attnum in &statistics.stxkeys {
+        let index = usize::try_from(attnum.saturating_sub(1)).ok()?;
+        let column = relation.desc.columns.get(index)?;
+        items.push(quote_identifier(&column.name));
+    }
+    for expr in statistics_expression_texts(statistics) {
+        if looks_like_function_call(&expr) {
+            items.push(expr);
+        } else {
+            items.push(format!("({expr})"));
+        }
+    }
+    Some(items.join(", "))
+}
+
+fn statistics_enabled_kinds(
+    statistics: &crate::include::catalog::PgStatisticExtRow,
+) -> (bool, bool, bool) {
+    let mut ndistinct = false;
+    let mut dependencies = false;
+    let mut mcv = false;
+    for kind in &statistics.stxkind {
+        match *kind {
+            b'd' => ndistinct = true,
+            b'f' => dependencies = true,
+            b'm' => mcv = true,
+            _ => {}
+        }
+    }
+    (ndistinct, dependencies, mcv)
+}
+
+fn statistics_definition_text(
+    statistics: &crate::include::catalog::PgStatisticExtRow,
+    catalog: &dyn CatalogLookup,
+) -> Option<String> {
+    let namespace_name = catalog
+        .namespace_row_by_oid(statistics.stxnamespace)?
+        .nspname;
+    let columns = statistics_columns_text(statistics, catalog)?;
+    let relation_name = statistics_relation_display_name(catalog, statistics.stxrelid)?;
+    let expr_count = statistics_expression_texts(statistics).len();
+    let ncolumns = statistics.stxkeys.len() + expr_count;
+    let (ndistinct, dependencies, mcv) = statistics_enabled_kinds(statistics);
+    let mut out = format!(
+        "CREATE STATISTICS {}",
+        quote_qualified_identifier(&namespace_name, &statistics.stxname)
+    );
+    if ncolumns > 1 && (!ndistinct || !dependencies || !mcv) {
+        let mut kinds = Vec::new();
+        if ndistinct {
+            kinds.push("ndistinct");
+        }
+        if dependencies {
+            kinds.push("dependencies");
+        }
+        if mcv {
+            kinds.push("mcv");
+        }
+        out.push_str(&format!(" ({})", kinds.join(", ")));
+    }
+    out.push_str(" ON ");
+    out.push_str(&columns);
+    out.push_str(" FROM ");
+    out.push_str(&relation_name);
+    Some(out)
+}
+
+fn statistics_visible_in_search_path(
+    statistics: &crate::include::catalog::PgStatisticExtRow,
+    catalog: &dyn CatalogLookup,
+) -> bool {
+    let is_temp_schema = |schema_name: &str| {
+        schema_name.eq_ignore_ascii_case("pg_temp")
+            || schema_name.to_ascii_lowercase().starts_with("pg_temp_")
+    };
+    if catalog
+        .namespace_row_by_oid(statistics.stxnamespace)
+        .is_some_and(|namespace| is_temp_schema(&namespace.nspname))
+    {
+        return false;
+    }
+    let search_path = catalog.search_path();
+    if search_path.is_empty() {
+        return statistics.stxnamespace == PG_CATALOG_NAMESPACE_OID;
+    }
+    for schema_name in search_path {
+        if is_temp_schema(&schema_name) {
+            continue;
+        }
+        for candidate in catalog.statistic_ext_rows() {
+            if !candidate.stxname.eq_ignore_ascii_case(&statistics.stxname) {
+                continue;
+            }
+            let Some(namespace) = catalog.namespace_row_by_oid(candidate.stxnamespace) else {
+                continue;
+            };
+            if is_temp_schema(&namespace.nspname) {
+                continue;
+            }
+            if namespace.nspname.eq_ignore_ascii_case(&schema_name) {
+                return candidate.oid == statistics.oid;
+            }
+        }
+    }
+    false
 }
 
 fn eval_pg_rust_internal_binary_coercible(values: &[Value]) -> Result<Value, ExecError> {
@@ -1016,6 +1217,41 @@ fn eval_regclass_to_text_function(
         return Ok(Value::Text(
             quote_identifier_if_needed(&relation_name).into(),
         ));
+    }
+    Ok(Value::Text(oid.to_string().into()))
+}
+
+fn eval_regtype_to_text_function(
+    values: &[Value],
+    ctx: Option<&ExecutorContext>,
+) -> Result<Value, ExecError> {
+    let Some(value) = values.first() else {
+        return Ok(Value::Null);
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let oid = match value {
+        Value::Int32(oid) if *oid >= 0 => *oid as u32,
+        Value::Int64(oid) if *oid >= 0 && *oid <= i64::from(u32::MAX) => *oid as u32,
+        _ => {
+            return Err(ExecError::TypeMismatch {
+                op: "::text",
+                left: value.clone(),
+                right: Value::Text("".into()),
+            });
+        }
+    };
+    if oid == 0 {
+        return Ok(Value::Text("-".into()));
+    }
+    if let Some(type_name) = ctx
+        .and_then(|ctx| ctx.catalog.as_ref())
+        .and_then(|catalog| catalog.type_by_oid(oid))
+        .map(|row| row.typname)
+        .or_else(|| builtin_type_name_for_oid(oid))
+    {
+        return Ok(Value::Text(quote_identifier_if_needed(&type_name).into()));
     }
     Ok(Value::Text(oid.to_string().into()))
 }
@@ -1322,6 +1558,13 @@ fn eval_pg_describe_object(values: &[Value], ctx: &ExecutorContext) -> Result<Va
                 "pg_operator" => catalog
                     .operator_by_oid(objid)
                     .map(|row| operator_identity_text(&row, catalog)),
+                "pg_statistic_ext" => catalog.statistic_ext_row_by_oid(objid).and_then(|row| {
+                    let namespace = catalog.namespace_row_by_oid(row.stxnamespace)?;
+                    Some(format!(
+                        "statistics object {}",
+                        quote_qualified_identifier(&namespace.nspname, &row.stxname)
+                    ))
+                }),
                 _ => None,
             };
             Ok(description
@@ -1331,6 +1574,102 @@ fn eval_pg_describe_object(values: &[Value], ctx: &ExecutorContext) -> Result<Va
         _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "pg_describe_object(classid, objid, objsubid)",
             actual: format!("PgDescribeObject({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_pg_get_statisticsobjdef(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null] => Ok(Value::Null),
+        [oid] => {
+            let oid = oid_arg_to_u32(oid, "pg_get_statisticsobjdef")?;
+            let catalog = executor_catalog(ctx)?;
+            Ok(catalog
+                .statistic_ext_row_by_oid(oid)
+                .and_then(|row| statistics_definition_text(&row, catalog))
+                .map(|text| Value::Text(text.into()))
+                .unwrap_or(Value::Null))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_get_statisticsobjdef(oid)",
+            actual: format!("PgGetStatisticsObjDef({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_pg_get_statisticsobjdef_columns(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null] => Ok(Value::Null),
+        [oid] => {
+            let oid = oid_arg_to_u32(oid, "pg_get_statisticsobjdef_columns")?;
+            let catalog = executor_catalog(ctx)?;
+            Ok(catalog
+                .statistic_ext_row_by_oid(oid)
+                .and_then(|row| statistics_columns_text(&row, catalog))
+                .map(|text| Value::Text(text.into()))
+                .unwrap_or(Value::Null))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_get_statisticsobjdef_columns(oid)",
+            actual: format!("PgGetStatisticsObjDefColumns({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_pg_get_statisticsobjdef_expressions(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null] => Ok(Value::Null),
+        [oid] => {
+            let oid = oid_arg_to_u32(oid, "pg_get_statisticsobjdef_expressions")?;
+            let catalog = executor_catalog(ctx)?;
+            let Some(statistics) = catalog.statistic_ext_row_by_oid(oid) else {
+                return Ok(Value::Null);
+            };
+            let expressions = statistics_expression_texts(&statistics);
+            if expressions.is_empty() {
+                return Ok(Value::Null);
+            }
+            Ok(Value::Array(
+                expressions
+                    .into_iter()
+                    .map(|expr| Value::Text(expr.into()))
+                    .collect(),
+            ))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_get_statisticsobjdef_expressions(oid)",
+            actual: format!("PgGetStatisticsObjDefExpressions({} args)", values.len()),
+        })),
+    }
+}
+
+fn eval_pg_statistics_obj_is_visible(
+    values: &[Value],
+    ctx: &ExecutorContext,
+) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null] => Ok(Value::Null),
+        [oid] => {
+            let oid = oid_arg_to_u32(oid, "pg_statistics_obj_is_visible")?;
+            let catalog = executor_catalog(ctx)?;
+            Ok(Value::Bool(
+                catalog
+                    .statistic_ext_row_by_oid(oid)
+                    .is_some_and(|row| statistics_visible_in_search_path(&row, catalog)),
+            ))
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_statistics_obj_is_visible(oid)",
+            actual: format!("PgStatisticsObjIsVisible({} args)", values.len()),
         })),
     }
 }
@@ -1353,6 +1692,214 @@ fn eval_pg_get_expr(values: &[Value]) -> Result<Value, ExecError> {
             actual: format!("PgGetExpr({} args)", values.len()),
         })),
     }
+}
+
+fn eval_pg_get_constraintdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let constraint_oid = match values {
+        [Value::Null] | [Value::Null, _] | [_, Value::Null] => return Ok(Value::Null),
+        [constraint_oid] => oid_arg_to_u32(constraint_oid, "pg_get_constraintdef")?,
+        [constraint_oid, _pretty] => oid_arg_to_u32(constraint_oid, "pg_get_constraintdef")?,
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "pg_get_constraintdef(oid [, pretty])",
+                actual: format!("PgGetConstraintDef({} args)", values.len()),
+            }));
+        }
+    };
+    let catalog = executor_catalog(ctx)?;
+    let Some(row) = catalog
+        .constraint_rows()
+        .into_iter()
+        .find(|row| row.oid == constraint_oid)
+    else {
+        return Ok(Value::Null);
+    };
+    Ok(format_constraintdef_for_catalog(catalog, &row)
+        .map(|definition| Value::Text(definition.into()))
+        .unwrap_or(Value::Null))
+}
+
+fn format_constraintdef_for_catalog(
+    catalog: &dyn CatalogLookup,
+    row: &crate::include::catalog::PgConstraintRow,
+) -> Option<String> {
+    match row.contype {
+        CONSTRAINT_NOTNULL => Some("NOT NULL".into()),
+        CONSTRAINT_CHECK => row
+            .conbin
+            .as_deref()
+            .map(|expr_sql| format!("CHECK ({expr_sql})")),
+        CONSTRAINT_PRIMARY | CONSTRAINT_UNIQUE => {
+            format_index_backed_constraintdef_for_catalog(catalog, row)
+        }
+        CONSTRAINT_FOREIGN => format_foreign_key_constraintdef_for_catalog(catalog, row),
+        _ => None,
+    }
+}
+
+fn format_index_backed_constraintdef_for_catalog(
+    catalog: &dyn CatalogLookup,
+    row: &crate::include::catalog::PgConstraintRow,
+) -> Option<String> {
+    let relation = catalog.lookup_relation_by_oid(row.conrelid)?;
+    let index = catalog
+        .index_relations_for_heap(row.conrelid)
+        .into_iter()
+        .find(|index| index.relation_oid == row.conindid)?;
+    let mut columns = index_column_names_for_heap(&relation.desc, &index.index_meta.indkey)?;
+    if row.conperiod
+        && let Some(period_column) = columns.last_mut()
+    {
+        period_column.push_str(" WITHOUT OVERLAPS");
+    }
+    let prefix = if row.contype == CONSTRAINT_PRIMARY {
+        "PRIMARY KEY"
+    } else {
+        "UNIQUE"
+    };
+    Some(format!("{prefix} ({})", columns.join(", ")))
+}
+
+fn format_foreign_key_constraintdef_for_catalog(
+    catalog: &dyn CatalogLookup,
+    row: &crate::include::catalog::PgConstraintRow,
+) -> Option<String> {
+    let relation = catalog.lookup_relation_by_oid(row.conrelid)?;
+    let referenced_relation = catalog.lookup_relation_by_oid(row.confrelid)?;
+    let local_columns = index_column_names_for_heap(&relation.desc, row.conkey.as_ref()?)?;
+    let referenced_columns =
+        index_column_names_for_heap(&referenced_relation.desc, row.confkey.as_ref()?)?;
+    let referenced_name = catalog
+        .class_row_by_oid(row.confrelid)
+        .map(|class| class.relname)
+        .unwrap_or_else(|| row.confrelid.to_string());
+    let mut def = format!(
+        "FOREIGN KEY ({}) REFERENCES {}({})",
+        local_columns.join(", "),
+        referenced_name,
+        referenced_columns.join(", ")
+    );
+    if row.confdeltype == 'r' {
+        def.push_str(" ON DELETE RESTRICT");
+    }
+    if row.confupdtype == 'r' {
+        def.push_str(" ON UPDATE RESTRICT");
+    }
+    Some(def)
+}
+
+fn eval_pg_get_indexdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let (index_oid, column_no) = match values {
+        [Value::Null] | [Value::Null, _, _] | [_, Value::Null, _] | [_, _, Value::Null] => {
+            return Ok(Value::Null);
+        }
+        [index_oid] => (oid_arg_to_u32(index_oid, "pg_get_indexdef")?, 0),
+        [index_oid, column_no, _pretty] => (
+            oid_arg_to_u32(index_oid, "pg_get_indexdef")?,
+            int32_arg(column_no, "pg_get_indexdef")?,
+        ),
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "pg_get_indexdef(oid [, column_no, pretty])",
+                actual: format!("PgGetIndexDef({} args)", values.len()),
+            }));
+        }
+    };
+    let catalog = executor_catalog(ctx)?;
+    let Some((relation, index)) = index_relation_for_oid(catalog, index_oid) else {
+        return Ok(Value::Null);
+    };
+    if column_no > 0 {
+        let columns = index_column_names_for_heap(&relation.desc, &index.index_meta.indkey);
+        return Ok(columns
+            .and_then(|columns| columns.get((column_no as usize).saturating_sub(1)).cloned())
+            .map(|column| Value::Text(column.into()))
+            .unwrap_or(Value::Null));
+    }
+    Ok(Value::Text(
+        format_indexdef_for_catalog(catalog, &relation, &index).into(),
+    ))
+}
+
+fn index_relation_for_oid(
+    catalog: &dyn CatalogLookup,
+    index_oid: u32,
+) -> Option<(
+    crate::backend::parser::BoundRelation,
+    crate::backend::parser::BoundIndexRelation,
+)> {
+    catalog
+        .constraint_rows()
+        .into_iter()
+        .find(|row| row.conindid == index_oid)
+        .and_then(|row| {
+            let relation = catalog.lookup_relation_by_oid(row.conrelid)?;
+            let index = catalog
+                .index_relations_for_heap(row.conrelid)
+                .into_iter()
+                .find(|index| index.relation_oid == index_oid)?;
+            Some((relation, index))
+        })
+}
+
+fn format_indexdef_for_catalog(
+    catalog: &dyn CatalogLookup,
+    relation: &crate::backend::parser::BoundRelation,
+    index: &crate::backend::parser::BoundIndexRelation,
+) -> String {
+    let table_name = catalog
+        .class_row_by_oid(relation.relation_oid)
+        .map(|class| class.relname)
+        .unwrap_or_else(|| relation.relation_oid.to_string());
+    let amname = bootstrap_pg_am_rows()
+        .into_iter()
+        .find(|row| row.oid == index.index_meta.am_oid)
+        .map(|row| row.amname)
+        .unwrap_or_else(|| "btree".into());
+    let columns = index_column_names_for_heap(&relation.desc, &index.index_meta.indkey)
+        .unwrap_or_else(|| {
+            index
+                .desc
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect()
+        });
+    let unique = if index.index_meta.indisunique {
+        "UNIQUE "
+    } else {
+        ""
+    };
+    let mut definition = format!(
+        "CREATE {unique}INDEX {} ON {} USING {} ({})",
+        index.name,
+        table_name,
+        amname,
+        columns.join(", ")
+    );
+    if let Some(predicate) = index
+        .index_meta
+        .indpred
+        .as_deref()
+        .filter(|pred| !pred.is_empty())
+    {
+        definition.push_str(" WHERE (");
+        definition.push_str(predicate);
+        definition.push(')');
+    }
+    definition
+}
+
+fn index_column_names_for_heap(desc: &RelationDesc, attnums: &[i16]) -> Option<Vec<String>> {
+    attnums
+        .iter()
+        .map(|attnum| {
+            (*attnum > 0)
+                .then(|| desc.columns.get((*attnum as usize).saturating_sub(1)))
+                .flatten()
+                .map(|column| column.name.clone())
+        })
+        .collect()
 }
 
 fn eval_pg_get_viewdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
@@ -1539,6 +2086,9 @@ fn eval_pg_column_size_values(values: &[Value]) -> Result<Value, ExecError> {
             crate::backend::executor::value_io::format_record_text(record).len()
         }
         Value::Range(_) => crate::backend::executor::render_range_text(value)
+            .unwrap_or_default()
+            .len(),
+        Value::Inet(_) | Value::Cidr(_) => crate::backend::executor::render_network_text(value)
             .unwrap_or_default()
             .len(),
         Value::Multirange(_) => super::expr_multirange::render_multirange_text(value)
@@ -1871,15 +2421,19 @@ fn eval_op_expr(
         (OpExprKind::Concat, [left, right]) => {
             concat_values(eval_expr(left, slot, ctx)?, eval_expr(right, slot, ctx)?)
         }
-        (OpExprKind::Eq, [left, right]) => compare_values(
+        (OpExprKind::Eq, [left, right]) => compare_values_with_type(
             "=",
             eval_expr(left, slot, ctx)?,
+            expr_sql_type_hint(left),
             eval_expr(right, slot, ctx)?,
+            expr_sql_type_hint(right),
             op.collation_oid,
         ),
-        (OpExprKind::NotEq, [left, right]) => not_equal_values(
+        (OpExprKind::NotEq, [left, right]) => not_equal_values_with_type(
             eval_expr(left, slot, ctx)?,
+            expr_sql_type_hint(left),
             eval_expr(right, slot, ctx)?,
+            expr_sql_type_hint(right),
             op.collation_oid,
         ),
         (OpExprKind::Lt, [left, right]) => order_values(
@@ -2069,6 +2623,16 @@ fn current_temp_namespace_name(ctx: &ExecutorContext) -> Option<CompactString> {
                 .and_then(|(schema, _)| schema.starts_with("pg_temp_").then_some(schema))
                 .map(Into::into)
         })
+}
+
+fn current_temp_namespace_oid(ctx: &ExecutorContext) -> Option<u32> {
+    let name = current_temp_namespace_name(ctx)?;
+    ctx.catalog
+        .as_ref()?
+        .namespace_rows()
+        .into_iter()
+        .find(|row| row.nspname == name.as_str())
+        .map(|row| row.oid)
 }
 
 fn eval_scalar_array_op_expr(
@@ -2465,15 +3029,19 @@ pub fn eval_plpgsql_expr(expr: &Expr, slot: &mut TupleSlot) -> Result<Value, Exe
                 eval_plpgsql_expr(left, slot)?,
                 eval_plpgsql_expr(right, slot)?,
             ),
-            (OpExprKind::Eq, [left, right]) => compare_values(
+            (OpExprKind::Eq, [left, right]) => compare_values_with_type(
                 "=",
                 eval_plpgsql_expr(left, slot)?,
+                expr_sql_type_hint(left),
                 eval_plpgsql_expr(right, slot)?,
+                expr_sql_type_hint(right),
                 op.collation_oid,
             ),
-            (OpExprKind::NotEq, [left, right]) => not_equal_values(
+            (OpExprKind::NotEq, [left, right]) => not_equal_values_with_type(
                 eval_plpgsql_expr(left, slot)?,
+                expr_sql_type_hint(left),
                 eval_plpgsql_expr(right, slot)?,
+                expr_sql_type_hint(right),
                 op.collation_oid,
             ),
             (OpExprKind::Lt, [left, right]) => order_values(
@@ -2765,6 +3333,16 @@ fn cast_record_value_for_target(
     target: SqlType,
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
+    if matches!(
+        target.kind,
+        SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar
+    ) && !target.is_array
+    {
+        return Ok(Value::Text(
+            crate::backend::executor::value_io::format_record_text(&record).into(),
+        ));
+    }
+
     let descriptor = match target {
         SqlType {
             kind: SqlTypeKind::Composite,
@@ -2955,6 +3533,7 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::Chr => eval_chr_function(&values),
         BuiltinScalarFunction::TextToRegClass => eval_text_to_regclass_function(&values, None),
         BuiltinScalarFunction::RegClassToText => eval_regclass_to_text_function(&values, None),
+        BuiltinScalarFunction::RegTypeToText => eval_regtype_to_text_function(&values, None),
         BuiltinScalarFunction::RegRoleToText => eval_regrole_to_text_function(&values, None),
         BuiltinScalarFunction::QuoteLiteral => eval_quote_literal_function(&values),
         BuiltinScalarFunction::BpcharToText => eval_bpchar_to_text_function(&values),
@@ -3169,6 +3748,10 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::ObjDescription
         | BuiltinScalarFunction::PgDescribeObject
         | BuiltinScalarFunction::PgGetExpr
+        | BuiltinScalarFunction::PgGetStatisticsObjDef
+        | BuiltinScalarFunction::PgGetStatisticsObjDefColumns
+        | BuiltinScalarFunction::PgGetStatisticsObjDefExpressions
+        | BuiltinScalarFunction::PgStatisticsObjIsVisible
         | BuiltinScalarFunction::PgRelationIsPublishable
         | BuiltinScalarFunction::PgIndexAmHasProperty
         | BuiltinScalarFunction::PgIndexHasProperty
@@ -3850,6 +4433,16 @@ fn eval_builtin_function(
         },
         BuiltinScalarFunction::PgGetUserById => eval_pg_get_userbyid(&values, ctx),
         BuiltinScalarFunction::PgGetAcl => eval_pg_get_acl(&values, ctx),
+        BuiltinScalarFunction::PgGetStatisticsObjDef => eval_pg_get_statisticsobjdef(&values, ctx),
+        BuiltinScalarFunction::PgGetStatisticsObjDefColumns => {
+            eval_pg_get_statisticsobjdef_columns(&values, ctx)
+        }
+        BuiltinScalarFunction::PgGetStatisticsObjDefExpressions => {
+            eval_pg_get_statisticsobjdef_expressions(&values, ctx)
+        }
+        BuiltinScalarFunction::PgStatisticsObjIsVisible => {
+            eval_pg_statistics_obj_is_visible(&values, ctx)
+        }
         BuiltinScalarFunction::Now
         | BuiltinScalarFunction::TransactionTimestamp
         | BuiltinScalarFunction::StatementTimestamp
@@ -3877,9 +4470,9 @@ fn eval_builtin_function(
         BuiltinScalarFunction::IsFinite => eval_isfinite_function(&values),
         BuiltinScalarFunction::MakeDate => eval_make_date_function(&values),
         BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),
-        BuiltinScalarFunction::PgMyTempSchema => Ok(current_temp_namespace_name(ctx)
-            .map(Value::Text)
-            .unwrap_or(Value::Null)),
+        BuiltinScalarFunction::PgMyTempSchema => Ok(Value::Int64(i64::from(
+            current_temp_namespace_oid(ctx).unwrap_or(0),
+        ))),
         BuiltinScalarFunction::PgRustInternalBinaryCoercible => {
             eval_pg_rust_internal_binary_coercible(&values)
         }
@@ -4086,6 +4679,8 @@ fn eval_builtin_function(
         BuiltinScalarFunction::ObjDescription => eval_obj_description(&values, ctx),
         BuiltinScalarFunction::PgDescribeObject => eval_pg_describe_object(&values, ctx),
         BuiltinScalarFunction::PgGetExpr => eval_pg_get_expr(&values),
+        BuiltinScalarFunction::PgGetConstraintDef => eval_pg_get_constraintdef(&values, ctx),
+        BuiltinScalarFunction::PgGetIndexDef => eval_pg_get_indexdef(&values, ctx),
         BuiltinScalarFunction::PgGetViewDef => eval_pg_get_viewdef(&values, ctx),
         BuiltinScalarFunction::PgGetTriggerDef => eval_pg_get_triggerdef(&values, ctx),
         BuiltinScalarFunction::PgTriggerDepth => Ok(Value::Int32(ctx.trigger_depth as i32)),
@@ -4244,6 +4839,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Reverse => eval_reverse_function(&values),
         BuiltinScalarFunction::TextToRegClass => eval_text_to_regclass_function(&values, Some(ctx)),
         BuiltinScalarFunction::RegClassToText => eval_regclass_to_text_function(&values, Some(ctx)),
+        BuiltinScalarFunction::RegTypeToText => eval_regtype_to_text_function(&values, Some(ctx)),
         BuiltinScalarFunction::RegRoleToText => eval_regrole_to_text_function(&values, Some(ctx)),
         BuiltinScalarFunction::BpcharToText => eval_bpchar_to_text_function(&values),
         BuiltinScalarFunction::QuoteLiteral => eval_quote_literal_function(&values),

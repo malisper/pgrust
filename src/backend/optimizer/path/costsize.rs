@@ -898,6 +898,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
     for index in indexes.iter().filter(|index| {
         index.index_meta.indisvalid
             && index.index_meta.indisready
+            && !index.index_meta.indisexclusion
             && !index.index_meta.indkey.is_empty()
     }) {
         let Some(spec) = build_index_path_spec(filter.as_ref(), order_items.as_deref(), index)
@@ -2429,6 +2430,7 @@ pub(super) fn estimate_sql_type_width(sql_type: SqlType) -> usize {
         | SqlTypeKind::RegClass
         | SqlTypeKind::RegType
         | SqlTypeKind::RegRole
+        | SqlTypeKind::RegNamespace
         | SqlTypeKind::RegOperator
         | SqlTypeKind::RegProcedure
         | SqlTypeKind::Xid
