@@ -15,7 +15,7 @@ use super::{
     CatalogLookup, CheckConstraintAction, CreateTableStatement, ForeignKeyConstraintAction,
     IndexBackedConstraintAction, LoweredPartitionSpec, NotNullConstraintAction, ParseError,
     PartitionBoundSpec, normalize_create_table_constraints, raw_type_name_hint,
-    resolve_raw_type_name,
+    resolve_raw_type_name, validate_generated_columns,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +100,24 @@ pub fn lower_create_table(
                     crate::backend::parser::RawTypeName::Serial(kind) => Some(kind),
                     _ => None,
                 };
+                if column.generated.is_some() && column.default_expr.is_some() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "generated column without DEFAULT",
+                        actual: format!(
+                            "both default and generation expression specified for column \"{}\"",
+                            column.name
+                        ),
+                    });
+                }
+                if serial_kind.is_some() && column.generated.is_some() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "non-serial generated column",
+                        actual: format!(
+                            "both serial and generation expression specified for column \"{}\"",
+                            column.name
+                        ),
+                    });
+                }
                 if serial_kind.is_some() && column.default_expr.is_some() {
                     return Err(ParseError::UnexpectedToken {
                         expected: "serial column without explicit DEFAULT",
@@ -117,11 +135,16 @@ pub fn lower_create_table(
                     desc.not_null_constraint_no_inherit = not_null.no_inherit;
                     desc.not_null_primary_key_owned = not_null.primary_key_owned;
                 }
-                desc.default_expr = column.default_expr.clone();
-                desc.missing_default_value = column
-                    .default_expr
-                    .as_deref()
-                    .and_then(|sql| super::derive_literal_default_value(sql, sql_type).ok());
+                if let Some(generated) = &column.generated {
+                    desc.default_expr = Some(generated.expr_sql.clone());
+                    desc.generated = Some(generated.kind);
+                } else {
+                    desc.default_expr = column.default_expr.clone();
+                    desc.missing_default_value = column
+                        .default_expr
+                        .as_deref()
+                        .and_then(|sql| super::derive_literal_default_value(sql, sql_type).ok());
+                }
                 if let Some(serial_kind) = serial_kind {
                     desc.default_expr = None;
                     desc.missing_default_value = None;
@@ -140,6 +163,8 @@ pub fn lower_create_table(
             })
             .collect::<Result<Vec<_>, _>>()?,
     };
+
+    validate_generated_columns(&relation_desc, catalog)?;
 
     Ok(LoweredCreateTable {
         relation_desc,
@@ -251,13 +276,26 @@ fn expand_like_clause(
                     },
                 });
             }
+            let generated = if options.defaults {
+                column.generated.and_then(|kind| {
+                    column.default_expr.clone().map(|expr_sql| {
+                        crate::include::nodes::parsenodes::ColumnGeneratedDef { expr_sql, kind }
+                    })
+                })
+            } else {
+                None
+            };
             CreateTableElement::Column(crate::backend::parser::ColumnDef {
                 name: column.name.clone(),
                 ty: RawTypeName::Builtin(column.sql_type),
-                default_expr: options
-                    .defaults
-                    .then(|| column.default_expr.clone())
-                    .flatten(),
+                default_expr: if generated.is_some() {
+                    None
+                } else if options.defaults {
+                    column.default_expr.clone()
+                } else {
+                    None
+                },
+                generated,
                 compression: match column.storage.attcompression {
                     AttributeCompression::Default => None,
                     compression => Some(compression),
@@ -368,8 +406,8 @@ fn validate_create_column_compression(
 mod tests {
     use super::*;
     use crate::backend::parser::{
-        ColumnDef, ConstraintAttributes, CreateTableElement, OnCommitAction, RawTypeName, SqlType,
-        TablePersistence,
+        ColumnDef, ColumnGeneratedKind, ConstraintAttributes, CreateTableElement, OnCommitAction,
+        RawTypeName, SqlType, TablePersistence,
     };
     use crate::include::catalog::PgConstraintRow;
 
@@ -407,6 +445,7 @@ mod tests {
                 name: "a".into(),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::AnyArray)),
                 default_expr: None,
+                generated: None,
                 compression: None,
                 constraints: vec![],
             })],
@@ -438,6 +477,7 @@ mod tests {
                     name: "id".into(),
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
                     default_expr: None,
+                    generated: None,
                     compression: None,
                     constraints: vec![crate::backend::parser::ColumnConstraint::PrimaryKey {
                         attributes: ConstraintAttributes::default(),
@@ -447,6 +487,7 @@ mod tests {
                     name: "note".into(),
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
                     default_expr: None,
+                    generated: None,
                     compression: None,
                     constraints: vec![crate::backend::parser::ColumnConstraint::NotNull {
                         attributes: ConstraintAttributes {
@@ -611,6 +652,64 @@ mod tests {
     }
 
     #[test]
+    fn lower_create_table_like_including_defaults_copies_generated_columns() {
+        let mut source_desc = RelationDesc {
+            columns: vec![
+                column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
+                column_desc("doubled", SqlType::new(SqlTypeKind::Int4), true),
+            ],
+        };
+        source_desc.columns[1].default_expr = Some("id * 2".into());
+        source_desc.columns[1].generated = Some(ColumnGeneratedKind::Stored);
+        let catalog = LikeCatalog {
+            relation: Some(crate::backend::parser::BoundRelation {
+                rel: crate::RelFileLocator {
+                    spc_oid: 1,
+                    db_oid: 1,
+                    rel_number: 42,
+                },
+                relation_oid: 42,
+                toast: None,
+                namespace_oid: crate::include::catalog::PUBLIC_NAMESPACE_OID,
+                owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+                relpersistence: 'p',
+                relkind: 'r',
+                relispartition: false,
+                relpartbound: None,
+                desc: source_desc,
+                partitioned_table: None,
+            }),
+            constraints: Vec::new(),
+        };
+        let stmt = CreateTableStatement {
+            schema_name: None,
+            table_name: "copy_table".into(),
+            persistence: TablePersistence::Permanent,
+            on_commit: OnCommitAction::PreserveRows,
+            elements: vec![CreateTableElement::Like(CreateTableLikeClause {
+                relation_name: "source_table".into(),
+                options: vec![CreateTableLikeOption::IncludingDefaults],
+            })],
+            inherits: Vec::new(),
+            partition_spec: None,
+            partition_of: None,
+            partition_bound: None,
+            if_not_exists: false,
+        };
+
+        let lowered = lower_create_table(&stmt, &catalog).unwrap();
+        assert_eq!(lowered.relation_desc.columns.len(), 2);
+        assert_eq!(
+            lowered.relation_desc.columns[1].default_expr.as_deref(),
+            Some("id * 2")
+        );
+        assert_eq!(
+            lowered.relation_desc.columns[1].generated,
+            Some(ColumnGeneratedKind::Stored)
+        );
+    }
+
+    #[test]
     fn lower_create_table_rejects_conflicting_not_null_no_inherit() {
         let stmt = CreateTableStatement {
             schema_name: None,
@@ -622,6 +721,7 @@ mod tests {
                     name: "id".into(),
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
                     default_expr: None,
+                    generated: None,
                     compression: None,
                     constraints: vec![crate::backend::parser::ColumnConstraint::PrimaryKey {
                         attributes: ConstraintAttributes::default(),
@@ -665,6 +765,7 @@ mod tests {
                 name: "id".into(),
                 ty: RawTypeName::Serial(SerialKind::Regular),
                 default_expr: None,
+                generated: None,
                 compression: None,
                 constraints: vec![],
             })],
@@ -702,6 +803,7 @@ mod tests {
                 name: "id".into(),
                 ty: RawTypeName::Serial(SerialKind::Regular),
                 default_expr: Some("7".into()),
+                generated: None,
                 compression: None,
                 constraints: vec![],
             })],
@@ -735,6 +837,7 @@ mod tests {
                 name: "f1".into(),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
                 default_expr: None,
+                generated: None,
                 compression: Some(AttributeCompression::Pglz),
                 constraints: vec![],
             })],
@@ -767,6 +870,7 @@ mod tests {
                 name: "f1".into(),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
                 default_expr: None,
+                generated: None,
                 compression: Some(AttributeCompression::Pglz),
                 constraints: vec![],
             })],

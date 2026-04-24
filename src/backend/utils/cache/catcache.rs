@@ -340,6 +340,10 @@ impl CatCache {
                     attstattarget: column.attstattarget,
                     attinhcount: column.attinhcount,
                     attislocal: column.attislocal,
+                    attgenerated: column
+                        .generated
+                        .map(|kind| kind.catalog_char())
+                        .unwrap_or('\0'),
                     sql_type: column.sql_type,
                 })
                 .collect::<Vec<_>>();
