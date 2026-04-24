@@ -259,6 +259,25 @@ fn foreign_key_match_code(match_type: ForeignKeyMatchType) -> char {
     }
 }
 
+fn create_table_like_statistics_name_base(
+    relation_name: &str,
+    source_row: &crate::include::catalog::PgStatisticExtRow,
+    relation: &crate::backend::parser::BoundRelation,
+) -> String {
+    let target_name = source_row
+        .stxkeys
+        .iter()
+        .find_map(|attnum| {
+            usize::try_from(*attnum)
+                .ok()
+                .and_then(|index| index.checked_sub(1))
+                .and_then(|index| relation.desc.columns.get(index))
+                .map(|column| column.name.as_str())
+        })
+        .unwrap_or("expr");
+    format!("{relation_name}_{target_name}_stat")
+}
+
 fn column_attnums_for_names(
     desc: &crate::backend::executor::RelationDesc,
     columns: &[String],
@@ -748,6 +767,164 @@ impl Database {
             column_index: column.column_index,
             sequence_oid,
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_create_table_like_post_create_actions(
+        &self,
+        client_id: ClientId,
+        relation: &crate::backend::parser::BoundRelation,
+        lowered: &crate::backend::parser::LoweredCreateTable,
+        xid: TransactionId,
+        mut cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<CommandId, ExecError> {
+        for action in &lowered.like_post_create_actions {
+            if action.include_comments {
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid,
+                    client_id,
+                    waiter: None,
+                    interrupts: self.interrupt_state(client_id),
+                };
+                let effect = self
+                    .catalog
+                    .write()
+                    .copy_relation_column_comments_mvcc(
+                        action.source_relation_oid,
+                        relation.relation_oid,
+                        i32::try_from(relation.desc.columns.len()).unwrap_or(i32::MAX),
+                        &ctx,
+                    )
+                    .map_err(map_catalog_error)?;
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
+                catalog_effects.push(effect);
+                cid = cid.saturating_add(1);
+            }
+
+            if action.include_statistics {
+                cid = self.copy_create_table_like_statistics(
+                    client_id,
+                    action.source_relation_oid,
+                    relation,
+                    action.include_comments,
+                    xid,
+                    cid,
+                    catalog_effects,
+                )?;
+            }
+        }
+        Ok(cid)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn copy_create_table_like_statistics(
+        &self,
+        client_id: ClientId,
+        source_relation_oid: u32,
+        relation: &crate::backend::parser::BoundRelation,
+        include_comments: bool,
+        xid: TransactionId,
+        mut cid: CommandId,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<CommandId, ExecError> {
+        let source_statistics = self
+            .backend_catcache(client_id, Some((xid, cid)))
+            .map_err(map_catalog_error)?
+            .statistic_ext_rows_for_relation(source_relation_oid);
+        if source_statistics.is_empty() {
+            return Ok(cid);
+        }
+
+        let relation_name = self
+            .backend_catcache(client_id, Some((xid, cid)))
+            .map_err(map_catalog_error)?
+            .class_by_oid(relation.relation_oid)
+            .map(|row| row.relname.to_ascii_lowercase())
+            .unwrap_or_else(|| relation.relation_oid.to_string());
+        let mut used_names = std::collections::BTreeSet::new();
+        for source_row in source_statistics {
+            let base_name =
+                create_table_like_statistics_name_base(&relation_name, &source_row, relation);
+            let mut candidate = base_name.clone();
+            let mut suffix = 1usize;
+            loop {
+                let catalog = self
+                    .backend_catcache(client_id, Some((xid, cid)))
+                    .map_err(map_catalog_error)?;
+                if !used_names.contains(&candidate)
+                    && catalog
+                        .statistic_ext_row_by_name_namespace(&candidate, relation.namespace_oid)
+                        .is_none()
+                {
+                    break;
+                }
+                candidate = format!("{base_name}{suffix}");
+                suffix = suffix.saturating_add(1);
+            }
+            used_names.insert(candidate.clone());
+
+            let row = crate::include::catalog::PgStatisticExtRow {
+                oid: 0,
+                stxrelid: relation.relation_oid,
+                stxname: candidate,
+                stxnamespace: relation.namespace_oid,
+                stxowner: self.auth_state(client_id).current_user_oid(),
+                stxkeys: source_row.stxkeys.clone(),
+                stxstattarget: source_row.stxstattarget,
+                stxkind: source_row.stxkind.clone(),
+                stxexprs: source_row.stxexprs.clone(),
+            };
+            let ctx = CatalogWriteContext {
+                pool: self.pool.clone(),
+                txns: self.txns.clone(),
+                xid,
+                cid,
+                client_id,
+                waiter: None,
+                interrupts: self.interrupt_state(client_id),
+            };
+            let (created_oid, effect) = self
+                .catalog
+                .write()
+                .create_statistics_mvcc(row, &ctx)
+                .map_err(map_catalog_error)?;
+            self.apply_catalog_mutation_effect_immediate(&effect)?;
+            catalog_effects.push(effect);
+            cid = cid.saturating_add(1);
+
+            if include_comments {
+                let ctx = CatalogWriteContext {
+                    pool: self.pool.clone(),
+                    txns: self.txns.clone(),
+                    xid,
+                    cid,
+                    client_id,
+                    waiter: None,
+                    interrupts: self.interrupt_state(client_id),
+                };
+                let effect = self
+                    .catalog
+                    .write()
+                    .copy_object_comment_mvcc(
+                        source_row.oid,
+                        crate::include::catalog::PG_STATISTIC_EXT_RELATION_OID,
+                        created_oid,
+                        crate::include::catalog::PG_STATISTIC_EXT_RELATION_OID,
+                        &ctx,
+                    )
+                    .map_err(map_catalog_error)?;
+                self.apply_catalog_mutation_effect_immediate(&effect)?;
+                catalog_effects.push(effect);
+                cid = cid.saturating_add(1);
+            }
+        }
+
+        self.plan_cache.invalidate_all();
+        Ok(cid)
     }
 
     pub(crate) fn execute_create_domain_stmt_with_search_path(
@@ -1648,12 +1825,20 @@ impl Database {
                             configured_search_path,
                             catalog_effects,
                         )?;
+                        let next_cid = self.apply_create_table_like_post_create_actions(
+                            client_id,
+                            &relation,
+                            &lowered,
+                            xid,
+                            constraint_cid_base.saturating_add(1),
+                            catalog_effects,
+                        )?;
                         if let Some(parent_oid) = lowered.partition_parent_oid {
                             let next_cid = self
                                 .reconcile_partitioned_parent_indexes_for_attached_child_in_transaction(
                                     client_id,
                                     xid,
-                                    constraint_cid_base.saturating_add(1),
+                                    next_cid,
                                     parent_oid,
                                     relation.relation_oid,
                                     configured_search_path,
@@ -2086,6 +2271,8 @@ impl Database {
                                     ),
                                     default_expr: None,
                                     generated: None,
+                                    identity: None,
+                                    storage: None,
                                     compression: None,
                                     constraints: vec![],
                                 },

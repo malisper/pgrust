@@ -11956,6 +11956,254 @@ fn like_including_all_copies_without_overlaps_constraints() {
 }
 
 #[test]
+fn create_table_like_copies_generated_only_when_requested() {
+    let base = temp_dir("create_table_like_generated");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table like_gen_src (a int4, b int4 generated always as (a + 1) stored)",
+    )
+    .unwrap();
+    db.execute(1, "create table like_gen_plain (like like_gen_src)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table like_gen_copy (like like_gen_src including generated)",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into like_gen_plain values (4, 99)")
+        .unwrap();
+    db.execute(1, "insert into like_gen_copy(a) values (4)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select b from like_gen_plain"),
+        vec![vec![Value::Int32(99)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select b from like_gen_copy"),
+        vec![vec![Value::Int32(5)]]
+    );
+}
+
+#[test]
+fn create_table_like_copies_identity_only_when_requested() {
+    let base = temp_dir("create_table_like_identity");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table like_id_src (a bigint generated always as identity, b text)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select attidentity from pg_attribute where attrelid = (select oid from pg_class where relname = 'like_id_src') and attname = 'a'",
+        ),
+        vec![vec![Value::Text("a".into())]]
+    );
+    db.execute(1, "create table like_id_plain (like like_id_src)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table like_id_copy (like like_id_src including identity)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select attidentity from pg_attribute where attrelid = (select oid from pg_class where relname = 'like_id_copy') and attname = 'a'",
+        ),
+        vec![vec![Value::Text("a".into())]]
+    );
+
+    match db.execute(1, "insert into like_id_plain (b) values ('plain')") {
+        Err(ExecError::NotNullViolation { column, .. }) => assert_eq!(column, "a"),
+        other => panic!("expected missing identity default to fail, got {other:?}"),
+    }
+    db.execute(1, "insert into like_id_copy (b) values ('copy')")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select a, b from like_id_copy"),
+        vec![vec![Value::Int64(1), Value::Text("copy".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select attidentity from pg_attribute where attrelid = (select oid from pg_class where relname = 'like_id_copy') and attname = 'a'",
+        ),
+        vec![vec![Value::Text("a".into())]]
+    );
+}
+
+#[test]
+fn create_table_like_copies_storage_and_compression_only_when_requested() {
+    let base = temp_dir("create_table_like_storage_compression");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table like_storage_src (a text compression pglz)")
+        .unwrap();
+    db.execute(
+        1,
+        "alter table like_storage_src alter column a set storage external",
+    )
+    .unwrap();
+    db.execute(1, "create table like_storage_plain (like like_storage_src)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table like_storage_copy (like like_storage_src including storage including compression)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select attstorage, attcompression from pg_attribute where attrelid = (select oid from pg_class where relname = 'like_storage_plain') and attname = 'a'",
+        ),
+        vec![vec![Value::Text("x".into()), Value::Text("".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select attstorage, attcompression from pg_attribute where attrelid = (select oid from pg_class where relname = 'like_storage_copy') and attname = 'a'",
+        ),
+        vec![vec![Value::Text("e".into()), Value::Text("p".into())]]
+    );
+}
+
+#[test]
+fn create_table_like_copies_column_comments_only_when_requested() {
+    let base = temp_dir("create_table_like_comments");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table like_comment_src (a int4, b text)")
+        .unwrap();
+    let relation = db
+        .lazy_catalog_lookup(1, None, None)
+        .lookup_any_relation("like_comment_src")
+        .unwrap();
+    let xid = db.txns.write().begin();
+    let ctx = crate::backend::catalog::store::CatalogWriteContext {
+        pool: db.pool.clone(),
+        txns: db.txns.clone(),
+        xid,
+        cid: 0,
+        client_id: 1,
+        waiter: Some(db.txn_waiter.clone()),
+        interrupts: db.interrupt_state(1),
+    };
+    let effect = db
+        .catalog
+        .write()
+        .comment_column_mvcc(relation.relation_oid, 2, Some("copied b"), &ctx)
+        .unwrap();
+    db.apply_catalog_mutation_effect_immediate(&effect).unwrap();
+    db.txns.write().commit(xid).unwrap();
+
+    db.execute(1, "create table like_comment_plain (like like_comment_src)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table like_comment_copy (like like_comment_src including comments)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select d.description \
+             from pg_description d \
+             join pg_class c on c.oid = d.objoid \
+             where c.relname = 'like_comment_plain' and d.classoid = 1259 and d.objsubid = 2",
+        ),
+        Vec::<Vec<Value>>::new()
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select d.description \
+             from pg_description d \
+             join pg_class c on c.oid = d.objoid \
+             where c.relname = 'like_comment_copy' and d.classoid = 1259 and d.objsubid = 2",
+        ),
+        vec![vec![Value::Text("copied b".into())]]
+    );
+}
+
+#[test]
+fn create_table_like_copies_statistics_only_when_requested() {
+    let base = temp_dir("create_table_like_statistics");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table like_stats_src (a int4, b int4, c int4)")
+        .unwrap();
+    db.execute(
+        1,
+        "create statistics like_stats_src_ab_stats (dependencies) on a, b from like_stats_src",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "comment on statistics like_stats_src_ab_stats is 'source stats'",
+    )
+    .unwrap();
+
+    db.execute(1, "create table like_stats_plain (like like_stats_src)")
+        .unwrap();
+    db.execute(
+        1,
+        "create table like_stats_copy (like like_stats_src including statistics including comments)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_statistic_ext where stxrelid = (select oid from pg_class where relname = 'like_stats_plain')",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select stxname, stxkeys, stxkind \
+             from pg_statistic_ext \
+             where stxrelid = (select oid from pg_class where relname = 'like_stats_copy')",
+        ),
+        vec![vec![
+            Value::Text("like_stats_copy_a_stat".into()),
+            Value::Text("1 2".into()),
+            typed_text_array_value(&["f"], crate::include::catalog::INTERNAL_CHAR_TYPE_OID),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select d.description \
+             from pg_description d \
+             join pg_statistic_ext s on s.oid = d.objoid \
+             where s.stxname = 'like_stats_copy_a_stat' and d.classoid = 3381",
+        ),
+        vec![vec![Value::Text("source stats".into())]]
+    );
+}
+
+#[test]
 fn alter_table_add_without_overlaps_on_inherited_columns() {
     let base = temp_dir("without_overlaps_inherited_alter");
     let db = Database::open(&base, 16).unwrap();

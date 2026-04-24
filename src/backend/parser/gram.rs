@@ -9286,6 +9286,42 @@ fn build_create_table_like_clause(
                     } else {
                         CreateTableLikeOption::ExcludingIndexes
                     }
+                } else if raw.ends_with("identity") {
+                    if including {
+                        CreateTableLikeOption::IncludingIdentity
+                    } else {
+                        CreateTableLikeOption::ExcludingIdentity
+                    }
+                } else if raw.ends_with("generated") {
+                    if including {
+                        CreateTableLikeOption::IncludingGenerated
+                    } else {
+                        CreateTableLikeOption::ExcludingGenerated
+                    }
+                } else if raw.ends_with("comments") {
+                    if including {
+                        CreateTableLikeOption::IncludingComments
+                    } else {
+                        CreateTableLikeOption::ExcludingComments
+                    }
+                } else if raw.ends_with("storage") {
+                    if including {
+                        CreateTableLikeOption::IncludingStorage
+                    } else {
+                        CreateTableLikeOption::ExcludingStorage
+                    }
+                } else if raw.ends_with("compression") {
+                    if including {
+                        CreateTableLikeOption::IncludingCompression
+                    } else {
+                        CreateTableLikeOption::ExcludingCompression
+                    }
+                } else if raw.ends_with("statistics") {
+                    if including {
+                        CreateTableLikeOption::IncludingStatistics
+                    } else {
+                        CreateTableLikeOption::ExcludingStatistics
+                    }
                 } else if raw.ends_with("all") {
                     if including {
                         CreateTableLikeOption::IncludingAll
@@ -10912,6 +10948,9 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
     ))?;
     let mut default_expr = None;
     let mut generated = None;
+    let mut identity = None;
+    let storage = None;
+    let mut compression = None;
     let mut constraints = Vec::new();
     for flag in inner {
         let Some(flag) = (match flag.as_rule() {
@@ -10930,6 +10969,12 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
             Rule::column_generated => {
                 set_column_generated(&mut generated, build_column_generated(flag)?, &name)?;
             }
+            Rule::column_identity => {
+                set_column_identity(&mut identity, build_column_identity(flag)?, &name)?;
+            }
+            Rule::column_compression => {
+                compression = Some(build_column_compression(flag)?);
+            }
             Rule::nullable => {}
             Rule::named_column_constraint => {
                 let generated_part = flag
@@ -10940,6 +10985,16 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
                     set_column_generated(
                         &mut generated,
                         build_column_generated(generated_part)?,
+                        &name,
+                    )?;
+                } else if let Some(identity_part) = flag
+                    .clone()
+                    .into_inner()
+                    .find(|part| part.as_rule() == Rule::column_identity)
+                {
+                    set_column_identity(
+                        &mut identity,
+                        build_column_identity(identity_part)?,
                         &name,
                     )?;
                 } else {
@@ -10961,7 +11016,9 @@ fn build_column_def(pair: Pair<'_, Rule>) -> Result<ColumnDef, ParseError> {
         ty,
         default_expr,
         generated,
-        compression: None,
+        identity,
+        storage,
+        compression,
         constraints,
     })
 }
@@ -10979,6 +11036,56 @@ fn set_column_generated(
     }
     *target = Some(value);
     Ok(())
+}
+
+fn set_column_identity(
+    target: &mut Option<ColumnIdentityKind>,
+    value: ColumnIdentityKind,
+    column_name: &str,
+) -> Result<(), ParseError> {
+    if target.is_some() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "single identity clause",
+            actual: format!("multiple identity clauses specified for column \"{column_name}\""),
+        });
+    }
+    *target = Some(value);
+    Ok(())
+}
+
+fn build_column_identity(pair: Pair<'_, Rule>) -> Result<ColumnIdentityKind, ParseError> {
+    let when = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::generated_when)
+        .map(|part| part.as_str().trim().to_ascii_lowercase())
+        .ok_or(ParseError::UnexpectedEof)?;
+    match when.as_str() {
+        "always" => Ok(ColumnIdentityKind::Always),
+        "by default" => Ok(ColumnIdentityKind::ByDefault),
+        other => Err(ParseError::UnexpectedToken {
+            expected: "GENERATED ALWAYS or GENERATED BY DEFAULT",
+            actual: other.into(),
+        }),
+    }
+}
+
+fn build_column_compression(
+    pair: Pair<'_, Rule>,
+) -> Result<crate::include::access::htup::AttributeCompression, ParseError> {
+    let raw = pair.as_str().trim().to_ascii_lowercase();
+    if raw.ends_with("default") {
+        return Ok(crate::include::access::htup::AttributeCompression::Default);
+    }
+    if raw.ends_with("pglz") {
+        return Ok(crate::include::access::htup::AttributeCompression::Pglz);
+    }
+    if raw.ends_with("lz4") {
+        return Ok(crate::include::access::htup::AttributeCompression::Lz4);
+    }
+    Err(ParseError::UnexpectedToken {
+        expected: "compression method",
+        actual: pair.as_str().into(),
+    })
 }
 
 fn build_column_generated(pair: Pair<'_, Rule>) -> Result<ColumnGeneratedDef, ParseError> {

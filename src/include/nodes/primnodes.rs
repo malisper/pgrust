@@ -70,6 +70,7 @@ pub struct ColumnDesc {
     pub default_expr: Option<String>,
     pub default_sequence_oid: Option<u32>,
     pub generated: Option<ColumnGeneratedKind>,
+    pub identity: Option<crate::include::nodes::parsenodes::ColumnIdentityKind>,
     pub missing_default_value: Option<Value>,
 }
 

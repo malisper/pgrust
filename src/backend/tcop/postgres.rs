@@ -2329,7 +2329,12 @@ fn psql_describe_columns_query(
                 row.push(Value::Null);
             }
             if include_attidentity {
-                row.push(Value::InternalChar(0));
+                row.push(Value::InternalChar(
+                    column
+                        .identity
+                        .map(|kind| kind.catalog_char() as u8)
+                        .unwrap_or(0),
+                ));
             }
             if include_attgenerated {
                 row.push(Value::InternalChar(

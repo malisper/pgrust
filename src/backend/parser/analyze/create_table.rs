@@ -26,6 +26,7 @@ pub struct LoweredCreateTable {
     pub constraint_actions: Vec<IndexBackedConstraintAction>,
     pub foreign_key_actions: Vec<ForeignKeyConstraintAction>,
     pub owned_sequences: Vec<OwnedSequenceSpec>,
+    pub like_post_create_actions: Vec<CreateTableLikePostCreateAction>,
     pub parent_oids: Vec<u32>,
     pub partition_spec: Option<LoweredPartitionSpec>,
     pub partition_parent_oid: Option<u32>,
@@ -40,6 +41,13 @@ pub struct OwnedSequenceSpec {
     pub sql_type: SqlType,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateTableLikePostCreateAction {
+    pub source_relation_oid: u32,
+    pub include_comments: bool,
+    pub include_statistics: bool,
+}
+
 pub fn create_relation_desc(
     stmt: &CreateTableStatement,
     catalog: &dyn CatalogLookup,
@@ -51,7 +59,7 @@ pub fn lower_create_table(
     stmt: &CreateTableStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<LoweredCreateTable, ParseError> {
-    let expanded = expand_create_table_like_clauses(stmt, catalog)?;
+    let (expanded, like_post_create_actions) = expand_create_table_like_clauses(stmt, catalog)?;
     let columns = expanded.columns().cloned().collect::<Vec<_>>();
     let normalized = normalize_create_table_constraints(&expanded, catalog)?;
     let constraint_actions = normalized.index_backed.clone();
@@ -109,6 +117,19 @@ pub fn lower_create_table(
                         ),
                     });
                 }
+                if column.identity.is_some()
+                    && (column.generated.is_some()
+                        || column.default_expr.is_some()
+                        || serial_kind.is_some())
+                {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "identity column without DEFAULT, generated expression, or serial type",
+                        actual: format!(
+                            "conflicting identity definition for column \"{}\"",
+                            column.name
+                        ),
+                    });
+                }
                 if serial_kind.is_some() && column.generated.is_some() {
                     return Err(ParseError::UnexpectedToken {
                         expected: "non-serial generated column",
@@ -127,7 +148,7 @@ pub fn lower_create_table(
                         ),
                     });
                 }
-                let nullable = not_null.is_none() && serial_kind.is_none();
+                let nullable = not_null.is_none() && serial_kind.is_none() && column.identity.is_none();
                 let mut desc = column_desc(column.name.clone(), sql_type, nullable);
                 if let Some(not_null) = not_null {
                     desc.not_null_constraint_name = Some(not_null.constraint_name.clone());
@@ -138,6 +159,8 @@ pub fn lower_create_table(
                 if let Some(generated) = &column.generated {
                     desc.default_expr = Some(generated.expr_sql.clone());
                     desc.generated = Some(generated.kind);
+                } else if let Some(identity) = column.identity {
+                    desc.identity = Some(identity);
                 } else {
                     desc.default_expr = column.default_expr.clone();
                     desc.missing_default_value = column
@@ -154,6 +177,19 @@ pub fn lower_create_table(
                         serial_kind,
                         sql_type,
                     });
+                }
+                if column.identity.is_some() {
+                    desc.default_expr = None;
+                    desc.missing_default_value = None;
+                    owned_sequences.push(OwnedSequenceSpec {
+                        column_index: index,
+                        column_name: column.name.clone(),
+                        serial_kind: serial_kind_for_identity_sql_type(sql_type)?,
+                        sql_type,
+                    });
+                }
+                if let Some(storage) = column.storage {
+                    desc.storage.attstorage = storage;
                 }
                 if let Some(compression) = column.compression {
                     validate_create_column_compression(sql_type, compression)?;
@@ -173,6 +209,7 @@ pub fn lower_create_table(
         constraint_actions,
         foreign_key_actions: normalized.foreign_keys,
         owned_sequences,
+        like_post_create_actions,
         parent_oids: Vec::new(),
         partition_spec: None,
         partition_parent_oid: None,
@@ -183,28 +220,33 @@ pub fn lower_create_table(
 fn expand_create_table_like_clauses(
     stmt: &CreateTableStatement,
     catalog: &dyn CatalogLookup,
-) -> Result<CreateTableStatement, ParseError> {
+) -> Result<(CreateTableStatement, Vec<CreateTableLikePostCreateAction>), ParseError> {
     if !stmt
         .elements
         .iter()
         .any(|element| matches!(element, CreateTableElement::Like(_)))
     {
-        return Ok(stmt.clone());
+        return Ok((stmt.clone(), Vec::new()));
     }
 
     let mut expanded = stmt.clone();
     expanded.elements = Vec::new();
+    let mut post_create_actions = Vec::new();
     for element in &stmt.elements {
         match element {
             CreateTableElement::Column(_) | CreateTableElement::Constraint(_) => {
                 expanded.elements.push(element.clone());
             }
             CreateTableElement::Like(like) => {
-                expanded.elements.extend(expand_like_clause(like, catalog)?);
+                let (elements, post_create_action) = expand_like_clause(like, catalog)?;
+                expanded.elements.extend(elements);
+                if let Some(action) = post_create_action {
+                    post_create_actions.push(action);
+                }
             }
         }
     }
-    Ok(expanded)
+    Ok((expanded, post_create_actions))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -212,6 +254,12 @@ struct LikeExpansionOptions {
     defaults: bool,
     constraints: bool,
     indexes: bool,
+    identity: bool,
+    generated: bool,
+    comments: bool,
+    storage: bool,
+    compression: bool,
+    statistics: bool,
 }
 
 impl LikeExpansionOptions {
@@ -220,24 +268,54 @@ impl LikeExpansionOptions {
             defaults: false,
             constraints: false,
             indexes: false,
+            identity: false,
+            generated: false,
+            comments: false,
+            storage: false,
+            compression: false,
+            statistics: false,
         };
         for option in &clause.options {
             match option {
                 CreateTableLikeOption::IncludingDefaults => options.defaults = true,
                 CreateTableLikeOption::IncludingConstraints => options.constraints = true,
                 CreateTableLikeOption::IncludingIndexes => options.indexes = true,
+                CreateTableLikeOption::IncludingIdentity => options.identity = true,
+                CreateTableLikeOption::IncludingGenerated => options.generated = true,
+                CreateTableLikeOption::IncludingComments => options.comments = true,
+                CreateTableLikeOption::IncludingStorage => options.storage = true,
+                CreateTableLikeOption::IncludingCompression => options.compression = true,
+                CreateTableLikeOption::IncludingStatistics => options.statistics = true,
                 CreateTableLikeOption::IncludingAll => {
                     options.defaults = true;
                     options.constraints = true;
                     options.indexes = true;
+                    options.identity = true;
+                    options.generated = true;
+                    options.comments = true;
+                    options.storage = true;
+                    options.compression = true;
+                    options.statistics = true;
                 }
                 CreateTableLikeOption::ExcludingDefaults => options.defaults = false,
                 CreateTableLikeOption::ExcludingConstraints => options.constraints = false,
                 CreateTableLikeOption::ExcludingIndexes => options.indexes = false,
+                CreateTableLikeOption::ExcludingIdentity => options.identity = false,
+                CreateTableLikeOption::ExcludingGenerated => options.generated = false,
+                CreateTableLikeOption::ExcludingComments => options.comments = false,
+                CreateTableLikeOption::ExcludingStorage => options.storage = false,
+                CreateTableLikeOption::ExcludingCompression => options.compression = false,
+                CreateTableLikeOption::ExcludingStatistics => options.statistics = false,
                 CreateTableLikeOption::ExcludingAll => {
                     options.defaults = false;
                     options.constraints = false;
                     options.indexes = false;
+                    options.identity = false;
+                    options.generated = false;
+                    options.comments = false;
+                    options.storage = false;
+                    options.compression = false;
+                    options.statistics = false;
                 }
             }
         }
@@ -248,7 +326,13 @@ impl LikeExpansionOptions {
 fn expand_like_clause(
     clause: &CreateTableLikeClause,
     catalog: &dyn CatalogLookup,
-) -> Result<Vec<CreateTableElement>, ParseError> {
+) -> Result<
+    (
+        Vec<CreateTableElement>,
+        Option<CreateTableLikePostCreateAction>,
+    ),
+    ParseError,
+> {
     let source = catalog
         .lookup_any_relation(&clause.relation_name)
         .ok_or_else(|| ParseError::UnknownTable(clause.relation_name.clone()))?;
@@ -276,7 +360,7 @@ fn expand_like_clause(
                     },
                 });
             }
-            let generated = if options.defaults {
+            let generated = if options.generated {
                 column.generated.and_then(|kind| {
                     column.default_expr.clone().map(|expr_sql| {
                         crate::include::nodes::parsenodes::ColumnGeneratedDef { expr_sql, kind }
@@ -290,15 +374,17 @@ fn expand_like_clause(
                 ty: RawTypeName::Builtin(column.sql_type),
                 default_expr: if generated.is_some() {
                     None
-                } else if options.defaults {
+                } else if options.defaults && column.generated.is_none() {
                     column.default_expr.clone()
                 } else {
                     None
                 },
                 generated,
-                compression: match column.storage.attcompression {
-                    AttributeCompression::Default => None,
-                    compression => Some(compression),
+                identity: options.identity.then_some(column.identity).flatten(),
+                storage: options.storage.then_some(column.storage.attstorage),
+                compression: match (options.compression, column.storage.attcompression) {
+                    (false, _) | (true, AttributeCompression::Default) => None,
+                    (true, compression) => Some(compression),
                 },
                 constraints,
             })
@@ -352,7 +438,14 @@ fn expand_like_clause(
         }
     }
 
-    Ok(elements)
+    let post_create_action =
+        (options.comments || options.statistics).then_some(CreateTableLikePostCreateAction {
+            source_relation_oid: source.relation_oid,
+            include_comments: options.comments,
+            include_statistics: options.statistics,
+        });
+
+    Ok((elements, post_create_action))
 }
 
 fn constraint_column_names(attnums: Option<&[i16]>, desc: &RelationDesc) -> Option<Vec<String>> {
@@ -364,6 +457,18 @@ fn constraint_column_names(attnums: Option<&[i16]>, desc: &RelationDesc) -> Opti
             (!column.dropped).then(|| column.name.clone())
         })
         .collect()
+}
+
+fn serial_kind_for_identity_sql_type(sql_type: SqlType) -> Result<SerialKind, ParseError> {
+    match sql_type.kind {
+        SqlTypeKind::Int2 if !sql_type.is_array => Ok(SerialKind::Small),
+        SqlTypeKind::Int4 if !sql_type.is_array => Ok(SerialKind::Regular),
+        SqlTypeKind::Int8 if !sql_type.is_array => Ok(SerialKind::Big),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "smallint, integer, or bigint identity column",
+            actual: format_sql_type_name(sql_type),
+        }),
+    }
 }
 
 fn validate_create_column_compression(
@@ -446,6 +551,8 @@ mod tests {
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::AnyArray)),
                 default_expr: None,
                 generated: None,
+                identity: None,
+                storage: None,
                 compression: None,
                 constraints: vec![],
             })],
@@ -478,6 +585,8 @@ mod tests {
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
                     default_expr: None,
                     generated: None,
+                    identity: None,
+                    storage: None,
                     compression: None,
                     constraints: vec![crate::backend::parser::ColumnConstraint::PrimaryKey {
                         attributes: ConstraintAttributes::default(),
@@ -488,6 +597,8 @@ mod tests {
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
                     default_expr: None,
                     generated: None,
+                    identity: None,
+                    storage: None,
                     compression: None,
                     constraints: vec![crate::backend::parser::ColumnConstraint::NotNull {
                         attributes: ConstraintAttributes {
@@ -652,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn lower_create_table_like_including_defaults_copies_generated_columns() {
+    fn lower_create_table_like_generated_option_controls_generated_columns() {
         let mut source_desc = RelationDesc {
             columns: vec![
                 column_desc("id", SqlType::new(SqlTypeKind::Int4), false),
@@ -699,6 +810,17 @@ mod tests {
 
         let lowered = lower_create_table(&stmt, &catalog).unwrap();
         assert_eq!(lowered.relation_desc.columns.len(), 2);
+        assert_eq!(lowered.relation_desc.columns[1].default_expr, None);
+        assert_eq!(lowered.relation_desc.columns[1].generated, None);
+
+        let stmt = CreateTableStatement {
+            elements: vec![CreateTableElement::Like(CreateTableLikeClause {
+                relation_name: "source_table".into(),
+                options: vec![CreateTableLikeOption::IncludingGenerated],
+            })],
+            ..stmt
+        };
+        let lowered = lower_create_table(&stmt, &catalog).unwrap();
         assert_eq!(
             lowered.relation_desc.columns[1].default_expr.as_deref(),
             Some("id * 2")
@@ -722,6 +844,8 @@ mod tests {
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
                     default_expr: None,
                     generated: None,
+                    identity: None,
+                    storage: None,
                     compression: None,
                     constraints: vec![crate::backend::parser::ColumnConstraint::PrimaryKey {
                         attributes: ConstraintAttributes::default(),
@@ -766,6 +890,8 @@ mod tests {
                 ty: RawTypeName::Serial(SerialKind::Regular),
                 default_expr: None,
                 generated: None,
+                identity: None,
+                storage: None,
                 compression: None,
                 constraints: vec![],
             })],
@@ -804,6 +930,8 @@ mod tests {
                 ty: RawTypeName::Serial(SerialKind::Regular),
                 default_expr: Some("7".into()),
                 generated: None,
+                identity: None,
+                storage: None,
                 compression: None,
                 constraints: vec![],
             })],
@@ -838,6 +966,8 @@ mod tests {
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
                 default_expr: None,
                 generated: None,
+                identity: None,
+                storage: None,
                 compression: Some(AttributeCompression::Pglz),
                 constraints: vec![],
             })],
@@ -871,6 +1001,8 @@ mod tests {
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
                 default_expr: None,
                 generated: None,
+                identity: None,
+                storage: None,
                 compression: Some(AttributeCompression::Pglz),
                 constraints: vec![],
             })],

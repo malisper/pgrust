@@ -335,6 +335,10 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
                 attstattarget: column.attstattarget,
                 attinhcount: column.attinhcount,
                 attislocal: column.attislocal,
+                attidentity: column
+                    .identity
+                    .map(|kind| kind.catalog_char())
+                    .unwrap_or('\0'),
                 attgenerated: column
                     .generated
                     .map(|kind| kind.catalog_char())
