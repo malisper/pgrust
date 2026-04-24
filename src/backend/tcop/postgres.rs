@@ -3942,7 +3942,9 @@ fn handle_describe(
             None => send_no_data(stream),
         },
         b'P' => match state.session.portal_columns(&name) {
-            Some(cols) => {
+            Some(mut cols) => {
+                let catalog = state.session.catalog_lookup(db);
+                annotate_query_columns_with_wire_type_oids(&mut cols, &catalog);
                 let formats = state
                     .session
                     .portal_result_formats(&name)
