@@ -15,7 +15,9 @@
 #   --skip-build      Don't rebuild pgrust_server
 #   --skip-server     Assume server is already running (don't start/stop it)
 #   --timeout SECS    Per-test timeout in seconds (default: 60)
-#   --jobs N          Run tests from the same schedule line in parallel, up to N jobs (default: 4)
+#   --jobs N          Run tests from the same schedule line in parallel, up to N jobs (default: 4).
+#                     With managed servers, parallel workers use isolated pgrust
+#                     server instances, ports, data dirs, and tablespaces.
 #   --schedule FILE   Use an alternate PostgreSQL-style schedule file
 #   --test TESTNAME   Run only this test (without .sql extension)
 #   --results-dir DIR Directory for results (default: unique temp dir)
@@ -236,6 +238,7 @@ build_scheduled_test_groups() {
     already_seen_group_file() {
         local needle="$1"
         local existing
+        [[ ${#seen_files[@]} -gt 0 ]] || return 1
         for existing in "${seen_files[@]}"; do
             [[ "$existing" == "$needle" ]] && return 0
         done
@@ -323,6 +326,7 @@ STATEMENT_TIMEOUT=5
 SINGLE_TEST=""
 RESULTS_DIR=""
 DATA_DIR=""
+DATA_DIR_PROVIDED=false
 SERVER_PID=""
 USE_PGRUST_SETUP=true
 REGRESS_USER="${PGRUST_REGRESS_USER:-${PGUSER:-$(id -un)}}"
@@ -330,6 +334,7 @@ REGRESS_TABLESPACE_DIR=""
 STARTUP_WAIT_SECS="${PGRUST_STARTUP_WAIT_SECS:-300}"
 SUMMARY_READY=false
 SUMMARY_WRITTEN=false
+ISOLATED_PARALLEL=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -341,7 +346,7 @@ while [[ $# -gt 0 ]]; do
         --schedule) SCHEDULE_FILE="$2"; SCHEDULE_OVERRIDE=true; shift 2 ;;
         --test) SINGLE_TEST="$2"; shift 2 ;;
         --results-dir) RESULTS_DIR="$2"; shift 2 ;;
-        --data-dir) DATA_DIR="$2"; shift 2 ;;
+        --data-dir) DATA_DIR="$2"; DATA_DIR_PROVIDED=true; shift 2 ;;
         --pgrust-setup) USE_PGRUST_SETUP=true; shift ;;
         --upstream-setup) USE_PGRUST_SETUP=false; shift ;;
         *) echo "Unknown flag: $1"; exit 1 ;;
@@ -351,6 +356,10 @@ done
 if ! [[ "$JOBS" =~ ^[0-9]+$ ]] || [[ "$JOBS" -lt 1 ]]; then
     echo "ERROR: --jobs must be a positive integer"
     exit 1
+fi
+
+if [[ "$JOBS" -gt 1 && "$SKIP_SERVER" == false ]]; then
+    ISOLATED_PARALLEL=true
 fi
 
 SERVER_PROFILE=release
@@ -547,8 +556,9 @@ echo "Regression results dir: $RESULTS_DIR"
 echo "Regression data dir: $DATA_DIR"
 echo "Regression user: $REGRESS_USER"
 
-# Start pgrust server
-if [[ "$SKIP_SERVER" == false ]]; then
+# Start pgrust server. Parallel managed runs start one isolated server per
+# concurrent test instead, so a crash or timeout cannot contaminate siblings.
+if [[ "$SKIP_SERVER" == false && "$ISOLATED_PARALLEL" == false ]]; then
     # Fresh data directory for each run
     rm -rf "$DATA_DIR"
     mkdir -p "$DATA_DIR"
@@ -576,17 +586,20 @@ run_bootstrap_setup() {
     local setup_sql=""
     local setup_out=""
     local setup_label=""
+    local setup_output_stem="${PGRUST_SETUP_OUTPUT_STEM:-}"
 
     if [[ "$USE_PGRUST_SETUP" == true ]]; then
         setup_sql="$PGRUST_DIR/scripts/test_setup_pgrust.sql"
-        setup_out="$RESULTS_DIR/output/test_setup_pgrust.out"
+        setup_output_stem="${setup_output_stem:-test_setup_pgrust}"
+        setup_out="$RESULTS_DIR/output/${setup_output_stem}.out"
         setup_label="pgrust setup bootstrap"
         mkdir -p "$RESULTS_DIR/fixtures"
         prepare_setup_fixture "$setup_sql" "$PREPARED_SETUP_SQL"
         setup_sql="$PREPARED_SETUP_SQL"
     else
         setup_sql="$SQL_DIR/test_setup.sql"
-        setup_out="$RESULTS_DIR/output/test_setup.out"
+        setup_output_stem="${setup_output_stem:-test_setup}"
+        setup_out="$RESULTS_DIR/output/${setup_output_stem}.out"
         setup_label="upstream setup bootstrap"
     fi
 
@@ -595,6 +608,7 @@ run_bootstrap_setup() {
         return 1
     fi
 
+    mkdir -p "$(dirname "$setup_out")"
     echo "Running $setup_label..."
     if ! run_psql_file "$TIMEOUT" "$setup_sql" "$setup_out" psql "${PG_ARGS[@]}" -v ON_ERROR_STOP=1 -a -q; then
         echo "ERROR: $setup_label failed"
@@ -608,7 +622,9 @@ run_bootstrap_setup() {
 echo "Per-query statement_timeout: ${STATEMENT_TIMEOUT}s"
 echo "Per-file timeout: ${TIMEOUT}s"
 
-if ! run_bootstrap_setup; then
+if [[ "$ISOLATED_PARALLEL" == true ]]; then
+    echo "Parallel isolation: each concurrent test gets its own pgrust server, port, data dir, and tablespace."
+elif ! run_bootstrap_setup; then
     exit 1
 fi
 
@@ -1043,6 +1059,57 @@ run_one_regression_test() {
     fi
 }
 
+run_one_regression_test_isolated() (
+    local sql_file="$1"
+    local worker_slot="$2"
+    local test_name="$(basename "$sql_file" .sql)"
+    local worker_name="${worker_slot}_${test_name}"
+    local worker_root="$RESULTS_DIR/workers/$worker_name"
+    local output_file="$RESULTS_DIR/output/${test_name}.out"
+    local status_file="$RESULTS_DIR/status/${test_name}.status"
+
+    PORT=$((PORT + worker_slot + 1))
+    if [[ "$DATA_DIR_PROVIDED" == true ]]; then
+        DATA_DIR="$DATA_DIR/$worker_name"
+    else
+        DATA_DIR="$worker_root/data"
+    fi
+    SERVER_PID=""
+    REGRESS_TABLESPACE_DIR="$worker_root/tablespaces/regress_tblspace"
+    PREPARED_SETUP_SQL="$worker_root/fixtures/test_setup_pgrust.sql"
+    export PGRUST_REGRESS_TABLESPACE_DIR="$REGRESS_TABLESPACE_DIR"
+    export PGRUST_TABLESPACE_VERSION_DIRECTORY="$TABLESPACE_VERSION_DIRECTORY"
+    export PGRUST_SETUP_OUTPUT_STEM="test_setup_${worker_name}"
+    PG_ARGS=(-X -h 127.0.0.1 -p "$PORT" -U postgres -v "abs_srcdir=$PG_REGRESS_ABS" -v HIDE_TOAST_COMPRESSION=on)
+
+    trap stop_server EXIT
+    rm -rf "$worker_root"
+    mkdir -p "$DATA_DIR" "$worker_root/fixtures"
+    write_regression_config
+
+    if ! start_server; then
+        {
+            echo "ERROR: isolated worker $worker_name failed to start pgrust server"
+            echo "port: $PORT"
+            echo "data dir: $DATA_DIR"
+        } > "$output_file"
+        write_test_status "$status_file" "error" "$test_name" 0 0 0 0
+        return 1
+    fi
+
+    if ! run_bootstrap_setup; then
+        {
+            echo "ERROR: isolated worker $worker_name failed regression bootstrap"
+            echo "port: $PORT"
+            echo "data dir: $DATA_DIR"
+        } >> "$output_file"
+        write_test_status "$status_file" "error" "$test_name" 0 0 0 0
+        return 1
+    fi
+
+    run_one_regression_test "$sql_file"
+)
+
 collect_test_status() {
     local sql_file="$1"
     local test_name="$(basename "$sql_file" .sql)"
@@ -1112,12 +1179,18 @@ run_test_batch() {
     local -a pids=()
     local sql_file=""
     local pid=""
+    local slot=0
     local collect_rc=0
     local batch_needs_restart=false
 
     for sql_file in "${batch[@]}"; do
-        run_one_regression_test "$sql_file" &
+        if [[ "$ISOLATED_PARALLEL" == true ]]; then
+            run_one_regression_test_isolated "$sql_file" "$slot" &
+        else
+            run_one_regression_test "$sql_file" &
+        fi
         pids+=("$!")
+        slot=$((slot + 1))
     done
 
     for pid in "${pids[@]}"; do
@@ -1127,6 +1200,9 @@ run_test_batch() {
     for sql_file in "${batch[@]}"; do
         collect_rc=0
         collect_test_status "$sql_file" || collect_rc=$?
+        if [[ "$ISOLATED_PARALLEL" == true ]]; then
+            continue
+        fi
         if [[ "$collect_rc" -eq 1 ]]; then
             if [[ "$SKIP_SERVER" == false ]] && ! kill -0 "$SERVER_PID" 2>/dev/null; then
                 batch_needs_restart=true
