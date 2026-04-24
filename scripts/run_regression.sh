@@ -283,7 +283,7 @@ SERVER_PROFILE=release
 SERVER_PROFILE_DIR=release
 BUILD_ENV=()
 BUILD_ARGS=(--release --bin pgrust_server)
-if [[ -n "$SINGLE_TEST" ]]; then
+if [[ -n "$SINGLE_TEST" && "$SINGLE_TEST" != "alter_table" ]]; then
     SERVER_PROFILE="dev, opt-level 0"
     SERVER_PROFILE_DIR=debug
     BUILD_ENV=(CARGO_PROFILE_DEV_OPT_LEVEL=0)
