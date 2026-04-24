@@ -581,10 +581,17 @@ pub(super) fn validate_scalar_function_arity(
         })
         .unwrap_or_else(|| match func {
             BuiltinScalarFunction::ToTsVector
+            | BuiltinScalarFunction::JsonbToTsVector
             | BuiltinScalarFunction::ToTsQuery
             | BuiltinScalarFunction::PlainToTsQuery
             | BuiltinScalarFunction::PhraseToTsQuery
-            | BuiltinScalarFunction::WebSearchToTsQuery => matches!(args.len(), 1 | 2),
+            | BuiltinScalarFunction::WebSearchToTsQuery => {
+                if matches!(func, BuiltinScalarFunction::JsonbToTsVector) {
+                    matches!(args.len(), 2 | 3)
+                } else {
+                    matches!(args.len(), 1 | 2)
+                }
+            }
             BuiltinScalarFunction::Int4Pl => args.len() == 2,
             BuiltinScalarFunction::Int8Inc => args.len() == 1,
             BuiltinScalarFunction::Int8IncAny => args.len() == 2,
@@ -631,9 +638,9 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::CurrentSetting => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::PgNotify => args.len() == 2,
             BuiltinScalarFunction::PgNotificationQueueUsage => args.is_empty(),
-            BuiltinScalarFunction::PgTypeof | BuiltinScalarFunction::PgColumnCompression => {
-                args.len() == 1
-            }
+            BuiltinScalarFunction::PgTypeof
+            | BuiltinScalarFunction::PgColumnCompression
+            | BuiltinScalarFunction::PgColumnSize => args.len() == 1,
             BuiltinScalarFunction::NextVal | BuiltinScalarFunction::CurrVal => args.len() == 1,
             BuiltinScalarFunction::SetVal => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::PgGetSerialSequence => args.len() == 2,
@@ -1083,7 +1090,7 @@ pub(super) fn comparison_operator_exists(
 pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<SqlType> {
     match func {
         BuiltinScalarFunction::TsMatch => return Some(SqlType::new(SqlTypeKind::Bool)),
-        BuiltinScalarFunction::ToTsVector => {
+        BuiltinScalarFunction::ToTsVector | BuiltinScalarFunction::JsonbToTsVector => {
             return Some(SqlType::new(SqlTypeKind::TsVector));
         }
         BuiltinScalarFunction::ToTsQuery
@@ -1411,6 +1418,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_column_compression",
             BuiltinScalarFunction::PgColumnCompression,
         ),
+        ("pg_column_size", BuiltinScalarFunction::PgColumnSize),
         ("nextval", BuiltinScalarFunction::NextVal),
         ("currval", BuiltinScalarFunction::CurrVal),
         ("setval", BuiltinScalarFunction::SetVal),
@@ -1649,6 +1657,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("to_json", BuiltinScalarFunction::ToJson),
         ("to_jsonb", BuiltinScalarFunction::ToJsonb),
         ("to_tsvector", BuiltinScalarFunction::ToTsVector),
+        ("jsonb_to_tsvector", BuiltinScalarFunction::JsonbToTsVector),
         ("to_tsquery", BuiltinScalarFunction::ToTsQuery),
         ("plainto_tsquery", BuiltinScalarFunction::PlainToTsQuery),
         ("phraseto_tsquery", BuiltinScalarFunction::PhraseToTsQuery),
@@ -2202,6 +2211,15 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
         }
         if by_func
             .iter()
+            .all(|(candidate, _)| *candidate != BuiltinScalarFunction::PgColumnSize)
+        {
+            by_func.push((
+                BuiltinScalarFunction::PgColumnSize,
+                SqlType::new(SqlTypeKind::Int4),
+            ));
+        }
+        if by_func
+            .iter()
             .all(|(candidate, _)| *candidate != BuiltinScalarFunction::PgNotify)
         {
             by_func.push((
@@ -2306,6 +2324,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::PgGetStatisticsObjDefColumns
             | BuiltinScalarFunction::PgGetStatisticsObjDefExpressions
             | BuiltinScalarFunction::PgStatisticsObjIsVisible
+            | BuiltinScalarFunction::PgColumnSize
             | BuiltinScalarFunction::PgRelationIsPublishable
             | BuiltinScalarFunction::PgIndexAmHasProperty
             | BuiltinScalarFunction::PgIndexHasProperty

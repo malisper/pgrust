@@ -1207,12 +1207,12 @@ fn bind_select_list_srf_call(
                         vec![QueryColumn::text("key"), QueryColumn::text("value")]
                     }
                     JsonTableFunction::ArrayElements => vec![QueryColumn {
-                        name: "json_array_elements".into(),
+                        name: "value".into(),
                         sql_type: SqlType::new(SqlTypeKind::Json),
                         wire_type_oid: None,
                     }],
                     JsonTableFunction::ArrayElementsText => {
-                        vec![QueryColumn::text("json_array_elements_text")]
+                        vec![QueryColumn::text("value")]
                     }
                     JsonTableFunction::JsonbPathQuery => vec![QueryColumn {
                         name: "jsonb_path_query".into(),
@@ -1234,12 +1234,12 @@ fn bind_select_list_srf_call(
                         vec![QueryColumn::text("key"), QueryColumn::text("value")]
                     }
                     JsonTableFunction::JsonbArrayElements => vec![QueryColumn {
-                        name: "jsonb_array_elements".into(),
+                        name: "value".into(),
                         sql_type: SqlType::new(SqlTypeKind::Jsonb),
                         wire_type_oid: None,
                     }],
                     JsonTableFunction::JsonbArrayElementsText => {
-                        vec![QueryColumn::text("jsonb_array_elements_text")]
+                        vec![QueryColumn::text("value")]
                     }
                 };
                 Ok(SetReturningCall::JsonTableFunction {

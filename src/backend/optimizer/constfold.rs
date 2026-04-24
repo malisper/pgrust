@@ -684,6 +684,11 @@ fn simplify_expr(expr: Expr, case_test_value: Option<&Value>) -> Result<Expr, Pa
 }
 
 fn cast_is_const_fold_safe(value: &Value, target: SqlType) -> bool {
+    if matches!(value, Value::Null)
+        && matches!(target.kind, SqlTypeKind::Record | SqlTypeKind::Composite)
+    {
+        return false;
+    }
     let Some(source) = value.sql_type_hint() else {
         return true;
     };

@@ -743,6 +743,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 | Some(BuiltinScalarFunction::RegexpInstr)
                 | Some(BuiltinScalarFunction::JsonArrayLength)
                 | Some(BuiltinScalarFunction::JsonbArrayLength)
+                | Some(BuiltinScalarFunction::PgColumnSize)
                 | Some(BuiltinScalarFunction::Scale)
                 | Some(BuiltinScalarFunction::MinScale)
                 | Some(BuiltinScalarFunction::WidthBucket)

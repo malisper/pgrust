@@ -1,12 +1,12 @@
 use super::exec_expr::eval_expr;
-use super::expr_casts::cast_value_with_config;
+use super::expr_casts::{cast_text_value_with_config, cast_value_with_config};
 use super::node_types::*;
 use super::{ExecError, ExecutorContext};
 use crate::backend::executor::expr_datetime::render_json_datetime_value_text_with_config;
 use crate::backend::executor::jsonb::{
     JsonbValue, decode_jsonb, encode_jsonb, jsonb_builder_key, jsonb_from_value, jsonb_get,
     jsonb_object_from_pairs, jsonb_path, jsonb_to_text_value, jsonb_to_value,
-    parse_json_text_input, parse_jsonb_text, render_jsonb_bytes,
+    parse_json_text_input, parse_jsonb_text, render_jsonb_bytes, render_temporal_jsonb_value,
 };
 use crate::backend::executor::jsonpath::{
     EvaluationContext as JsonPathEvaluationContext, canonicalize_jsonpath, evaluate_jsonpath,
@@ -16,7 +16,7 @@ use crate::backend::executor::render_bit_text;
 use crate::backend::executor::render_datetime_value_text;
 use crate::backend::executor::render_range_text;
 use crate::backend::libpq::pqformat::format_bytea_text;
-use crate::backend::parser::CatalogLookup;
+use crate::backend::parser::{CatalogLookup, ParseError};
 use crate::backend::utils::record::lookup_anonymous_record_descriptor;
 use crate::include::catalog::RECORD_TYPE_OID;
 use crate::include::nodes::datum::{ArrayValue, RecordDescriptor, RecordValue};
@@ -24,6 +24,7 @@ use crate::include::nodes::parsenodes::{SqlType, SqlTypeKind};
 use crate::include::nodes::primnodes::{
     BuiltinScalarFunction, Expr, JsonRecordFunction, QueryColumn, expr_sql_type_hint,
 };
+use crate::include::nodes::tsearch::{TsLexeme, TsVector};
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::session::ByteaOutputFormat;
 use serde_json::Value as SerdeJsonValue;
@@ -96,6 +97,220 @@ impl ParsedJsonValue {
                 JsonbValue::Object(_) => "object",
             },
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct JsonbTsVectorFlags {
+    key: bool,
+    string: bool,
+    numeric: bool,
+    boolean: bool,
+}
+
+impl JsonbTsVectorFlags {
+    fn strings_only() -> Self {
+        Self {
+            key: false,
+            string: true,
+            numeric: false,
+            boolean: false,
+        }
+    }
+
+    fn all() -> Self {
+        Self {
+            key: true,
+            string: true,
+            numeric: true,
+            boolean: true,
+        }
+    }
+
+    fn empty() -> Self {
+        Self {
+            key: false,
+            string: false,
+            numeric: false,
+            boolean: false,
+        }
+    }
+
+    fn enable(&mut self, flag: &str) -> Result<(), ExecError> {
+        match flag {
+            "all" => *self = Self::all(),
+            "key" => self.key = true,
+            "string" => self.string = true,
+            "numeric" => self.numeric = true,
+            "boolean" => self.boolean = true,
+            _ => {
+                return Err(ExecError::DetailedError {
+                    message: format!("wrong flag in flag array: \"{flag}\""),
+                    detail: None,
+                    hint: Some(jsonb_to_tsvector_flags_hint()),
+                    sqlstate: "22023",
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn jsonb_to_tsvector_value(
+    config_name: Option<&str>,
+    jsonb: &Value,
+    flags: Option<&Value>,
+) -> Result<Value, ExecError> {
+    let Value::Jsonb(bytes) = jsonb else {
+        return Err(ExecError::TypeMismatch {
+            op: "jsonb_to_tsvector",
+            left: jsonb.clone(),
+            right: Value::Null,
+        });
+    };
+    let flags = match flags {
+        Some(value) => parse_jsonb_to_tsvector_flags(value)?,
+        None => JsonbTsVectorFlags::strings_only(),
+    };
+    let jsonb = decode_jsonb(bytes)?;
+    let mut builder = JsonbTsVectorBuilder {
+        config_name,
+        flags,
+        next_position: 1,
+        lexemes: Vec::new(),
+    };
+    builder.add_value(&jsonb)?;
+    Ok(Value::TsVector(TsVector::new(builder.lexemes)))
+}
+
+fn parse_jsonb_to_tsvector_flags(value: &Value) -> Result<JsonbTsVectorFlags, ExecError> {
+    let parsed = ParsedJsonValue::from_value(value)?;
+    let json = match parsed {
+        ParsedJsonValue::Json(value) => value,
+        ParsedJsonValue::Jsonb(value) => value.to_serde(),
+    };
+    match json {
+        SerdeJsonValue::String(flag) => {
+            let mut flags = JsonbTsVectorFlags::empty();
+            flags.enable(&flag)?;
+            Ok(flags)
+        }
+        SerdeJsonValue::Array(items) => {
+            let mut flags = JsonbTsVectorFlags::empty();
+            for item in items {
+                let SerdeJsonValue::String(flag) = item else {
+                    return Err(ExecError::DetailedError {
+                        message: "flag array element is not a string".into(),
+                        detail: None,
+                        hint: Some(jsonb_to_tsvector_flags_hint()),
+                        sqlstate: "22023",
+                    });
+                };
+                flags.enable(&flag)?;
+            }
+            Ok(flags)
+        }
+        SerdeJsonValue::Null => Err(ExecError::DetailedError {
+            message: "flag array element is not a string".into(),
+            detail: None,
+            hint: Some(jsonb_to_tsvector_flags_hint()),
+            sqlstate: "22023",
+        }),
+        _ => Err(ExecError::DetailedError {
+            message: "wrong flag type, only arrays and scalars are allowed".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        }),
+    }
+}
+
+fn jsonb_to_tsvector_flags_hint() -> String {
+    "Possible values are: \"string\", \"numeric\", \"boolean\", \"key\", and \"all\".".into()
+}
+
+struct JsonbTsVectorBuilder<'a> {
+    config_name: Option<&'a str>,
+    flags: JsonbTsVectorFlags,
+    next_position: u16,
+    lexemes: Vec<TsLexeme>,
+}
+
+impl JsonbTsVectorBuilder<'_> {
+    fn add_value(&mut self, value: &JsonbValue) -> Result<(), ExecError> {
+        match value {
+            JsonbValue::Null => {}
+            JsonbValue::String(text) => {
+                if self.flags.string {
+                    self.add_part(text, true)?;
+                }
+            }
+            JsonbValue::Numeric(value) => {
+                if self.flags.numeric {
+                    self.add_part(&value.render(), true)?;
+                }
+            }
+            JsonbValue::Bool(value) => {
+                if self.flags.boolean {
+                    self.add_part(if *value { "true" } else { "false" }, true)?;
+                }
+            }
+            JsonbValue::Array(items) => {
+                for item in items {
+                    self.add_value(item)?;
+                }
+            }
+            JsonbValue::Object(items) => {
+                for (key, value) in items {
+                    self.add_object_item(key, value)?;
+                }
+            }
+            JsonbValue::Date(_)
+            | JsonbValue::Time(_)
+            | JsonbValue::TimeTz(_)
+            | JsonbValue::Timestamp(_)
+            | JsonbValue::TimestampTz(_) => {
+                if self.flags.string {
+                    self.add_part(&render_temporal_jsonb_value(value), true)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn add_object_item(&mut self, key: &str, value: &JsonbValue) -> Result<(), ExecError> {
+        let key_emitted = if self.flags.key {
+            self.add_part(key, false)?
+        } else {
+            false
+        };
+        if key_emitted {
+            self.next_position = self.next_position.saturating_add(1);
+        }
+        self.add_value(value)?;
+        Ok(())
+    }
+
+    fn add_part(&mut self, text: &str, add_gap: bool) -> Result<bool, ExecError> {
+        let (mut lexemes, next_position) =
+            crate::backend::tsearch::tsvector_lexemes_with_config_name(
+                self.config_name,
+                text,
+                self.next_position,
+            )
+            .map_err(|e| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "valid text search input",
+                    actual: format!("jsonb_to_tsvector: {e}"),
+                })
+            })?;
+        let emitted = !lexemes.is_empty();
+        self.lexemes.append(&mut lexemes);
+        self.next_position = next_position;
+        if add_gap && next_position != 1 {
+            self.next_position = self.next_position.saturating_add(1);
+        }
+        Ok(emitted)
     }
 }
 
@@ -371,6 +586,9 @@ pub(crate) fn eval_json_builtin_function(
                 render_json_object_function(values)?,
             ))),
             BuiltinScalarFunction::JsonStripNulls => {
+                if matches!(values.first(), None | Some(Value::Null)) {
+                    return Ok(Value::Null);
+                }
                 let strip_in_arrays =
                     parse_optional_bool_flag(values.get(1), false, "json_strip_nulls")?;
                 let json = ParsedJsonValue::from_value(values.first().unwrap_or(&Value::Null))?;
@@ -535,6 +753,9 @@ pub(crate) fn eval_json_builtin_function(
                 &render_jsonb_object_function(values)?,
             ))),
             BuiltinScalarFunction::JsonbStripNulls => {
+                if matches!(values.first(), None | Some(Value::Null)) {
+                    return Ok(Value::Null);
+                }
                 let strip_in_arrays =
                     parse_optional_bool_flag(values.get(1), false, "jsonb_strip_nulls")?;
                 let json = parse_jsonb_target(
@@ -648,9 +869,18 @@ pub(crate) fn eval_json_builtin_function(
                             "delete_key" => delete_jsonb_path(&json, &path)?,
                             "return_target" => json,
                             "raise_exception" => {
-                                return Err(ExecError::RaiseException(
-                                    "JSON value must not be null".into(),
-                                ));
+                                return Err(ExecError::DetailedError {
+                                    message: "JSON value must not be null".into(),
+                                    detail: Some(
+                                        "Exception was raised because null_value_treatment is \"raise_exception\"."
+                                            .into(),
+                                    ),
+                                    hint: Some(
+                                        "To avoid, either change the null_value_treatment argument or ensure that an SQL NULL is not passed."
+                                            .into(),
+                                    ),
+                                    sqlstate: "22023",
+                                });
                             }
                             _ => unreachable!(),
                         };
@@ -930,6 +1160,7 @@ fn json_record_row_from_value(
                 json_record_field_to_value(
                     value,
                     column.sql_type,
+                    base_fields.and_then(|fields| fields.get(index)),
                     &JsonRecordPath::default().with_key(&column.name),
                     ctx,
                 )
@@ -946,6 +1177,7 @@ fn json_record_row_from_value(
 fn json_record_field_to_value(
     value: &SerdeJsonValue,
     ty: SqlType,
+    base_value: Option<&Value>,
     path: &JsonRecordPath,
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
@@ -966,10 +1198,18 @@ fn json_record_field_to_value(
             };
             match value {
                 SerdeJsonValue::Object(_) => {
+                    let nested_base = match base_value {
+                        Some(Value::Record(record))
+                            if record.fields.len() == descriptor.fields.len() =>
+                        {
+                            Value::Record(record.clone())
+                        }
+                        _ => Value::Null,
+                    };
                     let fields = json_record_row_from_value(
                         "json record expansion",
                         value,
-                        &Value::Null,
+                        &nested_base,
                         &record_columns_from_descriptor(&descriptor),
                         ctx,
                     )?;
@@ -999,12 +1239,8 @@ fn cast_json_scalar_value(
     ctx: &ExecutorContext,
 ) -> Result<Value, ExecError> {
     let text = json_record_scalar_text(value)?;
-    cast_value_with_config(
-        Value::Text(CompactString::from_owned(text)),
-        ty,
-        &ctx.datetime_config,
-    )
-    .map_err(|err| json_record_error_with_hint(err, path.hint()))
+    cast_text_value_with_config(&text, ty, false, &ctx.datetime_config)
+        .map_err(|err| json_record_error_with_hint(err, path.hint()))
 }
 
 fn json_record_array_to_value(
@@ -1023,12 +1259,24 @@ fn json_record_array_to_value(
         SerdeJsonValue::Array(items) => {
             let mut saw_array = false;
             let mut saw_scalar = false;
+            let element_type = ty.element_type();
             let nested = items
                 .iter()
                 .enumerate()
                 .map(|(index, item)| {
                     let next_path = path.with_index(index);
                     let is_array = matches!(item, SerdeJsonValue::Array(_));
+                    if matches!(element_type.kind, SqlTypeKind::Json | SqlTypeKind::Jsonb)
+                        && !element_type.is_array
+                    {
+                        return json_record_field_to_value(
+                            item,
+                            element_type,
+                            None,
+                            &next_path,
+                            ctx,
+                        );
+                    }
                     if is_array {
                         if saw_scalar {
                             return Err(expected_json_array_error(&next_path, next_path.hint()));
@@ -1039,7 +1287,7 @@ fn json_record_array_to_value(
                     } else {
                         saw_scalar = true;
                     }
-                    json_record_array_nested_value(item, ty.element_type(), &next_path, ctx)
+                    json_record_array_nested_value(item, element_type, &next_path, ctx)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let array = ArrayValue::from_nested_values(nested, vec![1]).map_err(|details| {
@@ -1065,7 +1313,7 @@ fn json_record_array_nested_value(
     if matches!(value, SerdeJsonValue::Array(_)) {
         return json_record_array_to_value(value, SqlType::array_of(element_type), path, ctx);
     }
-    json_record_field_to_value(value, element_type, path, ctx)
+    json_record_field_to_value(value, element_type, None, path, ctx)
 }
 
 fn json_record_scalar_text(value: &SerdeJsonValue) -> Result<String, ExecError> {
@@ -1174,11 +1422,9 @@ fn parse_record_literal_to_value(
         .zip(fields)
         .map(|(field, raw)| match raw {
             None => Ok(Value::Null),
-            Some(raw) => cast_value_with_config(
-                Value::Text(CompactString::from_owned(raw)),
-                field.sql_type,
-                &ctx.datetime_config,
-            ),
+            Some(raw) => {
+                cast_text_value_with_config(&raw, field.sql_type, false, &ctx.datetime_config)
+            }
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Value::Record(RecordValue::from_descriptor(
@@ -2303,6 +2549,15 @@ fn set_jsonb_path(
     )
 }
 
+fn jsonb_insert_existing_key_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "cannot replace existing key".into(),
+        detail: None,
+        hint: Some("Try using the function jsonb_set to replace key value.".into()),
+        sqlstate: "22023",
+    }
+}
+
 fn set_jsonb_path_inner(
     target: &JsonbValue,
     path: &[Option<String>],
@@ -2318,11 +2573,8 @@ fn set_jsonb_path_inner(
             JsonbValue::Object(items) => {
                 let mut out = items.clone();
                 if let Some((_, value)) = out.iter_mut().find(|(key, _)| key == step) {
-                    if insert_after {
-                        return Err(ExecError::InvalidStorageValue {
-                            column: "jsonb".into(),
-                            details: "cannot replace existing key".into(),
-                        });
+                    if insert_mode {
+                        return Err(jsonb_insert_existing_key_error());
                     }
                     *value = replacement;
                 } else if create_missing {
