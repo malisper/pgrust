@@ -5,6 +5,7 @@ pub struct Block {
     pub label: Option<String>,
     pub declarations: Vec<Decl>,
     pub statements: Vec<Stmt>,
+    pub exception_handlers: Vec<ExceptionHandler>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +70,19 @@ pub enum ForQuerySource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExceptionHandler {
+    pub conditions: Vec<ExceptionCondition>,
+    pub statements: Vec<Stmt>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExceptionCondition {
+    Others,
+    SqlState(String),
+    ConditionName(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
     Block(Block),
     Assign {
@@ -100,6 +114,10 @@ pub enum Stmt {
         message: String,
         params: Vec<String>,
     },
+    Assert {
+        condition: String,
+        message: Option<String>,
+    },
     Return {
         expr: Option<String>,
     },
@@ -112,6 +130,11 @@ pub enum Stmt {
     },
     Perform {
         sql: String,
+    },
+    DynamicExecute {
+        sql_expr: String,
+        into_targets: Vec<AssignTarget>,
+        using_exprs: Vec<String>,
     },
     ExecSql {
         sql: String,

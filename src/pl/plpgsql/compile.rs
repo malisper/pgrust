@@ -21,8 +21,8 @@ use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{QueryColumn, TargetEntry, Var, user_attrno};
 
 use super::ast::{
-    AliasTarget, AssignTarget, Block, Decl, ForQuerySource, ForTarget, RaiseLevel, ReturnQueryKind,
-    Stmt, VarDecl,
+    AliasTarget, AssignTarget, Block, Decl, ExceptionCondition, ForQuerySource, ForTarget,
+    RaiseLevel, ReturnQueryKind, Stmt, VarDecl,
 };
 use super::gram::parse_block;
 
@@ -30,6 +30,7 @@ use super::gram::parse_block;
 pub(crate) struct CompiledBlock {
     pub(crate) local_slots: Vec<CompiledVar>,
     pub(crate) statements: Vec<CompiledStmt>,
+    pub(crate) exception_handlers: Vec<CompiledExceptionHandler>,
     pub(crate) total_slots: usize,
 }
 
@@ -119,6 +120,12 @@ pub(crate) enum CompiledForQuerySource {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct CompiledExceptionHandler {
+    pub(crate) conditions: Vec<ExceptionCondition>,
+    pub(crate) statements: Vec<CompiledStmt>,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) enum FunctionReturnContract {
     Scalar {
         ty: SqlType,
@@ -198,6 +205,10 @@ pub(crate) enum CompiledStmt {
         message: String,
         params: Vec<CompiledExpr>,
     },
+    Assert {
+        condition: CompiledExpr,
+        message: Option<CompiledExpr>,
+    },
     Return {
         expr: Option<CompiledExpr>,
     },
@@ -215,6 +226,11 @@ pub(crate) enum CompiledStmt {
     },
     Perform {
         plan: PlannedStmt,
+    },
+    DynamicExecute {
+        sql_expr: CompiledExpr,
+        into_targets: Vec<CompiledSelectIntoTarget>,
+        using_exprs: Vec<CompiledExpr>,
     },
     SelectInto {
         plan: PlannedStmt,
@@ -747,10 +763,26 @@ fn compile_block(
         .iter()
         .map(|stmt| compile_stmt(stmt, catalog, &mut env, return_contract))
         .collect::<Result<Vec<_>, _>>()?;
+    let exception_handlers = block
+        .exception_handlers
+        .iter()
+        .map(|handler| {
+            Ok(CompiledExceptionHandler {
+                conditions: handler.conditions.clone(),
+                statements: compile_stmt_list(
+                    &handler.statements,
+                    catalog,
+                    &mut env,
+                    return_contract,
+                )?,
+            })
+        })
+        .collect::<Result<Vec<_>, ParseError>>()?;
     outer.next_slot = outer.next_slot.max(env.next_slot);
     Ok(CompiledBlock {
         local_slots,
         statements,
+        exception_handlers,
         total_slots: outer.next_slot,
     })
 }
@@ -937,6 +969,13 @@ fn compile_stmt(
                     .collect::<Result<_, _>>()?,
             }
         }
+        Stmt::Assert { condition, message } => CompiledStmt::Assert {
+            condition: compile_condition_text(condition, catalog, env)?,
+            message: message
+                .as_deref()
+                .map(|expr| compile_expr_text(expr, catalog, env))
+                .transpose()?,
+        },
         Stmt::Return { expr } => {
             compile_return_stmt(expr.as_deref(), catalog, env, return_contract)?
         }
@@ -947,6 +986,11 @@ fn compile_stmt(
             compile_return_query_stmt(sql, *kind, catalog, env, return_contract)?
         }
         Stmt::Perform { sql } => compile_perform_stmt(sql, catalog, env)?,
+        Stmt::DynamicExecute {
+            sql_expr,
+            into_targets,
+            using_exprs,
+        } => compile_dynamic_execute_stmt(sql_expr, into_targets, using_exprs, catalog, env)?,
         Stmt::ExecSql { sql } => compile_exec_sql_stmt(sql, catalog, env)?,
     })
 }
@@ -1121,6 +1165,30 @@ fn compile_perform_stmt(
         env,
     )?;
     Ok(CompiledStmt::Perform { plan: planned })
+}
+
+fn compile_dynamic_execute_stmt(
+    sql_expr: &str,
+    into_targets: &[AssignTarget],
+    using_exprs: &[String],
+    catalog: &dyn CatalogLookup,
+    env: &CompileEnv,
+) -> Result<CompiledStmt, ParseError> {
+    let targets = into_targets
+        .iter()
+        .map(|target| {
+            resolve_assign_target(target, env)
+                .map(|(slot, ty)| CompiledSelectIntoTarget { slot, ty })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(CompiledStmt::DynamicExecute {
+        sql_expr: compile_expr_text(sql_expr, catalog, env)?,
+        into_targets: targets,
+        using_exprs: using_exprs
+            .iter()
+            .map(|expr| compile_expr_text(expr, catalog, env))
+            .collect::<Result<_, _>>()?,
+    })
 }
 
 fn compile_exec_sql_stmt(
