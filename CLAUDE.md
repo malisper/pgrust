@@ -87,10 +87,10 @@ For an even tighter feedback loop, configure your tool to run `cargo fmt` immedi
 
 The canonical shared types live under `src/include/nodes`:
 
-- [src/include/nodes/parsenodes.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/include/nodes/parsenodes.rs): raw SQL AST produced by the parser.
-- [src/include/nodes/datum.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/include/nodes/datum.rs): logical scalar values like `Value` and `NumericValue`.
-- [src/include/nodes/plannodes.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/include/nodes/plannodes.rs): bound expressions, logical plans, column metadata, aggregates, and scalar-function identifiers.
-- [src/include/nodes/execnodes.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/include/nodes/execnodes.rs): executor runtime state such as tuple slots and concrete `*State` plan-node structs.
+- [src/include/nodes/parsenodes.rs](/src/include/nodes/parsenodes.rs): raw SQL AST produced by the parser.
+- [src/include/nodes/datum.rs](/src/include/nodes/datum.rs): logical scalar values like `Value` and `NumericValue`.
+- [src/include/nodes/plannodes.rs](/src/include/nodes/plannodes.rs): bound expressions, logical plans, column metadata, aggregates, and scalar-function identifiers.
+- [src/include/nodes/execnodes.rs](/src/include/nodes/execnodes.rs): executor runtime state such as tuple slots and concrete `*State` plan-node structs.
 
 Rules:
 
@@ -100,24 +100,24 @@ Rules:
 
 ## Parser Structure
 
-Top-level parser entry points are in [src/backend/parser/mod.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/parser/mod.rs). This module should stay thin: grammar entry points, public parser API, and re-exports.
+Top-level parser entry points are in [src/backend/parser/mod.rs](/src/backend/parser/mod.rs). This module should stay thin: grammar entry points, public parser API, and re-exports.
 
 Grammar files:
 
-- [src/backend/parser/gram.pest](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/parser/gram.pest)
-- [src/backend/parser/gram.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/parser/gram.rs)
+- [src/backend/parser/gram.pest](/src/backend/parser/gram.pest)
+- [src/backend/parser/gram.rs](/src/backend/parser/gram.rs)
 
 Semantic analysis lives in `src/backend/parser/analyze`:
 
-- [src/backend/parser/analyze/mod.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/parser/analyze/mod.rs): statement-level orchestration, DDL/DML binding entry points, and top-level `SELECT` planning flow.
-- [src/backend/parser/analyze/scope.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/parser/analyze/scope.rs): relation binding, scope construction, column resolution, outer-scope lookup.
-- [src/backend/parser/analyze/coerce.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/parser/analyze/coerce.rs): coercion helpers, type-family logic, and common-type selection.
-- [src/backend/parser/analyze/functions.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/parser/analyze/functions.rs): builtin scalar-function and aggregate lookup plus arity validation.
-- [src/backend/parser/analyze/expr.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/parser/analyze/expr.rs): normal expression binding.
-- [src/backend/parser/analyze/infer.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/parser/analyze/infer.rs): SQL expression type inference.
-- [src/backend/parser/analyze/agg.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/parser/analyze/agg.rs): aggregate discovery and grouped-column validation.
-- [src/backend/parser/analyze/agg_output.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/parser/analyze/agg_output.rs): binding grouped aggregate output expressions.
-- [src/backend/parser/analyze/agg_output_special.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/parser/analyze/agg_output_special.rs): grouped subquery/function/array helper paths.
+- [src/backend/parser/analyze/mod.rs](/src/backend/parser/analyze/mod.rs): statement-level orchestration, DDL/DML binding entry points, and top-level `SELECT` planning flow.
+- [src/backend/parser/analyze/scope.rs](/src/backend/parser/analyze/scope.rs): relation binding, scope construction, column resolution, outer-scope lookup.
+- [src/backend/parser/analyze/coerce.rs](/src/backend/parser/analyze/coerce.rs): coercion helpers, type-family logic, and common-type selection.
+- [src/backend/parser/analyze/functions.rs](/src/backend/parser/analyze/functions.rs): builtin scalar-function and aggregate lookup plus arity validation.
+- [src/backend/parser/analyze/expr.rs](/src/backend/parser/analyze/expr.rs): normal expression binding.
+- [src/backend/parser/analyze/infer.rs](/src/backend/parser/analyze/infer.rs): SQL expression type inference.
+- [src/backend/parser/analyze/agg.rs](/src/backend/parser/analyze/agg.rs): aggregate discovery and grouped-column validation.
+- [src/backend/parser/analyze/agg_output.rs](/src/backend/parser/analyze/agg_output.rs): binding grouped aggregate output expressions.
+- [src/backend/parser/analyze/agg_output_special.rs](/src/backend/parser/analyze/agg_output_special.rs): grouped subquery/function/array helper paths.
 
 Guidance:
 
@@ -127,25 +127,25 @@ Guidance:
 
 ## Executor Structure
 
-The executor facade is [src/backend/executor/mod.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/executor/mod.rs). It owns public executor entry points, shared executor error types, and exports, but most production logic should live in submodules.
+The executor facade is [src/backend/executor/mod.rs](/src/backend/executor/mod.rs). It owns public executor entry points, shared executor error types, and exports, but most production logic should live in submodules.
 
 Execution modules:
 
-- [src/backend/executor/startup.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/executor/startup.rs): plan startup and plan-state construction.
-- [src/backend/executor/driver.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/executor/driver.rs): top-level execution flow and tuple production.
-- [src/backend/executor/nodes.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/executor/nodes.rs): runtime behavior for concrete plan-node state structs.
-- [src/backend/executor/agg.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/executor/agg.rs): aggregate transition and finalize logic.
+- [src/backend/executor/startup.rs](/src/backend/executor/startup.rs): plan startup and plan-state construction.
+- [src/backend/executor/driver.rs](/src/backend/executor/driver.rs): top-level execution flow and tuple production.
+- [src/backend/executor/nodes.rs](/src/backend/executor/nodes.rs): runtime behavior for concrete plan-node state structs.
+- [src/backend/executor/agg.rs](/src/backend/executor/agg.rs): aggregate transition and finalize logic.
 
 Expression and value handling:
 
-- [src/backend/executor/exec_expr.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/executor/exec_expr.rs): high-level expression evaluation entry points.
-- [src/backend/executor/expr_ops.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/executor/expr_ops.rs): arithmetic, comparison, ordering, and boolean operator helpers.
-- [src/backend/executor/expr_casts.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/executor/expr_casts.rs): cast and coercion behavior during execution.
-- [src/backend/executor/expr_compile.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/executor/expr_compile.rs): predicate compilation and fixed-layout fast paths.
-- [src/backend/executor/expr_json.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/executor/expr_json.rs): JSON operator and builder behavior.
-- [src/backend/executor/value_io.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/executor/value_io.rs): tuple encoding/decoding and value serialization helpers.
-- [src/backend/executor/exec_tuples.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/executor/exec_tuples.rs): tuple decoding/deformation helpers.
-- [src/backend/executor/jsonb.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/executor/jsonb.rs) and [src/backend/executor/jsonpath.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/executor/jsonpath.rs): JSONB and JSONPath support.
+- [src/backend/executor/exec_expr.rs](/src/backend/executor/exec_expr.rs): high-level expression evaluation entry points.
+- [src/backend/executor/expr_ops.rs](/src/backend/executor/expr_ops.rs): arithmetic, comparison, ordering, and boolean operator helpers.
+- [src/backend/executor/expr_casts.rs](/src/backend/executor/expr_casts.rs): cast and coercion behavior during execution.
+- [src/backend/executor/expr_compile.rs](/src/backend/executor/expr_compile.rs): predicate compilation and fixed-layout fast paths.
+- [src/backend/executor/expr_json.rs](/src/backend/executor/expr_json.rs): JSON operator and builder behavior.
+- [src/backend/executor/value_io.rs](/src/backend/executor/value_io.rs): tuple encoding/decoding and value serialization helpers.
+- [src/backend/executor/exec_tuples.rs](/src/backend/executor/exec_tuples.rs): tuple decoding/deformation helpers.
+- [src/backend/executor/jsonb.rs](/src/backend/executor/jsonb.rs) and [src/backend/executor/jsonpath.rs](/src/backend/executor/jsonpath.rs): JSONB and JSONPath support.
 
 Guidance:
 
@@ -155,22 +155,22 @@ Guidance:
 
 ## Catalog, Access, Storage, and Protocol
 
-- [src/backend/catalog/catalog.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/catalog/catalog.rs): catalog state and metadata operations.
-- [src/backend/commands/tablecmds.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/commands/tablecmds.rs): DDL-heavy command handling.
-- [src/backend/commands/copyfrom.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/commands/copyfrom.rs): `COPY FROM`.
-- [src/backend/commands/explain.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/commands/explain.rs): `EXPLAIN` formatting and explain-only behavior.
+- [src/backend/catalog/catalog.rs](/src/backend/catalog/catalog.rs): catalog state and metadata operations.
+- [src/backend/commands/tablecmds.rs](/src/backend/commands/tablecmds.rs): DDL-heavy command handling.
+- [src/backend/commands/copyfrom.rs](/src/backend/commands/copyfrom.rs): `COPY FROM`.
+- [src/backend/commands/explain.rs](/src/backend/commands/explain.rs): `EXPLAIN` formatting and explain-only behavior.
 - `src/backend/access/*`: heap access methods and transaction-visible tuple handling.
 - `src/backend/storage/*`: page layout and storage primitives.
-- [src/backend/libpq/pqcomm.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/libpq/pqcomm.rs) and [src/backend/libpq/pqformat.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/libpq/pqformat.rs): wire protocol messaging and error formatting.
-- [src/backend/tcop/postgres.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/backend/tcop/postgres.rs): SQL execution entry flow and SQLSTATE mapping.
+- [src/backend/libpq/pqcomm.rs](/src/backend/libpq/pqcomm.rs) and [src/backend/libpq/pqformat.rs](/src/backend/libpq/pqformat.rs): wire protocol messaging and error formatting.
+- [src/backend/tcop/postgres.rs](/src/backend/tcop/postgres.rs): SQL execution entry flow and SQLSTATE mapping.
 
 ## Server Layer
 
 The PostgreSQL-like backend modules sit under `src/backend`, but process/session orchestration is in `src/pgrust`:
 
-- [src/pgrust/server.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/pgrust/server.rs): TCP server loop.
-- [src/pgrust/session.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/pgrust/session.rs): per-client session behavior.
-- [src/pgrust/database.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/pgrust/database.rs): database-level shared state and temp-object/session interactions.
+- [src/pgrust/server.rs](/src/pgrust/server.rs): TCP server loop.
+- [src/pgrust/session.rs](/src/pgrust/session.rs): per-client session behavior.
+- [src/pgrust/database.rs](/src/pgrust/database.rs): database-level shared state and temp-object/session interactions.
 
 If a change is about SQL semantics, planning, or execution, it usually belongs under `src/backend`, not `src/pgrust`.
 

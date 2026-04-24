@@ -38,7 +38,7 @@ The principal handoff objects are:
 
 ## 1. Protocol / Traffic Cop Boundary
 
-The "traffic cop" layer lives in [`src/backend/tcop/postgres.c`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/backend/tcop/postgres.c) and related `tcop/` files.
+The "traffic cop" layer lives in [`src/backend/tcop/postgres.c`](../postgres/src/backend/tcop/postgres.c) and related `tcop/` files.
 
 Primary responsibilities:
 
@@ -71,8 +71,8 @@ The parser boundary converts text into raw syntax trees.
 
 Key source:
 
-- [`src/backend/tcop/postgres.c`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/backend/tcop/postgres.c)
-- [`src/backend/parser/`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/backend/parser)
+- [`src/backend/tcop/postgres.c`](../postgres/src/backend/tcop/postgres.c)
+- [`src/backend/parser/`](../postgres/src/backend/parser)
 
 Key function:
 
@@ -96,7 +96,7 @@ The parser boundary is intentionally narrow: it produces syntax, not semantics.
 
 This is the first semantic boundary.
 
-Key functions in [`src/backend/tcop/postgres.c`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/backend/tcop/postgres.c):
+Key functions in [`src/backend/tcop/postgres.c`](../postgres/src/backend/tcop/postgres.c):
 
 - `pg_analyze_and_rewrite_fixedparams()`
 - `pg_analyze_and_rewrite_varparams()`
@@ -105,8 +105,8 @@ Key functions in [`src/backend/tcop/postgres.c`](/Users/malisper/workspace/work/
 
 Key lower modules:
 
-- [`src/backend/parser/`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/backend/parser)
-- [`src/backend/rewrite/`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/backend/rewrite)
+- [`src/backend/parser/`](../postgres/src/backend/parser)
+- [`src/backend/rewrite/`](../postgres/src/backend/rewrite)
 
 Boundary contract:
 
@@ -133,8 +133,8 @@ This boundary turns semantic queries into executable plans.
 
 Key API:
 
-- [`src/include/optimizer/optimizer.h`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/include/optimizer/optimizer.h)
-- [`src/include/optimizer/planner.h`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/include/optimizer/planner.h)
+- [`src/include/optimizer/optimizer.h`](../postgres/src/include/optimizer/optimizer.h)
+- [`src/include/optimizer/planner.h`](../postgres/src/include/optimizer/planner.h)
 
 Key functions:
 
@@ -165,8 +165,8 @@ Utility statements do not follow the normal planner/executor path.
 
 Key API:
 
-- [`src/backend/tcop/utility.c`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/backend/tcop/utility.c)
-- [`src/include/tcop/utility.h`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/include/tcop/utility.h)
+- [`src/backend/tcop/utility.c`](../postgres/src/backend/tcop/utility.c)
+- [`src/include/tcop/utility.h`](../postgres/src/include/tcop/utility.h)
 
 Key functions:
 
@@ -192,8 +192,8 @@ Portals are the execution-state boundary between planning and actually running a
 
 Key API:
 
-- [`src/include/utils/portal.h`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/include/utils/portal.h)
-- [`src/backend/tcop/pquery.c`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/backend/tcop/pquery.c)
+- [`src/include/utils/portal.h`](../postgres/src/include/utils/portal.h)
+- [`src/backend/tcop/pquery.c`](../postgres/src/backend/tcop/pquery.c)
 
 Key object:
 
@@ -219,8 +219,8 @@ The executor consumes plans and produces effects and tuples.
 
 Key API:
 
-- [`src/include/executor/executor.h`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/include/executor/executor.h)
-- [`src/backend/executor/`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/backend/executor)
+- [`src/include/executor/executor.h`](../postgres/src/include/executor/executor.h)
+- [`src/backend/executor/`](../postgres/src/backend/executor)
 
 Key functions:
 
@@ -254,7 +254,7 @@ The function manager is the dynamic call boundary for SQL-callable functions.
 
 Key API:
 
-- [`src/include/fmgr.h`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/include/fmgr.h)
+- [`src/include/fmgr.h`](../postgres/src/include/fmgr.h)
 
 Key objects:
 
@@ -282,8 +282,8 @@ PostgreSQL does not let most subsystems manipulate raw catalog tuples directly a
 
 Key APIs:
 
-- [`src/include/utils/syscache.h`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/include/utils/syscache.h)
-- [`src/include/utils/relcache.h`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/include/utils/relcache.h)
+- [`src/include/utils/syscache.h`](../postgres/src/include/utils/syscache.h)
+- [`src/include/utils/relcache.h`](../postgres/src/include/utils/relcache.h)
 
 Key objects and functions:
 
@@ -314,11 +314,11 @@ MVCC state and transaction state are their own subsystem, not just a property of
 
 Key documentation in source:
 
-- [`src/backend/access/transam/README`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/backend/access/transam/README)
+- [`src/backend/access/transam/README`](../postgres/src/backend/access/transam/README)
 
 Key API:
 
-- [`src/include/utils/snapmgr.h`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/include/utils/snapmgr.h)
+- [`src/include/utils/snapmgr.h`](../postgres/src/include/utils/snapmgr.h)
 
 Key functions:
 
@@ -350,7 +350,7 @@ This is the primary abstraction boundary for table storage behavior.
 
 Key API:
 
-- [`src/include/access/tableam.h`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/include/access/tableam.h)
+- [`src/include/access/tableam.h`](../postgres/src/include/access/tableam.h)
 
 Key concepts:
 
@@ -385,9 +385,9 @@ This is the parallel abstraction boundary for indexes.
 
 Key APIs:
 
-- [`src/include/access/amapi.h`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/include/access/amapi.h)
-- [`src/include/access/genam.h`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/include/access/genam.h)
-- [`src/backend/access/index/indexam.c`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/backend/access/index/indexam.c)
+- [`src/include/access/amapi.h`](../postgres/src/include/access/amapi.h)
+- [`src/include/access/genam.h`](../postgres/src/include/access/genam.h)
+- [`src/backend/access/index/indexam.c`](../postgres/src/backend/access/index/indexam.c)
 
 Key concepts:
 
@@ -419,7 +419,7 @@ The buffer manager is the page-cache boundary between access methods and physica
 
 Key API:
 
-- [`src/include/storage/bufmgr.h`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/include/storage/bufmgr.h)
+- [`src/include/storage/bufmgr.h`](../postgres/src/include/storage/bufmgr.h)
 
 Key functions:
 
@@ -444,7 +444,7 @@ The storage manager is the low-level physical file boundary.
 
 Key API:
 
-- [`src/include/storage/smgr.h`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/include/storage/smgr.h)
+- [`src/include/storage/smgr.h`](../postgres/src/include/storage/smgr.h)
 
 Key object:
 
@@ -475,7 +475,7 @@ Durability is a separate subsystem boundary from data access.
 
 Key source area:
 
-- [`src/backend/access/transam/`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/backend/access/transam)
+- [`src/backend/access/transam/`](../postgres/src/backend/access/transam)
 
 Key functions:
 
@@ -503,7 +503,7 @@ The backend process is not the whole server. There is a separate process-managem
 
 Key source area:
 
-- [`src/backend/postmaster/`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/backend/postmaster)
+- [`src/backend/postmaster/`](../postgres/src/backend/postmaster)
 
 Examples:
 
@@ -541,12 +541,12 @@ If I had to summarize PostgreSQL's subsystem boundaries by object type rather th
 
 The main intentional extension seams are:
 
-- planner hooks in [`src/include/optimizer/planner.h`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/include/optimizer/planner.h)
-- executor hooks in [`src/include/executor/executor.h`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/include/executor/executor.h)
-- utility hook in [`src/include/tcop/utility.h`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/include/tcop/utility.h)
-- table access methods in [`src/include/access/tableam.h`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/include/access/tableam.h)
-- index access methods in [`src/include/access/amapi.h`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/include/access/amapi.h)
-- SQL-callable functions through [`src/include/fmgr.h`](/Users/malisper/workspace/work/postgres-rewrite/postgres/src/include/fmgr.h)
+- planner hooks in [`src/include/optimizer/planner.h`](../postgres/src/include/optimizer/planner.h)
+- executor hooks in [`src/include/executor/executor.h`](../postgres/src/include/executor/executor.h)
+- utility hook in [`src/include/tcop/utility.h`](../postgres/src/include/tcop/utility.h)
+- table access methods in [`src/include/access/tableam.h`](../postgres/src/include/access/tableam.h)
+- index access methods in [`src/include/access/amapi.h`](../postgres/src/include/access/amapi.h)
+- SQL-callable functions through [`src/include/fmgr.h`](../postgres/src/include/fmgr.h)
 
 These are much more real API boundaries than random internal helper functions.
 

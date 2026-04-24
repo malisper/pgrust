@@ -124,7 +124,7 @@ The current heap layer still does not implement:
 - wide-table support beyond the current tuple-header attribute-count limit
   The heap tuple header currently stores the physical attribute count in
   `infomask2 & HEAP_NATTS_MASK`, which only has 11 bits in
-  [src/include/access/htup.rs](/Users/malisper/workspace/work/postgres-rewrite/pgrust/src/include/access/htup.rs).
+  [src/include/access/htup.rs](/src/include/access/htup.rs).
   That means the current heap format can only represent up to 2047 columns in
   one tuple, and the null bitmap grows in lockstep with that attribute count.
   This matches PostgreSQL's basic header field width, but it means wide-table
