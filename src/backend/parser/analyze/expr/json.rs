@@ -1,5 +1,47 @@
 use super::*;
 
+fn jsonb_operator_metadata(op: crate::include::nodes::primnodes::OpExprKind) -> Option<(u32, u32)> {
+    use crate::include::catalog::{
+        JSONB_CONTAINED_OPERATOR_OID, JSONB_CONTAINED_PROC_OID, JSONB_CONTAINS_OPERATOR_OID,
+        JSONB_CONTAINS_PROC_OID, JSONB_EXISTS_ALL_OPERATOR_OID, JSONB_EXISTS_ALL_PROC_OID,
+        JSONB_EXISTS_ANY_OPERATOR_OID, JSONB_EXISTS_ANY_PROC_OID, JSONB_EXISTS_OPERATOR_OID,
+        JSONB_EXISTS_PROC_OID,
+    };
+    Some(match op {
+        crate::include::nodes::primnodes::OpExprKind::JsonbContains => {
+            (JSONB_CONTAINS_OPERATOR_OID, JSONB_CONTAINS_PROC_OID)
+        }
+        crate::include::nodes::primnodes::OpExprKind::JsonbContained => {
+            (JSONB_CONTAINED_OPERATOR_OID, JSONB_CONTAINED_PROC_OID)
+        }
+        crate::include::nodes::primnodes::OpExprKind::JsonbExists => {
+            (JSONB_EXISTS_OPERATOR_OID, JSONB_EXISTS_PROC_OID)
+        }
+        crate::include::nodes::primnodes::OpExprKind::JsonbExistsAny => {
+            (JSONB_EXISTS_ANY_OPERATOR_OID, JSONB_EXISTS_ANY_PROC_OID)
+        }
+        crate::include::nodes::primnodes::OpExprKind::JsonbExistsAll => {
+            (JSONB_EXISTS_ALL_OPERATOR_OID, JSONB_EXISTS_ALL_PROC_OID)
+        }
+        _ => return None,
+    })
+}
+
+fn jsonb_op_expr(op: crate::include::nodes::primnodes::OpExprKind, args: Vec<Expr>) -> Expr {
+    if let Some((opno, opfuncid)) = jsonb_operator_metadata(op) {
+        Expr::Op(Box::new(crate::include::nodes::primnodes::OpExpr {
+            opno,
+            opfuncid,
+            op,
+            opresulttype: SqlType::new(SqlTypeKind::Bool),
+            args,
+            collation_oid: None,
+        }))
+    } else {
+        Expr::op_auto(op, args)
+    }
+}
+
 fn bind_json_binary_operands(
     left: &SqlExpr,
     right: &SqlExpr,
@@ -140,7 +182,7 @@ pub(super) fn bind_json_binary_expr(
     };
     let left = left_bound;
     let _ = raw_left_type;
-    Ok(Expr::op_auto(op, vec![left, right]))
+    Ok(jsonb_op_expr(op, vec![left, right]))
 }
 
 fn bind_jsonb_containment_expr(
@@ -200,7 +242,7 @@ fn bind_jsonb_containment_expr(
         grouped_outer,
         ctes,
     )?;
-    Ok(Expr::op_auto(
+    Ok(jsonb_op_expr(
         op,
         vec![
             coerce_bound_expr(left_bound, raw_left_type, jsonb_type),

@@ -499,6 +499,7 @@ impl CatalogStore {
             indnullsnotdistinct: false,
             indisexclusion: false,
             brin_options: None,
+            gin_options: None,
         };
         self.create_index_for_relation_with_options(
             index_name,
@@ -2801,6 +2802,7 @@ impl CatalogStore {
             indnullsnotdistinct: false,
             indisexclusion: false,
             brin_options: None,
+            gin_options: None,
         };
         self.create_index_for_relation_mvcc_with_options(
             index_name,
@@ -5314,6 +5316,7 @@ fn build_index_entry_with_relkind(
                 .filter(|pred| !pred.is_empty())
                 .map(str::to_string),
             brin_options: resolved_options.brin_options.clone(),
+            gin_options: resolved_options.gin_options.clone(),
         }),
     };
     control.next_rel_number = control
@@ -5381,6 +5384,7 @@ fn build_toast_catalog_changes(
             indnullsnotdistinct: false,
             indisexclusion: false,
             brin_options: None,
+            gin_options: None,
         },
         None,
         control,
@@ -5438,6 +5442,7 @@ fn default_index_build_options_for_relation(
         indnullsnotdistinct: false,
         indisexclusion: false,
         brin_options: None,
+        gin_options: None,
     })
 }
 
@@ -6864,6 +6869,7 @@ fn catalog_entry_from_relation_row(
             indexprs: index.indexprs.clone(),
             indpred: index.indpred.clone(),
             brin_options: index.brin_options.clone(),
+            gin_options: index.gin_options.clone(),
         }),
     }
 }
@@ -7228,6 +7234,7 @@ fn catalog_entry_from_visible_relation(
             indexprs: index.indexprs.clone(),
             indpred: index.indpred.clone(),
             brin_options: index.brin_options.clone(),
+            gin_options: index.gin_options.clone(),
         }),
     })
 }
@@ -7278,6 +7285,7 @@ fn catalog_entry_from_relation(relation: &RelCacheEntry) -> CatalogEntry {
             indexprs: index.indexprs.clone(),
             indpred: index.indpred.clone(),
             brin_options: index.brin_options.clone(),
+            gin_options: index.gin_options.clone(),
         }),
     }
 }

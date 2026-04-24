@@ -714,6 +714,7 @@ impl<'a> PartitionedIndexInstaller<'a> {
                 indnullsnotdistinct: index.index_meta.indnullsnotdistinct,
                 indisexclusion: index.index_meta.indisexclusion,
                 brin_options: index.index_meta.brin_options.clone(),
+                gin_options: index.index_meta.gin_options.clone(),
             },
         })
     }

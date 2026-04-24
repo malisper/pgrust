@@ -79,6 +79,11 @@ pub const JSONB_CONTAINED_PROC_OID: u32 = 4045;
 pub const JSONB_EXISTS_PROC_OID: u32 = 4046;
 pub const JSONB_EXISTS_ANY_PROC_OID: u32 = 4047;
 pub const JSONB_EXISTS_ALL_PROC_OID: u32 = 4048;
+pub const GIN_COMPARE_JSONB_PROC_OID: u32 = 3480;
+pub const GIN_EXTRACT_JSONB_PROC_OID: u32 = 3482;
+pub const GIN_EXTRACT_JSONB_QUERY_PROC_OID: u32 = 3483;
+pub const GIN_CONSISTENT_JSONB_PROC_OID: u32 = 3484;
+pub const GIN_TRICONSISTENT_JSONB_PROC_OID: u32 = 3488;
 pub const GIST_BOX_CONSISTENT_PROC_OID: u32 = 2578;
 pub const GIST_BOX_PENALTY_PROC_OID: u32 = 2581;
 pub const GIST_BOX_PICKSPLIT_PROC_OID: u32 = 2582;
@@ -3198,6 +3203,89 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             &oid_argtypes(&[JSONB_TYPE_OID, TEXT_ARRAY_TYPE_OID]),
             "jsonb_exists_all",
             2,
+            false,
+            false,
+            'f',
+            's',
+        ),
+        proc_row(
+            GIN_COMPARE_JSONB_PROC_OID,
+            "gin_compare_jsonb",
+            INT4_TYPE_OID,
+            &oid_argtypes(&[TEXT_TYPE_OID, TEXT_TYPE_OID]),
+            "gin_compare_jsonb",
+            2,
+            false,
+            false,
+            'f',
+            's',
+        ),
+        proc_row(
+            GIN_EXTRACT_JSONB_PROC_OID,
+            "gin_extract_jsonb",
+            INTERNAL_TYPE_OID,
+            &oid_argtypes(&[JSONB_TYPE_OID, INTERNAL_TYPE_OID]),
+            "gin_extract_jsonb",
+            2,
+            false,
+            false,
+            'f',
+            's',
+        ),
+        proc_row(
+            GIN_EXTRACT_JSONB_QUERY_PROC_OID,
+            "gin_extract_jsonb_query",
+            INTERNAL_TYPE_OID,
+            &oid_argtypes(&[
+                JSONB_TYPE_OID,
+                INTERNAL_TYPE_OID,
+                INT2_TYPE_OID,
+                INTERNAL_TYPE_OID,
+                INTERNAL_TYPE_OID,
+                INTERNAL_TYPE_OID,
+                INTERNAL_TYPE_OID,
+            ]),
+            "gin_extract_jsonb_query",
+            7,
+            false,
+            false,
+            'f',
+            's',
+        ),
+        proc_row(
+            GIN_CONSISTENT_JSONB_PROC_OID,
+            "gin_consistent_jsonb",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[
+                INTERNAL_TYPE_OID,
+                INT2_TYPE_OID,
+                JSONB_TYPE_OID,
+                INT4_TYPE_OID,
+                INTERNAL_TYPE_OID,
+                INTERNAL_TYPE_OID,
+            ]),
+            "gin_consistent_jsonb",
+            6,
+            false,
+            false,
+            'f',
+            's',
+        ),
+        proc_row(
+            GIN_TRICONSISTENT_JSONB_PROC_OID,
+            "gin_triconsistent_jsonb",
+            INTERNAL_TYPE_OID,
+            &oid_argtypes(&[
+                INTERNAL_TYPE_OID,
+                INT2_TYPE_OID,
+                JSONB_TYPE_OID,
+                INT4_TYPE_OID,
+                INTERNAL_TYPE_OID,
+                INTERNAL_TYPE_OID,
+                INTERNAL_TYPE_OID,
+            ]),
+            "gin_triconsistent_jsonb",
+            7,
             false,
             false,
             'f',

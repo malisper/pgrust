@@ -2,7 +2,7 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, BRIN_AM_OID, BTREE_AM_OID, GIST_AM_OID, HASH_AM_OID,
+    BOOTSTRAP_SUPERUSER_OID, BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID,
     PG_CATALOG_NAMESPACE_OID, SPGIST_AM_OID,
 };
 
@@ -25,6 +25,7 @@ pub const GIST_BOX_FAMILY_OID: u32 = 2593;
 pub const GIST_POLY_FAMILY_OID: u32 = 2594;
 pub const GIST_CIRCLE_FAMILY_OID: u32 = 2595;
 pub const GIST_RANGE_FAMILY_OID: u32 = 3919;
+pub const GIN_JSONB_FAMILY_OID: u32 = 4036;
 pub const SPGIST_BOX_FAMILY_OID: u32 = 4001;
 pub const BRIN_BYTEA_MINMAX_FAMILY_OID: u32 = 76100;
 pub const BRIN_CHAR_MINMAX_FAMILY_OID: u32 = 76101;
@@ -213,6 +214,13 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
             oid: SPGIST_BOX_FAMILY_OID,
             opfmethod: SPGIST_AM_OID,
             opfname: "box_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
+            oid: GIN_JSONB_FAMILY_OID,
+            opfmethod: GIN_AM_OID,
+            opfname: "jsonb_ops".into(),
             opfnamespace: PG_CATALOG_NAMESPACE_OID,
             opfowner: BOOTSTRAP_SUPERUSER_OID,
         },
