@@ -2,8 +2,8 @@ use super::*;
 use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{
-    Aggref, BoolExpr, FuncExpr, OpExpr, OrderByEntry, ScalarArrayOpExpr, SubLink, attrno_index,
-    is_system_attr, user_attrno,
+    Aggref, BoolExpr, FuncExpr, OpExpr, OrderByEntry, ScalarArrayOpExpr, SetReturningExpr, SubLink,
+    attrno_index, is_system_attr, user_attrno,
 };
 use crate::include::nodes::primnodes::{ExprArraySubscript, JoinType, Var};
 
@@ -361,7 +361,7 @@ pub(super) fn query_from_from_projection(input: AnalyzedFrom, targets: Vec<Targe
         limit_offset: 0,
         locking_clause: None,
         row_marks: Vec::new(),
-        project_set: None,
+        has_target_srfs: false,
         recursive_union: None,
         set_operation: None,
     }
@@ -445,6 +445,12 @@ pub(crate) fn shift_expr_rtindexes(expr: Expr, offset: usize) -> Expr {
                 .map(|arg| shift_expr_rtindexes(arg, offset))
                 .collect(),
             ..*func
+        })),
+        Expr::SetReturning(srf) => Expr::SetReturning(Box::new(SetReturningExpr {
+            call: srf
+                .call
+                .map_exprs(|expr| shift_expr_rtindexes(expr, offset)),
+            ..*srf
         })),
         Expr::Xml(xml) => Expr::Xml(Box::new(crate::include::nodes::primnodes::XmlExpr {
             named_args: xml
@@ -715,6 +721,12 @@ pub(crate) fn rewrite_local_vars_for_output_exprs(
                 .map(|arg| rewrite_local_vars_for_output_exprs(arg, source_varno, output_exprs))
                 .collect(),
             ..*func
+        })),
+        Expr::SetReturning(srf) => Expr::SetReturning(Box::new(SetReturningExpr {
+            call: srf.call.map_exprs(|expr| {
+                rewrite_local_vars_for_output_exprs(expr, source_varno, output_exprs)
+            }),
+            ..*srf
         })),
         Expr::Xml(xml) => Expr::Xml(Box::new(crate::include::nodes::primnodes::XmlExpr {
             named_args: xml

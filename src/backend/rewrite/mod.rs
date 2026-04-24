@@ -21,7 +21,7 @@ pub(crate) use views::{
 use crate::backend::parser::{CatalogLookup, ParseError};
 use crate::include::nodes::parsenodes::{Query, RangeTblEntry, RangeTblEntryKind};
 use crate::include::nodes::primnodes::{
-    AggAccum, Expr, ExprArraySubscript, ProjectSetTarget, SetReturningCall, SortGroupClause,
+    AggAccum, Expr, ExprArraySubscript, SetReturningCall, SetReturningExpr, SortGroupClause,
     SubLink, TargetEntry, WindowClause, WindowFrame, WindowFrameBound, WindowFuncExpr,
     WindowFuncKind, WindowSpec,
 };
@@ -97,22 +97,7 @@ fn rewrite_query(
                 rewrite_sort_group_clause(clause, catalog, expanded_views, active_policy_relations)
             })
             .collect::<Result<Vec<_>, _>>()?,
-        project_set: query
-            .project_set
-            .map(|targets| {
-                targets
-                    .into_iter()
-                    .map(|target| {
-                        rewrite_project_set_target(
-                            target,
-                            catalog,
-                            expanded_views,
-                            active_policy_relations,
-                        )
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .transpose()?,
+        has_target_srfs: query.has_target_srfs,
         recursive_union: query
             .recursive_union
             .map(|recursive_union| {
@@ -410,38 +395,6 @@ fn rewrite_window_func_expr(
     })
 }
 
-fn rewrite_project_set_target(
-    target: ProjectSetTarget,
-    catalog: &dyn CatalogLookup,
-    expanded_views: &[u32],
-    active_policy_relations: &mut Vec<u32>,
-) -> Result<ProjectSetTarget, ParseError> {
-    match target {
-        ProjectSetTarget::Scalar(entry) => Ok(ProjectSetTarget::Scalar(rewrite_target_entry(
-            entry,
-            catalog,
-            expanded_views,
-            active_policy_relations,
-        )?)),
-        ProjectSetTarget::Set {
-            name,
-            call,
-            sql_type,
-            column_index,
-        } => Ok(ProjectSetTarget::Set {
-            name,
-            call: rewrite_set_returning_call(
-                call,
-                catalog,
-                expanded_views,
-                active_policy_relations,
-            )?,
-            sql_type,
-            column_index,
-        }),
-    }
-}
-
 fn rewrite_agg_accum(
     accum: AggAccum,
     catalog: &dyn CatalogLookup,
@@ -712,6 +665,15 @@ fn rewrite_semantic_expr(
                 })
                 .collect::<Result<Vec<_>, _>>()?,
             ..*func
+        })),
+        Expr::SetReturning(srf) => Expr::SetReturning(Box::new(SetReturningExpr {
+            call: rewrite_set_returning_call(
+                srf.call,
+                catalog,
+                expanded_views,
+                active_policy_relations,
+            )?,
+            ..*srf
         })),
         Expr::Aggref(aggref) => Expr::Aggref(Box::new(crate::include::nodes::primnodes::Aggref {
             args: aggref

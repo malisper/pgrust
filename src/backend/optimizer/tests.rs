@@ -1179,6 +1179,7 @@ fn into_plan_project_set_set_arg_lowers_via_child_tlist_identity() {
         input,
         vec![crate::include::nodes::primnodes::ProjectSetTarget::Set {
             name: "g".into(),
+            source_expr: Expr::Const(Value::Null),
             call: crate::include::nodes::primnodes::SetReturningCall::GenerateSeries {
                 func_oid: 1,
                 func_variadic: false,

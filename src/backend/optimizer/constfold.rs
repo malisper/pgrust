@@ -11,8 +11,8 @@ use crate::include::nodes::parsenodes::{
 };
 use crate::include::nodes::primnodes::{
     AggAccum, Aggref, BoolExpr, BoolExprType, CaseExpr, CaseWhen, Expr, ExprArraySubscript, OpExpr,
-    OpExprKind, OrderByEntry, ProjectSetTarget, SetReturningCall, SortGroupClause, TargetEntry,
-    WindowClause, WindowFrame, WindowFrameBound, WindowFuncExpr, WindowFuncKind, XmlExpr,
+    OpExprKind, OrderByEntry, SetReturningCall, SortGroupClause, TargetEntry, WindowClause,
+    WindowFrame, WindowFrameBound, WindowFuncExpr, WindowFuncKind, XmlExpr,
 };
 
 pub(crate) fn fold_query_constants(query: Query) -> Result<Query, ParseError> {
@@ -71,15 +71,7 @@ fn simplify_query(query: Query) -> Result<Query, ParseError> {
         limit_offset: query.limit_offset,
         locking_clause: query.locking_clause,
         row_marks: query.row_marks,
-        project_set: query
-            .project_set
-            .map(|targets| {
-                targets
-                    .into_iter()
-                    .map(simplify_project_set_target)
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .transpose()?,
+        has_target_srfs: query.has_target_srfs,
         recursive_union: query
             .recursive_union
             .map(|query| simplify_recursive_union(*query).map(Box::new))
@@ -206,25 +198,6 @@ fn simplify_order_by_entry(item: OrderByEntry) -> Result<OrderByEntry, ParseErro
         expr: simplify_expr(item.expr, None)?,
         ..item
     })
-}
-
-fn simplify_project_set_target(target: ProjectSetTarget) -> Result<ProjectSetTarget, ParseError> {
-    match target {
-        ProjectSetTarget::Scalar(entry) => {
-            Ok(ProjectSetTarget::Scalar(simplify_target_entry(entry)?))
-        }
-        ProjectSetTarget::Set {
-            name,
-            call,
-            sql_type,
-            column_index,
-        } => Ok(ProjectSetTarget::Set {
-            name,
-            call: simplify_set_returning_call(call)?,
-            sql_type,
-            column_index,
-        }),
-    }
 }
 
 fn simplify_set_returning_call(call: SetReturningCall) -> Result<SetReturningCall, ParseError> {
@@ -516,6 +489,12 @@ fn simplify_expr(expr: Expr, case_test_value: Option<&Value>) -> Result<Expr, Pa
                     .map(|expr| simplify_expr(expr, case_test_value))
                     .collect::<Result<Vec<_>, _>>()?,
                 ..*func
+            },
+        ))),
+        Expr::SetReturning(srf) => Ok(Expr::SetReturning(Box::new(
+            crate::include::nodes::primnodes::SetReturningExpr {
+                call: simplify_set_returning_call(srf.call)?,
+                ..*srf
             },
         ))),
         Expr::SubLink(sublink) => Ok(Expr::SubLink(Box::new(
