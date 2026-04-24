@@ -8269,6 +8269,52 @@ fn parse_alter_table_attach_partition() {
 }
 
 #[test]
+fn parse_alter_table_detach_partition_modes() {
+    match parse_statement("alter table measurement detach partition measurement_mid").unwrap() {
+        Statement::AlterTableDetachPartition(stmt) => {
+            assert_eq!(stmt.parent_table, "measurement");
+            assert_eq!(stmt.partition_table, "measurement_mid");
+            assert_eq!(stmt.mode, DetachPartitionMode::Immediate);
+        }
+        other => panic!("expected AlterTableDetachPartition, got {:?}", other),
+    }
+
+    match parse_statement(
+        "alter table if exists only measurement detach partition measurement_mid concurrently",
+    )
+    .unwrap()
+    {
+        Statement::AlterTableDetachPartition(stmt) => {
+            assert!(stmt.if_exists);
+            assert!(stmt.only);
+            assert_eq!(stmt.parent_table, "measurement");
+            assert_eq!(stmt.partition_table, "measurement_mid");
+            assert_eq!(stmt.mode, DetachPartitionMode::Concurrently);
+        }
+        other => panic!("expected AlterTableDetachPartition, got {:?}", other),
+    }
+
+    match parse_statement("alter table measurement detach partition measurement_mid finalize")
+        .unwrap()
+    {
+        Statement::AlterTableDetachPartition(stmt) => {
+            assert_eq!(stmt.mode, DetachPartitionMode::Finalize);
+        }
+        other => panic!("expected AlterTableDetachPartition, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_alter_table_detach_partition_rejects_trailing_syntax() {
+    assert!(
+        parse_statement(
+            "alter table measurement detach partition measurement_mid concurrently finalize"
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn parse_create_table_partition_by_hash() {
     match parse_statement("create table measurement (a int) partition by hash (a)").unwrap() {
         Statement::CreateTable(ct) => {

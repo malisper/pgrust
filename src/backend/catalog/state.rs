@@ -394,6 +394,7 @@ impl Catalog {
             let mut child_oids = catalog
                 .inheritance_children(relation_oid)
                 .into_iter()
+                .filter(|row| !row.inhdetachpending)
                 .map(|row| row.inhrelid)
                 .collect::<Vec<_>>();
             child_oids.sort_unstable();

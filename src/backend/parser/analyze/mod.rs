@@ -757,6 +757,7 @@ pub trait CatalogLookup {
             let mut child_oids = self
                 .inheritance_children(parent_oid)
                 .into_iter()
+                .filter(|row| !row.inhdetachpending)
                 .map(|row| row.inhrelid)
                 .collect::<Vec<_>>();
             child_oids.sort_unstable();

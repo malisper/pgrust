@@ -300,6 +300,70 @@ impl Database {
         Ok(())
     }
 
+    pub(crate) fn drop_cloned_parent_row_triggers_from_partition_in_transaction(
+        &self,
+        client_id: ClientId,
+        xid: TransactionId,
+        cid: CommandId,
+        parent_oid: u32,
+        child_oid: u32,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<CommandId, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let parent_trigger_oids = catalog
+            .trigger_rows_for_relation(parent_oid)
+            .into_iter()
+            .filter(trigger_row_is_row)
+            .map(|row| row.oid)
+            .collect::<BTreeSet<_>>();
+        if parent_trigger_oids.is_empty() {
+            return Ok(cid);
+        }
+        let child_triggers = catalog
+            .trigger_rows_for_relation(child_oid)
+            .into_iter()
+            .filter(|row| row.tgparentid != 0 && parent_trigger_oids.contains(&row.tgparentid))
+            .collect::<Vec<_>>();
+        if child_triggers.is_empty() {
+            return Ok(cid);
+        }
+
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        let mut effects = Vec::new();
+        {
+            let mut catalog_store = self.catalog.write();
+            for child_trigger in child_triggers {
+                let descendants =
+                    inherited_trigger_descendants(&catalog, child_oid, child_trigger.oid);
+                for row in descendants.iter().rev() {
+                    let (_removed, effect) = catalog_store
+                        .drop_trigger_mvcc(row.tgrelid, &row.tgname, &ctx)
+                        .map_err(map_catalog_error)?;
+                    effects.push(effect);
+                }
+                let (_removed, effect) = catalog_store
+                    .drop_trigger_mvcc(child_trigger.tgrelid, &child_trigger.tgname, &ctx)
+                    .map_err(map_catalog_error)?;
+                effects.push(effect);
+            }
+        }
+        for effect in &effects {
+            self.apply_catalog_mutation_effect_immediate(effect)?;
+        }
+        self.plan_cache.invalidate_all();
+        catalog_effects.extend(effects);
+        Ok(cid.saturating_add(1))
+    }
+
     fn create_partition_trigger_clones_in_transaction(
         &self,
         client_id: ClientId,
@@ -813,6 +877,7 @@ fn direct_partition_child_oids(catalog: &dyn CatalogLookup, parent_oid: u32) -> 
     let mut children = catalog
         .inheritance_children(parent_oid)
         .into_iter()
+        .filter(|row| !row.inhdetachpending)
         .filter_map(|row| {
             catalog
                 .relation_by_oid(row.inhrelid)

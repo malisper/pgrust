@@ -2361,6 +2361,114 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn mark_relation_inheritance_detached_mvcc(
+        &mut self,
+        relation_oid: u32,
+        parent_oid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let mut current_inherits = relation_inherits_mvcc(self, ctx, relation_oid)?;
+        crate::include::catalog::sort_pg_inherits_rows(&mut current_inherits);
+        let old_inherit = current_inherits
+            .iter()
+            .find(|row| row.inhparent == parent_oid)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(parent_oid.to_string()))?;
+        if old_inherit.inhdetachpending {
+            return Ok(CatalogMutationEffect::default());
+        }
+        let new_inherit = PgInheritsRow {
+            inhdetachpending: true,
+            ..old_inherit.clone()
+        };
+        let rows_to_delete = PhysicalCatalogRows {
+            inherits: vec![old_inherit],
+            ..PhysicalCatalogRows::default()
+        };
+        let rows_to_insert = PhysicalCatalogRows {
+            inherits: vec![new_inherit],
+            ..PhysicalCatalogRows::default()
+        };
+        let kinds = vec![BootstrapCatalogKind::PgInherits];
+        self.invalidate_relcache_init_for_kinds(&kinds);
+        delete_catalog_rows_subset_mvcc(ctx, &rows_to_delete, self.scope_db_oid(), &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &rows_to_insert, self.scope_db_oid(), &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        effect_record_oid(&mut effect.relation_oids, parent_oid);
+        Ok(effect)
+    }
+
+    pub fn drop_partition_inheritance_parent_mvcc(
+        &mut self,
+        relation_oid: u32,
+        parent_oid: u32,
+        expect_detach_pending: Option<bool>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let current_inherits = relation_inherits_mvcc(self, ctx, relation_oid)?;
+        let removed_inherit = current_inherits
+            .iter()
+            .find(|row| row.inhparent == parent_oid)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(parent_oid.to_string()))?;
+        if let Some(expected) = expect_detach_pending
+            && removed_inherit.inhdetachpending != expected
+        {
+            return Err(CatalogError::UnknownTable(parent_oid.to_string()));
+        }
+        let removed_depends =
+            depend_rows_for_object_mvcc(self, ctx, PG_CLASS_RELATION_OID, relation_oid)?
+                .into_iter()
+                .filter(|row| {
+                    row.classid == PG_CLASS_RELATION_OID
+                        && row.objid == relation_oid
+                        && row.refclassid == PG_CLASS_RELATION_OID
+                        && row.refobjid == parent_oid
+                        && row.refobjsubid == 0
+                        && row.deptype == DEPENDENCY_NORMAL
+                })
+                .collect::<Vec<_>>();
+
+        let mut rows_to_delete = PhysicalCatalogRows {
+            inherits: vec![removed_inherit],
+            depends: removed_depends,
+            ..PhysicalCatalogRows::default()
+        };
+        let mut rows_to_insert = PhysicalCatalogRows::default();
+        if let Some(old_parent) = class_row_by_oid_mvcc(self, ctx, parent_oid)? {
+            let has_remaining_children = relation_inherited_by_mvcc(self, ctx, parent_oid)?
+                .into_iter()
+                .any(|row| row.inhrelid != relation_oid);
+            if old_parent.relhassubclass != has_remaining_children {
+                rows_to_delete.classes.push(old_parent.clone());
+                rows_to_insert.classes.push(PgClassRow {
+                    relhassubclass: has_remaining_children,
+                    ..old_parent
+                });
+            }
+        }
+
+        let mut kinds = vec![
+            BootstrapCatalogKind::PgDepend,
+            BootstrapCatalogKind::PgInherits,
+        ];
+        if !rows_to_delete.classes.is_empty() {
+            kinds.push(BootstrapCatalogKind::PgClass);
+        }
+        self.invalidate_relcache_init_for_kinds(&kinds);
+        delete_catalog_rows_subset_mvcc(ctx, &rows_to_delete, self.scope_db_oid(), &kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &rows_to_insert, self.scope_db_oid(), &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        effect_record_oid(&mut effect.relation_oids, parent_oid);
+        Ok(effect)
+    }
+
     pub fn drop_relation_inheritance_parent_mvcc(
         &mut self,
         relation_oid: u32,
