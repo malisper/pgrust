@@ -494,6 +494,12 @@ fn resolve_relation_row_expr_in_scope(
     scope: &BoundScope,
     name: &str,
 ) -> Option<Vec<(String, Expr)>> {
+    let relation_exists = scope.relations.iter().any(|relation| {
+        relation
+            .relation_names
+            .iter()
+            .any(|relation_name| relation_name.eq_ignore_ascii_case(name))
+    });
     let mut matched = false;
     let fields = scope
         .columns
@@ -512,7 +518,7 @@ fn resolve_relation_row_expr_in_scope(
             Some((column.output_name.clone(), expr.clone()))
         })
         .collect::<Vec<_>>();
-    matched.then_some(fields)
+    (matched || relation_exists).then_some(fields)
 }
 
 fn from_item_is_lateral(item: &FromItem) -> bool {

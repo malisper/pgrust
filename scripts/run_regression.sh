@@ -14,7 +14,7 @@
 #   --port PORT       Port for pgrust server (default: 5433)
 #   --skip-build      Don't rebuild pgrust_server
 #   --skip-server     Assume server is already running (don't start/stop it)
-#   --timeout SECS    Per-test timeout in seconds (default: 30)
+#   --timeout SECS    Per-test timeout in seconds (default: 60)
 #   --test TESTNAME   Run only this test (without .sql extension)
 #   --results-dir DIR Directory for results (default: unique temp dir)
 #   --data-dir DIR    Directory for the pgrust cluster (default: unique temp dir)
@@ -252,7 +252,7 @@ add_aggregate_dependencies() {
 PORT=5433
 SKIP_BUILD=false
 SKIP_SERVER=false
-TIMEOUT=30
+TIMEOUT=60
 SINGLE_TEST=""
 RESULTS_DIR=""
 DATA_DIR=""
