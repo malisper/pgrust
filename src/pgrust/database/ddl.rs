@@ -348,9 +348,8 @@ pub(crate) fn reject_relation_with_referencing_foreign_keys(
     operation: &'static str,
 ) -> Result<(), ExecError> {
     let mut references = catalog
-        .constraint_rows()
+        .foreign_key_constraint_rows_referencing_relation(relation_oid)
         .into_iter()
-        .filter(|row| row.contype == CONSTRAINT_FOREIGN && row.confrelid == relation_oid)
         .map(|row| (row.conname, relation_name_for_oid(catalog, row.conrelid)))
         .collect::<Vec<_>>();
     references.sort();
@@ -374,10 +373,15 @@ pub(crate) fn reject_column_with_foreign_key_dependencies(
     attnum: i16,
     operation: &'static str,
 ) -> Result<(), ExecError> {
-    let mut messages = catalog
-        .constraint_rows()
+    let outbound = catalog
+        .constraint_rows_for_relation(relation_oid)
         .into_iter()
-        .filter(|row| row.contype == CONSTRAINT_FOREIGN)
+        .filter(|row| row.contype == CONSTRAINT_FOREIGN);
+    let inbound = catalog
+        .foreign_key_constraint_rows_referencing_relation(relation_oid)
+        .into_iter();
+    let mut messages = outbound
+        .chain(inbound)
         .filter_map(|row| {
             if row.conrelid == relation_oid
                 && row
@@ -469,9 +473,8 @@ pub(crate) fn reject_index_with_referencing_foreign_keys(
     operation: &'static str,
 ) -> Result<(), ExecError> {
     let mut references = catalog
-        .constraint_rows()
+        .foreign_key_constraint_rows_referencing_index(index_oid)
         .into_iter()
-        .filter(|row| row.contype == CONSTRAINT_FOREIGN && row.conindid == index_oid)
         .map(|row| (row.conname, relation_name_for_oid(catalog, row.conrelid)))
         .collect::<Vec<_>>();
     references.sort();

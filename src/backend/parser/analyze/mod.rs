@@ -497,6 +497,13 @@ pub trait CatalogLookup {
         self.type_rows().into_iter().find(|row| row.oid == oid)
     }
 
+    fn type_by_name(&self, name: &str) -> Option<PgTypeRow> {
+        let normalized = normalize_catalog_lookup_name(name);
+        self.type_rows()
+            .into_iter()
+            .find(|row| row.typname.eq_ignore_ascii_case(normalized))
+    }
+
     fn range_rows(&self) -> Vec<PgRangeRow> {
         builtin_range_rows()
     }
@@ -628,6 +635,45 @@ pub trait CatalogLookup {
 
     fn constraint_rows_for_relation(&self, _relation_oid: u32) -> Vec<PgConstraintRow> {
         Vec::new()
+    }
+
+    fn constraint_row_by_oid(&self, oid: u32) -> Option<PgConstraintRow> {
+        self.constraint_rows()
+            .into_iter()
+            .find(|row| row.oid == oid)
+    }
+
+    fn constraint_rows_for_index(&self, index_oid: u32) -> Vec<PgConstraintRow> {
+        self.constraint_rows()
+            .into_iter()
+            .filter(|row| row.conindid == index_oid)
+            .collect()
+    }
+
+    fn foreign_key_constraint_rows_referencing_relation(
+        &self,
+        relation_oid: u32,
+    ) -> Vec<PgConstraintRow> {
+        self.constraint_rows()
+            .into_iter()
+            .filter(|row| {
+                row.contype == crate::include::catalog::CONSTRAINT_FOREIGN
+                    && row.confrelid == relation_oid
+            })
+            .collect()
+    }
+
+    fn foreign_key_constraint_rows_referencing_index(
+        &self,
+        index_oid: u32,
+    ) -> Vec<PgConstraintRow> {
+        self.constraint_rows()
+            .into_iter()
+            .filter(|row| {
+                row.contype == crate::include::catalog::CONSTRAINT_FOREIGN
+                    && row.conindid == index_oid
+            })
+            .collect()
     }
 
     fn constraint_rows(&self) -> Vec<PgConstraintRow> {
@@ -1299,9 +1345,7 @@ pub(crate) fn resolve_raw_type_name(
                 alias
             } else {
                 catalog
-                    .type_rows()
-                    .into_iter()
-                    .find(|row| row.typname.eq_ignore_ascii_case(name))
+                    .type_by_name(name)
                     .map(|row| row.sql_type)
                     .ok_or_else(|| ParseError::UnsupportedType(name.clone()))?
             };

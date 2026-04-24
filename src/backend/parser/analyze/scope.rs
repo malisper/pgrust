@@ -1898,9 +1898,7 @@ fn query_columns_from_alias_definitions(
                     }
                     RawTypeName::Record => SqlType::record(RECORD_TYPE_OID),
                     RawTypeName::Named { name, .. } => catalog
-                        .type_rows()
-                        .into_iter()
-                        .find(|row| row.typname.eq_ignore_ascii_case(name))
+                        .type_by_name(name)
                         .map(|row| row.sql_type)
                         .ok_or_else(|| ParseError::UnsupportedType(name.clone()))?,
                 },
