@@ -1605,6 +1605,16 @@ fn render_explain_expr_inner_with_qualifier(
             )
         }
         Expr::Func(func) => render_explain_func_expr(func, qualifier, column_names),
+        Expr::SubPlan(subplan) => {
+            if subplan.par_param.is_empty() {
+                format!("(InitPlan {}).col1", subplan.plan_id + 1)
+            } else {
+                format!("(SubPlan {})", subplan.plan_id + 1)
+            }
+        }
+        Expr::CurrentUser => "CURRENT_USER".into(),
+        Expr::CurrentRole => "CURRENT_ROLE".into(),
+        Expr::SessionUser => "SESSION_USER".into(),
         Expr::Similar {
             expr,
             pattern,
@@ -1640,7 +1650,36 @@ fn render_explain_func_expr(
             );
         }
     }
-    format!("{func:?}")
+    let name = match func.implementation {
+        ScalarFunctionImpl::Builtin(builtin) => builtin_scalar_function_name(builtin),
+        ScalarFunctionImpl::UserDefined { proc_oid } => func
+            .funcname
+            .clone()
+            .unwrap_or_else(|| format!("proc_{proc_oid}")),
+    };
+    let args = func
+        .args
+        .iter()
+        .map(|arg| render_explain_expr_inner_with_qualifier(arg, qualifier, column_names))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{name}({args})")
+}
+
+fn builtin_scalar_function_name(func: BuiltinScalarFunction) -> String {
+    match func {
+        BuiltinScalarFunction::Lower => "lower".into(),
+        BuiltinScalarFunction::Length => "length".into(),
+        BuiltinScalarFunction::JsonBuildArray => "json_build_array".into(),
+        BuiltinScalarFunction::JsonBuildObject => "json_build_object".into(),
+        BuiltinScalarFunction::JsonbBuildArray => "jsonb_build_array".into(),
+        BuiltinScalarFunction::JsonbBuildObject => "jsonb_build_object".into(),
+        BuiltinScalarFunction::RowToJson => "row_to_json".into(),
+        BuiltinScalarFunction::ArrayToJson => "array_to_json".into(),
+        BuiltinScalarFunction::ToJson => "to_json".into(),
+        BuiltinScalarFunction::ToJsonb => "to_jsonb".into(),
+        other => format!("{other:?}"),
+    }
 }
 
 fn builtin_scalar_function_infix_operator(
