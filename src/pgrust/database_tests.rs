@@ -6306,6 +6306,161 @@ fn setup_partial_index_matrix_db(label: &str) -> Database {
 }
 
 #[test]
+fn create_hash_index_catalog_and_equality_scan() {
+    let base = temp_dir("hash_index_catalog_scan");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (id int4 not null, name text)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into items values \
+         (1, 'one'), (2, 'two'), (42, 'target'), (99, 'other')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index items_id_hash on items using hash (id) with (fillfactor = 80)",
+    )
+    .unwrap();
+
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select name from items where id = 42",
+        "items_id_hash",
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select name from items where id = 42"),
+        vec![vec![Value::Text("target".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select am.amname from pg_class c join pg_am am on am.oid = c.relam \
+             where c.relname = 'items_id_hash'",
+        ),
+        vec![vec![Value::Text("hash".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indexdef from pg_indexes where tablename = 'items' \
+             and indexname = 'items_id_hash'",
+        ),
+        vec![vec![Value::Text(
+            "CREATE INDEX items_id_hash ON public.items USING hash (id)".into()
+        )]]
+    );
+
+    let catalog = db.catalog.read().catalog_snapshot().unwrap();
+    let index = catalog.get("items_id_hash").unwrap();
+    assert_eq!(
+        index
+            .index_meta
+            .as_ref()
+            .and_then(|meta| meta.hash_options)
+            .map(|options| options.fillfactor),
+        Some(80)
+    );
+    drop(catalog);
+    drop(db);
+
+    let reopened = Database::open(&base, 16).unwrap();
+    assert_explain_uses_index(
+        &reopened,
+        1,
+        "select name from items where id = 42",
+        "items_id_hash",
+    );
+    assert_eq!(
+        query_rows(&reopened, 1, "select name from items where id = 42"),
+        vec![vec![Value::Text("target".into())]]
+    );
+}
+
+#[test]
+fn hash_expression_partial_index_matches_equality_quals() {
+    let base = temp_dir("hash_expression_partial_index");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table items (id int4 not null, name text, flag text)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into items values \
+         (1, 'Alpha', 'keep'), \
+         (2, 'Alpha', 'skip'), \
+         (3, 'Beta', 'keep')",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index items_lower_hash on items using hash ((lower(name))) where flag = 'keep'",
+    )
+    .unwrap();
+
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select id from items where lower(name) = 'alpha' and flag = 'keep'",
+        "items_lower_hash",
+    );
+    assert_explain_uses_seqscan(
+        &db,
+        1,
+        "select id from items where lower(name) = 'alpha' and flag = 'skip'",
+        "items",
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id from items where lower(name) = 'alpha' and flag = 'keep'",
+        ),
+        vec![vec![Value::Int32(1)]]
+    );
+}
+
+#[test]
+fn hash_index_rejects_unsupported_shapes_and_options() {
+    let base = temp_dir("hash_index_rejections");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table items (a int4 not null, b int4 not null)")
+        .unwrap();
+
+    match db.execute(
+        1,
+        "create unique index items_a_hash on items using hash (a)",
+    ) {
+        Err(ExecError::Parse(ParseError::FeatureNotSupported(message)))
+            if message == "access method \"hash\" does not support unique indexes" => {}
+        other => panic!("expected unique hash index rejection, got {other:?}"),
+    }
+    match db.execute(1, "create index items_ab_hash on items using hash (a, b)") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message == "access method \"hash\" does not support multicolumn indexes"
+            && sqlstate == "0A000" => {}
+        other => panic!("expected multicolumn hash index rejection, got {other:?}"),
+    }
+    match db.execute(
+        1,
+        "create index items_a_hash_badopt on items using hash (a) with (pages_per_range = 1)",
+    ) {
+        Err(ExecError::Parse(ParseError::FeatureNotSupported(feature)))
+            if feature == "hash index option \"pages_per_range\"" => {}
+        other => panic!("expected hash reloption rejection, got {other:?}"),
+    }
+}
+
+#[test]
 fn single_thread_create_insert_select() {
     let base = temp_dir("single_thread");
     let db = Database::open(&base, 16).unwrap();

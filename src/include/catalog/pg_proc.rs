@@ -12,7 +12,7 @@ use crate::include::catalog::{
     PG_NODE_TREE_TYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, RECORD_TYPE_OID, REGCLASS_TYPE_OID,
     REGCONFIG_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_TYPE_OID,
     TIMESTAMPTZ_TYPE_OID, TIMETZ_TYPE_OID, TRIGGER_TYPE_OID, TSQUERY_TYPE_OID, TSRANGE_TYPE_OID,
-    TSTZRANGE_TYPE_OID, TSVECTOR_TYPE_OID, VARBIT_TYPE_OID, XML_TYPE_OID,
+    TSTZRANGE_TYPE_OID, TSVECTOR_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_TYPE_OID, XML_TYPE_OID,
     aggregate_func_for_dynamic_range_proc_oid,
 };
 use crate::include::nodes::primnodes::{AggFunc, BuiltinScalarFunction, BuiltinWindowFunction};
@@ -106,6 +106,28 @@ pub const BRIN_MINMAX_OPCINFO_PROC_OID: u32 = 3383;
 pub const BRIN_MINMAX_ADD_VALUE_PROC_OID: u32 = 3384;
 pub const BRIN_MINMAX_CONSISTENT_PROC_OID: u32 = 3385;
 pub const BRIN_MINMAX_UNION_PROC_OID: u32 = 3386;
+pub const HASH_BOOL_PROC_OID: u32 = 76500;
+pub const HASH_INT2_PROC_OID: u32 = 76501;
+pub const HASH_INT4_PROC_OID: u32 = 76502;
+pub const HASH_INT8_PROC_OID: u32 = 76503;
+pub const HASH_OID_PROC_OID: u32 = 76504;
+pub const HASH_CHAR_PROC_OID: u32 = 76505;
+pub const HASH_NAME_PROC_OID: u32 = 76506;
+pub const HASH_TEXT_PROC_OID: u32 = 76507;
+pub const HASH_VARCHAR_PROC_OID: u32 = 76508;
+pub const HASH_BPCHAR_PROC_OID: u32 = 76509;
+pub const HASH_FLOAT4_PROC_OID: u32 = 76510;
+pub const HASH_FLOAT8_PROC_OID: u32 = 76511;
+pub const HASH_NUMERIC_PROC_OID: u32 = 76512;
+pub const HASH_TIMESTAMP_PROC_OID: u32 = 76513;
+pub const HASH_TIMESTAMPTZ_PROC_OID: u32 = 76514;
+pub const HASH_DATE_PROC_OID: u32 = 76515;
+pub const HASH_TIME_PROC_OID: u32 = 76516;
+pub const HASH_TIMETZ_PROC_OID: u32 = 76517;
+pub const HASH_BYTEA_PROC_OID: u32 = 76518;
+pub const NAME_CMP_EQ_PROC_OID: u32 = 76550;
+pub const VARCHAR_CMP_EQ_PROC_OID: u32 = 76551;
+pub const NUMERIC_CMP_EQ_PROC_OID: u32 = 76552;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PgProcRow {
@@ -3589,6 +3611,8 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
     rows.extend(spgist_support_proc_rows());
     rows.extend(brin_scalar_comparison_proc_rows());
     rows.extend(brin_support_proc_rows());
+    rows.extend(hash_equality_proc_rows());
+    rows.extend(hash_support_proc_rows());
     rows
 }
 
@@ -5543,6 +5567,70 @@ fn brin_support_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
     ]
+}
+
+fn hash_equality_proc_rows() -> Vec<PgProcRow> {
+    vec![
+        comparison_proc_row(
+            NAME_CMP_EQ_PROC_OID,
+            "nameeq",
+            &[NAME_TYPE_OID, NAME_TYPE_OID],
+        ),
+        comparison_proc_row(
+            VARCHAR_CMP_EQ_PROC_OID,
+            "varchareq",
+            &[VARCHAR_TYPE_OID, VARCHAR_TYPE_OID],
+        ),
+        comparison_proc_row(
+            NUMERIC_CMP_EQ_PROC_OID,
+            "numeric_eq",
+            &[NUMERIC_TYPE_OID, NUMERIC_TYPE_OID],
+        ),
+    ]
+}
+
+fn hash_support_proc_rows() -> Vec<PgProcRow> {
+    [
+        (HASH_BOOL_PROC_OID, "hashbool", BOOL_TYPE_OID),
+        (HASH_INT2_PROC_OID, "hashint2", INT2_TYPE_OID),
+        (HASH_INT4_PROC_OID, "hashint4", INT4_TYPE_OID),
+        (HASH_INT8_PROC_OID, "hashint8", INT8_TYPE_OID),
+        (HASH_OID_PROC_OID, "hashoid", OID_TYPE_OID),
+        (HASH_CHAR_PROC_OID, "hashchar", INTERNAL_CHAR_TYPE_OID),
+        (HASH_NAME_PROC_OID, "hashname", NAME_TYPE_OID),
+        (HASH_TEXT_PROC_OID, "hashtext", TEXT_TYPE_OID),
+        (HASH_VARCHAR_PROC_OID, "hashvarchar", VARCHAR_TYPE_OID),
+        (HASH_BPCHAR_PROC_OID, "hashbpchar", BPCHAR_TYPE_OID),
+        (HASH_FLOAT4_PROC_OID, "hashfloat4", FLOAT4_TYPE_OID),
+        (HASH_FLOAT8_PROC_OID, "hashfloat8", FLOAT8_TYPE_OID),
+        (HASH_NUMERIC_PROC_OID, "hash_numeric", NUMERIC_TYPE_OID),
+        (HASH_TIMESTAMP_PROC_OID, "hashtimestamp", TIMESTAMP_TYPE_OID),
+        (
+            HASH_TIMESTAMPTZ_PROC_OID,
+            "hashtimestamptz",
+            TIMESTAMPTZ_TYPE_OID,
+        ),
+        (HASH_DATE_PROC_OID, "hashdate", DATE_TYPE_OID),
+        (HASH_TIME_PROC_OID, "hashtime", TIME_TYPE_OID),
+        (HASH_TIMETZ_PROC_OID, "hashtimetz", TIMETZ_TYPE_OID),
+        (HASH_BYTEA_PROC_OID, "hashbytea", BYTEA_TYPE_OID),
+    ]
+    .into_iter()
+    .map(|(oid, proname, type_oid)| {
+        proc_row(
+            oid,
+            proname,
+            INT4_TYPE_OID,
+            &oid_argtypes(&[type_oid]),
+            proname,
+            1,
+            false,
+            true,
+            'f',
+            'i',
+        )
+    })
+    .collect()
 }
 
 fn brin_scalar_comparison_proc_rows() -> Vec<PgProcRow> {

@@ -6668,6 +6668,7 @@ fn index_property_builtins_report_am_and_index_capabilities() {
                 indisexclusion: false,
                 brin_options: None,
                 gin_options: None,
+                hash_options: None,
             },
             None,
         )
@@ -6688,6 +6689,7 @@ fn index_property_builtins_report_am_and_index_capabilities() {
                 indisexclusion: false,
                 brin_options: None,
                 gin_options: None,
+                hash_options: None,
             },
             None,
         )
@@ -6708,6 +6710,7 @@ fn index_property_builtins_report_am_and_index_capabilities() {
                 indisexclusion: false,
                 brin_options: None,
                 gin_options: None,
+                hash_options: None,
             },
             None,
         )

@@ -57,7 +57,8 @@ enum IndexStrategyLookup {
 
 #[derive(Debug, Clone)]
 struct IndexableQual {
-    column: usize,
+    column: Option<usize>,
+    key_expr: Expr,
     lookup: IndexStrategyLookup,
     argument: IndexScanKeyArgument,
     expr: Expr,

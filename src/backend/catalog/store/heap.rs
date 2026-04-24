@@ -500,6 +500,7 @@ impl CatalogStore {
             indisexclusion: false,
             brin_options: None,
             gin_options: None,
+            hash_options: None,
         };
         self.create_index_for_relation_with_options(
             index_name,
@@ -2911,6 +2912,7 @@ impl CatalogStore {
             indisexclusion: false,
             brin_options: None,
             gin_options: None,
+            hash_options: None,
         };
         self.create_index_for_relation_mvcc_with_options(
             index_name,
@@ -5425,6 +5427,7 @@ fn build_index_entry_with_relkind(
                 .map(str::to_string),
             brin_options: resolved_options.brin_options.clone(),
             gin_options: resolved_options.gin_options.clone(),
+            hash_options: resolved_options.hash_options,
         }),
     };
     control.next_rel_number = control
@@ -5493,6 +5496,7 @@ fn build_toast_catalog_changes(
             indisexclusion: false,
             brin_options: None,
             gin_options: None,
+            hash_options: None,
         },
         None,
         control,
@@ -5551,6 +5555,7 @@ fn default_index_build_options_for_relation(
         indisexclusion: false,
         brin_options: None,
         gin_options: None,
+        hash_options: None,
     })
 }
 
@@ -6978,6 +6983,7 @@ fn catalog_entry_from_relation_row(
             indpred: index.indpred.clone(),
             brin_options: index.brin_options.clone(),
             gin_options: index.gin_options.clone(),
+            hash_options: index.hash_options,
         }),
     }
 }
@@ -7343,6 +7349,7 @@ fn catalog_entry_from_visible_relation(
             indpred: index.indpred.clone(),
             brin_options: index.brin_options.clone(),
             gin_options: index.gin_options.clone(),
+            hash_options: index.hash_options,
         }),
     })
 }
@@ -7394,6 +7401,7 @@ fn catalog_entry_from_relation(relation: &RelCacheEntry) -> CatalogEntry {
             indpred: index.indpred.clone(),
             brin_options: index.brin_options.clone(),
             gin_options: index.gin_options.clone(),
+            hash_options: index.hash_options,
         }),
     }
 }

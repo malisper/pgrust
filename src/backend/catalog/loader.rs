@@ -46,10 +46,11 @@ use crate::include::access::brin_page::{
     BRIN_PAGE_CONTENT_OFFSET, BrinMetaPageData, brin_is_meta_page,
 };
 use crate::include::access::gin::{GinOptions, gin_metapage_data};
+use crate::include::access::hash::{HashOptions, hash_metapage_data};
 use crate::include::catalog::{
-    BRIN_AM_OID, BootstrapCatalogKind, GIN_AM_OID, PgAmRow, PgAmopRow, PgAmprocRow, PgAttrdefRow,
-    PgAttributeRow, PgClassRow, PgCollationRow, PgConstraintRow, PgIndexRow, PgNamespaceRow,
-    PgOpclassRow, PgOpfamilyRow, PgTypeRow, bootstrap_catalog_kinds,
+    BRIN_AM_OID, BootstrapCatalogKind, GIN_AM_OID, HASH_AM_OID, PgAmRow, PgAmopRow, PgAmprocRow,
+    PgAttrdefRow, PgAttributeRow, PgClassRow, PgCollationRow, PgConstraintRow, PgIndexRow,
+    PgNamespaceRow, PgOpclassRow, PgOpfamilyRow, PgTypeRow, bootstrap_catalog_kinds,
     bootstrap_pg_auth_members_rows, bootstrap_pg_authid_rows, bootstrap_pg_database_rows,
     bootstrap_pg_tablespace_rows, bootstrap_relation_desc, system_catalog_index_by_oid,
 };
@@ -403,6 +404,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
         let rel = catalog_relation_locator(row.oid, row.relfilenode, db_oid);
         let brin_options = load_brin_options_from_metapage(base_dir, rel, row.relam, row.relkind);
         let gin_options = load_gin_options_from_metapage(base_dir, rel, row.relam, row.relkind);
+        let hash_options = load_hash_options_from_metapage(base_dir, rel, row.relam, row.relkind);
         catalog.insert(
             name,
             CatalogEntry {
@@ -452,6 +454,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                         indpred: index.indpred.clone(),
                         brin_options: brin_options.clone(),
                         gin_options: gin_options.clone(),
+                        hash_options,
                     }),
             },
         );
@@ -517,6 +520,29 @@ fn load_gin_options_from_metapage(
     let mut page = [0u8; BLCKSZ];
     smgr.read_block(rel, ForkNumber::Main, 0, &mut page).ok()?;
     gin_metapage_data(&page).ok().map(|meta| meta.options())
+}
+
+fn load_hash_options_from_metapage(
+    base_dir: &Path,
+    rel: RelFileLocator,
+    am_oid: u32,
+    relkind: char,
+) -> Option<HashOptions> {
+    if am_oid != HASH_AM_OID || relkind != 'i' || base_dir.as_os_str().is_empty() {
+        return None;
+    }
+
+    let mut smgr = MdStorageManager::new(base_dir);
+    if !smgr.exists(rel, ForkNumber::Main) || smgr.nblocks(rel, ForkNumber::Main).ok()? == 0 {
+        return None;
+    }
+
+    let mut page = [0u8; BLCKSZ];
+    smgr.read_block(rel, ForkNumber::Main, 0, &mut page).ok()?;
+    let meta = hash_metapage_data(&page).ok()?;
+    Some(HashOptions {
+        fillfactor: meta.hashm_ffactor as u16,
+    })
 }
 
 fn load_brin_options_from_metapage(

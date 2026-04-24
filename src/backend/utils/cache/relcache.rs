@@ -12,6 +12,7 @@ use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name, sql_type_oid};
 use crate::include::access::brin::BrinOptions;
 use crate::include::access::gin::GinOptions;
+use crate::include::access::hash::HashOptions;
 use crate::include::catalog::{
     ANYOID, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, PG_CATALOG_NAMESPACE_OID,
     PG_CONSTRAINT_RELATION_OID, PgPartitionedTableRow, bootstrap_catalog_kinds,
@@ -74,6 +75,7 @@ pub struct IndexRelCacheEntry {
     pub rd_indpred: Option<Option<Expr>>,
     pub brin_options: Option<BrinOptions>,
     pub gin_options: Option<GinOptions>,
+    pub hash_options: Option<HashOptions>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -548,6 +550,7 @@ impl RelCache {
                             rd_indpred: None,
                             brin_options: None,
                             gin_options: None,
+                            hash_options: None,
                         };
                     };
                     let indclass = index.indclass.clone();
@@ -585,6 +588,7 @@ impl RelCache {
                         rd_indpred: None,
                         brin_options: None,
                         gin_options: None,
+                        hash_options: None,
                     }
                 }),
             };
@@ -768,6 +772,7 @@ fn from_catalog_entry(entry: &CatalogEntry, support_lookup: &IndexSupportLookup)
                 rd_indpred: None,
                 brin_options: index.brin_options.clone(),
                 gin_options: index.gin_options.clone(),
+                hash_options: index.hash_options,
             }
         }),
     }
@@ -854,6 +859,7 @@ mod tests {
                     indisexclusion: false,
                     brin_options: None,
                     gin_options: None,
+                    hash_options: None,
                 },
             )
             .unwrap();
@@ -904,6 +910,7 @@ mod tests {
                     indisexclusion: false,
                     brin_options: None,
                     gin_options: None,
+                    hash_options: None,
                 },
             )
             .unwrap();
@@ -962,6 +969,7 @@ mod tests {
             rd_indpred: None,
             brin_options: None,
             gin_options: None,
+            hash_options: None,
         };
         let contains_proc_oid = bootstrap_pg_operator_rows()
             .into_iter()
@@ -1028,6 +1036,7 @@ mod tests {
             rd_indpred: None,
             brin_options: None,
             gin_options: None,
+            hash_options: None,
         };
         let distance_operator = bootstrap_pg_operator_rows()
             .into_iter()

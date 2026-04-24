@@ -62,6 +62,7 @@ pub const RM_XACT_ID: u8 = 2;
 pub const RM_BTREE_ID: u8 = 3;
 pub const RM_XLOG_ID: u8 = 4;
 pub const RM_GIST_ID: u8 = 5;
+pub const RM_HASH_ID: u8 = 6;
 
 pub const REGBUF_STANDARD: u8 = 1 << 0;
 pub const REGBUF_WILL_INIT: u8 = 1 << 1;
@@ -85,6 +86,13 @@ pub const XLOG_GIST_SPLIT: u8 = 0x12;
 pub const XLOG_GIST_PAGE_UPDATE: u8 = 0x13;
 pub const XLOG_GIST_SPLIT_COMPLETE: u8 = 0x14;
 pub const XLOG_GIST_VACUUM: u8 = 0x15;
+pub const XLOG_HASH_INIT_META_PAGE: u8 = 0x10;
+pub const XLOG_HASH_INSERT: u8 = 0x20;
+pub const XLOG_HASH_ADD_OVFL_PAGE: u8 = 0x30;
+pub const XLOG_HASH_SPLIT_ALLOCATE_PAGE: u8 = 0x40;
+pub const XLOG_HASH_SPLIT_PAGE: u8 = 0x50;
+pub const XLOG_HASH_DELETE: u8 = 0x60;
+pub const XLOG_HASH_VACUUM: u8 = 0x70;
 
 fn align_up(value: u64, align: u64) -> u64 {
     debug_assert!(align.is_power_of_two());
@@ -266,6 +274,12 @@ pub enum WalRecord {
         page: Box<[u8; PAGE_SIZE]>,
     },
     GistPageImage {
+        xid: u32,
+        tag: BufferTag,
+        page: Box<[u8; PAGE_SIZE]>,
+        info: u8,
+    },
+    HashPageImage {
         xid: u32,
         tag: BufferTag,
         page: Box<[u8; PAGE_SIZE]>,
@@ -830,6 +844,30 @@ impl WalReader {
                     .ok_or_else(|| WalError::Corrupt("gist record missing page image".into()))?
                     .clone();
                 WalRecord::GistPageImage {
+                    xid: decoded.xid,
+                    tag: block.tag,
+                    page,
+                    info: decoded.info,
+                }
+            }
+            (RM_HASH_ID, XLOG_FPI)
+            | (RM_HASH_ID, XLOG_HASH_INIT_META_PAGE)
+            | (RM_HASH_ID, XLOG_HASH_INSERT)
+            | (RM_HASH_ID, XLOG_HASH_ADD_OVFL_PAGE)
+            | (RM_HASH_ID, XLOG_HASH_SPLIT_ALLOCATE_PAGE)
+            | (RM_HASH_ID, XLOG_HASH_SPLIT_PAGE)
+            | (RM_HASH_ID, XLOG_HASH_DELETE)
+            | (RM_HASH_ID, XLOG_HASH_VACUUM) => {
+                let block = decoded
+                    .blocks
+                    .first()
+                    .ok_or_else(|| WalError::Corrupt("hash record missing block ref".into()))?;
+                let page = block
+                    .image
+                    .as_ref()
+                    .ok_or_else(|| WalError::Corrupt("hash record missing page image".into()))?
+                    .clone();
+                WalRecord::HashPageImage {
                     xid: decoded.xid,
                     tag: block.tag,
                     page,

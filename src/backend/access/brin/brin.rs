@@ -826,6 +826,7 @@ mod tests {
             rd_indpred: None,
             brin_options: Some(BrinOptions { pages_per_range }),
             gin_options: None,
+            hash_options: None,
         }
     }
 
