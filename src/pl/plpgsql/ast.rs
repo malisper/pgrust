@@ -16,7 +16,14 @@ pub struct VarDecl {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AliasDecl {
     pub name: String,
-    pub param_index: usize,
+    pub target: AliasTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AliasTarget {
+    Parameter(usize),
+    New,
+    Old,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

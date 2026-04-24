@@ -9,7 +9,7 @@ block = { declare_section? ~ kw_begin ~ stmt* ~ kw_end }
 declare_section = { kw_declare ~ (!kw_begin ~ decl_stmt)+ }
 decl_stmt = { alias_decl | var_decl }
 var_decl = { !kw_begin ~ ident ~ type_name_text ~ default_clause? ~ semi }
-alias_decl = { !kw_begin ~ ident ~ kw_alias ~ kw_for ~ positional_param ~ semi }
+alias_decl = { !kw_begin ~ ident ~ kw_alias ~ kw_for ~ alias_target ~ semi }
 default_clause = { assign_op ~ expr_until_semi }
 
 stmt = { nested_block_stmt | null_stmt | if_stmt | while_stmt | for_stmt | raise_stmt | return_query_stmt | return_next_stmt | return_stmt | perform_stmt | assign_stmt | exec_sql_stmt }
@@ -32,6 +32,7 @@ exec_sql_stmt = { !stmt_keyword_start ~ exec_sql_text ~ semi }
 return_query_sql = @{ expr_chunk+ }
 exec_sql_text = @{ expr_chunk+ }
 positional_param = @{ "$" ~ ASCII_DIGIT+ }
+alias_target = { positional_param | ident }
 raise_level = { kw_notice | kw_warning | kw_exception }
 stmt_keyword_start = _{
     kw_begin
@@ -53,9 +54,13 @@ ident = { quoted_ident | bare_ident }
 bare_ident = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 quoted_ident = @{ "\"" ~ ("\"\"" | !("\"") ~ ANY)* ~ "\"" }
 
-sql_string = @{ escape_string | string_literal }
+sql_string = @{ escape_string | dollar_string_literal | string_literal }
 string_literal = @{ "'" ~ ( "''" | (!"'" ~ ANY) )* ~ "'" }
 escape_string = @{ (^"e" | ^"E") ~ string_literal }
+dollar_string_literal = @{ dollar_quote_start ~ dollar_string_body ~ dollar_quote_end }
+dollar_quote_start = ${ "$" ~ PUSH(bare_ident?) ~ "$" }
+dollar_quote_end = ${ "$" ~ POP ~ "$" }
+dollar_string_body = { (!( "$" ~ PEEK ~ "$") ~ ANY)* }
 semi = _{ ";" }
 comma = _{ "," }
 assign_op = _{ ":=" | "=" }

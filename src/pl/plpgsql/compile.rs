@@ -21,8 +21,8 @@ use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{QueryColumn, TargetEntry, Var, user_attrno};
 
 use super::ast::{
-    AssignTarget, Block, Decl, ForQuerySource, ForTarget, RaiseLevel, ReturnQueryKind, Stmt,
-    VarDecl,
+    AliasTarget, AssignTarget, Block, Decl, ForQuerySource, ForTarget, RaiseLevel, ReturnQueryKind,
+    Stmt, VarDecl,
 };
 use super::gram::parse_block;
 
@@ -253,6 +253,7 @@ struct ScopeVar {
 struct RelationScopeVar {
     name: String,
     columns: Vec<SlotScopeColumn>,
+    trigger_row: Option<TriggerReturnedRow>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -343,8 +344,47 @@ impl CompileEnv {
         self.relation_scopes.push(RelationScopeVar {
             name: name.to_ascii_lowercase(),
             columns,
+            trigger_row: None,
         });
         CompiledTriggerRelation { slots, field_names }
+    }
+
+    fn define_trigger_relation_scope(
+        &mut self,
+        name: &str,
+        desc: &RelationDesc,
+        trigger_row: TriggerReturnedRow,
+    ) -> CompiledTriggerRelation {
+        let relation = self.define_relation_scope(name, desc);
+        if let Some(scope) = self
+            .relation_scopes
+            .iter_mut()
+            .find(|scope| scope.name.eq_ignore_ascii_case(name))
+        {
+            scope.trigger_row = Some(trigger_row);
+        }
+        relation
+    }
+
+    fn define_relation_alias(&mut self, name: &str, target: TriggerReturnedRow) -> bool {
+        let source_name = match target {
+            TriggerReturnedRow::New => "new",
+            TriggerReturnedRow::Old => "old",
+        };
+        let Some(source) = self
+            .relation_scopes
+            .iter()
+            .find(|scope| scope.name.eq_ignore_ascii_case(source_name))
+            .cloned()
+        else {
+            return false;
+        };
+        self.relation_scopes.push(RelationScopeVar {
+            name: name.to_ascii_lowercase(),
+            columns: source.columns,
+            trigger_row: Some(target),
+        });
+        true
     }
 
     fn get_relation_field(&self, relation: &str, field: &str) -> Option<&SlotScopeColumn> {
@@ -357,6 +397,13 @@ impl CompileEnv {
                     .iter()
                     .find(|column| !column.hidden && column.name.eq_ignore_ascii_case(field))
             })
+    }
+
+    fn trigger_relation_return_row(&self, relation: &str) -> Option<TriggerReturnedRow> {
+        self.relation_scopes
+            .iter()
+            .find(|scope| scope.name.eq_ignore_ascii_case(relation))
+            .and_then(|scope| scope.trigger_row)
     }
 
     fn visible_columns(&self) -> Vec<(String, SqlType)> {
@@ -679,14 +726,34 @@ fn compile_alias_decl(
     decl: &super::ast::AliasDecl,
     env: &mut CompileEnv,
 ) -> Result<(), ParseError> {
-    let parameter = env
-        .get_parameter(decl.param_index)
-        .cloned()
-        .ok_or_else(|| ParseError::UnexpectedToken {
-            expected: "function parameter referenced by ALIAS FOR",
-            actual: format!("${}", decl.param_index),
-        })?;
-    env.define_alias(&decl.name, parameter.slot, parameter.ty);
+    match decl.target {
+        AliasTarget::Parameter(index) => {
+            let parameter =
+                env.get_parameter(index)
+                    .cloned()
+                    .ok_or_else(|| ParseError::UnexpectedToken {
+                        expected: "function parameter referenced by ALIAS FOR",
+                        actual: format!("${index}"),
+                    })?;
+            env.define_alias(&decl.name, parameter.slot, parameter.ty);
+        }
+        AliasTarget::New => {
+            if !env.define_relation_alias(&decl.name, TriggerReturnedRow::New) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "trigger NEW row available for ALIAS FOR",
+                    actual: "NEW".into(),
+                });
+            }
+        }
+        AliasTarget::Old => {
+            if !env.define_relation_alias(&decl.name, TriggerReturnedRow::Old) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "trigger OLD row available for ALIAS FOR",
+                    actual: "OLD".into(),
+                });
+            }
+        }
+    }
     Ok(())
 }
 
@@ -801,17 +868,12 @@ fn compile_return_stmt(
     };
     match (contract, expr) {
         (FunctionReturnContract::Trigger { .. }, Some(expr))
-            if expr.trim().eq_ignore_ascii_case("new") =>
+            if env.trigger_relation_return_row(expr.trim()).is_some() =>
         {
             Ok(CompiledStmt::ReturnTriggerRow {
-                row: TriggerReturnedRow::New,
-            })
-        }
-        (FunctionReturnContract::Trigger { .. }, Some(expr))
-            if expr.trim().eq_ignore_ascii_case("old") =>
-        {
-            Ok(CompiledStmt::ReturnTriggerRow {
-                row: TriggerReturnedRow::Old,
+                row: env
+                    .trigger_relation_return_row(expr.trim())
+                    .ok_or(ParseError::UnexpectedEof)?,
             })
         }
         (FunctionReturnContract::Trigger { .. }, Some(expr))
@@ -2350,8 +2412,8 @@ fn normalize_plpgsql_from_item(item: FromItem, env: &CompileEnv) -> FromItem {
 }
 
 fn seed_trigger_env(env: &mut CompileEnv, relation_desc: &RelationDesc) -> CompiledTriggerBindings {
-    let new_row = env.define_relation_scope("new", relation_desc);
-    let old_row = env.define_relation_scope("old", relation_desc);
+    let new_row = env.define_trigger_relation_scope("new", relation_desc, TriggerReturnedRow::New);
+    let old_row = env.define_trigger_relation_scope("old", relation_desc, TriggerReturnedRow::Old);
     let tg_name_slot = env.define_var("tg_name", SqlType::new(SqlTypeKind::Text));
     let tg_op_slot = env.define_var("tg_op", SqlType::new(SqlTypeKind::Text));
     let tg_when_slot = env.define_var("tg_when", SqlType::new(SqlTypeKind::Text));
@@ -2436,7 +2498,16 @@ pub(crate) fn compile_decl_type(type_name: &str) -> Result<SqlType, ParseError> 
 
 #[cfg(test)]
 mod tests {
-    use super::rewrite_plpgsql_query_condition;
+    use super::*;
+    use crate::backend::parser::BoundRelation;
+
+    struct EmptyCatalog;
+
+    impl CatalogLookup for EmptyCatalog {
+        fn lookup_any_relation(&self, _name: &str) -> Option<BoundRelation> {
+            None
+        }
+    }
 
     #[test]
     fn rewrites_plpgsql_count_condition_with_from_clause() {
@@ -2460,5 +2531,34 @@ mod tests {
             rewrite_plpgsql_query_condition("new.slotno < 1 or new.slotno > hubrec.nslots"),
             None
         );
+    }
+
+    #[test]
+    fn aliases_trigger_relation_scope() {
+        let mut env = CompileEnv::default();
+        let desc = RelationDesc {
+            columns: Vec::new(),
+        };
+        let bindings = seed_trigger_env(&mut env, &desc);
+
+        assert!(env.define_relation_alias("ps", TriggerReturnedRow::New));
+        assert_eq!(
+            env.trigger_relation_return_row("ps"),
+            Some(TriggerReturnedRow::New)
+        );
+
+        let stmt = compile_return_stmt(
+            Some("ps"),
+            &EmptyCatalog,
+            &env,
+            Some(&FunctionReturnContract::Trigger { bindings }),
+        )
+        .unwrap();
+        assert!(matches!(
+            stmt,
+            CompiledStmt::ReturnTriggerRow {
+                row: TriggerReturnedRow::New
+            }
+        ));
     }
 }
