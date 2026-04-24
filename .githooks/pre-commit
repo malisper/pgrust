@@ -51,12 +51,28 @@ STAGED_ADDED_FILES="$(git diff --cached --name-only --diff-filter=A -- ':(exclud
 
 hits=()
 
+# Patterns in redactions.txt that are too broad to flag at commit time.
+# filter-repo still scrubs them at publish; the hook just doesn't block on
+# them. Keep this list small — every skipped pattern is a potential leak
+# from commit to scrub. Specifically: "shipment" is a common English word
+# and would false-positive on legitimate docs/tests/commit messages.
+HOOK_SKIP_PATTERNS=("shipment")
+
+is_skipped() {
+    local p="$1"
+    for s in "${HOOK_SKIP_PATTERNS[@]}"; do
+        [[ "$p" == "$s" ]] && return 0
+    done
+    return 1
+}
+
 # Content patterns from redactions.txt (LHS of `==>`).
 while IFS= read -r line; do
     [[ -z "$line" ]] && continue
     [[ "${line:0:1}" == "#" ]] && continue
     pattern="${line%%==>*}"
     [[ -z "$pattern" ]] && continue
+    is_skipped "$pattern" && continue
     if [[ -n "$STAGED_ADDITIONS" ]] && printf '%s\n' "$STAGED_ADDITIONS" | grep -qF -- "$pattern"; then
         hits+=("content: $pattern")
     fi
