@@ -16373,8 +16373,8 @@ fn insert_sql_numeric_round_trips_through_storage() {
 fn scalar_subquery_target_list_returns_per_row_counts() {
     let mut harness = seed_people_and_pets("scalar_subquery_target_list");
     assert_query_rows(
-            harness
-                .execute(
+        harness
+            .execute(
                     INVALID_TRANSACTION_ID,
                     "select p.name, (select count(*) from pets q where q.owner_id = p.id) from people p order by p.id",
                 )
@@ -16383,8 +16383,25 @@ fn scalar_subquery_target_list_returns_per_row_counts() {
                 vec![Value::Text("alice".into()), Value::Int64(2)],
                 vec![Value::Text("bob".into()), Value::Int64(1)],
                 vec![Value::Text("carol".into()), Value::Int64(0)],
-            ],
-        );
+        ],
+    );
+}
+
+#[test]
+fn scalar_subquery_can_cast_outer_whole_row_to_text() {
+    let base = temp_dir("scalar_subquery_outer_whole_row_text");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select (select (a.*)::text) from (values (42)) a(id)",
+        )
+        .unwrap(),
+        vec![vec![Value::Text("(42)".into())]],
+    );
 }
 
 #[test]
