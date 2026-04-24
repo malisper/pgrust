@@ -44,13 +44,13 @@ In Claude Code specifically: prefer the `EnterWorktree` tool when starting work,
 
 Rust formatting is pinned: `rust-toolchain.toml` fixes the rustc/rustfmt version and `rustfmt.toml` fixes the style edition. CI fails any PR that is not formatted with that exact rustfmt.
 
-The repo ships a versioned pre-commit hook in `.githooks/pre-commit` that runs `cargo fmt -- --check`. Activate it with one command per clone (and per worktree, since worktrees have their own git config):
+The repo ships a versioned pre-commit hook in `.githooks/pre-commit` that runs `cargo fmt -- --check` and a content-hygiene check for patterns that would be scrubbed by the release flow. Activate it with one command per clone (and per worktree, since worktrees have their own git config):
 
 ```sh
 bash scripts/setup-dev.sh
 ```
 
-This sets `core.hooksPath` to `.githooks` for that clone. After it runs, every `git commit` is rejected in <1 second if anything is unformatted. The setup is idempotent and safe to re-run.
+This sets `core.hooksPath` to `.githooks` for that clone. After it runs, every `git commit` is rejected in <1 second if anything is unformatted. The hygiene check is warn-only until 2026-05-01, then it also blocks — see the hook file itself for details. The setup is idempotent and safe to re-run.
 
 - After editing any `*.rs` file, run `cargo fmt` before considering the task done. Running from inside the repo uses the pinned toolchain automatically.
 - Do not reformat files you did not otherwise touch. If you notice unrelated drift, leave it — a separate fmt-only PR is the right cleanup path. Agents mixing stray reformatting into feature PRs is the exact churn this policy exists to prevent.
