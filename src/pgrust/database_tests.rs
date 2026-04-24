@@ -1278,6 +1278,18 @@ fn query_rows(db: &Database, client_id: u32, sql: &str) -> Vec<Vec<Value>> {
     }
 }
 
+fn insert_items_sql(range: std::ops::Range<i32>, note_prefix: &str) -> String {
+    let values = range
+        .map(|id| format!("({id}, '{note_prefix}{id}')"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("insert into items values {values}")
+}
+
+fn delete_items_before_sql(upper_bound: i32) -> String {
+    format!("delete from items where id < {upper_bound}")
+}
+
 fn session_query_rows(session: &mut Session, db: &Database, sql: &str) -> Vec<Vec<Value>> {
     match session.execute(db, sql).unwrap() {
         StatementResult::Query { rows, .. } => rows,
@@ -18756,16 +18768,10 @@ fn reopening_database_replays_btree_wal() {
         let db = Database::open_with_options(&base, DatabaseOpenOptions::new(256)).unwrap();
         db.execute(1, "create table items (id int4 not null, note text)")
             .unwrap();
-        for i in 0..400 {
-            db.execute(1, &format!("insert into items values ({i}, 'before{i}')"))
-                .unwrap();
-        }
+        db.execute(1, &insert_items_sql(0..400, "before")).unwrap();
         db.execute(1, "create index items_id_idx on items (id)")
             .unwrap();
-        for i in 400..900 {
-            db.execute(1, &format!("insert into items values ({i}, 'after{i}')"))
-                .unwrap();
-        }
+        db.execute(1, &insert_items_sql(400..900, "after")).unwrap();
         assert_explain_uses_index(
             &db,
             1,
@@ -18833,21 +18839,15 @@ fn vacuum_records_recyclable_btree_pages_in_fsm() {
     session
         .execute(&db, "create table items (id int4 not null, note text)")
         .unwrap();
-    for i in 0..1500 {
-        session
-            .execute(&db, &format!("insert into items values ({i}, 'row{i}')"))
-            .unwrap();
-    }
+    session
+        .execute(&db, &insert_items_sql(0..1500, "row"))
+        .unwrap();
     session
         .execute(&db, "create index items_id_idx on items (id)")
         .unwrap();
 
     let index_rel = relation_locator_for(&db, 1, "items_id_idx");
-    for i in 0..900 {
-        session
-            .execute(&db, &format!("delete from items where id = {i}"))
-            .unwrap();
-    }
+    session.execute(&db, &delete_items_before_sql(900)).unwrap();
     session.execute(&db, "vacuum items").unwrap();
 
     let fsm_page = read_relation_fork_block(
@@ -18877,21 +18877,17 @@ fn vacuum_reused_btree_pages_prevent_relation_growth() {
     session
         .execute(&db, "create table items (id int4 not null, note text)")
         .unwrap();
-    for i in 0..1800 {
-        session
-            .execute(&db, &format!("insert into items values ({i}, 'row{i}')"))
-            .unwrap();
-    }
+    session
+        .execute(&db, &insert_items_sql(0..1800, "row"))
+        .unwrap();
     session
         .execute(&db, "create index items_id_idx on items (id)")
         .unwrap();
 
     let index_rel = relation_locator_for(&db, 1, "items_id_idx");
-    for i in 0..1200 {
-        session
-            .execute(&db, &format!("delete from items where id = {i}"))
-            .unwrap();
-    }
+    session
+        .execute(&db, &delete_items_before_sql(1200))
+        .unwrap();
     session.execute(&db, "vacuum items").unwrap();
 
     let blocks_after_vacuum = relation_fork_nblocks(
@@ -18900,11 +18896,9 @@ fn vacuum_reused_btree_pages_prevent_relation_growth() {
         crate::backend::storage::smgr::ForkNumber::Main,
     );
 
-    for i in 2000..2600 {
-        session
-            .execute(&db, &format!("insert into items values ({i}, 'row{i}')"))
-            .unwrap();
-    }
+    session
+        .execute(&db, &insert_items_sql(2000..2600, "row"))
+        .unwrap();
 
     let blocks_after_reinsert = relation_fork_nblocks(
         &db,

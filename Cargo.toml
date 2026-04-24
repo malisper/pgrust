@@ -10,7 +10,7 @@ readme = "README.md"
 [lib]
 name = "pgrust"
 path = "src/lib.rs"
-crate-type = ["rlib", "cdylib"]
+crate-type = ["rlib"]
 
 [features]
 default = []
