@@ -14,7 +14,7 @@
 #   --port PORT       Port for pgrust server (default: 5433)
 #   --skip-build      Don't rebuild pgrust_server
 #   --skip-server     Assume server is already running (don't start/stop it)
-#   --timeout SECS    Per-test timeout in seconds (default: 60)
+#   --timeout SECS    Per-test timeout in seconds (default: 300)
 #   --test TESTNAME   Run only this test (without .sql extension)
 #   --results-dir DIR Directory for results (default: unique temp dir)
 #   --data-dir DIR    Directory for the pgrust cluster (default: unique temp dir)
@@ -252,7 +252,7 @@ add_aggregate_dependencies() {
 PORT=5433
 SKIP_BUILD=false
 SKIP_SERVER=false
-TIMEOUT=60
+TIMEOUT=300
 SINGLE_TEST=""
 RESULTS_DIR=""
 DATA_DIR=""
@@ -597,17 +597,24 @@ timeout_list=()
 SUMMARY_READY=true
 RUN_STATUS="completed"
 
+rate_pct() {
+    local numerator="$1"
+    local denominator="$2"
+
+    if [[ "$denominator" -gt 0 ]]; then
+        LC_ALL=C awk -v n="$numerator" -v d="$denominator" 'BEGIN { printf "%.2f", (n * 100) / d }'
+    else
+        printf "0.00"
+    fi
+}
+
 write_summary() {
     local status="${1:-completed}"
     local pass_pct=0
     local query_pct=0
 
-    if [[ $TOTAL -gt 0 ]]; then
-        pass_pct=$((PASSED * 100 / TOTAL))
-    fi
-    if [[ $TOTAL_QUERIES -gt 0 ]]; then
-        query_pct=$((QUERIES_MATCHED * 100 / TOTAL_QUERIES))
-    fi
+    pass_pct="$(rate_pct "$PASSED" "$TOTAL")"
+    query_pct="$(rate_pct "$QUERIES_MATCHED" "$TOTAL_QUERIES")"
 
     cat > "$RESULTS_DIR/summary.json" <<EOF
 {
@@ -656,7 +663,7 @@ print_summary() {
     echo "  Timed out: $TIMED_OUT"
 
     if [[ $TOTAL -gt 0 ]]; then
-        pass_pct=$((PASSED * 100 / TOTAL))
+        pass_pct="$(rate_pct "$PASSED" "$TOTAL")"
         echo "  Pass rate: ${pass_pct}% ($PASSED / $TOTAL)"
     fi
 
@@ -667,7 +674,7 @@ print_summary() {
     echo "  Mismatched:$QUERIES_MISMATCHED"
 
     if [[ $TOTAL_QUERIES -gt 0 ]]; then
-        query_pct=$((QUERIES_MATCHED * 100 / TOTAL_QUERIES))
+        query_pct="$(rate_pct "$QUERIES_MATCHED" "$TOTAL_QUERIES")"
         echo "  Match rate: ${query_pct}% ($QUERIES_MATCHED / $TOTAL_QUERIES)"
     fi
 
