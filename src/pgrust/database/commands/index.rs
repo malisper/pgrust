@@ -122,6 +122,8 @@ impl Database {
             amproc_entries: support.amproc_entries,
             indexprs: meta.indexprs.clone(),
             indpred: meta.indpred.clone(),
+            rd_indexprs: None,
+            rd_indpred: None,
             brin_options: meta.brin_options.clone(),
         })
     }
@@ -901,28 +903,31 @@ impl Database {
                 None,
                 &mut ctx,
             )?;
+            let mut relcache_index_meta = relcache_index_meta.clone();
+            let index_exprs = crate::backend::parser::relation_get_index_expressions(
+                &mut relcache_index_meta,
+                &relation.desc,
+                &ctx.catalog
+                    .clone()
+                    .expect("visible catalog for expression index build"),
+            )
+            .map_err(ExecError::Parse)?;
+            let index_predicate = crate::backend::parser::relation_get_index_predicate(
+                &mut relcache_index_meta,
+                &relation.desc,
+                &ctx.catalog
+                    .clone()
+                    .expect("visible catalog for expression index build"),
+            )
+            .map_err(ExecError::Parse)?;
             let bound_index = crate::backend::parser::BoundIndexRelation {
                 name: index_name.to_string(),
                 rel: index_entry.rel,
                 relation_oid: index_entry.relation_oid,
                 desc: index_entry.desc.clone(),
                 index_meta: relcache_index_meta.clone(),
-                index_exprs: crate::backend::parser::bind_index_exprs(
-                    &relcache_index_meta,
-                    &relation.desc,
-                    &ctx.catalog
-                        .clone()
-                        .expect("visible catalog for expression index build"),
-                )
-                .map_err(ExecError::Parse)?,
-                index_predicate: crate::backend::parser::bind_index_predicate(
-                    &relcache_index_meta,
-                    &relation.desc,
-                    &ctx.catalog
-                        .clone()
-                        .expect("visible catalog for expression index build"),
-                )
-                .map_err(ExecError::Parse)?,
+                index_exprs,
+                index_predicate,
             };
             let mut index_meta = bound_index.index_meta.clone();
             index_meta.indkey = (1..=index_meta.indkey.len())

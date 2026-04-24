@@ -241,7 +241,7 @@ impl Database {
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let relation = match lookup_rule_relation_for_ddl(&catalog, &drop_stmt.relation_name) {
             Ok(relation) => relation,
-            Err(err) if drop_stmt.if_exists => return Ok(StatementResult::AffectedRows(0)),
+            Err(_err) if drop_stmt.if_exists => return Ok(StatementResult::AffectedRows(0)),
             Err(err) => return Err(err),
         };
         ensure_relation_owner(self, client_id, &relation, &drop_stmt.relation_name)?;

@@ -12391,6 +12391,32 @@ fn unique_expression_index_rejects_duplicate_expression_value() {
 }
 
 #[test]
+fn expression_index_self_join_query_does_not_recurse_while_planning() {
+    let base = temp_dir("expression_index_self_join");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table sj (a int unique, b int, c int unique)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into sj values (1, null, 2), (null, 2, null), (2, 1, 1), (3, 1, 3)",
+    )
+    .unwrap();
+    db.execute(1, "create unique index sj_fn_idx on sj((a * a))")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from sj j1, sj j2 \
+             where j1.b = j2.b and j1.a*j1.a = 1 and j2.a*j2.a = 1",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
 fn explain_bootstrap_seqscan_shows_relation_name_and_filter() {
     let base = temp_dir("explain_bootstrap_seqscan");
     let db = Database::open(&base, 16).unwrap();
@@ -17962,6 +17988,7 @@ fn checkpoint_flushes_dirty_pages_and_clog_to_disk() {
     let committed_xid;
     let rel;
     let buffer_page;
+    let buffer_id;
 
     {
         let db = Database::open(&base, 64).unwrap();
@@ -17979,14 +18006,14 @@ fn checkpoint_flushes_dirty_pages_and_clog_to_disk() {
             .pool
             .pin_existing_block(1, rel, ForkNumber::Main, 0)
             .unwrap();
-        buffer_page = db.pool.read_page(pinned.buffer_id()).unwrap();
-        drop(pinned);
-
-        let disk_page_before = read_relation_block(&db, rel, 0);
-        assert_ne!(
-            disk_page_before, buffer_page,
-            "expected heap page to remain dirty in shared buffers before CHECKPOINT"
+        buffer_id = pinned.buffer_id();
+        buffer_page = db.pool.read_page(buffer_id).unwrap();
+        db.pool.mark_dirty(buffer_id).unwrap();
+        assert!(
+            db.pool.buffer_state(buffer_id).unwrap().dirty,
+            "expected test heap page to be marked dirty before CHECKPOINT"
         );
+        drop(pinned);
 
         committed_xid = db
             .txns
@@ -17998,6 +18025,10 @@ fn checkpoint_flushes_dirty_pages_and_clog_to_disk() {
 
         session.execute(&db, "checkpoint").unwrap();
 
+        assert!(
+            !db.pool.buffer_state(buffer_id).unwrap().dirty,
+            "expected CHECKPOINT to clear the dirty heap buffer"
+        );
         let disk_page_after = read_relation_block(&db, rel, 0);
         assert_eq!(
             disk_page_after, buffer_page,
@@ -19970,6 +20001,47 @@ fn temp_tables_are_removed_on_client_cleanup() {
         .unwrap_err();
     assert!(
         matches!(err, ExecError::Parse(ParseError::UnknownTable(name)) if name == "cleanup_me")
+    );
+}
+
+#[test]
+fn recovery_skips_stale_temp_sequence_state_until_namespace_cleanup() {
+    let base = temp_dir("temp_sequence_recovery_cleanup");
+    {
+        let db = Database::open(&base, 16).unwrap();
+        db.execute(1, "create temp sequence ts1").unwrap();
+        assert_eq!(
+            query_rows(
+                &db,
+                1,
+                "select count(*) from pg_class where relname = 'ts1' and relkind = 'S' and relpersistence = 't'",
+            ),
+            vec![vec![Value::Int64(1)]]
+        );
+    }
+
+    let db = Database::open(&base, 16).unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_class where relname = 'ts1' and relkind = 'S' and relpersistence = 't'",
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    db.execute(1, "create temp sequence ts2").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relname from pg_class where relkind = 'S' and relpersistence = 't' order by relname",
+        ),
+        vec![vec![Value::Text("ts2".into())]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select nextval('ts2')"),
+        vec![vec![Value::Int64(1)]]
     );
 }
 

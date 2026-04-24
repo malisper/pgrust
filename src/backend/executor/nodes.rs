@@ -2105,11 +2105,40 @@ impl PlanNode for NestedLoopJoinState {
                 if eval_qual_list(&self.join_qual, &mut self.slot, ctx)? {
                     self.current_left_matched = true;
                     right_matched[ri] = true;
+                    if matches!(self.kind, JoinType::Anti) {
+                        self.right_index = right_rows.len();
+                        break;
+                    }
                     if eval_qual_list(&self.qual, &mut self.slot, ctx)? {
+                        if matches!(self.kind, JoinType::Semi) {
+                            let left = self.current_left.take().unwrap();
+                            self.slot.tts_values = left.slot.tts_values;
+                            self.slot.tts_nvalid = self.left_width;
+                            self.slot.kind = SlotKind::Virtual;
+                            self.slot.virtual_tid = None;
+                            self.slot.decode_offset = 0;
+                            self.current_bindings = left.system_bindings;
+                            set_active_system_bindings(ctx, &self.current_bindings);
+                            finish_row(&mut self.stats, start);
+                            return Ok(Some(&mut self.slot));
+                        }
                         finish_row(&mut self.stats, start);
                         return Ok(Some(&mut self.slot));
                     }
                 }
+            }
+
+            if !self.current_left_matched && matches!(self.kind, JoinType::Anti) {
+                let left = self.current_left.take().unwrap();
+                self.slot.tts_values = left.slot.tts_values;
+                self.slot.tts_nvalid = self.left_width;
+                self.slot.kind = SlotKind::Virtual;
+                self.slot.virtual_tid = None;
+                self.slot.decode_offset = 0;
+                self.current_bindings = left.system_bindings;
+                set_active_system_bindings(ctx, &self.current_bindings);
+                finish_row(&mut self.stats, start);
+                return Ok(Some(&mut self.slot));
             }
 
             if !self.current_left_matched && matches!(self.kind, JoinType::Left | JoinType::Full) {
@@ -2138,7 +2167,7 @@ impl PlanNode for NestedLoopJoinState {
         &self.current_bindings
     }
     fn column_names(&self) -> &[String] {
-        &self.combined_names
+        &self.output_names
     }
     fn node_stats(&self) -> &NodeExecStats {
         &self.stats
@@ -2155,6 +2184,8 @@ impl PlanNode for NestedLoopJoinState {
             JoinType::Left => "Nested Loop Left Join".into(),
             JoinType::Right => "Nested Loop Right Join".into(),
             JoinType::Full => "Nested Loop Full Join".into(),
+            JoinType::Semi => "Nested Loop Semi Join".into(),
+            JoinType::Anti => "Nested Loop Anti Join".into(),
             JoinType::Cross => "Nested Loop".into(),
         }
     }
@@ -2273,7 +2304,28 @@ fn exec_lateral_join<'a>(
             if eval_qual_list(&state.join_qual, &mut state.slot, ctx)? {
                 state.current_left_matched = true;
                 right_matched[ri] = true;
+                if matches!(state.kind, JoinType::Anti) {
+                    state.right_index = right_rows.len();
+                    break;
+                }
                 if eval_qual_list(&state.qual, &mut state.slot, ctx)? {
+                    if matches!(state.kind, JoinType::Semi) {
+                        let left = state.current_left.take().unwrap();
+                        state.slot.tts_values = left.slot.tts_values;
+                        state.slot.tts_nvalid = state.left_width;
+                        state.slot.kind = SlotKind::Virtual;
+                        state.slot.virtual_tid = None;
+                        state.slot.decode_offset = 0;
+                        state.current_bindings = left.system_bindings;
+                        set_active_system_bindings(ctx, &state.current_bindings);
+                        if let Some(saved_params) = state.current_nest_param_saves.take() {
+                            restore_exec_params(saved_params, ctx);
+                        }
+                        state.right_rows = None;
+                        state.right_matched = None;
+                        finish_row(&mut state.stats, start);
+                        return Ok(Some(&mut state.slot));
+                    }
                     finish_row(&mut state.stats, start);
                     return Ok(Some(&mut state.slot));
                 }
@@ -2305,6 +2357,23 @@ fn exec_lateral_join<'a>(
 
         clear_outer_expr_bindings(ctx);
         clear_inner_expr_bindings(ctx);
+        if !state.current_left_matched && matches!(state.kind, JoinType::Anti) {
+            let left = state.current_left.take().unwrap();
+            state.slot.tts_values = left.slot.tts_values;
+            state.slot.tts_nvalid = state.left_width;
+            state.slot.kind = SlotKind::Virtual;
+            state.slot.virtual_tid = None;
+            state.slot.decode_offset = 0;
+            state.current_bindings = left.system_bindings;
+            set_active_system_bindings(ctx, &state.current_bindings);
+            if let Some(saved_params) = state.current_nest_param_saves.take() {
+                restore_exec_params(saved_params, ctx);
+            }
+            state.right_rows = None;
+            state.right_matched = None;
+            finish_row(&mut state.stats, start);
+            return Ok(Some(&mut state.slot));
+        }
         if !state.current_left_matched && matches!(state.kind, JoinType::Left | JoinType::Full) {
             let left = state.current_left.as_ref().unwrap();
             let mut combined_values: Vec<Value> = left.slot.tts_values.clone();

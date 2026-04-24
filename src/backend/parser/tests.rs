@@ -3,9 +3,11 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{Expr, Plan, RelationDesc, Value};
 use crate::include::access::htup::{AttributeAlign, AttributeCompression, AttributeStorage};
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, JSON_TYPE_OID, PUBLIC_NAMESPACE_OID, PgAuthIdRow,
-    PgAuthMembersRow, PgClassRow, PgPolicyRow, PgProcRow, PgRewriteRow, PgTypeRow, PolicyCommand,
-    RECORD_TYPE_OID, bootstrap_pg_proc_rows, sort_pg_rewrite_rows,
+    BOOTSTRAP_SUPERUSER_OID, CONSTRAINT_PRIMARY, JSON_TYPE_OID, PUBLIC_NAMESPACE_OID,
+    PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow, PgCollationRow,
+    PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow, PgPolicyRow, PgProcRow, PgRangeRow,
+    PgRewriteRow, PgTypeRow, PolicyCommand, RECORD_TYPE_OID, bootstrap_pg_proc_rows,
+    sort_pg_rewrite_rows,
 };
 use crate::include::nodes::parsenodes::{
     AggregateArgType, AggregateSignatureKind, AliasColumnDef, AliasColumnSpec,
@@ -1019,6 +1021,187 @@ fn catalog_with_people_expression_unique_index() -> Catalog {
         },
     );
     catalog
+}
+
+struct PanicIndexDiscoveryCatalog<'a> {
+    inner: &'a Catalog,
+}
+
+impl CatalogLookup for PanicIndexDiscoveryCatalog<'_> {
+    fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation> {
+        self.inner.lookup_any_relation(name)
+    }
+
+    fn lookup_relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {
+        self.inner.lookup_relation_by_oid(relation_oid)
+    }
+
+    fn relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {
+        self.inner.relation_by_oid(relation_oid)
+    }
+
+    fn namespace_row_by_oid(&self, oid: u32) -> Option<PgNamespaceRow> {
+        self.inner.namespace_row_by_oid(oid)
+    }
+
+    fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
+        self.inner.proc_rows_by_name(name)
+    }
+
+    fn proc_row_by_oid(&self, oid: u32) -> Option<PgProcRow> {
+        self.inner.proc_row_by_oid(oid)
+    }
+
+    fn opclass_rows(&self) -> Vec<PgOpclassRow> {
+        self.inner.opclass_rows()
+    }
+
+    fn collation_rows(&self) -> Vec<PgCollationRow> {
+        self.inner.collation_rows()
+    }
+
+    fn aggregate_by_fnoid(&self, aggfnoid: u32) -> Option<PgAggregateRow> {
+        self.inner.aggregate_by_fnoid(aggfnoid)
+    }
+
+    fn operator_by_name_left_right(
+        &self,
+        name: &str,
+        left_type_oid: u32,
+        right_type_oid: u32,
+    ) -> Option<PgOperatorRow> {
+        self.inner
+            .operator_by_name_left_right(name, left_type_oid, right_type_oid)
+    }
+
+    fn operator_by_oid(&self, oid: u32) -> Option<PgOperatorRow> {
+        self.inner.operator_by_oid(oid)
+    }
+
+    fn cast_by_source_target(
+        &self,
+        source_type_oid: u32,
+        target_type_oid: u32,
+    ) -> Option<PgCastRow> {
+        self.inner
+            .cast_by_source_target(source_type_oid, target_type_oid)
+    }
+
+    fn type_rows(&self) -> Vec<PgTypeRow> {
+        self.inner.type_rows()
+    }
+
+    fn type_by_oid(&self, oid: u32) -> Option<PgTypeRow> {
+        self.inner.type_by_oid(oid)
+    }
+
+    fn type_by_name(&self, name: &str) -> Option<PgTypeRow> {
+        self.inner.type_by_name(name)
+    }
+
+    fn range_rows(&self) -> Vec<PgRangeRow> {
+        self.inner.range_rows()
+    }
+
+    fn type_oid_for_sql_type(&self, sql_type: SqlType) -> Option<u32> {
+        self.inner.type_oid_for_sql_type(sql_type)
+    }
+
+    fn language_rows(&self) -> Vec<PgLanguageRow> {
+        self.inner.language_rows()
+    }
+
+    fn language_row_by_oid(&self, oid: u32) -> Option<PgLanguageRow> {
+        self.inner.language_row_by_oid(oid)
+    }
+
+    fn language_row_by_name(&self, name: &str) -> Option<PgLanguageRow> {
+        self.inner.language_row_by_name(name)
+    }
+
+    fn class_row_by_oid(&self, relation_oid: u32) -> Option<PgClassRow> {
+        self.inner.class_row_by_oid(relation_oid)
+    }
+
+    fn index_relations_for_heap(&self, relation_oid: u32) -> Vec<BoundIndexRelation> {
+        panic!("index expression binding discovered indexes for relation {relation_oid}");
+    }
+}
+
+#[test]
+fn bind_expression_index_metadata_does_not_discover_heap_indexes() {
+    let mut catalog = Catalog::default();
+    catalog.insert(
+        "expr_items",
+        test_catalog_entry(
+            15040,
+            RelationDesc {
+                columns: vec![column_desc("a", SqlType::new(SqlTypeKind::Int4), false)],
+            },
+        ),
+    );
+    let heap = catalog.lookup_any_relation("expr_items").unwrap();
+    catalog.insert(
+        "expr_items_a_square_idx",
+        CatalogEntry {
+            rel: crate::RelFileLocator {
+                spc_oid: 0,
+                db_oid: 1,
+                rel_number: 15041,
+            },
+            relation_oid: 50041,
+            namespace_oid: 11,
+            owner_oid: BOOTSTRAP_SUPERUSER_OID,
+            relacl: None,
+            row_type_oid: 60041,
+            array_type_oid: 0,
+            reltoastrelid: 0,
+            relpersistence: 'p',
+            relkind: 'i',
+            am_oid: crate::include::catalog::BTREE_AM_OID,
+            relhastriggers: false,
+            relhassubclass: false,
+            relispartition: false,
+            relpartbound: None,
+            relrowsecurity: false,
+            relforcerowsecurity: false,
+            relpages: 0,
+            reltuples: 0.0,
+            relallvisible: 0,
+            relallfrozen: 0,
+            relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
+            desc: RelationDesc {
+                columns: vec![column_desc("expr", SqlType::new(SqlTypeKind::Int4), false)],
+            },
+            partitioned_table: None,
+            index_meta: Some(crate::backend::catalog::state::CatalogIndexMeta {
+                indrelid: heap.relation_oid,
+                indisunique: true,
+                indnullsnotdistinct: false,
+                indisprimary: false,
+                indisexclusion: false,
+                indisvalid: true,
+                indisready: true,
+                indislive: true,
+                indkey: vec![0],
+                indclass: vec![crate::include::catalog::INT4_BTREE_OPCLASS_OID],
+                indcollation: vec![0],
+                indoption: vec![0],
+                indexprs: Some(serde_json::to_string(&vec!["a * a"]).unwrap()),
+                indpred: None,
+                brin_options: None,
+            }),
+        },
+    );
+    let relcache = crate::backend::utils::cache::relcache::RelCache::from_catalog(&catalog);
+    let mut index_meta = relcache
+        .get_by_name("expr_items_a_square_idx")
+        .and_then(|entry| entry.index.clone())
+        .unwrap();
+    let wrapper = PanicIndexDiscoveryCatalog { inner: &catalog };
+    let exprs = relation_get_index_expressions(&mut index_meta, &heap.desc, &wrapper).unwrap();
+    assert_eq!(exprs.len(), 1);
+    assert!(index_meta.rd_indexprs.is_some());
 }
 
 fn catalog_with_people_name_c_collation_index() -> Catalog {

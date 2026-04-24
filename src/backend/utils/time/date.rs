@@ -420,7 +420,7 @@ fn split_meridiem_suffix(text: &str) -> (&str, Option<&str>) {
 fn apply_meridiem(hour: u32, meridiem: Option<&str>) -> Option<u32> {
     match meridiem.map(|value| value.to_ascii_lowercase()) {
         None => Some(hour),
-        Some(value) if !(1..=12).contains(&hour) => None,
+        Some(_) if !(1..=12).contains(&hour) => None,
         Some(value) if value == "am" => Some(if hour == 12 { 0 } else { hour }),
         Some(value) if value == "pm" => Some(if hour == 12 { 12 } else { hour + 12 }),
         _ => None,

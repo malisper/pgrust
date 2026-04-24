@@ -21,6 +21,7 @@ use crate::backend::storage::lmgr::{
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 use crate::backend::storage::sync::SyncQueue;
 use crate::backend::utils::cache::plancache::PlanCache;
+use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::BackendCacheState;
 use crate::backend::utils::misc::checkpoint::{CheckpointConfig, CheckpointStatsSnapshot};
 use crate::backend::utils::misc::interrupts::InterruptState;
@@ -591,7 +592,7 @@ fn open_relfiles_for_store(
 ) -> Result<(), CatalogError> {
     let relcache = store.relcache()?;
     for (_, entry) in relcache.entries() {
-        if !relkind_has_storage(entry.relkind) {
+        if !entry_has_startup_storage(entry) {
             continue;
         }
         let rel = entry.rel;
@@ -607,7 +608,7 @@ fn create_relfiles_for_store_with_smg(
 ) -> Result<(), CatalogError> {
     let relcache = store.relcache()?;
     for (_, entry) in relcache.entries() {
-        if !relkind_has_storage(entry.relkind) {
+        if !entry_has_startup_storage(entry) {
             continue;
         }
         let rel = entry.rel;
@@ -615,4 +616,11 @@ fn create_relfiles_for_store_with_smg(
         let _ = smgr.create(rel, ForkNumber::Main, false);
     }
     Ok(())
+}
+
+fn entry_has_startup_storage(entry: &RelCacheEntry) -> bool {
+    // Match PostgreSQL's split: temp relation storage is backend-local and is
+    // cleaned from the temp namespace on reuse, not opened or WAL-recreated by
+    // cluster startup.
+    relkind_has_storage(entry.relkind) && entry.relpersistence != 't'
 }

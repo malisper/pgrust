@@ -165,10 +165,10 @@ fn rewrite_rte(
 ) -> Result<RangeTblEntry, ParseError> {
     let kind = match rte.kind {
         RangeTblEntryKind::Relation {
-            rel,
+            rel: _,
             relation_oid,
             relkind,
-            toast,
+            toast: _,
         } if relkind == 'v' => {
             let analyzed = rewrite_view_relation_query(
                 relation_oid,

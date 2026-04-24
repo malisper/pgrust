@@ -248,13 +248,12 @@ pub(crate) fn validate_deferred_foreign_key_constraints(
     };
 
     for constraint_oid in affected_constraint_oids {
-        let Some(row) = catalog
-            .constraint_rows()
-            .into_iter()
-            .find(|row| row.oid == constraint_oid && row.contype == CONSTRAINT_FOREIGN)
-        else {
+        let Some(row) = catalog.constraint_row_by_oid(constraint_oid) else {
             continue;
         };
+        if row.contype != CONSTRAINT_FOREIGN {
+            continue;
+        }
         let Some(relation) = catalog.lookup_relation_by_oid(row.conrelid) else {
             continue;
         };

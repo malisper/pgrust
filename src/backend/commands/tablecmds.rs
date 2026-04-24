@@ -896,9 +896,13 @@ pub(crate) fn index_key_values_for_row(
                     actual: "missing visible catalog".into(),
                 })
             })?;
-            fallback_exprs =
-                crate::backend::parser::bind_index_exprs(&index.index_meta, heap_desc, catalog)
-                    .map_err(ExecError::Parse)?;
+            let mut index_meta = index.index_meta.clone();
+            fallback_exprs = crate::backend::parser::relation_get_index_expressions(
+                &mut index_meta,
+                heap_desc,
+                catalog,
+            )
+            .map_err(ExecError::Parse)?;
             fallback_exprs.iter()
         } else {
             [].iter()
