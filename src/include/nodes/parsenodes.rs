@@ -304,6 +304,7 @@ pub enum Statement {
     AlterSequenceRename(AlterTableRenameStatement),
     AlterIndexRename(AlterTableRenameStatement),
     AlterViewRename(AlterTableRenameStatement),
+    AlterIndexAttachPartition(AlterIndexAttachPartitionStatement),
     AlterIndexAlterColumnStatistics(AlterIndexAlterColumnStatisticsStatement),
     AlterTableAddColumn(AlterTableAddColumnStatement),
     AlterTableAddConstraint(AlterTableAddConstraintStatement),
@@ -344,6 +345,7 @@ pub enum Statement {
     CommentOnConversion(CommentOnConversionStatement),
     CommentOnForeignDataWrapper(CommentOnForeignDataWrapperStatement),
     CommentOnPublication(CommentOnPublicationStatement),
+    CommentOnStatistics(CommentOnStatisticsStatement),
     CommentOnAggregate(CommentOnAggregateStatement),
     CommentOnFunction(CommentOnFunctionStatement),
     CreateDomain(CreateDomainStatement),
@@ -359,6 +361,7 @@ pub enum Statement {
     DropConversion(DropConversionStatement),
     DropDatabase(DropDatabaseStatement),
     DropPublication(DropPublicationStatement),
+    DropStatistics(DropStatisticsStatement),
     DropFunction(DropFunctionStatement),
     DropOperator(DropOperatorStatement),
     DropAggregate(DropAggregateStatement),
@@ -1243,6 +1246,7 @@ impl CreateTableStatement {
 pub enum PartitionStrategy {
     List,
     Range,
+    Hash,
 }
 
 impl PartitionStrategy {
@@ -1250,6 +1254,7 @@ impl PartitionStrategy {
         match self {
             PartitionStrategy::List => 'l',
             PartitionStrategy::Range => 'r',
+            PartitionStrategy::Hash => 'h',
         }
     }
 }
@@ -1276,6 +1281,10 @@ pub enum RawPartitionBoundSpec {
         to: Vec<RawPartitionRangeDatum>,
         is_default: bool,
     },
+    Hash {
+        modulus: i32,
+        remainder: i32,
+    },
 }
 
 impl RawPartitionBoundSpec {
@@ -1283,6 +1292,7 @@ impl RawPartitionBoundSpec {
         match self {
             RawPartitionBoundSpec::List { is_default, .. }
             | RawPartitionBoundSpec::Range { is_default, .. } => *is_default,
+            RawPartitionBoundSpec::Hash { .. } => false,
         }
     }
 }
@@ -1398,7 +1408,7 @@ pub struct CreatePolicyStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateStatisticsStatement {
     pub if_not_exists: bool,
-    pub statistics_name: String,
+    pub statistics_name: Option<String>,
     pub kinds: Vec<String>,
     pub targets: Vec<String>,
     pub from_clause: String,
@@ -1408,13 +1418,34 @@ pub struct CreateStatisticsStatement {
 pub struct AlterStatisticsStatement {
     pub if_exists: bool,
     pub statistics_name: String,
-    pub statistics_target: i32,
+    pub action: AlterStatisticsAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterStatisticsAction {
+    Rename { new_name: String },
+    SetStatistics { target: i16 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropStatisticsStatement {
+    pub if_exists: bool,
+    pub statistics_names: Vec<String>,
+    pub cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentOnStatisticsStatement {
+    pub statistics_name: String,
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateIndexStatement {
     pub unique: bool,
     pub nulls_not_distinct: bool,
+    pub concurrently: bool,
+    pub only: bool,
     pub if_not_exists: bool,
     pub index_name: String,
     pub table_name: String,
@@ -1424,6 +1455,12 @@ pub struct CreateIndexStatement {
     pub predicate: Option<SqlExpr>,
     pub predicate_sql: Option<String>,
     pub options: Vec<RelOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterIndexAttachPartitionStatement {
+    pub parent_index_name: String,
+    pub child_index_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2217,6 +2254,7 @@ pub struct DropTriggerStatement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DropIndexStatement {
+    pub concurrently: bool,
     pub if_exists: bool,
     pub index_names: Vec<String>,
 }
@@ -2519,6 +2557,7 @@ pub enum SqlTypeKind {
     RegClass,
     RegType,
     RegRole,
+    RegNamespace,
     RegOperator,
     RegProcedure,
     Tid,

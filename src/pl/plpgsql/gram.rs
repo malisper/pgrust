@@ -466,9 +466,10 @@ fn build_while_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
 }
 
 fn build_raise_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let raw = pair.as_str().to_string();
     let mut level = RaiseLevel::Exception;
     let mut message = None;
-    let mut params = Vec::new();
+    let mut message_sql = None::<String>;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::raise_level => {
@@ -482,6 +483,7 @@ fn build_raise_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
                 };
             }
             Rule::sql_string => {
+                message_sql = Some(part.as_str().to_string());
                 let expr = parse_expr(part.as_str())?;
                 let text = match expr {
                     SqlExpr::Const(Value::Text(text)) => text.to_string(),
@@ -494,14 +496,41 @@ fn build_raise_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
                 };
                 message = Some(text);
             }
-            Rule::expr_until_comma_or_semi => params.push(part.as_str().trim().to_string()),
             _ => {}
         }
     }
+    let params = raise_params_from_raw_sql(&raw, message_sql.as_deref())?;
     Ok(Stmt::Raise {
         level,
         message: message.ok_or(ParseError::UnexpectedEof)?,
         params,
+    })
+}
+
+fn raise_params_from_raw_sql(
+    raw: &str,
+    message_sql: Option<&str>,
+) -> Result<Vec<String>, ParseError> {
+    let Some(message_sql) = message_sql else {
+        return Ok(Vec::new());
+    };
+    let Some(message_start) = raw.find(message_sql) else {
+        return Ok(Vec::new());
+    };
+    let mut rest = raw[message_start + message_sql.len()..].trim();
+    if let Some(stripped) = rest.strip_suffix(';') {
+        rest = stripped.trim_end();
+    }
+    let Some(stripped) = rest.strip_prefix(',') else {
+        return Ok(Vec::new());
+    };
+    let rest = stripped.trim();
+    if rest.is_empty() {
+        return Ok(Vec::new());
+    }
+    split_top_level_csv(rest).ok_or_else(|| ParseError::UnexpectedToken {
+        expected: "RAISE parameter list",
+        actual: rest.to_string(),
     })
 }
 
@@ -918,6 +947,35 @@ mod tests {
         assert_eq!(total_decl.name, "total");
         assert_eq!(total_decl.ty.kind, SqlTypeKind::Int4);
         assert_eq!(block.statements.len(), 3);
+    }
+
+    #[test]
+    fn parse_raise_params_ignore_commas_inside_nested_sql() {
+        let block = parse_block(
+            "
+            begin
+                raise notice 'trigger = %, new table = %',
+                    TG_NAME,
+                    (select string_agg(new_table::text, ', ' order by a) from new_table);
+            end
+            ",
+        )
+        .unwrap();
+
+        let Stmt::Raise {
+            message, params, ..
+        } = &block.statements[0]
+        else {
+            panic!("expected raise statement");
+        };
+        assert_eq!(message, "trigger = %, new table = %");
+        assert_eq!(
+            params,
+            &vec![
+                "TG_NAME".to_string(),
+                "(select string_agg(new_table::text, ', ' order by a) from new_table)".to_string(),
+            ]
+        );
     }
 
     #[test]

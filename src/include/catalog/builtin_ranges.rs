@@ -707,6 +707,41 @@ pub fn synthetic_range_proc_rows_by_name(
         .collect()
 }
 
+pub fn is_synthetic_range_proc_name(name: &str) -> bool {
+    let normalized = normalize_lookup_name(name);
+    builtin_range_specs().iter().any(|spec| {
+        spec.name.eq_ignore_ascii_case(normalized)
+            || spec.multirange_name.eq_ignore_ascii_case(normalized)
+    }) || matches!(
+        normalized.to_ascii_lowercase().as_str(),
+        "multirange"
+            | "isempty"
+            | "lower"
+            | "upper"
+            | "lower_inc"
+            | "upper_inc"
+            | "lower_inf"
+            | "upper_inf"
+            | "range_merge"
+            | "range_adjacent"
+            | "range_minus"
+            | "range_contains"
+            | "range_contained_by"
+            | "range_intersect_agg"
+            | "unnest"
+            | "range_agg"
+            | "range_overlaps_multirange"
+            | "multirange_overlaps_range"
+            | "multirange_overlaps_multirange"
+            | "multirange_contains_elem"
+            | "multirange_contains_range"
+            | "multirange_contains_multirange"
+            | "elem_contained_by_multirange"
+            | "range_contained_by_multirange"
+            | "multirange_contained_by_multirange"
+    )
+}
+
 pub fn synthetic_range_proc_row_by_oid(
     oid: u32,
     type_rows: &[PgTypeRow],

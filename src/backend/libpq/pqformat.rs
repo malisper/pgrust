@@ -10,9 +10,15 @@ use crate::backend::executor::{
     render_range_text,
 };
 use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::backend::statistics::{
+    render_pg_dependencies_text, render_pg_mcv_list_text, render_pg_ndistinct_text,
+};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::access::htup::TupleError;
-use crate::include::catalog::{TRIGGER_TYPE_OID, builtin_type_rows, range_type_ref_for_sql_type};
+use crate::include::catalog::{
+    PG_DEPENDENCIES_TYPE_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID, TRIGGER_TYPE_OID,
+    builtin_type_rows, range_type_ref_for_sql_type,
+};
 use crate::include::nodes::datum::InetValue;
 use crate::pgrust::session::ByteaOutputFormat;
 use num_bigint::BigInt;
@@ -206,7 +212,9 @@ pub(crate) fn send_query_result(
     tag: &str,
     float_format: FloatFormatOptions,
     role_names: Option<&HashMap<u32, String>>,
+    relation_names: Option<&HashMap<u32, String>>,
     proc_names: Option<&HashMap<u32, String>>,
+    namespace_names: Option<&HashMap<u32, String>>,
 ) -> io::Result<()> {
     send_row_description(stream, columns)?;
     let mut row_buf = Vec::new();
@@ -219,7 +227,9 @@ pub(crate) fn send_query_result(
             &mut row_buf,
             float_format.clone(),
             role_names,
+            relation_names,
             proc_names,
+            namespace_names,
         )?;
     }
     send_command_complete(stream, tag)
@@ -440,6 +450,9 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::RegClass => crate::include::catalog::REGCLASS_ARRAY_TYPE_OID as i32,
             SqlTypeKind::RegType => unreachable!("regtype arrays are unsupported"),
             SqlTypeKind::RegRole => unreachable!("regrole arrays are unsupported"),
+            SqlTypeKind::RegNamespace => {
+                crate::include::catalog::REGNAMESPACE_ARRAY_TYPE_OID as i32
+            }
             SqlTypeKind::RegOperator => crate::include::catalog::REGOPERATOR_ARRAY_TYPE_OID as i32,
             SqlTypeKind::RegProcedure => {
                 crate::include::catalog::REGPROCEDURE_ARRAY_TYPE_OID as i32
@@ -543,6 +556,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::RegClass => (crate::include::catalog::REGCLASS_TYPE_OID as i32, 4, -1),
         SqlTypeKind::RegType => (crate::include::catalog::REGTYPE_TYPE_OID as i32, 4, -1),
         SqlTypeKind::RegRole => (crate::include::catalog::REGROLE_TYPE_OID as i32, 4, -1),
+        SqlTypeKind::RegNamespace => (crate::include::catalog::REGNAMESPACE_TYPE_OID as i32, 4, -1),
         SqlTypeKind::RegOperator => (crate::include::catalog::REGOPERATOR_TYPE_OID as i32, 4, -1),
         SqlTypeKind::RegProcedure => (crate::include::catalog::REGPROCEDURE_TYPE_OID as i32, 4, -1),
         SqlTypeKind::Tid => (27, 6, -1),
@@ -597,6 +611,19 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
     }
 }
 
+fn format_catalog_oid_text(
+    oid: u32,
+    names: Option<&HashMap<u32, String>>,
+    dash_on_zero: bool,
+) -> String {
+    if dash_on_zero && oid == 0 {
+        return "-".to_string();
+    }
+    names
+        .and_then(|names| names.get(&oid).cloned())
+        .unwrap_or_else(|| oid.to_string())
+}
+
 pub(crate) fn send_typed_data_row(
     w: &mut impl Write,
     values: &[Value],
@@ -605,7 +632,9 @@ pub(crate) fn send_typed_data_row(
     buf: &mut Vec<u8>,
     float_format: FloatFormatOptions,
     role_names: Option<&HashMap<u32, String>>,
+    relation_names: Option<&HashMap<u32, String>>,
     proc_names: Option<&HashMap<u32, String>>,
+    namespace_names: Option<&HashMap<u32, String>>,
 ) -> io::Result<()> {
     buf.clear();
     buf.extend_from_slice(&(values.len() as i16).to_be_bytes());
@@ -658,6 +687,27 @@ pub(crate) fn send_typed_data_row(
                         let written = itoa_buf.format(*v);
                         buf.extend_from_slice(written.as_bytes());
                     }
+                } else if matches!(sql_type.map(|ty| ty.kind), Some(SqlTypeKind::RegClass)) {
+                    if let Ok(relation_oid) = u32::try_from(*v) {
+                        buf.extend_from_slice(
+                            format_catalog_oid_text(relation_oid, relation_names, true).as_bytes(),
+                        );
+                    } else {
+                        let mut itoa_buf = itoa::Buffer::new();
+                        let written = itoa_buf.format(*v);
+                        buf.extend_from_slice(written.as_bytes());
+                    }
+                } else if matches!(sql_type.map(|ty| ty.kind), Some(SqlTypeKind::RegNamespace)) {
+                    if let Ok(namespace_oid) = u32::try_from(*v) {
+                        buf.extend_from_slice(
+                            format_catalog_oid_text(namespace_oid, namespace_names, true)
+                                .as_bytes(),
+                        );
+                    } else {
+                        let mut itoa_buf = itoa::Buffer::new();
+                        let written = itoa_buf.format(*v);
+                        buf.extend_from_slice(written.as_bytes());
+                    }
                 } else if matches!(sql_type.map(|ty| ty.kind), Some(SqlTypeKind::RegProcedure)) {
                     if let Ok(proc_oid) = u32::try_from(*v) {
                         if proc_oid == 0 {
@@ -701,6 +751,27 @@ pub(crate) fn send_typed_data_row(
                         let written = itoa_buf.format(*v);
                         buf.extend_from_slice(written.as_bytes());
                     }
+                } else if matches!(sql_type.map(|ty| ty.kind), Some(SqlTypeKind::RegClass)) {
+                    if let Ok(relation_oid) = u32::try_from(*v) {
+                        buf.extend_from_slice(
+                            format_catalog_oid_text(relation_oid, relation_names, true).as_bytes(),
+                        );
+                    } else {
+                        let mut itoa_buf = itoa::Buffer::new();
+                        let written = itoa_buf.format(*v);
+                        buf.extend_from_slice(written.as_bytes());
+                    }
+                } else if matches!(sql_type.map(|ty| ty.kind), Some(SqlTypeKind::RegNamespace)) {
+                    if let Ok(namespace_oid) = u32::try_from(*v) {
+                        buf.extend_from_slice(
+                            format_catalog_oid_text(namespace_oid, namespace_names, true)
+                                .as_bytes(),
+                        );
+                    } else {
+                        let mut itoa_buf = itoa::Buffer::new();
+                        let written = itoa_buf.format(*v);
+                        buf.extend_from_slice(written.as_bytes());
+                    }
                 } else if matches!(sql_type.map(|ty| ty.kind), Some(SqlTypeKind::RegProcedure)) {
                     if let Ok(proc_oid) = u32::try_from(*v) {
                         if proc_oid == 0 {
@@ -733,7 +804,14 @@ pub(crate) fn send_typed_data_row(
                 buf.extend_from_slice(rendered.as_bytes());
             }
             Value::Bytea(v) => {
-                let rendered = format_bytea_text(v, float_format.bytea_output);
+                let rendered = match sql_type.and_then(|ty| (!ty.is_array).then_some(ty.type_oid)) {
+                    Some(PG_NDISTINCT_TYPE_OID) => render_pg_ndistinct_text(v)
+                        .unwrap_or_else(|_| format_bytea_text(v, float_format.bytea_output)),
+                    Some(PG_DEPENDENCIES_TYPE_OID) => render_pg_dependencies_text(v)
+                        .unwrap_or_else(|_| format_bytea_text(v, float_format.bytea_output)),
+                    Some(PG_MCV_LIST_TYPE_OID) => render_pg_mcv_list_text(v),
+                    _ => format_bytea_text(v, float_format.bytea_output),
+                };
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }
@@ -926,6 +1004,7 @@ fn encode_binary_data_row_value(value: &Value, sql_type: SqlType) -> Result<Vec<
                     | SqlTypeKind::RegClass
                     | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
+                    | SqlTypeKind::RegNamespace
                     | SqlTypeKind::RegOperator
                     | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid
@@ -1969,6 +2048,8 @@ mod tests {
             FloatFormatOptions::default(),
             Some(&role_names),
             None,
+            None,
+            None,
         )
         .unwrap();
 
@@ -1997,7 +2078,9 @@ mod tests {
             &mut row_buf,
             FloatFormatOptions::default(),
             None,
+            None,
             Some(&proc_names),
+            None,
         )
         .unwrap();
 
@@ -2025,10 +2108,74 @@ mod tests {
             FloatFormatOptions::default(),
             None,
             None,
+            None,
+            None,
         )
         .unwrap();
 
         assert!(out.windows(1).any(|window| window == b"-"));
+    }
+
+    #[test]
+    fn typed_data_row_renders_regclass_with_relation_name() {
+        let mut out = Vec::new();
+        let mut row_buf = Vec::new();
+        let mut relation_names = HashMap::new();
+        relation_names.insert(1259, "pg_class".to_string());
+
+        send_typed_data_row(
+            &mut out,
+            &[Value::Int64(1259)],
+            &[QueryColumn {
+                name: "relid".into(),
+                sql_type: SqlType::new(SqlTypeKind::RegClass),
+                wire_type_oid: None,
+            }],
+            &[],
+            &mut row_buf,
+            FloatFormatOptions::default(),
+            None,
+            Some(&relation_names),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            out.windows("pg_class".len())
+                .any(|window| window == b"pg_class")
+        );
+    }
+
+    #[test]
+    fn typed_data_row_renders_regnamespace_with_schema_name() {
+        let mut out = Vec::new();
+        let mut row_buf = Vec::new();
+        let mut namespace_names = HashMap::new();
+        namespace_names.insert(2200, "public".to_string());
+
+        send_typed_data_row(
+            &mut out,
+            &[Value::Int64(2200)],
+            &[QueryColumn {
+                name: "nsp".into(),
+                sql_type: SqlType::new(SqlTypeKind::RegNamespace),
+                wire_type_oid: None,
+            }],
+            &[],
+            &mut row_buf,
+            FloatFormatOptions::default(),
+            None,
+            None,
+            None,
+            Some(&namespace_names),
+        )
+        .unwrap();
+
+        assert!(
+            out.windows("public".len())
+                .any(|window| window == b"public")
+        );
     }
 
     #[test]
@@ -2050,6 +2197,8 @@ mod tests {
             &[],
             &mut row_buf,
             FloatFormatOptions::default(),
+            None,
+            None,
             None,
             None,
         )

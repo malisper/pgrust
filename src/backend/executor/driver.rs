@@ -179,7 +179,9 @@ fn execute_statement_with_source(
         | Statement::AlterStatistics(_)
         | Statement::CreatePolicy(_)
         | Statement::AlterPolicy(_)
-        | Statement::DropPolicy(_) => Ok(StatementResult::AffectedRows(0)),
+        | Statement::DropPolicy(_)
+        | Statement::CommentOnStatistics(_)
+        | Statement::DropStatistics(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::CopyFrom(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "COPY handled by session layer",
             actual: "COPY".into(),
@@ -202,6 +204,7 @@ fn execute_statement_with_source(
         }
         Statement::AlterTableRename(_)
         | Statement::AlterIndexRename(_)
+        | Statement::AlterIndexAttachPartition(_)
         | Statement::AlterViewRename(_)
         | Statement::AlterIndexAlterColumnStatistics(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {

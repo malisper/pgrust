@@ -4,6 +4,7 @@ use crate::include::nodes::primnodes::QueryColumn;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyntheticSystemViewKind {
     PgViews,
+    PgIndexes,
     PgPolicies,
     PgRules,
     PgStats,
@@ -87,6 +88,7 @@ pub fn synthetic_system_views() -> &'static [SyntheticSystemView] {
 }
 
 const PG_VIEW_ALIASES: &[&str] = &["pg_views", "pg_catalog.pg_views"];
+const PG_INDEXES_ALIASES: &[&str] = &["pg_indexes", "pg_catalog.pg_indexes"];
 const PG_POLICIES_ALIASES: &[&str] = &["pg_policies", "pg_catalog.pg_policies"];
 const PG_RULES_ALIASES: &[&str] = &["pg_rules", "pg_catalog.pg_rules"];
 const PG_STATS_ALIASES: &[&str] = &["pg_stats", "pg_catalog.pg_stats"];
@@ -111,6 +113,14 @@ const PG_VIEWS_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::text("viewname"),
     SyntheticSystemViewColumn::text("viewowner"),
     SyntheticSystemViewColumn::text("definition"),
+];
+
+const PG_INDEXES_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("schemaname"),
+    SyntheticSystemViewColumn::text("tablename"),
+    SyntheticSystemViewColumn::text("indexname"),
+    SyntheticSystemViewColumn::text("tablespace"),
+    SyntheticSystemViewColumn::text("indexdef"),
 ];
 
 const PG_POLICIES_COLUMNS: &[SyntheticSystemViewColumn] = &[
@@ -347,12 +357,19 @@ const INFORMATION_SCHEMA_COLUMNS_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::text("is_updatable"),
 ];
 
-const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 14] = [
+const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 15] = [
     SyntheticSystemView {
         kind: SyntheticSystemViewKind::PgViews,
         canonical_name: "pg_catalog.pg_views",
         aliases: PG_VIEW_ALIASES,
         columns: PG_VIEWS_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgIndexes,
+        canonical_name: "pg_catalog.pg_indexes",
+        aliases: PG_INDEXES_ALIASES,
+        columns: PG_INDEXES_COLUMNS,
         view_definition_sql: "",
     },
     SyntheticSystemView {

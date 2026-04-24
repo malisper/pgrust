@@ -277,6 +277,34 @@ fn cast_text_to_regclass(
     Ok(Value::Int64(relation_oid as i64))
 }
 
+fn cast_text_to_regnamespace(
+    text: &str,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<Value, ExecError> {
+    if let Ok(Value::Int64(oid)) = cast_text_to_oid(text) {
+        return Ok(Value::Int64(oid));
+    }
+
+    let catalog = catalog.ok_or_else(|| ExecError::DetailedError {
+        message: format!("schema \"{text}\" does not exist"),
+        detail: None,
+        hint: None,
+        sqlstate: "3F000",
+    })?;
+    let namespace_oid = catalog
+        .namespace_rows()
+        .into_iter()
+        .find(|row| row.nspname == text)
+        .map(|row| row.oid)
+        .ok_or_else(|| ExecError::DetailedError {
+            message: format!("schema \"{text}\" does not exist"),
+            detail: None,
+            hint: None,
+            sqlstate: "3F000",
+        })?;
+    Ok(Value::Int64(namespace_oid as i64))
+}
+
 fn regclass_text_input(value: &Value, source_type: Option<SqlType>) -> Option<&str> {
     let source_is_text_like = source_type.is_some_and(|ty| {
         matches!(
@@ -291,6 +319,30 @@ fn regclass_text_input(value: &Value, source_type: Option<SqlType>) -> Option<&s
     } else {
         None
     }
+}
+
+fn cast_regnamespace_to_text(
+    value: &Value,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<Value, ExecError> {
+    let oid = match value {
+        Value::Int32(oid) if *oid >= 0 => *oid as u32,
+        Value::Int64(oid) if *oid >= 0 && *oid <= i64::from(u32::MAX) => *oid as u32,
+        other => {
+            return Err(ExecError::TypeMismatch {
+                op: "::text",
+                left: other.clone(),
+                right: Value::Text("".into()),
+            });
+        }
+    };
+    if oid == 0 {
+        return Ok(Value::Text("-".into()));
+    }
+    Ok(catalog
+        .and_then(|catalog| catalog.namespace_row_by_oid(oid))
+        .map(|row| Value::Text(row.nspname.into()))
+        .unwrap_or_else(|| Value::Text(oid.to_string().into())))
 }
 
 const NUMERIC_MAX_INPUT_DIGITS_BEFORE_DECIMAL: i32 = 131072;
@@ -1597,6 +1649,19 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             return cast_text_to_regclass(text, catalog);
         }
     }
+    if matches!(ty.kind, SqlTypeKind::RegNamespace) && !ty.is_array {
+        if let Some(text) = regclass_text_input(&value, source_type) {
+            return cast_text_to_regnamespace(text, catalog);
+        }
+    }
+    if matches!(ty.kind, SqlTypeKind::Text)
+        && !ty.is_array
+        && source_type.is_some_and(|source| {
+            matches!(source.element_type().kind, SqlTypeKind::RegNamespace) && !source.is_array
+        })
+    {
+        return cast_regnamespace_to_text(&value, catalog);
+    }
 
     if let Some(result) = cast_geometry_value(value.clone(), ty) {
         return result;
@@ -1625,6 +1690,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::RegClass
                     | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
+                    | SqlTypeKind::RegNamespace
                     | SqlTypeKind::RegOperator
                     | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid,
@@ -1763,6 +1829,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::RegClass
                     | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
+                    | SqlTypeKind::RegNamespace
                     | SqlTypeKind::RegOperator
                     | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid,
@@ -1935,6 +2002,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::RegClass
                     | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
+                    | SqlTypeKind::RegNamespace
                     | SqlTypeKind::RegOperator
                     | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid
@@ -2373,6 +2441,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::RegClass
                     | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
+                    | SqlTypeKind::RegNamespace
                     | SqlTypeKind::RegOperator
                     | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid,
@@ -2578,6 +2647,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::RegClass
                     | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
+                    | SqlTypeKind::RegNamespace
                     | SqlTypeKind::RegOperator
                     | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid,
@@ -2694,7 +2764,14 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             }
             _ => Ok(Value::PgArray(array)),
         },
-        Value::Record(record) => Ok(Value::Record(record)),
+        Value::Record(record) => match ty.kind {
+            SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar => {
+                Ok(Value::Text(CompactString::from_owned(
+                    crate::backend::executor::value_io::format_record_text(&record),
+                )))
+            }
+            _ => Ok(Value::Record(record)),
+        },
     }
 }
 
@@ -2854,6 +2931,7 @@ pub(super) fn cast_text_value_with_config(
         }),
         SqlTypeKind::RegClass
         | SqlTypeKind::RegRole
+        | SqlTypeKind::RegNamespace
         | SqlTypeKind::RegOperator
         | SqlTypeKind::RegType
         | SqlTypeKind::RegProcedure
@@ -3031,6 +3109,7 @@ pub(super) fn cast_numeric_value(
         | SqlTypeKind::RegClass
         | SqlTypeKind::RegType
         | SqlTypeKind::RegRole
+        | SqlTypeKind::RegNamespace
         | SqlTypeKind::RegOperator
         | SqlTypeKind::RegProcedure
         | SqlTypeKind::Xid => value
@@ -3147,6 +3226,7 @@ fn cast_float_to_int(value: f64, ty: SqlType) -> Result<Value, ExecError> {
         | SqlTypeKind::RegClass
         | SqlTypeKind::RegType
         | SqlTypeKind::RegRole
+        | SqlTypeKind::RegNamespace
         | SqlTypeKind::RegOperator
         | SqlTypeKind::RegProcedure => {
             if rounded < 0.0 || rounded > u32::MAX as f64 {

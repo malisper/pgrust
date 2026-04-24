@@ -219,6 +219,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             return sql.find(op).map(|index| index + 1);
         }
         ExecError::Parse(crate::backend::parser::ParseError::DetailedError { message, .. }) => {
+            if let Some(position) = publication_where_error_position(sql, message, None) {
+                return Some(position);
+            }
             if let Some(position) = trigger_when_error_position(sql, message) {
                 return Some(position);
             }
@@ -275,12 +278,19 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
                 return None;
             }
         }
-        ExecError::DetailedError { message, .. } => {
+        ExecError::DetailedError {
+            message, detail, ..
+        } => {
             if message.starts_with("invalid value for parameter \"default_toast_compression\"") {
                 return None;
             }
             if message.starts_with("invalid size: \"") {
                 return None;
+            }
+            if let Some(position) =
+                publication_where_error_position(sql, message, detail.as_deref())
+            {
+                return Some(position);
             }
             if let Some(position) = trigger_when_error_position(sql, message) {
                 return Some(position);
@@ -302,6 +312,46 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         _ => return None,
     };
     find_error_value_position(sql, value)
+}
+
+fn publication_where_error_position(
+    sql: &str,
+    message: &str,
+    detail: Option<&str>,
+) -> Option<usize> {
+    if message == "WHERE clause not allowed for schema" {
+        return find_case_insensitive_token_position(sql, "WHERE");
+    }
+    if message.starts_with("argument of PUBLICATION WHERE must be type boolean") {
+        return find_publication_where_expression_position(sql);
+    }
+    if message == "aggregate functions are not allowed in WHERE" {
+        return find_case_insensitive_token_position(sql, "AVG(")
+            .or_else(|| find_case_insensitive_token_position(sql, "WHERE"));
+    }
+    if message == "invalid publication WHERE expression" {
+        if detail == Some("System columns are not allowed.") {
+            return find_case_insensitive_token_position(sql, "ctid");
+        }
+        return find_case_insensitive_token_position(sql, "WHERE");
+    }
+    if message == "cannot use a WHERE clause when removing a table from a publication" {
+        return find_case_insensitive_token_position(sql, "WHERE");
+    }
+    None
+}
+
+fn find_publication_where_expression_position(sql: &str) -> Option<usize> {
+    let where_position = find_case_insensitive_token_position(sql, "WHERE")?;
+    let mut index = where_position - 1 + "WHERE".len();
+    let bytes = sql.as_bytes();
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    if index < bytes.len() && bytes[index] == b'(' {
+        index += 1;
+    }
+    Some(index + 1)
 }
 
 fn find_json_literal_position(sql: &str, raw_input: &str) -> Option<usize> {
@@ -1240,7 +1290,9 @@ fn execute_query_statement(
                 let mut columns = guard.columns.clone();
                 let catalog = state.session.catalog_lookup(db);
                 let role_names = role_name_map(&catalog);
+                let relation_names = relation_name_map(&catalog);
                 let proc_names = proc_name_map(&catalog);
+                let namespace_names = namespace_name_map(&catalog);
                 annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
                 let mut row_buf = Vec::new();
                 let mut row_count = 0usize;
@@ -1271,7 +1323,9 @@ fn execute_query_statement(
                                                 .clone(),
                                         },
                                         Some(&role_names),
+                                        Some(&relation_names),
                                         Some(&proc_names),
+                                        Some(&namespace_names),
                                     )?;
                                     row_count += 1;
                                 }
@@ -1319,7 +1373,9 @@ fn execute_query_statement(
         }) => {
             let catalog = state.session.catalog_lookup(db);
             let role_names = role_name_map(&catalog);
+            let relation_names = relation_name_map(&catalog);
             let proc_names = proc_name_map(&catalog);
+            let namespace_names = namespace_name_map(&catalog);
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
             flush_pending_backend_messages(stream, db, &state.session)?;
             send_query_result(
@@ -1333,7 +1389,9 @@ fn execute_query_statement(
                     datetime_config: state.session.datetime_config().clone(),
                 },
                 Some(&role_names),
+                Some(&relation_names),
                 Some(&proc_names),
+                Some(&namespace_names),
             )?;
             Ok(QueryStatementFlow::Continue)
         }
@@ -1507,6 +1565,39 @@ fn proc_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
         })
 }
 
+fn relation_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
+    catalog
+        .materialize_visible_catalog()
+        .map(|visible| {
+            visible
+                .relcache()
+                .entries()
+                .map(|(name, entry)| {
+                    let relname = name
+                        .rsplit_once('.')
+                        .map(|(_, relname)| relname)
+                        .unwrap_or(name)
+                        .to_string();
+                    (entry.relation_oid, relname)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn namespace_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
+    catalog
+        .materialize_visible_catalog()
+        .map(|visible| {
+            visible
+                .namespace_rows()
+                .into_iter()
+                .map(|row| (row.oid, row.nspname))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn try_handle_psql_describe_query(
     stream: &mut impl Write,
     db: &Database,
@@ -1518,7 +1609,9 @@ fn try_handle_psql_describe_query(
     };
     let catalog = state.session.catalog_lookup(db);
     let role_names = role_name_map(&catalog);
+    let relation_names = relation_name_map(&catalog);
     let proc_names = proc_name_map(&catalog);
+    let namespace_names = namespace_name_map(&catalog);
     send_query_result(
         stream,
         &columns,
@@ -1530,7 +1623,9 @@ fn try_handle_psql_describe_query(
             datetime_config: state.session.datetime_config().clone(),
         },
         Some(&role_names),
+        Some(&relation_names),
         Some(&proc_names),
+        Some(&namespace_names),
     )?;
     Ok(true)
 }
@@ -1643,33 +1738,29 @@ fn psql_describe_statistics_query(
         .ok()?;
     let txn_ctx = session.catalog_txn_ctx();
     let search_path = session.configured_search_path();
-    let mut rows = db
-        .statistics_objects
-        .read()
-        .values()
-        .filter(|entry| entry.relation_oid == relation_oid)
-        .filter_map(|entry| {
+    let catalog = session.catalog_lookup(db);
+    let mut rows = catalog
+        .statistic_ext_rows_for_relation(relation_oid)
+        .into_iter()
+        .filter_map(|row| {
             let relation_name = db.relation_display_name(
                 session.client_id,
                 txn_ctx,
                 search_path.as_deref(),
-                entry.relation_oid,
+                row.stxrelid,
             )?;
-            let (schema_name, base_name) = split_qualified_statistics_name(&entry.name);
+            let schema_name = catalog.namespace_row_by_oid(row.stxnamespace)?.nspname;
+            let columns = statistics_row_columns_text(&catalog, &row)?;
             Some(vec![
-                Value::Int32(entry.oid as i32),
+                Value::Int32(row.oid as i32),
                 Value::Text(relation_name.into()),
                 Value::Text(schema_name.into()),
-                Value::Text(base_name.into()),
-                Value::Text(entry.targets.join(", ").into()),
-                Value::Bool(statistics_kind_enabled(entry, "ndistinct")),
-                Value::Bool(statistics_kind_enabled(entry, "dependencies")),
-                Value::Bool(statistics_kind_enabled(entry, "mcv")),
-                if entry.statistics_target == -1 {
-                    Value::Null
-                } else {
-                    Value::Int16(entry.statistics_target)
-                },
+                Value::Text(row.stxname.clone().into()),
+                Value::Text(columns.into()),
+                Value::Bool(statistics_row_kind_enabled(&row, b'd')),
+                Value::Bool(statistics_row_kind_enabled(&row, b'f')),
+                Value::Bool(statistics_row_kind_enabled(&row, b'm')),
+                row.stxstattarget.map_or(Value::Null, Value::Int16),
             ])
         })
         .collect::<Vec<_>>();
@@ -1721,7 +1812,9 @@ fn try_handle_statistics_catalog_query(
     };
     let catalog = state.session.catalog_lookup(db);
     let role_names = role_name_map(&catalog);
+    let relation_names = relation_name_map(&catalog);
     let proc_names = proc_name_map(&catalog);
+    let namespace_names = namespace_name_map(&catalog);
     send_query_result(
         stream,
         &columns,
@@ -1733,7 +1826,9 @@ fn try_handle_statistics_catalog_query(
             datetime_config: state.session.datetime_config().clone(),
         },
         Some(&role_names),
+        Some(&relation_names),
         Some(&proc_names),
+        Some(&namespace_names),
     )?;
     Ok(true)
 }
@@ -1747,7 +1842,7 @@ fn execute_statistics_catalog_query(
     if lower.contains("from pg_statistic_ext s left join pg_statistic_ext_data d")
         && lower.contains("where s.stxname =")
     {
-        return statistics_object_data_query(db, sql);
+        return statistics_object_data_query(session, db, sql);
     }
     if lower.contains("from pg_statistic_ext s, pg_statistic_ext_data d")
         || lower.contains("from pg_statistic_ext s join pg_statistic_ext_data d")
@@ -1766,27 +1861,19 @@ fn execute_statistics_catalog_query(
 }
 
 fn statistics_object_data_query(
+    session: &Session,
     db: &Database,
     sql: &str,
 ) -> Option<(Vec<QueryColumn>, Vec<Vec<Value>>)> {
     let name = extract_single_quoted_literal_after(sql, "where s.stxname =")?;
-    let rows = db
-        .statistics_objects
-        .read()
-        .values()
-        .filter(|entry| {
-            split_qualified_statistics_name(&entry.name)
-                .1
-                .eq_ignore_ascii_case(&name)
-        })
-        .map(|entry| {
+    let catalog = session.catalog_lookup(db);
+    let rows = catalog
+        .statistic_ext_rows()
+        .into_iter()
+        .filter(|row| row.stxname.eq_ignore_ascii_case(&name))
+        .map(|row| {
             vec![
-                Value::Text(
-                    split_qualified_statistics_name(&entry.name)
-                        .1
-                        .to_string()
-                        .into(),
-                ),
+                Value::Text(row.stxname.into()),
                 Value::Null,
                 Value::Null,
                 Value::Null,
@@ -1829,15 +1916,25 @@ fn split_qualified_statistics_name(name: &str) -> (&str, &str) {
         .unwrap_or(("public", name))
 }
 
-fn statistics_kind_enabled(
-    entry: &crate::pgrust::database::StatisticsObjectEntry,
-    kind: &str,
-) -> bool {
-    entry.kinds.is_empty()
-        || entry
-            .kinds
-            .iter()
-            .any(|value| value.eq_ignore_ascii_case(kind))
+fn statistics_row_kind_enabled(row: &crate::include::catalog::PgStatisticExtRow, kind: u8) -> bool {
+    row.stxkind.is_empty() || row.stxkind.contains(&kind)
+}
+
+fn statistics_row_columns_text(
+    catalog: &dyn CatalogLookup,
+    row: &crate::include::catalog::PgStatisticExtRow,
+) -> Option<String> {
+    let relation = catalog.relation_by_oid(row.stxrelid)?;
+    let mut items = Vec::new();
+    for key in &row.stxkeys {
+        let attr_index = usize::try_from(key.saturating_sub(1)).ok()?;
+        let column = relation.desc.columns.get(attr_index)?;
+        items.push(column.name.to_string());
+    }
+    if let Some(exprs) = row.stxexprs.as_deref() {
+        items.extend(serde_json::from_str::<Vec<String>>(exprs).ok()?);
+    }
+    Some(items.join(", "))
 }
 
 fn extract_single_quoted_literal_after<'a>(sql: &'a str, needle: &str) -> Option<String> {
@@ -2898,6 +2995,11 @@ pub(crate) fn format_psql_indexdef(
     let amname = db
         .access_method_name_for_relation(session.client_id, txn_ctx, index.relation_oid)
         .unwrap_or_else(|| "btree".to_string());
+    let only = db
+        .describe_relation_by_oid(session.client_id, txn_ctx, index.relation_oid)
+        .filter(|relation| relation.relkind == 'I')
+        .map(|_| " ONLY")
+        .unwrap_or("");
     let column_names = psql_index_display_columns(db, session, &index.desc, &index.index_meta)
         .into_iter()
         .map(|column| column.definition)
@@ -2908,7 +3010,7 @@ pub(crate) fn format_psql_indexdef(
         ""
     };
     let mut definition = format!(
-        "CREATE {unique}INDEX {} ON {} USING {} ({})",
+        "CREATE {unique}INDEX {} ON{only} {} USING {} ({})",
         index.name,
         table_name,
         amname,
@@ -3545,7 +3647,9 @@ fn execute_portal(
         }) => {
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
             let role_names = role_name_map(&catalog);
+            let relation_names = relation_name_map(&catalog);
             let proc_names = proc_name_map(&catalog);
+            let namespace_names = namespace_name_map(&catalog);
             if let Err(e) = validate_binary_result_formats(&rows, &columns, &portal.result_formats)
             {
                 send_queued_notices(stream)?;
@@ -3574,7 +3678,9 @@ fn execute_portal(
                         datetime_config: session.datetime_config().clone(),
                     },
                     Some(&role_names),
+                    Some(&relation_names),
                     Some(&proc_names),
+                    Some(&namespace_names),
                 )?;
             }
             send_command_complete(stream, &format!("SELECT {}", rows.len()))?;
