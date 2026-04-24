@@ -75,6 +75,8 @@ const PG_PUBLICATION_REL_PRRELID_PRPUBID_INDEX_KEYS: [i16; 2] = [3, 2];
 const PG_PUBLICATION_REL_PRPUBID_INDEX_KEYS: [i16; 1] = [2];
 const PG_PUBLICATION_NAMESPACE_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_PUBLICATION_NAMESPACE_PNNSPID_PNPUBID_INDEX_KEYS: [i16; 2] = [3, 2];
+const PG_POLICY_OID_INDEX_KEYS: [i16; 1] = [1];
+const PG_POLICY_POLRELID_POLNAME_INDEX_KEYS: [i16; 2] = [3, 2];
 const PG_AM_NAME_INDEX_KEYS: [i16; 1] = [2];
 const PG_AM_OID_INDEX_KEYS: [i16; 1] = [1];
 const PG_AMOP_FAM_STRAT_INDEX_KEYS: [i16; 5] = [2, 3, 4, 5, 6];
@@ -169,7 +171,7 @@ const OID_INT2_BOOL_OPCLASS_3: [u32; 3] = [
     BOOL_BTREE_OPCLASS_OID,
 ];
 
-pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 81] = [
+pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 83] = [
     CatalogIndexDescriptor {
         relation_oid: 2684,
         relation_name: "pg_namespace_nspname_index",
@@ -657,6 +659,22 @@ pub const SYSTEM_CATALOG_INDEXES: [CatalogIndexDescriptor; 81] = [
         unique: true,
         key_attnums: &PG_PUBLICATION_NAMESPACE_PNNSPID_PNPUBID_INDEX_KEYS,
         opclass_oids: &OID_OPCLASS_2,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 3257,
+        relation_name: "pg_policy_oid_index",
+        heap_kind: BootstrapCatalogKind::PgPolicy,
+        unique: true,
+        key_attnums: &PG_POLICY_OID_INDEX_KEYS,
+        opclass_oids: &OID_OPCLASS_1,
+    },
+    CatalogIndexDescriptor {
+        relation_oid: 3258,
+        relation_name: "pg_policy_polrelid_polname_index",
+        heap_kind: BootstrapCatalogKind::PgPolicy,
+        unique: true,
+        key_attnums: &PG_POLICY_POLRELID_POLNAME_INDEX_KEYS,
+        opclass_oids: &OID_NAME_OPCLASS_2,
     },
     CatalogIndexDescriptor {
         relation_oid: 2651,
