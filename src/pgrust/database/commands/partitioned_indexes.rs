@@ -439,6 +439,7 @@ impl<'a> PartitionedIndexInstaller<'a> {
                     reltoastrelid: index_entry.reltoastrelid,
                     relpersistence: index_entry.relpersistence,
                     relkind: index_entry.relkind,
+                    relispopulated: index_entry.relispopulated,
                     relhastriggers: index_entry.relhastriggers,
                     relispartition: index_entry.relispartition,
                     relpartbound: index_entry.relpartbound.clone(),

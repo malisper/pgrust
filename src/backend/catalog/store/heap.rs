@@ -770,6 +770,59 @@ impl CatalogStore {
         owner_oid: u32,
         ctx: &CatalogWriteContext,
     ) -> Result<(CreateTableResult, CatalogMutationEffect), CatalogError> {
+        self.create_storage_relation_mvcc_with_options(
+            name,
+            desc,
+            namespace_oid,
+            db_oid,
+            relpersistence,
+            'r',
+            toast_namespace_oid,
+            toast_namespace_name,
+            owner_oid,
+            ctx,
+        )
+    }
+
+    pub fn create_materialized_view_mvcc_with_options(
+        &mut self,
+        name: impl Into<String>,
+        desc: RelationDesc,
+        namespace_oid: u32,
+        db_oid: u32,
+        relpersistence: char,
+        toast_namespace_oid: u32,
+        toast_namespace_name: &str,
+        owner_oid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(CreateTableResult, CatalogMutationEffect), CatalogError> {
+        self.create_storage_relation_mvcc_with_options(
+            name,
+            desc,
+            namespace_oid,
+            db_oid,
+            relpersistence,
+            'm',
+            toast_namespace_oid,
+            toast_namespace_name,
+            owner_oid,
+            ctx,
+        )
+    }
+
+    fn create_storage_relation_mvcc_with_options(
+        &mut self,
+        name: impl Into<String>,
+        desc: RelationDesc,
+        namespace_oid: u32,
+        db_oid: u32,
+        relpersistence: char,
+        relkind: char,
+        toast_namespace_oid: u32,
+        toast_namespace_name: &str,
+        owner_oid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(CreateTableResult, CatalogMutationEffect), CatalogError> {
         let name = name.into();
         if self
             .get_relname_relid(ctx, &syscache_relname(&name), namespace_oid)?
@@ -786,7 +839,7 @@ impl CatalogStore {
             namespace_oid,
             db_oid,
             relpersistence,
-            'r',
+            relkind,
             owner_oid,
             &mut control,
         )?;
@@ -4568,6 +4621,27 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn set_matview_populated_mvcc(
+        &mut self,
+        relation_oid: u32,
+        relispopulated: bool,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, _new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, _control| {
+                if entry.relkind != 'm' {
+                    return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+                }
+                entry.relispopulated = relispopulated;
+                Ok(((), vec![BootstrapCatalogKind::PgClass]))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok(effect)
+    }
+
     pub fn alter_view_relation_desc_mvcc(
         &mut self,
         relation_oid: u32,
@@ -5212,6 +5286,7 @@ fn build_relation_entry(
         relhassubclass: false,
         relhastriggers: false,
         relispartition: false,
+        relispopulated: true,
         relpartbound: None,
         relrowsecurity: false,
         relforcerowsecurity: false,
@@ -5301,7 +5376,7 @@ fn build_index_entry_with_relkind(
 ) -> Result<CatalogEntry, CatalogError> {
     let _ = index_name;
     if relkind == 'i' {
-        if table.relkind != 'r' && table.relkind != 't' {
+        if !matches!(table.relkind, 'r' | 't' | 'm') {
             return Err(CatalogError::UnknownTable(table.relation_oid.to_string()));
         }
     } else if relkind == 'I' {
@@ -5386,6 +5461,7 @@ fn build_index_entry_with_relkind(
         relhassubclass: false,
         relhastriggers: false,
         relispartition: false,
+        relispopulated: true,
         relpartbound: None,
         relrowsecurity: false,
         relforcerowsecurity: false,
@@ -6243,6 +6319,7 @@ fn class_row_for_relation_name(relation_name: &str, entry: &CatalogEntry) -> PgC
         relhastriggers: entry.relhastriggers,
         relrowsecurity: entry.relrowsecurity,
         relforcerowsecurity: entry.relforcerowsecurity,
+        relispopulated: entry.relispopulated,
         relispartition: entry.relispartition,
         relfrozenxid: entry.relfrozenxid,
         relpartbound: entry.relpartbound.clone(),
@@ -6951,6 +7028,7 @@ fn catalog_entry_from_relation_row(
         relhassubclass: class_row.relhassubclass,
         relhastriggers: relation.relhastriggers,
         relispartition: class_row.relispartition,
+        relispopulated: class_row.relispopulated,
         relpartbound: class_row.relpartbound.clone(),
         relrowsecurity: class_row.relrowsecurity,
         relforcerowsecurity: class_row.relforcerowsecurity,
@@ -7316,6 +7394,7 @@ fn catalog_entry_from_visible_relation(
         relhassubclass: class_row.relhassubclass,
         relhastriggers: relation.relhastriggers,
         relispartition: class_row.relispartition,
+        relispopulated: class_row.relispopulated,
         relpartbound: class_row.relpartbound.clone(),
         relrowsecurity: class_row.relrowsecurity,
         relforcerowsecurity: class_row.relforcerowsecurity,
@@ -7367,6 +7446,7 @@ fn catalog_entry_from_relation(relation: &RelCacheEntry) -> CatalogEntry {
         relhassubclass: false,
         relhastriggers: relation.relhastriggers,
         relispartition: relation.relispartition,
+        relispopulated: relation.relispopulated,
         relpartbound: relation.relpartbound.clone(),
         relrowsecurity: relation.relrowsecurity,
         relforcerowsecurity: relation.relforcerowsecurity,
@@ -7424,7 +7504,7 @@ fn resolved_sql_type_oid(
 }
 
 fn relkind_is_droppable_table(relkind: char) -> bool {
-    matches!(relkind, 'r' | 'p')
+    matches!(relkind, 'r' | 'p' | 'm')
 }
 
 fn has_nonpartition_inherited_children_visible(catcache: &CatCache, relation_oid: u32) -> bool {

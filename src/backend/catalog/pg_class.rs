@@ -22,6 +22,7 @@ pub fn relkind_for_plain_table() -> PgClassRow {
         relhastriggers: false,
         relrowsecurity: false,
         relforcerowsecurity: false,
+        relispopulated: true,
         relispartition: false,
         relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
         relpartbound: None,

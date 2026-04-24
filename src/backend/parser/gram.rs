@@ -7013,12 +7013,21 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             inner.as_str(),
         )?)),
         Rule::create_table_stmt => build_create_table(inner),
+        Rule::create_materialized_view_stmt => Ok(Statement::CreateTableAs(
+            build_create_materialized_view(inner)?,
+        )),
         Rule::create_view_stmt => Ok(Statement::CreateView(build_create_view(inner)?)),
         Rule::create_rule_stmt => Ok(Statement::CreateRule(build_create_rule(inner)?)),
+        Rule::refresh_materialized_view_stmt => Ok(Statement::RefreshMaterializedView(
+            build_refresh_materialized_view(inner)?,
+        )),
         Rule::drop_role_stmt => Ok(Statement::DropRole(build_drop_role(inner)?)),
         Rule::drop_database_stmt => Ok(Statement::DropDatabase(build_drop_database(inner)?)),
         Rule::drop_table_stmt => Ok(Statement::DropTable(build_drop_table(inner)?)),
         Rule::drop_index_stmt => Ok(Statement::DropIndex(build_drop_index(inner)?)),
+        Rule::drop_materialized_view_stmt => Ok(Statement::DropMaterializedView(
+            build_drop_materialized_view(inner)?,
+        )),
         Rule::drop_view_stmt => Ok(Statement::DropView(build_drop_view(inner)?)),
         Rule::drop_rule_stmt => Ok(Statement::DropRule(build_drop_rule(inner)?)),
         Rule::drop_policy_stmt => Ok(Statement::DropPolicy(build_drop_policy_statement(
@@ -7867,7 +7876,10 @@ fn build_select_into(pair: Pair<'_, Rule>) -> Result<CreateTableAsStatement, Par
         on_commit: OnCommitAction::PreserveRows,
         column_names: Vec::new(),
         query: build_simple_select_statement(query_parts)?,
+        query_sql: None,
         if_not_exists: false,
+        object_type: TableAsObjectType::Table,
+        skip_data: false,
     })
 }
 
@@ -8939,6 +8951,7 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
     let mut inherits = Vec::new();
     let mut ctas_columns = Vec::new();
     let mut query = None;
+    let mut query_sql = None;
     let mut is_ctas = false;
     let mut if_not_exists = false;
     for part in pair.into_inner() {
@@ -8976,7 +8989,10 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
                                 .unwrap_or_default();
                         }
                         Rule::on_commit_clause => on_commit = build_on_commit_action(inner)?,
-                        Rule::select_stmt => query = Some(build_select(inner)?),
+                        Rule::select_stmt => {
+                            query_sql = Some(inner.as_str().trim().to_string());
+                            query = Some(build_select(inner)?);
+                        }
                         _ => {}
                     }
                 }
@@ -9006,7 +9022,10 @@ fn build_create_table(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
             on_commit,
             column_names: ctas_columns,
             query: query.ok_or(ParseError::UnexpectedEof)?,
+            query_sql,
             if_not_exists,
+            object_type: TableAsObjectType::Table,
+            skip_data: false,
         }))
     } else {
         Ok(Statement::CreateTable(CreateTableStatement {
@@ -9061,6 +9080,55 @@ fn build_create_schema(pair: Pair<'_, Rule>) -> Result<CreateSchemaStatement, Pa
         auth_role,
         if_not_exists,
         elements: Vec::new(),
+    })
+}
+
+fn build_create_materialized_view(
+    pair: Pair<'_, Rule>,
+) -> Result<CreateTableAsStatement, ParseError> {
+    let mut relation_name = None;
+    let mut column_names = Vec::new();
+    let mut query = None;
+    let mut query_sql = None;
+    let mut if_not_exists = false;
+    let mut skip_data = false;
+
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::if_not_exists_clause => if_not_exists = true,
+            Rule::identifier if relation_name.is_none() => {
+                relation_name = Some(build_relation_name(part))
+            }
+            Rule::create_matview_column_list => {
+                column_names = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::ident_list)
+                    .map(|inner| inner.into_inner().map(build_identifier).collect())
+                    .unwrap_or_default();
+            }
+            Rule::select_stmt => {
+                query_sql = Some(part.as_str().trim().to_string());
+                query = Some(build_select(part)?);
+            }
+            Rule::matview_data_clause => {
+                skip_data = part.as_str().to_ascii_lowercase().contains("no");
+            }
+            _ => {}
+        }
+    }
+
+    let (schema_name, table_name) = relation_name.ok_or(ParseError::UnexpectedEof)?;
+    Ok(CreateTableAsStatement {
+        schema_name,
+        table_name,
+        persistence: TablePersistence::Permanent,
+        on_commit: OnCommitAction::PreserveRows,
+        column_names,
+        query: query.ok_or(ParseError::UnexpectedEof)?,
+        query_sql,
+        if_not_exists,
+        object_type: TableAsObjectType::MaterializedView,
+        skip_data,
     })
 }
 
@@ -10403,6 +10471,30 @@ fn build_drop_view(pair: Pair<'_, Rule>) -> Result<DropViewStatement, ParseError
     })
 }
 
+fn build_drop_materialized_view(
+    pair: Pair<'_, Rule>,
+) -> Result<DropMaterializedViewStatement, ParseError> {
+    let mut if_exists = false;
+    let mut view_names = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::if_exists_clause => if_exists = true,
+            Rule::ident_list => {
+                view_names.extend(part.into_inner().map(build_identifier));
+            }
+            Rule::identifier => view_names.push(build_identifier(part)),
+            _ => {}
+        }
+    }
+    if view_names.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    Ok(DropMaterializedViewStatement {
+        if_exists,
+        view_names,
+    })
+}
+
 fn build_drop_rule(pair: Pair<'_, Rule>) -> Result<DropRuleStatement, ParseError> {
     let mut if_exists = false;
     let mut rule_name = None;
@@ -10495,6 +10587,31 @@ fn build_truncate_table(pair: Pair<'_, Rule>) -> Result<TruncateTableStatement, 
         .map(|part| part.into_inner().map(build_identifier).collect::<Vec<_>>())
         .ok_or(ParseError::UnexpectedEof)?;
     Ok(TruncateTableStatement { table_names })
+}
+
+fn build_refresh_materialized_view(
+    pair: Pair<'_, Rule>,
+) -> Result<RefreshMaterializedViewStatement, ParseError> {
+    let raw = pair.as_str().to_ascii_lowercase();
+    let concurrently = raw
+        .split_ascii_whitespace()
+        .any(|word| word == "concurrently");
+    let mut relation_name = None;
+    let mut skip_data = false;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => relation_name = Some(build_identifier(part)),
+            Rule::matview_data_clause => {
+                skip_data = part.as_str().to_ascii_lowercase().contains("no");
+            }
+            _ => {}
+        }
+    }
+    Ok(RefreshMaterializedViewStatement {
+        relation_name: relation_name.ok_or(ParseError::UnexpectedEof)?,
+        concurrently,
+        skip_data,
+    })
 }
 
 fn build_vacuum(pair: Pair<'_, Rule>) -> Result<VacuumStatement, ParseError> {

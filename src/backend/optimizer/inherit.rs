@@ -57,6 +57,7 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
                     rel: child.rel,
                     relation_oid: child.relation_oid,
                     relkind: child.relkind,
+                    relispopulated: child.relispopulated,
                     toast: child.toast,
                 },
             };

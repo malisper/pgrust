@@ -1925,7 +1925,7 @@ fn eval_pg_get_viewdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value,
     let Some(relation) = catalog.lookup_relation_by_oid(relation_oid) else {
         return Ok(Value::Null);
     };
-    if relation.relkind != 'v' {
+    if !matches!(relation.relkind, 'v' | 'm') {
         return Ok(Value::Null);
     }
     let definition =

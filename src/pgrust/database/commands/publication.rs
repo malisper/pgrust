@@ -1776,6 +1776,7 @@ mod tests {
             owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             relpersistence: 't',
             relkind: 'r',
+            relispopulated: true,
             relispartition: false,
             relpartbound: None,
             desc: crate::include::nodes::primnodes::RelationDesc {
@@ -1815,6 +1816,7 @@ mod tests {
             owner_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
             relpersistence: 'u',
             relkind: 'r',
+            relispopulated: true,
             relispartition: false,
             relpartbound: None,
             desc: crate::include::nodes::primnodes::RelationDesc {

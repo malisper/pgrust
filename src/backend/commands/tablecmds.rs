@@ -692,11 +692,11 @@ fn validate_maintenance_targets(
 ) -> Result<(), ExecError> {
     for target in targets {
         let entry = match catalog.lookup_any_relation(&target.table_name) {
-            Some(entry) if entry.relkind == 'r' => entry,
+            Some(entry) if matches!(entry.relkind, 'r' | 'm') => entry,
             Some(_) => {
                 return Err(ExecError::Parse(ParseError::WrongObjectType {
                     name: target.table_name.clone(),
-                    expected: "table",
+                    expected: "table or materialized view",
                 }));
             }
             None => {
@@ -2259,7 +2259,10 @@ pub fn collect_vacuum_stats(
     let mut processed = 0u64;
     let mut stats = Vec::with_capacity(targets.len());
     for target in targets {
-        let Some(entry) = catalog.lookup_relation(&target.table_name) else {
+        let Some(entry) = catalog
+            .lookup_any_relation(&target.table_name)
+            .filter(|entry| matches!(entry.relkind, 'r' | 'm'))
+        else {
             continue;
         };
         let scan = crate::backend::access::heap::vacuumlazy::vacuum_relation_scan(

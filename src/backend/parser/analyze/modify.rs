@@ -727,6 +727,7 @@ pub fn plan_merge(
         entry.rel,
         entry.relation_oid,
         entry.relkind,
+        entry.relispopulated,
         entry.toast,
         !stmt.target_only,
         entry.desc.clone(),
@@ -888,6 +889,9 @@ fn lookup_modify_relation(
 ) -> Result<BoundRelation, ParseError> {
     match catalog.lookup_any_relation(name) {
         Some(entry) if matches!(entry.relkind, 'r' | 'p' | 'v') => Ok(entry),
+        Some(entry) if entry.relkind == 'm' => Err(ParseError::FeatureNotSupportedMessage(
+            format!("cannot change materialized view \"{name}\""),
+        )),
         Some(_) => Err(ParseError::WrongObjectType {
             name: name.to_string(),
             expected: "table or view",
@@ -2127,6 +2131,7 @@ fn bind_update_from(
         entry.rel,
         entry.relation_oid,
         entry.relkind,
+        entry.relispopulated,
         entry.toast,
         !stmt.only && entry.relkind == 'r',
         entry.desc.clone(),

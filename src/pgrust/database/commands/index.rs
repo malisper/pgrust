@@ -841,6 +841,7 @@ impl Database {
                     reltoastrelid: index_entry.reltoastrelid,
                     relpersistence: index_entry.relpersistence,
                     relkind: index_entry.relkind,
+                    relispopulated: index_entry.relispopulated,
                     relhastriggers: index_entry.relhastriggers,
                     relispartition: index_entry.relispartition,
                     relpartbound: index_entry.relpartbound.clone(),
@@ -1139,10 +1140,10 @@ impl Database {
                 sqlstate: "0A000",
             });
         }
-        if !matches!(entry.relkind, 'r' | 'p') {
+        if !matches!(entry.relkind, 'r' | 'p' | 'm') {
             return Err(ExecError::Parse(ParseError::WrongObjectType {
                 name: create_stmt.table_name.clone(),
-                expected: "table",
+                expected: "table or materialized view",
             }));
         }
         ensure_relation_owner(self, client_id, &entry, &create_stmt.table_name)?;

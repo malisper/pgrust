@@ -1196,6 +1196,275 @@ fn session_query_rows(session: &mut Session, db: &Database, sql: &str) -> Vec<Ve
 }
 
 #[test]
+fn materialized_view_create_refresh_metadata_and_drop() {
+    let db = Database::open_ephemeral(64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table mv_base(id int4, name text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into mv_base values (1, 'one'), (2, 'two')")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create materialized view mv_partial_alias(id_alias) as select id, name from mv_base",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id_alias, name from mv_partial_alias order by id_alias"
+        ),
+        vec![
+            vec![Value::Int32(1), Value::Text("one".into())],
+            vec![Value::Int32(2), Value::Text("two".into())],
+        ]
+    );
+    let too_many_aliases_err = session
+        .execute(
+            &db,
+            "create materialized view mv_too_many_aliases(id, name, extra) as \
+             select id, name from mv_base",
+        )
+        .unwrap_err();
+    assert!(matches!(
+        too_many_aliases_err,
+        ExecError::Parse(ParseError::DetailedError {
+            message,
+            sqlstate: "42601",
+            ..
+        }) if message == "too many column names were specified"
+    ));
+    session
+        .execute(
+            &db,
+            "create materialized view mv_items as select id, name from mv_base where id > 1",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id, name from mv_items order by id"
+        ),
+        vec![vec![Value::Int32(2), Value::Text("two".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relkind::text, relispopulated from pg_class where relname = 'mv_items'",
+        ),
+        vec![vec![Value::Text("m".into()), Value::Bool(true)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select r.rulename from pg_rewrite r join pg_class c on c.oid = r.ev_class \
+             where c.relname = 'mv_items' order by r.rulename",
+        ),
+        vec![vec![Value::Text("_RETURN".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_matviews where matviewname = 'mv_items'",
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select matviewname, ispopulated from pg_matviews where matviewname = 'mv_items'",
+        ),
+        vec![vec![Value::Text("mv_items".into()), Value::Bool(true)]]
+    );
+
+    session
+        .execute(&db, "insert into mv_base values (3, 'three')")
+        .unwrap();
+    session
+        .execute(&db, "refresh materialized view mv_items")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id, name from mv_items order by id"
+        ),
+        vec![
+            vec![Value::Int32(2), Value::Text("two".into())],
+            vec![Value::Int32(3), Value::Text("three".into())],
+        ]
+    );
+
+    session
+        .execute(&db, "create index on mv_items(id)")
+        .unwrap();
+    session.execute(&db, "analyze mv_items").unwrap();
+    session.execute(&db, "vacuum mv_items").unwrap();
+
+    let drop_table_err = session.execute(&db, "drop table mv_items").unwrap_err();
+    assert!(matches!(
+        drop_table_err,
+        ExecError::Parse(ParseError::WrongObjectType {
+            expected: "table",
+            ..
+        })
+    ));
+    session
+        .execute(&db, "drop materialized view if exists mv_items")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_class where relname = 'mv_items'",
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn materialized_view_with_no_data_refreshes_and_rejects_writes() {
+    let dir = temp_dir("matview_no_data");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table mv_no_data_base(id int4, name text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into mv_no_data_base values (1, 'one'), (2, 'two')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create materialized view mv_no_data(id, name) as \
+             select id, name from mv_no_data_base with no data",
+        )
+        .unwrap();
+
+    let scan_err = session
+        .execute(&db, "select id, name from mv_no_data")
+        .unwrap_err();
+    assert!(matches!(
+        scan_err,
+        ExecError::DetailedError {
+            message,
+            hint: Some(hint),
+            sqlstate,
+            ..
+        } if message == "materialized view \"mv_no_data\" has not been populated"
+            && hint == "Use the REFRESH MATERIALIZED VIEW command."
+            && sqlstate == "55000"
+    ));
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select ispopulated from pg_matviews where matviewname = 'mv_no_data'",
+        ),
+        vec![vec![Value::Bool(false)]]
+    );
+
+    session
+        .execute(&db, "refresh materialized view mv_no_data")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id, name from mv_no_data order by id"
+        ),
+        vec![
+            vec![Value::Int32(1), Value::Text("one".into())],
+            vec![Value::Int32(2), Value::Text("two".into())],
+        ]
+    );
+
+    let insert_err = session
+        .execute(&db, "insert into mv_no_data values (3, 'three')")
+        .unwrap_err();
+    assert!(matches!(
+        insert_err,
+        ExecError::Parse(ParseError::FeatureNotSupportedMessage(message))
+            if message == "cannot change materialized view \"mv_no_data\""
+    ));
+    let copy_path = dir.join("mv_no_data.tsv");
+    fs::write(&copy_path, "3\tthree\n").unwrap();
+    let copy_err = session
+        .execute(
+            &db,
+            &format!("copy mv_no_data from '{}'", copy_path.display()),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        copy_err,
+        ExecError::Parse(ParseError::FeatureNotSupportedMessage(message))
+            if message == "cannot change materialized view \"mv_no_data\""
+    ));
+
+    session
+        .execute(&db, "refresh materialized view mv_no_data with no data")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relispopulated from pg_class where relname = 'mv_no_data'",
+        ),
+        vec![vec![Value::Bool(false)]]
+    );
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "refresh materialized view mv_no_data")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select id, name from mv_no_data order by id"
+        ),
+        vec![
+            vec![Value::Int32(1), Value::Text("one".into())],
+            vec![Value::Int32(2), Value::Text("two".into())],
+        ]
+    );
+    session
+        .execute(&db, "refresh materialized view mv_no_data with no data")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select relispopulated from pg_class where relname = 'mv_no_data'",
+        ),
+        vec![vec![Value::Bool(false)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select ispopulated from pg_matviews where matviewname = 'mv_no_data'",
+        ),
+        vec![vec![Value::Bool(false)]]
+    );
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
 fn standalone_listen_and_unlisten_update_subscriptions_immediately() {
     let db = Database::open_ephemeral(32).unwrap();
 
