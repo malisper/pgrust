@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, btree_map::Entry};
 use std::rc::Rc;
 
 use parking_lot::RwLock;
@@ -40,7 +40,7 @@ use super::explain::{
     format_buffer_usage, format_explain_lines_with_costs, format_explain_plan_with_subplans,
     format_verbose_explain_plan_with_subplans, push_explain_line,
 };
-use super::partition::route_partition_target;
+use super::partition::{exec_find_partition, exec_setup_partition_tuple_routing};
 use super::trigger::RuntimeTriggers;
 use super::upsert::execute_insert_on_conflict_rows;
 use crate::backend::executor::exec_expr::{compile_predicate_with_decoder, eval_expr};
@@ -2544,6 +2544,61 @@ fn first_toast_index_for_relation(
         .next()
 }
 
+struct PartitionResultRelInfo {
+    relation_name: String,
+    relation: crate::backend::parser::BoundRelation,
+    relation_constraints: BoundRelationConstraints,
+    indexes: Vec<BoundIndexRelation>,
+    toast_index: Option<BoundIndexRelation>,
+    rows: Vec<Vec<Value>>,
+}
+
+impl PartitionResultRelInfo {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        catalog: &dyn CatalogLookup,
+        fallback_relation_name: &str,
+        root_relation_oid: u32,
+        root_constraints: &BoundRelationConstraints,
+        root_indexes: &[BoundIndexRelation],
+        root_toast_index: Option<&BoundIndexRelation>,
+        relation: crate::backend::parser::BoundRelation,
+    ) -> Result<Self, ExecError> {
+        let relation_name = catalog
+            .class_row_by_oid(relation.relation_oid)
+            .map(|row| row.relname)
+            .unwrap_or_else(|| fallback_relation_name.to_string());
+        let relation_constraints = if relation.relation_oid == root_relation_oid {
+            root_constraints.clone()
+        } else {
+            bind_relation_constraints(
+                Some(&relation_name),
+                relation.relation_oid,
+                &relation.desc,
+                catalog,
+            )?
+        };
+        let indexes = if relation.relation_oid == root_relation_oid {
+            root_indexes.to_vec()
+        } else {
+            catalog.index_relations_for_heap(relation.relation_oid)
+        };
+        let toast_index = if relation.relation_oid == root_relation_oid {
+            root_toast_index.cloned()
+        } else {
+            first_toast_index_for_relation(catalog, relation.toast)
+        };
+        Ok(Self {
+            relation_name,
+            relation,
+            relation_constraints,
+            indexes,
+            toast_index,
+            rows: Vec::new(),
+        })
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_insert_rows_with_routing(
     catalog: &dyn CatalogLookup,
@@ -2596,55 +2651,47 @@ fn execute_insert_rows_with_routing(
         );
     }
 
-    let mut routed = BTreeMap::<
-        u32,
-        (
-            String,
-            crate::backend::parser::BoundRelation,
-            Vec<Vec<Value>>,
-        ),
-    >::new();
+    let mut routed = BTreeMap::<u32, PartitionResultRelInfo>::new();
+    let mut proute = exec_setup_partition_tuple_routing(catalog, &target_relation)?;
     for row in rows {
-        let leaf = route_partition_target(catalog, &target_relation, row, &ctx.datetime_config)?;
-        let leaf_name = catalog
-            .class_row_by_oid(leaf.relation_oid)
-            .map(|row| row.relname)
-            .unwrap_or_else(|| relation_name.to_string());
-        routed
-            .entry(leaf.relation_oid)
-            .or_insert_with(|| (leaf_name, leaf.clone(), Vec::new()))
-            .2
-            .push(row.clone());
+        let leaf = exec_find_partition(
+            catalog,
+            &mut proute,
+            &target_relation,
+            row,
+            &ctx.datetime_config,
+        )?;
+        match routed.entry(leaf.relation_oid) {
+            Entry::Occupied(mut entry) => entry.get_mut().rows.push(row.clone()),
+            Entry::Vacant(entry) => {
+                let mut result_rel_info = PartitionResultRelInfo::new(
+                    catalog,
+                    relation_name,
+                    relation_oid,
+                    relation_constraints,
+                    indexes,
+                    toast_index,
+                    leaf,
+                )?;
+                result_rel_info.rows.push(row.clone());
+                entry.insert(result_rel_info);
+            }
+        }
     }
 
     let mut inserted_rows = Vec::new();
-    for (_, (leaf_name, leaf, leaf_rows)) in routed {
-        let leaf_constraints = if leaf.relation_oid == relation_oid {
-            relation_constraints.clone()
-        } else {
-            bind_relation_constraints(Some(&leaf_name), leaf.relation_oid, &leaf.desc, catalog)?
-        };
-        let leaf_indexes = if leaf.relation_oid == relation_oid {
-            indexes.to_vec()
-        } else {
-            catalog.index_relations_for_heap(leaf.relation_oid)
-        };
-        let leaf_toast_index = if leaf.relation_oid == relation_oid {
-            toast_index.cloned()
-        } else {
-            first_toast_index_for_relation(catalog, leaf.toast)
-        };
+    for (_, result_rel_info) in routed {
         inserted_rows.extend(execute_insert_rows(
-            &leaf_name,
-            leaf.relation_oid,
-            leaf.rel,
-            leaf.toast,
-            leaf_toast_index.as_ref(),
-            &leaf.desc,
-            &leaf_constraints,
+            &result_rel_info.relation_name,
+            result_rel_info.relation.relation_oid,
+            result_rel_info.relation.rel,
+            result_rel_info.relation.toast,
+            result_rel_info.toast_index.as_ref(),
+            &result_rel_info.relation.desc,
+            &result_rel_info.relation_constraints,
             rls_write_checks,
-            &leaf_indexes,
-            &leaf_rows,
+            &result_rel_info.indexes,
+            &result_rel_info.rows,
             ctx,
             xid,
             cid,

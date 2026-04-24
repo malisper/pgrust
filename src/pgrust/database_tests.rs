@@ -3153,6 +3153,71 @@ fn drop_table_drops_partitioned_roots_and_subpartitioned_children() {
 }
 
 #[test]
+fn partition_tuple_routing_handles_nested_and_default_partitions() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table route_orders(id int4, region text) partition by list (region)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table route_orders_eu partition of route_orders for values in ('eu') partition by range (id)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table route_orders_eu_low partition of route_orders_eu for values from (minvalue) to (100)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table route_orders_eu_high partition of route_orders_eu for values from (100) to (maxvalue)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table route_orders_other partition of route_orders default",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into route_orders values (1, 'eu'), (150, 'eu'), (5, 'us'), (6, 'apac')",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from route_orders_eu_low"),
+        vec![vec![Value::Int64(1)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from route_orders_eu_high"),
+        vec![vec![Value::Int64(1)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from route_orders_other"),
+        vec![vec![Value::Int64(2)]]
+    );
+
+    match session.execute(&db, "insert into route_orders_eu_low values (250, 'eu')") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message
+            == "new row for relation \"route_orders_eu_low\" violates partition constraint"
+            && sqlstate == "23514" => {}
+        other => panic!("expected partition constraint violation, got {other:?}"),
+    }
+}
+
+#[test]
 fn hash_partitioned_tables_route_rows_and_validate_bounds() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
