@@ -9,6 +9,7 @@ pub mod detoast;
 pub mod genam;
 pub mod gin;
 pub mod gist;
+pub mod hash;
 pub mod heapam_xlog;
 pub mod heaptoast;
 pub mod htup;

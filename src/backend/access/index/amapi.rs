@@ -1,5 +1,7 @@
 use crate::include::access::amapi::IndexAmRoutine;
-use crate::include::catalog::{BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, SPGIST_AM_OID};
+use crate::include::catalog::{
+    BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID, SPGIST_AM_OID,
+};
 
 pub fn index_am_handler(am_oid: u32) -> Option<IndexAmRoutine> {
     match am_oid {
@@ -8,13 +10,14 @@ pub fn index_am_handler(am_oid: u32) -> Option<IndexAmRoutine> {
         GIST_AM_OID => Some(crate::backend::access::gist::gist_am_handler()),
         SPGIST_AM_OID => Some(crate::backend::access::spgist::spgist_am_handler()),
         BRIN_AM_OID => Some(crate::backend::access::brin::brin_am_handler()),
+        HASH_AM_OID => Some(crate::backend::access::hash::hash_am_handler()),
         _ => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::include::catalog::SPGIST_AM_OID;
+    use crate::include::catalog::{HASH_AM_OID, SPGIST_AM_OID};
 
     use super::index_am_handler;
 
@@ -26,5 +29,17 @@ mod tests {
         assert!(am.amcanorderbyop);
         assert!(!am.amcanmulticol);
         assert!(!am.amsearchnulls);
+    }
+
+    #[test]
+    fn hash_oid_routes_to_native_hash_handler() {
+        let am = index_am_handler(HASH_AM_OID).expect("hash handler");
+
+        assert_eq!(am.amstrategies, 1);
+        assert_eq!(am.amsupport, 1);
+        assert!(am.amcanhash);
+        assert!(am.amgetbitmap.is_some());
+        assert!(!am.amcanorder);
+        assert!(!am.amcanunique);
     }
 }

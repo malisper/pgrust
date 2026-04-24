@@ -229,7 +229,7 @@ fn maybe_compress_index_value(
     }
 }
 
-fn encode_key_payload(
+pub(crate) fn encode_key_payload(
     desc: &RelationDesc,
     values: &[Value],
     default_toast_compression: AttributeCompression,
@@ -257,7 +257,10 @@ fn encode_key_payload(
     Ok(payload)
 }
 
-fn decode_key_payload(desc: &RelationDesc, payload: &[u8]) -> Result<Vec<Value>, CatalogError> {
+pub(crate) fn decode_key_payload(
+    desc: &RelationDesc,
+    payload: &[u8],
+) -> Result<Vec<Value>, CatalogError> {
     if payload.len() < 2 {
         return Err(CatalogError::Corrupt("index tuple payload too short"));
     }
@@ -1564,6 +1567,7 @@ impl IndexScanOpaqueExt for IndexScanOpaque {
             IndexScanOpaque::Spgist(_) => None,
             IndexScanOpaque::Brin(_) => None,
             IndexScanOpaque::Gin(_) => None,
+            IndexScanOpaque::Hash(_) => None,
             IndexScanOpaque::None => None,
         }
     }
@@ -1609,6 +1613,7 @@ fn btgettuple(scan: &mut IndexScanDesc) -> Result<bool, CatalogError> {
             IndexScanOpaque::Spgist(_) => true,
             IndexScanOpaque::Brin(_) => true,
             IndexScanOpaque::Gin(_) => true,
+            IndexScanOpaque::Hash(_) => true,
             IndexScanOpaque::None => true,
         };
         if needs_load {

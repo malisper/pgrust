@@ -142,6 +142,7 @@ pub fn system_catalog_index_meta(
         indpred: None,
         brin_options: None,
         gin_options: None,
+        hash_options: None,
     }
 }
 
@@ -182,6 +183,7 @@ pub fn system_catalog_index_relcache(
         rd_indpred: None,
         brin_options: None,
         gin_options: None,
+        hash_options: None,
     }
 }
 

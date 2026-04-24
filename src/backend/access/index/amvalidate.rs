@@ -4,13 +4,14 @@ use crate::include::access::gist::{
     GIST_CONSISTENT_PROC, GIST_DISTANCE_PROC, GIST_EQUAL_PROC, GIST_PENALTY_PROC,
     GIST_PICKSPLIT_PROC, GIST_TRANSLATE_CMPTYPE_PROC, GIST_UNION_PROC,
 };
+use crate::include::access::hash::HASH_STANDARD_PROC;
 use crate::include::access::spgist::{
     SPGIST_CHOOSE_PROC, SPGIST_CONFIG_PROC, SPGIST_INNER_CONSISTENT_PROC,
     SPGIST_LEAF_CONSISTENT_PROC, SPGIST_PICKSPLIT_PROC,
 };
 use crate::include::catalog::{
-    BRIN_AM_OID, GIST_AM_OID, SPGIST_AM_OID, bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows,
-    bootstrap_pg_opclass_rows,
+    BRIN_AM_OID, GIST_AM_OID, HASH_AM_OID, SPGIST_AM_OID, bootstrap_pg_amop_rows,
+    bootstrap_pg_amproc_rows, bootstrap_pg_opclass_rows,
 };
 
 pub fn validate_index_am(am_oid: u32) -> bool {
@@ -19,6 +20,9 @@ pub fn validate_index_am(am_oid: u32) -> bool {
     }
     if am_oid == BRIN_AM_OID {
         return crate::backend::access::brin::validate_brin_am();
+    }
+    if am_oid == HASH_AM_OID {
+        return validate_hash_am();
     }
     if am_oid != GIST_AM_OID && am_oid != SPGIST_AM_OID {
         return true;
@@ -80,6 +84,38 @@ pub fn validate_index_am(am_oid: u32) -> bool {
                 return false;
             }
         } else if row.amopsortfamily == 0 {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn validate_hash_am() -> bool {
+    let proc_rows = bootstrap_pg_amproc_rows();
+    let amop_rows = bootstrap_pg_amop_rows();
+    let opclasses = bootstrap_pg_opclass_rows()
+        .into_iter()
+        .filter(|row| row.opcmethod == HASH_AM_OID)
+        .collect::<Vec<_>>();
+
+    for opclass in opclasses {
+        if !proc_rows.iter().any(|row| {
+            row.amprocfamily == opclass.opcfamily
+                && row.amproclefttype == opclass.opcintype
+                && row.amprocrighttype == opclass.opcintype
+                && row.amprocnum == HASH_STANDARD_PROC
+        }) {
+            return false;
+        }
+        if !amop_rows.iter().any(|row| {
+            row.amopmethod == HASH_AM_OID
+                && row.amopfamily == opclass.opcfamily
+                && row.amoplefttype == opclass.opcintype
+                && row.amoprighttype == opclass.opcintype
+                && row.amopstrategy == 1
+                && row.amoppurpose == 's'
+        }) {
             return false;
         }
     }

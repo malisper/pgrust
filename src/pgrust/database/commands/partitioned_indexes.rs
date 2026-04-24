@@ -258,7 +258,9 @@ impl<'a> PartitionedIndexInstaller<'a> {
             && index.index_meta.indclass == spec.build_options.indclass
             && index.index_meta.indcollation == spec.build_options.indcollation
             && index.index_meta.indoption == spec.build_options.indoption
-            && index.index_meta.brin_options == spec.build_options.brin_options)
+            && index.index_meta.brin_options == spec.build_options.brin_options
+            && index.index_meta.gin_options == spec.build_options.gin_options
+            && index.index_meta.hash_options == spec.build_options.hash_options)
     }
 
     fn find_attached_child_index(
@@ -717,6 +719,7 @@ impl<'a> PartitionedIndexInstaller<'a> {
                 indisexclusion: index.index_meta.indisexclusion,
                 brin_options: index.index_meta.brin_options.clone(),
                 gin_options: index.index_meta.gin_options.clone(),
+                hash_options: index.index_meta.hash_options,
             },
         })
     }

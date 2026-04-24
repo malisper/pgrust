@@ -12,7 +12,7 @@ use crate::include::access::brin::BRIN_DEFAULT_PAGES_PER_RANGE;
 use crate::include::access::brin_page::REVMAP_PAGE_MAXITEMS;
 use crate::include::access::htup::SIZEOF_HEAP_TUPLE_HEADER;
 use crate::include::catalog::{
-    BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, PgStatisticRow, SPGIST_AM_OID,
+    BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID, PgStatisticRow, SPGIST_AM_OID,
     bootstrap_pg_operator_rows, builtin_scalar_function_for_proc_oid,
     proc_oid_for_builtin_scalar_function, relkind_has_storage,
 };
@@ -2234,6 +2234,10 @@ pub(super) fn build_index_path_spec(
             let (keys, used_indexes) = build_gist_index_keys(index, &parsed_quals);
             (keys, used_indexes, 0)
         }
+        HASH_AM_OID => {
+            let (keys, used_indexes) = build_hash_index_keys(index, &parsed_quals);
+            (keys, used_indexes, 0)
+        }
         GIST_AM_OID | SPGIST_AM_OID => {
             let (keys, used_indexes) = build_gist_index_keys(index, &parsed_quals);
             (keys, used_indexes, 0)
@@ -2701,11 +2705,40 @@ fn const_argument(expr: &Expr) -> Option<Value> {
 }
 
 fn simple_index_column(index: &BoundIndexRelation, index_pos: usize) -> Option<usize> {
-    // :HACK: Costing still assumes index keys map directly to heap columns.
-    // Expression GiST indexes can be built and maintained, but until planner
-    // matching learns indexprs, they remain invisible to this path logic too.
     let attnum = *index.index_meta.indkey.get(index_pos)?;
     (attnum > 0).then_some((attnum - 1) as usize)
+}
+
+fn index_expression_position(index: &BoundIndexRelation, index_pos: usize) -> Option<usize> {
+    if *index.index_meta.indkey.get(index_pos)? != 0 {
+        return None;
+    }
+    Some(
+        index
+            .index_meta
+            .indkey
+            .iter()
+            .take(index_pos)
+            .filter(|attnum| **attnum == 0)
+            .count(),
+    )
+}
+
+fn index_key_matches_qual(
+    index: &BoundIndexRelation,
+    index_pos: usize,
+    qual: &IndexableQual,
+) -> bool {
+    if let Some(column) = simple_index_column(index, index_pos) {
+        return qual.column == Some(column);
+    }
+    let Some(expr_pos) = index_expression_position(index, index_pos) else {
+        return false;
+    };
+    index
+        .index_exprs
+        .get(expr_pos)
+        .is_some_and(|index_expr| strip_casts(index_expr) == strip_casts(&qual.key_expr))
 }
 
 fn operator_commutator_oid(operator_oid: u32) -> Option<u32> {
@@ -2884,6 +2917,10 @@ fn qual_strategy(
                 (index.index_meta.am_oid == BTREE_AM_OID || index.index_meta.am_oid == BRIN_AM_OID)
                     .then(|| btree_builtin_strategy(kind))
                     .flatten()
+                    .or_else(|| {
+                        (index.index_meta.am_oid == HASH_AM_OID && kind == OpExprKind::Eq)
+                            .then_some(1)
+                    })
             }),
         super::super::IndexStrategyLookup::Proc(proc_oid) => index
             .index_meta
@@ -2912,7 +2949,7 @@ fn build_btree_index_keys(
         };
         if let Some((qual_idx, strategy, argument)) =
             parsed_quals.iter().enumerate().find_map(|(idx, qual)| {
-                if used[idx] || qual.column != column {
+                if used[idx] || qual.column != Some(column) {
                     return None;
                 }
                 let strategy = qual_strategy(index, index_pos, qual)?;
@@ -2931,7 +2968,7 @@ fn build_btree_index_keys(
         }
         if let Some((qual_idx, strategy, argument)) =
             parsed_quals.iter().enumerate().find_map(|(idx, qual)| {
-                if used[idx] || qual.column != column {
+                if used[idx] || qual.column != Some(column) {
                     return None;
                 }
                 let strategy = qual_strategy(index, index_pos, qual)?;
@@ -2963,7 +3000,7 @@ fn build_gist_index_keys(
         .filter_map(|(qual_idx, qual)| {
             let (index_pos, strategy) =
                 (0..index.index_meta.indkey.len()).find_map(|index_pos| {
-                    (simple_index_column(index, index_pos) == Some(qual.column))
+                    (index_key_matches_qual(index, index_pos, qual))
                         .then(|| qual_strategy(index, index_pos, qual))
                         .flatten()
                         .map(|strategy| (index_pos, strategy))
@@ -2990,7 +3027,7 @@ fn build_brin_index_keys(
         .filter_map(|(qual_idx, qual)| {
             let (index_pos, strategy) =
                 (0..index.index_meta.indkey.len()).find_map(|index_pos| {
-                    (simple_index_column(index, index_pos) == Some(qual.column))
+                    (index_key_matches_qual(index, index_pos, qual))
                         .then(|| qual_strategy(index, index_pos, qual))
                         .flatten()
                         .map(|strategy| (index_pos, strategy))
@@ -3006,15 +3043,42 @@ fn build_brin_index_keys(
     (keys, used_qual_indexes)
 }
 
+fn build_hash_index_keys(
+    index: &BoundIndexRelation,
+    parsed_quals: &[IndexableQual],
+) -> (Vec<IndexScanKey>, Vec<usize>) {
+    if index.index_meta.indkey.len() != 1 {
+        return (Vec::new(), Vec::new());
+    }
+    let Some((qual_idx, key)) = parsed_quals
+        .iter()
+        .enumerate()
+        .find_map(|(qual_idx, qual)| {
+            if !index_key_matches_qual(index, 0, qual) {
+                return None;
+            }
+            let strategy = qual_strategy(index, 0, qual)?;
+            (strategy == 1).then_some((
+                qual_idx,
+                IndexScanKey::new(1, strategy, qual.argument.clone()),
+            ))
+        })
+    else {
+        return (Vec::new(), Vec::new());
+    };
+    (vec![key], vec![qual_idx])
+}
+
 fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
     fn mk(
-        column: usize,
+        key_expr: &Expr,
         lookup: super::super::IndexStrategyLookup,
         argument: IndexScanKeyArgument,
         expr: &Expr,
     ) -> Option<IndexableQual> {
         Some(IndexableQual {
-            column,
+            column: expr_column_index(key_expr),
+            key_expr: strip_casts(key_expr).clone(),
             lookup,
             argument,
             expr: expr.clone(),
@@ -3025,11 +3089,9 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
         Expr::Op(op) if op.args.len() == 2 => {
             let left = strip_casts(&op.args[0]);
             let right = &op.args[1];
-            if let (Some(column), Some(argument)) =
-                (expr_column_index(left), index_key_argument(right))
-            {
+            if let Some(argument) = index_key_argument(right) {
                 return mk(
-                    column,
+                    left,
                     super::super::IndexStrategyLookup::Operator {
                         oid: op.opno,
                         kind: op.op,
@@ -3038,12 +3100,9 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
                     expr,
                 );
             }
-            if let (Some(argument), Some(column)) = (
-                index_key_argument(&op.args[0]),
-                expr_column_index(strip_casts(&op.args[1])),
-            ) {
+            if let Some(argument) = index_key_argument(&op.args[0]) {
                 return mk(
-                    column,
+                    strip_casts(&op.args[1]),
                     super::super::IndexStrategyLookup::Operator {
                         oid: operator_commutator_oid(op.opno).unwrap_or(0),
                         kind: commuted_op_expr_kind(op.op)?,
@@ -3057,22 +3116,17 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
         Expr::Func(func) if func.args.len() == 2 => {
             let left = strip_casts(&func.args[0]);
             let right = &func.args[1];
-            if let (Some(column), Some(argument)) =
-                (expr_column_index(left), index_key_argument(right))
-            {
+            if let Some(argument) = index_key_argument(right) {
                 return mk(
-                    column,
+                    left,
                     super::super::IndexStrategyLookup::Proc(func.funcid),
                     argument,
                     expr,
                 );
             }
-            if let (Some(argument), Some(column)) = (
-                index_key_argument(&func.args[0]),
-                expr_column_index(strip_casts(&func.args[1])),
-            ) {
+            if let Some(argument) = index_key_argument(&func.args[0]) {
                 return mk(
-                    column,
+                    strip_casts(&func.args[1]),
                     super::super::IndexStrategyLookup::Proc(commuted_function_proc_oid(
                         func.funcid,
                     )?),
