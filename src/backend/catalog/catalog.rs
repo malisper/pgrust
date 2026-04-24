@@ -143,6 +143,7 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         | SqlTypeKind::RegClass
         | SqlTypeKind::RegType
         | SqlTypeKind::RegRole
+        | SqlTypeKind::RegNamespace
         | SqlTypeKind::RegOperator
         | SqlTypeKind::RegProcedure
         | SqlTypeKind::Xid
@@ -222,6 +223,7 @@ pub(crate) fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         SqlTypeKind::RegClass => ScalarType::Int32,
         SqlTypeKind::RegType => ScalarType::Int32,
         SqlTypeKind::RegRole => ScalarType::Int32,
+        SqlTypeKind::RegNamespace => ScalarType::Int32,
         SqlTypeKind::RegOperator => ScalarType::Int32,
         SqlTypeKind::RegProcedure => ScalarType::Int32,
         SqlTypeKind::Tid => ScalarType::Text,

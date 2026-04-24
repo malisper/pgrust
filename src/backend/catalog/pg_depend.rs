@@ -7,8 +7,8 @@ use crate::include::catalog::{
     PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID,
     PG_NAMESPACE_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_PROC_RELATION_OID,
     PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
-    PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TRIGGER_RELATION_OID,
-    PG_TYPE_RELATION_OID, PgDependRow,
+    PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_STATISTIC_EXT_RELATION_OID,
+    PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PgDependRow, PgStatisticExtRow,
 };
 use std::collections::BTreeSet;
 
@@ -433,6 +433,38 @@ pub fn publication_namespace_depend_rows(
             deptype: DEPENDENCY_AUTO,
         },
     ];
+    sort_pg_depend_rows(&mut rows);
+    rows
+}
+
+pub fn statistic_ext_depend_rows(row: &PgStatisticExtRow) -> Vec<PgDependRow> {
+    let mut rows = vec![PgDependRow {
+        classid: PG_STATISTIC_EXT_RELATION_OID,
+        objid: row.oid,
+        objsubid: 0,
+        refclassid: PG_NAMESPACE_RELATION_OID,
+        refobjid: row.stxnamespace,
+        refobjsubid: 0,
+        deptype: DEPENDENCY_NORMAL,
+    }];
+    rows.push(PgDependRow {
+        classid: PG_STATISTIC_EXT_RELATION_OID,
+        objid: row.oid,
+        objsubid: 0,
+        refclassid: PG_CLASS_RELATION_OID,
+        refobjid: row.stxrelid,
+        refobjsubid: 0,
+        deptype: DEPENDENCY_AUTO,
+    });
+    rows.extend(row.stxkeys.iter().copied().map(|attnum| PgDependRow {
+        classid: PG_STATISTIC_EXT_RELATION_OID,
+        objid: row.oid,
+        objsubid: 0,
+        refclassid: PG_CLASS_RELATION_OID,
+        refobjid: row.stxrelid,
+        refobjsubid: i32::from(attnum),
+        deptype: DEPENDENCY_AUTO,
+    }));
     sort_pg_depend_rows(&mut rows);
     rows
 }

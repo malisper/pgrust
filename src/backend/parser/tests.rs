@@ -1161,6 +1161,8 @@ fn visible_catalog_without_text_input_cast(
         base.publication_rows(),
         base.publication_rel_rows(),
         base.publication_namespace_rows(),
+        base.statistic_ext_rows(),
+        base.statistic_ext_data_rows(),
         base.am_rows(),
         base.amop_rows(),
         base.amproc_rows(),
@@ -1219,6 +1221,8 @@ fn visible_catalog_without_operator(
         base.publication_rows(),
         base.publication_rel_rows(),
         base.publication_namespace_rows(),
+        base.statistic_ext_rows(),
+        base.statistic_ext_data_rows(),
         base.am_rows(),
         base.amop_rows(),
         base.amproc_rows(),
@@ -1294,6 +1298,8 @@ fn visible_catalog_with_extra_opclasses(
         base.publication_rows(),
         base.publication_rel_rows(),
         base.publication_namespace_rows(),
+        base.statistic_ext_rows(),
+        base.statistic_ext_data_rows(),
         base.am_rows(),
         base.amop_rows(),
         base.amproc_rows(),
@@ -1811,7 +1817,7 @@ fn parse_create_statistics_statement() {
         stmt,
         Statement::CreateStatistics(CreateStatisticsStatement {
             if_not_exists: true,
-            statistics_name: "public.tst".into(),
+            statistics_name: Some("public.tst".into()),
             kinds: vec!["ndistinct".into(), "dependencies".into()],
             targets: vec!["a".into(), "(b + 1)".into()],
             from_clause: "items".into(),
@@ -1820,16 +1826,68 @@ fn parse_create_statistics_statement() {
 }
 
 #[test]
-fn parse_alter_statistics_statement() {
-    let stmt = parse_statement("alter statistics if exists public.tst set statistics 0").unwrap();
+fn parse_create_statistics_without_explicit_name() {
+    let stmt = parse_statement("create statistics on a, (b + 1) from items").unwrap();
     assert_eq!(
         stmt,
-        Statement::AlterStatistics(AlterStatisticsStatement {
-            if_exists: true,
-            statistics_name: "public.tst".into(),
-            statistics_target: 0,
+        Statement::CreateStatistics(CreateStatisticsStatement {
+            if_not_exists: false,
+            statistics_name: None,
+            kinds: vec![],
+            targets: vec!["a".into(), "(b + 1)".into()],
+            from_clause: "items".into(),
         })
     );
+}
+
+#[test]
+fn parse_statistics_ddl_statements() {
+    assert!(matches!(
+        parse_statement("alter statistics if exists public.tst rename to public.tst2").unwrap(),
+        Statement::AlterStatistics(AlterStatisticsStatement {
+            if_exists: true,
+            statistics_name,
+            action: AlterStatisticsAction::Rename { new_name },
+        }) if statistics_name == "public.tst" && new_name == "public.tst2"
+    ));
+
+    assert!(matches!(
+        parse_statement("alter statistics tst set statistics 42").unwrap(),
+        Statement::AlterStatistics(AlterStatisticsStatement {
+            if_exists: false,
+            statistics_name,
+            action: AlterStatisticsAction::SetStatistics { target },
+        }) if statistics_name == "tst" && target == 42
+    ));
+
+    assert!(matches!(
+        parse_statement("drop statistics if exists public.tst, tst2 cascade").unwrap(),
+        Statement::DropStatistics(DropStatisticsStatement {
+            if_exists: true,
+            statistics_names,
+            cascade: true,
+        }) if statistics_names == vec!["public.tst", "tst2"]
+    ));
+
+    assert!(matches!(
+        parse_statement("comment on statistics public.tst is 'hello'").unwrap(),
+        Statement::CommentOnStatistics(CommentOnStatisticsStatement {
+            statistics_name,
+            comment,
+        }) if statistics_name == "public.tst" && comment.as_deref() == Some("hello")
+    ));
+}
+
+#[test]
+fn parse_statistics_rejects_unparenthesized_expression_targets() {
+    assert!(matches!(
+        parse_statement("create statistics tst on y + z from items"),
+        Err(ParseError::UnexpectedToken { .. })
+    ));
+    assert!(matches!(
+        parse_statement("create statistics tst on (x, y) from items"),
+        Err(ParseError::UnexpectedToken { .. })
+    ));
 }
 
 #[test]
