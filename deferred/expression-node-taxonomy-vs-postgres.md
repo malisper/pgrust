@@ -1,12 +1,12 @@
 ## Expression Node Taxonomy vs PostgreSQL
 
 `pgrust` now has some PostgreSQL-shaped semantic expression nodes in
-[src/include/nodes/primnodes.rs](src/include/nodes/primnodes.rs),
+[src/include/nodes/primnodes.rs](/src/include/nodes/primnodes.rs),
 such as `Var`, `OpExpr`, `BoolExpr`, `FuncExpr`, `Aggref`, `SubLink`, and
 `SubPlan`.
 
 But the overall expression taxonomy still does not line up with PostgreSQL's
-[primnodes.h](~/postgres/src/include/nodes/primnodes.h).
+[primnodes.h](../postgres/src/include/nodes/primnodes.h).
 
 Examples of current differences:
 

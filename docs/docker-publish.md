@@ -4,7 +4,7 @@ This repo ships the main runtime image to Docker Hub as:
 
 - `malisper/pgrust`
 
-The publish flow is local/manual. It builds from the main [Dockerfile](Dockerfile) and pushes a multi-arch image for:
+The publish flow is local/manual. It builds from the main [Dockerfile](/Dockerfile) and pushes a multi-arch image for:
 
 - `linux/amd64`
 - `linux/arm64`
@@ -64,4 +64,4 @@ After push, it verifies the manifest includes both target platforms.
 
 ## Early Access
 
-This publish flow does not use [Dockerfile.early-access](Dockerfile.early-access). The early-access image/tarball path remains separate and manual.
+This publish flow does not use [Dockerfile.early-access](/Dockerfile.early-access). The early-access image/tarball path remains separate and manual.

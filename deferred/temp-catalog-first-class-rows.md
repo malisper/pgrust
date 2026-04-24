@@ -4,7 +4,7 @@ Permanent catalog publication now uses first-class stored `pg_constraint` and
 `pg_depend` rows.
 
 Temp catalog materialization still synthesizes those rows on the fly in
-[src/pgrust/database.rs](src/pgrust/database.rs:472)
+[src/pgrust/database.rs](/src/pgrust/database.rs:472)
 when building the visible temp overlay.
 
 That means permanent and temp paths do not yet use the same source-of-truth
