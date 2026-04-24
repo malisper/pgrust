@@ -6,6 +6,7 @@ mod bestpath;
 mod constfold;
 mod inherit;
 mod joininfo;
+mod partition_prune;
 mod path;
 mod pathnodes;
 mod plan;
