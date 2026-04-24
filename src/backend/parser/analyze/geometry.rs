@@ -24,10 +24,10 @@ fn bind_geometry_call(
         .collect::<Vec<_>>();
     let peer_geometry_type = if args.len() == 2 {
         match (arg_types[0], arg_types[1]) {
-            (left, right) if is_geometry_type(left) && is_string_literal_expr(args[1]) => {
+            (left, _) if is_geometry_type(left) && is_string_literal_expr(args[1]) => {
                 Some((1usize, left.element_type()))
             }
-            (left, right) if is_string_literal_expr(args[0]) && is_geometry_type(right) => {
+            (_, right) if is_string_literal_expr(args[0]) && is_geometry_type(right) => {
                 Some((0usize, right.element_type()))
             }
             _ => None,

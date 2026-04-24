@@ -12670,7 +12670,7 @@ fn row_to_json_supports_qualified_star_inside_row_constructor() {
 #[test]
 fn jsonb_agg_supports_whole_row_alias_arguments() {
     let base = temp_dir("jsonb_agg_whole_row_alias");
-    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let txns = TransactionManager::new_durable(&base).unwrap();
 
     match run_sql(
         &base,

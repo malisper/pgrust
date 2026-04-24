@@ -615,7 +615,6 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::backend::executor::ExecError;
     use crate::pgrust::database::Database;
     use crate::pgrust::session::Session;

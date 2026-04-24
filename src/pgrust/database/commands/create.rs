@@ -1,14 +1,10 @@
 use super::super::*;
-use crate::backend::commands::partition::{
-    validate_new_partition_bound, validate_partition_relation_compatibility,
-    validate_relation_rows_for_partition_bound,
-};
+use crate::backend::commands::partition::validate_new_partition_bound;
 use crate::backend::parser::{
     AggregateArgType, AggregateSignatureKind, CreateAggregateStatement, CreateFunctionReturnSpec,
     CreateFunctionStatement, FunctionArgMode, FunctionParallel, FunctionVolatility,
     OwnedSequenceSpec, PartitionBoundSpec, SequenceOptionsSpec, SqlTypeKind,
-    lower_partition_bound_for_relation, pg_partitioned_table_row, resolve_raw_type_name,
-    serialize_partition_bound,
+    pg_partitioned_table_row, resolve_raw_type_name, serialize_partition_bound,
 };
 use crate::include::catalog::{
     ANYOID, BOOTSTRAP_SUPERUSER_OID, BYTEA_TYPE_OID, INTERNAL_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
@@ -16,7 +12,7 @@ use crate::include::catalog::{
     PgProcRow, RECORD_TYPE_OID,
 };
 use crate::include::nodes::parsenodes::{ForeignKeyAction, ForeignKeyMatchType};
-use crate::include::nodes::primnodes::{QueryColumn, ToastRelationRef};
+use crate::include::nodes::primnodes::QueryColumn;
 use crate::pgrust::database::{
     SequenceData, SequenceRuntime, default_sequence_name_base, format_nextval_default_oid,
     initial_sequence_state, resolve_sequence_options_spec, sequence_type_oid_for_serial_kind,
@@ -890,7 +886,7 @@ impl Database {
         }
 
         let mut proretset = false;
-        let mut prorettype = 0u32;
+        let prorettype: u32;
         let mut proallargtypes = None;
         let mut proargmodes = None;
         let mut proargnames = all_arg_names
@@ -1532,7 +1528,7 @@ impl Database {
                         })
                 };
                 match result {
-                    Err(CatalogError::TableAlreadyExists(name)) if create_stmt.if_not_exists => {
+                    Err(CatalogError::TableAlreadyExists(_name)) if create_stmt.if_not_exists => {
                         Ok(StatementResult::AffectedRows(0))
                     }
                     Err(err) => Err(map_catalog_error(err)),
