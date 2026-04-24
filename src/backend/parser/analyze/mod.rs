@@ -36,11 +36,12 @@ use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
     PgCollationRow, PgConstraintRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
-    PgOperatorRow, PgPartitionedTableRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow,
-    PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows,
-    bootstrap_pg_collation_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
-    bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
-    builtin_range_rows, builtin_type_rows, multirange_type_ref_for_sql_type,
+    PgOperatorRow, PgPartitionedTableRow, PgProcRow, PgRangeRow, PgRewriteRow,
+    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTypeRow, RECORD_TYPE_OID,
+    bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
+    bootstrap_pg_language_rows, bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows,
+    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
+    is_synthetic_range_proc_name, multirange_type_ref_for_sql_type,
     proc_oid_for_builtin_aggregate_function, range_type_ref_for_sql_type, relkind_is_analyzable,
     synthetic_range_proc_row_by_oid, synthetic_range_proc_rows_by_name,
 };
@@ -136,6 +137,25 @@ fn dedup_proc_rows(rows: &mut Vec<PgProcRow>) {
             row.prosrc.clone(),
         ))
     });
+}
+
+fn extend_synthetic_range_proc_rows<C: CatalogLookup + ?Sized>(
+    catalog: &C,
+    name: &str,
+    rows: &mut Vec<PgProcRow>,
+) {
+    let needs_synthetic_lookup = if rows.is_empty() {
+        is_synthetic_range_proc_name(name) || resolve_scalar_function(name).is_none()
+    } else {
+        is_synthetic_range_proc_name(name)
+    };
+    if needs_synthetic_lookup {
+        rows.extend(synthetic_range_proc_rows_by_name(
+            name,
+            &catalog.type_rows(),
+            &catalog.range_rows(),
+        ));
+    }
 }
 
 pub(crate) fn bind_index_exprs(
@@ -345,6 +365,10 @@ pub trait CatalogLookup {
         BOOTSTRAP_SUPERUSER_OID
     }
 
+    fn search_path(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     fn session_user_oid(&self) -> u32 {
         BOOTSTRAP_SUPERUSER_OID
     }
@@ -361,6 +385,10 @@ pub trait CatalogLookup {
         bootstrap_pg_namespace_rows()
             .into_iter()
             .find(|row| row.oid == oid)
+    }
+
+    fn namespace_rows(&self) -> Vec<PgNamespaceRow> {
+        bootstrap_pg_namespace_rows().to_vec()
     }
 
     fn row_security_enabled(&self) -> bool {
@@ -399,11 +427,7 @@ pub trait CatalogLookup {
             .into_iter()
             .filter(|row| row.proname.eq_ignore_ascii_case(normalized))
             .collect::<Vec<_>>();
-        rows.extend(synthetic_range_proc_rows_by_name(
-            name,
-            &self.type_rows(),
-            &self.range_rows(),
-        ));
+        extend_synthetic_range_proc_rows(self, name, &mut rows);
         dedup_proc_rows(&mut rows);
         rows
     }
@@ -538,6 +562,48 @@ pub trait CatalogLookup {
 
     fn rewrite_rows_for_relation(&self, _relation_oid: u32) -> Vec<PgRewriteRow> {
         Vec::new()
+    }
+
+    fn statistic_ext_rows(&self) -> Vec<PgStatisticExtRow> {
+        Vec::new()
+    }
+
+    fn statistic_ext_row_by_oid(&self, oid: u32) -> Option<PgStatisticExtRow> {
+        self.statistic_ext_rows()
+            .into_iter()
+            .find(|row| row.oid == oid)
+    }
+
+    fn statistic_ext_row_by_name_namespace(
+        &self,
+        name: &str,
+        namespace_oid: u32,
+    ) -> Option<PgStatisticExtRow> {
+        let normalized = normalize_catalog_lookup_name(name);
+        self.statistic_ext_rows().into_iter().find(|row| {
+            row.stxnamespace == namespace_oid && row.stxname.eq_ignore_ascii_case(normalized)
+        })
+    }
+
+    fn statistic_ext_rows_for_relation(&self, relation_oid: u32) -> Vec<PgStatisticExtRow> {
+        self.statistic_ext_rows()
+            .into_iter()
+            .filter(|row| row.stxrelid == relation_oid)
+            .collect()
+    }
+
+    fn statistic_ext_data_rows(&self) -> Vec<PgStatisticExtDataRow> {
+        Vec::new()
+    }
+
+    fn statistic_ext_data_row(
+        &self,
+        stxoid: u32,
+        stxdinherit: bool,
+    ) -> Option<PgStatisticExtDataRow> {
+        self.statistic_ext_data_rows()
+            .into_iter()
+            .find(|row| row.stxoid == stxoid && row.stxdinherit == stxdinherit)
     }
 
     fn trigger_rows_for_relation(
@@ -725,11 +791,7 @@ impl CatalogLookup for Catalog {
             .into_iter()
             .cloned()
             .collect::<Vec<_>>();
-        rows.extend(synthetic_range_proc_rows_by_name(
-            name,
-            &self.type_rows(),
-            &self.range_rows(),
-        ));
+        extend_synthetic_range_proc_rows(self, name, &mut rows);
         dedup_proc_rows(&mut rows);
         rows
     }
@@ -1254,11 +1316,7 @@ fn builtin_named_type_alias(name: &str) -> Option<SqlType> {
     } else if name.eq_ignore_ascii_case("regoperator") {
         Some(SqlType::new(SqlTypeKind::RegOperator))
     } else if name.eq_ignore_ascii_case("regnamespace") {
-        // :HACK: PostgreSQL's `regnamespace` is an OID-backed catalog type with
-        // namespace-aware I/O. pgrust only needs enough surface area for
-        // `pg_my_temp_schema()::regnamespace::text` in the json/jsonb regressions,
-        // so keep it text-compatible until the full reg* catalog type family lands.
-        Some(SqlType::new(SqlTypeKind::Text))
+        Some(SqlType::new(SqlTypeKind::RegNamespace))
     } else {
         None
     }

@@ -356,6 +356,7 @@ fn sql_type_kind_tag(kind: SqlTypeKind) -> u8 {
         SqlTypeKind::RegClass => 8,
         SqlTypeKind::RegType => 63,
         SqlTypeKind::RegRole => 55,
+        SqlTypeKind::RegNamespace => 8,
         SqlTypeKind::RegOperator => 66,
         SqlTypeKind::RegProcedure => 52,
         SqlTypeKind::Tid => 9,
@@ -1336,6 +1337,7 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
                     | SqlTypeKind::RegClass
                     | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
+                    | SqlTypeKind::RegNamespace
                     | SqlTypeKind::RegOperator
                     | SqlTypeKind::RegProcedure
                     | SqlTypeKind::Xid
@@ -1719,6 +1721,7 @@ pub(crate) fn decode_value_with_toast(
                     | SqlTypeKind::RegClass
                     | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
+                    | SqlTypeKind::RegNamespace
                     | SqlTypeKind::RegOperator
                     | SqlTypeKind::RegProcedure
                     | SqlTypeKind::RegConfig
