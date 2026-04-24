@@ -140,6 +140,7 @@ impl<'a> PartitionedIndexInstaller<'a> {
         inherits.sort_by_key(|row| (row.inhseqno, row.inhrelid));
         inherits
             .into_iter()
+            .filter(|row| !row.inhdetachpending)
             .filter_map(|row| {
                 catalog
                     .relation_by_oid(row.inhrelid)
@@ -156,6 +157,7 @@ impl<'a> PartitionedIndexInstaller<'a> {
         inherits.sort_by_key(|row| (row.inhseqno, row.inhrelid));
         inherits
             .into_iter()
+            .filter(|row| !row.inhdetachpending)
             .map(|row| self.index_by_oid(row.inhrelid))
             .collect()
     }
