@@ -605,6 +605,8 @@ fn index_relcache_entry_from_index_row(
         amproc_entries: support.amproc_entries,
         indexprs: index.indexprs,
         indpred: index.indpred,
+        rd_indexprs: None,
+        rd_indpred: None,
         brin_options: None,
     }
 }

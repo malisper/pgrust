@@ -169,6 +169,30 @@ pub(crate) fn bind_index_exprs(
     heap_desc: &RelationDesc,
     catalog: &dyn CatalogLookup,
 ) -> Result<Vec<Expr>, ParseError> {
+    if let Some(exprs) = &index_meta.rd_indexprs {
+        return Ok(exprs.clone());
+    }
+    bind_index_exprs_uncached(index_meta, heap_desc, catalog)
+}
+
+pub(crate) fn relation_get_index_expressions(
+    index_meta: &mut crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    heap_desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<Expr>, ParseError> {
+    if let Some(exprs) = &index_meta.rd_indexprs {
+        return Ok(exprs.clone());
+    }
+    let exprs = bind_index_exprs_uncached(index_meta, heap_desc, catalog)?;
+    index_meta.rd_indexprs = Some(exprs.clone());
+    Ok(exprs)
+}
+
+fn bind_index_exprs_uncached(
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    heap_desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<Vec<Expr>, ParseError> {
     let Some(indexprs) = index_meta.indexprs.as_deref() else {
         return Ok(Vec::new());
     };
@@ -177,13 +201,38 @@ pub(crate) fn bind_index_exprs(
             expected: "serialized index expressions",
             actual: "invalid index expression metadata".into(),
         })?;
+    let index_catalog = IndexExpressionCatalogLookup { inner: catalog };
     expr_sqls
         .into_iter()
-        .map(|expr_sql| bind_relation_expr(&expr_sql, None, heap_desc, catalog))
+        .map(|expr_sql| bind_relation_expr(&expr_sql, None, heap_desc, &index_catalog))
         .collect()
 }
 
 pub(crate) fn bind_index_predicate(
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    heap_desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<Expr>, ParseError> {
+    if let Some(predicate) = &index_meta.rd_indpred {
+        return Ok(predicate.clone());
+    }
+    bind_index_predicate_uncached(index_meta, heap_desc, catalog)
+}
+
+pub(crate) fn relation_get_index_predicate(
+    index_meta: &mut crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    heap_desc: &RelationDesc,
+    catalog: &dyn CatalogLookup,
+) -> Result<Option<Expr>, ParseError> {
+    if let Some(predicate) = &index_meta.rd_indpred {
+        return Ok(predicate.clone());
+    }
+    let predicate = bind_index_predicate_uncached(index_meta, heap_desc, catalog)?;
+    index_meta.rd_indpred = Some(predicate.clone());
+    Ok(predicate)
+}
+
+fn bind_index_predicate_uncached(
     index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
     heap_desc: &RelationDesc,
     catalog: &dyn CatalogLookup,
@@ -200,7 +249,8 @@ pub(crate) fn bind_index_predicate(
     let relation_name = relation_name
         .as_deref()
         .map(|name| name.rsplit('.').next().unwrap_or(name));
-    bind_index_predicate_sql_expr(predicate_sql, relation_name, heap_desc, catalog).map(Some)
+    let index_catalog = IndexExpressionCatalogLookup { inner: catalog };
+    bind_index_predicate_sql_expr(predicate_sql, relation_name, heap_desc, &index_catalog).map(Some)
 }
 
 fn build_sort_clause(
@@ -778,6 +828,173 @@ pub trait CatalogLookup {
     }
 }
 
+struct IndexExpressionCatalogLookup<'a> {
+    inner: &'a dyn CatalogLookup,
+}
+
+impl CatalogLookup for IndexExpressionCatalogLookup<'_> {
+    fn lookup_any_relation(&self, _name: &str) -> Option<BoundRelation> {
+        None
+    }
+
+    fn current_user_oid(&self) -> u32 {
+        self.inner.current_user_oid()
+    }
+
+    fn search_path(&self) -> Vec<String> {
+        self.inner.search_path()
+    }
+
+    fn session_user_oid(&self) -> u32 {
+        self.inner.session_user_oid()
+    }
+
+    fn authid_rows(&self) -> Vec<PgAuthIdRow> {
+        self.inner.authid_rows()
+    }
+
+    fn auth_members_rows(&self) -> Vec<PgAuthMembersRow> {
+        self.inner.auth_members_rows()
+    }
+
+    fn namespace_row_by_oid(&self, oid: u32) -> Option<PgNamespaceRow> {
+        self.inner.namespace_row_by_oid(oid)
+    }
+
+    fn namespace_rows(&self) -> Vec<PgNamespaceRow> {
+        self.inner.namespace_rows()
+    }
+
+    fn row_security_enabled(&self) -> bool {
+        self.inner.row_security_enabled()
+    }
+
+    fn current_relation_pages(&self, relation_oid: u32) -> Option<u32> {
+        self.inner.current_relation_pages(relation_oid)
+    }
+
+    fn brin_pages_per_range(&self, relation_oid: u32) -> Option<u32> {
+        self.inner.brin_pages_per_range(relation_oid)
+    }
+
+    fn index_relations_for_heap(&self, relation_oid: u32) -> Vec<BoundIndexRelation> {
+        panic!("index expression binding must not discover indexes for relation {relation_oid}");
+    }
+
+    fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
+        self.inner.proc_rows_by_name(name)
+    }
+
+    fn proc_row_by_oid(&self, oid: u32) -> Option<PgProcRow> {
+        self.inner.proc_row_by_oid(oid)
+    }
+
+    fn opclass_rows(&self) -> Vec<PgOpclassRow> {
+        self.inner.opclass_rows()
+    }
+
+    fn collation_rows(&self) -> Vec<PgCollationRow> {
+        self.inner.collation_rows()
+    }
+
+    fn aggregate_by_fnoid(&self, aggfnoid: u32) -> Option<PgAggregateRow> {
+        self.inner.aggregate_by_fnoid(aggfnoid)
+    }
+
+    fn operator_by_name_left_right(
+        &self,
+        name: &str,
+        left_type_oid: u32,
+        right_type_oid: u32,
+    ) -> Option<PgOperatorRow> {
+        self.inner
+            .operator_by_name_left_right(name, left_type_oid, right_type_oid)
+    }
+
+    fn operator_by_oid(&self, oid: u32) -> Option<PgOperatorRow> {
+        self.inner.operator_by_oid(oid)
+    }
+
+    fn cast_by_source_target(
+        &self,
+        source_type_oid: u32,
+        target_type_oid: u32,
+    ) -> Option<PgCastRow> {
+        self.inner
+            .cast_by_source_target(source_type_oid, target_type_oid)
+    }
+
+    fn type_rows(&self) -> Vec<PgTypeRow> {
+        self.inner.type_rows()
+    }
+
+    fn type_by_oid(&self, oid: u32) -> Option<PgTypeRow> {
+        self.inner.type_by_oid(oid)
+    }
+
+    fn type_by_name(&self, name: &str) -> Option<PgTypeRow> {
+        self.inner.type_by_name(name)
+    }
+
+    fn range_rows(&self) -> Vec<PgRangeRow> {
+        self.inner.range_rows()
+    }
+
+    fn range_row_by_type_oid(&self, oid: u32) -> Option<PgRangeRow> {
+        self.inner.range_row_by_type_oid(oid)
+    }
+
+    fn type_oid_for_sql_type(&self, sql_type: SqlType) -> Option<u32> {
+        self.inner.type_oid_for_sql_type(sql_type)
+    }
+
+    fn language_rows(&self) -> Vec<PgLanguageRow> {
+        self.inner.language_rows()
+    }
+
+    fn language_row_by_oid(&self, oid: u32) -> Option<PgLanguageRow> {
+        self.inner.language_row_by_oid(oid)
+    }
+
+    fn language_row_by_name(&self, name: &str) -> Option<PgLanguageRow> {
+        self.inner.language_row_by_name(name)
+    }
+
+    fn class_row_by_oid(&self, relation_oid: u32) -> Option<PgClassRow> {
+        self.inner.class_row_by_oid(relation_oid)
+    }
+}
+
+pub(crate) fn bound_index_relation_from_relcache_entry(
+    name: String,
+    entry: &crate::backend::utils::cache::relcache::RelCacheEntry,
+    catalog: &dyn CatalogLookup,
+) -> Option<BoundIndexRelation> {
+    let mut index_meta = entry.index.as_ref()?.clone();
+    let (index_exprs, index_predicate) = if let Some(heap) =
+        catalog.relation_by_oid(index_meta.indrelid)
+    {
+        let index_exprs = relation_get_index_expressions(&mut index_meta, &heap.desc, catalog)
+            .unwrap_or_default();
+        let index_predicate = relation_get_index_predicate(&mut index_meta, &heap.desc, catalog)
+            .ok()
+            .flatten();
+        (index_exprs, index_predicate)
+    } else {
+        (Vec::new(), None)
+    };
+
+    Some(BoundIndexRelation {
+        name,
+        rel: entry.rel,
+        relation_oid: entry.relation_oid,
+        desc: entry.desc.clone(),
+        index_meta,
+        index_exprs,
+        index_predicate,
+    })
+}
+
 impl CatalogLookup for Catalog {
     fn lookup_any_relation(&self, name: &str) -> Option<BoundRelation> {
         let relcache = RelCache::from_catalog(self);
@@ -814,29 +1031,15 @@ impl CatalogLookup for Catalog {
 
     fn index_relations_for_heap(&self, relation_oid: u32) -> Vec<BoundIndexRelation> {
         let relcache = RelCache::from_catalog(self);
-        let mut seen = BTreeSet::new();
         relcache
-            .entries()
-            .filter_map(|(name, entry)| {
-                let index_meta = entry.index.as_ref()?;
-                if index_meta.indrelid != relation_oid || !seen.insert(entry.relation_oid) {
-                    return None;
-                }
-                Some(BoundIndexRelation {
-                    name: name.rsplit('.').next().unwrap_or(name).to_string(),
-                    rel: entry.rel,
-                    relation_oid: entry.relation_oid,
-                    desc: entry.desc.clone(),
-                    index_meta: index_meta.clone(),
-                    index_exprs: self
-                        .relation_by_oid(index_meta.indrelid)
-                        .and_then(|heap| bind_index_exprs(index_meta, &heap.desc, self).ok())
-                        .unwrap_or_default(),
-                    index_predicate: self
-                        .relation_by_oid(index_meta.indrelid)
-                        .and_then(|heap| bind_index_predicate(index_meta, &heap.desc, self).ok())
-                        .flatten(),
-                })
+            .relation_get_index_list(relation_oid)
+            .into_iter()
+            .filter_map(|index_oid| {
+                let entry = relcache.get_by_oid(index_oid)?;
+                let name = relcache
+                    .relation_name_by_oid(index_oid)
+                    .unwrap_or_else(|| index_oid.to_string());
+                bound_index_relation_from_relcache_entry(name, entry, self)
             })
             .collect()
     }
@@ -1118,28 +1321,14 @@ impl CatalogLookup for RelCache {
     }
 
     fn index_relations_for_heap(&self, relation_oid: u32) -> Vec<BoundIndexRelation> {
-        let mut seen = BTreeSet::new();
-        self.entries()
-            .filter_map(|(name, entry)| {
-                let index_meta = entry.index.as_ref()?;
-                if index_meta.indrelid != relation_oid || !seen.insert(entry.relation_oid) {
-                    return None;
-                }
-                Some(BoundIndexRelation {
-                    name: name.rsplit('.').next().unwrap_or(name).to_string(),
-                    rel: entry.rel,
-                    relation_oid: entry.relation_oid,
-                    desc: entry.desc.clone(),
-                    index_meta: index_meta.clone(),
-                    index_exprs: self
-                        .relation_by_oid(index_meta.indrelid)
-                        .and_then(|heap| bind_index_exprs(index_meta, &heap.desc, self).ok())
-                        .unwrap_or_default(),
-                    index_predicate: self
-                        .relation_by_oid(index_meta.indrelid)
-                        .and_then(|heap| bind_index_predicate(index_meta, &heap.desc, self).ok())
-                        .flatten(),
-                })
+        self.relation_get_index_list(relation_oid)
+            .into_iter()
+            .filter_map(|index_oid| {
+                let entry = self.get_by_oid(index_oid)?;
+                let name = self
+                    .relation_name_by_oid(index_oid)
+                    .unwrap_or_else(|| index_oid.to_string());
+                bound_index_relation_from_relcache_entry(name, entry, self)
             })
             .collect()
     }
