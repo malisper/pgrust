@@ -46,6 +46,8 @@ struct RelCacheEntryFile {
     reltoastrelid: u32,
     relpersistence: char,
     relkind: char,
+    #[serde(default = "default_relispopulated")]
+    relispopulated: bool,
     relhastriggers: bool,
     relrowsecurity: bool,
     relforcerowsecurity: bool,
@@ -80,6 +82,10 @@ struct ColumnDescFile {
     generated: Option<crate::include::nodes::parsenodes::ColumnGeneratedKind>,
     #[serde(default)]
     identity: Option<crate::include::nodes::parsenodes::ColumnIdentityKind>,
+}
+
+fn default_relispopulated() -> bool {
+    true
 }
 
 pub(super) fn relcache_init_path_for_scope(base_dir: &Path, scope: CatalogScope) -> PathBuf {
@@ -200,6 +206,7 @@ fn relcache_entry_to_file(entry: &RelCacheEntry) -> RelCacheEntryFile {
         reltoastrelid: entry.reltoastrelid,
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
+        relispopulated: entry.relispopulated,
         relhastriggers: entry.relhastriggers,
         relrowsecurity: entry.relrowsecurity,
         relforcerowsecurity: entry.relforcerowsecurity,
@@ -221,6 +228,7 @@ fn relcache_entry_from_file(entry: RelCacheEntryFile) -> RelCacheEntry {
         reltoastrelid: entry.reltoastrelid,
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
+        relispopulated: entry.relispopulated,
         relhastriggers: entry.relhastriggers,
         relispartition: false,
         relpartbound: None,

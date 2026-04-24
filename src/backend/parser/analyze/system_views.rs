@@ -83,6 +83,7 @@ pub(super) fn bind_builtin_system_view(
     let view = synthetic_system_view(name)?;
     let rows = match view.kind {
         SyntheticSystemViewKind::PgViews => catalog.pg_views_rows(),
+        SyntheticSystemViewKind::PgMatviews => catalog.pg_matviews_rows(),
         SyntheticSystemViewKind::PgIndexes => catalog.pg_indexes_rows(),
         SyntheticSystemViewKind::PgPolicies => catalog.pg_policies_rows(),
         SyntheticSystemViewKind::PgRules => catalog.pg_rules_rows(),

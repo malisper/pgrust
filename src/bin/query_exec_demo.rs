@@ -165,6 +165,7 @@ fn main() -> Result<(), ExecError> {
                 relation_name: "items".into(),
                 relation_oid: 0,
                 relkind: 'r',
+                relispopulated: true,
                 toast: None,
                 desc: desc(),
             }),

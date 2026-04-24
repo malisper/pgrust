@@ -266,6 +266,7 @@ impl CatCache {
                 relhastriggers: entry.relhastriggers,
                 relrowsecurity: entry.relrowsecurity,
                 relforcerowsecurity: entry.relforcerowsecurity,
+                relispopulated: entry.relispopulated,
                 relispartition: entry.relispartition,
                 relfrozenxid: entry.relfrozenxid,
                 relpartbound: entry.relpartbound.clone(),

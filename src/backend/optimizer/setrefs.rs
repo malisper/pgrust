@@ -3143,6 +3143,7 @@ fn set_seq_scan_references(
     relation_name: String,
     relation_oid: u32,
     relkind: char,
+    relispopulated: bool,
     toast: Option<crate::include::nodes::primnodes::ToastRelationRef>,
     desc: crate::include::nodes::primnodes::RelationDesc,
 ) -> Plan {
@@ -3153,6 +3154,7 @@ fn set_seq_scan_references(
         relation_name,
         relation_oid,
         relkind,
+        relispopulated,
         toast,
         desc,
     }
@@ -3978,6 +3980,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             relation_name,
             relation_oid,
             relkind,
+            relispopulated,
             toast,
             desc,
             ..
@@ -3988,6 +3991,7 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             relation_name,
             relation_oid,
             relkind,
+            relispopulated,
             toast,
             desc,
         ),

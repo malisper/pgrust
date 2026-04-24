@@ -361,6 +361,7 @@ pub enum Path {
         relation_name: String,
         relation_oid: u32,
         relkind: char,
+        relispopulated: bool,
         toast: Option<ToastRelationRef>,
         desc: RelationDesc,
     },

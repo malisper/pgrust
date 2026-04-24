@@ -4,9 +4,10 @@ use crate::backend::parser::{BoundRelation, CatalogLookup};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{
-    build_pg_indexes_rows, build_pg_locks_rows, build_pg_policies_rows, build_pg_rules_rows,
-    build_pg_stat_io_rows, build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
-    build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_views_rows,
+    build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
+    build_pg_rules_rows, build_pg_stat_io_rows, build_pg_stat_user_functions_rows,
+    build_pg_stat_user_tables_rows, build_pg_statio_user_tables_rows, build_pg_stats_rows,
+    build_pg_views_rows,
 };
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
@@ -563,6 +564,19 @@ impl CatalogLookup for VisibleCatalog {
         )
     }
 
+    fn pg_matviews_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
+        let Some(catcache) = &self.catcache else {
+            return Vec::new();
+        };
+        build_pg_matviews_rows(
+            catcache.namespace_rows(),
+            catcache.authid_rows(),
+            catcache.class_rows(),
+            catcache.index_rows(),
+            catcache.rewrite_rows(),
+        )
+    }
+
     fn pg_indexes_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
         let Some(catcache) = &self.catcache else {
             return Vec::new();
@@ -684,6 +698,7 @@ fn bound_relation_from_relcache_entry(
         owner_oid: entry.owner_oid,
         relpersistence: entry.relpersistence,
         relkind: entry.relkind,
+        relispopulated: entry.relispopulated,
         relispartition: entry.relispartition,
         relpartbound: entry.relpartbound.clone(),
         desc: entry.desc.clone(),

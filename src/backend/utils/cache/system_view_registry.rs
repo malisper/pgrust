@@ -4,6 +4,7 @@ use crate::include::nodes::primnodes::QueryColumn;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyntheticSystemViewKind {
     PgViews,
+    PgMatviews,
     PgIndexes,
     PgPolicies,
     PgRules,
@@ -88,6 +89,7 @@ pub fn synthetic_system_views() -> &'static [SyntheticSystemView] {
 }
 
 const PG_VIEW_ALIASES: &[&str] = &["pg_views", "pg_catalog.pg_views"];
+const PG_MATVIEWS_ALIASES: &[&str] = &["pg_matviews", "pg_catalog.pg_matviews"];
 const PG_INDEXES_ALIASES: &[&str] = &["pg_indexes", "pg_catalog.pg_indexes"];
 const PG_POLICIES_ALIASES: &[&str] = &["pg_policies", "pg_catalog.pg_policies"];
 const PG_RULES_ALIASES: &[&str] = &["pg_rules", "pg_catalog.pg_rules"];
@@ -112,6 +114,16 @@ const PG_VIEWS_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::text("schemaname"),
     SyntheticSystemViewColumn::text("viewname"),
     SyntheticSystemViewColumn::text("viewowner"),
+    SyntheticSystemViewColumn::text("definition"),
+];
+
+const PG_MATVIEWS_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::text("schemaname"),
+    SyntheticSystemViewColumn::text("matviewname"),
+    SyntheticSystemViewColumn::text("matviewowner"),
+    SyntheticSystemViewColumn::text("tablespace"),
+    SyntheticSystemViewColumn::new("hasindexes", SqlType::new(SqlTypeKind::Bool)),
+    SyntheticSystemViewColumn::new("ispopulated", SqlType::new(SqlTypeKind::Bool)),
     SyntheticSystemViewColumn::text("definition"),
 ];
 
@@ -357,12 +369,19 @@ const INFORMATION_SCHEMA_COLUMNS_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::text("is_updatable"),
 ];
 
-const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 15] = [
+const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 16] = [
     SyntheticSystemView {
         kind: SyntheticSystemViewKind::PgViews,
         canonical_name: "pg_catalog.pg_views",
         aliases: PG_VIEW_ALIASES,
         columns: PG_VIEWS_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgMatviews,
+        canonical_name: "pg_catalog.pg_matviews",
+        aliases: PG_MATVIEWS_ALIASES,
+        columns: PG_MATVIEWS_COLUMNS,
         view_definition_sql: "",
     },
     SyntheticSystemView {

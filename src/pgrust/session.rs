@@ -4449,6 +4449,18 @@ impl Session {
                     &mut txn.temp_effects,
                 )
             }
+            Statement::RefreshMaterializedView(ref refresh_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_refresh_materialized_view_stmt_in_transaction_with_search_path(
+                    client_id,
+                    refresh_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::DropType(ref drop_stmt) => {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
@@ -4476,6 +4488,29 @@ impl Session {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_drop_view_stmt_in_transaction_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::DropMaterializedView(ref drop_stmt) => {
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let rels = {
+                    drop_stmt
+                        .view_names
+                        .iter()
+                        .filter_map(|name| catalog.lookup_any_relation(name).map(|e| e.rel))
+                        .collect::<Vec<_>>()
+                };
+                for rel in rels {
+                    self.lock_table_if_needed(db, rel, TableLockMode::AccessExclusive)?;
+                }
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_drop_materialized_view_stmt_in_transaction_with_search_path(
                     client_id,
                     drop_stmt,
                     xid,
@@ -5057,6 +5092,11 @@ impl Session {
                     let entry = catalog.lookup_any_relation(table_name).ok_or_else(|| {
                         ExecError::Parse(ParseError::UnknownTable(table_name.to_string()))
                     })?;
+                    if entry.relkind == 'm' {
+                        return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+                            format!("cannot change materialized view \"{table_name}\""),
+                        )));
+                    }
                     if relation_has_row_security(entry.relation_oid, &catalog) {
                         return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
                             "COPY FROM is not yet supported on tables with row-level security"

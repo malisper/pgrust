@@ -685,6 +685,18 @@ impl PlanNode for SeqScanState {
             return Ok(Some(&mut self.slot));
         }
 
+        if self.relkind == 'm' && !self.relispopulated {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "materialized view \"{}\" has not been populated",
+                    self.relation_name
+                ),
+                detail: None,
+                hint: Some("Use the REFRESH MATERIALIZED VIEW command.".into()),
+                sqlstate: "55000",
+            });
+        }
+
         if self.scan.is_none() {
             self.scan = Some(heap_scan_begin_visible(
                 &ctx.pool,

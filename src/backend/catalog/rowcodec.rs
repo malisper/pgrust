@@ -327,10 +327,11 @@ pub(crate) fn pg_class_row_from_values(values: Vec<Value>) -> Result<PgClassRow,
         relhastriggers: expect_bool(&values[17])?,
         relrowsecurity: expect_bool(&values[18])?,
         relforcerowsecurity: expect_bool(&values[19])?,
-        relispartition: expect_bool(&values[20])?,
-        relfrozenxid: expect_oid(&values[21])?,
-        relpartbound: nullable_text(&values[22])?,
-        relacl: nullable_text_array(&values[23])?,
+        relispopulated: expect_bool(&values[20])?,
+        relispartition: expect_bool(&values[21])?,
+        relfrozenxid: expect_oid(&values[22])?,
+        relpartbound: nullable_text(&values[23])?,
+        relacl: nullable_text_array(&values[24])?,
     })
 }
 
@@ -1051,6 +1052,7 @@ fn pg_class_row_values(row: PgClassRow) -> Vec<Value> {
         Value::Bool(row.relhastriggers),
         Value::Bool(row.relrowsecurity),
         Value::Bool(row.relforcerowsecurity),
+        Value::Bool(row.relispopulated),
         Value::Bool(row.relispartition),
         Value::Int32(row.relfrozenxid as i32),
         row.relpartbound

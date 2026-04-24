@@ -468,6 +468,7 @@ fn test_catalog_entry(rel_number: u32, desc: RelationDesc) -> CatalogEntry {
         reltoastrelid: 0,
         relpersistence: 'p',
         relkind: 'r',
+        relispopulated: true,
         am_oid: crate::include::catalog::relam_for_relkind('r'),
         relhastriggers: false,
         relhassubclass: false,
@@ -527,6 +528,7 @@ fn people_view_entry() -> CatalogEntry {
         reltoastrelid: 0,
         relpersistence: 'p',
         relkind: 'v',
+        relispopulated: true,
         am_oid: crate::include::catalog::relam_for_relkind('v'),
         relhastriggers: false,
         relhassubclass: false,
@@ -718,6 +720,7 @@ fn catalog_with_people_id_index() -> Catalog {
             reltoastrelid: 0,
             relpersistence: 'p',
             relkind: 'i',
+            relispopulated: true,
             am_oid: crate::include::catalog::BTREE_AM_OID,
             relhastriggers: false,
             relhassubclass: false,
@@ -781,6 +784,7 @@ fn catalog_with_people_primary_key_opclass(opclass_oid: u32) -> Catalog {
             reltoastrelid: 0,
             relpersistence: 'p',
             relkind: 'i',
+            relispopulated: true,
             am_oid: crate::include::catalog::BTREE_AM_OID,
             relhastriggers: false,
             relhassubclass: false,
@@ -873,6 +877,7 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
             reltoastrelid: 0,
             relpersistence: 'p',
             relkind: 'i',
+            relispopulated: true,
             am_oid: crate::include::catalog::BTREE_AM_OID,
             relhastriggers: false,
             relhassubclass: false,
@@ -933,6 +938,7 @@ fn catalog_with_people_ctid_partial_unique_index() -> Catalog {
             reltoastrelid: 0,
             relpersistence: 'p',
             relkind: 'i',
+            relispopulated: true,
             am_oid: crate::include::catalog::BTREE_AM_OID,
             relhastriggers: false,
             relhassubclass: false,
@@ -993,6 +999,7 @@ fn catalog_with_people_expression_unique_index() -> Catalog {
             reltoastrelid: 0,
             relpersistence: 'p',
             relkind: 'i',
+            relispopulated: true,
             am_oid: crate::include::catalog::BTREE_AM_OID,
             relhastriggers: false,
             relhassubclass: false,
@@ -1168,6 +1175,7 @@ fn bind_expression_index_metadata_does_not_discover_heap_indexes() {
             reltoastrelid: 0,
             relpersistence: 'p',
             relkind: 'i',
+            relispopulated: true,
             am_oid: crate::include::catalog::BTREE_AM_OID,
             relhastriggers: false,
             relhassubclass: false,
@@ -1236,6 +1244,7 @@ fn catalog_with_people_name_c_collation_index() -> Catalog {
             reltoastrelid: 0,
             relpersistence: 'p',
             relkind: 'i',
+            relispopulated: true,
             am_oid: crate::include::catalog::BTREE_AM_OID,
             relhastriggers: false,
             relhassubclass: false,
@@ -1304,6 +1313,7 @@ fn catalog_with_text_parent_primary_key() -> Catalog {
             reltoastrelid: 0,
             relpersistence: 'p',
             relkind: 'i',
+            relispopulated: true,
             am_oid: crate::include::catalog::BTREE_AM_OID,
             relhastriggers: false,
             relhassubclass: false,
@@ -6993,6 +7003,22 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("create temp table tempy(id) as select 1").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { table_name, column_names, persistence: TablePersistence::Temporary, .. }) if table_name == "tempy" && column_names == vec!["id"])
     );
     assert!(
+        matches!(
+            parse_statement("create materialized view if not exists mv_items(id, name) as select id, name from people with no data").unwrap(),
+            Statement::CreateTableAs(CreateTableAsStatement {
+                table_name,
+                column_names,
+                if_not_exists: true,
+                object_type: TableAsObjectType::MaterializedView,
+                skip_data: true,
+                query_sql: Some(query_sql),
+                ..
+            }) if table_name == "mv_items"
+                && column_names == vec!["id", "name"]
+                && query_sql == "select id, name from people"
+        )
+    );
+    assert!(
         matches!(parse_statement("select * into cmmove1 from cmdata").unwrap(), Statement::CreateTableAs(CreateTableAsStatement { schema_name: None, table_name, persistence: TablePersistence::Permanent, column_names, query: SelectStatement { from: Some(FromItem::Table { name, .. }), .. }, .. }) if table_name == "cmmove1" && column_names.is_empty() && name == "cmdata")
     );
     assert!(
@@ -7051,6 +7077,15 @@ fn parse_insert_update_delete() {
     );
     assert!(
         matches!(parse_statement("drop view if exists item_names, recent_items").unwrap(), Statement::DropView(DropViewStatement { if_exists: true, view_names }) if view_names == vec!["item_names", "recent_items"])
+    );
+    assert!(
+        matches!(parse_statement("drop materialized view if exists mv_items").unwrap(), Statement::DropMaterializedView(DropMaterializedViewStatement { if_exists: true, view_names }) if view_names == vec!["mv_items"])
+    );
+    assert!(
+        matches!(parse_statement("refresh materialized view mv_items").unwrap(), Statement::RefreshMaterializedView(RefreshMaterializedViewStatement { relation_name, concurrently: false, skip_data: false }) if relation_name == "mv_items")
+    );
+    assert!(
+        matches!(parse_statement("refresh materialized view concurrently mv_items with no data").unwrap(), Statement::RefreshMaterializedView(RefreshMaterializedViewStatement { relation_name, concurrently: true, skip_data: true }) if relation_name == "mv_items")
     );
     assert!(
         matches!(parse_statement("truncate table pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers").unwrap(), Statement::TruncateTable(TruncateTableStatement { table_names }) if table_names == vec!["pgbench_accounts", "pgbench_branches", "pgbench_history", "pgbench_tellers"])

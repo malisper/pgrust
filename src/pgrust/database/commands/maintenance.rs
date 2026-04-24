@@ -59,6 +59,22 @@ fn relation_basename(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
 }
 
+fn lookup_vacuum_relation_for_ddl(
+    catalog: &dyn CatalogLookup,
+    name: &str,
+) -> Result<crate::backend::parser::BoundRelation, ExecError> {
+    match catalog.lookup_any_relation(name) {
+        Some(entry) if matches!(entry.relkind, 'r' | 'm') => Ok(entry),
+        Some(_) => Err(ExecError::Parse(ParseError::WrongObjectType {
+            name: name.to_string(),
+            expected: "table or materialized view",
+        })),
+        None => Err(ExecError::Parse(ParseError::TableDoesNotExist(
+            name.to_string(),
+        ))),
+    }
+}
+
 fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {
     if argtypes.trim().is_empty() {
         return Some(Vec::new());
@@ -296,7 +312,7 @@ fn collect_catalog_vacuum_targets(
 
     let mut targets = Vec::new();
     for class in class_rows {
-        if class.relkind != 'r' {
+        if !matches!(class.relkind, 'r' | 'm') {
             continue;
         }
         if db.other_session_temp_namespace_oid(client_id, class.relnamespace) {
@@ -1191,7 +1207,7 @@ impl Database {
             .collect::<Vec<_>>();
         let rels = relation_names
             .iter()
-            .map(|name| lookup_heap_relation_for_ddl(&catalog, name))
+            .map(|name| lookup_vacuum_relation_for_ddl(&catalog, name))
             .collect::<Result<Vec<_>, _>>()?;
         let rel_locs = rels.iter().map(|rel| rel.rel).collect::<Vec<_>>();
         lock_tables_interruptible(

@@ -1790,6 +1790,7 @@ impl Database {
                                 owner_oid: created.entry.owner_oid,
                                 relpersistence: created.entry.relpersistence,
                                 relkind: created.entry.relkind,
+                                relispopulated: created.entry.relispopulated,
                                 relispartition: created.entry.relispartition,
                                 relpartbound: created.entry.relpartbound.clone(),
                                 desc: created.entry.desc.clone(),
@@ -1946,6 +1947,7 @@ impl Database {
                             owner_oid: created.entry.owner_oid,
                             relpersistence: created.entry.relpersistence,
                             relkind: created.entry.relkind,
+                            relispopulated: created.entry.relispopulated,
                             relispartition: created.entry.relispartition,
                             relpartbound: created.entry.relpartbound.clone(),
                             desc: created.entry.desc.clone(),
@@ -2168,6 +2170,18 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
         temp_effects: &mut Vec<TempMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
+        if create_stmt.object_type
+            == crate::include::nodes::parsenodes::TableAsObjectType::MaterializedView
+        {
+            return self.execute_create_materialized_view_stmt_in_transaction_with_search_path(
+                client_id,
+                create_stmt,
+                xid,
+                cid,
+                configured_search_path,
+                catalog_effects,
+            );
+        }
         let interrupts = self.interrupt_state(client_id);
         let (table_name, namespace_oid, persistence) = self
             .normalize_create_table_as_stmt_with_search_path(
