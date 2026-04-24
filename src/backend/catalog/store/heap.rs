@@ -5851,7 +5851,7 @@ fn conflicting_type_oid_for_name_mvcc(
     }
     Ok(
         type_row_by_name_namespace_mvcc(store, ctx, type_name, namespace_oid)?
-            .filter(|row| row.oid != type_oid)
+            .filter(|row| row.oid != type_oid && !visible_type_rows.contains_key(&row.oid))
             .map(|row| row.oid),
     )
 }
