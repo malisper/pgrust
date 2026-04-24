@@ -69,10 +69,12 @@ const PG_OPCLASS_AM_NAME_NSP_INDEX_OID: u32 = 2686;
 const PG_OPCLASS_OID_INDEX_OID: u32 = 2687;
 const PG_OPFAMILY_OID_INDEX_OID: u32 = 2755;
 const PG_OPERATOR_OID_INDEX_OID: u32 = 2688;
+const PG_OPERATOR_OPRNAME_L_R_N_INDEX_OID: u32 = 2689;
 const PG_PARTITIONED_TABLE_PARTRELID_INDEX_OID: u32 = 3351;
 const PG_POLICY_OID_INDEX_OID: u32 = 3257;
 const PG_POLICY_POLRELID_POLNAME_INDEX_OID: u32 = 3258;
 const PG_PROC_OID_INDEX_OID: u32 = 2690;
+const PG_PROC_PRONAME_ARGS_NSP_INDEX_OID: u32 = 2691;
 const PG_PUBLICATION_OID_INDEX_OID: u32 = 6110;
 const PG_PUBLICATION_PUBNAME_INDEX_OID: u32 = 6111;
 const PG_PUBLICATION_REL_OID_INDEX_OID: u32 = 6112;
@@ -148,6 +150,8 @@ pub enum SysCacheId {
     OpfamilyOid,
     // PostgreSQL syscache name: OPEROID.
     OperOid,
+    // PostgreSQL syscache name: OPERNAMENSP.
+    OperNameNsp,
     // PostgreSQL syscache name: PARTRELID.
     PartRelId,
     // PostgreSQL systable scan index: PolicyOidIndexId.
@@ -156,6 +160,8 @@ pub enum SysCacheId {
     PolicyPolrelidPolname,
     // PostgreSQL syscache name: PROCOID.
     ProcOid,
+    // PostgreSQL syscache name: PROCNAMEARGSNSP.
+    ProcNameArgsNsp,
     // PostgreSQL syscache name: PUBLICATIONOID.
     PublicationOid,
     // PostgreSQL syscache name: PUBLICATIONNAME.
@@ -228,10 +234,12 @@ impl SysCacheId {
             Self::OpclassOid => PG_OPCLASS_OID_INDEX_OID,
             Self::OpfamilyOid => PG_OPFAMILY_OID_INDEX_OID,
             Self::OperOid => PG_OPERATOR_OID_INDEX_OID,
+            Self::OperNameNsp => PG_OPERATOR_OPRNAME_L_R_N_INDEX_OID,
             Self::PartRelId => PG_PARTITIONED_TABLE_PARTRELID_INDEX_OID,
             Self::PolicyOid => PG_POLICY_OID_INDEX_OID,
             Self::PolicyPolrelidPolname => PG_POLICY_POLRELID_POLNAME_INDEX_OID,
             Self::ProcOid => PG_PROC_OID_INDEX_OID,
+            Self::ProcNameArgsNsp => PG_PROC_PRONAME_ARGS_NSP_INDEX_OID,
             Self::PublicationOid => PG_PUBLICATION_OID_INDEX_OID,
             Self::PublicationName => PG_PUBLICATION_PUBNAME_INDEX_OID,
             Self::PublicationRel => PG_PUBLICATION_REL_OID_INDEX_OID,
@@ -304,9 +312,10 @@ impl SysCacheId {
             Self::DependDepender
             | Self::DependReference
             | Self::DescriptionObj
+            | Self::ProcNameArgsNsp
             | Self::StatRelAttInh => 3,
             Self::ClaAmNameNsp => 3,
-            Self::AmprocNum => 4,
+            Self::AmprocNum | Self::OperNameNsp => 4,
             Self::AmopStrategy => 5,
         }
     }
@@ -423,14 +432,18 @@ fn sys_cache_tuple_from_values(
             pg_opclass_row_from_values(values).map(SysCacheTuple::Opclass)
         }
         SysCacheId::OpfamilyOid => pg_opfamily_row_from_values(values).map(SysCacheTuple::Opfamily),
-        SysCacheId::OperOid => pg_operator_row_from_values(values).map(SysCacheTuple::Operator),
+        SysCacheId::OperOid | SysCacheId::OperNameNsp => {
+            pg_operator_row_from_values(values).map(SysCacheTuple::Operator)
+        }
         SysCacheId::PartRelId => {
             pg_partitioned_table_row_from_values(values).map(SysCacheTuple::PartitionedTable)
         }
         SysCacheId::PolicyOid | SysCacheId::PolicyPolrelidPolname => {
             pg_policy_row_from_values(values).map(SysCacheTuple::Policy)
         }
-        SysCacheId::ProcOid => pg_proc_row_from_values(values).map(SysCacheTuple::Proc),
+        SysCacheId::ProcOid | SysCacheId::ProcNameArgsNsp => {
+            pg_proc_row_from_values(values).map(SysCacheTuple::Proc)
+        }
         SysCacheId::PublicationOid | SysCacheId::PublicationName => {
             pg_publication_row_from_values(values).map(SysCacheTuple::Publication)
         }
@@ -1417,6 +1430,18 @@ pub(crate) fn search_sys_cache_list2_db(
     key2: Value,
 ) -> Result<Vec<SysCacheTuple>, CatalogError> {
     search_sys_cache_list_db(db, client_id, txn_ctx, cache_id, vec![key1, key2])
+}
+
+pub(crate) fn search_sys_cache_list3_db(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    cache_id: SysCacheId,
+    key1: Value,
+    key2: Value,
+    key3: Value,
+) -> Result<Vec<SysCacheTuple>, CatalogError> {
+    search_sys_cache_list_db(db, client_id, txn_ctx, cache_id, vec![key1, key2, key3])
 }
 
 fn search_sys_cache_list_db(

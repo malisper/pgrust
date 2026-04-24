@@ -11,8 +11,8 @@ use crate::backend::utils::cache::syscache::{
     SysCacheId, SysCacheTuple, backend_catcache, backend_relcache, ensure_am_rows,
     ensure_attribute_rows, ensure_class_rows, ensure_constraint_rows, ensure_index_rows,
     ensure_namespace_rows, ensure_proc_rows, ensure_rewrite_rows, ensure_statistic_rows,
-    ensure_type_rows, relation_id_get_relation_db, search_sys_cache_list1_db, search_sys_cache1_db,
-    search_sys_cache2_db,
+    ensure_type_rows, relation_id_get_relation_db, search_sys_cache_list1_db,
+    search_sys_cache_list3_db, search_sys_cache1_db, search_sys_cache2_db,
 };
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_policies_rows, build_pg_rules_rows,
@@ -38,6 +38,10 @@ fn oid_key(oid: u32) -> Value {
     Value::Int64(i64::from(oid))
 }
 
+fn catalog_name_key(name: &str) -> Value {
+    Value::Text(normalize_catalog_name(name).to_ascii_lowercase().into())
+}
+
 fn namespace_row_by_name(
     db: &Database,
     client_id: ClientId,
@@ -49,7 +53,7 @@ fn namespace_row_by_name(
         client_id,
         txn_ctx,
         SysCacheId::NamespaceName,
-        Value::Text(normalize_catalog_name(name).to_ascii_lowercase().into()),
+        catalog_name_key(name),
     )
     .ok()?
     .into_iter()
@@ -370,18 +374,177 @@ fn proc_rows_by_name(
     txn_ctx: Option<(TransactionId, CommandId)>,
     name: &str,
 ) -> Vec<PgProcRow> {
-    visible_catcache(db, client_id, txn_ctx)
-        .into_iter()
-        .flat_map(|catcache| {
-            catcache
-                .proc_rows_by_name(name)
-                .into_iter()
-                .cloned()
-                .collect::<Vec<_>>()
-        })
-        .collect()
+    let normalized = crate::backend::parser::analyze::normalize_catalog_lookup_name(name);
+    let mut rows = search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::ProcNameArgsNsp,
+        catalog_name_key(normalized),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Proc(row) => Some(row),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+    crate::backend::catalog::pg_proc::sort_pg_proc_rows(&mut rows);
+    rows
 }
 
+fn operator_row_by_name_left_right(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    name: &str,
+    left_type_oid: u32,
+    right_type_oid: u32,
+) -> Option<PgOperatorRow> {
+    let normalized = crate::backend::parser::analyze::normalize_catalog_lookup_name(name);
+    let mut rows = search_sys_cache_list3_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::OperNameNsp,
+        catalog_name_key(normalized),
+        oid_key(left_type_oid),
+        oid_key(right_type_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Operator(row) => Some(row),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+    crate::backend::catalog::pg_operator::sort_pg_operator_rows(&mut rows);
+    rows.into_iter().find(|row| {
+        row.oprname.eq_ignore_ascii_case(normalized)
+            && row.oprleft == left_type_oid
+            && row.oprright == right_type_oid
+    })
+}
+
+fn statistic_rows_for_relation(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relation_oid: u32,
+) -> Vec<PgStatisticRow> {
+    let mut rows = search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::StatRelAttInh,
+        oid_key(relation_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::Statistic(row) => Some(row),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+    rows.sort_by_key(|row| (row.staattnum, row.stainherit));
+    rows
+}
+
+fn statistic_ext_row_by_oid(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    oid: u32,
+) -> Option<PgStatisticExtRow> {
+    search_sys_cache1_db(db, client_id, txn_ctx, SysCacheId::StatExtOid, oid_key(oid))
+        .ok()?
+        .into_iter()
+        .find_map(|tuple| match tuple {
+            SysCacheTuple::StatisticExt(row) => Some(row),
+            _ => None,
+        })
+}
+
+fn statistic_ext_row_by_name_namespace(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    name: &str,
+    namespace_oid: u32,
+) -> Option<PgStatisticExtRow> {
+    let normalized = crate::backend::parser::analyze::normalize_catalog_lookup_name(name);
+    search_sys_cache2_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::StatExtNameNsp,
+        catalog_name_key(normalized),
+        oid_key(namespace_oid),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::StatisticExt(row) => Some(row),
+        _ => None,
+    })
+}
+
+fn statistic_ext_rows_for_relation(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    relation_oid: u32,
+) -> Vec<PgStatisticExtRow> {
+    search_sys_cache_list1_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::StatisticExtRelId,
+        oid_key(relation_oid),
+    )
+    .map(|tuples| {
+        tuples
+            .into_iter()
+            .filter_map(|tuple| match tuple {
+                SysCacheTuple::StatisticExt(row) => Some(row),
+                _ => None,
+            })
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+fn statistic_ext_data_row(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    stxoid: u32,
+    stxdinherit: bool,
+) -> Option<PgStatisticExtDataRow> {
+    search_sys_cache2_db(
+        db,
+        client_id,
+        txn_ctx,
+        SysCacheId::StatisticExtDataStxoidInh,
+        oid_key(stxoid),
+        Value::Bool(stxdinherit),
+    )
+    .ok()?
+    .into_iter()
+    .find_map(|tuple| match tuple {
+        SysCacheTuple::StatisticExtData(row) => Some(row),
+        _ => None,
+    })
+}
 fn dedup_proc_rows(rows: &mut Vec<PgProcRow>) {
     let mut seen = BTreeSet::new();
     rows.retain(|row| {
@@ -1010,31 +1173,10 @@ pub fn constraint_rows_for_relation(
     if !rows.is_empty() {
         return rows;
     }
-    if let Ok(relcache) = backend_relcache(db, client_id, txn_ctx)
-        && let Some(entry) = relcache.get_by_oid(relation_oid)
-        && let Some(class) = class_row_by_oid(db, client_id, txn_ctx, relation_oid)
-    {
-        return derived_pg_constraint_rows(
-            relation_oid,
-            &class.relname,
-            entry.namespace_oid,
-            &entry.desc,
-        );
-    }
-    let constraint_rows = ensure_constraint_rows(db, client_id, txn_ctx)
-        .into_iter()
-        .filter(|row| row.conrelid == relation_oid)
-        .collect::<Vec<_>>();
-    if !constraint_rows.is_empty() {
-        return constraint_rows;
-    }
-    let Some(class) = ensure_class_rows(db, client_id, txn_ctx)
-        .into_iter()
-        .find(|row| row.oid == relation_oid)
-    else {
+    let Some(entry) = relation_entry_by_oid(db, client_id, txn_ctx, relation_oid) else {
         return Vec::new();
     };
-    let Some(entry) = relation_entry_by_oid(db, client_id, txn_ctx, relation_oid) else {
+    let Some(class) = class_row_by_oid(db, client_id, txn_ctx, relation_oid) else {
         return Vec::new();
     };
     derived_pg_constraint_rows(
@@ -1083,16 +1225,14 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         left_type_oid: u32,
         right_type_oid: u32,
     ) -> Option<PgOperatorRow> {
-        let normalized = crate::backend::parser::analyze::normalize_catalog_lookup_name(name);
-        backend_catcache(self.db, self.client_id, self.txn_ctx)
-            .ok()?
-            .operator_rows()
-            .into_iter()
-            .find(|row| {
-                row.oprname.eq_ignore_ascii_case(normalized)
-                    && row.oprleft == left_type_oid
-                    && row.oprright == right_type_oid
-            })
+        operator_row_by_name_left_right(
+            self.db,
+            self.client_id,
+            self.txn_ctx,
+            name,
+            left_type_oid,
+            right_type_oid,
+        )
     }
 
     fn operator_by_oid(&self, oid: u32) -> Option<PgOperatorRow> {
@@ -1292,10 +1432,29 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
     }
 
     fn statistic_rows_for_relation(&self, relation_oid: u32) -> Vec<PgStatisticRow> {
-        ensure_statistic_rows(self.db, self.client_id, self.txn_ctx)
-            .into_iter()
-            .filter(|row| row.starelid == relation_oid)
-            .collect()
+        statistic_rows_for_relation(self.db, self.client_id, self.txn_ctx, relation_oid)
+    }
+
+    fn statistic_ext_row_by_oid(&self, oid: u32) -> Option<PgStatisticExtRow> {
+        statistic_ext_row_by_oid(self.db, self.client_id, self.txn_ctx, oid)
+    }
+
+    fn statistic_ext_row_by_name_namespace(
+        &self,
+        name: &str,
+        namespace_oid: u32,
+    ) -> Option<PgStatisticExtRow> {
+        statistic_ext_row_by_name_namespace(
+            self.db,
+            self.client_id,
+            self.txn_ctx,
+            name,
+            namespace_oid,
+        )
+    }
+
+    fn statistic_ext_rows_for_relation(&self, relation_oid: u32) -> Vec<PgStatisticExtRow> {
+        statistic_ext_rows_for_relation(self.db, self.client_id, self.txn_ctx, relation_oid)
     }
 
     fn statistic_ext_rows(&self) -> Vec<PgStatisticExtRow> {
@@ -1308,6 +1467,14 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         backend_catcache(self.db, self.client_id, self.txn_ctx)
             .map(|catcache| catcache.statistic_ext_data_rows())
             .unwrap_or_default()
+    }
+
+    fn statistic_ext_data_row(
+        &self,
+        stxoid: u32,
+        stxdinherit: bool,
+    ) -> Option<PgStatisticExtDataRow> {
+        statistic_ext_data_row(self.db, self.client_id, self.txn_ctx, stxoid, stxdinherit)
     }
 
     fn pg_views_rows(&self) -> Vec<Vec<Value>> {
