@@ -153,6 +153,7 @@ fn rewrite_rte(
             rel: _,
             relation_oid,
             relkind,
+            relispopulated: _,
             toast: _,
         } if relkind == 'v' => {
             let analyzed = rewrite_view_relation_query(
@@ -177,11 +178,13 @@ fn rewrite_rte(
             rel,
             relation_oid,
             relkind,
+            relispopulated,
             toast,
         } => RangeTblEntryKind::Relation {
             rel,
             relation_oid,
             relkind,
+            relispopulated,
             toast,
         },
         RangeTblEntryKind::Join {

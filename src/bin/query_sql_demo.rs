@@ -160,6 +160,7 @@ fn main() -> Result<(), ExecError> {
             reltoastrelid: 0,
             relpersistence: 'p',
             relkind: 'r',
+            relispopulated: true,
             relhastriggers: false,
             relispartition: false,
             relpartbound: None,

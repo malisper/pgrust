@@ -310,6 +310,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             relation_name,
             relation_oid,
             relkind,
+            relispopulated,
             toast,
             desc,
         } => {
@@ -327,6 +328,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 rel,
                 relation_name,
                 relkind,
+                relispopulated,
                 toast_relation: toast,
                 column_names,
                 desc,
@@ -639,6 +641,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 relation_name,
                 relation_oid,
                 relkind,
+                relispopulated,
                 toast,
                 desc,
             } = *input
@@ -660,6 +663,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 rel,
                 relation_name,
                 relkind,
+                relispopulated,
                 toast_relation: toast,
                 column_names,
                 desc,

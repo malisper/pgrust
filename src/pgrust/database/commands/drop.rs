@@ -219,7 +219,7 @@ fn drop_table_direct_dependencies(
                 let Some(class) = ctx.catcache.class_by_oid(row.objid) else {
                     continue;
                 };
-                if !matches!(class.relkind, 'r' | 'p' | 'S' | 'v') {
+                if !matches!(class.relkind, 'r' | 'p' | 'S' | 'v' | 'm') {
                     continue;
                 }
                 deps.push(DropTableDependency::Relation {
@@ -258,7 +258,7 @@ fn drop_table_direct_dependencies(
                 let Some(owner) = ctx.catcache.class_by_oid(rewrite.ev_class) else {
                     continue;
                 };
-                if owner.relkind == 'v' {
+                if matches!(owner.relkind, 'v' | 'm') {
                     if !relation_oids.insert(owner.oid) {
                         continue;
                     }
@@ -1296,7 +1296,7 @@ impl Database {
         Ok(StatementResult::AffectedRows(dropped))
     }
 
-    fn execute_drop_relation_stmt_in_transaction_with_search_path(
+    pub(super) fn execute_drop_relation_stmt_in_transaction_with_search_path(
         &self,
         client_id: ClientId,
         relation_names: &[String],
@@ -1438,7 +1438,7 @@ impl Database {
                     if expected_relkind != 'v' {
                         self.apply_catalog_mutation_effect_immediate(&effect)?;
                     }
-                    if expected_relkind == 'r' {
+                    if matches!(expected_relkind, 'r' | 'm') {
                         self.session_stats_state(client_id)
                             .write()
                             .note_relation_drop(relation_oid, &self.stats);
@@ -1457,6 +1457,7 @@ impl Database {
                     result = Err(ExecError::Parse(ParseError::UnexpectedToken {
                         expected: match expected_relkind {
                             'i' => "droppable index",
+                            'm' => "droppable materialized view",
                             'v' => "droppable view",
                             _ => "droppable table",
                         },

@@ -451,6 +451,16 @@ fn execute_statement_with_source(
             expected: "ALTER SEQUENCE RENAME handled by database/session layer",
             actual: "ALTER SEQUENCE RENAME".into(),
         })),
+        Statement::RefreshMaterializedView(_) => {
+            Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "REFRESH MATERIALIZED VIEW handled by database/session layer",
+                actual: "REFRESH MATERIALIZED VIEW".into(),
+            }))
+        }
+        Statement::DropMaterializedView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "DROP MATERIALIZED VIEW handled by database/session layer",
+            actual: "DROP MATERIALIZED VIEW".into(),
+        })),
         Statement::TruncateTable(stmt) => execute_truncate_table(stmt, catalog, ctx, xid),
         Statement::Vacuum(stmt) => execute_vacuum(stmt, catalog, ctx),
         Statement::Insert(stmt) => {

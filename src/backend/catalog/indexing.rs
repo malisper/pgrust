@@ -66,6 +66,7 @@ pub fn system_catalog_index_entry_for_db(
         relhassubclass: false,
         relhastriggers: false,
         relispartition: false,
+        relispopulated: true,
         relpartbound: None,
         relrowsecurity: false,
         relforcerowsecurity: false,

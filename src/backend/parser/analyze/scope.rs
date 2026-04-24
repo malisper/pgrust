@@ -60,6 +60,7 @@ pub struct BoundRelation {
     pub owner_oid: u32,
     pub relpersistence: char,
     pub relkind: char,
+    pub relispopulated: bool,
     pub relispartition: bool,
     pub relpartbound: Option<String>,
     pub desc: RelationDesc,
@@ -594,10 +595,10 @@ pub(super) fn bind_from_item_with_ctes(
             let entry = catalog
                 .lookup_any_relation(name)
                 .ok_or_else(|| ParseError::UnknownTable(name.to_string()))?;
-            if !matches!(entry.relkind, 'r' | 'p' | 'v' | 'S') {
+            if !matches!(entry.relkind, 'r' | 'p' | 'v' | 'm' | 'S') {
                 return Err(ParseError::WrongObjectType {
                     name: name.to_string(),
-                    expected: "table, view, or sequence",
+                    expected: "table, view, materialized view, or sequence",
                 });
             }
             let desc = entry.desc.clone();
@@ -606,6 +607,7 @@ pub(super) fn bind_from_item_with_ctes(
                 entry.rel,
                 entry.relation_oid,
                 entry.relkind,
+                entry.relispopulated,
                 entry.toast,
                 !*only && matches!(entry.relkind, 'r' | 'p'),
                 desc.clone(),
@@ -1921,6 +1923,9 @@ pub(super) fn lookup_relation(
 ) -> Result<BoundRelation, ParseError> {
     match catalog.lookup_any_relation(name) {
         Some(entry) if matches!(entry.relkind, 'r' | 'p') => Ok(entry),
+        Some(entry) if entry.relkind == 'm' => Err(ParseError::FeatureNotSupportedMessage(
+            format!("cannot change materialized view \"{name}\""),
+        )),
         Some(_) => Err(ParseError::WrongObjectType {
             name: name.to_string(),
             expected: "table",

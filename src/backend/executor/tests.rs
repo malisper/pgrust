@@ -143,6 +143,7 @@ fn test_catalog_entry(rel: RelFileLocator, desc: RelationDesc) -> CatalogEntry {
         reltoastrelid: 0,
         relpersistence: 'p',
         relkind: 'r',
+        relispopulated: true,
         am_oid: crate::include::catalog::relam_for_relkind('r'),
         relhastriggers: false,
         relhassubclass: false,
@@ -356,6 +357,7 @@ fn people_scan_plan() -> Plan {
         relation_name: "people".into(),
         relation_oid: 0,
         relkind: 'r',
+        relispopulated: true,
         toast: None,
         desc: relation_desc(),
     }
@@ -369,6 +371,7 @@ fn pets_scan_plan() -> Plan {
         relation_name: "pets".into(),
         relation_oid: 0,
         relkind: 'r',
+        relispopulated: true,
         toast: None,
         desc: pets_relation_desc(),
     }
@@ -1217,6 +1220,7 @@ fn seqscan_filter_projection_returns_expected_rows() {
                 relation_name: "people".into(),
                 relation_oid: 0,
                 relkind: 'r',
+                relispopulated: true,
                 toast: None,
                 desc: relation_desc(),
             }),
@@ -1295,6 +1299,7 @@ fn seqscan_skips_superseded_versions() {
         relation_name: "people".into(),
         relation_oid: 0,
         relkind: 'r',
+        relispopulated: true,
         toast: None,
         desc: relation_desc(),
     };

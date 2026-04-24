@@ -16,9 +16,10 @@ use crate::backend::utils::cache::syscache::{
     search_sys_cache2_db,
 };
 use crate::backend::utils::cache::system_views::{
-    build_pg_indexes_rows, build_pg_locks_rows, build_pg_policies_rows, build_pg_rules_rows,
-    build_pg_stat_io_rows, build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
-    build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_views_rows,
+    build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
+    build_pg_rules_rows, build_pg_stat_io_rows, build_pg_stat_user_functions_rows,
+    build_pg_stat_user_tables_rows, build_pg_statio_user_tables_rows, build_pg_stats_rows,
+    build_pg_views_rows,
 };
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::access::brin_page::{
@@ -1306,6 +1307,7 @@ pub fn lookup_any_relation(
             owner_oid: entry.owner_oid,
             relpersistence: entry.relpersistence,
             relkind: entry.relkind,
+            relispopulated: entry.relispopulated,
             desc: entry.desc.clone(),
             relispartition: entry.relispartition,
             relpartbound: entry.relpartbound.clone(),
@@ -1333,6 +1335,7 @@ pub fn lookup_any_relation(
             owner_oid: temp.owner_oid,
             relpersistence: temp.relpersistence,
             relkind: temp.relkind,
+            relispopulated: temp.relispopulated,
             desc: temp.desc.clone(),
             relispartition: temp.relispartition,
             relpartbound: temp.relpartbound.clone(),
@@ -1363,6 +1366,7 @@ pub fn lookup_any_relation(
             owner_oid: entry.owner_oid,
             relpersistence: entry.relpersistence,
             relkind: entry.relkind,
+            relispopulated: entry.relispopulated,
             desc: entry.desc.clone(),
             relispartition: entry.relispartition,
             relpartbound: entry.relpartbound.clone(),
@@ -1505,6 +1509,7 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             owner_oid: entry.owner_oid,
             relpersistence: entry.relpersistence,
             relkind: entry.relkind,
+            relispopulated: entry.relispopulated,
             desc: entry.desc.clone(),
             relispartition: entry.relispartition,
             relpartbound: entry.relpartbound.clone(),
@@ -1861,6 +1866,21 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             ensure_attribute_rows(self.db, self.client_id, self.txn_ctx),
             ensure_index_rows(self.db, self.client_id, self.txn_ctx),
             ensure_am_rows(self.db, self.client_id, self.txn_ctx),
+        )
+    }
+
+    fn pg_matviews_rows(&self) -> Vec<Vec<Value>> {
+        let authids = self
+            .db
+            .auth_catalog(self.client_id, self.txn_ctx)
+            .map(|catalog| catalog.roles().to_vec())
+            .unwrap_or_default();
+        build_pg_matviews_rows(
+            ensure_namespace_rows(self.db, self.client_id, self.txn_ctx),
+            authids,
+            ensure_class_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_index_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_rewrite_rows(self.db, self.client_id, self.txn_ctx),
         )
     }
 
