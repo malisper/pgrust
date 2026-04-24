@@ -31,6 +31,7 @@ pub(crate) fn enforce_relation_constraints(
                 relation: relation_name.to_string(),
                 column: column.name.clone(),
                 constraint: constraint_name,
+                detail: Some(format_failing_row_detail(values, &ctx.datetime_config)),
             });
         }
     }

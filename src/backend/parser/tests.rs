@@ -9,17 +9,17 @@ use crate::include::catalog::{
 };
 use crate::include::nodes::parsenodes::{
     AggregateArgType, AggregateSignatureKind, AliasColumnDef, AliasColumnSpec,
-    AlterTableTriggerMode, AlterTableTriggerStateStatement, AlterTableTriggerTarget,
-    AlterTriggerRenameStatement, ColumnConstraint, CommentOnAggregateStatement,
-    CommentOnFunctionStatement, CompositeTypeAttributeDef, CreateAggregateStatement,
-    CreateCompositeTypeStatement, CreateTriggerStatement, CreateTypeStatement,
-    DropAggregateStatement, DropTriggerStatement, DropTypeStatement, ForeignKeyAction,
-    ForeignKeyMatchType, IndexColumnDef, InsertSource, InsertStatement, JoinTreeNode,
-    PartitionStrategy, PublicationObjectSpec, PublicationOption, PublicationSchemaName,
-    RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey, RawPartitionRangeDatum,
-    RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement, SqlCallArgs, TableConstraint,
-    TriggerEvent, TriggerEventSpec, TriggerLevel, TriggerReferencingSpec, TriggerTiming,
-    ViewCheckOption,
+    AlterColumnExpressionAction, AlterTableTriggerMode, AlterTableTriggerStateStatement,
+    AlterTableTriggerTarget, AlterTriggerRenameStatement, ColumnConstraint, ColumnGeneratedKind,
+    CommentOnAggregateStatement, CommentOnFunctionStatement, CompositeTypeAttributeDef,
+    CreateAggregateStatement, CreateCompositeTypeStatement, CreateTriggerStatement,
+    CreateTypeStatement, DropAggregateStatement, DropTriggerStatement, DropTypeStatement,
+    ForeignKeyAction, ForeignKeyMatchType, IndexColumnDef, InsertSource, InsertStatement,
+    JoinTreeNode, PartitionStrategy, PublicationObjectSpec, PublicationOption,
+    PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey,
+    RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement,
+    SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel,
+    TriggerReferencingSpec, TriggerTiming, ViewCheckOption,
 };
 use crate::include::nodes::primnodes::{AttrNumber, JoinType, Var, is_system_attr};
 
@@ -737,6 +737,7 @@ fn catalog_with_people_id_index() -> Catalog {
                 indisunique: false,
                 indnullsnotdistinct: false,
                 indisprimary: false,
+                indisexclusion: false,
                 indisvalid: true,
                 indisready: true,
                 indislive: true,
@@ -797,6 +798,7 @@ fn catalog_with_people_primary_key_opclass(opclass_oid: u32) -> Catalog {
                 indisunique: true,
                 indnullsnotdistinct: false,
                 indisprimary: true,
+                indisexclusion: false,
                 indisvalid: true,
                 indisready: true,
                 indislive: true,
@@ -886,6 +888,7 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
                 indisunique: true,
                 indnullsnotdistinct: false,
                 indisprimary: false,
+                indisexclusion: false,
                 indisvalid: true,
                 indisready: true,
                 indislive: true,
@@ -943,6 +946,7 @@ fn catalog_with_people_ctid_partial_unique_index() -> Catalog {
                 indisunique: true,
                 indnullsnotdistinct: false,
                 indisprimary: false,
+                indisexclusion: false,
                 indisvalid: true,
                 indisready: true,
                 indislive: true,
@@ -1000,6 +1004,7 @@ fn catalog_with_people_expression_unique_index() -> Catalog {
                 indisunique: true,
                 indnullsnotdistinct: false,
                 indisprimary: false,
+                indisexclusion: false,
                 indisvalid: true,
                 indisready: true,
                 indislive: true,
@@ -1057,6 +1062,7 @@ fn catalog_with_people_name_c_collation_index() -> Catalog {
                 indisunique: true,
                 indnullsnotdistinct: false,
                 indisprimary: false,
+                indisexclusion: false,
                 indisvalid: true,
                 indisready: true,
                 indislive: true,
@@ -1122,6 +1128,7 @@ fn catalog_with_text_parent_primary_key() -> Catalog {
                 indisunique: true,
                 indnullsnotdistinct: false,
                 indisprimary: true,
+                indisexclusion: false,
                 indisvalid: true,
                 indisready: true,
                 indislive: true,
@@ -1161,6 +1168,8 @@ fn visible_catalog_without_text_input_cast(
         base.publication_rows(),
         base.publication_rel_rows(),
         base.publication_namespace_rows(),
+        base.statistic_ext_rows(),
+        base.statistic_ext_data_rows(),
         base.am_rows(),
         base.amop_rows(),
         base.amproc_rows(),
@@ -1219,6 +1228,8 @@ fn visible_catalog_without_operator(
         base.publication_rows(),
         base.publication_rel_rows(),
         base.publication_namespace_rows(),
+        base.statistic_ext_rows(),
+        base.statistic_ext_data_rows(),
         base.am_rows(),
         base.amop_rows(),
         base.amproc_rows(),
@@ -1294,6 +1305,8 @@ fn visible_catalog_with_extra_opclasses(
         base.publication_rows(),
         base.publication_rel_rows(),
         base.publication_namespace_rows(),
+        base.statistic_ext_rows(),
+        base.statistic_ext_data_rows(),
         base.am_rows(),
         base.amop_rows(),
         base.amproc_rows(),
@@ -1663,6 +1676,8 @@ fn parse_create_unique_index_statement() {
         Statement::CreateIndex(CreateIndexStatement {
             unique: true,
             nulls_not_distinct: false,
+            concurrently: false,
+            only: false,
             if_not_exists: false,
             index_name: "num_exp_add_idx".into(),
             table_name: "num_exp_add".into(),
@@ -1809,7 +1824,7 @@ fn parse_create_statistics_statement() {
         stmt,
         Statement::CreateStatistics(CreateStatisticsStatement {
             if_not_exists: true,
-            statistics_name: "public.tst".into(),
+            statistics_name: Some("public.tst".into()),
             kinds: vec!["ndistinct".into(), "dependencies".into()],
             targets: vec!["a".into(), "(b + 1)".into()],
             from_clause: "items".into(),
@@ -1818,16 +1833,68 @@ fn parse_create_statistics_statement() {
 }
 
 #[test]
-fn parse_alter_statistics_statement() {
-    let stmt = parse_statement("alter statistics if exists public.tst set statistics 0").unwrap();
+fn parse_create_statistics_without_explicit_name() {
+    let stmt = parse_statement("create statistics on a, (b + 1) from items").unwrap();
     assert_eq!(
         stmt,
-        Statement::AlterStatistics(AlterStatisticsStatement {
-            if_exists: true,
-            statistics_name: "public.tst".into(),
-            statistics_target: 0,
+        Statement::CreateStatistics(CreateStatisticsStatement {
+            if_not_exists: false,
+            statistics_name: None,
+            kinds: vec![],
+            targets: vec!["a".into(), "(b + 1)".into()],
+            from_clause: "items".into(),
         })
     );
+}
+
+#[test]
+fn parse_statistics_ddl_statements() {
+    assert!(matches!(
+        parse_statement("alter statistics if exists public.tst rename to public.tst2").unwrap(),
+        Statement::AlterStatistics(AlterStatisticsStatement {
+            if_exists: true,
+            statistics_name,
+            action: AlterStatisticsAction::Rename { new_name },
+        }) if statistics_name == "public.tst" && new_name == "public.tst2"
+    ));
+
+    assert!(matches!(
+        parse_statement("alter statistics tst set statistics 42").unwrap(),
+        Statement::AlterStatistics(AlterStatisticsStatement {
+            if_exists: false,
+            statistics_name,
+            action: AlterStatisticsAction::SetStatistics { target },
+        }) if statistics_name == "tst" && target == 42
+    ));
+
+    assert!(matches!(
+        parse_statement("drop statistics if exists public.tst, tst2 cascade").unwrap(),
+        Statement::DropStatistics(DropStatisticsStatement {
+            if_exists: true,
+            statistics_names,
+            cascade: true,
+        }) if statistics_names == vec!["public.tst", "tst2"]
+    ));
+
+    assert!(matches!(
+        parse_statement("comment on statistics public.tst is 'hello'").unwrap(),
+        Statement::CommentOnStatistics(CommentOnStatisticsStatement {
+            statistics_name,
+            comment,
+        }) if statistics_name == "public.tst" && comment.as_deref() == Some("hello")
+    ));
+}
+
+#[test]
+fn parse_statistics_rejects_unparenthesized_expression_targets() {
+    assert!(matches!(
+        parse_statement("create statistics tst on y + z from items"),
+        Err(ParseError::UnexpectedToken { .. })
+    ));
+    assert!(matches!(
+        parse_statement("create statistics tst on (x, y) from items"),
+        Err(ParseError::UnexpectedToken { .. })
+    ));
 }
 
 #[test]
@@ -1854,6 +1921,8 @@ fn parse_create_index_with_method_and_ordering() {
         Statement::CreateIndex(CreateIndexStatement {
             unique: false,
             nulls_not_distinct: false,
+            concurrently: false,
+            only: false,
             if_not_exists: false,
             index_name: "num_exp_add_idx".into(),
             table_name: "num_exp_add".into(),
@@ -1897,6 +1966,8 @@ fn parse_create_index_with_if_not_exists_and_opclass() {
         Statement::CreateIndex(CreateIndexStatement {
             unique: false,
             nulls_not_distinct: false,
+            concurrently: false,
+            only: false,
             if_not_exists: true,
             index_name: "onek_unique1".into(),
             table_name: "onek".into(),
@@ -1926,6 +1997,8 @@ fn parse_create_index_without_name() {
         Statement::CreateIndex(CreateIndexStatement {
             unique: false,
             nulls_not_distinct: false,
+            concurrently: false,
+            only: false,
             if_not_exists: false,
             index_name: String::new(),
             table_name: "tenk1".into(),
@@ -2010,6 +2083,43 @@ fn parse_create_operator_class_hash_support() {
 }
 
 #[test]
+fn parse_partitioned_index_ddl_forms() {
+    assert!(matches!(
+        parse_statement("create index concurrently on idxpart(a)").unwrap(),
+        Statement::CreateIndex(CreateIndexStatement {
+            concurrently: true,
+            index_name,
+            table_name,
+            ..
+        }) if index_name.is_empty() && table_name == "idxpart"
+    ));
+    assert!(matches!(
+        parse_statement("create index on only idxpart(a)").unwrap(),
+        Statement::CreateIndex(CreateIndexStatement {
+            only: true,
+            index_name,
+            table_name,
+            ..
+        }) if index_name.is_empty() && table_name == "idxpart"
+    ));
+    assert!(matches!(
+        parse_statement("drop index concurrently idxpart_a_idx").unwrap(),
+        Statement::DropIndex(DropIndexStatement {
+            concurrently: true,
+            if_exists: false,
+            index_names,
+        }) if index_names == vec!["idxpart_a_idx"]
+    ));
+    assert_eq!(
+        parse_statement("alter index idxpart_a_idx attach partition idxpart1_a_idx").unwrap(),
+        Statement::AlterIndexAttachPartition(AlterIndexAttachPartitionStatement {
+            parent_index_name: "idxpart_a_idx".into(),
+            child_index_name: "idxpart1_a_idx".into(),
+        })
+    );
+}
+
+#[test]
 fn parse_create_index_with_expression_item() {
     let stmt = parse_statement("create index attmp_idx on attmp (a, (d + e), b)").unwrap();
     assert_eq!(
@@ -2017,6 +2127,8 @@ fn parse_create_index_with_expression_item() {
         Statement::CreateIndex(CreateIndexStatement {
             unique: false,
             nulls_not_distinct: false,
+            concurrently: false,
+            only: false,
             if_not_exists: false,
             index_name: "attmp_idx".into(),
             table_name: "attmp".into(),
@@ -2069,6 +2181,8 @@ fn parse_create_partial_index_statement_captures_predicate_sql() {
         Statement::CreateIndex(CreateIndexStatement {
             unique: false,
             nulls_not_distinct: false,
+            concurrently: false,
+            only: false,
             if_not_exists: false,
             index_name: "onek2_u1_prtl".into(),
             table_name: "onek2".into(),
@@ -2103,6 +2217,7 @@ fn parse_alter_table_add_column_statement() {
                 name: "note".into(),
                 ty: builtin_type(SqlType::new(SqlTypeKind::Text)),
                 default_expr: Some("'hello'".into()),
+                generated: None,
                 compression: None,
                 constraints: vec![],
             },
@@ -3097,6 +3212,23 @@ fn parse_alter_role_rename_statement() {
             constraint: TableConstraint::PrimaryKey {
                 attributes: attrs(),
                 columns: vec!["id".into()],
+                without_overlaps: None,
+            },
+        })
+    );
+
+    let stmt = parse_statement("alter table items add primary key (id, valid_at without overlaps)")
+        .unwrap();
+    assert_eq!(
+        stmt,
+        Statement::AlterTableAddConstraint(AlterTableAddConstraintStatement {
+            if_exists: false,
+            only: false,
+            table_name: "items".into(),
+            constraint: TableConstraint::PrimaryKey {
+                attributes: attrs(),
+                columns: vec!["id".into(), "valid_at".into()],
+                without_overlaps: Some("valid_at".into()),
             },
         })
     );
@@ -3111,6 +3243,7 @@ fn parse_alter_role_rename_statement() {
             constraint: TableConstraint::Unique {
                 attributes: attrs(),
                 columns: vec!["note".into()],
+                without_overlaps: None,
             },
         })
     );
@@ -4769,6 +4902,10 @@ fn parse_standalone_type_names() {
         SqlType::new(SqlTypeKind::Char)
     );
     assert_eq!(
+        parse_type_name("char").unwrap(),
+        SqlType::with_char_len(SqlTypeKind::Char, 1)
+    );
+    assert_eq!(
         parse_type_name("bytea").unwrap(),
         SqlType::new(SqlTypeKind::Bytea)
     );
@@ -4980,6 +5117,61 @@ fn parse_typed_string_literal_expression() {
     assert!(matches!(
         &stmt.targets[4].expr,
         SqlExpr::Cast(_, ty) if *ty == SqlType::new(SqlTypeKind::TimestampTz)
+    ));
+}
+
+#[test]
+fn parse_interval_typed_string_literals() {
+    let stmt = parse_select(
+        "select interval '1 day', interval(2) '1 day 01:02:03.456', interval '1-2' year to month, interval '12:34.5678' minute to second(2)",
+    )
+    .unwrap();
+    assert_eq!(stmt.targets.len(), 4);
+    for target in &stmt.targets {
+        assert!(matches!(
+            &target.expr,
+            SqlExpr::Cast(inner, ty)
+                if ty.as_builtin().is_some_and(|ty| ty.kind == SqlTypeKind::Interval)
+                    && matches!(inner.as_ref(), SqlExpr::Const(Value::Text(_)))
+        ));
+    }
+    assert!(matches!(
+        &stmt.targets[1].expr,
+        SqlExpr::Cast(_, ty)
+            if ty.as_builtin().is_some_and(|ty| {
+                ty.kind == SqlTypeKind::Interval && ty.typmod == 2
+            })
+    ));
+    assert!(matches!(
+        &stmt.targets[3].expr,
+        SqlExpr::Cast(_, ty)
+            if ty.as_builtin().is_some_and(|ty| {
+                ty.kind == SqlTypeKind::Interval && ty.typmod == 2
+            })
+    ));
+}
+
+#[test]
+fn parse_interval_field_qualified_casts() {
+    let stmt = parse_select(
+        "select f1::interval day to minute, cast(f1 as interval second(2)), f1::interval[] from interval_tbl",
+    )
+    .unwrap();
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::Cast(_, ty) if ty.as_builtin().is_some_and(|ty| ty.kind == SqlTypeKind::Interval)
+    ));
+    assert!(matches!(
+        &stmt.targets[1].expr,
+        SqlExpr::Cast(_, ty)
+            if ty.as_builtin().is_some_and(|ty| {
+                ty.kind == SqlTypeKind::Interval && ty.typmod == 2
+            })
+    ));
+    assert!(matches!(
+        &stmt.targets[2].expr,
+        SqlExpr::Cast(_, ty)
+            if *ty == RawTypeName::Builtin(SqlType::array_of(SqlType::new(SqlTypeKind::Interval)))
     ));
 }
 
@@ -5641,6 +5833,19 @@ fn analyze_timestamptz_typed_string_literal_keeps_timestamp_tz_type() {
         &query.target_list[0].expr,
         Expr::Cast(inner, ty)
             if *ty == SqlType::new(SqlTypeKind::TimestampTz)
+                && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _)))
+    ));
+}
+
+#[test]
+fn analyze_interval_typed_string_literal_keeps_interval_type() {
+    let stmt = parse_select("select interval '1 day'").unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+    assert!(matches!(
+        &query.target_list[0].expr,
+        Expr::Cast(inner, ty)
+            if *ty == SqlType::new(SqlTypeKind::Interval)
                 && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _)))
     ));
 }
@@ -6581,7 +6786,7 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("drop table if exists pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers").unwrap(), Statement::DropTable(DropTableStatement { if_exists: true, table_names, .. }) if table_names == vec!["pgbench_accounts", "pgbench_branches", "pgbench_history", "pgbench_tellers"])
     );
     assert!(
-        matches!(parse_statement("drop index tenant_idx").unwrap(), Statement::DropIndex(DropIndexStatement { if_exists: false, index_names }) if index_names == vec!["tenant_idx"])
+        matches!(parse_statement("drop index tenant_idx").unwrap(), Statement::DropIndex(DropIndexStatement { concurrently: false, if_exists: false, index_names }) if index_names == vec!["tenant_idx"])
     );
     assert!(
         matches!(parse_statement("drop schema if exists tenant_a, tenant_b").unwrap(), Statement::DropSchema(DropSchemaStatement { if_exists: true, schema_names, cascade: false }) if schema_names == vec!["tenant_a", "tenant_b"])
@@ -7853,12 +8058,40 @@ fn parse_alter_table_attach_partition() {
 }
 
 #[test]
-fn parse_hash_partition_syntax_remains_unsupported() {
+fn parse_create_table_partition_by_hash() {
     match parse_statement("create table measurement (a int) partition by hash (a)").unwrap() {
-        Statement::Unsupported(stmt) => {
-            assert!(stmt.sql.to_ascii_lowercase().contains("partition by hash"));
+        Statement::CreateTable(ct) => {
+            assert_eq!(
+                ct.partition_spec,
+                Some(RawPartitionSpec {
+                    strategy: PartitionStrategy::Hash,
+                    keys: vec![RawPartitionKey::Column("a".into())],
+                })
+            );
         }
-        other => panic!("expected Unsupported, got {:?}", other),
+        other => panic!("expected CreateTable, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_create_table_hash_partition_bound() {
+    match parse_statement(
+        "create table measurement_h0 partition of measurement \
+         for values with (modulus 4, remainder 0)",
+    )
+    .unwrap()
+    {
+        Statement::CreateTable(ct) => {
+            assert_eq!(ct.partition_of.as_deref(), Some("measurement"));
+            assert_eq!(
+                ct.partition_bound,
+                Some(RawPartitionBoundSpec::Hash {
+                    modulus: 4,
+                    remainder: 0,
+                })
+            );
+        }
+        other => panic!("expected CreateTable, got {:?}", other),
     }
 }
 
@@ -8370,10 +8603,12 @@ fn parse_create_table_primary_key_and_unique_constraints() {
             TableConstraint::PrimaryKey {
                 attributes: attrs(),
                 columns: vec!["id".into(), "note".into()],
+                without_overlaps: None,
             },
             TableConstraint::Unique {
                 attributes: attrs(),
                 columns: vec!["note".into(), "id".into()],
+                without_overlaps: None,
             },
         ]
     );
@@ -8392,7 +8627,34 @@ fn parse_create_table_primary_key_and_unique_constraints() {
                 ..attrs()
             },
             columns: vec!["id".into()],
+            without_overlaps: None,
         }]
+    );
+
+    let stmt = parse_statement(
+        "create table items (id int4, valid_at int4range, constraint temporal_pk primary key (id, valid_at without overlaps), unique (id, valid_at without overlaps))",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    assert_eq!(
+        ct.constraints().cloned().collect::<Vec<_>>(),
+        vec![
+            TableConstraint::PrimaryKey {
+                attributes: ConstraintAttributes {
+                    name: Some("temporal_pk".into()),
+                    ..attrs()
+                },
+                columns: vec!["id".into(), "valid_at".into()],
+                without_overlaps: Some("valid_at".into()),
+            },
+            TableConstraint::Unique {
+                attributes: attrs(),
+                columns: vec!["id".into(), "valid_at".into()],
+                without_overlaps: Some("valid_at".into()),
+            },
+        ]
     );
 
     let stmt = parse_statement("create table items (id int4 unique nulls not distinct, note text)")
@@ -11223,6 +11485,67 @@ fn parse_create_table_column_defaults() {
     let columns = ct.columns().collect::<Vec<_>>();
     assert_eq!(columns[0].default_expr.as_deref(), Some("'1001'"));
     assert_eq!(columns[1].default_expr.as_deref(), Some("B'0101'"));
+}
+
+#[test]
+fn parse_create_table_generated_columns() {
+    let stmt = parse_statement(
+        "create table generated_items (a int4, b int4 generated always as (a + 1), c int4 generated always as (a + 2) stored)",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+    let columns = ct.columns().collect::<Vec<_>>();
+    let virtual_column = columns[1].generated.as_ref().expect("virtual generated");
+    assert_eq!(virtual_column.kind, ColumnGeneratedKind::Virtual);
+    assert_eq!(virtual_column.expr_sql, "a + 1");
+    let stored_column = columns[2].generated.as_ref().expect("stored generated");
+    assert_eq!(stored_column.kind, ColumnGeneratedKind::Stored);
+    assert_eq!(stored_column.expr_sql, "a + 2");
+}
+
+#[test]
+fn parse_create_table_generated_rejects_by_default_and_duplicate_clause() {
+    let by_default =
+        parse_statement("create table bad (a int4, b int4 generated by default as (a))")
+            .unwrap_err();
+    assert!(format!("{by_default:?}").contains("GENERATED ALWAYS"));
+
+    let duplicate = parse_statement(
+        "create table bad (a int4, b int4 generated always as (a) generated always as (a))",
+    )
+    .unwrap_err();
+    assert!(format!("{duplicate:?}").contains("multiple generation clauses"));
+}
+
+#[test]
+fn parse_alter_table_column_expression_statements() {
+    let stmt = parse_statement("alter table items alter column total set expression as (qty + 1)")
+        .unwrap();
+    match stmt {
+        Statement::AlterTableAlterColumnExpression(stmt) => {
+            assert_eq!(stmt.table_name, "items");
+            assert_eq!(stmt.column_name, "total");
+            assert!(matches!(
+                stmt.action,
+                AlterColumnExpressionAction::Set { ref expr_sql, .. } if expr_sql == "qty + 1"
+            ));
+        }
+        other => panic!("expected alter column expression, got {other:?}"),
+    }
+
+    let stmt =
+        parse_statement("alter table items alter column total drop expression if exists").unwrap();
+    match stmt {
+        Statement::AlterTableAlterColumnExpression(stmt) => {
+            assert!(matches!(
+                stmt.action,
+                AlterColumnExpressionAction::Drop { missing_ok: true }
+            ));
+        }
+        other => panic!("expected alter column expression, got {other:?}"),
+    }
 }
 
 #[test]

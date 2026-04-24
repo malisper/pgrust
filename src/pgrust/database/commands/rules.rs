@@ -1061,7 +1061,7 @@ fn execute_view_insert_with_triggers(
             }
             affected_rows += 1;
         }
-        triggers.after_statement(ctx)?;
+        triggers.after_statement(None, ctx)?;
         if stmt.returning.is_empty() {
             Ok(StatementResult::AffectedRows(affected_rows))
         } else {
@@ -1112,7 +1112,7 @@ fn execute_view_update_with_triggers(
         }
         affected_rows += 1;
     }
-    triggers.after_statement(ctx)?;
+    triggers.after_statement(None, ctx)?;
     Ok((affected_rows, returned_rows))
 }
 
@@ -1152,7 +1152,7 @@ fn execute_view_delete_with_triggers(
         }
         affected_rows += 1;
     }
-    triggers.after_statement(ctx)?;
+    triggers.after_statement(None, ctx)?;
     Ok((affected_rows, returned_rows))
 }
 

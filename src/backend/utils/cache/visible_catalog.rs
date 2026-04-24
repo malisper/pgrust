@@ -3,19 +3,19 @@ use crate::backend::parser::{BoundRelation, CatalogLookup};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{
-    build_pg_locks_rows, build_pg_policies_rows, build_pg_rules_rows, build_pg_stat_io_rows,
-    build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
+    build_pg_indexes_rows, build_pg_locks_rows, build_pg_policies_rows, build_pg_rules_rows,
+    build_pg_stat_io_rows, build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
     build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_views_rows,
 };
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
     PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow, PgForeignDataWrapperRow,
     PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow, PgOperatorRow,
-    PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow,
-    PgTriggerRow, PgTypeRow, bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows,
-    bootstrap_pg_collation_rows, bootstrap_pg_database_rows, bootstrap_pg_language_rows,
-    bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
-    bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
+    PgPartitionedTableRow, PgPolicyRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticExtDataRow,
+    PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTypeRow, bootstrap_pg_aggregate_rows,
+    bootstrap_pg_cast_rows, bootstrap_pg_collation_rows, bootstrap_pg_database_rows,
+    bootstrap_pg_language_rows, bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows,
+    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
     synthetic_range_proc_rows_by_name,
 };
 use crate::pgrust::database::DatabaseStatsStore;
@@ -25,11 +25,24 @@ use std::collections::BTreeSet;
 pub struct VisibleCatalog {
     relcache: RelCache,
     catcache: Option<CatCache>,
+    search_path: Vec<String>,
 }
 
 impl VisibleCatalog {
     pub fn new(relcache: RelCache, catcache: Option<CatCache>) -> Self {
-        Self { relcache, catcache }
+        Self::with_search_path(relcache, catcache, Vec::new())
+    }
+
+    pub fn with_search_path(
+        relcache: RelCache,
+        catcache: Option<CatCache>,
+        search_path: Vec<String>,
+    ) -> Self {
+        Self {
+            relcache,
+            catcache,
+            search_path,
+        }
     }
 
     pub fn relcache(&self) -> &RelCache {
@@ -49,6 +62,24 @@ impl VisibleCatalog {
         };
         let relname = name.rsplit('.').next().unwrap_or(name);
         derived_pg_constraint_rows(relation_oid, relname, entry.namespace_oid, &entry.desc)
+    }
+
+    pub fn constraint_rows(&self) -> Vec<PgConstraintRow> {
+        if let Some(catcache) = &self.catcache {
+            return catcache.constraint_rows();
+        }
+        self.relcache
+            .entries()
+            .flat_map(|(name, entry)| {
+                let relname = name.rsplit('.').next().unwrap_or(name);
+                derived_pg_constraint_rows(
+                    entry.relation_oid,
+                    relname,
+                    entry.namespace_oid,
+                    &entry.desc,
+                )
+            })
+            .collect()
     }
 
     pub fn trigger_rows_for_relation(&self, relation_oid: u32) -> Vec<PgTriggerRow> {
@@ -147,6 +178,20 @@ impl VisibleCatalog {
             .unwrap_or_default()
     }
 
+    pub fn statistic_ext_rows(&self) -> Vec<PgStatisticExtRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| catcache.statistic_ext_rows())
+            .unwrap_or_default()
+    }
+
+    pub fn statistic_ext_data_rows(&self) -> Vec<PgStatisticExtDataRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| catcache.statistic_ext_data_rows())
+            .unwrap_or_default()
+    }
+
     pub fn role_name_by_oid(&self, role_oid: u32) -> Option<String> {
         self.catcache.as_ref().and_then(|catcache| {
             catcache
@@ -199,6 +244,10 @@ impl CatalogLookup for VisibleCatalog {
         VisibleCatalog::constraint_rows_for_relation(self, relation_oid)
     }
 
+    fn constraint_rows(&self) -> Vec<PgConstraintRow> {
+        VisibleCatalog::constraint_rows(self)
+    }
+
     fn relation_by_oid(&self, relation_oid: u32) -> Option<BoundRelation> {
         self.relcache
             .get_by_oid(relation_oid)
@@ -209,36 +258,36 @@ impl CatalogLookup for VisibleCatalog {
         &self,
         relation_oid: u32,
     ) -> Vec<crate::backend::parser::BoundIndexRelation> {
+        let mut seen = BTreeSet::new();
         self.relcache
             .entries()
             .filter_map(|(name, entry)| {
                 let index_meta = entry.index.as_ref()?;
-                (index_meta.indrelid == relation_oid).then(|| {
-                    crate::backend::parser::BoundIndexRelation {
-                        name: name.rsplit('.').next().unwrap_or(name).to_string(),
-                        rel: entry.rel,
-                        relation_oid: entry.relation_oid,
-                        desc: entry.desc.clone(),
-                        index_meta: index_meta.clone(),
-                        index_exprs: self
-                            .relation_by_oid(index_meta.indrelid)
-                            .and_then(|heap| {
-                                crate::backend::parser::analyze::bind_index_exprs(
-                                    index_meta, &heap.desc, self,
-                                )
-                                .ok()
-                            })
-                            .unwrap_or_default(),
-                        index_predicate: self.relation_by_oid(index_meta.indrelid).and_then(
-                            |heap| {
-                                crate::backend::parser::analyze::bind_index_predicate(
-                                    index_meta, &heap.desc, self,
-                                )
-                                .ok()
-                                .flatten()
-                            },
-                        ),
-                    }
+                if index_meta.indrelid != relation_oid || !seen.insert(entry.relation_oid) {
+                    return None;
+                }
+                Some(crate::backend::parser::BoundIndexRelation {
+                    name: name.rsplit('.').next().unwrap_or(name).to_string(),
+                    rel: entry.rel,
+                    relation_oid: entry.relation_oid,
+                    desc: entry.desc.clone(),
+                    index_meta: index_meta.clone(),
+                    index_exprs: self
+                        .relation_by_oid(index_meta.indrelid)
+                        .and_then(|heap| {
+                            crate::backend::parser::analyze::bind_index_exprs(
+                                index_meta, &heap.desc, self,
+                            )
+                            .ok()
+                        })
+                        .unwrap_or_default(),
+                    index_predicate: self.relation_by_oid(index_meta.indrelid).and_then(|heap| {
+                        crate::backend::parser::analyze::bind_index_predicate(
+                            index_meta, &heap.desc, self,
+                        )
+                        .ok()
+                        .flatten()
+                    }),
                 })
             })
             .collect()
@@ -246,6 +295,10 @@ impl CatalogLookup for VisibleCatalog {
 
     fn current_user_oid(&self) -> u32 {
         BOOTSTRAP_SUPERUSER_OID
+    }
+
+    fn search_path(&self) -> Vec<String> {
+        self.search_path.clone()
     }
 
     fn session_user_oid(&self) -> u32 {
@@ -269,6 +322,13 @@ impl CatalogLookup for VisibleCatalog {
                     .into_iter()
                     .find(|row| row.oid == oid)
             })
+    }
+
+    fn namespace_rows(&self) -> Vec<PgNamespaceRow> {
+        self.catcache
+            .as_ref()
+            .map(|catcache| catcache.namespace_rows())
+            .unwrap_or_else(|| bootstrap_pg_namespace_rows().to_vec())
     }
 
     fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
@@ -503,6 +563,14 @@ impl CatalogLookup for VisibleCatalog {
             .unwrap_or_default()
     }
 
+    fn statistic_ext_rows(&self) -> Vec<PgStatisticExtRow> {
+        VisibleCatalog::statistic_ext_rows(self)
+    }
+
+    fn statistic_ext_data_rows(&self) -> Vec<PgStatisticExtDataRow> {
+        VisibleCatalog::statistic_ext_data_rows(self)
+    }
+
     fn pg_views_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
         let Some(catcache) = &self.catcache else {
             return Vec::new();
@@ -512,6 +580,19 @@ impl CatalogLookup for VisibleCatalog {
             catcache.authid_rows(),
             catcache.class_rows(),
             catcache.rewrite_rows(),
+        )
+    }
+
+    fn pg_indexes_rows(&self) -> Vec<Vec<crate::backend::executor::Value>> {
+        let Some(catcache) = &self.catcache else {
+            return Vec::new();
+        };
+        build_pg_indexes_rows(
+            catcache.namespace_rows(),
+            catcache.class_rows(),
+            catcache.attribute_rows(),
+            catcache.index_rows(),
+            catcache.am_rows(),
         )
     }
 
@@ -685,6 +766,8 @@ mod tests {
             base.publication_rows(),
             base.publication_rel_rows(),
             base.publication_namespace_rows(),
+            base.statistic_ext_rows(),
+            base.statistic_ext_data_rows(),
             base.am_rows(),
             base.amop_rows(),
             base.amproc_rows(),

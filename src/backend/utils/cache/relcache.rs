@@ -425,6 +425,10 @@ impl RelCache {
                     desc.attstattarget = attr.attstattarget;
                     desc.attinhcount = attr.attinhcount;
                     desc.attislocal = attr.attislocal;
+                    desc.generated =
+                        crate::include::nodes::parsenodes::ColumnGeneratedKind::from_catalog_char(
+                            attr.attgenerated,
+                        );
                     desc.dropped = attr.attisdropped;
                     if let Some(constraint) = not_null_constraints.get(&(class.oid, attr.attnum)) {
                         desc.not_null_constraint_oid = Some(constraint.oid);
@@ -791,6 +795,7 @@ mod tests {
                     indcollation: vec![0],
                     indoption: vec![0],
                     indnullsnotdistinct: false,
+                    indisexclusion: false,
                     brin_options: None,
                 },
             )
@@ -839,6 +844,7 @@ mod tests {
                     indcollation: vec![0],
                     indoption: vec![0],
                     indnullsnotdistinct: true,
+                    indisexclusion: false,
                     brin_options: None,
                 },
             )
@@ -1074,6 +1080,8 @@ mod tests {
             rows.publications,
             rows.publication_rels,
             rows.publication_namespaces,
+            rows.statistics_ext,
+            rows.statistics_ext_data,
             rows.ams,
             rows.amops,
             rows.amprocs,

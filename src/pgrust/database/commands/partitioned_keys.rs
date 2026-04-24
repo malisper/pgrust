@@ -18,6 +18,7 @@ struct PartitionedKeySpec {
     columns: Vec<String>,
     primary: bool,
     nulls_not_distinct: bool,
+    without_overlaps: Option<String>,
 }
 
 impl PartitionedKeySpec {
@@ -26,6 +27,7 @@ impl PartitionedKeySpec {
             columns: action.columns.clone(),
             primary: action.primary,
             nulls_not_distinct: action.nulls_not_distinct,
+            without_overlaps: action.without_overlaps.clone(),
         }
     }
 
@@ -270,14 +272,23 @@ impl<'a> PartitionedKeyInstaller<'a> {
     ) -> Result<(u32, u32, CatalogIndexBuildOptions, Vec<IndexColumnDef>), ExecError> {
         let index_columns = spec.index_columns();
         let (access_method_oid, access_method_handler, build_options) =
-            self.db.resolve_simple_index_build_options(
-                self.client_id,
-                Some((self.xid, self.visible_cid())),
-                "btree",
-                relation,
-                &index_columns,
-                &[],
-            )?;
+            if spec.without_overlaps.is_some() {
+                self.db.resolve_temporal_index_build_options(
+                    self.client_id,
+                    Some((self.xid, self.visible_cid())),
+                    relation,
+                    &index_columns,
+                )?
+            } else {
+                self.db.resolve_simple_index_build_options(
+                    self.client_id,
+                    Some((self.xid, self.visible_cid())),
+                    "btree",
+                    relation,
+                    &index_columns,
+                    &[],
+                )?
+            };
         Ok((
             access_method_oid,
             access_method_handler,
@@ -337,6 +348,7 @@ impl<'a> PartitionedKeyInstaller<'a> {
             if class_row.relam != build_options.am_oid
                 || index.index_meta.indisprimary != spec.primary
                 || !index.index_meta.indisunique
+                || index.index_meta.indisexclusion != spec.without_overlaps.is_some()
                 || index.index_meta.indnullsnotdistinct != spec.nulls_not_distinct
                 || index.index_meta.indkey != expected_attnums
                 || index.index_meta.indexprs.is_some()
@@ -344,6 +356,7 @@ impl<'a> PartitionedKeyInstaller<'a> {
                 || index.index_meta.indclass != build_options.indclass
                 || index.index_meta.indcollation != build_options.indcollation
                 || index.index_meta.indoption != build_options.indoption
+                || row.conperiod != spec.without_overlaps.is_some()
             {
                 continue;
             }
@@ -593,11 +606,26 @@ impl<'a> PartitionedKeyInstaller<'a> {
     ) -> Result<PgConstraintRow, ExecError> {
         let cid = self.take_cid();
         let ctx = self.write_ctx(cid);
+        let conexclop = if spec.without_overlaps.is_some() {
+            let catalog = self.db.lazy_catalog_lookup(
+                self.client_id,
+                Some((self.xid, self.visible_cid())),
+                self.configured_search_path,
+            );
+            Some(self.db.temporal_constraint_operator_oids_for_relation(
+                relation_oid,
+                &spec.columns,
+                spec.without_overlaps.as_deref(),
+                &catalog,
+            )?)
+        } else {
+            None
+        };
         let (constraint, effect) = self
             .db
             .catalog
             .write()
-            .create_index_backed_constraint_mvcc_with_inheritance(
+            .create_index_backed_constraint_mvcc_with_inheritance_and_period(
                 relation_oid,
                 index_oid,
                 constraint_name.to_string(),
@@ -607,6 +635,8 @@ impl<'a> PartitionedKeyInstaller<'a> {
                 conislocal,
                 coninhcount,
                 connoinherit,
+                spec.without_overlaps.is_some(),
+                conexclop,
                 &ctx,
             )
             .map_err(map_catalog_error)?;
@@ -683,6 +713,11 @@ impl<'a> PartitionedKeyInstaller<'a> {
             columns: Self::column_names_for_attnums(&relation.desc, &attnums)?,
             primary: constraint.contype == CONSTRAINT_PRIMARY,
             nulls_not_distinct: index.index_meta.indnullsnotdistinct,
+            without_overlaps: constraint
+                .conperiod
+                .then(|| Self::column_names_for_attnums(&relation.desc, &attnums).ok())
+                .flatten()
+                .and_then(|columns| columns.last().cloned()),
         })
     }
 
@@ -705,6 +740,7 @@ impl<'a> PartitionedKeyInstaller<'a> {
                     columns: spec.columns.clone(),
                     primary: spec.primary,
                     nulls_not_distinct: spec.nulls_not_distinct,
+                    without_overlaps: spec.without_overlaps.clone(),
                 }],
             )
             .map_err(ExecError::Parse)?;

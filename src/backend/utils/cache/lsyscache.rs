@@ -8,13 +8,13 @@ use crate::backend::storage::smgr::{BLCKSZ, ForkNumber, StorageManager};
 use crate::backend::utils::cache::catcache::normalize_catalog_name;
 use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
-    backend_catcache, backend_relcache, ensure_attribute_rows, ensure_class_rows,
+    backend_catcache, backend_relcache, ensure_am_rows, ensure_attribute_rows, ensure_class_rows,
     ensure_constraint_rows, ensure_index_rows, ensure_inherit_rows, ensure_namespace_rows,
     ensure_proc_rows, ensure_rewrite_rows, ensure_statistic_rows, ensure_type_rows,
 };
 use crate::backend::utils::cache::system_views::{
-    build_pg_locks_rows, build_pg_policies_rows, build_pg_rules_rows, build_pg_stat_io_rows,
-    build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
+    build_pg_indexes_rows, build_pg_locks_rows, build_pg_policies_rows, build_pg_rules_rows,
+    build_pg_stat_io_rows, build_pg_stat_user_functions_rows, build_pg_stat_user_tables_rows,
     build_pg_statio_user_tables_rows, build_pg_stats_rows, build_pg_views_rows,
 };
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
@@ -24,8 +24,8 @@ use crate::include::access::brin_page::{
 use crate::include::catalog::{
     PgAggregateRow, PgAmRow, PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow,
     PgCollationRow, PgConstraintRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
-    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticRow,
-    PgTriggerRow, PgTypeRow,
+    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticExtDataRow,
+    PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTypeRow,
 };
 use crate::include::nodes::datum::Value;
 use crate::pgrust::database::{
@@ -474,6 +474,8 @@ pub fn index_relation_oids_for_heap(
                 .into_iter()
                 .filter(|row| row.indrelid == relation_oid)
                 .map(|row| row.indexrelid)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
                 .collect()
         })
         .unwrap_or_default()
@@ -818,6 +820,10 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         self.db.auth_state(self.client_id).current_user_oid()
     }
 
+    fn search_path(&self) -> Vec<String> {
+        self.search_path.clone()
+    }
+
     fn session_user_oid(&self) -> u32 {
         self.db.auth_state(self.client_id).session_user_oid()
     }
@@ -838,6 +844,10 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
 
     fn namespace_row_by_oid(&self, oid: u32) -> Option<PgNamespaceRow> {
         namespace_row_by_oid(self.db, self.client_id, self.txn_ctx, oid)
+    }
+
+    fn namespace_rows(&self) -> Vec<PgNamespaceRow> {
+        ensure_namespace_rows(self.db, self.client_id, self.txn_ctx)
     }
 
     fn row_security_enabled(&self) -> bool {
@@ -979,6 +989,18 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             .collect()
     }
 
+    fn statistic_ext_rows(&self) -> Vec<PgStatisticExtRow> {
+        backend_catcache(self.db, self.client_id, self.txn_ctx)
+            .map(|catcache| catcache.statistic_ext_rows())
+            .unwrap_or_default()
+    }
+
+    fn statistic_ext_data_rows(&self) -> Vec<PgStatisticExtDataRow> {
+        backend_catcache(self.db, self.client_id, self.txn_ctx)
+            .map(|catcache| catcache.statistic_ext_data_rows())
+            .unwrap_or_default()
+    }
+
     fn pg_views_rows(&self) -> Vec<Vec<Value>> {
         let authids = self
             .db
@@ -990,6 +1012,16 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             authids,
             ensure_class_rows(self.db, self.client_id, self.txn_ctx),
             ensure_rewrite_rows(self.db, self.client_id, self.txn_ctx),
+        )
+    }
+
+    fn pg_indexes_rows(&self) -> Vec<Vec<Value>> {
+        build_pg_indexes_rows(
+            ensure_namespace_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_class_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_attribute_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_index_rows(self.db, self.client_id, self.txn_ctx),
+            ensure_am_rows(self.db, self.client_id, self.txn_ctx),
         )
     }
 
@@ -1166,9 +1198,10 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
                 relcache.insert(format!("{}.{}", temp_namespace.name, name), entry.entry);
             }
         }
-        Some(VisibleCatalog::new(
+        Some(VisibleCatalog::with_search_path(
             relcache.with_search_path(&self.search_path),
             Some(catcache),
+            self.search_path.clone(),
         ))
     }
 }

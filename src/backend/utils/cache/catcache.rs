@@ -29,6 +29,9 @@ use crate::backend::catalog::pg_proc::sort_pg_proc_rows;
 use crate::backend::catalog::pg_publication::{
     sort_pg_publication_namespace_rows, sort_pg_publication_rel_rows, sort_pg_publication_rows,
 };
+use crate::backend::catalog::pg_statistic_ext::{
+    sort_pg_statistic_ext_data_rows, sort_pg_statistic_ext_rows,
+};
 use crate::backend::catalog::pg_tablespace::sort_pg_tablespace_rows;
 use crate::backend::catalog::pg_trigger::sort_pg_trigger_rows;
 use crate::backend::catalog::pg_ts_config::sort_pg_ts_config_rows;
@@ -52,15 +55,15 @@ use crate::include::catalog::{
     PgClassRow, PgCollationRow, PgConstraintRow, PgDatabaseRow, PgDependRow,
     PgForeignDataWrapperRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
     PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow,
-    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticRow,
-    PgTablespaceRow, PgTriggerRow, PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow,
-    PgTsTemplateRow, PgTypeRow, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID,
-    REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
-    TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
-    TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID,
-    VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
-    XID_ARRAY_TYPE_OID, XID_TYPE_OID, XML_ARRAY_TYPE_OID, XML_TYPE_OID,
-    bootstrap_composite_type_rows, bootstrap_pg_aggregate_rows, bootstrap_pg_am_rows,
+    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
+    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTriggerRow,
+    PgTsConfigMapRow, PgTsConfigRow, PgTsDictRow, PgTsParserRow, PgTsTemplateRow, PgTypeRow,
+    REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID,
+    REGDICTIONARY_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TID_ARRAY_TYPE_OID, TID_TYPE_OID,
+    TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID, TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID,
+    TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID,
+    VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, XID_ARRAY_TYPE_OID, XID_TYPE_OID, XML_ARRAY_TYPE_OID,
+    XML_TYPE_OID, bootstrap_composite_type_rows, bootstrap_pg_aggregate_rows, bootstrap_pg_am_rows,
     bootstrap_pg_amop_rows, bootstrap_pg_amproc_rows, bootstrap_pg_auth_members_rows,
     bootstrap_pg_authid_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
     bootstrap_pg_constraint_rows, bootstrap_pg_database_rows,
@@ -92,6 +95,8 @@ pub struct CatCache {
     publication_rows: Vec<PgPublicationRow>,
     publication_rel_rows: Vec<PgPublicationRelRow>,
     publication_namespace_rows: Vec<PgPublicationNamespaceRow>,
+    statistic_ext_rows: Vec<PgStatisticExtRow>,
+    statistic_ext_data_rows: Vec<PgStatisticExtDataRow>,
     am_rows: Vec<PgAmRow>,
     amop_rows: Vec<PgAmopRow>,
     amproc_rows: Vec<PgAmprocRow>,
@@ -335,6 +340,10 @@ impl CatCache {
                     attstattarget: column.attstattarget,
                     attinhcount: column.attinhcount,
                     attislocal: column.attislocal,
+                    attgenerated: column
+                        .generated
+                        .map(|kind| kind.catalog_char())
+                        .unwrap_or('\0'),
                     sql_type: column.sql_type,
                 })
                 .collect::<Vec<_>>();
@@ -412,6 +421,12 @@ impl CatCache {
         cache
             .publication_namespace_rows
             .extend(catalog.publication_namespace_rows().iter().cloned());
+        cache
+            .statistic_ext_rows
+            .extend(catalog.statistic_ext_rows().iter().cloned());
+        cache
+            .statistic_ext_data_rows
+            .extend(catalog.statistic_ext_data_rows().iter().cloned());
         sort_pg_constraint_rows(&mut cache.constraint_rows);
         sort_pg_depend_rows(&mut cache.depend_rows);
         sort_pg_inherits_rows(&mut cache.inherit_rows);
@@ -421,6 +436,8 @@ impl CatCache {
         sort_pg_publication_rows(&mut cache.publication_rows);
         sort_pg_publication_rel_rows(&mut cache.publication_rel_rows);
         sort_pg_publication_namespace_rows(&mut cache.publication_namespace_rows);
+        sort_pg_statistic_ext_rows(&mut cache.statistic_ext_rows);
+        sort_pg_statistic_ext_data_rows(&mut cache.statistic_ext_data_rows);
         sort_pg_index_rows(&mut cache.index_rows);
 
         cache.normalize_composite_array_types();
@@ -443,6 +460,8 @@ impl CatCache {
             rows.publications,
             rows.publication_rels,
             rows.publication_namespaces,
+            rows.statistics_ext,
+            rows.statistics_ext_data,
             rows.ams,
             rows.amops,
             rows.amprocs,
@@ -485,6 +504,8 @@ impl CatCache {
         publication_rows: Vec<PgPublicationRow>,
         publication_rel_rows: Vec<PgPublicationRelRow>,
         publication_namespace_rows: Vec<PgPublicationNamespaceRow>,
+        statistic_ext_rows: Vec<PgStatisticExtRow>,
+        statistic_ext_data_rows: Vec<PgStatisticExtDataRow>,
         am_rows: Vec<PgAmRow>,
         amop_rows: Vec<PgAmopRow>,
         amproc_rows: Vec<PgAmprocRow>,
@@ -561,6 +582,10 @@ impl CatCache {
         sort_pg_publication_rel_rows(&mut cache.publication_rel_rows);
         cache.publication_namespace_rows = publication_namespace_rows;
         sort_pg_publication_namespace_rows(&mut cache.publication_namespace_rows);
+        cache.statistic_ext_rows = statistic_ext_rows;
+        sort_pg_statistic_ext_rows(&mut cache.statistic_ext_rows);
+        cache.statistic_ext_data_rows = statistic_ext_data_rows;
+        sort_pg_statistic_ext_data_rows(&mut cache.statistic_ext_data_rows);
         cache.am_rows = am_rows;
         sort_pg_am_rows(&mut cache.am_rows);
         cache.amop_rows = amop_rows;
@@ -775,6 +800,48 @@ impl CatCache {
             .collect()
     }
 
+    pub fn statistic_ext_rows(&self) -> Vec<PgStatisticExtRow> {
+        self.statistic_ext_rows.clone()
+    }
+
+    pub fn statistic_ext_row_by_oid(&self, oid: u32) -> Option<&PgStatisticExtRow> {
+        self.statistic_ext_rows.iter().find(|row| row.oid == oid)
+    }
+
+    pub fn statistic_ext_row_by_name_namespace(
+        &self,
+        name: &str,
+        namespace_oid: u32,
+    ) -> Option<&PgStatisticExtRow> {
+        let normalized = normalize_catalog_name(name);
+        self.statistic_ext_rows.iter().find(|row| {
+            row.stxnamespace == namespace_oid && row.stxname.eq_ignore_ascii_case(normalized)
+        })
+    }
+
+    pub fn statistic_ext_rows_for_relation(&self, relation_oid: u32) -> Vec<PgStatisticExtRow> {
+        let start = self
+            .statistic_ext_rows
+            .partition_point(|row| row.stxrelid < relation_oid);
+        let end = start
+            + self.statistic_ext_rows[start..].partition_point(|row| row.stxrelid == relation_oid);
+        self.statistic_ext_rows[start..end].to_vec()
+    }
+
+    pub fn statistic_ext_data_rows(&self) -> Vec<PgStatisticExtDataRow> {
+        self.statistic_ext_data_rows.clone()
+    }
+
+    pub fn statistic_ext_data_row(
+        &self,
+        stxoid: u32,
+        stxdinherit: bool,
+    ) -> Option<&PgStatisticExtDataRow> {
+        self.statistic_ext_data_rows
+            .iter()
+            .find(|row| row.stxoid == stxoid && row.stxdinherit == stxdinherit)
+    }
+
     pub fn policy_rows(&self) -> Vec<PgPolicyRow> {
         self.policy_rows.clone()
     }
@@ -976,6 +1043,16 @@ fn catalog_object_name(name: &str) -> &str {
 }
 
 pub fn sql_type_oid(sql_type: SqlType) -> u32 {
+    if !sql_type.is_array && sql_type.type_oid != 0 {
+        return sql_type.type_oid;
+    }
+    if let Some(row) = builtin_type_rows()
+        .into_iter()
+        .chain(bootstrap_composite_type_rows())
+        .find(|row| row.sql_type == sql_type)
+    {
+        return row.oid;
+    }
     if let Some(range_type) = range_type_ref_for_sql_type(sql_type) {
         if sql_type.is_array {
             if sql_type.type_oid != 0 && matches!(sql_type.kind, SqlTypeKind::Range) {
@@ -1088,6 +1165,8 @@ pub fn sql_type_oid(sql_type: SqlType) -> u32 {
         (SqlTypeKind::RegType, true) => unreachable!("regtype arrays are unsupported"),
         (SqlTypeKind::RegRole, false) => crate::include::catalog::REGROLE_TYPE_OID,
         (SqlTypeKind::RegRole, true) => unreachable!("regrole arrays are unsupported"),
+        (SqlTypeKind::RegNamespace, false) => crate::include::catalog::REGNAMESPACE_TYPE_OID,
+        (SqlTypeKind::RegNamespace, true) => crate::include::catalog::REGNAMESPACE_ARRAY_TYPE_OID,
         (SqlTypeKind::RegOperator, false) => crate::include::catalog::REGOPERATOR_TYPE_OID,
         (SqlTypeKind::RegOperator, true) => crate::include::catalog::REGOPERATOR_ARRAY_TYPE_OID,
         (SqlTypeKind::RegProcedure, false) => crate::include::catalog::REGPROCEDURE_TYPE_OID,

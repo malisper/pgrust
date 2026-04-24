@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, btree_map::Entry};
 use std::rc::Rc;
 
 use parking_lot::RwLock;
@@ -21,11 +21,12 @@ use crate::backend::parser::{
     BoundDeleteStatement, BoundDeleteTarget, BoundForeignKeyConstraint, BoundIndexRelation,
     BoundInsertSource, BoundInsertStatement, BoundMergeAction, BoundMergeStatement,
     BoundMergeWhenClause, BoundModifyRowSource, BoundOnConflictAction, BoundReferencedByForeignKey,
-    BoundRelationConstraints, BoundUpdateStatement, BoundUpdateTarget, Catalog, CatalogLookup,
-    DropTableStatement, ExplainStatement, ForeignKeyAction, MaintenanceTarget, MergeStatement,
-    ParseError, SelectStatement, SqlType, SqlTypeKind, Statement, TruncateTableStatement,
-    UpdateStatement, VacuumStatement, bind_create_table, bind_referenced_by_foreign_keys,
-    bind_relation_constraints, bind_scalar_expr_in_scope, bind_update,
+    BoundRelationConstraints, BoundTemporalConstraint, BoundUpdateStatement, BoundUpdateTarget,
+    Catalog, CatalogLookup, DropTableStatement, ExplainStatement, ForeignKeyAction,
+    MaintenanceTarget, MergeStatement, ParseError, SelectStatement, SqlType, SqlTypeKind,
+    Statement, TruncateTableStatement, UpdateStatement, VacuumStatement, bind_create_table,
+    bind_generated_expr, bind_referenced_by_foreign_keys, bind_relation_constraints,
+    bind_scalar_expr_in_scope, bind_update,
 };
 use crate::backend::rewrite::RlsWriteCheck;
 use crate::backend::rewrite::pg_rewrite_query;
@@ -39,7 +40,7 @@ use super::explain::{
     format_buffer_usage, format_explain_lines_with_costs, format_explain_plan_with_subplans,
     format_verbose_explain_plan_with_subplans, push_explain_line,
 };
-use super::partition::route_partition_target;
+use super::partition::{exec_find_partition, exec_setup_partition_tuple_routing};
 use super::trigger::RuntimeTriggers;
 use super::upsert::execute_insert_on_conflict_rows;
 use crate::backend::executor::exec_expr::{compile_predicate_with_decoder, eval_expr};
@@ -92,6 +93,7 @@ fn finalize_bound_insert(
         stmt.on_conflict
             .map(|clause| crate::backend::parser::BoundOnConflictClause {
                 arbiter_indexes: clause.arbiter_indexes,
+                arbiter_temporal_constraints: clause.arbiter_temporal_constraints,
                 action: match clause.action {
                     BoundOnConflictAction::Nothing => BoundOnConflictAction::Nothing,
                     BoundOnConflictAction::Update {
@@ -865,10 +867,11 @@ pub(crate) fn maintain_indexes_for_row(
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || {
-        for index in indexes
-            .iter()
-            .filter(|index| index.index_meta.indisvalid && index.index_meta.indisready)
-        {
+        for index in indexes.iter().filter(|index| {
+            index.index_meta.indisvalid
+                && index.index_meta.indisready
+                && !index.index_meta.indisexclusion
+        }) {
             insert_index_entry_for_row(heap_rel, heap_desc, index, values, heap_tid, ctx)?;
         }
         Ok(())
@@ -1003,6 +1006,16 @@ pub(crate) fn write_insert_heap_row(
         values,
         ctx,
     )?;
+    enforce_temporal_constraints_for_write(
+        relation_name,
+        rel,
+        toast,
+        desc,
+        relation_constraints,
+        values,
+        None,
+        ctx,
+    )?;
     crate::backend::executor::enforce_outbound_foreign_keys(
         relation_name,
         &relation_constraints.foreign_keys,
@@ -1070,6 +1083,8 @@ pub(crate) fn write_updated_row(
         &crate::backend::utils::misc::interrupts::InterruptState,
     )>,
 ) -> Result<WriteUpdatedRowResult, ExecError> {
+    let mut current_values = current_values.to_vec();
+    materialize_generated_columns(desc, &mut current_values, ctx)?;
     let old_tuple = if toast.is_some() {
         Some(heap_fetch(&*ctx.pool, ctx.client_id, rel, current_tid)?)
     } else {
@@ -1079,35 +1094,45 @@ pub(crate) fn write_updated_row(
         relation_name,
         desc,
         rls_write_checks,
-        current_values,
+        &current_values,
         ctx,
     )?;
     crate::backend::executor::enforce_relation_constraints(
         relation_name,
         desc,
         relation_constraints,
-        current_values,
+        &current_values,
+        ctx,
+    )?;
+    enforce_temporal_constraints_for_write(
+        relation_name,
+        rel,
+        toast,
+        desc,
+        relation_constraints,
+        &current_values,
+        Some(current_tid),
         ctx,
     )?;
     crate::backend::executor::enforce_outbound_foreign_keys(
         relation_name,
         &relation_constraints.foreign_keys,
         Some(current_old_values),
-        current_values,
+        &current_values,
         ctx,
     )?;
     let pending_set_default_rechecks = apply_inbound_foreign_key_actions_on_update(
         relation_name,
         referenced_by_foreign_keys,
         current_old_values,
-        current_values,
+        &current_values,
         ctx,
         xid,
         cid,
         waiter,
     )?;
     let (replacement, toasted) =
-        toast_tuple_for_write(desc, current_values, toast, toast_index, ctx, xid, cid)?;
+        toast_tuple_for_write(desc, &current_values, toast, toast_index, ctx, xid, cid)?;
     match heap_update_with_waiter(
         &*ctx.pool,
         ctx.client_id,
@@ -1123,7 +1148,7 @@ pub(crate) fn write_updated_row(
             if let (Some(toast), Some(old_tuple)) = (toast, old_tuple.as_ref()) {
                 delete_external_from_tuple(ctx, toast, desc, old_tuple, xid)?;
             }
-            maintain_indexes_for_row(rel, desc, indexes, current_values, new_tid, ctx)?;
+            maintain_indexes_for_row(rel, desc, indexes, &current_values, new_tid, ctx)?;
             validate_pending_set_default_rechecks(pending_set_default_rechecks, ctx)?;
             Ok(WriteUpdatedRowResult::Updated(new_tid))
         }
@@ -1239,6 +1264,246 @@ pub(crate) fn collect_matching_rows_heap(
 
     heap_scan_end::<ExecError>(&*ctx.pool, ctx.client_id, &mut scan)?;
     Ok(rows)
+}
+
+pub(crate) fn temporal_arbiter_conflicts_with_existing_row(
+    relation_name: &str,
+    rel: crate::backend::storage::smgr::RelFileLocator,
+    toast: Option<ToastRelationRef>,
+    desc: &RelationDesc,
+    constraint: &BoundTemporalConstraint,
+    values: &[Value],
+    excluded_tid: Option<ItemPointerData>,
+    ctx: &mut ExecutorContext,
+) -> Result<bool, ExecError> {
+    validate_temporal_period_value(relation_name, desc, constraint, values)?;
+    if temporal_constraint_skips_conflict_check(constraint, values) {
+        return Ok(false);
+    }
+    let rows = collect_matching_rows_heap(rel, desc, toast, None, ctx)?;
+    for (tid, existing) in rows {
+        if excluded_tid.is_some_and(|excluded| excluded == tid) {
+            continue;
+        }
+        if temporal_rows_conflict(constraint, values, &existing)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub(crate) fn enforce_temporal_constraints_for_write(
+    relation_name: &str,
+    rel: crate::backend::storage::smgr::RelFileLocator,
+    toast: Option<ToastRelationRef>,
+    desc: &RelationDesc,
+    constraints: &BoundRelationConstraints,
+    values: &[Value],
+    excluded_tid: Option<ItemPointerData>,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for constraint in &constraints.temporal {
+        if !constraint.enforced {
+            continue;
+        }
+        validate_temporal_period_value(relation_name, desc, constraint, values)?;
+        if temporal_constraint_skips_conflict_check(constraint, values) {
+            continue;
+        }
+        let rows = collect_matching_rows_heap(rel, desc, toast, None, ctx)?;
+        for (tid, existing) in rows {
+            if excluded_tid.is_some_and(|excluded| excluded == tid) {
+                continue;
+            }
+            if temporal_rows_conflict(constraint, values, &existing)? {
+                return Err(temporal_exclusion_violation(
+                    desc,
+                    relation_name,
+                    constraint,
+                    values,
+                    &existing,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_temporal_constraint_existing_rows(
+    relation_name: &str,
+    desc: &RelationDesc,
+    constraint: &BoundTemporalConstraint,
+    rows: &[(ItemPointerData, Vec<Value>)],
+    _ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for (left_pos, (_, left_values)) in rows.iter().enumerate() {
+        validate_temporal_period_value(relation_name, desc, constraint, left_values)?;
+        if temporal_constraint_skips_conflict_check(constraint, left_values) {
+            continue;
+        }
+        for (_, right_values) in rows.iter().skip(left_pos + 1) {
+            if temporal_constraint_skips_conflict_check(constraint, right_values) {
+                continue;
+            }
+            if temporal_rows_conflict(constraint, left_values, right_values)? {
+                let left_key = constraint_key_values(constraint, left_values);
+                let right_key = constraint_key_values(constraint, right_values);
+                return Err(ExecError::DetailedError {
+                    message: format!(
+                        "could not create exclusion constraint \"{}\"",
+                        constraint.constraint_name
+                    ),
+                    detail: Some(
+                        crate::backend::executor::value_io::format_exclusion_create_key_detail(
+                            &constraint_columns(desc, constraint),
+                            &left_key,
+                            &right_key,
+                        ),
+                    ),
+                    hint: None,
+                    sqlstate: "23P01",
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_temporal_period_value(
+    relation_name: &str,
+    desc: &RelationDesc,
+    constraint: &BoundTemporalConstraint,
+    values: &[Value],
+) -> Result<(), ExecError> {
+    let period_value = values
+        .get(constraint.period_column_index)
+        .unwrap_or(&Value::Null);
+    let empty = match period_value {
+        Value::Range(range) => range.empty,
+        Value::Multirange(multirange) => multirange.ranges.is_empty(),
+        _ => false,
+    };
+    if empty {
+        let column_name = desc
+            .columns
+            .get(constraint.period_column_index)
+            .map(|column| column.name.as_str())
+            .unwrap_or("?");
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "empty WITHOUT OVERLAPS value found in column \"{}\" in relation \"{}\"",
+                column_name, relation_name
+            ),
+            detail: None,
+            hint: None,
+            sqlstate: "23P01",
+        });
+    }
+    Ok(())
+}
+
+fn temporal_constraint_skips_conflict_check(
+    constraint: &BoundTemporalConstraint,
+    values: &[Value],
+) -> bool {
+    !constraint.primary
+        && constraint
+            .column_indexes
+            .iter()
+            .any(|index| matches!(values.get(*index), Some(Value::Null) | None))
+}
+
+fn temporal_rows_conflict(
+    constraint: &BoundTemporalConstraint,
+    proposed: &[Value],
+    existing: &[Value],
+) -> Result<bool, ExecError> {
+    for index in &constraint.column_indexes {
+        if *index == constraint.period_column_index {
+            continue;
+        }
+        let left = proposed.get(*index).unwrap_or(&Value::Null);
+        let right = existing.get(*index).unwrap_or(&Value::Null);
+        if matches!(left, Value::Null) || matches!(right, Value::Null) {
+            return Ok(false);
+        }
+        if compare_order_values(left, right, None, None, false)? != std::cmp::Ordering::Equal {
+            return Ok(false);
+        }
+    }
+    Ok(temporal_periods_overlap(
+        proposed
+            .get(constraint.period_column_index)
+            .unwrap_or(&Value::Null),
+        existing
+            .get(constraint.period_column_index)
+            .unwrap_or(&Value::Null),
+    ))
+}
+
+fn temporal_periods_overlap(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Range(left), Value::Range(right)) => {
+            crate::backend::executor::expr_range::range_overlap(left, right)
+        }
+        (Value::Multirange(left), Value::Range(right)) => {
+            crate::backend::executor::expr_multirange::multirange_overlaps_range(left, right)
+        }
+        (Value::Range(left), Value::Multirange(right)) => {
+            crate::backend::executor::expr_multirange::multirange_overlaps_range(right, left)
+        }
+        (Value::Multirange(left), Value::Multirange(right)) => {
+            crate::backend::executor::expr_multirange::multirange_overlaps_multirange(left, right)
+        }
+        _ => false,
+    }
+}
+
+fn temporal_exclusion_violation(
+    desc: &RelationDesc,
+    _relation_name: &str,
+    constraint: &BoundTemporalConstraint,
+    proposed: &[Value],
+    existing: &[Value],
+) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "conflicting key value violates exclusion constraint \"{}\"",
+            constraint.constraint_name
+        ),
+        detail: {
+            let proposed_key = constraint_key_values(constraint, proposed);
+            let existing_key = constraint_key_values(constraint, existing);
+            Some(
+                crate::backend::executor::value_io::format_exclusion_key_detail(
+                    &constraint_columns(desc, constraint),
+                    &proposed_key,
+                    &existing_key,
+                ),
+            )
+        },
+        hint: None,
+        sqlstate: "23P01",
+    }
+}
+
+fn constraint_key_values(constraint: &BoundTemporalConstraint, values: &[Value]) -> Vec<Value> {
+    constraint
+        .column_indexes
+        .iter()
+        .map(|index| values.get(*index).cloned().unwrap_or(Value::Null))
+        .collect()
+}
+
+fn constraint_columns(
+    desc: &RelationDesc,
+    constraint: &BoundTemporalConstraint,
+) -> Vec<crate::backend::executor::ColumnDesc> {
+    constraint
+        .column_indexes
+        .iter()
+        .filter_map(|index| desc.columns.get(*index).cloned())
+        .collect()
 }
 
 fn collect_matching_rows_index(
@@ -1412,6 +1677,7 @@ fn relation_write_state_for_foreign_key(
             .collect(),
         checks: Vec::new(),
         foreign_keys: Vec::new(),
+        temporal: Vec::new(),
     };
     let referenced_by = bind_referenced_by_foreign_keys(
         constraint.child_relation_oid,
@@ -1480,6 +1746,61 @@ fn evaluate_default_value(
     let (bound, _) = bind_scalar_expr_in_scope(&parsed, &[], catalog).map_err(ExecError::Parse)?;
     let mut slot = TupleSlot::virtual_row(vec![Value::Null; desc.columns.len()]);
     eval_expr(&bound, &mut slot, ctx)
+}
+
+pub(super) fn materialize_generated_columns(
+    desc: &RelationDesc,
+    values: &mut [Value],
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    if !desc.columns.iter().any(|column| column.generated.is_some()) {
+        return Ok(());
+    }
+    let generated_exprs = {
+        let catalog = ctx
+            .catalog
+            .as_ref()
+            .ok_or_else(|| ExecError::DetailedError {
+                message: "generated column evaluation failed".into(),
+                detail: Some("executor context missing visible catalog".into()),
+                hint: None,
+                sqlstate: "XX000",
+            })?;
+        desc.columns
+            .iter()
+            .enumerate()
+            .filter_map(|(column_index, column)| match column.generated {
+                Some(crate::backend::parser::ColumnGeneratedKind::Stored) => Some(
+                    bind_generated_expr(desc, column_index, catalog)
+                        .map_err(ExecError::Parse)
+                        .and_then(|expr| {
+                            expr.ok_or_else(|| {
+                                ExecError::Parse(ParseError::InvalidTableDefinition(format!(
+                                    "generation expression missing for column \"{}\"",
+                                    column.name
+                                )))
+                            })
+                        })
+                        .map(|expr| (column_index, expr)),
+                ),
+                _ => None,
+            })
+            .collect::<Result<Vec<_>, ExecError>>()?
+    };
+    let mut slot = TupleSlot::virtual_row(values.to_vec());
+    for (column_index, expr) in generated_exprs {
+        values[column_index] = eval_expr(&expr, &mut slot, ctx)?.to_owned_value();
+    }
+    for (column_index, column) in desc.columns.iter().enumerate() {
+        match column.generated {
+            Some(crate::backend::parser::ColumnGeneratedKind::Virtual) => {
+                values[column_index] = Value::Null;
+            }
+            Some(crate::backend::parser::ColumnGeneratedKind::Stored) => {}
+            None => {}
+        }
+    }
+    Ok(())
 }
 
 struct AppliedSetDefaultAction {
@@ -1575,6 +1896,17 @@ fn apply_referential_action_to_rows(
             .cloned()
             .collect::<Vec<_>>()
     });
+    let triggers = RuntimeTriggers::load(
+        catalog,
+        constraint.child_relation_oid,
+        &constraint.child_relation_name,
+        &constraint.child_desc,
+        TriggerOperation::Update,
+        &[],
+        ctx.session_replication_role,
+    )?;
+    triggers.before_statement(ctx)?;
+    let mut transition_capture = triggers.new_transition_capture();
     let mut updated_rows = Vec::new();
     for (tid, current_values) in rows {
         ctx.check_for_interrupts()?;
@@ -1614,6 +1946,11 @@ fn apply_referential_action_to_rows(
                     }
                     ForeignKeyAction::NoAction | ForeignKeyAction::Restrict => unreachable!(),
                 }
+                let Some(updated_values) =
+                    triggers.before_row_update(&current_values, updated_values, ctx)?
+                else {
+                    continue;
+                };
                 if let Some(full_relation_constraints) = full_relation_constraints.as_ref() {
                     crate::backend::executor::enforce_relation_constraints(
                         &constraint.child_relation_name,
@@ -1651,6 +1988,12 @@ fn apply_referential_action_to_rows(
                     cid,
                     waiter,
                 )?;
+                triggers.capture_update_row(
+                    &mut transition_capture,
+                    &current_values,
+                    &updated_values,
+                );
+                triggers.after_row_update(&current_values, &updated_values, ctx)?;
                 if matches!(action, ForeignKeyAction::SetDefault) {
                     updated_rows.push(updated_values);
                 }
@@ -1658,6 +2001,8 @@ fn apply_referential_action_to_rows(
             ForeignKeyAction::NoAction | ForeignKeyAction::Restrict => unreachable!(),
         }
     }
+    triggers.after_transition_rows(&transition_capture, ctx)?;
+    triggers.after_statement(Some(&transition_capture), ctx)?;
     if matches!(action, ForeignKeyAction::SetDefault) {
         let outbound_constraint = outbound_constraint.ok_or_else(|| ExecError::DetailedError {
             message: "foreign key action failed".into(),
@@ -1800,7 +2145,30 @@ fn apply_inbound_foreign_key_actions_on_delete(
                     .map(|index| values.get(*index).cloned().unwrap_or(Value::Null))
                     .collect::<Vec<_>>();
                 let rows = collect_referencing_rows(constraint, &key_values, ctx)?;
+                let catalog = ctx
+                    .catalog
+                    .as_ref()
+                    .ok_or_else(|| ExecError::DetailedError {
+                        message: "foreign key action failed".into(),
+                        detail: Some("executor context missing visible catalog".into()),
+                        hint: None,
+                        sqlstate: "XX000",
+                    })?;
+                let triggers = RuntimeTriggers::load(
+                    catalog,
+                    constraint.child_relation_oid,
+                    &constraint.child_relation_name,
+                    &constraint.child_desc,
+                    TriggerOperation::Delete,
+                    &[],
+                    ctx.session_replication_role,
+                )?;
+                triggers.before_statement(ctx)?;
+                let mut transition_capture = triggers.new_transition_capture();
                 for (tid, child_values) in rows {
+                    if !triggers.before_row_delete(&child_values, ctx)? {
+                        continue;
+                    }
                     let target = BoundDeleteTarget {
                         relation_name: constraint.child_relation_name.clone(),
                         rel: constraint.child_rel,
@@ -1815,8 +2183,19 @@ fn apply_inbound_foreign_key_actions_on_delete(
                         row_source: BoundModifyRowSource::Heap,
                         predicate: None,
                     };
-                    let _ = apply_base_delete_row(&target, tid, child_values, ctx, xid, waiter)?;
+                    let _ = apply_base_delete_row(
+                        &target,
+                        tid,
+                        child_values.clone(),
+                        ctx,
+                        xid,
+                        waiter,
+                    )?;
+                    triggers.capture_delete_row(&mut transition_capture, &child_values);
+                    triggers.after_row_delete(&child_values, ctx)?;
                 }
+                triggers.after_transition_rows(&transition_capture, ctx)?;
+                triggers.after_statement(Some(&transition_capture), ctx)?;
             }
             ForeignKeyAction::SetNull | ForeignKeyAction::SetDefault => {
                 let key_values = constraint
@@ -2165,6 +2544,61 @@ fn first_toast_index_for_relation(
         .next()
 }
 
+struct PartitionResultRelInfo {
+    relation_name: String,
+    relation: crate::backend::parser::BoundRelation,
+    relation_constraints: BoundRelationConstraints,
+    indexes: Vec<BoundIndexRelation>,
+    toast_index: Option<BoundIndexRelation>,
+    rows: Vec<Vec<Value>>,
+}
+
+impl PartitionResultRelInfo {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        catalog: &dyn CatalogLookup,
+        fallback_relation_name: &str,
+        root_relation_oid: u32,
+        root_constraints: &BoundRelationConstraints,
+        root_indexes: &[BoundIndexRelation],
+        root_toast_index: Option<&BoundIndexRelation>,
+        relation: crate::backend::parser::BoundRelation,
+    ) -> Result<Self, ExecError> {
+        let relation_name = catalog
+            .class_row_by_oid(relation.relation_oid)
+            .map(|row| row.relname)
+            .unwrap_or_else(|| fallback_relation_name.to_string());
+        let relation_constraints = if relation.relation_oid == root_relation_oid {
+            root_constraints.clone()
+        } else {
+            bind_relation_constraints(
+                Some(&relation_name),
+                relation.relation_oid,
+                &relation.desc,
+                catalog,
+            )?
+        };
+        let indexes = if relation.relation_oid == root_relation_oid {
+            root_indexes.to_vec()
+        } else {
+            catalog.index_relations_for_heap(relation.relation_oid)
+        };
+        let toast_index = if relation.relation_oid == root_relation_oid {
+            root_toast_index.cloned()
+        } else {
+            first_toast_index_for_relation(catalog, relation.toast)
+        };
+        Ok(Self {
+            relation_name,
+            relation,
+            relation_constraints,
+            indexes,
+            toast_index,
+            rows: Vec::new(),
+        })
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_insert_rows_with_routing(
     catalog: &dyn CatalogLookup,
@@ -2217,55 +2651,47 @@ fn execute_insert_rows_with_routing(
         );
     }
 
-    let mut routed = BTreeMap::<
-        u32,
-        (
-            String,
-            crate::backend::parser::BoundRelation,
-            Vec<Vec<Value>>,
-        ),
-    >::new();
+    let mut routed = BTreeMap::<u32, PartitionResultRelInfo>::new();
+    let mut proute = exec_setup_partition_tuple_routing(catalog, &target_relation)?;
     for row in rows {
-        let leaf = route_partition_target(catalog, &target_relation, row, &ctx.datetime_config)?;
-        let leaf_name = catalog
-            .class_row_by_oid(leaf.relation_oid)
-            .map(|row| row.relname)
-            .unwrap_or_else(|| relation_name.to_string());
-        routed
-            .entry(leaf.relation_oid)
-            .or_insert_with(|| (leaf_name, leaf.clone(), Vec::new()))
-            .2
-            .push(row.clone());
+        let leaf = exec_find_partition(
+            catalog,
+            &mut proute,
+            &target_relation,
+            row,
+            &ctx.datetime_config,
+        )?;
+        match routed.entry(leaf.relation_oid) {
+            Entry::Occupied(mut entry) => entry.get_mut().rows.push(row.clone()),
+            Entry::Vacant(entry) => {
+                let mut result_rel_info = PartitionResultRelInfo::new(
+                    catalog,
+                    relation_name,
+                    relation_oid,
+                    relation_constraints,
+                    indexes,
+                    toast_index,
+                    leaf,
+                )?;
+                result_rel_info.rows.push(row.clone());
+                entry.insert(result_rel_info);
+            }
+        }
     }
 
     let mut inserted_rows = Vec::new();
-    for (_, (leaf_name, leaf, leaf_rows)) in routed {
-        let leaf_constraints = if leaf.relation_oid == relation_oid {
-            relation_constraints.clone()
-        } else {
-            bind_relation_constraints(Some(&leaf_name), leaf.relation_oid, &leaf.desc, catalog)?
-        };
-        let leaf_indexes = if leaf.relation_oid == relation_oid {
-            indexes.to_vec()
-        } else {
-            catalog.index_relations_for_heap(leaf.relation_oid)
-        };
-        let leaf_toast_index = if leaf.relation_oid == relation_oid {
-            toast_index.cloned()
-        } else {
-            first_toast_index_for_relation(catalog, leaf.toast)
-        };
+    for (_, result_rel_info) in routed {
         inserted_rows.extend(execute_insert_rows(
-            &leaf_name,
-            leaf.relation_oid,
-            leaf.rel,
-            leaf.toast,
-            leaf_toast_index.as_ref(),
-            &leaf.desc,
-            &leaf_constraints,
+            &result_rel_info.relation_name,
+            result_rel_info.relation.relation_oid,
+            result_rel_info.relation.rel,
+            result_rel_info.relation.toast,
+            result_rel_info.toast_index.as_ref(),
+            &result_rel_info.relation.desc,
+            &result_rel_info.relation_constraints,
             rls_write_checks,
-            &leaf_indexes,
-            &leaf_rows,
+            &result_rel_info.indexes,
+            &result_rel_info.rows,
             ctx,
             xid,
             cid,
@@ -2452,12 +2878,23 @@ fn execute_merge_update_row(
             ctx,
         )?;
     }
+    materialize_generated_columns(&stmt.desc, &mut updated_values, ctx)?;
     let old_tuple = heap_fetch(&*ctx.pool, ctx.client_id, stmt.rel, target_tid)?;
     crate::backend::executor::enforce_relation_constraints(
         &stmt.relation_name,
         &stmt.desc,
         &stmt.relation_constraints,
         &updated_values,
+        ctx,
+    )?;
+    enforce_temporal_constraints_for_write(
+        &stmt.relation_name,
+        stmt.rel,
+        stmt.toast,
+        &stmt.desc,
+        &stmt.relation_constraints,
+        &updated_values,
+        Some(target_tid),
         ctx,
     )?;
     crate::backend::executor::enforce_outbound_foreign_keys(
@@ -2899,6 +3336,7 @@ fn sql_type_display_name(ty: SqlType) -> String {
         SqlTypeKind::RegClass => "regclass",
         SqlTypeKind::RegType => "regtype",
         SqlTypeKind::RegRole => "regrole",
+        SqlTypeKind::RegNamespace => "regnamespace",
         SqlTypeKind::RegOperator => "regoperator",
         SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::Tid => "tid",
@@ -3906,15 +4344,19 @@ pub(crate) fn execute_insert_rows(
     if let Some(triggers) = &triggers {
         triggers.before_statement(ctx)?;
     }
+    let mut transition_capture = triggers
+        .as_ref()
+        .map(|triggers| triggers.new_transition_capture());
 
     let mut inserted_rows = Vec::new();
     for values in rows {
-        let Some(values) = (match &triggers {
+        let Some(mut values) = (match &triggers {
             Some(triggers) => triggers.before_row_insert(values.clone(), ctx)?,
             None => Some(values.clone()),
         }) else {
             continue;
         };
+        materialize_generated_columns(desc, &mut values, ctx)?;
         let heap_tid = write_insert_heap_row(
             relation_name,
             rel,
@@ -3931,12 +4373,20 @@ pub(crate) fn execute_insert_rows(
         maintain_indexes_for_row(rel, desc, indexes, &values, heap_tid, ctx)?;
         inserted_rows.push(values.clone());
         if let Some(triggers) = &triggers {
+            if let Some(capture) = transition_capture.as_mut() {
+                triggers.capture_insert_row(capture, &values);
+            }
             triggers.after_row_insert(&values, ctx)?;
         }
     }
 
     if let Some(triggers) = &triggers {
-        triggers.after_statement(ctx)?;
+        if let Some(capture) = transition_capture.as_ref() {
+            triggers.after_transition_rows(capture, ctx)?;
+            triggers.after_statement(Some(capture), ctx)?;
+        } else {
+            triggers.after_statement(None, ctx)?;
+        }
     }
 
     Ok(inserted_rows)
@@ -4021,6 +4471,9 @@ pub fn execute_prepared_insert_row(
     if let Some(triggers) = &triggers {
         triggers.before_statement(ctx)?;
     }
+    let mut transition_capture = triggers
+        .as_ref()
+        .map(|triggers| triggers.new_transition_capture());
 
     let mut slot = TupleSlot::virtual_row(vec![Value::Null; prepared.desc.columns.len()]);
     let mut values = prepared
@@ -4031,15 +4484,20 @@ pub fn execute_prepared_insert_row(
     for (column_index, param) in prepared.target_columns.iter().zip(params.iter()) {
         values[*column_index] = param.clone();
     }
-    let Some(values) = (match &triggers {
+    let Some(mut values) = (match &triggers {
         Some(triggers) => triggers.before_row_insert(values, ctx)?,
         None => Some(values),
     }) else {
         if let Some(triggers) = &triggers {
-            triggers.after_statement(ctx)?;
+            if let Some(capture) = transition_capture.as_ref() {
+                triggers.after_statement(Some(capture), ctx)?;
+            } else {
+                triggers.after_statement(None, ctx)?;
+            }
         }
         return Ok(());
     };
+    materialize_generated_columns(&prepared.desc, &mut values, ctx)?;
     let heap_tid = write_insert_heap_row(
         &prepared.relation_name,
         prepared.rel,
@@ -4065,8 +4523,16 @@ pub fn execute_prepared_insert_row(
         .write()
         .note_relation_insert(prepared.relation_oid);
     if let Some(triggers) = &triggers {
+        if let Some(capture) = transition_capture.as_mut() {
+            triggers.capture_insert_row(capture, &values);
+        }
         triggers.after_row_insert(&values, ctx)?;
-        triggers.after_statement(ctx)?;
+        if let Some(capture) = transition_capture.as_ref() {
+            triggers.after_transition_rows(capture, ctx)?;
+            triggers.after_statement(Some(capture), ctx)?;
+        } else {
+            triggers.after_statement(None, ctx)?;
+        }
     }
     Ok(())
 }
@@ -4122,6 +4588,9 @@ pub fn execute_update_with_waiter(
             if let Some(triggers) = &triggers {
                 triggers.before_statement(ctx)?;
             }
+            let mut transition_capture = triggers
+                .as_ref()
+                .map(|triggers| triggers.new_transition_capture());
 
             let desc = Rc::new(target.desc.clone());
             let attr_descs: Rc<[_]> = desc.attribute_descs().into();
@@ -4175,7 +4644,7 @@ pub fn execute_update_with_waiter(
                 let mut current_values = values;
                 loop {
                     ctx.check_for_interrupts()?;
-                    let Some(triggered_values) = (match &triggers {
+                    let Some(mut triggered_values) = (match &triggers {
                         Some(triggers) => triggers.before_row_update(
                             &current_old_values,
                             current_values.clone(),
@@ -4185,6 +4654,7 @@ pub fn execute_update_with_waiter(
                     }) else {
                         break;
                     };
+                    materialize_generated_columns(&target.desc, &mut triggered_values, ctx)?;
                     match write_updated_row(
                         &target.relation_name,
                         target.rel,
@@ -4209,6 +4679,13 @@ pub fn execute_update_with_waiter(
                                 .write()
                                 .note_relation_update(target.relation_oid);
                             if let Some(triggers) = &triggers {
+                                if let Some(capture) = transition_capture.as_mut() {
+                                    triggers.capture_update_row(
+                                        capture,
+                                        &current_old_values,
+                                        &triggered_values,
+                                    );
+                                }
                                 triggers.after_row_update(
                                     &current_old_values,
                                     &triggered_values,
@@ -4274,7 +4751,12 @@ pub fn execute_update_with_waiter(
             }
 
             if let Some(triggers) = &triggers {
-                triggers.after_statement(ctx)?;
+                if let Some(capture) = transition_capture.as_ref() {
+                    triggers.after_transition_rows(capture, ctx)?;
+                    triggers.after_statement(Some(capture), ctx)?;
+                } else {
+                    triggers.after_statement(None, ctx)?;
+                }
             }
         }
 
@@ -4451,6 +4933,14 @@ fn execute_update_from_joined_input(
     for trigger in triggers.iter().flatten() {
         trigger.before_statement(ctx)?;
     }
+    let mut transition_captures = triggers
+        .iter()
+        .map(|trigger| {
+            trigger
+                .as_ref()
+                .map(|trigger| trigger.new_transition_capture())
+        })
+        .collect::<Vec<_>>();
 
     let result = (|| {
         let mut state = executor_start(input_plan.plan_tree.clone());
@@ -4511,7 +5001,7 @@ fn execute_update_from_joined_input(
 
             loop {
                 ctx.check_for_interrupts()?;
-                let Some(triggered_values) = (match triggers[target_index].as_ref() {
+                let Some(mut triggered_values) = (match triggers[target_index].as_ref() {
                     Some(trigger) => trigger.before_row_update(
                         &current_old_values,
                         current_values.clone(),
@@ -4521,6 +5011,7 @@ fn execute_update_from_joined_input(
                 }) else {
                     break;
                 };
+                materialize_generated_columns(&target.desc, &mut triggered_values, ctx)?;
                 match write_updated_row(
                     &target.relation_name,
                     target.rel,
@@ -4545,6 +5036,13 @@ fn execute_update_from_joined_input(
                             .write()
                             .note_relation_update(target.relation_oid);
                         if let Some(trigger) = triggers[target_index].as_ref() {
+                            if let Some(capture) = transition_captures[target_index].as_mut() {
+                                trigger.capture_update_row(
+                                    capture,
+                                    &current_old_values,
+                                    &triggered_values,
+                                );
+                            }
                             trigger.after_row_update(
                                 &current_old_values,
                                 &triggered_values,
@@ -4602,8 +5100,17 @@ fn execute_update_from_joined_input(
         }
     })();
 
-    for trigger in triggers.iter_mut().flatten() {
-        trigger.after_statement(ctx)?;
+    if result.is_ok() {
+        for (trigger, capture) in triggers.iter_mut().zip(transition_captures.iter()) {
+            if let Some(trigger) = trigger {
+                if let Some(capture) = capture.as_ref() {
+                    trigger.after_transition_rows(capture, ctx)?;
+                    trigger.after_statement(Some(capture), ctx)?;
+                } else {
+                    trigger.after_statement(None, ctx)?;
+                }
+            }
+        }
     }
     result
 }
@@ -4652,6 +5159,9 @@ pub fn execute_delete_with_waiter(
             if let Some(triggers) = &triggers {
                 triggers.before_statement(ctx)?;
             }
+            let mut transition_capture = triggers
+                .as_ref()
+                .map(|triggers| triggers.new_transition_capture());
 
             let desc = Rc::new(target.desc.clone());
             let attr_descs: Rc<[_]> = desc.attribute_descs().into();
@@ -4739,6 +5249,9 @@ pub fn execute_delete_with_waiter(
                                 .write()
                                 .note_relation_delete(target.relation_oid);
                             if let Some(triggers) = &triggers {
+                                if let Some(capture) = transition_capture.as_mut() {
+                                    triggers.capture_delete_row(capture, &current_values);
+                                }
                                 triggers.after_row_delete(&current_values, ctx)?;
                             }
                             if !stmt.returning.is_empty() {
@@ -4780,7 +5293,12 @@ pub fn execute_delete_with_waiter(
             }
 
             if let Some(triggers) = &triggers {
-                triggers.after_statement(ctx)?;
+                if let Some(capture) = transition_capture.as_ref() {
+                    triggers.after_transition_rows(capture, ctx)?;
+                    triggers.after_statement(Some(capture), ctx)?;
+                } else {
+                    triggers.after_statement(None, ctx)?;
+                }
             }
         }
 
@@ -4969,6 +5487,7 @@ pub(crate) fn apply_base_update_row(
     let mut current_values = new_values;
     loop {
         ctx.check_for_interrupts()?;
+        materialize_generated_columns(&target.desc, &mut current_values, ctx)?;
         let old_tuple = heap_fetch(&*ctx.pool, ctx.client_id, target.rel, current_tid)?;
         crate::backend::executor::enforce_row_security_write_checks(
             &target.relation_name,
@@ -4982,6 +5501,16 @@ pub(crate) fn apply_base_update_row(
             &target.desc,
             &target.relation_constraints,
             &current_values,
+            ctx,
+        )?;
+        enforce_temporal_constraints_for_write(
+            &target.relation_name,
+            target.rel,
+            target.toast,
+            &target.desc,
+            &target.relation_constraints,
+            &current_values,
+            Some(current_tid),
             ctx,
         )?;
         crate::backend::executor::enforce_outbound_foreign_keys(

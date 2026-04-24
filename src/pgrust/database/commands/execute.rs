@@ -305,6 +305,12 @@ impl Database {
                     alter_stmt,
                     configured_search_path,
                 ),
+            Statement::DropStatistics(ref drop_stmt) => self
+                .execute_drop_statistics_stmt_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    configured_search_path,
+                ),
             Statement::AlterTableOwner(ref alter_stmt) => self
                 .execute_alter_table_owner_stmt_with_search_path(
                     client_id,
@@ -321,6 +327,12 @@ impl Database {
                 .execute_alter_index_rename_stmt_with_search_path(
                     client_id,
                     rename_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterIndexAttachPartition(ref attach_stmt) => self
+                .execute_alter_index_attach_partition_stmt_with_search_path(
+                    client_id,
+                    attach_stmt,
                     configured_search_path,
                 ),
             Statement::AlterViewRename(ref rename_stmt) => self
@@ -367,6 +379,12 @@ impl Database {
                 ),
             Statement::AlterTableAlterColumnDefault(ref alter_stmt) => self
                 .execute_alter_table_alter_column_default_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
+            Statement::AlterTableAlterColumnExpression(ref alter_stmt) => self
+                .execute_alter_table_alter_column_expression_stmt_with_search_path(
                     client_id,
                     alter_stmt,
                     configured_search_path,
@@ -719,6 +737,12 @@ impl Database {
             }
             Statement::CommentOnPublication(ref comment_stmt) => self
                 .execute_comment_on_publication_stmt_with_search_path(
+                    client_id,
+                    comment_stmt,
+                    configured_search_path,
+                ),
+            Statement::CommentOnStatistics(ref comment_stmt) => self
+                .execute_comment_on_statistics_stmt_with_search_path(
                     client_id,
                     comment_stmt,
                     configured_search_path,

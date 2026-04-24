@@ -162,15 +162,18 @@ fn inherited_table_constraints(
                     if !seen_keys.insert(key) {
                         continue;
                     }
+                    let without_overlaps = row.conperiod.then(|| columns.last().cloned()).flatten();
                     if row.contype == crate::include::catalog::CONSTRAINT_PRIMARY {
                         constraints.push(TableConstraint::PrimaryKey {
                             attributes: ConstraintAttributes::default(),
                             columns,
+                            without_overlaps,
                         });
                     } else {
                         constraints.push(TableConstraint::Unique {
                             attributes: ConstraintAttributes::default(),
                             columns,
+                            without_overlaps,
                         });
                     }
                 }
@@ -282,10 +285,20 @@ fn merge_inherited_columns(
                 continue;
             }
             let normalized = column.name.to_ascii_lowercase();
+            let generated = column.generated.and_then(|kind| {
+                column.default_expr.clone().map(|expr_sql| {
+                    crate::include::nodes::parsenodes::ColumnGeneratedDef { expr_sql, kind }
+                })
+            });
             let inherited = crate::backend::parser::ColumnDef {
                 name: column.name.clone(),
                 ty: RawTypeName::Builtin(column.sql_type),
-                default_expr: column.default_expr.clone(),
+                default_expr: if generated.is_some() {
+                    None
+                } else {
+                    column.default_expr.clone()
+                },
+                generated,
                 compression: Some(column.storage.attcompression),
                 constraints: inherited_constraints_for_parent(column),
             };
@@ -354,10 +367,20 @@ fn merge_parent_column(
     if !parent.nullable() {
         ensure_not_null_constraint(&mut merged.column);
     }
-    merged.conflicting_parent_default |= !merge_parent_default(
-        &mut merged.column.default_expr,
-        parent.default_expr.as_deref(),
-    );
+    ensure_matching_column_generated(
+        &merged.column.name,
+        merged.column.generated.as_ref(),
+        parent.generated.as_ref(),
+    )?;
+    if merged.column.generated.is_none() {
+        merged.column.generated = parent.generated.clone();
+    }
+    if merged.column.generated.is_none() {
+        merged.conflicting_parent_default |= !merge_parent_default(
+            &mut merged.column.default_expr,
+            parent.default_expr.as_deref(),
+        );
+    }
     Ok(())
 }
 
@@ -401,7 +424,28 @@ fn merge_local_column(
     if local.unique() {
         ensure_unique_constraint(&mut merged.column);
     }
+    ensure_matching_column_generated(
+        &merged.column.name,
+        merged.column.generated.as_ref(),
+        local.generated.as_ref(),
+    )?;
+    if local.generated.is_some() {
+        merged.column.generated = local.generated.clone();
+        merged.column.default_expr = None;
+        merged.conflicting_parent_default = false;
+    }
     if local.default_expr.is_some() {
+        if merged.column.generated.is_some() {
+            return Err(ParseError::DetailedError {
+                message: format!(
+                    "both default and generation expression specified for column \"{}\"",
+                    merged.column.name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42601",
+            });
+        }
         merged.column.default_expr = local.default_expr.clone();
         merged.conflicting_parent_default = false;
     }
@@ -491,6 +535,30 @@ fn ensure_matching_column_compression(
         hint: None,
         sqlstate: "42P16",
     })
+}
+
+fn ensure_matching_column_generated(
+    name: &str,
+    left: Option<&crate::include::nodes::parsenodes::ColumnGeneratedDef>,
+    right: Option<&crate::include::nodes::parsenodes::ColumnGeneratedDef>,
+) -> Result<(), ParseError> {
+    match (left, right) {
+        (Some(left), Some(right)) if left.kind != right.kind => Err(ParseError::DetailedError {
+            message: format!("column \"{name}\" has a generation conflict"),
+            detail: Some("Generated columns must be both virtual or both stored.".into()),
+            hint: None,
+            sqlstate: "42P16",
+        }),
+        (Some(_), None) | (None, Some(_)) => Err(ParseError::DetailedError {
+            message: format!("column \"{name}\" has a generation conflict"),
+            detail: Some(
+                "A generated column cannot inherit from or merge with a normal column.".into(),
+            ),
+            hint: None,
+            sqlstate: "42P16",
+        }),
+        _ => Ok(()),
+    }
 }
 
 fn merge_parent_column_compression(

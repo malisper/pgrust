@@ -7,7 +7,7 @@ use crate::backend::executor::{ExecError, StatementResult};
 use crate::backend::parser::{Catalog, DoStatement, ParseError};
 
 pub use ast::*;
-pub use compile::CompiledFunction;
+pub use compile::{CompiledFunction, TriggerTransitionTable};
 pub use exec::{
     PlpgsqlNotice, TriggerCallContext, TriggerFunctionResult, TriggerOperation, clear_notices,
     take_notices,
@@ -19,21 +19,23 @@ pub(crate) use exec::{
 pub use gram::parse_block;
 
 pub fn execute_do(stmt: &DoStatement) -> Result<StatementResult, ExecError> {
-    let language = stmt
-        .language
-        .as_deref()
-        .unwrap_or("plpgsql")
-        .to_ascii_lowercase();
-    if language != "plpgsql" {
-        return Err(ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "LANGUAGE plpgsql",
-            actual: format!("LANGUAGE {}", stmt.language.as_deref().unwrap_or("plpgsql")),
-        }));
-    }
-    exec::clear_notices();
-    let block = parse_block(&stmt.code)?;
-    let compiled = compile::compile_do_block(&block, &Catalog::default())?;
-    exec::execute_block(&compiled)
+    stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || {
+        let language = stmt
+            .language
+            .as_deref()
+            .unwrap_or("plpgsql")
+            .to_ascii_lowercase();
+        if language != "plpgsql" {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "LANGUAGE plpgsql",
+                actual: format!("LANGUAGE {}", stmt.language.as_deref().unwrap_or("plpgsql")),
+            }));
+        }
+        exec::clear_notices();
+        let block = parse_block(&stmt.code)?;
+        let compiled = compile::compile_do_block(&block, &Catalog::default())?;
+        exec::execute_block(&compiled)
+    })
 }
 
 #[cfg(test)]
@@ -157,6 +159,22 @@ mod tests {
             assert!(matches!(
                 err,
                 ExecError::RaiseException(message) if message == "boom 42"
+            ));
+        });
+    }
+
+    #[test]
+    fn execute_do_raise_accepts_dollar_quoted_message() {
+        run_plpgsql_test("execute_do_raise_accepts_dollar_quoted_message", || {
+            let stmt = DoStatement {
+                language: None,
+                code: r#"begin raise exception $$Patchfield "%" does not exist$$, 'PF0_1'; end"#
+                    .into(),
+            };
+            let err = execute_do(&stmt).unwrap_err();
+            assert!(matches!(
+                err,
+                ExecError::RaiseException(message) if message == "Patchfield \"PF0_1\" does not exist"
             ));
         });
     }

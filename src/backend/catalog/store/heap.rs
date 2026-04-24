@@ -15,7 +15,7 @@ use crate::backend::catalog::pg_depend::{
     inheritance_depend_rows, operator_depend_rows, primary_key_owned_not_null_depend_rows,
     proc_depend_rows, publication_namespace_depend_rows, publication_rel_depend_rows,
     relation_constraint_depend_rows, relation_rule_depend_rows, sort_pg_depend_rows,
-    trigger_depend_rows, view_rewrite_depend_rows,
+    statistic_ext_depend_rows, trigger_depend_rows, view_rewrite_depend_rows,
 };
 use crate::backend::catalog::rowcodec::{
     pg_description_row_from_values, pg_statistic_row_from_values,
@@ -41,13 +41,14 @@ use crate::include::catalog::{
     PG_CONSTRAINT_RELATION_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_NAMESPACE_RELATION_OID,
     PG_OPCLASS_RELATION_OID, PG_OPERATOR_RELATION_OID, PG_OPFAMILY_RELATION_OID,
     PG_PROC_RELATION_OID, PG_PUBLICATION_NAMESPACE_RELATION_OID, PG_PUBLICATION_REL_RELATION_OID,
-    PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TRIGGER_RELATION_OID,
-    PG_TYPE_RELATION_OID, PUBLISH_GENCOLS_NONE, PgAggregateRow, PgAmopRow, PgAmprocRow,
+    PG_PUBLICATION_RELATION_OID, PG_REWRITE_RELATION_OID, PG_STATISTIC_EXT_RELATION_OID,
+    PG_TRIGGER_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow, PgAmopRow, PgAmprocRow,
     PgAttrdefRow, PgAttributeRow, PgClassRow, PgConstraintRow, PgDatabaseRow, PgDependRow,
     PgDescriptionRow, PgForeignDataWrapperRow, PgInheritsRow, PgNamespaceRow, PgOpclassRow,
     PgOperatorRow, PgOpfamilyRow, PgPartitionedTableRow, PgPolicyRow, PgProcRow,
-    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow, PgStatisticRow,
-    PgTablespaceRow, PgTypeRow, relkind_has_storage,
+    PgPublicationNamespaceRow, PgPublicationRelRow, PgPublicationRow, PgRewriteRow,
+    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTablespaceRow, PgTypeRow,
+    relkind_has_storage,
 };
 use crate::include::nodes::datum::Value;
 
@@ -494,6 +495,7 @@ impl CatalogStore {
             indcollation: Vec::new(),
             indoption: Vec::new(),
             indnullsnotdistinct: false,
+            indisexclusion: false,
             brin_options: None,
         };
         self.create_index_for_relation_with_options(
@@ -1836,6 +1838,48 @@ impl CatalogStore {
         Ok((publication.oid, effect))
     }
 
+    pub fn create_statistics_mvcc(
+        &mut self,
+        mut row: PgStatisticExtRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
+        let catcache = visible_catalog_caches_for_ctx(self, ctx)?.0;
+        if catcache
+            .statistic_ext_row_by_name_namespace(&row.stxname, row.stxnamespace)
+            .is_some()
+        {
+            return Err(CatalogError::UniqueViolation(
+                "pg_statistic_ext_name_index".into(),
+            ));
+        }
+
+        let mut control = self.control_state()?;
+        if row.oid == 0 {
+            row.oid = control.next_oid;
+        }
+        control.next_oid = control.next_oid.max(row.oid.saturating_add(1));
+        self.persist_control_values(control.next_oid, control.next_rel_number)?;
+
+        let mut rows = PhysicalCatalogRows {
+            statistics_ext: vec![row.clone()],
+            depends: statistic_ext_depend_rows(&row),
+            ..PhysicalCatalogRows::default()
+        };
+        sort_pg_depend_rows(&mut rows.depends);
+
+        let mut kinds = vec![BootstrapCatalogKind::PgStatisticExt];
+        if !rows.depends.is_empty() {
+            kinds.push(BootstrapCatalogKind::PgDepend);
+        }
+        insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
+        self.control = control;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, row.stxrelid);
+        Ok((row.oid, effect))
+    }
+
     pub fn create_policy_mvcc(
         &mut self,
         mut row: PgPolicyRow,
@@ -1991,6 +2035,92 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn replace_statistics_row_mvcc(
+        &mut self,
+        row: PgStatisticExtRow,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let snapshot = ctx
+            .txns
+            .read()
+            .snapshot_for_command(ctx.xid, ctx.cid)
+            .map_err(|e| CatalogError::Io(format!("catalog snapshot failed: {e:?}")))?;
+        let description_rows = probe_system_catalog_rows_visible_in_db(
+            &ctx.pool,
+            &ctx.txns,
+            &snapshot,
+            ctx.client_id,
+            self.scope_db_oid(),
+            PG_DESCRIPTION_O_C_O_INDEX_OID,
+            vec![
+                crate::include::access::scankey::ScanKeyData {
+                    attribute_number: 1,
+                    strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                    argument: Value::Int64(i64::from(row.oid)),
+                },
+                crate::include::access::scankey::ScanKeyData {
+                    attribute_number: 2,
+                    strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                    argument: Value::Int64(i64::from(PG_STATISTIC_EXT_RELATION_OID)),
+                },
+                crate::include::access::scankey::ScanKeyData {
+                    attribute_number: 3,
+                    strategy: crate::include::access::nbtree::BT_EQUAL_STRATEGY_NUMBER,
+                    argument: Value::Int32(0),
+                },
+            ],
+        )?
+        .into_iter()
+        .map(pg_description_row_from_values)
+        .collect::<Result<Vec<_>, _>>()?;
+        let catcache = visible_catalog_caches_for_ctx(self, ctx)?.0;
+        let existing = catcache
+            .statistic_ext_row_by_oid(row.oid)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(row.oid.to_string()))?;
+        if catcache
+            .statistic_ext_row_by_name_namespace(&row.stxname, row.stxnamespace)
+            .is_some_and(|found| found.oid != row.oid)
+        {
+            return Err(CatalogError::UniqueViolation(
+                "pg_statistic_ext_name_index".into(),
+            ));
+        }
+
+        let old_depends = statistic_ext_depend_rows(&existing);
+        let old_rows = PhysicalCatalogRows {
+            statistics_ext: vec![existing],
+            depends: old_depends,
+            descriptions: description_rows.clone(),
+            ..PhysicalCatalogRows::default()
+        };
+        let new_rows = PhysicalCatalogRows {
+            statistics_ext: vec![row.clone()],
+            depends: statistic_ext_depend_rows(&row),
+            descriptions: description_rows.clone(),
+            ..PhysicalCatalogRows::default()
+        };
+        let mut delete_kinds = Vec::new();
+        let mut insert_kinds = vec![
+            BootstrapCatalogKind::PgStatisticExt,
+            BootstrapCatalogKind::PgDepend,
+        ];
+        if !description_rows.is_empty() {
+            delete_kinds.push(BootstrapCatalogKind::PgDescription);
+            insert_kinds.push(BootstrapCatalogKind::PgDescription);
+        }
+        delete_kinds.push(BootstrapCatalogKind::PgDepend);
+        delete_kinds.push(BootstrapCatalogKind::PgStatisticExt);
+        delete_catalog_rows_subset_mvcc(ctx, &old_rows, self.scope_db_oid(), &delete_kinds)?;
+        insert_catalog_rows_subset_mvcc(ctx, &new_rows, self.scope_db_oid(), &insert_kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &delete_kinds);
+        effect_record_catalog_kinds(&mut effect, &insert_kinds);
+        effect_record_oid(&mut effect.relation_oids, row.stxrelid);
+        Ok(effect)
+    }
+
     pub fn replace_publication_memberships_mvcc(
         &mut self,
         publication_oid: u32,
@@ -2106,6 +2236,61 @@ impl CatalogStore {
         Ok(effect)
     }
 
+    pub fn replace_statistics_data_rows_mvcc(
+        &mut self,
+        statistics_oid: u32,
+        mut rows: Vec<PgStatisticExtDataRow>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let catcache = visible_catalog_caches_for_ctx(self, ctx)?.0;
+        let old_rows = catcache
+            .statistic_ext_data_rows()
+            .into_iter()
+            .filter(|row| row.stxoid == statistics_oid)
+            .collect::<Vec<_>>();
+        let delete_kinds = if old_rows.is_empty() {
+            Vec::new()
+        } else {
+            vec![BootstrapCatalogKind::PgStatisticExtData]
+        };
+        if !old_rows.is_empty() {
+            delete_catalog_rows_subset_mvcc(
+                ctx,
+                &PhysicalCatalogRows {
+                    statistics_ext_data: old_rows,
+                    ..PhysicalCatalogRows::default()
+                },
+                self.scope_db_oid(),
+                &delete_kinds,
+            )?;
+        }
+
+        for row in &mut rows {
+            row.stxoid = statistics_oid;
+        }
+        let insert_kinds = if rows.is_empty() {
+            Vec::new()
+        } else {
+            vec![BootstrapCatalogKind::PgStatisticExtData]
+        };
+        if !rows.is_empty() {
+            insert_catalog_rows_subset_mvcc(
+                ctx,
+                &PhysicalCatalogRows {
+                    statistics_ext_data: rows,
+                    ..PhysicalCatalogRows::default()
+                },
+                self.scope_db_oid(),
+                &insert_kinds,
+            )?;
+        }
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &delete_kinds);
+        effect_record_catalog_kinds(&mut effect, &insert_kinds);
+        Ok(effect)
+    }
+
     pub fn drop_publication_mvcc(
         &mut self,
         publication_oid: u32,
@@ -2141,6 +2326,47 @@ impl CatalogStore {
         effect_record_catalog_kinds(&mut effect, &comment_effect.touched_catalogs);
         effect_record_catalog_kinds(&mut effect, &kinds);
         Ok((publication, effect))
+    }
+
+    pub fn drop_statistics_mvcc(
+        &mut self,
+        statistics_oid: u32,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(PgStatisticExtRow, CatalogMutationEffect), CatalogError> {
+        let catcache = visible_catalog_caches_for_ctx(self, ctx)?.0;
+        let statistics = catcache
+            .statistic_ext_row_by_oid(statistics_oid)
+            .cloned()
+            .ok_or_else(|| CatalogError::UnknownTable(statistics_oid.to_string()))?;
+        let depends = catcache
+            .depend_rows()
+            .into_iter()
+            .filter(|row| {
+                row.classid == PG_STATISTIC_EXT_RELATION_OID && row.objid == statistics_oid
+            })
+            .collect::<Vec<_>>();
+        let data_effect =
+            self.replace_statistics_data_rows_mvcc(statistics_oid, Vec::new(), ctx)?;
+        let comment_effect = self.comment_statistics_mvcc(statistics_oid, None, ctx)?;
+
+        let mut rows = PhysicalCatalogRows {
+            statistics_ext: vec![statistics.clone()],
+            depends,
+            ..PhysicalCatalogRows::default()
+        };
+        let mut kinds = vec![BootstrapCatalogKind::PgStatisticExt];
+        if !rows.depends.is_empty() {
+            kinds.push(BootstrapCatalogKind::PgDepend);
+            sort_pg_depend_rows(&mut rows.depends);
+        }
+        delete_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &data_effect.touched_catalogs);
+        effect_record_catalog_kinds(&mut effect, &comment_effect.touched_catalogs);
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, statistics.stxrelid);
+        Ok((statistics, effect))
     }
 
     pub fn create_relation_inheritance_mvcc(
@@ -2684,6 +2910,7 @@ impl CatalogStore {
             indcollation: Vec::new(),
             indoption: Vec::new(),
             indnullsnotdistinct: false,
+            indisexclusion: false,
             brin_options: None,
         };
         self.create_index_for_relation_mvcc_with_options(
@@ -2806,7 +3033,31 @@ impl CatalogStore {
         primary_key_owned_not_null_oids: &[u32],
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
-        self.create_index_backed_constraint_mvcc_with_inheritance(
+        self.create_index_backed_constraint_mvcc_with_period(
+            relation_oid,
+            index_oid,
+            conname,
+            contype,
+            primary_key_owned_not_null_oids,
+            false,
+            None,
+            ctx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_index_backed_constraint_mvcc_with_period(
+        &mut self,
+        relation_oid: u32,
+        index_oid: u32,
+        conname: impl Into<String>,
+        contype: char,
+        primary_key_owned_not_null_oids: &[u32],
+        conperiod: bool,
+        conexclop: Option<Vec<u32>>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        self.create_index_backed_constraint_mvcc_with_inheritance_and_period(
             relation_oid,
             index_oid,
             conname,
@@ -2816,6 +3067,8 @@ impl CatalogStore {
             true,
             0,
             false,
+            conperiod,
+            conexclop,
             ctx,
         )
         .map(|(_, effect)| effect)
@@ -2833,6 +3086,38 @@ impl CatalogStore {
         conislocal: bool,
         coninhcount: i16,
         connoinherit: bool,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(PgConstraintRow, CatalogMutationEffect), CatalogError> {
+        self.create_index_backed_constraint_mvcc_with_inheritance_and_period(
+            relation_oid,
+            index_oid,
+            conname,
+            contype,
+            primary_key_owned_not_null_oids,
+            conparentid,
+            conislocal,
+            coninhcount,
+            connoinherit,
+            false,
+            None,
+            ctx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_index_backed_constraint_mvcc_with_inheritance_and_period(
+        &mut self,
+        relation_oid: u32,
+        index_oid: u32,
+        conname: impl Into<String>,
+        contype: char,
+        primary_key_owned_not_null_oids: &[u32],
+        conparentid: u32,
+        conislocal: bool,
+        coninhcount: i16,
+        connoinherit: bool,
+        conperiod: bool,
+        conexclop: Option<Vec<u32>>,
         ctx: &CatalogWriteContext,
     ) -> Result<(PgConstraintRow, CatalogMutationEffect), CatalogError> {
         let conname = conname.into();
@@ -2881,12 +3166,12 @@ impl CatalogStore {
             conppeqop: None,
             conffeqop: None,
             confdelsetcols: None,
-            conexclop: None,
+            conexclop,
             conbin: None,
             conislocal,
             coninhcount,
             connoinherit,
-            conperiod: false,
+            conperiod,
         };
         control.next_oid = control.next_oid.saturating_add(1);
 
@@ -3810,6 +4095,7 @@ impl CatalogStore {
                 column.not_null_primary_key_owned = false;
                 column.attrdef_oid = None;
                 column.default_expr = None;
+                column.generated = None;
                 column.missing_default_value = None;
                 Ok((
                     (),
@@ -3858,6 +4144,50 @@ impl CatalogStore {
                 Ok((
                     (),
                     vec![
+                        BootstrapCatalogKind::PgDepend,
+                        BootstrapCatalogKind::PgAttrdef,
+                    ],
+                ))
+            })?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        effect_record_oid(&mut effect.type_oids, new_entry.row_type_oid);
+        Ok(effect)
+    }
+
+    pub fn alter_table_set_column_generation_mvcc(
+        &mut self,
+        relation_oid: u32,
+        column_name: &str,
+        default_expr: Option<String>,
+        generated: Option<crate::include::nodes::parsenodes::ColumnGeneratedKind>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let (_old_entry, new_entry, _, kinds) =
+            mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, move |entry, control| {
+                if entry.relkind != 'r' {
+                    return Err(CatalogError::UnknownTable(relation_oid.to_string()));
+                }
+                let column_index = relation_column_index_visible(&entry.desc, column_name)?;
+                let column = &mut entry.desc.columns[column_index];
+                column.default_expr = default_expr;
+                column.default_sequence_oid = None;
+                column.generated = generated;
+                if column.default_expr.is_some() {
+                    if column.attrdef_oid.is_none() {
+                        column.attrdef_oid = Some(control.next_oid);
+                        control.next_oid = control.next_oid.saturating_add(1);
+                    }
+                } else {
+                    column.attrdef_oid = None;
+                    column.missing_default_value = None;
+                }
+                Ok((
+                    (),
+                    vec![
+                        BootstrapCatalogKind::PgAttribute,
                         BootstrapCatalogKind::PgDepend,
                         BootstrapCatalogKind::PgAttrdef,
                     ],
@@ -4498,6 +4828,15 @@ impl CatalogStore {
         self.comment_shared_object_mvcc(publication_oid, PG_PUBLICATION_RELATION_OID, comment, ctx)
     }
 
+    pub fn comment_statistics_mvcc(
+        &mut self,
+        statistics_oid: u32,
+        comment: Option<&str>,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        self.comment_shared_object_mvcc(statistics_oid, PG_STATISTIC_EXT_RELATION_OID, comment, ctx)
+    }
+
     pub fn drop_rule_mvcc(
         &mut self,
         rewrite_oid: u32,
@@ -4983,6 +5322,7 @@ fn build_index_entry_with_relkind(
             indisunique: unique,
             indnullsnotdistinct: resolved_options.indnullsnotdistinct,
             indisprimary: primary,
+            indisexclusion: resolved_options.indisexclusion,
             indisvalid,
             indisready,
             indislive: true,
@@ -5064,6 +5404,7 @@ fn build_toast_catalog_changes(
             indcollation: vec![0, 0],
             indoption: vec![0, 0],
             indnullsnotdistinct: false,
+            indisexclusion: false,
             brin_options: None,
         },
         None,
@@ -5120,6 +5461,7 @@ fn default_index_build_options_for_relation(
         indcollation,
         indoption,
         indnullsnotdistinct: false,
+        indisexclusion: false,
         brin_options: None,
     })
 }
@@ -5383,30 +5725,29 @@ fn rows_for_new_relation_entry(
         .extend(type_rows_for_relation_name(relation_name, entry));
 
     rows.attributes
-        .extend(
-            entry
-                .desc
-                .columns
-                .iter()
-                .enumerate()
-                .map(|(idx, column)| PgAttributeRow {
-                    attrelid: entry.relation_oid,
-                    attname: column.name.clone(),
-                    atttypid: resolved_sql_type_oid(catcache, entry, column.sql_type),
-                    attlen: column.storage.attlen,
-                    attnum: idx.saturating_add(1) as i16,
-                    attnotnull: !column.storage.nullable,
-                    attisdropped: column.dropped,
-                    atttypmod: column.sql_type.typmod,
-                    attalign: column.storage.attalign,
-                    attstorage: column.storage.attstorage,
-                    attcompression: column.storage.attcompression,
-                    attstattarget: column.attstattarget,
-                    attinhcount: column.attinhcount,
-                    attislocal: column.attislocal,
-                    sql_type: column.sql_type,
-                }),
-        );
+        .extend(entry.desc.columns.iter().enumerate().map(|(idx, column)| {
+            PgAttributeRow {
+                attrelid: entry.relation_oid,
+                attname: column.name.clone(),
+                atttypid: resolved_sql_type_oid(catcache, entry, column.sql_type),
+                attlen: column.storage.attlen,
+                attnum: idx.saturating_add(1) as i16,
+                attnotnull: !column.storage.nullable,
+                attisdropped: column.dropped,
+                atttypmod: column.sql_type.typmod,
+                attalign: column.storage.attalign,
+                attstorage: column.storage.attstorage,
+                attcompression: column.storage.attcompression,
+                attstattarget: column.attstattarget,
+                attinhcount: column.attinhcount,
+                attislocal: column.attislocal,
+                attgenerated: column
+                    .generated
+                    .map(|kind| kind.catalog_char())
+                    .unwrap_or('\0'),
+                sql_type: column.sql_type,
+            }
+        }));
     rows.attrdefs.extend(
         entry
             .desc
@@ -5657,7 +5998,7 @@ fn index_row_for_entry(entry: &CatalogEntry) -> Option<crate::include::catalog::
         indisunique: index_meta.indisunique,
         indnullsnotdistinct: index_meta.indnullsnotdistinct,
         indisprimary: index_meta.indisprimary,
-        indisexclusion: false,
+        indisexclusion: index_meta.indisexclusion,
         indimmediate: true,
         indisclustered: false,
         indisvalid: index_meta.indisvalid,
@@ -5802,6 +6143,7 @@ fn catalog_entry_from_visible_relation(
             indisunique: index.indisunique,
             indnullsnotdistinct: index.indnullsnotdistinct,
             indisprimary: index.indisprimary,
+            indisexclusion: index.indisexclusion,
             indisvalid: index.indisvalid,
             indisready: index.indisready,
             indislive: index.indislive,
@@ -6002,7 +6344,7 @@ fn collect_relation_drop_oids_visible(
             continue;
         }
         if let Some(dependent) = relcache.get_by_oid(row.objid) {
-            if !matches!(dependent.relkind, 'r' | 'i' | 't' | 'S') {
+            if !matches!(dependent.relkind, 'r' | 'i' | 'I' | 't' | 'S') {
                 continue;
             }
             collect_relation_drop_oids_visible(
@@ -6060,7 +6402,7 @@ fn collect_relation_drop_oids(
             continue;
         }
         if let Some(dependent) = catalog.get_by_oid(row.objid) {
-            if !matches!(dependent.relkind, 'r' | 'i' | 't' | 'S') {
+            if !matches!(dependent.relkind, 'r' | 'i' | 'I' | 't' | 'S') {
                 continue;
             }
             collect_relation_drop_oids(catalog, depend_rows, dependent.relation_oid, seen, order);

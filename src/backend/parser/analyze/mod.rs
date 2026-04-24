@@ -9,6 +9,7 @@ mod create_table;
 mod create_table_inherits;
 mod expr;
 mod functions;
+mod generated;
 mod geometry;
 mod index_predicates;
 mod infer;
@@ -36,11 +37,12 @@ use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
     PgCollationRow, PgConstraintRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
-    PgOperatorRow, PgPartitionedTableRow, PgProcRow, PgRangeRow, PgRewriteRow, PgStatisticRow,
-    PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows,
-    bootstrap_pg_collation_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
-    bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
-    builtin_range_rows, builtin_type_rows, multirange_type_ref_for_sql_type,
+    PgOperatorRow, PgPartitionedTableRow, PgProcRow, PgRangeRow, PgRewriteRow,
+    PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTypeRow, RECORD_TYPE_OID,
+    bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows, bootstrap_pg_collation_rows,
+    bootstrap_pg_language_rows, bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows,
+    bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
+    is_synthetic_range_proc_name, multirange_type_ref_for_sql_type,
     proc_oid_for_builtin_aggregate_function, range_type_ref_for_sql_type, relkind_is_analyzable,
     synthetic_range_proc_row_by_oid, synthetic_range_proc_rows_by_name,
 };
@@ -59,8 +61,8 @@ static NEXT_WORKTABLE_ID: AtomicUsize = AtomicUsize::new(1);
 static NEXT_CTE_ID: AtomicUsize = AtomicUsize::new(1);
 use crate::backend::utils::cache::relcache::RelCache;
 use crate::backend::utils::cache::system_views::{
-    build_pg_locks_rows, build_pg_policies_rows, build_pg_rules_rows, build_pg_stats_rows,
-    build_pg_views_rows,
+    build_pg_indexes_rows, build_pg_locks_rows, build_pg_policies_rows, build_pg_rules_rows,
+    build_pg_stats_rows, build_pg_views_rows,
 };
 use agg::*;
 use agg_output::*;
@@ -69,12 +71,19 @@ pub use coerce::is_binary_coercible_type;
 use coerce::*;
 use collation::*;
 pub(crate) use constraints::*;
-pub(crate) use constraints::{BoundReferencedByForeignKey, BoundRelationConstraints};
+pub(crate) use constraints::{
+    BoundReferencedByForeignKey, BoundRelationConstraints, BoundTemporalConstraint,
+};
 pub use create_table::*;
 pub use create_table_inherits::*;
 pub(crate) use expr::bind_expr_with_outer_and_ctes;
 use expr::*;
 use functions::*;
+pub(crate) use generated::{
+    bind_generated_expr, expr_references_column, generated_relation_output_exprs,
+    scope_for_base_relation_with_generated, scope_for_relation_with_generated,
+    validate_generated_columns,
+};
 use geometry::*;
 pub(crate) use index_predicates::*;
 use infer::*;
@@ -104,7 +113,7 @@ pub(crate) use rules::{
 };
 pub use scope::BoundRelation;
 use scope::*;
-pub(crate) use scope::{BoundScope, scope_for_relation, shift_scope_rtindexes};
+pub(crate) use scope::{BoundCte, BoundScope, scope_for_relation, shift_scope_rtindexes};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
@@ -134,6 +143,25 @@ fn dedup_proc_rows(rows: &mut Vec<PgProcRow>) {
             row.prosrc.clone(),
         ))
     });
+}
+
+fn extend_synthetic_range_proc_rows<C: CatalogLookup + ?Sized>(
+    catalog: &C,
+    name: &str,
+    rows: &mut Vec<PgProcRow>,
+) {
+    let needs_synthetic_lookup = if rows.is_empty() {
+        is_synthetic_range_proc_name(name) || resolve_scalar_function(name).is_none()
+    } else {
+        is_synthetic_range_proc_name(name)
+    };
+    if needs_synthetic_lookup {
+        rows.extend(synthetic_range_proc_rows_by_name(
+            name,
+            &catalog.type_rows(),
+            &catalog.range_rows(),
+        ));
+    }
 }
 
 pub(crate) fn bind_index_exprs(
@@ -343,6 +371,10 @@ pub trait CatalogLookup {
         BOOTSTRAP_SUPERUSER_OID
     }
 
+    fn search_path(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     fn session_user_oid(&self) -> u32 {
         BOOTSTRAP_SUPERUSER_OID
     }
@@ -359,6 +391,10 @@ pub trait CatalogLookup {
         bootstrap_pg_namespace_rows()
             .into_iter()
             .find(|row| row.oid == oid)
+    }
+
+    fn namespace_rows(&self) -> Vec<PgNamespaceRow> {
+        bootstrap_pg_namespace_rows().to_vec()
     }
 
     fn row_security_enabled(&self) -> bool {
@@ -397,11 +433,7 @@ pub trait CatalogLookup {
             .into_iter()
             .filter(|row| row.proname.eq_ignore_ascii_case(normalized))
             .collect::<Vec<_>>();
-        rows.extend(synthetic_range_proc_rows_by_name(
-            name,
-            &self.type_rows(),
-            &self.range_rows(),
-        ));
+        extend_synthetic_range_proc_rows(self, name, &mut rows);
         dedup_proc_rows(&mut rows);
         rows
     }
@@ -538,6 +570,48 @@ pub trait CatalogLookup {
         Vec::new()
     }
 
+    fn statistic_ext_rows(&self) -> Vec<PgStatisticExtRow> {
+        Vec::new()
+    }
+
+    fn statistic_ext_row_by_oid(&self, oid: u32) -> Option<PgStatisticExtRow> {
+        self.statistic_ext_rows()
+            .into_iter()
+            .find(|row| row.oid == oid)
+    }
+
+    fn statistic_ext_row_by_name_namespace(
+        &self,
+        name: &str,
+        namespace_oid: u32,
+    ) -> Option<PgStatisticExtRow> {
+        let normalized = normalize_catalog_lookup_name(name);
+        self.statistic_ext_rows().into_iter().find(|row| {
+            row.stxnamespace == namespace_oid && row.stxname.eq_ignore_ascii_case(normalized)
+        })
+    }
+
+    fn statistic_ext_rows_for_relation(&self, relation_oid: u32) -> Vec<PgStatisticExtRow> {
+        self.statistic_ext_rows()
+            .into_iter()
+            .filter(|row| row.stxrelid == relation_oid)
+            .collect()
+    }
+
+    fn statistic_ext_data_rows(&self) -> Vec<PgStatisticExtDataRow> {
+        Vec::new()
+    }
+
+    fn statistic_ext_data_row(
+        &self,
+        stxoid: u32,
+        stxdinherit: bool,
+    ) -> Option<PgStatisticExtDataRow> {
+        self.statistic_ext_data_rows()
+            .into_iter()
+            .find(|row| row.stxoid == stxoid && row.stxdinherit == stxdinherit)
+    }
+
     fn trigger_rows_for_relation(
         &self,
         _relation_oid: u32,
@@ -617,6 +691,10 @@ pub trait CatalogLookup {
         Vec::new()
     }
 
+    fn pg_indexes_rows(&self) -> Vec<Vec<Value>> {
+        Vec::new()
+    }
+
     fn pg_policies_rows(&self) -> Vec<Vec<Value>> {
         Vec::new()
     }
@@ -690,11 +768,15 @@ impl CatalogLookup for Catalog {
 
     fn index_relations_for_heap(&self, relation_oid: u32) -> Vec<BoundIndexRelation> {
         let relcache = RelCache::from_catalog(self);
+        let mut seen = BTreeSet::new();
         relcache
             .entries()
             .filter_map(|(name, entry)| {
                 let index_meta = entry.index.as_ref()?;
-                (index_meta.indrelid == relation_oid).then(|| BoundIndexRelation {
+                if index_meta.indrelid != relation_oid || !seen.insert(entry.relation_oid) {
+                    return None;
+                }
+                Some(BoundIndexRelation {
                     name: name.rsplit('.').next().unwrap_or(name).to_string(),
                     rel: entry.rel,
                     relation_oid: entry.relation_oid,
@@ -719,11 +801,7 @@ impl CatalogLookup for Catalog {
             .into_iter()
             .cloned()
             .collect::<Vec<_>>();
-        rows.extend(synthetic_range_proc_rows_by_name(
-            name,
-            &self.type_rows(),
-            &self.range_rows(),
-        ));
+        extend_synthetic_range_proc_rows(self, name, &mut rows);
         dedup_proc_rows(&mut rows);
         rows
     }
@@ -879,6 +957,17 @@ impl CatalogLookup for Catalog {
         )
     }
 
+    fn pg_indexes_rows(&self) -> Vec<Vec<Value>> {
+        let catcache = crate::backend::utils::cache::catcache::CatCache::from_catalog(self);
+        build_pg_indexes_rows(
+            catcache.namespace_rows(),
+            catcache.class_rows(),
+            catcache.attribute_rows(),
+            catcache.index_rows(),
+            catcache.am_rows(),
+        )
+    }
+
     fn pg_policies_rows(&self) -> Vec<Vec<Value>> {
         let catcache = crate::backend::utils::cache::catcache::CatCache::from_catalog(self);
         build_pg_policies_rows(
@@ -983,10 +1072,14 @@ impl CatalogLookup for RelCache {
     }
 
     fn index_relations_for_heap(&self, relation_oid: u32) -> Vec<BoundIndexRelation> {
+        let mut seen = BTreeSet::new();
         self.entries()
             .filter_map(|(name, entry)| {
                 let index_meta = entry.index.as_ref()?;
-                (index_meta.indrelid == relation_oid).then(|| BoundIndexRelation {
+                if index_meta.indrelid != relation_oid || !seen.insert(entry.relation_oid) {
+                    return None;
+                }
+                Some(BoundIndexRelation {
                     name: name.rsplit('.').next().unwrap_or(name).to_string(),
                     rel: entry.rel,
                     relation_oid: entry.relation_oid,
@@ -1237,11 +1330,7 @@ fn builtin_named_type_alias(name: &str) -> Option<SqlType> {
     } else if name.eq_ignore_ascii_case("regoperator") {
         Some(SqlType::new(SqlTypeKind::RegOperator))
     } else if name.eq_ignore_ascii_case("regnamespace") {
-        // :HACK: PostgreSQL's `regnamespace` is an OID-backed catalog type with
-        // namespace-aware I/O. pgrust only needs enough surface area for
-        // `pg_my_temp_schema()::regnamespace::text` in the json/jsonb regressions,
-        // so keep it text-compatible until the full reg* catalog type family lands.
-        Some(SqlType::new(SqlTypeKind::Text))
+        Some(SqlType::new(SqlTypeKind::RegNamespace))
     } else {
         None
     }
@@ -1393,12 +1482,15 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
     relation_scopes: &[(String, Vec<SlotScopeColumn>)],
     columns: &[SlotScopeColumn],
     catalog: &dyn CatalogLookup,
+    ctes: &[BoundCte],
 ) -> Result<(Expr, SqlType), ParseError> {
     if columns.is_empty() && relation_scopes.is_empty() {
         let empty_scope = scope::empty_scope();
         let empty_outer = Vec::new();
-        let bound = bind_expr_with_outer(expr, &empty_scope, catalog, &empty_outer, None)?;
-        let sql_type = infer_sql_expr_type(expr, &empty_scope, catalog, &empty_outer, None);
+        let bound =
+            bind_expr_with_outer_and_ctes(expr, &empty_scope, catalog, &empty_outer, None, ctes)?;
+        let sql_type =
+            infer_sql_expr_type_with_ctes(expr, &empty_scope, catalog, &empty_outer, None, ctes);
         return Ok((bound, sql_type));
     }
 
@@ -1463,8 +1555,8 @@ pub(crate) fn bind_scalar_expr_in_named_slot_scope(
     // PL/pgSQL scalar expressions can contain correlated subqueries that need
     // to see the same named-slot scope as the enclosing expression.
     let outer_scopes = vec![scope.clone()];
-    let bound = bind_expr_with_outer(expr, &scope, catalog, &outer_scopes, None)?;
-    let sql_type = infer_sql_expr_type(expr, &scope, catalog, &outer_scopes, None);
+    let bound = bind_expr_with_outer_and_ctes(expr, &scope, catalog, &outer_scopes, None, ctes)?;
+    let sql_type = infer_sql_expr_type_with_ctes(expr, &scope, catalog, &outer_scopes, None, ctes);
     Ok((bound, sql_type))
 }
 
@@ -2604,6 +2696,15 @@ pub(crate) fn pg_plan_query_with_outer_scopes(
     build_plan_with_outer(stmt, catalog, outer_scopes, None, &[], &[])
 }
 
+pub(crate) fn pg_plan_query_with_outer_scopes_and_ctes(
+    stmt: &SelectStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    outer_ctes: &[BoundCte],
+) -> Result<PlannedStmt, ParseError> {
+    build_plan_with_outer(stmt, catalog, outer_scopes, None, outer_ctes, &[])
+}
+
 pub fn build_plan(stmt: &SelectStatement, catalog: &dyn CatalogLookup) -> Result<Plan, ParseError> {
     Ok(pg_plan_query(stmt, catalog)?.plan_tree)
 }
@@ -2636,6 +2737,82 @@ pub(crate) fn pg_plan_values_query_with_outer_scopes(
     outer_scopes: &[BoundScope],
 ) -> Result<PlannedStmt, ParseError> {
     build_values_plan_with_outer(stmt, catalog, outer_scopes, None, &[], &[])
+}
+
+pub(crate) fn pg_plan_values_query_with_outer_scopes_and_ctes(
+    stmt: &ValuesStatement,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    outer_ctes: &[BoundCte],
+) -> Result<PlannedStmt, ParseError> {
+    build_values_plan_with_outer(stmt, catalog, outer_scopes, None, outer_ctes, &[])
+}
+
+pub(crate) fn bound_cte_from_materialized_rows(
+    name: String,
+    desc: &RelationDesc,
+    rows: &[Vec<Value>],
+) -> BoundCte {
+    let cte_id = NEXT_CTE_ID.fetch_add(1, Ordering::Relaxed);
+    let visible_indexes = desc
+        .columns
+        .iter()
+        .enumerate()
+        .filter_map(|(index, column)| (!column.dropped).then_some(index))
+        .collect::<Vec<_>>();
+    let output_columns = visible_indexes
+        .iter()
+        .map(|index| {
+            let column = &desc.columns[*index];
+            QueryColumn {
+                name: column.name.clone(),
+                sql_type: column.sql_type,
+                wire_type_oid: None,
+            }
+        })
+        .collect::<Vec<_>>();
+    let values_rows = rows
+        .iter()
+        .map(|row| {
+            visible_indexes
+                .iter()
+                .map(|index| Expr::Const(row.get(*index).cloned().unwrap_or(Value::Null)))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let plan = AnalyzedFrom::values(values_rows, output_columns.clone());
+    BoundCte {
+        name,
+        cte_id,
+        plan: Query {
+            command_type: crate::include::executor::execdesc::CommandType::Select,
+            depends_on_row_security: false,
+            rtable: plan.rtable,
+            jointree: plan.jointree,
+            target_list: identity_target_list(&output_columns, &plan.output_exprs),
+            where_qual: None,
+            group_by: Vec::new(),
+            accumulators: Vec::new(),
+            window_clauses: Vec::new(),
+            having_qual: None,
+            sort_clause: Vec::new(),
+            limit_count: None,
+            limit_offset: 0,
+            locking_clause: None,
+            row_marks: Vec::new(),
+            project_set: None,
+            recursive_union: None,
+            set_operation: None,
+        },
+        desc: RelationDesc {
+            columns: output_columns
+                .into_iter()
+                .map(|column| column_desc(column.name, column.sql_type, true))
+                .collect(),
+        },
+        self_reference: false,
+        worktable_id: 0,
+    }
 }
 
 pub fn build_values_plan(

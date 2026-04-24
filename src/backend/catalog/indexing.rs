@@ -131,6 +131,7 @@ pub fn system_catalog_index_meta(
         indisunique: descriptor.unique,
         indnullsnotdistinct: false,
         indisprimary: false,
+        indisexclusion: false,
         indisvalid: true,
         indisready: true,
         indislive: true,

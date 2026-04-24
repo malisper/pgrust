@@ -649,7 +649,13 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::ObjDescription => args.len() == 2,
             BuiltinScalarFunction::PgDescribeObject => args.len() == 3,
             BuiltinScalarFunction::PgGetExpr => matches!(args.len(), 2 | 3),
+            BuiltinScalarFunction::PgGetConstraintDef => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::PgGetIndexDef => matches!(args.len(), 1 | 3),
             BuiltinScalarFunction::PgGetViewDef => matches!(args.len(), 1 | 2),
+            BuiltinScalarFunction::PgGetStatisticsObjDef
+            | BuiltinScalarFunction::PgGetStatisticsObjDefColumns
+            | BuiltinScalarFunction::PgGetStatisticsObjDefExpressions
+            | BuiltinScalarFunction::PgStatisticsObjIsVisible => args.len() == 1,
             BuiltinScalarFunction::PgRelationIsPublishable => args.len() == 1,
             BuiltinScalarFunction::PgIndexAmHasProperty => args.len() == 2,
             BuiltinScalarFunction::PgIndexHasProperty => args.len() == 2,
@@ -1349,6 +1355,16 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("cashlarger", BuiltinScalarFunction::CashLarger),
         ("cashsmaller", BuiltinScalarFunction::CashSmaller),
         ("cash_words", BuiltinScalarFunction::CashWords),
+        (
+            "pg_get_constraintdef",
+            BuiltinScalarFunction::PgGetConstraintDef,
+        ),
+        (
+            "pg_get_constraintdef_ext",
+            BuiltinScalarFunction::PgGetConstraintDef,
+        ),
+        ("pg_get_indexdef", BuiltinScalarFunction::PgGetIndexDef),
+        ("pg_get_indexdef_ext", BuiltinScalarFunction::PgGetIndexDef),
         ("pg_get_triggerdef", BuiltinScalarFunction::PgGetTriggerDef),
         ("pg_trigger_depth", BuiltinScalarFunction::PgTriggerDepth),
         ("now", BuiltinScalarFunction::Now),
@@ -1425,6 +1441,22 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("pg_get_expr", BuiltinScalarFunction::PgGetExpr),
         ("pg_get_expr_ext", BuiltinScalarFunction::PgGetExpr),
         ("pg_get_viewdef", BuiltinScalarFunction::PgGetViewDef),
+        (
+            "pg_get_statisticsobjdef",
+            BuiltinScalarFunction::PgGetStatisticsObjDef,
+        ),
+        (
+            "pg_get_statisticsobjdef_columns",
+            BuiltinScalarFunction::PgGetStatisticsObjDefColumns,
+        ),
+        (
+            "pg_get_statisticsobjdef_expressions",
+            BuiltinScalarFunction::PgGetStatisticsObjDefExpressions,
+        ),
+        (
+            "pg_statistics_obj_is_visible",
+            BuiltinScalarFunction::PgStatisticsObjIsVisible,
+        ),
         (
             "pg_relation_is_publishable",
             BuiltinScalarFunction::PgRelationIsPublishable,
@@ -1771,6 +1803,22 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             "pg_describe_object",
             BuiltinScalarFunction::PgDescribeObject,
         ),
+        (
+            "pg_get_statisticsobjdef",
+            BuiltinScalarFunction::PgGetStatisticsObjDef,
+        ),
+        (
+            "pg_get_statisticsobjdef_columns",
+            BuiltinScalarFunction::PgGetStatisticsObjDefColumns,
+        ),
+        (
+            "pg_get_statisticsobjdef_expressions",
+            BuiltinScalarFunction::PgGetStatisticsObjDefExpressions,
+        ),
+        (
+            "pg_statistics_obj_is_visible",
+            BuiltinScalarFunction::PgStatisticsObjIsVisible,
+        ),
         ("position", BuiltinScalarFunction::Position),
         ("strpos", BuiltinScalarFunction::Strpos),
         ("substring", BuiltinScalarFunction::Substring),
@@ -2109,7 +2157,11 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
             BuiltinScalarFunction::ObjDescription,
             BuiltinScalarFunction::PgDescribeObject,
             BuiltinScalarFunction::PgGetExpr,
+            BuiltinScalarFunction::PgGetConstraintDef,
+            BuiltinScalarFunction::PgGetIndexDef,
             BuiltinScalarFunction::PgGetViewDef,
+            BuiltinScalarFunction::PgGetStatisticsObjDef,
+            BuiltinScalarFunction::PgGetStatisticsObjDefColumns,
         ] {
             if by_func.iter().all(|(candidate, _)| *candidate != func) {
                 by_func.push((
@@ -2121,6 +2173,23 @@ fn scalar_fixed_return_types() -> &'static Vec<(BuiltinScalarFunction, SqlType)>
                     },
                 ));
             }
+        }
+        if by_func.iter().all(|(candidate, _)| {
+            *candidate != BuiltinScalarFunction::PgGetStatisticsObjDefExpressions
+        }) {
+            by_func.push((
+                BuiltinScalarFunction::PgGetStatisticsObjDefExpressions,
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+            ));
+        }
+        if by_func
+            .iter()
+            .all(|(candidate, _)| *candidate != BuiltinScalarFunction::PgStatisticsObjIsVisible)
+        {
+            by_func.push((
+                BuiltinScalarFunction::PgStatisticsObjIsVisible,
+                SqlType::new(SqlTypeKind::Bool),
+            ));
         }
         if by_func
             .iter()
@@ -2248,7 +2317,13 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::ObjDescription
             | BuiltinScalarFunction::PgDescribeObject
             | BuiltinScalarFunction::PgGetExpr
+            | BuiltinScalarFunction::PgGetConstraintDef
+            | BuiltinScalarFunction::PgGetIndexDef
             | BuiltinScalarFunction::PgGetViewDef
+            | BuiltinScalarFunction::PgGetStatisticsObjDef
+            | BuiltinScalarFunction::PgGetStatisticsObjDefColumns
+            | BuiltinScalarFunction::PgGetStatisticsObjDefExpressions
+            | BuiltinScalarFunction::PgStatisticsObjIsVisible
             | BuiltinScalarFunction::PgColumnSize
             | BuiltinScalarFunction::PgRelationIsPublishable
             | BuiltinScalarFunction::PgIndexAmHasProperty
@@ -3112,7 +3187,7 @@ mod tests {
         );
         assert_eq!(
             fixed_scalar_return_type(BuiltinScalarFunction::PgMyTempSchema),
-            Some(SqlType::new(SqlTypeKind::Text))
+            Some(SqlType::new(SqlTypeKind::Oid))
         );
         assert_eq!(
             fixed_scalar_return_type(BuiltinScalarFunction::CurrentDatabase),

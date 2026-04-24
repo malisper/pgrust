@@ -24,13 +24,16 @@ use std::thread;
 
 use std::time::{Duration, Instant};
 
-const TEST_TIMEOUT: Duration = Duration::from_secs(5);
-const CONTENTION_TEST_TIMEOUT: Duration = Duration::from_secs(15);
-const HEAVY_CONTENTION_TEST_TIMEOUT: Duration = Duration::from_secs(30);
+// These are deadlock watchdogs, not latency expectations. Full `cargo test`
+// runs several storage/concurrency tests at once, so leave enough headroom for
+// slow CI workers and parallel local agent workspaces.
+const TEST_TIMEOUT: Duration = Duration::from_secs(30);
+const CONTENTION_TEST_TIMEOUT: Duration = Duration::from_secs(60);
+const HEAVY_CONTENTION_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 const STRESS_TEST_TIMEOUT: Duration = Duration::from_secs(60);
 const PIN_LEAK_CONTENTION_TEST_TIMEOUT: Duration = Duration::from_secs(120);
 const SAME_ROW_UPDATE_TEST_TIMEOUT: Duration = Duration::from_secs(20);
-const PGBENCH_STYLE_TEST_TIMEOUT: Duration = Duration::from_secs(20);
+const PGBENCH_STYLE_TEST_TIMEOUT: Duration = Duration::from_secs(60);
 const SAME_ROW_UPDATE_FULL_SUITE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Start a background thread that periodically checks for deadlocks
@@ -244,6 +247,68 @@ fn ephemeral_database_executes_basic_sql() {
             vec![Value::Int32(1), Value::Text("a".into())],
             vec![Value::Int32(2), Value::Text("b".into())],
         ]
+    );
+}
+
+#[test]
+fn generated_columns_compute_on_insert_update_and_read() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table stored_generated (a int4, b int4 generated always as (a + 1) stored)",
+        )
+        .expect("create stored generated table");
+    session
+        .execute(&db, "insert into stored_generated(a) values (4)")
+        .expect("insert generated row");
+    session
+        .execute(&db, "insert into stored_generated values (5, default)")
+        .expect("insert generated default row");
+    assert_single_int_column_rows(
+        session
+            .execute(&db, "select b from stored_generated order by a")
+            .expect("select stored generated rows"),
+        vec![vec![Value::Int32(5)], vec![Value::Int32(6)]],
+    );
+
+    session
+        .execute(&db, "update stored_generated set a = 9 where a = 4")
+        .expect("update generated row");
+    assert_single_int_column_rows(
+        session
+            .execute(&db, "select b from stored_generated where a = 9")
+            .expect("select updated generated row"),
+        vec![vec![Value::Int32(10)]],
+    );
+
+    let err = session
+        .execute(&db, "insert into stored_generated values (7, 99)")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::DetailedError {
+            sqlstate: "428C9",
+            ..
+        })
+    ));
+
+    session
+        .execute(
+            &db,
+            "create table virtual_generated (a int4, b int4 generated always as (a + 1))",
+        )
+        .expect("create virtual generated table");
+    session
+        .execute(&db, "insert into virtual_generated(a) values (11)")
+        .expect("insert virtual generated row");
+    assert_single_int_column_rows(
+        session
+            .execute(&db, "select b from virtual_generated where b = 12")
+            .expect("select virtual generated row"),
+        vec![vec![Value::Int32(12)]],
     );
 }
 
@@ -3088,6 +3153,135 @@ fn drop_table_drops_partitioned_roots_and_subpartitioned_children() {
 }
 
 #[test]
+fn partition_tuple_routing_handles_nested_and_default_partitions() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table route_orders(id int4, region text) partition by list (region)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table route_orders_eu partition of route_orders for values in ('eu') partition by range (id)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table route_orders_eu_low partition of route_orders_eu for values from (minvalue) to (100)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table route_orders_eu_high partition of route_orders_eu for values from (100) to (maxvalue)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table route_orders_other partition of route_orders default",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into route_orders values (1, 'eu'), (150, 'eu'), (5, 'us'), (6, 'apac')",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from route_orders_eu_low"),
+        vec![vec![Value::Int64(1)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from route_orders_eu_high"),
+        vec![vec![Value::Int64(1)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from route_orders_other"),
+        vec![vec![Value::Int64(2)]]
+    );
+
+    match session.execute(&db, "insert into route_orders_eu_low values (250, 'eu')") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message
+            == "new row for relation \"route_orders_eu_low\" violates partition constraint"
+            && sqlstate == "23514" => {}
+        other => panic!("expected partition constraint violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn hash_partitioned_tables_route_rows_and_validate_bounds() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table hp (a int4, payload text) partition by hash (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table hp0 partition of hp for values with (modulus 2, remainder 0)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table hp1 partition of hp for values with (modulus 2, remainder 1)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "insert into hp values (1, 'one'), (2, 'two'), (3, 'three'), (null, 'nil')",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from hp"),
+        vec![vec![Value::Int64(4)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select partstrat::text from pg_partitioned_table where partrelid = 'hp'::regclass",
+        ),
+        vec![vec![Value::Text("h".into())]]
+    );
+
+    match session.execute(&db, "create table hp_default partition of hp default") {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) if message == "a hash-partitioned table may not have a default partition"
+            && sqlstate == "42P17" => {}
+        other => panic!("expected hash default partition rejection, got {other:?}"),
+    }
+
+    match session.execute(
+        &db,
+        "create table hp_bad partition of hp for values with (modulus 3, remainder 0)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) if message
+            == "every hash partition modulus must be a factor of the next larger modulus"
+            && sqlstate == "42P17" => {}
+        other => panic!("expected hash modulus factor rejection, got {other:?}"),
+    }
+}
+
+#[test]
 fn partitioned_primary_keys_support_rename_flow_and_index_tree_metadata() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
@@ -3144,6 +3338,407 @@ fn partitioned_primary_keys_support_rename_flow_and_index_tree_metadata() {
             "select relname from pg_class where relname = 'part_attmp_renamed'",
         ),
         vec![vec![Value::Text("part_attmp_renamed".into())]]
+    );
+}
+
+#[test]
+fn create_index_on_partitioned_table_builds_index_tree() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table idxpart (a int4, b int4) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart1 partition of idxpart for values from (0) to (10)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart2 partition of idxpart for values from (10) to (20) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart2a partition of idxpart2 for values from (10) to (15)",
+        )
+        .unwrap();
+
+    session.execute(&db, "create index on idxpart(a)").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relname, relkind::text, relhassubclass \
+               from pg_class \
+              where relname in ('idxpart_a_idx', 'idxpart1_a_idx', 'idxpart2_a_idx', 'idxpart2a_a_idx') \
+              order by relname",
+        ),
+        vec![
+            vec![
+                Value::Text("idxpart1_a_idx".into()),
+                Value::Text("i".into()),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("idxpart2_a_idx".into()),
+                Value::Text("I".into()),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("idxpart2a_a_idx".into()),
+                Value::Text("i".into()),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("idxpart_a_idx".into()),
+                Value::Text("I".into()),
+                Value::Bool(true),
+            ],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select child.relname, parent.relname \
+               from pg_inherits i \
+               join pg_class child on child.oid = i.inhrelid \
+               join pg_class parent on parent.oid = i.inhparent \
+              where parent.relname in ('idxpart_a_idx', 'idxpart2_a_idx') \
+              order by parent.relname, child.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("idxpart2a_a_idx".into()),
+                Value::Text("idxpart2_a_idx".into()),
+            ],
+            vec![
+                Value::Text("idxpart1_a_idx".into()),
+                Value::Text("idxpart_a_idx".into()),
+            ],
+            vec![
+                Value::Text("idxpart2_a_idx".into()),
+                Value::Text("idxpart_a_idx".into()),
+            ],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indexdef from pg_indexes where tablename = 'idxpart' and indexname = 'idxpart_a_idx'",
+        ),
+        vec![vec![Value::Text(
+            "CREATE INDEX idxpart_a_idx ON ONLY public.idxpart USING btree (a)".into(),
+        )]]
+    );
+}
+
+#[test]
+fn create_index_on_partitioned_table_reuses_only_child_without_recursing() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table idxpart (a int4) partition by range (a)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart1 partition of idxpart for values from (0) to (100)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart2 partition of idxpart for values from (100) to (1000) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart21 partition of idxpart2 for values from (100) to (200)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table idxpart22 partition of idxpart2 for values from (200) to (300)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create index on idxpart22(a)")
+        .unwrap();
+    session
+        .execute(&db, "create index on only idxpart2(a)")
+        .unwrap();
+    session.execute(&db, "create index on idxpart(a)").unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select idxcls.relname, heap.relname, coalesce(parent.relname, ''), idx.indisvalid \
+               from pg_index idx \
+               join pg_class idxcls on idxcls.oid = idx.indexrelid \
+               join pg_class heap on heap.oid = idx.indrelid \
+               left join pg_inherits inh on inh.inhrelid = idx.indexrelid \
+               left join pg_class parent on parent.oid = inh.inhparent \
+              where idxcls.relname like 'idxpart%' \
+              order by idxcls.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("idxpart1_a_idx".into()),
+                Value::Text("idxpart1".into()),
+                Value::Text("idxpart_a_idx".into()),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("idxpart22_a_idx".into()),
+                Value::Text("idxpart22".into()),
+                Value::Text("".into()),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("idxpart2_a_idx".into()),
+                Value::Text("idxpart2".into()),
+                Value::Text("idxpart_a_idx".into()),
+                Value::Bool(false),
+            ],
+            vec![
+                Value::Text("idxpart_a_idx".into()),
+                Value::Text("idxpart".into()),
+                Value::Text("".into()),
+                Value::Bool(false),
+            ],
+        ]
+    );
+    assert!(
+        query_rows(
+            &db,
+            1,
+            "select relname from pg_class where relname = 'idxpart21_a_idx'",
+        )
+        .is_empty()
+    );
+
+    session
+        .execute(
+            &db,
+            "alter index idxpart2_a_idx attach partition idxpart22_a_idx",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter index idxpart2_a_idx attach partition idxpart22_a_idx",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relname, indisvalid \
+               from pg_class join pg_index on indexrelid = oid \
+              where relname in ('idxpart2_a_idx', 'idxpart_a_idx') \
+              order by relname",
+        ),
+        vec![
+            vec![Value::Text("idxpart2_a_idx".into()), Value::Bool(false)],
+            vec![Value::Text("idxpart_a_idx".into()), Value::Bool(false)],
+        ]
+    );
+
+    session
+        .execute(&db, "create index on idxpart21(a)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter index idxpart2_a_idx attach partition idxpart21_a_idx",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relname, indisvalid \
+               from pg_class join pg_index on indexrelid = oid \
+              where relname in ('idxpart21_a_idx', 'idxpart22_a_idx', 'idxpart2_a_idx', 'idxpart_a_idx') \
+              order by relname",
+        ),
+        vec![
+            vec![Value::Text("idxpart21_a_idx".into()), Value::Bool(true)],
+            vec![Value::Text("idxpart22_a_idx".into()), Value::Bool(true)],
+            vec![Value::Text("idxpart2_a_idx".into()), Value::Bool(true)],
+            vec![Value::Text("idxpart_a_idx".into()), Value::Bool(true)],
+        ]
+    );
+}
+
+#[test]
+fn partitioned_index_only_and_future_partition_reconciliation() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table onlypart (a int4, b int4) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table onlypart1 partition of onlypart for values from (0) to (10)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create index on only onlypart(a)")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select relkind::text, relhassubclass from pg_class where relname = 'onlypart_a_idx'",
+        ),
+        vec![vec![Value::Text("I".into()), Value::Bool(false)]]
+    );
+    assert!(
+        query_rows(
+            &db,
+            1,
+            "select relname from pg_class where relname = 'onlypart1_a_idx'"
+        )
+        .is_empty()
+    );
+
+    session
+        .execute(
+            &db,
+            "create table futpart (a int4, b int4) partition by range (a)",
+        )
+        .unwrap();
+    session.execute(&db, "create index on futpart(a)").unwrap();
+    session
+        .execute(
+            &db,
+            "create table futpart1 partition of futpart for values from (0) to (10)",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select child.relname, parent.relname \
+               from pg_inherits i \
+               join pg_class child on child.oid = i.inhrelid \
+               join pg_class parent on parent.oid = i.inhparent \
+              where parent.relname = 'futpart_a_idx'",
+        ),
+        vec![vec![
+            Value::Text("futpart1_a_idx".into()),
+            Value::Text("futpart_a_idx".into()),
+        ]]
+    );
+}
+
+#[test]
+fn partitioned_index_reuses_explicit_child_and_supports_attach_drop() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table preidx (a int4, b int4) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table preidx1 partition of preidx for values from (0) to (10)",
+        )
+        .unwrap();
+    session.execute(&db, "create index on preidx1(a)").unwrap();
+    session.execute(&db, "create index on preidx(a)").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_class where relname like 'preidx1_a_idx%'",
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select child.relname, parent.relname \
+               from pg_inherits i \
+               join pg_class child on child.oid = i.inhrelid \
+               join pg_class parent on parent.oid = i.inhparent \
+              where parent.relname = 'preidx_a_idx'",
+        ),
+        vec![vec![
+            Value::Text("preidx1_a_idx".into()),
+            Value::Text("preidx_a_idx".into()),
+        ]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create table attachidx (a int4, b int4) partition by range (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table attachidx1 partition of attachidx for values from (0) to (10)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create index on only attachidx(a)")
+        .unwrap();
+    session
+        .execute(&db, "create index on attachidx1(a)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter index attachidx_a_idx attach partition attachidx1_a_idx",
+        )
+        .unwrap();
+
+    let err = session
+        .execute(&db, "drop index attachidx1_a_idx")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::DetailedError { message, hint: Some(hint), sqlstate, .. }
+            if message.contains("requires it")
+                && hint == "You can drop index attachidx_a_idx instead."
+                && sqlstate == "2BP01"
+    ));
+    session.execute(&db, "drop index attachidx_a_idx").unwrap();
+    assert!(
+        query_rows(
+            &db,
+            1,
+            "select relname from pg_class where relname in ('attachidx_a_idx', 'attachidx1_a_idx')",
+        )
+        .is_empty()
     );
 }
 
@@ -7168,21 +7763,51 @@ fn create_trigger_reports_postgres_style_transition_table_errors() {
 
     db.execute(1, "create table items (id int4, note text)")
         .unwrap();
+    db.execute(1, "create view item_view as select * from items")
+        .unwrap();
+    db.execute(
+        1,
+        "create table parent_part (id int4, note text) partition by range (id)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table child_part partition of parent_part for values from (0) to (10)",
+    )
+    .unwrap();
+    db.execute(1, "create table parent_inh (id int4, note text)")
+        .unwrap();
+    db.execute(1, "create table child_inh () inherits (parent_inh)")
+        .unwrap();
     db.execute(
         1,
         "create function items_trig() returns trigger language plpgsql as $$ begin return new; end $$",
     )
     .unwrap();
 
-    match db.execute(
-        1,
+    let assert_error = |sql: &str,
+                        expected_message: &str,
+                        expected_detail: Option<&str>,
+                        expected_sqlstate: &str| {
+        match db.execute(1, sql) {
+            Err(ExecError::DetailedError {
+                message,
+                detail,
+                sqlstate,
+                ..
+            }) if message == expected_message
+                && detail.as_deref() == expected_detail
+                && sqlstate == expected_sqlstate => {}
+            other => panic!("expected {expected_message:?} error, got {:?}", other),
+        }
+    };
+
+    assert_error(
         "create trigger items_multi after insert or update on items referencing new table as new_rows for each statement execute function items_trig()",
-    ) {
-        Err(ExecError::DetailedError { message, .. })
-            if message
-                == "transition tables cannot be specified for triggers with more than one event" => {}
-        other => panic!("expected transition-table multi-event error, got {:?}", other),
-    }
+        "transition tables cannot be specified for triggers with more than one event",
+        None,
+        "0A000",
+    );
 
     match db.execute(
         1,
@@ -7195,6 +7820,67 @@ fn create_trigger_reports_postgres_style_transition_table_errors() {
                 == Some("Use OLD TABLE or NEW TABLE for naming transition tables.") => {}
         other => panic!("expected referencing row-name error, got {:?}", other),
     }
+
+    assert_error(
+        "create trigger items_dup_new after insert on items referencing new table as new_rows new table as newer_rows for each statement execute function items_trig()",
+        "NEW TABLE cannot be specified multiple times",
+        None,
+        "42P17",
+    );
+    assert_error(
+        "create trigger items_bad_old after insert on items referencing old table as old_rows for each statement execute function items_trig()",
+        "OLD TABLE can only be specified for a DELETE or UPDATE trigger",
+        None,
+        "42P17",
+    );
+    assert_error(
+        "create trigger items_same after update on items referencing old table as rows new table as ROWS for each statement execute function items_trig()",
+        "OLD TABLE name and NEW TABLE name cannot be the same",
+        None,
+        "42P17",
+    );
+    assert_error(
+        "create trigger items_before before insert on items referencing new table as new_rows for each statement execute function items_trig()",
+        "transition table name can only be specified for an AFTER trigger",
+        None,
+        "42P17",
+    );
+    assert_error(
+        "create trigger items_col after update of note on items referencing new table as new_rows for each statement execute function items_trig()",
+        "transition tables cannot be specified for triggers with column lists",
+        None,
+        "0A000",
+    );
+    assert_error(
+        "create trigger items_trunc after truncate on items referencing old table as old_rows for each statement execute function items_trig()",
+        "TRUNCATE triggers with transition tables are not supported",
+        None,
+        "0A000",
+    );
+    assert_error(
+        "create trigger view_ref after insert on item_view referencing new table as new_rows for each statement execute function items_trig()",
+        "\"item_view\" is a view",
+        Some("Triggers on views cannot have transition tables."),
+        "42809",
+    );
+    assert_error(
+        "create trigger parent_part_ref after insert on parent_part referencing new table as new_rows for each row execute function items_trig()",
+        "\"parent_part\" is a partitioned table",
+        Some("ROW triggers with transition tables are not supported on partitioned tables."),
+        "42809",
+    );
+    assert_error(
+        "create trigger child_part_ref after insert on child_part referencing new table as new_rows for each row execute function items_trig()",
+        "ROW triggers with transition tables are not supported on partitions",
+        None,
+        "0A000",
+    );
+    assert_error(
+        "create trigger child_inh_ref after insert on child_inh referencing new table as new_rows for each row execute function items_trig()",
+        "ROW triggers with transition tables are not supported on inheritance children",
+        None,
+        "0A000",
+    );
 }
 
 #[test]
@@ -7222,6 +7908,155 @@ fn statement_trigger_return_value_is_ignored() {
         query_rows(&db, 1, "select id from items"),
         vec![vec![Value::Int32(1)]]
     );
+}
+
+#[test]
+fn transition_table_statement_triggers_can_read_statement_rows() {
+    let dir = temp_dir("transition_table_statement_rows");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(1, "create table new_rows (id int4, note text)")
+        .unwrap();
+    db.execute(1, "insert into new_rows values (100, 'catalog')")
+        .unwrap();
+    db.execute(
+        1,
+        "create function insert_transition_notice() returns trigger language plpgsql as $$
+         declare c int4; dyn int4 := 0; loop_id int4; sum_ids int4 := 0; expr_c int4;
+         begin
+           select count(*) into c from new_rows;
+           perform count(*) from new_rows;
+           for dyn in execute 'select count(*) from new_rows' loop
+             null;
+           end loop;
+           for loop_id in select id from new_rows loop
+             sum_ids := sum_ids + loop_id;
+           end loop;
+           expr_c := (select count(*) from new_rows);
+           raise notice 'insert:%:%:%:%', c, dyn, expr_c, sum_ids;
+           return null;
+         end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function update_transition_notice() returns trigger language plpgsql as $$
+         declare oc int4; nc int4; osum int4; nsum int4;
+         begin
+           select count(*), sum(id) into oc, osum from old_rows;
+           select count(*), sum(id) into nc, nsum from new_rows;
+           raise notice 'update:%:%:%:%', oc, nc, osum, nsum;
+           return null;
+         end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function delete_transition_notice() returns trigger language plpgsql as $$
+         declare oc int4; osum int4;
+         begin
+           select count(*), sum(id) into oc, osum from old_rows;
+           raise notice 'delete:%:%', oc, osum;
+           return null;
+         end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger items_insert_ref after insert on items referencing new table as new_rows for each statement execute function insert_transition_notice()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger items_update_ref after update on items referencing old table as old_rows new table as new_rows for each statement execute function update_transition_notice()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger items_delete_ref after delete on items referencing old table as old_rows for each statement execute function delete_transition_notice()",
+    )
+    .unwrap();
+
+    clear_notices();
+    db.execute(1, "insert into items values (1, 'a'), (2, 'b')")
+        .unwrap();
+    assert_eq!(take_notice_messages(), vec!["insert:2:2:2:3".to_string()]);
+
+    clear_notices();
+    db.execute(1, "update items set id = id + 10 where id <= 2")
+        .unwrap();
+    assert_eq!(take_notice_messages(), vec!["update:2:2:3:23".to_string()]);
+
+    clear_notices();
+    db.execute(1, "delete from items where id in (11, 12)")
+        .unwrap();
+    assert_eq!(take_notice_messages(), vec!["delete:2:23".to_string()]);
+}
+
+#[test]
+fn row_transition_table_triggers_see_full_statement_set() {
+    let dir = temp_dir("transition_table_row_trigger_rows");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function row_transition_notice() returns trigger language plpgsql as $$
+         declare c int4;
+         begin
+           select count(*) into c from new_rows;
+           raise notice 'row:%:%', NEW.id, c;
+           return NEW;
+         end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger items_row_ref after insert on items referencing new table as new_rows for each row execute function row_transition_notice()",
+    )
+    .unwrap();
+
+    clear_notices();
+    db.execute(1, "insert into items values (1, 'a'), (2, 'b')")
+        .unwrap();
+    assert_eq!(
+        take_notice_messages(),
+        vec!["row:1:2".to_string(), "row:2:2".to_string()]
+    );
+}
+
+#[test]
+fn transition_tables_cannot_be_referenced_by_persistent_objects() {
+    let dir = temp_dir("transition_table_persistent_object");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table items (id int4)").unwrap();
+    db.execute(
+        1,
+        "create function make_bogus_matview() returns trigger language plpgsql as $$
+         begin
+           create materialized view transition_test_mv as select * from new_table;
+           return NEW;
+         end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger items_ref after insert on items referencing new table as new_table for each statement execute function make_bogus_matview()",
+    )
+    .unwrap();
+
+    match db.execute(1, "insert into items values (42)") {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) if message
+            == "transition table \"new_table\" cannot be referenced in a persistent object"
+            && sqlstate == "0A000" => {}
+        other => panic!("expected persistent transition-table reference error, got {other:?}"),
+    }
 }
 
 #[test]
@@ -9337,22 +10172,23 @@ fn alter_statistics_updates_in_memory_statistics_target() {
     db.execute(1, "alter statistics ab1_a_b_stats set statistics 0")
         .unwrap();
 
-    let stats = db.statistics_objects.read();
-    let entry = stats
-        .values()
-        .find(|entry| entry.name.ends_with(".ab1_a_b_stats") || entry.name == "ab1_a_b_stats")
+    let catcache = db.backend_catcache(1, None).unwrap();
+    let entry = catcache
+        .statistic_ext_rows()
+        .into_iter()
+        .find(|entry| entry.stxname == "ab1_a_b_stats")
         .unwrap();
-    assert_eq!(entry.statistics_target, 0);
+    assert_eq!(entry.stxstattarget, Some(0));
 
-    drop(stats);
     db.execute(1, "alter statistics ab1_a_b_stats set statistics -1")
         .unwrap();
-    let stats = db.statistics_objects.read();
-    let entry = stats
-        .values()
-        .find(|entry| entry.name.ends_with(".ab1_a_b_stats") || entry.name == "ab1_a_b_stats")
+    let catcache = db.backend_catcache(1, None).unwrap();
+    let entry = catcache
+        .statistic_ext_rows()
+        .into_iter()
+        .find(|entry| entry.stxname == "ab1_a_b_stats")
         .unwrap();
-    assert_eq!(entry.statistics_target, -1);
+    assert_eq!(entry.stxstattarget, None);
 }
 
 #[test]
@@ -10804,6 +11640,370 @@ fn create_gist_range_index_with_explicit_opclass_uses_matching_type() {
                 .to_string()
                 .into()
         )]]
+    );
+}
+
+#[test]
+fn without_overlaps_primary_key_records_catalog_metadata_and_enforces_overlaps() {
+    let base = temp_dir("without_overlaps_pk_enforcement");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table temporal_items (\
+             id int4, \
+             valid_at int4range, \
+             constraint temporal_items_pk primary key (id, valid_at without overlaps)\
+         )",
+    )
+    .unwrap();
+
+    let lookup = db.lazy_catalog_lookup(1, None, None);
+    let relation = lookup.lookup_any_relation("temporal_items").unwrap();
+    let constraint = lookup
+        .constraint_rows_for_relation(relation.relation_oid)
+        .into_iter()
+        .find(|row| row.conname == "temporal_items_pk")
+        .unwrap();
+    assert!(constraint.conperiod);
+    assert_eq!(constraint.conkey.as_deref(), Some(&[1, 2][..]));
+    assert_eq!(constraint.conexclop.as_ref().map(Vec::len), Some(2));
+    let index = lookup
+        .index_relations_for_heap(relation.relation_oid)
+        .into_iter()
+        .find(|index| index.relation_oid == constraint.conindid)
+        .unwrap();
+    assert!(index.index_meta.indisexclusion);
+    assert_eq!(
+        psql_index_definition(&db, 1, "temporal_items", "temporal_items_pk"),
+        "CREATE UNIQUE INDEX temporal_items_pk ON temporal_items USING gist (id, valid_at)"
+    );
+    drop(lookup);
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_constraintdef(oid) from pg_constraint where conname = 'temporal_items_pk'",
+        ),
+        vec![vec![Value::Text(
+            "PRIMARY KEY (id, valid_at WITHOUT OVERLAPS)".into()
+        )]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_indexdef(conindid, 0, true) from pg_constraint where conname = 'temporal_items_pk'",
+        ),
+        vec![vec![Value::Text(
+            "CREATE UNIQUE INDEX temporal_items_pk ON temporal_items USING gist (id, valid_at)"
+                .into()
+        )]]
+    );
+
+    db.execute(
+        1,
+        "insert into temporal_items values \
+         (1, '[1,5)'::int4range), \
+         (1, '[5,9)'::int4range), \
+         (2, '[3,7)'::int4range)",
+    )
+    .unwrap();
+
+    match db.execute(
+        1,
+        "insert into temporal_items values (1, '[4,6)'::int4range)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23P01");
+            assert_eq!(
+                message,
+                "conflicting key value violates exclusion constraint \"temporal_items_pk\""
+            );
+        }
+        other => panic!("expected temporal exclusion violation, got {other:?}"),
+    }
+
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from temporal_items"),
+        vec![vec![Value::Int64(3)]]
+    );
+}
+
+#[test]
+fn without_overlaps_unique_handles_nulls_empty_ranges_and_updates() {
+    let base = temp_dir("without_overlaps_unique_runtime");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table temporal_unique (\
+             id int4, \
+             marker int4, \
+             valid_at int4range, \
+             constraint temporal_unique_key unique (id, valid_at without overlaps)\
+         )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into temporal_unique values \
+         (1, 1, '[1,5)'::int4range), \
+         (1, 2, '[5,9)'::int4range), \
+         (null, 3, '[1,5)'::int4range), \
+         (null, 4, '[2,4)'::int4range), \
+         (2, 5, null), \
+         (2, 6, null)",
+    )
+    .unwrap();
+
+    match db.execute(
+        1,
+        "insert into temporal_unique values (null, 7, 'empty'::int4range)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23P01");
+            assert!(message.contains("empty WITHOUT OVERLAPS value"));
+        }
+        other => panic!("expected empty range violation, got {other:?}"),
+    }
+
+    match db.execute(
+        1,
+        "update temporal_unique set valid_at = '[2,6)'::int4range where marker = 2",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23P01");
+            assert_eq!(
+                message,
+                "conflicting key value violates exclusion constraint \"temporal_unique_key\""
+            );
+        }
+        other => panic!("expected temporal exclusion violation on update, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_add_without_overlaps_validates_existing_rows() {
+    let base = temp_dir("without_overlaps_alter_table");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table clean_periods (id int4, valid_at int4range)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into clean_periods values (1, '[1,5)'::int4range), (1, '[5,9)'::int4range)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "alter table clean_periods add constraint clean_periods_key unique (id, valid_at without overlaps)",
+    )
+    .unwrap();
+
+    let lookup = db.lazy_catalog_lookup(1, None, None);
+    let relation = lookup.lookup_any_relation("clean_periods").unwrap();
+    let constraint = lookup
+        .constraint_rows_for_relation(relation.relation_oid)
+        .into_iter()
+        .find(|row| row.conname == "clean_periods_key")
+        .unwrap();
+    assert!(constraint.conperiod);
+    drop(lookup);
+
+    db.execute(
+        1,
+        "create table conflicting_periods (id int4, valid_at int4range)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into conflicting_periods values (1, '[1,5)'::int4range), (1, '[4,9)'::int4range)",
+    )
+    .unwrap();
+    match db.execute(
+        1,
+        "alter table conflicting_periods add constraint conflicting_periods_key unique (id, valid_at without overlaps)",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23P01");
+            assert_eq!(
+                message,
+                "could not create exclusion constraint \"conflicting_periods_key\""
+            );
+        }
+        other => panic!("expected temporal validation failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn without_overlaps_on_conflict_do_nothing_uses_temporal_arbiters() {
+    let base = temp_dir("without_overlaps_on_conflict");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table temporal_conflict (\
+             id int4, \
+             valid_at int4range, \
+             constraint temporal_conflict_pk primary key (id, valid_at without overlaps)\
+         )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into temporal_conflict values (1, '[1,5)'::int4range)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        db.execute(
+            1,
+            "insert into temporal_conflict values (1, '[4,8)'::int4range) on conflict do nothing",
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(0)
+    );
+    assert_eq!(
+        db.execute(
+            1,
+            "insert into temporal_conflict values (1, '[4,8)'::int4range) \
+             on conflict on constraint temporal_conflict_pk do nothing",
+        )
+        .unwrap(),
+        StatementResult::AffectedRows(0)
+    );
+
+    match db.execute(
+        1,
+        "insert into temporal_conflict values (1, '[4,8)'::int4range) \
+         on conflict (id, valid_at) do nothing",
+    ) {
+        Err(ExecError::Parse(ParseError::UnexpectedToken { expected, actual })) => {
+            assert_eq!(expected, "inferable unique btree index");
+            assert_eq!(
+                actual,
+                "there is no unique or exclusion constraint matching the ON CONFLICT specification"
+            );
+        }
+        other => panic!("expected arbiter inference rejection, got {other:?}"),
+    }
+
+    match db.execute(
+        1,
+        "insert into temporal_conflict values (1, '[4,8)'::int4range) \
+         on conflict on constraint temporal_conflict_pk do update set valid_at = excluded.valid_at",
+    ) {
+        Err(ExecError::Parse(ParseError::DetailedError {
+            message, sqlstate, ..
+        })) => {
+            assert_eq!(sqlstate, "0A000");
+            assert_eq!(
+                message,
+                "ON CONFLICT DO UPDATE not supported with exclusion constraints"
+            );
+        }
+        other => panic!("expected unsupported temporal DO UPDATE, got {other:?}"),
+    }
+}
+
+#[test]
+fn like_including_all_copies_without_overlaps_constraints() {
+    let base = temp_dir("without_overlaps_like_including_all");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table temporal_like_src (\
+             id int4, \
+             valid_at int4range, \
+             constraint temporal_like_src_pk primary key (id, valid_at without overlaps)\
+         )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table temporal_like_dst (like temporal_like_src including all)",
+    )
+    .unwrap();
+
+    let lookup = db.lazy_catalog_lookup(1, None, None);
+    let relation = lookup.lookup_any_relation("temporal_like_dst").unwrap();
+    let constraint = lookup
+        .constraint_rows_for_relation(relation.relation_oid)
+        .into_iter()
+        .find(|row| row.contype == crate::include::catalog::CONSTRAINT_PRIMARY)
+        .unwrap();
+    assert!(constraint.conperiod);
+    let index = lookup
+        .index_relations_for_heap(relation.relation_oid)
+        .into_iter()
+        .find(|index| index.relation_oid == constraint.conindid)
+        .unwrap();
+    assert!(index.index_meta.indisexclusion);
+}
+
+#[test]
+fn alter_table_add_without_overlaps_on_inherited_columns() {
+    let base = temp_dir("without_overlaps_inherited_alter");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table temporal_parent (id int4range, valid_at daterange)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table temporal_child () inherits (temporal_parent)",
+    )
+    .unwrap();
+    let lookup = db.lazy_catalog_lookup(1, None, None);
+    let relation = lookup.lookup_any_relation("temporal_child").unwrap();
+    assert_eq!(
+        relation
+            .desc
+            .columns
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["id", "valid_at"]
+    );
+    drop(lookup);
+
+    db.execute(
+        1,
+        "alter table temporal_child \
+         add constraint temporal_child_pk primary key (id, valid_at without overlaps)",
+    )
+    .unwrap();
+
+    let lookup = db.lazy_catalog_lookup(1, None, None);
+    let relation = lookup.lookup_any_relation("temporal_child").unwrap();
+    let constraint = lookup
+        .constraint_rows_for_relation(relation.relation_oid)
+        .into_iter()
+        .find(|row| row.conname == "temporal_child_pk")
+        .unwrap();
+    assert!(constraint.conperiod);
+    assert!(
+        relation
+            .desc
+            .columns
+            .iter()
+            .all(|column| !column.storage.nullable)
     );
 }
 
@@ -15181,6 +16381,219 @@ fn unique_index_update_same_key_succeeds_without_self_conflict() {
 }
 
 #[test]
+fn indexed_bpchar_repeated_update_keeps_one_visible_row() {
+    let base = temp_dir("indexed_bpchar_repeated_update_one_visible");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table slots (slotname char(20), backlink char(20))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index slots_name_idx on slots using btree (slotname bpchar_ops)",
+    )
+    .unwrap();
+    db.execute(1, "insert into slots values ('PS.base.a1', '')")
+        .unwrap();
+    db.execute(
+        1,
+        "update slots set backlink = 'WS.001.1a' where slotname = 'PS.base.a1'::bpchar",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "update slots set backlink = 'WS.001.1a' where slotname = 'PS.base.a1'::bpchar",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select slotname, backlink from slots order by slotname"
+        ),
+        vec![vec![
+            Value::Text("PS.base.a1          ".into()),
+            Value::Text("WS.001.1a           ".into())
+        ]]
+    );
+}
+
+#[test]
+fn reciprocal_bpchar_after_triggers_keep_one_visible_row() {
+    let base = temp_dir("reciprocal_bpchar_after_triggers_one_visible");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table left_slots (slotname char(20), backlink char(20))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table right_slots (slotname char(20), backlink char(20))",
+    )
+    .unwrap();
+    db.execute(1, "insert into right_slots values ('R1', '')")
+        .unwrap();
+    db.execute(
+        1,
+        "create function set_right(myname bpchar, blname bpchar) returns int4 language plpgsql as $$ declare rec record; begin select into rec * from right_slots where slotname = myname; if not found then raise exception '% missing', myname; end if; if rec.backlink != blname then update right_slots set backlink = blname where slotname = myname; end if; return 0; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function set_left(myname bpchar, blname bpchar) returns int4 language plpgsql as $$ declare rec record; begin select into rec * from left_slots where slotname = myname; if not found then raise exception '% missing', myname; end if; if rec.backlink != blname then update left_slots set backlink = blname where slotname = myname; end if; return 0; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function left_after() returns trigger language plpgsql as $$ declare dummy int4; begin if new.backlink != '' then dummy := set_right(new.backlink, new.slotname); end if; return new; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function right_after() returns trigger language plpgsql as $$ declare dummy int4; begin if new.backlink != '' then dummy := set_left(new.backlink, new.slotname); end if; return new; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function left_before_update() returns trigger language plpgsql as $$ begin if new.slotname != old.slotname then delete from left_slots where slotname = old.slotname; insert into left_slots values (new.slotname, new.backlink); return null; end if; return new; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function right_before_update() returns trigger language plpgsql as $$ begin if new.slotname != old.slotname then delete from right_slots where slotname = old.slotname; insert into right_slots values (new.slotname, new.backlink); return null; end if; return new; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger left_before_update before update on left_slots for each row execute function left_before_update()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger right_before_update before update on right_slots for each row execute function right_before_update()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger left_after after insert or update on left_slots for each row execute function left_after()",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger right_after after insert or update on right_slots for each row execute function right_after()",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into left_slots values ('L1', 'R1')")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select slotname, backlink from left_slots order by slotname"
+        ),
+        vec![vec![
+            Value::Text("L1                  ".into()),
+            Value::Text("R1                  ".into())
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select slotname, backlink from right_slots order by slotname"
+        ),
+        vec![vec![
+            Value::Text("R1                  ".into()),
+            Value::Text("L1                  ".into())
+        ]]
+    );
+}
+
+#[test]
+fn bpchar_before_update_trigger_does_not_treat_unchanged_key_as_renamed() {
+    let base = temp_dir("bpchar_before_update_same_key_not_renamed");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table slots (slotname char(20), backlink char(20))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function slots_bu() returns trigger language plpgsql as $$ begin if new.slotname != old.slotname then delete from slots where slotname = old.slotname; insert into slots values (new.slotname, new.backlink); return null; end if; return new; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger slots_bu before update on slots for each row execute function slots_bu()",
+    )
+    .unwrap();
+    db.execute(1, "insert into slots values ('S1', '')")
+        .unwrap();
+    db.execute(1, "update slots set backlink = 'B1' where slotname = 'S1'")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select slotname, backlink from slots order by slotname"
+        ),
+        vec![vec![
+            Value::Text("S1                  ".into()),
+            Value::Text("B1                  ".into())
+        ]]
+    );
+}
+
+#[test]
+fn plpgsql_update_maintains_each_visible_index_once() {
+    let base = temp_dir("plpgsql_update_maintains_index_once");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table slots (slotname char(20), backlink char(20))",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create unique index slots_name_idx on slots using btree (slotname bpchar_ops)",
+    )
+    .unwrap();
+    db.execute(1, "insert into slots values ('WS.001.1a', '')")
+        .unwrap();
+    db.execute(
+        1,
+        "create function set_backlink(myname bpchar, blname bpchar) returns int4 language plpgsql as $$ begin update slots set backlink = blname where slotname = myname; return 0; end $$",
+    )
+    .unwrap();
+    db.execute(1, "select set_backlink('WS.001.1a', 'PS.base.a1')")
+        .unwrap();
+
+    let rows = query_rows(
+        &db,
+        1,
+        "select slotname, backlink from slots order by slotname",
+    );
+    assert_eq!(
+        rows,
+        vec![vec![
+            Value::Text("WS.001.1a           ".into()),
+            Value::Text("PS.base.a1          ".into())
+        ]],
+    );
+}
+
+#[test]
 fn unique_index_delete_then_reinsert_same_key_succeeds() {
     let base = temp_dir("unique_index_delete_then_reinsert_same_key");
     let db = Database::open(&base, 16).unwrap();
@@ -17257,7 +18670,7 @@ fn create_function_accepts_bpchar_argument_types() {
         .unwrap()
     {
         StatementResult::Query { rows, .. } => {
-            assert_eq!(rows, vec![vec![Value::Text("W".into())]]);
+            assert_eq!(rows, vec![vec![Value::Text("WS".into())]]);
         }
         other => panic!("expected query result, got {:?}", other),
     }
@@ -22183,6 +23596,37 @@ fn plpgsql_alias_record_select_into_and_update_work() {
 }
 
 #[test]
+fn after_insert_trigger_nested_sql_sees_inserted_row() {
+    let dir = temp_dir("after_insert_trigger_nested_sql_sees_row");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table slots (slotname text, backlink text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function require_slot(text) returns int4 language plpgsql as $$ declare rec record; begin select into rec * from slots where slotname = $1; if not found then raise exception '% missing', $1; end if; return 0; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function slots_after_insert() returns trigger language plpgsql as $$ declare dummy int4; begin dummy := require_slot(new.slotname); return new; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger slots_after_insert after insert on slots for each row execute function slots_after_insert()",
+    )
+    .unwrap();
+
+    db.execute(1, "insert into slots values ('PS.base.b1', '')")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select slotname from slots"),
+        vec![vec![Value::Text("PS.base.b1".into())]]
+    );
+}
+
+#[test]
 fn plpgsql_static_query_for_loop_record_target_supports_field_access() {
     let dir = temp_dir("plpgsql_query_loop_record_fields");
     let db = Database::open(&dir, 64).unwrap();
@@ -22527,6 +23971,67 @@ fn pg_get_triggerdef_defaults_to_unpretty_and_lowercase_old_new() {
             ),
             Value::Text(
                 "CREATE TRIGGER items_before BEFORE UPDATE OF note ON items FOR EACH ROW WHEN (old.note IS DISTINCT FROM new.note) EXECUTE FUNCTION items_before()".into(),
+            ),
+        ]]
+    );
+}
+
+#[test]
+fn trigger_transition_table_names_are_visible_in_catalog_helpers() {
+    let dir = temp_dir("trigger_transition_catalog_helpers");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table items (id int4, note text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function items_after() returns trigger language plpgsql as $$ begin return null; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create trigger items_after after update on items referencing old table as old_rows new table as new_rows for each statement execute function items_after()",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select tgoldtable, tgnewtable from pg_trigger where tgname = 'items_after'",
+        ),
+        vec![vec![
+            Value::Text("old_rows".into()),
+            Value::Text("new_rows".into()),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select action_reference_old_table, action_reference_new_table
+             from information_schema.triggers
+             where trigger_name = 'items_after'",
+        ),
+        vec![vec![
+            Value::Text("old_rows".into()),
+            Value::Text("new_rows".into()),
+        ]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_triggerdef(oid), pg_get_triggerdef(oid, true)
+             from pg_trigger
+             where tgname = 'items_after'",
+        ),
+        vec![vec![
+            Value::Text(
+                "CREATE TRIGGER items_after AFTER UPDATE ON public.items REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION items_after()".into(),
+            ),
+            Value::Text(
+                "CREATE TRIGGER items_after AFTER UPDATE ON items REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION items_after()".into(),
             ),
         ]]
     );

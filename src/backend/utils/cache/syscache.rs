@@ -27,6 +27,8 @@ fn merge_catcaches(shared: CatCache, local: CatCache) -> CatCache {
         local.publication_rows(),
         local.publication_rel_rows(),
         local.publication_namespace_rows(),
+        local.statistic_ext_rows(),
+        local.statistic_ext_data_rows(),
         local.am_rows(),
         local.amop_rows(),
         local.amproc_rows(),

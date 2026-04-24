@@ -11,7 +11,7 @@ use crate::include::access::amapi::{
 use crate::include::access::brin::BrinOptions;
 use crate::include::catalog::{
     BRIN_AM_OID, GIST_AM_OID, GIST_RANGE_FAMILY_OID, SPGIST_AM_OID, builtin_range_rows,
-    range_type_ref_for_sql_type,
+    multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::parsenodes::RelOption;
 use std::collections::BTreeSet;
@@ -22,6 +22,64 @@ struct ResolvedIndexSupportMetadata {
     opckeytype_oids: Vec<u32>,
     amop_entries: Vec<Vec<IndexAmOpEntry>>,
     amproc_entries: Vec<Vec<IndexAmProcEntry>>,
+}
+
+fn type_oid_for_temporal_index_type(
+    sql_type: crate::backend::parser::SqlType,
+    type_rows: &[crate::include::catalog::PgTypeRow],
+) -> Option<u32> {
+    range_type_ref_for_sql_type(sql_type)
+        .map(|range_type| range_type.type_oid())
+        .or_else(|| {
+            multirange_type_ref_for_sql_type(sql_type)
+                .map(|multirange_type| multirange_type.type_oid())
+        })
+        .or_else(|| {
+            type_rows
+                .iter()
+                .find(|row| row.sql_type == sql_type)
+                .map(|row| row.oid)
+        })
+        .or_else(|| {
+            type_rows
+                .iter()
+                .find(|row| {
+                    row.sql_type.kind == sql_type.kind
+                        && row.sql_type.is_array == sql_type.is_array
+                        && row.typrelid == 0
+                })
+                .map(|row| row.oid)
+        })
+}
+
+fn catalog_type_oid(
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+    sql_type: crate::backend::parser::SqlType,
+) -> Option<u32> {
+    range_type_ref_for_sql_type(sql_type)
+        .map(|range_type| range_type.type_oid())
+        .or_else(|| {
+            multirange_type_ref_for_sql_type(sql_type)
+                .map(|multirange_type| multirange_type.type_oid())
+        })
+        .or_else(|| {
+            catalog
+                .type_rows()
+                .into_iter()
+                .find(|row| row.sql_type == sql_type)
+                .map(|row| row.oid)
+        })
+        .or_else(|| {
+            catalog
+                .type_rows()
+                .into_iter()
+                .find(|row| {
+                    row.sql_type.kind == sql_type.kind
+                        && row.sql_type.is_array == sql_type.is_array
+                        && row.typrelid == 0
+                })
+                .map(|row| row.oid)
+        })
 }
 
 impl Database {
@@ -41,9 +99,9 @@ impl Database {
             indnatts: meta.indkey.len() as i16,
             indnkeyatts: meta.indkey.len() as i16,
             indisunique: meta.indisunique,
-            indnullsnotdistinct: false,
+            indnullsnotdistinct: meta.indnullsnotdistinct,
             indisprimary: meta.indisprimary,
-            indisexclusion: false,
+            indisexclusion: meta.indisexclusion,
             indimmediate: false,
             indisclustered: false,
             indisvalid: meta.indisvalid,
@@ -190,7 +248,7 @@ impl Database {
         })
     }
 
-    fn default_index_base_name(
+    pub(super) fn default_index_base_name(
         relation_name: &str,
         columns: &[crate::backend::parser::IndexColumnDef],
     ) -> String {
@@ -363,9 +421,142 @@ impl Database {
                 indcollation,
                 indoption,
                 indnullsnotdistinct: false,
+                indisexclusion: false,
                 brin_options,
             },
         ))
+    }
+
+    pub(super) fn resolve_temporal_index_build_options(
+        &self,
+        client_id: ClientId,
+        txn_ctx: Option<(TransactionId, CommandId)>,
+        relation: &crate::backend::parser::BoundRelation,
+        columns: &[crate::backend::parser::IndexColumnDef],
+    ) -> Result<(u32, u32, CatalogIndexBuildOptions), ExecError> {
+        let access_method = crate::backend::utils::cache::lsyscache::access_method_row_by_name(
+            self, client_id, txn_ctx, "gist",
+        )
+        .filter(|row| row.amtype == 'i')
+        .ok_or_else(|| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "GiST index access method",
+                actual: "unsupported index access method".into(),
+            })
+        })?;
+        let type_rows =
+            crate::backend::utils::cache::syscache::ensure_type_rows(self, client_id, txn_ctx);
+        let mut indclass = Vec::with_capacity(columns.len());
+        let mut indcollation = Vec::with_capacity(columns.len());
+        let mut indoption = Vec::with_capacity(columns.len());
+        for column in columns {
+            let sql_type = relation
+                .desc
+                .columns
+                .iter()
+                .find(|desc| desc.name.eq_ignore_ascii_case(&column.name))
+                .ok_or_else(|| ExecError::Parse(ParseError::UnknownColumn(column.name.clone())))?
+                .sql_type;
+            let type_oid =
+                type_oid_for_temporal_index_type(sql_type, &type_rows).ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnsupportedType(column.name.clone()))
+                })?;
+            let opclass_oid = if sql_type.is_range() || sql_type.is_multirange() {
+                crate::include::catalog::RANGE_GIST_OPCLASS_OID
+            } else {
+                crate::include::catalog::default_btree_opclass_oid(type_oid).ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnsupportedType(column.name.clone()))
+                })?
+            };
+            indclass.push(opclass_oid);
+            indcollation.push(0);
+            indoption.push(0);
+        }
+        Ok((
+            access_method.oid,
+            access_method.amhandler,
+            CatalogIndexBuildOptions {
+                am_oid: access_method.oid,
+                indclass,
+                indcollation,
+                indoption,
+                indnullsnotdistinct: false,
+                indisexclusion: true,
+                brin_options: None,
+            },
+        ))
+    }
+
+    pub(super) fn temporal_constraint_operator_oids_for_relation(
+        &self,
+        relation_oid: u32,
+        columns: &[String],
+        without_overlaps: Option<&str>,
+        catalog: &dyn crate::backend::parser::CatalogLookup,
+    ) -> Result<Vec<u32>, ExecError> {
+        let relation = catalog.relation_by_oid(relation_oid).ok_or_else(|| {
+            ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "relation for temporal constraint",
+                actual: format!("missing relation {relation_oid}"),
+            })
+        })?;
+        self.temporal_constraint_operator_oids_for_desc(
+            &relation.desc,
+            columns,
+            without_overlaps,
+            catalog,
+        )
+    }
+
+    pub(super) fn temporal_constraint_operator_oids_for_desc(
+        &self,
+        desc: &crate::backend::executor::RelationDesc,
+        columns: &[String],
+        without_overlaps: Option<&str>,
+        catalog: &dyn crate::backend::parser::CatalogLookup,
+    ) -> Result<Vec<u32>, ExecError> {
+        let Some(period_column) = without_overlaps else {
+            return Ok(Vec::new());
+        };
+        columns
+            .iter()
+            .map(|column_name| {
+                let column = desc
+                    .columns
+                    .iter()
+                    .find(|column| !column.dropped && column.name.eq_ignore_ascii_case(column_name))
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::UnknownColumn(column_name.clone()))
+                    })?;
+                let type_oid = catalog_type_oid(catalog, column.sql_type).ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnsupportedType(column.name.clone()))
+                })?;
+                let op_name = if column.name.eq_ignore_ascii_case(period_column) {
+                    "&&"
+                } else {
+                    "="
+                };
+                let mut operator_type_oids = vec![type_oid];
+                if op_name == "&&"
+                    && let Some(multirange_type) = multirange_type_ref_for_sql_type(column.sql_type)
+                {
+                    operator_type_oids.push(multirange_type.range_type_oid());
+                }
+                operator_type_oids
+                    .into_iter()
+                    .find_map(|candidate_oid| {
+                        catalog.operator_by_name_left_right(op_name, candidate_oid, candidate_oid)
+                    })
+                    .map(|row| row.oid)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::UndefinedOperator {
+                            op: if op_name == "&&" { "&&" } else { "=" },
+                            left_type: column.name.clone(),
+                            right_type: column.name.clone(),
+                        })
+                    })
+            })
+            .collect()
     }
 
     pub(super) fn build_simple_index_in_transaction(
@@ -506,7 +697,7 @@ impl Database {
             index_relation: index_entry.rel,
             index_name: index_name.to_string(),
             index_desc: index_entry.desc.clone(),
-            index_meta: relcache_index_meta,
+            index_meta: relcache_index_meta.clone(),
             default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
             maintenance_work_mem_kb,
             expr_eval: (has_expression_keys || has_predicate).then_some(IndexBuildExprContext {
@@ -526,18 +717,36 @@ impl Database {
                 visible_catalog: visible_catalog.clone(),
             }),
         };
-        crate::backend::access::index::indexam::index_build_stub(&build_ctx, access_method_oid)
-            .map_err(|err| match err {
-                CatalogError::UniqueViolation(constraint) => ExecError::UniqueViolation {
-                    constraint,
-                    detail: None,
+        if index_meta.indisexclusion {
+            // :HACK: Temporal PK/UNIQUE constraints are enforced by a heap scan for now.
+            // Keep the GiST relation initialized for catalog/deparse parity without relying
+            // on full exclusion-index probing or btree_gist-equivalent scalar support.
+            crate::backend::access::index::indexam::index_build_empty_stub(
+                &IndexBuildEmptyContext {
+                    pool: self.pool.clone(),
+                    client_id,
+                    xid,
+                    index_relation: index_entry.rel,
+                    index_desc: index_entry.desc.clone(),
+                    index_meta: relcache_index_meta.clone(),
                 },
-                CatalogError::Interrupted(reason) => ExecError::Interrupted(reason),
-                _ => ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "index access method build",
-                    actual: "index build failed".into(),
-                }),
-            })?;
+                access_method_oid,
+            )
+            .map_err(map_catalog_error)?;
+        } else {
+            crate::backend::access::index::indexam::index_build_stub(&build_ctx, access_method_oid)
+                .map_err(|err| match err {
+                    CatalogError::UniqueViolation(constraint) => ExecError::UniqueViolation {
+                        constraint,
+                        detail: None,
+                    },
+                    CatalogError::Interrupted(reason) => ExecError::Interrupted(reason),
+                    _ => ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "index access method build",
+                        actual: "index build failed".into(),
+                    }),
+                })?;
+        }
 
         let mut catalog_guard = self.catalog.write();
         let readiness_ctx = CatalogWriteContext {
@@ -863,7 +1072,18 @@ impl Database {
                 ))
             })?;
 
-        if entry.relkind != 'r' {
+        if entry.relkind == 'p' && create_stmt.concurrently {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "cannot create index on partitioned table \"{}\" concurrently",
+                    create_stmt.table_name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
+        if !matches!(entry.relkind, 'r' | 'p') {
             return Err(ExecError::Parse(ParseError::WrongObjectType {
                 name: create_stmt.table_name.clone(),
                 expected: "table",
@@ -983,6 +1203,35 @@ impl Database {
         } else {
             create_stmt.index_name.clone()
         };
+        if entry.relkind == 'p' {
+            match self.build_partitioned_index_in_transaction(
+                client_id,
+                &entry,
+                &index_name,
+                &index_columns,
+                create_stmt.predicate_sql.as_deref(),
+                create_stmt.unique,
+                create_stmt.nulls_not_distinct,
+                create_stmt.only,
+                xid,
+                cid,
+                access_method_oid,
+                access_method_handler,
+                &build_options,
+                maintenance_work_mem_kb,
+                configured_search_path,
+                catalog_effects,
+            ) {
+                Ok(_) => {}
+                Err(ExecError::Parse(ParseError::TableAlreadyExists(_)))
+                    if create_stmt.if_not_exists =>
+                {
+                    return Ok(StatementResult::AffectedRows(0));
+                }
+                Err(err) => return Err(err),
+            }
+            return Ok(StatementResult::AffectedRows(0));
+        }
         match self.build_simple_index_in_transaction(
             client_id,
             &entry,
