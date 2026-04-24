@@ -1962,6 +1962,10 @@ fn try_parse_unsupported_statement(sql: &str) -> Option<Statement> {
         Some("SELECT form")
     } else if lowered.starts_with("delete from ") {
         Some("DELETE form")
+    } else if lowered.starts_with("prepare ") {
+        Some("PREPARE")
+    } else if lowered.starts_with("execute ") {
+        Some("EXECUTE")
     } else {
         None
     }?;
