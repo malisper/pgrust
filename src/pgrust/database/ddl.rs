@@ -20,7 +20,7 @@ use crate::include::catalog::{
     CONSTRAINT_FOREIGN, DEPENDENCY_INTERNAL, DEPENDENCY_NORMAL, PG_CATALOG_NAMESPACE_OID,
     PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_REWRITE_RELATION_OID, PG_TRIGGER_RELATION_OID,
     PG_TYPE_RELATION_OID, PUBLIC_NAMESPACE_OID, builtin_range_name_for_sql_type,
-    relkind_is_analyzable,
+    builtin_type_name_for_oid, relkind_is_analyzable,
 };
 use crate::include::nodes::primnodes::{Var, user_attrno};
 
@@ -695,13 +695,22 @@ fn is_text_like_type(ty: SqlType) -> bool {
         )
 }
 
-pub(crate) fn format_sql_type_name(sql_type: SqlType) -> &'static str {
+pub(crate) fn format_sql_type_name(sql_type: SqlType) -> String {
     if sql_type.is_range() {
-        return builtin_range_name_for_sql_type(sql_type).unwrap_or("range");
+        return builtin_range_name_for_sql_type(sql_type)
+            .unwrap_or("range")
+            .to_string();
     }
     if sql_type.is_multirange() {
         return crate::include::catalog::builtin_multirange_name_for_sql_type(sql_type)
-            .unwrap_or("multirange");
+            .unwrap_or("multirange")
+            .to_string();
+    }
+    if !sql_type.is_array
+        && sql_type.type_oid != 0
+        && let Some(name) = builtin_type_name_for_oid(sql_type.type_oid)
+    {
+        return name;
     }
     match sql_type.kind {
         SqlTypeKind::AnyElement => "anyelement",
@@ -728,6 +737,7 @@ pub(crate) fn format_sql_type_name(sql_type: SqlType) -> &'static str {
         SqlTypeKind::RegClass => "regclass",
         SqlTypeKind::RegType => "regtype",
         SqlTypeKind::RegRole => "regrole",
+        SqlTypeKind::RegNamespace => "regnamespace",
         SqlTypeKind::RegOperator => "regoperator",
         SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::OidVector => "oidvector",
@@ -776,6 +786,7 @@ pub(crate) fn format_sql_type_name(sql_type: SqlType) -> &'static str {
         | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
         SqlTypeKind::Multirange => unreachable!("multirange handled above"),
     }
+    .to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

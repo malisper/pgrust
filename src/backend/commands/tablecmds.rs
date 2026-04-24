@@ -1575,6 +1575,17 @@ fn apply_referential_action_to_rows(
             .cloned()
             .collect::<Vec<_>>()
     });
+    let triggers = RuntimeTriggers::load(
+        catalog,
+        constraint.child_relation_oid,
+        &constraint.child_relation_name,
+        &constraint.child_desc,
+        TriggerOperation::Update,
+        &[],
+        ctx.session_replication_role,
+    )?;
+    triggers.before_statement(ctx)?;
+    let mut transition_capture = triggers.new_transition_capture();
     let mut updated_rows = Vec::new();
     for (tid, current_values) in rows {
         ctx.check_for_interrupts()?;
@@ -1614,6 +1625,11 @@ fn apply_referential_action_to_rows(
                     }
                     ForeignKeyAction::NoAction | ForeignKeyAction::Restrict => unreachable!(),
                 }
+                let Some(updated_values) =
+                    triggers.before_row_update(&current_values, updated_values, ctx)?
+                else {
+                    continue;
+                };
                 if let Some(full_relation_constraints) = full_relation_constraints.as_ref() {
                     crate::backend::executor::enforce_relation_constraints(
                         &constraint.child_relation_name,
@@ -1651,6 +1667,12 @@ fn apply_referential_action_to_rows(
                     cid,
                     waiter,
                 )?;
+                triggers.capture_update_row(
+                    &mut transition_capture,
+                    &current_values,
+                    &updated_values,
+                );
+                triggers.after_row_update(&current_values, &updated_values, ctx)?;
                 if matches!(action, ForeignKeyAction::SetDefault) {
                     updated_rows.push(updated_values);
                 }
@@ -1658,6 +1680,8 @@ fn apply_referential_action_to_rows(
             ForeignKeyAction::NoAction | ForeignKeyAction::Restrict => unreachable!(),
         }
     }
+    triggers.after_transition_rows(&transition_capture, ctx)?;
+    triggers.after_statement(Some(&transition_capture), ctx)?;
     if matches!(action, ForeignKeyAction::SetDefault) {
         let outbound_constraint = outbound_constraint.ok_or_else(|| ExecError::DetailedError {
             message: "foreign key action failed".into(),
@@ -1800,7 +1824,30 @@ fn apply_inbound_foreign_key_actions_on_delete(
                     .map(|index| values.get(*index).cloned().unwrap_or(Value::Null))
                     .collect::<Vec<_>>();
                 let rows = collect_referencing_rows(constraint, &key_values, ctx)?;
+                let catalog = ctx
+                    .catalog
+                    .as_ref()
+                    .ok_or_else(|| ExecError::DetailedError {
+                        message: "foreign key action failed".into(),
+                        detail: Some("executor context missing visible catalog".into()),
+                        hint: None,
+                        sqlstate: "XX000",
+                    })?;
+                let triggers = RuntimeTriggers::load(
+                    catalog,
+                    constraint.child_relation_oid,
+                    &constraint.child_relation_name,
+                    &constraint.child_desc,
+                    TriggerOperation::Delete,
+                    &[],
+                    ctx.session_replication_role,
+                )?;
+                triggers.before_statement(ctx)?;
+                let mut transition_capture = triggers.new_transition_capture();
                 for (tid, child_values) in rows {
+                    if !triggers.before_row_delete(&child_values, ctx)? {
+                        continue;
+                    }
                     let target = BoundDeleteTarget {
                         relation_name: constraint.child_relation_name.clone(),
                         rel: constraint.child_rel,
@@ -1815,8 +1862,19 @@ fn apply_inbound_foreign_key_actions_on_delete(
                         row_source: BoundModifyRowSource::Heap,
                         predicate: None,
                     };
-                    let _ = apply_base_delete_row(&target, tid, child_values, ctx, xid, waiter)?;
+                    let _ = apply_base_delete_row(
+                        &target,
+                        tid,
+                        child_values.clone(),
+                        ctx,
+                        xid,
+                        waiter,
+                    )?;
+                    triggers.capture_delete_row(&mut transition_capture, &child_values);
+                    triggers.after_row_delete(&child_values, ctx)?;
                 }
+                triggers.after_transition_rows(&transition_capture, ctx)?;
+                triggers.after_statement(Some(&transition_capture), ctx)?;
             }
             ForeignKeyAction::SetNull | ForeignKeyAction::SetDefault => {
                 let key_values = constraint
@@ -2899,6 +2957,7 @@ fn sql_type_display_name(ty: SqlType) -> String {
         SqlTypeKind::RegClass => "regclass",
         SqlTypeKind::RegType => "regtype",
         SqlTypeKind::RegRole => "regrole",
+        SqlTypeKind::RegNamespace => "regnamespace",
         SqlTypeKind::RegOperator => "regoperator",
         SqlTypeKind::RegProcedure => "regprocedure",
         SqlTypeKind::Tid => "tid",
@@ -3906,6 +3965,9 @@ pub(crate) fn execute_insert_rows(
     if let Some(triggers) = &triggers {
         triggers.before_statement(ctx)?;
     }
+    let mut transition_capture = triggers
+        .as_ref()
+        .map(|triggers| triggers.new_transition_capture());
 
     let mut inserted_rows = Vec::new();
     for values in rows {
@@ -3931,12 +3993,20 @@ pub(crate) fn execute_insert_rows(
         maintain_indexes_for_row(rel, desc, indexes, &values, heap_tid, ctx)?;
         inserted_rows.push(values.clone());
         if let Some(triggers) = &triggers {
+            if let Some(capture) = transition_capture.as_mut() {
+                triggers.capture_insert_row(capture, &values);
+            }
             triggers.after_row_insert(&values, ctx)?;
         }
     }
 
     if let Some(triggers) = &triggers {
-        triggers.after_statement(ctx)?;
+        if let Some(capture) = transition_capture.as_ref() {
+            triggers.after_transition_rows(capture, ctx)?;
+            triggers.after_statement(Some(capture), ctx)?;
+        } else {
+            triggers.after_statement(None, ctx)?;
+        }
     }
 
     Ok(inserted_rows)
@@ -4021,6 +4091,9 @@ pub fn execute_prepared_insert_row(
     if let Some(triggers) = &triggers {
         triggers.before_statement(ctx)?;
     }
+    let mut transition_capture = triggers
+        .as_ref()
+        .map(|triggers| triggers.new_transition_capture());
 
     let mut slot = TupleSlot::virtual_row(vec![Value::Null; prepared.desc.columns.len()]);
     let mut values = prepared
@@ -4036,7 +4109,11 @@ pub fn execute_prepared_insert_row(
         None => Some(values),
     }) else {
         if let Some(triggers) = &triggers {
-            triggers.after_statement(ctx)?;
+            if let Some(capture) = transition_capture.as_ref() {
+                triggers.after_statement(Some(capture), ctx)?;
+            } else {
+                triggers.after_statement(None, ctx)?;
+            }
         }
         return Ok(());
     };
@@ -4065,8 +4142,16 @@ pub fn execute_prepared_insert_row(
         .write()
         .note_relation_insert(prepared.relation_oid);
     if let Some(triggers) = &triggers {
+        if let Some(capture) = transition_capture.as_mut() {
+            triggers.capture_insert_row(capture, &values);
+        }
         triggers.after_row_insert(&values, ctx)?;
-        triggers.after_statement(ctx)?;
+        if let Some(capture) = transition_capture.as_ref() {
+            triggers.after_transition_rows(capture, ctx)?;
+            triggers.after_statement(Some(capture), ctx)?;
+        } else {
+            triggers.after_statement(None, ctx)?;
+        }
     }
     Ok(())
 }
@@ -4122,6 +4207,9 @@ pub fn execute_update_with_waiter(
             if let Some(triggers) = &triggers {
                 triggers.before_statement(ctx)?;
             }
+            let mut transition_capture = triggers
+                .as_ref()
+                .map(|triggers| triggers.new_transition_capture());
 
             let desc = Rc::new(target.desc.clone());
             let attr_descs: Rc<[_]> = desc.attribute_descs().into();
@@ -4209,6 +4297,13 @@ pub fn execute_update_with_waiter(
                                 .write()
                                 .note_relation_update(target.relation_oid);
                             if let Some(triggers) = &triggers {
+                                if let Some(capture) = transition_capture.as_mut() {
+                                    triggers.capture_update_row(
+                                        capture,
+                                        &current_old_values,
+                                        &triggered_values,
+                                    );
+                                }
                                 triggers.after_row_update(
                                     &current_old_values,
                                     &triggered_values,
@@ -4274,7 +4369,12 @@ pub fn execute_update_with_waiter(
             }
 
             if let Some(triggers) = &triggers {
-                triggers.after_statement(ctx)?;
+                if let Some(capture) = transition_capture.as_ref() {
+                    triggers.after_transition_rows(capture, ctx)?;
+                    triggers.after_statement(Some(capture), ctx)?;
+                } else {
+                    triggers.after_statement(None, ctx)?;
+                }
             }
         }
 
@@ -4451,6 +4551,14 @@ fn execute_update_from_joined_input(
     for trigger in triggers.iter().flatten() {
         trigger.before_statement(ctx)?;
     }
+    let mut transition_captures = triggers
+        .iter()
+        .map(|trigger| {
+            trigger
+                .as_ref()
+                .map(|trigger| trigger.new_transition_capture())
+        })
+        .collect::<Vec<_>>();
 
     let result = (|| {
         let mut state = executor_start(input_plan.plan_tree.clone());
@@ -4545,6 +4653,13 @@ fn execute_update_from_joined_input(
                             .write()
                             .note_relation_update(target.relation_oid);
                         if let Some(trigger) = triggers[target_index].as_ref() {
+                            if let Some(capture) = transition_captures[target_index].as_mut() {
+                                trigger.capture_update_row(
+                                    capture,
+                                    &current_old_values,
+                                    &triggered_values,
+                                );
+                            }
                             trigger.after_row_update(
                                 &current_old_values,
                                 &triggered_values,
@@ -4602,8 +4717,17 @@ fn execute_update_from_joined_input(
         }
     })();
 
-    for trigger in triggers.iter_mut().flatten() {
-        trigger.after_statement(ctx)?;
+    if result.is_ok() {
+        for (trigger, capture) in triggers.iter_mut().zip(transition_captures.iter()) {
+            if let Some(trigger) = trigger {
+                if let Some(capture) = capture.as_ref() {
+                    trigger.after_transition_rows(capture, ctx)?;
+                    trigger.after_statement(Some(capture), ctx)?;
+                } else {
+                    trigger.after_statement(None, ctx)?;
+                }
+            }
+        }
     }
     result
 }
@@ -4652,6 +4776,9 @@ pub fn execute_delete_with_waiter(
             if let Some(triggers) = &triggers {
                 triggers.before_statement(ctx)?;
             }
+            let mut transition_capture = triggers
+                .as_ref()
+                .map(|triggers| triggers.new_transition_capture());
 
             let desc = Rc::new(target.desc.clone());
             let attr_descs: Rc<[_]> = desc.attribute_descs().into();
@@ -4739,6 +4866,9 @@ pub fn execute_delete_with_waiter(
                                 .write()
                                 .note_relation_delete(target.relation_oid);
                             if let Some(triggers) = &triggers {
+                                if let Some(capture) = transition_capture.as_mut() {
+                                    triggers.capture_delete_row(capture, &current_values);
+                                }
                                 triggers.after_row_delete(&current_values, ctx)?;
                             }
                             if !stmt.returning.is_empty() {
@@ -4780,7 +4910,12 @@ pub fn execute_delete_with_waiter(
             }
 
             if let Some(triggers) = &triggers {
-                triggers.after_statement(ctx)?;
+                if let Some(capture) = transition_capture.as_ref() {
+                    triggers.after_transition_rows(capture, ctx)?;
+                    triggers.after_statement(Some(capture), ctx)?;
+                } else {
+                    triggers.after_statement(None, ctx)?;
+                }
             }
         }
 

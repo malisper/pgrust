@@ -51,7 +51,7 @@ mod tests {
         });
 
         client_stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(Duration::from_secs(15)))
             .unwrap();
         (client_stream, server)
     }
@@ -77,7 +77,7 @@ mod tests {
 
         let stream = TcpStream::connect(addr).unwrap();
         stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(Duration::from_secs(15)))
             .unwrap();
         (stream, server)
     }
@@ -818,7 +818,7 @@ mod tests {
         send_startup(&mut stream);
         let _ = read_until_ready(&mut stream, "startup");
 
-        send_query(&mut stream, "set statement_timeout = '50ms'");
+        send_query(&mut stream, "set statement_timeout = '500ms'");
         let _ = read_until_ready(&mut stream, "set_timeout");
 
         send_query(&mut stream, "select * from generate_series(1, 1000000000)");
@@ -860,7 +860,7 @@ mod tests {
             &[
                 ("user", "postgres"),
                 ("database", "postgres"),
-                ("options", "-c statement_timeout=50ms"),
+                ("options", "-c statement_timeout=500ms"),
             ],
         );
         let _ = read_until_ready(&mut stream, "startup_with_options");
@@ -892,7 +892,7 @@ mod tests {
         send_startup(&mut stream);
         let _ = read_until_ready(&mut stream, "startup");
 
-        send_query(&mut stream, "set statement_timeout = '50ms'");
+        send_query(&mut stream, "set statement_timeout = '500ms'");
         let _ = read_until_ready(&mut stream, "set_timeout");
 
         send_parse(

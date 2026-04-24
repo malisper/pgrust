@@ -4,9 +4,9 @@ use crate::backend::executor::Value;
 use crate::backend::rewrite::format_stored_rule_definition;
 use crate::backend::utils::cache::system_view_registry::synthetic_system_views;
 use crate::include::catalog::{
-    BOOTSTRAP_SUPERUSER_OID, NAME_TYPE_OID, PG_LANGUAGE_INTERNAL_OID, PgAttributeRow, PgAuthIdRow,
-    PgClassRow, PgIndexRow, PgNamespaceRow, PgPolicyRow, PgProcRow, PgRewriteRow, PgStatisticRow,
-    PolicyCommand,
+    BOOTSTRAP_SUPERUSER_OID, NAME_TYPE_OID, PG_LANGUAGE_INTERNAL_OID, PgAmRow, PgAttributeRow,
+    PgAuthIdRow, PgClassRow, PgIndexRow, PgNamespaceRow, PgPolicyRow, PgProcRow, PgRewriteRow,
+    PgStatisticRow, PolicyCommand,
 };
 use crate::include::nodes::datum::ArrayValue;
 use crate::pgrust::database::DatabaseStatsStore;
@@ -69,6 +69,109 @@ pub fn build_pg_views_rows(
     append_synthetic_pg_catalog_view_rows(&mut rows, &role_names);
     rows.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
     rows.into_iter().map(|(_, _, row)| row).collect()
+}
+
+pub fn build_pg_indexes_rows(
+    namespaces: Vec<PgNamespaceRow>,
+    classes: Vec<PgClassRow>,
+    attributes: Vec<PgAttributeRow>,
+    indexes: Vec<PgIndexRow>,
+    access_methods: Vec<PgAmRow>,
+) -> Vec<Vec<Value>> {
+    let namespace_names = namespaces
+        .into_iter()
+        .map(|row| (row.oid, row.nspname))
+        .collect::<BTreeMap<_, _>>();
+    let classes_by_oid = classes
+        .into_iter()
+        .map(|row| (row.oid, row))
+        .collect::<BTreeMap<_, _>>();
+    let am_names = access_methods
+        .into_iter()
+        .map(|row| (row.oid, row.amname))
+        .collect::<BTreeMap<_, _>>();
+    let mut attributes_by_relation = BTreeMap::<u32, BTreeMap<i16, String>>::new();
+    for attribute in attributes {
+        if attribute.attnum <= 0 || attribute.attisdropped {
+            continue;
+        }
+        attributes_by_relation
+            .entry(attribute.attrelid)
+            .or_default()
+            .insert(attribute.attnum, attribute.attname);
+    }
+
+    let mut rows = indexes
+        .into_iter()
+        .filter_map(|index| {
+            let table = classes_by_oid.get(&index.indrelid)?;
+            let index_class = classes_by_oid.get(&index.indexrelid)?;
+            if !matches!(index_class.relkind, 'i' | 'I') {
+                return None;
+            }
+            let schemaname = namespace_names
+                .get(&table.relnamespace)
+                .cloned()
+                .unwrap_or_else(|| "public".to_string());
+            let column_names = index
+                .indkey
+                .iter()
+                .map(|attnum| {
+                    if *attnum == 0 {
+                        "expr".to_string()
+                    } else {
+                        attributes_by_relation
+                            .get(&table.oid)
+                            .and_then(|attrs| attrs.get(attnum))
+                            .cloned()
+                            .unwrap_or_else(|| attnum.to_string())
+                    }
+                })
+                .collect::<Vec<_>>();
+            let unique = if index.indisunique { "UNIQUE " } else { "" };
+            let only = if index_class.relkind == 'I' {
+                " ONLY"
+            } else {
+                ""
+            };
+            let table_name = format!("{}.{}", schemaname, table.relname);
+            let amname = am_names
+                .get(&index_class.relam)
+                .cloned()
+                .unwrap_or_else(|| "btree".to_string());
+            let mut indexdef = format!(
+                "CREATE {unique}INDEX {} ON{only} {} USING {} ({})",
+                index_class.relname,
+                table_name,
+                amname,
+                column_names.join(", ")
+            );
+            if let Some(predicate) = index.indpred.as_deref().filter(|sql| !sql.is_empty()) {
+                indexdef.push_str(" WHERE (");
+                indexdef.push_str(predicate);
+                indexdef.push(')');
+            }
+            Some((
+                schemaname.clone(),
+                table.relname.clone(),
+                index_class.relname.clone(),
+                vec![
+                    Value::Text(schemaname.into()),
+                    Value::Text(table.relname.clone().into()),
+                    Value::Text(index_class.relname.clone().into()),
+                    Value::Null,
+                    Value::Text(indexdef.into()),
+                ],
+            ))
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    rows.into_iter().map(|(_, _, _, row)| row).collect()
 }
 
 fn append_synthetic_pg_catalog_view_rows(
