@@ -6,7 +6,7 @@
 # By default, this script:
 #   1. Builds pgrust_server in release mode, or dev mode for --test
 #   2. Starts it on a fresh data directory
-#   3. Runs each .sql regression test via psql with statement_timeout = TIMEOUT
+#   3. Runs each .sql regression test via psql with statement_timeout = '5s'
 #   4. Compares output against expected .out files
 #   5. Reports pass/fail/error statistics
 #
@@ -490,7 +490,7 @@ export PGRUST_REGRESS_TABLESPACE_DIR="$REGRESS_TABLESPACE_DIR"
 export PGTZ="America/Los_Angeles"
 export PGDATESTYLE="Postgres, MDY"
 setup_pg_regress_env
-export PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c statement_timeout=${TIMEOUT}s"
+export PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c statement_timeout=5s"
 # PG18 psql adds a verbose \d+ Compression column by default. Keep the
 # regression client surface aligned with the checked-in expected files until
 # the repo moves those fixtures to the new default shape.
@@ -529,7 +529,7 @@ run_bootstrap_setup() {
     return 0
 }
 
-echo "Per-query statement_timeout: ${TIMEOUT}s"
+echo "Per-query statement_timeout: 5s"
 
 if ! run_bootstrap_setup; then
     exit 1
