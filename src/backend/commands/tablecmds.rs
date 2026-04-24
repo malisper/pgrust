@@ -21,12 +21,12 @@ use crate::backend::parser::{
     BoundDeleteStatement, BoundDeleteTarget, BoundForeignKeyConstraint, BoundIndexRelation,
     BoundInsertSource, BoundInsertStatement, BoundMergeAction, BoundMergeStatement,
     BoundMergeWhenClause, BoundModifyRowSource, BoundOnConflictAction, BoundReferencedByForeignKey,
-    BoundRelationConstraints, BoundTemporalConstraint, BoundUpdateStatement, BoundUpdateTarget,
-    Catalog, CatalogLookup, DropTableStatement, ExplainStatement, ForeignKeyAction,
-    MaintenanceTarget, MergeStatement, ParseError, SelectStatement, SqlType, SqlTypeKind,
-    Statement, TruncateTableStatement, UpdateStatement, VacuumStatement, bind_create_table,
-    bind_generated_expr, bind_referenced_by_foreign_keys, bind_relation_constraints,
-    bind_scalar_expr_in_scope, bind_update,
+    BoundRelation, BoundRelationConstraints, BoundTemporalConstraint, BoundUpdateStatement,
+    BoundUpdateTarget, Catalog, CatalogLookup, DropTableStatement, ExplainStatement,
+    ForeignKeyAction, MaintenanceTarget, MergeStatement, ParseError, SelectStatement, SqlType,
+    SqlTypeKind, Statement, TruncateTableStatement, UpdateStatement, VacuumStatement,
+    bind_create_table, bind_generated_expr, bind_referenced_by_foreign_keys,
+    bind_relation_constraints, bind_scalar_expr_in_scope, bind_update,
 };
 use crate::backend::rewrite::RlsWriteCheck;
 use crate::backend::rewrite::pg_rewrite_query;
@@ -2256,8 +2256,7 @@ pub fn collect_vacuum_stats(
     catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<crate::backend::access::heap::vacuumlazy::VacuumRelationStats>, ExecError> {
-    let mut processed = 0u64;
-    let mut stats = Vec::with_capacity(targets.len());
+    let mut relations = Vec::with_capacity(targets.len());
     for target in targets {
         let Some(entry) = catalog
             .lookup_any_relation(&target.table_name)
@@ -2265,6 +2264,19 @@ pub fn collect_vacuum_stats(
         else {
             continue;
         };
+        relations.push(entry);
+    }
+    collect_vacuum_stats_for_relations(&relations, catalog, ctx)
+}
+
+pub(crate) fn collect_vacuum_stats_for_relations(
+    relations: &[BoundRelation],
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<crate::backend::access::heap::vacuumlazy::VacuumRelationStats>, ExecError> {
+    let mut processed = 0u64;
+    let mut stats = Vec::with_capacity(relations.len());
+    for entry in relations {
         let scan = crate::backend::access::heap::vacuumlazy::vacuum_relation_scan(
             &ctx.pool,
             ctx.client_id,

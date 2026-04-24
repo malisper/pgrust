@@ -591,20 +591,32 @@ pub(crate) fn build_pg_stat_user_tables_rows(
                     Value::Int64(0),
                     Value::Int64(rel_stats.live_tuples),
                     Value::Int64(rel_stats.dead_tuples),
-                    Value::Int64(0),
-                    Value::Int64(0),
-                    Value::Null,
-                    Value::Null,
-                    Value::Null,
-                    Value::Null,
-                    Value::Int64(0),
-                    Value::Int64(0),
-                    Value::Int64(0),
-                    Value::Int64(0),
-                    Value::Float64(0.0),
-                    Value::Float64(0.0),
-                    Value::Float64(0.0),
-                    Value::Float64(0.0),
+                    Value::Int64(rel_stats.mod_since_analyze),
+                    Value::Int64(rel_stats.ins_since_vacuum),
+                    rel_stats
+                        .last_vacuum
+                        .map(Value::TimestampTz)
+                        .unwrap_or(Value::Null),
+                    rel_stats
+                        .last_autovacuum
+                        .map(Value::TimestampTz)
+                        .unwrap_or(Value::Null),
+                    rel_stats
+                        .last_analyze
+                        .map(Value::TimestampTz)
+                        .unwrap_or(Value::Null),
+                    rel_stats
+                        .last_autoanalyze
+                        .map(Value::TimestampTz)
+                        .unwrap_or(Value::Null),
+                    Value::Int64(rel_stats.vacuum_count),
+                    Value::Int64(rel_stats.autovacuum_count),
+                    Value::Int64(rel_stats.analyze_count),
+                    Value::Int64(rel_stats.autoanalyze_count),
+                    Value::Float64(rel_stats.total_vacuum_time_micros as f64 / 1000.0),
+                    Value::Float64(rel_stats.total_autovacuum_time_micros as f64 / 1000.0),
+                    Value::Float64(rel_stats.total_analyze_time_micros as f64 / 1000.0),
+                    Value::Float64(rel_stats.total_autoanalyze_time_micros as f64 / 1000.0),
                 ],
             ))
         })

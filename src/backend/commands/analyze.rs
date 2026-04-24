@@ -159,37 +159,75 @@ pub(crate) fn collect_analyze_stats(
             .lookup_analyzable_relation(&target.table_name)
             .ok_or_else(|| ExecError::Parse(ParseError::UnknownTable(target.table_name.clone())))?;
         let selected = selected_columns(&relation, target)?;
-        if relation.relkind == 'p' {
-            let inherited = if target.only {
-                InheritanceAnalyzeStats {
-                    reltuples: 0.0,
-                    statistics: Vec::new(),
-                }
-            } else {
-                sample_inheritance_tree(&relation, &selected, catalog, ctx)?
-            };
-            out.push(AnalyzeRelationStats {
-                relation_oid: relation.relation_oid,
-                relpages: -1,
-                reltuples: inherited.reltuples,
-                statistics: inherited.statistics,
-            });
-            continue;
-        }
-        let root_stats = sample_relation(&relation, &selected, catalog, ctx)?;
-        let mut statistics = root_stats.statistics;
-        if !target.only && catalog.has_subclass(relation.relation_oid) {
-            statistics
-                .extend(sample_inheritance_tree(&relation, &selected, catalog, ctx)?.statistics);
-        }
-        out.push(AnalyzeRelationStats {
-            relation_oid: relation.relation_oid,
-            relpages: root_stats.relpages,
-            reltuples: root_stats.reltuples,
-            statistics,
-        });
+        collect_analyze_stats_for_relation(
+            &relation,
+            selected,
+            target.only,
+            catalog,
+            ctx,
+            &mut out,
+        )?;
     }
     Ok(out)
+}
+
+pub(crate) fn collect_analyze_stats_for_relations(
+    relations: &[BoundRelation],
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<AnalyzeRelationStats>, ExecError> {
+    let mut out = Vec::with_capacity(relations.len());
+    for relation in relations {
+        ctx.check_for_interrupts()?;
+        collect_analyze_stats_for_relation(
+            relation,
+            (0..relation.desc.columns.len()).collect(),
+            false,
+            catalog,
+            ctx,
+            &mut out,
+        )?;
+    }
+    Ok(out)
+}
+
+fn collect_analyze_stats_for_relation(
+    relation: &BoundRelation,
+    selected: Vec<usize>,
+    only: bool,
+    catalog: &dyn CatalogLookup,
+    ctx: &mut ExecutorContext,
+    out: &mut Vec<AnalyzeRelationStats>,
+) -> Result<(), ExecError> {
+    if relation.relkind == 'p' {
+        let inherited = if only {
+            InheritanceAnalyzeStats {
+                reltuples: 0.0,
+                statistics: Vec::new(),
+            }
+        } else {
+            sample_inheritance_tree(&relation, &selected, catalog, ctx)?
+        };
+        out.push(AnalyzeRelationStats {
+            relation_oid: relation.relation_oid,
+            relpages: -1,
+            reltuples: inherited.reltuples,
+            statistics: inherited.statistics,
+        });
+        return Ok(());
+    }
+    let root_stats = sample_relation(&relation, &selected, catalog, ctx)?;
+    let mut statistics = root_stats.statistics;
+    if !only && catalog.has_subclass(relation.relation_oid) {
+        statistics.extend(sample_inheritance_tree(&relation, &selected, catalog, ctx)?.statistics);
+    }
+    out.push(AnalyzeRelationStats {
+        relation_oid: relation.relation_oid,
+        relpages: root_stats.relpages,
+        reltuples: root_stats.reltuples,
+        statistics,
+    });
+    Ok(())
 }
 
 fn selected_columns(

@@ -163,6 +163,24 @@ impl TableLockManager {
         }
     }
 
+    pub fn try_lock_table(
+        &self,
+        rel: RelFileLocator,
+        mode: TableLockMode,
+        client_id: ClientId,
+    ) -> bool {
+        let mut state = self.state.lock();
+        let entries = state.locks.entry(rel).or_default();
+        let has_conflict = entries.iter().any(|e| {
+            e.holder != client_id && e.mode.conflicts_with(mode_for_holder(e, client_id, mode))
+        });
+        if has_conflict {
+            return false;
+        }
+        grant_table_lock(entries, client_id, mode);
+        true
+    }
+
     pub fn unlock_table(&self, rel: RelFileLocator, client_id: ClientId) {
         let mut state = self.state.lock();
         if let Some(entries) = state.locks.get_mut(&rel) {

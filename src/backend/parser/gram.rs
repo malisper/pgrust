@@ -6900,6 +6900,10 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::listen_stmt => Ok(Statement::Listen(build_listen(inner)?)),
         Rule::unlisten_stmt => Ok(Statement::Unlisten(build_unlisten(inner)?)),
         Rule::show_stmt => Ok(Statement::Show(build_show(inner)?)),
+        Rule::declare_cursor_stmt => Ok(Statement::DeclareCursor(build_declare_cursor(inner)?)),
+        Rule::fetch_stmt => Ok(Statement::Fetch(build_fetch(inner)?)),
+        Rule::move_stmt => Ok(Statement::Move(build_fetch(inner)?)),
+        Rule::close_portal_stmt => Ok(Statement::ClosePortal(build_close_portal(inner)?)),
         Rule::set_session_authorization_stmt => Ok(Statement::SetSessionAuthorization(
             build_set_session_authorization(inner)?,
         )),
@@ -7307,6 +7311,135 @@ fn build_unlisten(pair: Pair<'_, Rule>) -> Result<UnlistenStatement, ParseError>
         return Err(ParseError::UnexpectedEof);
     }
     Ok(UnlistenStatement { channel })
+}
+
+fn build_declare_cursor(pair: Pair<'_, Rule>) -> Result<DeclareCursorStatement, ParseError> {
+    let mut name = None;
+    let mut binary = false;
+    let mut insensitive = false;
+    let mut scroll = CursorScrollOption::Unspecified;
+    let mut hold = false;
+    let mut query = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => {
+                if name.is_none() {
+                    name = Some(build_identifier(part));
+                }
+            }
+            Rule::cursor_option => {
+                let text = part.as_str().to_ascii_lowercase();
+                if text == "binary" {
+                    binary = true;
+                } else if text == "insensitive" {
+                    insensitive = true;
+                } else if text.contains("no") {
+                    scroll = CursorScrollOption::NoScroll;
+                } else if text == "scroll" {
+                    scroll = CursorScrollOption::Scroll;
+                }
+            }
+            Rule::cursor_hold_clause => {
+                hold = part.as_str().to_ascii_lowercase().starts_with("with");
+            }
+            Rule::select_stmt => query = Some(build_select(part)?),
+            _ => {}
+        }
+    }
+    Ok(DeclareCursorStatement {
+        name: name.ok_or(ParseError::UnexpectedEof)?,
+        binary,
+        insensitive,
+        scroll,
+        hold,
+        query: query.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn build_fetch(pair: Pair<'_, Rule>) -> Result<FetchStatement, ParseError> {
+    let mut direction = FetchDirection::Next;
+    let mut cursor_name = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::fetch_direction => direction = build_fetch_direction(part)?,
+            Rule::fetch_portal_name => {
+                cursor_name = part
+                    .into_inner()
+                    .find(|inner| inner.as_rule() == Rule::identifier)
+                    .map(build_identifier);
+            }
+            _ => {}
+        }
+    }
+    Ok(FetchStatement {
+        cursor_name: cursor_name.ok_or(ParseError::UnexpectedEof)?,
+        direction,
+    })
+}
+
+fn build_fetch_direction(pair: Pair<'_, Rule>) -> Result<FetchDirection, ParseError> {
+    let text = pair.as_str().trim().to_ascii_lowercase();
+    if text == "next" {
+        return Ok(FetchDirection::Next);
+    }
+    if text == "prior" {
+        return Ok(FetchDirection::Prior);
+    }
+    if text == "first" {
+        return Ok(FetchDirection::First);
+    }
+    if text == "last" {
+        return Ok(FetchDirection::Last);
+    }
+    if let Some(rest) = text.strip_prefix("absolute") {
+        return Ok(FetchDirection::Absolute(parse_i64(rest.trim())?));
+    }
+    if let Some(rest) = text.strip_prefix("relative") {
+        return Ok(FetchDirection::Relative(parse_i64(rest.trim())?));
+    }
+    if let Some(rest) = text.strip_prefix("forward") {
+        let rest = rest.trim();
+        if rest.is_empty() {
+            return Ok(FetchDirection::Forward(Some(1)));
+        }
+        return Ok(FetchDirection::Forward(fetch_count_from_text(rest)?));
+    }
+    if let Some(rest) = text.strip_prefix("backward") {
+        let rest = rest.trim();
+        if rest.is_empty() {
+            return Ok(FetchDirection::Backward(Some(1)));
+        }
+        return Ok(FetchDirection::Backward(fetch_count_from_text(rest)?));
+    }
+    Ok(FetchDirection::Forward(fetch_count_from_text(&text)?))
+}
+
+fn fetch_count_from_text(text: &str) -> Result<Option<i64>, ParseError> {
+    if text.is_empty() || text == "all" {
+        Ok(None)
+    } else {
+        Ok(Some(parse_i64(text)?))
+    }
+}
+
+fn parse_i64(text: &str) -> Result<i64, ParseError> {
+    text.parse::<i64>()
+        .map_err(|_| ParseError::InvalidInteger(text.to_string()))
+}
+
+fn build_close_portal(pair: Pair<'_, Rule>) -> Result<ClosePortalStatement, ParseError> {
+    let mut name = None;
+    let mut all = false;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::identifier => name = Some(build_identifier(part)),
+            Rule::kw_all => all = true,
+            _ => {}
+        }
+    }
+    Ok(ClosePortalStatement {
+        name: if all { None } else { name },
+    })
 }
 
 fn build_set_session_authorization(

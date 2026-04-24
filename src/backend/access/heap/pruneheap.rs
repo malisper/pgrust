@@ -23,6 +23,7 @@ pub enum PruneTupleState {
 pub struct PrunePageResult {
     pub removable_offsets: Vec<u16>,
     pub freeze_offsets: Vec<u16>,
+    pub nonremovable_dead_tuples: usize,
     pub all_visible: bool,
     pub all_frozen: bool,
     pub relfrozenxid_candidate: Option<TransactionId>,
@@ -37,6 +38,7 @@ pub fn classify_page_for_prune(
     let max_offset = page_get_max_offset_number(page)?;
     let mut removable_offsets = Vec::new();
     let mut freeze_offsets = Vec::new();
+    let mut nonremovable_dead_tuples = 0usize;
     let mut all_visible = true;
     let mut all_frozen = true;
     let mut relfrozenxid_candidate = None;
@@ -87,6 +89,7 @@ pub fn classify_page_for_prune(
             PruneTupleState::DeadNotRemovable | PruneTupleState::AbortedInsertGarbage => {
                 all_visible = false;
                 all_frozen = false;
+                nonremovable_dead_tuples += 1;
             }
         }
     }
@@ -94,6 +97,7 @@ pub fn classify_page_for_prune(
     Ok(PrunePageResult {
         removable_offsets,
         freeze_offsets,
+        nonremovable_dead_tuples,
         all_visible,
         all_frozen: all_visible && all_frozen,
         relfrozenxid_candidate,

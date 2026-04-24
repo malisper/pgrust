@@ -195,10 +195,14 @@ mod tests {
     }
 
     fn send_execute(stream: &mut impl Write, portal_name: &str) {
+        send_execute_with_max_rows(stream, portal_name, 0);
+    }
+
+    fn send_execute_with_max_rows(stream: &mut impl Write, portal_name: &str, max_rows: i32) {
         let mut body = Vec::new();
         body.extend_from_slice(portal_name.as_bytes());
         body.push(0);
-        body.extend_from_slice(&0i32.to_be_bytes());
+        body.extend_from_slice(&max_rows.to_be_bytes());
         send_typed_message(stream, b'E', &body);
     }
 
@@ -1094,6 +1098,60 @@ mod tests {
         }));
 
         let _ = stream.shutdown(Shutdown::Both);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn extended_protocol_execute_max_rows_suspends_and_resumes_portal() {
+        let (mut stream, server) = start_test_connection();
+        send_startup(&mut stream);
+        let _ = read_until_ready(&mut stream, "startup");
+
+        send_parse(
+            &mut stream,
+            "partial_stmt",
+            "select * from generate_series(1, 3)",
+        );
+        send_bind(&mut stream, "partial_portal", "partial_stmt");
+        send_execute_with_max_rows(&mut stream, "partial_portal", 2);
+        send_execute_with_max_rows(&mut stream, "partial_portal", 2);
+        send_sync(&mut stream);
+
+        let response = read_until_ready(&mut stream, "partial_execute");
+        assert!(response.iter().any(|(kind, _)| *kind == b'1'));
+        assert!(response.iter().any(|(kind, _)| *kind == b'2'));
+        let suspend_index = response
+            .iter()
+            .position(|(kind, _)| *kind == b's')
+            .expect("first execute should suspend the portal");
+        let complete_index = response
+            .iter()
+            .position(|(kind, _)| *kind == b'C')
+            .expect("second execute should complete the portal");
+        assert!(suspend_index < complete_index);
+
+        let rows = response
+            .iter()
+            .filter(|(kind, _)| *kind == b'D')
+            .map(|(_, body)| data_row_values(body))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows,
+            vec![
+                vec![Some("1".into())],
+                vec![Some("2".into())],
+                vec![Some("3".into())],
+            ]
+        );
+        assert_eq!(
+            response
+                .iter()
+                .find(|(kind, _)| *kind == b'C')
+                .map(|(_, body)| command_tag(body)),
+            Some("SELECT 1".to_string())
+        );
+
+        stream.shutdown(Shutdown::Both).unwrap();
         server.join().unwrap();
     }
 
