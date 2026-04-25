@@ -2809,9 +2809,6 @@ impl PlanNode for NestedLoopJoinState {
         if self.right_plan.is_some() {
             return exec_lateral_join(self, ctx, start);
         }
-        if self.cross_right_outer {
-            return exec_cross_join(self, ctx, start);
-        }
 
         if self.right_rows.is_none() {
             let mut rows = Vec::new();
@@ -3192,68 +3189,6 @@ fn exec_lateral_join<'a>(
         state.right_rows = None;
         state.right_matched = None;
         state.current_left = None;
-    }
-}
-
-fn exec_cross_join<'a>(
-    state: &'a mut NestedLoopJoinState,
-    ctx: &mut ExecutorContext,
-    start: Option<Instant>,
-) -> Result<Option<&'a mut TupleSlot>, ExecError> {
-    if state.left_rows.is_none() {
-        let mut rows = Vec::new();
-        while state.left.exec_proc_node(ctx)?.is_some() {
-            ctx.check_for_interrupts()?;
-            rows.push(state.left.materialize_current_row()?);
-        }
-        state.left_rows = Some(rows);
-    }
-
-    loop {
-        ctx.check_for_interrupts()?;
-        if state.current_right.is_none() {
-            match state.right.exec_proc_node(ctx)?.is_some() {
-                true => {
-                    state.current_right = Some(state.right.materialize_current_row()?);
-                    state.left_index = 0;
-                }
-                false => {
-                    finish_eof(&mut state.stats, start, ctx);
-                    return Ok(None);
-                }
-            }
-        }
-
-        let left_rows = state.left_rows.as_ref().unwrap();
-        while state.left_index < left_rows.len() {
-            let li = state.left_index;
-            state.left_index += 1;
-
-            let left = &left_rows[li];
-            let right = state.current_right.as_ref().unwrap();
-            let mut combined_values: Vec<Value> = left.slot.tts_values.clone();
-            combined_values.extend(right.slot.tts_values.iter().cloned());
-            let nvalid = combined_values.len();
-            state.slot.tts_values = combined_values;
-            state.slot.tts_nvalid = nvalid;
-            state.slot.kind = SlotKind::Virtual;
-            state.slot.virtual_tid = None;
-            state.slot.decode_offset = 0;
-            state.current_bindings =
-                merge_system_bindings(&left.system_bindings, &right.system_bindings);
-            set_active_system_bindings(ctx, &state.current_bindings);
-            set_outer_expr_bindings(ctx, left.slot.tts_values.clone(), &left.system_bindings);
-            set_inner_expr_bindings(ctx, right.slot.tts_values.clone(), &right.system_bindings);
-
-            if eval_qual_list(&state.join_qual, &mut state.slot, ctx)?
-                && eval_qual_list(&state.qual, &mut state.slot, ctx)?
-            {
-                finish_row(&mut state.stats, start);
-                return Ok(Some(&mut state.slot));
-            }
-        }
-
-        state.current_right = None;
     }
 }
 
