@@ -14207,7 +14207,7 @@ fn explain_inner_join_can_reorder_commutative_inputs() {
         .unwrap();
     let hash_pos = lines
         .iter()
-        .position(|line| line.trim_start().starts_with("Hash  "));
+        .position(|line| line.trim_start().starts_with("->  Hash  "));
     assert!(
         small_pos < big_pos
             || hash_pos.is_some_and(|hash_pos| big_pos < hash_pos && hash_pos < small_pos),
@@ -14735,11 +14735,17 @@ fn select_list_srf_order_by_limit_is_sorted_before_project_set() {
     );
     let project_set_idx = lines
         .iter()
-        .position(|line| line.trim_start().starts_with("ProjectSet"))
+        .position(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("ProjectSet") || trimmed.starts_with("->  ProjectSet")
+        })
         .expect("expected ProjectSet in explain output");
     let sort_idx = lines
         .iter()
-        .position(|line| line.trim_start().starts_with("Sort  "))
+        .position(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("Sort  ") || trimmed.starts_with("->  Sort  ")
+        })
         .expect("expected Sort in explain output");
     assert!(
         project_set_idx < sort_idx,
