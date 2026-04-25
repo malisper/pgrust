@@ -195,6 +195,8 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::Const(Value::Uuid(_)) => SqlType::new(SqlTypeKind::Uuid),
         SqlExpr::Const(Value::Inet(_)) => SqlType::new(SqlTypeKind::Inet),
         SqlExpr::Const(Value::Cidr(_)) => SqlType::new(SqlTypeKind::Cidr),
+        SqlExpr::Const(Value::MacAddr(_)) => SqlType::new(SqlTypeKind::MacAddr),
+        SqlExpr::Const(Value::MacAddr8(_)) => SqlType::new(SqlTypeKind::MacAddr8),
         SqlExpr::Const(Value::Bool(_)) => SqlType::new(SqlTypeKind::Bool),
         SqlExpr::Row(items) => {
             infer_sql_row_expr_type(items, scope, catalog, outer_scopes, grouped_outer, ctes)
@@ -778,6 +780,45 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     _ => SqlType::new(SqlTypeKind::Timestamp),
                 },
                 Some(BuiltinScalarFunction::IsFinite) => SqlType::new(SqlTypeKind::Bool),
+                Some(
+                    BuiltinScalarFunction::MacAddrEq
+                    | BuiltinScalarFunction::MacAddrNe
+                    | BuiltinScalarFunction::MacAddrLt
+                    | BuiltinScalarFunction::MacAddrLe
+                    | BuiltinScalarFunction::MacAddrGt
+                    | BuiltinScalarFunction::MacAddrGe
+                    | BuiltinScalarFunction::MacAddr8Eq
+                    | BuiltinScalarFunction::MacAddr8Ne
+                    | BuiltinScalarFunction::MacAddr8Lt
+                    | BuiltinScalarFunction::MacAddr8Le
+                    | BuiltinScalarFunction::MacAddr8Gt
+                    | BuiltinScalarFunction::MacAddr8Ge,
+                ) => SqlType::new(SqlTypeKind::Bool),
+                Some(
+                    BuiltinScalarFunction::MacAddrCmp
+                    | BuiltinScalarFunction::MacAddr8Cmp
+                    | BuiltinScalarFunction::HashMacAddr
+                    | BuiltinScalarFunction::HashMacAddr8,
+                ) => SqlType::new(SqlTypeKind::Int4),
+                Some(
+                    BuiltinScalarFunction::HashMacAddrExtended
+                    | BuiltinScalarFunction::HashMacAddr8Extended,
+                ) => SqlType::new(SqlTypeKind::Int8),
+                Some(
+                    BuiltinScalarFunction::MacAddrNot
+                    | BuiltinScalarFunction::MacAddrAnd
+                    | BuiltinScalarFunction::MacAddrOr
+                    | BuiltinScalarFunction::MacAddrTrunc
+                    | BuiltinScalarFunction::MacAddr8ToMacAddr,
+                ) => SqlType::new(SqlTypeKind::MacAddr),
+                Some(
+                    BuiltinScalarFunction::MacAddrToMacAddr8
+                    | BuiltinScalarFunction::MacAddr8Not
+                    | BuiltinScalarFunction::MacAddr8And
+                    | BuiltinScalarFunction::MacAddr8Or
+                    | BuiltinScalarFunction::MacAddr8Trunc
+                    | BuiltinScalarFunction::MacAddr8Set7Bit,
+                ) => SqlType::new(SqlTypeKind::MacAddr8),
                 Some(BuiltinScalarFunction::MakeDate) => SqlType::new(SqlTypeKind::Date),
                 Some(BuiltinScalarFunction::MakeTime) => SqlType::new(SqlTypeKind::Time),
                 Some(BuiltinScalarFunction::MakeTimestamp) => SqlType::new(SqlTypeKind::Timestamp),

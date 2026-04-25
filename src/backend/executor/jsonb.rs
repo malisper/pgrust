@@ -10,6 +10,8 @@ use crate::backend::executor::expr_datetime::render_json_datetime_value_text_wit
 use crate::backend::executor::render_bit_text;
 use crate::backend::executor::render_datetime_value_text;
 use crate::backend::executor::render_interval_text;
+use crate::backend::executor::render_macaddr_text;
+use crate::backend::executor::render_macaddr8_text;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::stack_depth::stack_depth_limit_error;
@@ -786,6 +788,8 @@ pub(crate) fn jsonb_from_value(
         Value::Bytea(bytes) => JsonbValue::String(format_bytea_text(bytes, ByteaOutputFormat::Hex)),
         Value::Inet(v) => JsonbValue::String(v.render_inet()),
         Value::Cidr(v) => JsonbValue::String(v.render_cidr()),
+        Value::MacAddr(v) => JsonbValue::String(render_macaddr_text(v)),
+        Value::MacAddr8(v) => JsonbValue::String(render_macaddr8_text(v)),
         Value::InternalChar(v) => {
             JsonbValue::String(crate::backend::executor::render_internal_char_text(*v))
         }
@@ -1074,6 +1078,8 @@ pub(crate) fn jsonb_builder_key(value: &Value) -> Result<String, ExecError> {
         Value::Bytea(bytes) => Ok(format_bytea_text(bytes, ByteaOutputFormat::Hex)),
         Value::Inet(v) => Ok(v.render_inet()),
         Value::Cidr(v) => Ok(v.render_cidr()),
+        Value::MacAddr(v) => Ok(render_macaddr_text(v)),
+        Value::MacAddr8(v) => Ok(render_macaddr8_text(v)),
         Value::InternalChar(v) => Ok(crate::backend::executor::render_internal_char_text(*v)),
         Value::EnumOid(v) => Ok(v.to_string()),
         Value::JsonPath(text) => Ok(text.to_string()),

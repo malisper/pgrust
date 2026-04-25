@@ -1497,10 +1497,11 @@ impl Session {
                     result
                 } else {
                     let search_path = self.configured_search_path();
-                    db.execute_create_schema_stmt_with_search_path(
+                    db.execute_create_schema_stmt_with_search_path_and_maintenance_work_mem(
                         self.client_id,
                         create_stmt,
                         search_path.as_deref(),
+                        self.maintenance_work_mem_kb()?,
                     )
                 }
             }
@@ -4870,13 +4871,15 @@ impl Session {
             }
             Statement::CreateSchema(ref create_stmt) => {
                 let search_path = self.configured_search_path();
+                let maintenance_work_mem_kb = self.maintenance_work_mem_kb()?;
                 let txn = self.active_txn.as_mut().unwrap();
-                db.execute_create_schema_stmt_in_transaction_with_search_path(
+                db.execute_create_schema_stmt_in_transaction_with_search_path_and_maintenance_work_mem(
                     client_id,
                     create_stmt,
                     xid,
                     cid,
                     search_path.as_deref(),
+                    maintenance_work_mem_kb,
                     &mut txn.catalog_effects,
                     &mut txn.temp_effects,
                     &mut txn.sequence_effects,
@@ -6340,7 +6343,10 @@ impl Session {
                                         &self.datetime_config,
                                     )?
                                 }
-                                ScalarType::Inet | ScalarType::Cidr => {
+                                ScalarType::Inet
+                                | ScalarType::Cidr
+                                | ScalarType::MacAddr
+                                | ScalarType::MacAddr8 => {
                                     cast_value_with_source_type_catalog_and_config(
                                         Value::Text(raw.clone().into()),
                                         None,
@@ -7828,6 +7834,8 @@ fn copy_value_to_field(
         Value::PgLsn(v) => crate::backend::executor::render_pg_lsn_text(*v),
         Value::Inet(v) => v.render_inet(),
         Value::Cidr(v) => v.render_cidr(),
+        Value::MacAddr(v) => crate::backend::executor::render_macaddr_text(v),
+        Value::MacAddr8(v) => crate::backend::executor::render_macaddr8_text(v),
         Value::Money(v) => crate::backend::executor::money_format_text(*v),
         Value::TsVector(v) => crate::backend::executor::render_tsvector_text(v),
         Value::TsQuery(v) => crate::backend::executor::render_tsquery_text(v),

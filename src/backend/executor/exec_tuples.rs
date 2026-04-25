@@ -4,6 +4,7 @@
 use super::ExecError;
 use super::exec_expr::parse_numeric_text;
 use super::expr_geometry::{decode_path_bytes, decode_polygon_bytes};
+use super::expr_mac::{parse_macaddr_bytes, parse_macaddr8_bytes};
 use super::expr_network::{parse_cidr_bytes, parse_inet_bytes};
 use super::expr_range::decode_range_bytes;
 use super::value_io::missing_column_value;
@@ -401,6 +402,8 @@ impl CompiledTupleDecoder {
                                 radius: f64::from_le_bytes(bytes[16..24].try_into().unwrap()),
                             }),
                             ScalarType::Bool => Value::Bool(bytes[0] != 0),
+                            ScalarType::MacAddr => Value::MacAddr(parse_macaddr_bytes(bytes)?),
+                            ScalarType::MacAddr8 => Value::MacAddr8(parse_macaddr8_bytes(bytes)?),
                             ScalarType::Numeric => {
                                 values.push(Value::Null);
                                 continue;

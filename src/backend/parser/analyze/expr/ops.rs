@@ -583,6 +583,8 @@ pub(super) fn supports_comparison_operator(
                 | SqlTypeKind::Inet
                 | SqlTypeKind::Cidr
                 | SqlTypeKind::PgLsn
+                | SqlTypeKind::MacAddr
+                | SqlTypeKind::MacAddr8
         )
         && matches!(op, "=" | "<>" | "<" | "<=" | ">" | ">=")
     {
@@ -969,16 +971,18 @@ pub(super) fn bind_bitwise_expr(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
-    let left_type =
+    let raw_left_type =
         infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
-    let right_type =
+    let raw_right_type =
         infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
+    let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
     if is_bit_string_type(left_type) && is_bit_string_type(right_type) {
         let common = resolve_common_scalar_type(left_type, right_type)
             .unwrap_or(SqlType::new(SqlTypeKind::VarBit));
         let left = coerce_bound_expr(
             bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?,
-            left_type,
+            raw_left_type,
             common,
         );
         let right = coerce_bound_expr(
@@ -990,8 +994,28 @@ pub(super) fn bind_bitwise_expr(
                 grouped_outer,
                 ctes,
             )?,
-            right_type,
+            raw_right_type,
             common,
+        );
+        return Ok(Expr::op_auto(make, vec![left, right]));
+    }
+    if left_type == right_type && is_macaddr_type(left_type) {
+        let left = coerce_bound_expr(
+            bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?,
+            raw_left_type,
+            left_type,
+        );
+        let right = coerce_bound_expr(
+            bind_expr_with_outer_and_ctes(
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?,
+            raw_right_type,
+            right_type,
         );
         return Ok(Expr::op_auto(make, vec![left, right]));
     }
@@ -1005,12 +1029,12 @@ pub(super) fn bind_bitwise_expr(
     let common = resolve_numeric_binary_type(op, left_type, right_type)?;
     let left = coerce_bound_expr(
         bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?,
-        left_type,
+        raw_left_type,
         common,
     );
     let right = coerce_bound_expr(
         bind_expr_with_outer_and_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes)?,
-        right_type,
+        raw_right_type,
         common,
     );
     Ok(Expr::op_auto(make, vec![left, right]))

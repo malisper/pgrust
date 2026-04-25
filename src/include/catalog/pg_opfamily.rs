@@ -17,6 +17,8 @@ pub const BTREE_NUMERIC_FAMILY_OID: u32 = 1988;
 pub const BTREE_BIT_FAMILY_OID: u32 = 423;
 pub const BTREE_BYTEA_FAMILY_OID: u32 = 428;
 pub const BTREE_UUID_FAMILY_OID: u32 = 2968;
+pub const BTREE_MACADDR_FAMILY_OID: u32 = 76040;
+pub const BTREE_MACADDR8_FAMILY_OID: u32 = 76041;
 pub const BTREE_DATETIME_FAMILY_OID: u32 = 434;
 pub const BTREE_FLOAT_FAMILY_OID: u32 = 1970;
 pub const BTREE_VARBIT_FAMILY_OID: u32 = 2002;
@@ -44,6 +46,12 @@ pub const BRIN_DATETIME_MINMAX_FAMILY_OID: u32 = 76108;
 pub const BRIN_TIMETZ_MINMAX_FAMILY_OID: u32 = 76109;
 pub const BRIN_BIT_MINMAX_FAMILY_OID: u32 = 76110;
 pub const BRIN_VARBIT_MINMAX_FAMILY_OID: u32 = 76111;
+pub const BRIN_MACADDR_MINMAX_FAMILY_OID: u32 = 76114;
+pub const BRIN_MACADDR8_MINMAX_FAMILY_OID: u32 = 76115;
+pub const BRIN_MACADDR_MINMAX_MULTI_FAMILY_OID: u32 = 76116;
+pub const BRIN_MACADDR8_MINMAX_MULTI_FAMILY_OID: u32 = 76117;
+pub const BRIN_MACADDR_BLOOM_FAMILY_OID: u32 = 76118;
+pub const BRIN_MACADDR8_BLOOM_FAMILY_OID: u32 = 76119;
 pub const HASH_BPCHAR_FAMILY_OID: u32 = 427;
 pub const HASH_CHAR_FAMILY_OID: u32 = 431;
 pub const HASH_DATE_FAMILY_OID: u32 = 435;
@@ -59,6 +67,8 @@ pub const HASH_TIMESTAMP_FAMILY_OID: u32 = 2040;
 pub const HASH_BOOL_FAMILY_OID: u32 = 2222;
 pub const HASH_BYTEA_FAMILY_OID: u32 = 2223;
 pub const HASH_UUID_FAMILY_OID: u32 = 2969;
+pub const HASH_MACADDR_FAMILY_OID: u32 = 76230;
+pub const HASH_MACADDR8_FAMILY_OID: u32 = 76231;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgOpfamilyRow {
@@ -115,6 +125,20 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
             oid: BTREE_UUID_FAMILY_OID,
             opfmethod: BTREE_AM_OID,
             opfname: "uuid_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
+            oid: BTREE_MACADDR_FAMILY_OID,
+            opfmethod: BTREE_AM_OID,
+            opfname: "macaddr_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
+            oid: BTREE_MACADDR8_FAMILY_OID,
+            opfmethod: BTREE_AM_OID,
+            opfname: "macaddr8_ops".into(),
             opfnamespace: PG_CATALOG_NAMESPACE_OID,
             opfowner: BOOTSTRAP_SUPERUSER_OID,
         },
@@ -277,6 +301,20 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
         brin_row(BRIN_TIMETZ_MINMAX_FAMILY_OID, "timetz_minmax_ops"),
         brin_row(BRIN_BIT_MINMAX_FAMILY_OID, "bit_minmax_ops"),
         brin_row(BRIN_VARBIT_MINMAX_FAMILY_OID, "varbit_minmax_ops"),
+        brin_row(BRIN_MACADDR_MINMAX_FAMILY_OID, "macaddr_minmax_ops"),
+        brin_row(BRIN_MACADDR8_MINMAX_FAMILY_OID, "macaddr8_minmax_ops"),
+        // :HACK: pgrust's BRIN runtime is still generic minmax-only; expose
+        // PostgreSQL-compatible minmax-multi and bloom catalog families now.
+        brin_row(
+            BRIN_MACADDR_MINMAX_MULTI_FAMILY_OID,
+            "macaddr_minmax_multi_ops",
+        ),
+        brin_row(
+            BRIN_MACADDR8_MINMAX_MULTI_FAMILY_OID,
+            "macaddr8_minmax_multi_ops",
+        ),
+        brin_row(BRIN_MACADDR_BLOOM_FAMILY_OID, "macaddr_bloom_ops"),
+        brin_row(BRIN_MACADDR8_BLOOM_FAMILY_OID, "macaddr8_bloom_ops"),
         hash_row(HASH_BPCHAR_FAMILY_OID, "bpchar_ops"),
         hash_row(HASH_CHAR_FAMILY_OID, "char_ops"),
         hash_row(HASH_DATE_FAMILY_OID, "date_ops"),
@@ -292,6 +330,8 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
         hash_row(HASH_BOOL_FAMILY_OID, "bool_ops"),
         hash_row(HASH_BYTEA_FAMILY_OID, "bytea_ops"),
         hash_row(HASH_UUID_FAMILY_OID, "uuid_ops"),
+        hash_row(HASH_MACADDR_FAMILY_OID, "macaddr_ops"),
+        hash_row(HASH_MACADDR8_FAMILY_OID, "macaddr8_ops"),
     ]
 }
 
@@ -312,5 +352,48 @@ fn hash_row(oid: u32, name: &str) -> PgOpfamilyRow {
         opfname: name.into(),
         opfnamespace: PG_CATALOG_NAMESPACE_OID,
         opfowner: BOOTSTRAP_SUPERUSER_OID,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bootstrap_rows_include_macaddr_opfamilies() {
+        let rows = bootstrap_pg_opfamily_rows();
+        for (oid, method, name) in [
+            (BTREE_MACADDR_FAMILY_OID, BTREE_AM_OID, "macaddr_ops"),
+            (BTREE_MACADDR8_FAMILY_OID, BTREE_AM_OID, "macaddr8_ops"),
+            (
+                BRIN_MACADDR_MINMAX_FAMILY_OID,
+                BRIN_AM_OID,
+                "macaddr_minmax_ops",
+            ),
+            (
+                BRIN_MACADDR8_MINMAX_FAMILY_OID,
+                BRIN_AM_OID,
+                "macaddr8_minmax_ops",
+            ),
+            (
+                BRIN_MACADDR_MINMAX_MULTI_FAMILY_OID,
+                BRIN_AM_OID,
+                "macaddr_minmax_multi_ops",
+            ),
+            (
+                BRIN_MACADDR8_BLOOM_FAMILY_OID,
+                BRIN_AM_OID,
+                "macaddr8_bloom_ops",
+            ),
+            (HASH_MACADDR_FAMILY_OID, HASH_AM_OID, "macaddr_ops"),
+            (HASH_MACADDR8_FAMILY_OID, HASH_AM_OID, "macaddr8_ops"),
+        ] {
+            assert!(
+                rows.iter().any(|row| {
+                    row.oid == oid && row.opfmethod == method && row.opfname == name
+                }),
+                "missing opfamily {name} ({oid})"
+            );
+        }
     }
 }

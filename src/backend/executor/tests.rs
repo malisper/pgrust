@@ -21714,3 +21714,169 @@ fn uuid_type_supports_indexes_and_generation_functions() {
         other => panic!("expected query result, got {other:?}"),
     }
 }
+
+#[test]
+fn macaddr_sql_casts_operators_functions_arrays_and_errors() {
+    let base = temp_dir("macaddr_sql_surface");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select \
+                '08002b010203'::macaddr::text, \
+                '08002b010203'::macaddr::macaddr8::text, \
+                '08:00:2b:ff:fe:01:02:03'::macaddr8::macaddr::text, \
+                trunc('08:00:2b:01:02:03'::macaddr)::text, \
+                trunc('08:00:2b:01:02:03:04:05'::macaddr8)::text, \
+                macaddr8_set7bit('00:00:00:00:00:00:00:00'::macaddr8)::text, \
+                (~('ff:00:2b:01:02:03'::macaddr))::text, \
+                ('ff:00:2b:01:02:03'::macaddr & '0f:0f:0f:0f:0f:0f'::macaddr)::text, \
+                ('f0:00:00:00:00:00'::macaddr | '0f:00:00:00:00:00'::macaddr)::text, \
+                '08:00:2b:01:02:03'::macaddr < '09:00:2b:01:02:03'::macaddr, \
+                macaddr_cmp('09:00:2b:01:02:03'::macaddr, '08:00:2b:01:02:03'::macaddr), \
+                macaddr8_cmp('08:00:2b:01:02:03:04:05'::macaddr8, '08:00:2b:01:02:03:04:05'::macaddr8), \
+                hashmacaddr('08:00:2b:01:02:03'::macaddr) = hashmacaddr('08:00:2b:01:02:03'::macaddr), \
+                hashmacaddr8('08:00:2b:01:02:03:04:05'::macaddr8) = hashmacaddr8('08:00:2b:01:02:03:04:05'::macaddr8), \
+                hashmacaddrextended('08:00:2b:01:02:03'::macaddr, 42) = hashmacaddrextended('08:00:2b:01:02:03'::macaddr, 42), \
+                '{08:00:2b:01:02:03,09:00:2b:01:02:03}'::macaddr[]::text, \
+                ('{08:00:2b:01:02:03:04:05,09:00:2b:01:02:03:04:05}'::macaddr8[])[2]::text",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("08:00:2b:01:02:03".into()),
+            Value::Text("08:00:2b:ff:fe:01:02:03".into()),
+            Value::Text("08:00:2b:01:02:03".into()),
+            Value::Text("08:00:2b:00:00:00".into()),
+            Value::Text("08:00:2b:00:00:00:00:00".into()),
+            Value::Text("02:00:00:00:00:00:00:00".into()),
+            Value::Text("00:ff:d4:fe:fd:fc".into()),
+            Value::Text("0f:00:0b:01:02:03".into()),
+            Value::Text("ff:00:00:00:00:00".into()),
+            Value::Bool(true),
+            Value::Int32(1),
+            Value::Int32(0),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Text("{08:00:2b:01:02:03,09:00:2b:01:02:03}".into()),
+            Value::Text("09:00:2b:01:02:03:04:05".into()),
+        ]],
+    );
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select \
+                pg_input_is_valid('08:00:2b:01:02:03', 'macaddr'), \
+                pg_input_is_valid('08:00:2b:01:02:ZZ', 'macaddr'), \
+                pg_input_is_valid('08:00:2b:01:02:03:04:05', 'macaddr8'), \
+                pg_input_is_valid('08:00:2b:01:02:03:04:ZZ', 'macaddr8'), \
+                pg_input_is_valid('{08:00:2b:01:02:03,09:00:2b:01:02:03}', 'macaddr[]'), \
+                pg_input_is_valid('{08:00:2b:01:02:03:04:05,09:00:2b:01:02:03:04:05}', '_macaddr8'), \
+                pg_input_error_sqlstate('08:00:2b:01:02:ZZ', 'macaddr')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Text("22P02".into()),
+        ]],
+    );
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select '08:00:2b:01:02:03:04:05'::macaddr8::macaddr",
+    )
+    .unwrap_err()
+    {
+        ExecError::DetailedError {
+            message,
+            sqlstate,
+            hint: Some(hint),
+            ..
+        } => {
+            assert_eq!(message, "macaddr8 data out of range to convert to macaddr");
+            assert_eq!(sqlstate, "22003");
+            assert!(hint.contains("FF and FE"));
+        }
+        other => panic!("expected macaddr8 conversion error, got {other:?}"),
+    }
+}
+
+#[test]
+fn macaddr_table_storage_and_copy_text_input_roundtrip() {
+    let db = Database::open(temp_dir("macaddr_storage_copy"), 16).unwrap();
+    let mut session = Session::new(1);
+
+    db.execute(
+        1,
+        "create table macs (m macaddr, m8 macaddr8, ma macaddr[], m8a macaddr8[])",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into macs values (
+            '08002b010203',
+            '08002b0102030405',
+            '{08:00:2b:01:02:03,09:00:2b:01:02:03}'::macaddr[],
+            '{08:00:2b:01:02:03:04:05,09:00:2b:01:02:03:04:05}'::macaddr8[]
+        )",
+    )
+    .unwrap();
+    assert_eq!(
+        session
+            .copy_from_rows(
+                &db,
+                "macs",
+                &[vec![
+                    "aa-bb-cc-dd-ee-ff".into(),
+                    "aa:bb:cc:dd:ee:ff".into(),
+                    "{aa:bb:cc:dd:ee:ff}".into(),
+                    "{aa:bb:cc:dd:ee:ff}".into(),
+                ]]
+            )
+            .unwrap(),
+        1
+    );
+
+    match session
+        .execute(
+            &db,
+            "select m::text, m8::text, ma::text, m8a::text from macs order by m",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, columns, .. } => {
+            assert_eq!(columns[0].sql_type.kind, SqlTypeKind::Text);
+            assert_eq!(
+                rows,
+                vec![
+                    vec![
+                        Value::Text("08:00:2b:01:02:03".into()),
+                        Value::Text("08:00:2b:01:02:03:04:05".into()),
+                        Value::Text("{08:00:2b:01:02:03,09:00:2b:01:02:03}".into()),
+                        Value::Text("{08:00:2b:01:02:03:04:05,09:00:2b:01:02:03:04:05}".into()),
+                    ],
+                    vec![
+                        Value::Text("aa:bb:cc:dd:ee:ff".into()),
+                        Value::Text("aa:bb:cc:ff:fe:dd:ee:ff".into()),
+                        Value::Text("{aa:bb:cc:dd:ee:ff}".into()),
+                        Value::Text("{aa:bb:cc:ff:fe:dd:ee:ff}".into()),
+                    ],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}

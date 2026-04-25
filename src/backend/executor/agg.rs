@@ -1,6 +1,7 @@
 use super::render_bit_text;
 use super::{
     compare_order_values, parse_numeric_text, render_datetime_value_text, render_interval_text,
+    render_macaddr_text, render_macaddr8_text,
 };
 use crate::backend::executor::ExecError;
 use crate::backend::executor::exec_expr::{expect_float8_arg, float8_regr_accum_state};
@@ -1294,6 +1295,8 @@ fn json_object_agg_key(key: &Value) -> String {
         Value::Bytea(v) => format_bytea_text(v, ByteaOutputFormat::Hex),
         Value::Inet(v) => v.render_inet(),
         Value::Cidr(v) => v.render_cidr(),
+        Value::MacAddr(v) => render_macaddr_text(v),
+        Value::MacAddr8(v) => render_macaddr8_text(v),
         Value::InternalChar(v) => crate::backend::executor::render_internal_char_text(*v),
         Value::Json(v) => v.to_string(),
         Value::Jsonb(v) => render_jsonb_bytes(v).unwrap_or_else(|_| "null".into()),
@@ -1378,6 +1381,8 @@ fn value_to_json_text(value: &Value) -> String {
         }
         Value::Inet(v) => serde_json::to_string(&v.render_inet()).unwrap(),
         Value::Cidr(v) => serde_json::to_string(&v.render_cidr()).unwrap(),
+        Value::MacAddr(v) => serde_json::to_string(&render_macaddr_text(v)).unwrap(),
+        Value::MacAddr8(v) => serde_json::to_string(&render_macaddr8_text(v)).unwrap(),
         Value::InternalChar(v) => {
             serde_json::to_string(&crate::backend::executor::render_internal_char_text(*v)).unwrap()
         }

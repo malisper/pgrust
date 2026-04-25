@@ -879,6 +879,8 @@ pub(crate) fn format_sql_type_name(sql_type: SqlType) -> String {
         SqlTypeKind::Uuid => "uuid",
         SqlTypeKind::Inet => "inet",
         SqlTypeKind::Cidr => "cidr",
+        SqlTypeKind::MacAddr => "macaddr",
+        SqlTypeKind::MacAddr8 => "macaddr8",
         SqlTypeKind::Float4 => "real",
         SqlTypeKind::Float8 => "double precision",
         SqlTypeKind::Money => "money",
