@@ -51,45 +51,88 @@ fn format_timestamp_date(pg_days: i32, config: &DateTimeConfig, include_weekday:
 }
 
 fn format_timestamp_year_suffix(pg_days: i32) -> String {
+    let (year, bc) = format_timestamp_year_parts(pg_days);
+    if bc { format!("{year} BC") } else { year }
+}
+
+fn format_timestamp_year_parts(pg_days: i32) -> (String, bool) {
     let (mut year, _, _) = ymd_from_days(pg_days);
     let bc = year <= 0;
     if bc {
         year = 1 - year;
-        format!("{year:04} BC")
+        (format!("{year:04}"), true)
     } else {
-        format!("{year:04}")
+        (format!("{year:04}"), false)
     }
 }
 
-fn format_timestamptz_year_zone_suffix(pg_days: i32, zone: &str) -> String {
-    let (mut year, _, _) = ymd_from_days(pg_days);
-    let bc = year <= 0;
-    if bc {
-        year = 1 - year;
-        format!("{year:04} {zone} BC")
-    } else {
-        format!("{year:04} {zone}")
-    }
-}
-
-fn timezone_abbrev_for_output(config: &DateTimeConfig, pg_days: i32) -> Option<&'static str> {
-    match current_timezone_name(config)
+fn timezone_abbrev_for_output(
+    config: &DateTimeConfig,
+    utc_usecs: i64,
+    offset_seconds: i32,
+) -> Option<String> {
+    let normalized = current_timezone_name(config)
         .trim()
         .to_ascii_lowercase()
-        .as_str()
-    {
-        "utc" | "gmt" | "etc/utc" | "etc/gmt" | "z" | "zulu" => Some("UTC"),
-        "pst" => Some("PST"),
-        "pdt" => Some("PDT"),
+        .to_string();
+    match normalized.as_str() {
+        "utc" | "gmt" | "etc/utc" | "etc/gmt" | "z" | "zulu" => Some("UTC".into()),
+        "pst" => Some("PST".into()),
+        "pdt" => Some("PDT".into()),
         "america/los_angeles" => {
-            if pg_days < days_from_ymd(1884, 1, 1).expect("valid cutoff date") {
-                Some("LMT")
+            let local_usecs = utc_usecs + i64::from(offset_seconds) * USECS_PER_SEC;
+            let (pg_days, _) = timestamp_parts_from_usecs(local_usecs);
+            if offset_seconds == -(7 * 3600 + 52 * 60 + 58)
+                || pg_days < days_from_ymd(1884, 1, 1).expect("valid cutoff date")
+            {
+                Some("LMT".into())
+            } else if la_date_is_dst(pg_days) {
+                Some("PDT".into())
             } else {
-                Some("PST")
+                Some("PST".into())
             }
         }
-        _ => None,
+        _ => named_timezone_abbreviation_at_utc(current_timezone_name(config), utc_usecs),
     }
+}
+
+fn la_date_is_dst(pg_days: i32) -> bool {
+    let (year, month, day) = ymd_from_days(pg_days);
+    if year <= 2006 {
+        match month {
+            5..=9 => true,
+            1..=3 | 11 | 12 => false,
+            4 => day >= nth_weekday_of_month(year, 4, 0, 1),
+            10 => day < last_weekday_of_month(year, 10, 0),
+            _ => false,
+        }
+    } else {
+        match month {
+            4..=10 => true,
+            1 | 2 | 12 => false,
+            3 => day >= nth_weekday_of_month(year, 3, 0, 2),
+            11 => day < nth_weekday_of_month(year, 11, 0, 1),
+            _ => false,
+        }
+    }
+}
+
+fn nth_weekday_of_month(year: i32, month: u32, weekday: u32, nth: u32) -> u32 {
+    let first = days_from_ymd(year, month, 1).expect("valid month");
+    let first_weekday = day_of_week_from_julian_day(julian_day_from_postgres_date(first));
+    1 + ((7 + weekday - first_weekday) % 7) + (nth - 1) * 7
+}
+
+fn last_weekday_of_month(year: i32, month: u32, weekday: u32) -> u32 {
+    let (next_year, next_month) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    let last = days_from_ymd(next_year, next_month, 1).expect("valid month") - 1;
+    let (_, _, last_day) = ymd_from_days(last);
+    let last_weekday = day_of_week_from_julian_day(julian_day_from_postgres_date(last));
+    last_day - ((7 + last_weekday - weekday) % 7)
 }
 
 fn tokenize_timestamp(text: &str) -> Vec<&str> {
@@ -461,6 +504,20 @@ fn timezone_spec_offset(
                     DateTimeParseError::UnknownTimeZone(name.to_ascii_lowercase()),
                 );
             }
+            if normalized == "mmt" {
+                if current_timezone_name(config).eq_ignore_ascii_case("America/Montevideo") {
+                    return named_timezone_offset_seconds_for_local(
+                        current_timezone_name(config),
+                        local_usecs,
+                    )
+                    .ok_or(DateTimeParseError::UnknownTimeZone(
+                        name.to_ascii_lowercase(),
+                    ));
+                }
+                return named_timezone_offset_seconds(&name).ok_or(
+                    DateTimeParseError::UnknownTimeZone(name.to_ascii_lowercase()),
+                );
+            }
             named_timezone_offset_seconds_for_local(&name, local_usecs)
                 .or_else(|| named_timezone_offset_seconds(&name))
                 .ok_or(DateTimeParseError::UnknownTimeZone(
@@ -556,6 +613,11 @@ pub fn parse_timestamptz_text(
             return Ok(TimestampTzADT(
                 crate::include::nodes::datetime::TIMESTAMP_NOBEGIN,
             ));
+        }
+        Some(DateTimeKeyword::Epoch) => {
+            return days_from_ymd(1970, 1, 1)
+                .map(|days| TimestampTzADT(days as i64 * USECS_PER_DAY))
+                .ok_or(DateTimeParseError::Invalid);
         }
         _ => {}
     }
@@ -675,15 +737,21 @@ pub fn format_timestamptz_text(value: TimestampTzADT, config: &DateTimeConfig) -
     let (days, time_usecs) = timestamp_parts_from_usecs(adjusted);
     match config.date_style_format {
         DateStyleFormat::Postgres => {
-            let zone = timezone_abbrev_for_output(config, days)
-                .map(str::to_string)
+            let zone = timezone_abbrev_for_output(config, value.0, offset_seconds)
                 .unwrap_or_else(|| format_offset(offset_seconds));
-            format!(
-                "{} {} {}",
+            let (year, bc) = format_timestamp_year_parts(days);
+            let rendered = format!(
+                "{} {} {} {}",
                 format_timestamp_date(days, config, true),
                 format_time_usecs(time_usecs),
-                format_timestamptz_year_zone_suffix(days, &zone),
-            )
+                year,
+                zone,
+            );
+            if bc {
+                format!("{rendered} BC")
+            } else {
+                rendered
+            }
         }
         _ => format!(
             "{} {}{}",
@@ -734,6 +802,121 @@ mod format_tests {
         assert_eq!(
             format_timestamptz_text(ts, &config),
             "Tue Jan 01 00:00:00 1901 PST"
+        );
+    }
+
+    #[test]
+    fn formats_timestamptz_dst_abbreviation_in_postgres_style() {
+        let config = DateTimeConfig {
+            date_style_format: DateStyleFormat::Postgres,
+            date_order: DateOrder::Mdy,
+            time_zone: "America/Los_Angeles".into(),
+            ..DateTimeConfig::default()
+        };
+        let ts =
+            parse_timestamptz_text("Wed Jul 11 10:51:14 America/New_York 2001", &config).unwrap();
+        assert_eq!(
+            format_timestamptz_text(ts, &config),
+            "Wed Jul 11 07:51:14 2001 PDT"
+        );
+    }
+
+    #[test]
+    fn formats_timestamptz_far_future_dst_abbreviation_in_postgres_style() {
+        let config = DateTimeConfig {
+            date_style_format: DateStyleFormat::Postgres,
+            date_order: DateOrder::Mdy,
+            time_zone: "America/Los_Angeles".into(),
+            ..DateTimeConfig::default()
+        };
+        let ts = parse_timestamptz_text("205000-07-10 17:32:01 Europe/Helsinki", &config).unwrap();
+        assert_eq!(
+            format_timestamptz_text(ts, &config),
+            "Thu Jul 10 07:32:01 205000 PDT"
+        );
+    }
+
+    #[test]
+    fn formats_timestamptz_legacy_la_dst_rule_in_postgres_style() {
+        let config = DateTimeConfig {
+            date_style_format: DateStyleFormat::Postgres,
+            date_order: DateOrder::Mdy,
+            time_zone: "America/Los_Angeles".into(),
+            ..DateTimeConfig::default()
+        };
+        let ts = parse_timestamptz_text("2000-03-15 08:14:01 GMT+8", &config).unwrap();
+        assert_eq!(
+            format_timestamptz_text(ts, &config),
+            "Wed Mar 15 08:14:01 2000 PST"
+        );
+    }
+
+    #[test]
+    fn parses_timestamptz_epoch_as_utc_instant() {
+        let config = DateTimeConfig {
+            date_style_format: DateStyleFormat::Postgres,
+            date_order: DateOrder::Mdy,
+            time_zone: "America/Los_Angeles".into(),
+            ..DateTimeConfig::default()
+        };
+        let ts = parse_timestamptz_text("epoch", &config).unwrap();
+        assert_eq!(
+            format_timestamptz_text(ts, &config),
+            "Wed Dec 31 16:00:00 1969 PST"
+        );
+    }
+
+    #[test]
+    fn formats_timestamptz_bc_zone_before_era_in_postgres_style() {
+        let config = DateTimeConfig {
+            date_style_format: DateStyleFormat::Postgres,
+            date_order: DateOrder::Mdy,
+            time_zone: "America/Los_Angeles".into(),
+            ..DateTimeConfig::default()
+        };
+        let ts = parse_timestamptz_text("Feb 16 17:32:01 0097 BC", &config).unwrap();
+        assert_eq!(
+            format_timestamptz_text(ts, &config),
+            "Tue Feb 16 17:32:01 0097 LMT BC"
+        );
+    }
+
+    #[test]
+    fn formats_timestamptz_historic_timezone_abbreviations() {
+        let london = DateTimeConfig {
+            date_style_format: DateStyleFormat::Postgres,
+            date_order: DateOrder::Mdy,
+            time_zone: "Europe/London".into(),
+            ..DateTimeConfig::default()
+        };
+        let lmt = parse_timestamptz_text("Jan 01 00:00:00 2024 LMT", &london).unwrap();
+        assert_eq!(
+            format_timestamptz_text(lmt, &london),
+            "Mon Jan 01 00:01:15 2024 GMT"
+        );
+
+        let utc = DateTimeConfig {
+            date_style_format: DateStyleFormat::Postgres,
+            date_order: DateOrder::Mdy,
+            time_zone: "UTC".into(),
+            ..DateTimeConfig::default()
+        };
+        let mmt = parse_timestamptz_text("1912-01-01 00:00 MMT", &utc).unwrap();
+        assert_eq!(
+            format_timestamptz_text(mmt, &utc),
+            "Sun Dec 31 17:30:00 1911 UTC"
+        );
+
+        let montevideo = DateTimeConfig {
+            date_style_format: DateStyleFormat::Postgres,
+            date_order: DateOrder::Mdy,
+            time_zone: "America/Montevideo".into(),
+            ..DateTimeConfig::default()
+        };
+        let mmt = parse_timestamptz_text("1912-01-01 00:00 MMT", &montevideo).unwrap();
+        assert_eq!(
+            format_timestamptz_text(mmt, &montevideo),
+            "Mon Jan 01 00:00:00 1912 MMT"
         );
     }
 }

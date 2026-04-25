@@ -5585,6 +5585,22 @@ fn parse_datetime_literal_output_names_use_postgres_aliases() {
 }
 
 #[test]
+fn parse_timestamp_output_names_match_postgres_shorthands() {
+    let stmt = parse_select(
+        "select timestamp with time zone '2024-01-02 03:04:05+00', time with time zone '03:04:05+00'",
+    )
+    .unwrap();
+    assert_eq!(stmt.targets[0].output_name, "timestamptz");
+    assert_eq!(stmt.targets[1].output_name, "timetz");
+}
+
+#[test]
+fn parse_at_time_zone_uses_timezone_output_name() {
+    let stmt = parse_select("select '19970210 173201' at time zone 'America/New_York'").unwrap();
+    assert_eq!(stmt.targets[0].output_name, "timezone");
+}
+
+#[test]
 fn parse_interval_typed_string_literals() {
     let stmt = parse_select(
         "select interval '1 day', interval(2) '1 day 01:02:03.456', interval '1-2' year to month, interval '12:34.5678' minute to second(2)",
