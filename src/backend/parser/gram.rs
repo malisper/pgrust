@@ -483,7 +483,7 @@ fn try_parse_create_schema_statement(
     let mut auth_role = None;
     if keyword_at_start(rest, "authorization") {
         rest = consume_keyword(rest, "authorization").trim_start();
-        let (role, next) = parse_sql_identifier(rest)?;
+        let (role, next) = parse_role_spec(rest)?;
         auth_role = Some(role);
         rest = next.trim_start();
     } else {
@@ -492,7 +492,7 @@ fn try_parse_create_schema_statement(
         rest = next.trim_start();
         if keyword_at_start(rest, "authorization") {
             rest = consume_keyword(rest, "authorization").trim_start();
-            let (role, next) = parse_sql_identifier(rest)?;
+            let (role, next) = parse_role_spec(rest)?;
             auth_role = Some(role);
             rest = next.trim_start();
         }
@@ -531,6 +531,36 @@ fn try_parse_create_schema_statement(
         if_not_exists,
         elements,
     })))
+}
+
+fn parse_role_spec(input: &str) -> Result<(RoleSpec, &str), ParseError> {
+    let rest = input.trim_start();
+    if keyword_at_start(rest, "current_user") {
+        return Ok((RoleSpec::CurrentUser, consume_keyword(rest, "current_user")));
+    }
+    if keyword_at_start(rest, "current_role") {
+        return Ok((RoleSpec::CurrentRole, consume_keyword(rest, "current_role")));
+    }
+    if keyword_at_start(rest, "session_user") {
+        return Ok((RoleSpec::SessionUser, consume_keyword(rest, "session_user")));
+    }
+    let (role_name, rest) = parse_sql_identifier(rest)?;
+    Ok((RoleSpec::RoleName(role_name), rest))
+}
+
+fn build_role_spec(pair: Pair<'_, Rule>) -> RoleSpec {
+    if pair.as_rule() == Rule::identifier
+        && let Some(inner) = pair.clone().into_inner().next()
+        && inner.as_rule() == Rule::unquoted_identifier
+    {
+        match inner.as_str().to_ascii_lowercase().as_str() {
+            "current_user" => return RoleSpec::CurrentUser,
+            "current_role" => return RoleSpec::CurrentRole,
+            "session_user" => return RoleSpec::SessionUser,
+            _ => {}
+        }
+    }
+    RoleSpec::RoleName(build_identifier(pair))
 }
 
 fn split_create_schema_elements(input: &str) -> Result<Vec<String>, ParseError> {
@@ -10365,7 +10395,7 @@ fn build_create_schema(pair: Pair<'_, Rule>) -> Result<CreateSchemaStatement, Pa
                 let role = part
                     .into_inner()
                     .find(|inner| inner.as_rule() == Rule::identifier)
-                    .map(build_identifier)
+                    .map(build_role_spec)
                     .ok_or(ParseError::UnexpectedEof)?;
                 auth_role = Some(role);
             }
@@ -10373,7 +10403,7 @@ fn build_create_schema(pair: Pair<'_, Rule>) -> Result<CreateSchemaStatement, Pa
                 let role = part
                     .into_inner()
                     .find(|inner| inner.as_rule() == Rule::identifier)
-                    .map(build_identifier)
+                    .map(build_role_spec)
                     .ok_or(ParseError::UnexpectedEof)?;
                 auth_role = Some(role);
             }

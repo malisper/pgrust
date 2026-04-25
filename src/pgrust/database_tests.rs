@@ -8654,6 +8654,81 @@ fn create_schema_supports_authorization_and_if_not_exists() {
 }
 
 #[test]
+fn create_schema_authorization_current_role_uses_active_role() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role schema_owner superuser")
+        .unwrap();
+    session.execute(&db, "set role schema_owner").unwrap();
+    session
+        .execute(
+            &db,
+            "create schema authorization current_role
+               create table schema_owner.tab (id int4)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select n.nspname, a.rolname
+               from pg_namespace n
+               join pg_authid a on a.oid = n.nspowner
+              where n.nspname = 'schema_owner'",
+        ),
+        vec![vec![
+            Value::Text("schema_owner".into()),
+            Value::Text("schema_owner".into()),
+        ]]
+    );
+}
+
+#[test]
+fn drop_schema_cascade_reports_schema_owned_relation_notices() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create schema tenant_notice
+               create table tenant_notice.tab (id int4)",
+        )
+        .unwrap();
+    take_backend_notice_messages();
+    session
+        .execute(&db, "drop schema tenant_notice cascade")
+        .unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![String::from("drop cascades to table tenant_notice.tab")]
+    );
+
+    session
+        .execute(&db, "create role schema_owner superuser")
+        .unwrap();
+    session.execute(&db, "set role schema_owner").unwrap();
+    session
+        .execute(
+            &db,
+            "create schema authorization current_role
+               create table schema_owner.tab (id int4)",
+        )
+        .unwrap();
+    take_backend_notice_messages();
+    session
+        .execute(&db, "drop schema schema_owner cascade")
+        .unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![String::from("drop cascades to table tab")]
+    );
+}
+
+#[test]
 fn create_schema_reports_duplicate_and_reserved_name_errors() {
     let db = Database::open_ephemeral(16).unwrap();
 

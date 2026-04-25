@@ -1,7 +1,7 @@
 use crate::backend::executor::ExecError;
 use crate::backend::parser::{
     CreateIndexStatement, CreateSchemaStatement, CreateSequenceStatement, CreateTableStatement,
-    CreateTriggerStatement, CreateViewStatement, GrantObjectStatement, Statement,
+    CreateTriggerStatement, CreateViewStatement, GrantObjectStatement, RoleSpec, Statement,
 };
 use crate::include::catalog::PgNamespaceRow;
 use crate::pgrust::auth::{AuthCatalog, AuthState};
@@ -163,19 +163,27 @@ pub(crate) fn resolve_create_schema_stmt(
             hint: None,
             sqlstate: "42704",
         })?;
-    let target_owner = match stmt.auth_role.as_deref() {
-        Some(role_name) => {
-            auth_catalog
+    let target_owner =
+        match stmt.auth_role.as_ref() {
+            Some(RoleSpec::RoleName(role_name)) => auth_catalog
                 .role_by_name(role_name)
                 .ok_or_else(|| ExecError::DetailedError {
                     message: format!("role \"{role_name}\" does not exist"),
                     detail: None,
                     hint: None,
                     sqlstate: "42704",
-                })?
-        }
-        None => current_user,
-    };
+                })?,
+            Some(RoleSpec::CurrentUser | RoleSpec::CurrentRole) => current_user,
+            Some(RoleSpec::SessionUser) => auth_catalog
+                .role_by_oid(auth.session_user_oid())
+                .ok_or_else(|| ExecError::DetailedError {
+                    message: "session user does not exist".into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42704",
+                })?,
+            None => current_user,
+        };
 
     if target_owner.oid != auth.current_user_oid()
         && !auth.can_set_role(target_owner.oid, auth_catalog)
