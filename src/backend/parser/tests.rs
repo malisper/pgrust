@@ -10003,6 +10003,34 @@ fn parse_jsonb_agg_with_local_order_by() {
 }
 
 #[test]
+fn parse_jsonb_agg_with_local_order_by_using_operator() {
+    let stmt = parse_select("select jsonb_agg(id order by note using ~>~) from people").unwrap();
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::FuncCall {
+            name,
+            args,
+            order_by,
+            ..
+        } if name == "jsonb_agg"
+            && args.args().len() == 1
+            && order_by.len() == 1
+            && order_by[0].descending
+            && order_by[0].using_operator.as_deref() == Some("~>~")
+            && matches!(order_by[0].expr, SqlExpr::Column(ref name) if name == "note")
+    ));
+}
+
+#[test]
+fn parse_select_order_by_using_operator() {
+    let stmt = parse_select("select note from people order by note using > nulls last").unwrap();
+    assert_eq!(stmt.order_by.len(), 1);
+    assert!(stmt.order_by[0].descending);
+    assert_eq!(stmt.order_by[0].nulls_first, Some(false));
+    assert_eq!(stmt.order_by[0].using_operator.as_deref(), Some(">"));
+}
+
+#[test]
 fn parse_aggregate_filter_clause() {
     let stmt = parse_select("select count(*) filter (where note is not null) from people").unwrap();
     assert!(matches!(

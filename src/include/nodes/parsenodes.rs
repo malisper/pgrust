@@ -1129,6 +1129,7 @@ pub struct OrderByItem {
     pub expr: SqlExpr,
     pub descending: bool,
     pub nulls_first: Option<bool>,
+    pub using_operator: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
