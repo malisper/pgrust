@@ -2,6 +2,7 @@ use super::ExecError;
 use super::expr_bit::render_bit_text;
 use super::expr_casts::{
     cast_value, numeric_input_would_overflow, parse_bytea_text, render_internal_char_text,
+    render_interval_text,
 };
 use super::expr_datetime::render_datetime_value_text;
 use super::expr_format::{to_char_float, to_char_int, to_char_numeric, to_number_numeric};
@@ -431,6 +432,7 @@ fn value_output_text(value: &Value) -> Result<String, ExecError> {
         Value::Money(v) => crate::backend::executor::money_format_text(*v),
         Value::Float64(v) => v.to_string(),
         Value::Numeric(v) => v.render(),
+        Value::Interval(v) => render_interval_text(*v),
         Value::Bool(v) => {
             if *v {
                 "t".into()

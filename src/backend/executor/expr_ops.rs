@@ -98,6 +98,7 @@ pub(crate) fn compare_order_values(
             .then_with(|| a.offset_seconds.cmp(&b.offset_seconds))),
         (Value::Timestamp(a), Value::Timestamp(b)) => Ok(a.cmp(b)),
         (Value::TimestampTz(a), Value::TimestampTz(b)) => Ok(a.cmp(b)),
+        (Value::Interval(a), Value::Interval(b)) => Ok(a.cmp_key().cmp(&b.cmp_key())),
         (Value::Bit(a), Value::Bit(b)) => Ok(compare_bit_strings(a, b)),
         (Value::Bytea(a), Value::Bytea(b)) => Ok(a.cmp(b)),
         (Value::Inet(a), Value::Inet(b)) => {
@@ -198,6 +199,7 @@ pub(crate) fn compare_values(
         (Value::TimeTz(l), Value::TimeTz(r)) => Ok(Value::Bool(l == r)),
         (Value::Timestamp(l), Value::Timestamp(r)) => Ok(Value::Bool(l == r)),
         (Value::TimestampTz(l), Value::TimestampTz(r)) => Ok(Value::Bool(l == r)),
+        (Value::Interval(l), Value::Interval(r)) => Ok(Value::Bool(l == r)),
         (Value::Bytea(l), Value::Bytea(r)) => Ok(Value::Bool(l == r)),
         (Value::Inet(l), Value::Inet(r)) => Ok(Value::Bool(l == r)),
         (Value::Cidr(l), Value::Cidr(r)) => Ok(Value::Bool(l == r)),
@@ -326,6 +328,7 @@ pub(crate) fn values_are_distinct(left: &Value, right: &Value) -> bool {
         (Value::TimeTz(l), Value::TimeTz(r)) => l != r,
         (Value::Timestamp(l), Value::Timestamp(r)) => l != r,
         (Value::TimestampTz(l), Value::TimestampTz(r)) => l != r,
+        (Value::Interval(l), Value::Interval(r)) => l != r,
         (Value::Bytea(l), Value::Bytea(r)) => l != r,
         (Value::Bit(l), Value::Bit(r)) => l != r,
         (Value::Float64(l), Value::Float64(r)) => !pg_float_eq(*l, *r),

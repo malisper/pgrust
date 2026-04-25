@@ -580,14 +580,21 @@ fn canonicalize_tid_text(text: &str) -> Result<String, ExecError> {
     Ok(format!("({block_number},{offset_number})"))
 }
 
-pub(crate) fn canonicalize_interval_text(text: &str) -> Result<String, ExecError> {
-    fn invalid(text: &str) -> ExecError {
-        ExecError::DetailedError {
-            message: format!("invalid input syntax for type interval: \"{text}\""),
-            detail: None,
-            hint: None,
-            sqlstate: "22P02",
-        }
+pub(crate) fn invalid_interval_text_error(text: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("invalid input syntax for type interval: \"{text}\""),
+        detail: None,
+        hint: None,
+        sqlstate: "22P02",
+    }
+}
+
+pub(crate) fn render_interval_text(value: IntervalValue) -> String {
+    if value.is_infinity() {
+        return "infinity".into();
+    }
+    if value.is_neg_infinity() {
+        return "-infinity".into();
     }
 
     fn unit_suffix(value: i64, singular: &str, plural: &str) -> String {
@@ -598,50 +605,59 @@ pub(crate) fn canonicalize_interval_text(text: &str) -> Result<String, ExecError
         }
     }
 
-    fn render_interval(months: i32, days: i32, micros: i64, negative: bool) -> String {
-        let mut parts = Vec::new();
-        let years = months / 12;
-        let rem_months = months % 12;
-        if years != 0 {
-            parts.push(unit_suffix(i64::from(years), "year", "years"));
-        }
-        if rem_months != 0 {
-            parts.push(unit_suffix(i64::from(rem_months), "mon", "mons"));
-        }
-        if days != 0 {
-            parts.push(unit_suffix(i64::from(days), "day", "days"));
-        }
+    let (value, negative) = value.abs_for_display();
+    let mut parts = Vec::new();
+    let years = value.months / 12;
+    let rem_months = value.months % 12;
+    if years != 0 {
+        parts.push(unit_suffix(i64::from(years), "year", "years"));
+    }
+    if rem_months != 0 {
+        parts.push(unit_suffix(i64::from(rem_months), "mon", "mons"));
+    }
+    if value.days != 0 {
+        parts.push(unit_suffix(i64::from(value.days), "day", "days"));
+    }
 
-        let total_seconds = micros / 1_000_000;
-        let subsec = micros % 1_000_000;
-        let hours = total_seconds / 3600;
-        let minutes = (total_seconds % 3600) / 60;
-        let seconds = total_seconds % 60;
-        if hours != 0 {
-            parts.push(unit_suffix(hours, "hour", "hours"));
-        }
-        if minutes != 0 {
-            parts.push(unit_suffix(minutes, "min", "mins"));
-        }
-        if seconds != 0 || subsec != 0 || parts.is_empty() {
-            let seconds_text = if subsec == 0 {
-                seconds.to_string()
-            } else {
-                let mut rendered = format!("{seconds}.{subsec:06}");
-                while rendered.ends_with('0') {
-                    rendered.pop();
-                }
-                rendered
-            };
-            let label = if seconds_text == "1" { "sec" } else { "secs" };
-            parts.push(format!("{seconds_text} {label}"));
-        }
+    let total_seconds = value.time_micros / 1_000_000;
+    let subsec = value.time_micros % 1_000_000;
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    if hours != 0 {
+        parts.push(unit_suffix(hours, "hour", "hours"));
+    }
+    if minutes != 0 {
+        parts.push(unit_suffix(minutes, "min", "mins"));
+    }
+    if seconds != 0 || subsec != 0 {
+        let seconds_text = if subsec == 0 {
+            seconds.to_string()
+        } else {
+            let mut rendered = format!("{seconds}.{subsec:06}");
+            while rendered.ends_with('0') {
+                rendered.pop();
+            }
+            rendered
+        };
+        let label = if seconds_text == "1" { "sec" } else { "secs" };
+        parts.push(format!("{seconds_text} {label}"));
+    }
 
-        let mut out = format!("@ {}", parts.join(" "));
-        if negative && out != "@ 0 secs" {
-            out.push_str(" ago");
-        }
-        out
+    if parts.is_empty() {
+        return "@ 0".into();
+    }
+
+    let mut out = format!("@ {}", parts.join(" "));
+    if negative && out != "@ 0" {
+        out.push_str(" ago");
+    }
+    out
+}
+
+pub(crate) fn parse_interval_text_value(text: &str) -> Result<IntervalValue, ExecError> {
+    fn invalid(text: &str) -> ExecError {
+        invalid_interval_text_error(text)
     }
 
     let mut rest = text.trim();
@@ -667,10 +683,26 @@ pub(crate) fn canonicalize_interval_text(text: &str) -> Result<String, ExecError
         return Err(invalid(text));
     }
 
+    if rest.eq_ignore_ascii_case("infinity") || rest.eq_ignore_ascii_case("inf") {
+        return Ok(if negative {
+            IntervalValue::neg_infinity()
+        } else {
+            IntervalValue::infinity()
+        });
+    }
+    if rest.eq_ignore_ascii_case("-infinity") || rest.eq_ignore_ascii_case("-inf") {
+        return Ok(IntervalValue::neg_infinity());
+    }
+
     if rest.contains(':') {
         let parsed =
             parse_time_text(rest, &DateTimeConfig::default()).map_err(|_| invalid(text))?;
-        return Ok(render_interval(0, 0, parsed.0, negative));
+        let value = IntervalValue {
+            time_micros: parsed.0,
+            days: 0,
+            months: 0,
+        };
+        return Ok(if negative { value.negate() } else { value });
     }
 
     let tokens = rest.split_whitespace().collect::<Vec<_>>();
@@ -685,33 +717,63 @@ pub(crate) fn canonicalize_interval_text(text: &str) -> Result<String, ExecError
         match pair[1].to_ascii_lowercase().as_str() {
             "year" | "years" => {
                 let value = pair[0].parse::<i64>().map_err(|_| invalid(text))?;
-                months += i32::try_from(value * 12).map_err(|_| invalid(text))?
+                months = months
+                    .checked_add(
+                        i32::try_from(value.saturating_mul(12)).map_err(|_| invalid(text))?,
+                    )
+                    .ok_or_else(|| invalid(text))?;
             }
             "mon" | "mons" | "month" | "months" => {
                 let value = pair[0].parse::<i64>().map_err(|_| invalid(text))?;
-                months += i32::try_from(value).map_err(|_| invalid(text))?
+                months = months
+                    .checked_add(i32::try_from(value).map_err(|_| invalid(text))?)
+                    .ok_or_else(|| invalid(text))?;
             }
             "day" | "days" => {
                 let value = pair[0].parse::<i64>().map_err(|_| invalid(text))?;
-                days += i32::try_from(value).map_err(|_| invalid(text))?
+                days = days
+                    .checked_add(i32::try_from(value).map_err(|_| invalid(text))?)
+                    .ok_or_else(|| invalid(text))?;
             }
             "hour" | "hours" => {
                 let value = pair[0].parse::<i64>().map_err(|_| invalid(text))?;
-                micros += value.saturating_mul(3_600_000_000)
+                micros = micros
+                    .checked_add(
+                        value
+                            .checked_mul(3_600_000_000)
+                            .ok_or_else(|| invalid(text))?,
+                    )
+                    .ok_or_else(|| invalid(text))?;
             }
             "min" | "mins" | "minute" | "minutes" => {
                 let value = pair[0].parse::<i64>().map_err(|_| invalid(text))?;
-                micros += value.saturating_mul(60_000_000)
+                micros = micros
+                    .checked_add(value.checked_mul(60_000_000).ok_or_else(|| invalid(text))?)
+                    .ok_or_else(|| invalid(text))?;
             }
             "sec" | "secs" | "second" | "seconds" => {
                 let value = pair[0].parse::<f64>().map_err(|_| invalid(text))?;
-                micros += (value * 1_000_000.0).round() as i64
+                if !value.is_finite() {
+                    return Err(invalid(text));
+                }
+                micros = micros
+                    .checked_add((value * 1_000_000.0).round() as i64)
+                    .ok_or_else(|| invalid(text))?;
             }
             _ => return Err(invalid(text)),
         }
     }
 
-    Ok(render_interval(months, days, micros, negative))
+    let value = IntervalValue {
+        time_micros: micros,
+        days,
+        months,
+    };
+    Ok(if negative { value.negate() } else { value })
+}
+
+pub(crate) fn canonicalize_interval_text(text: &str) -> Result<String, ExecError> {
+    parse_interval_text_value(text).map(render_interval_text)
 }
 
 pub(crate) fn parse_bytea_text(text: &str) -> Result<Vec<u8>, ExecError> {
@@ -2181,6 +2243,23 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 right: Value::Null,
             }),
         },
+        Value::Interval(v) => match ty.kind {
+            SqlTypeKind::Interval => Ok(Value::Interval(v)),
+            SqlTypeKind::Text
+            | SqlTypeKind::Name
+            | SqlTypeKind::Char
+            | SqlTypeKind::Varchar
+            | SqlTypeKind::Json
+            | SqlTypeKind::Jsonb
+            | SqlTypeKind::JsonPath => {
+                cast_text_value_with_config(&render_interval_text(v), ty, true, config)
+            }
+            _ => Err(ExecError::TypeMismatch {
+                op: "::interval",
+                left: Value::Interval(v),
+                right: Value::Null,
+            }),
+        },
         Value::Text(text) => cast_text_value_with_config(text.as_str(), ty, true, config),
         Value::TextRef(ptr, len) => {
             let text = unsafe {
@@ -2883,9 +2962,7 @@ pub(crate) fn cast_text_value_with_config(
                 column: "timetz".into(),
                 details: format!("invalid input syntax for type time with time zone: \"{text}\""),
             }),
-        SqlTypeKind::Interval => Ok(Value::Text(CompactString::from_owned(
-            canonicalize_interval_text(text)?,
-        ))),
+        SqlTypeKind::Interval => Ok(Value::Interval(parse_interval_text_value(text)?)),
         SqlTypeKind::Timestamp => parse_timestamp_text(text, config)
             .map(Value::Timestamp)
             .map(|value| apply_time_precision(value, ty.time_precision()))
@@ -3471,7 +3548,7 @@ mod tests {
     use crate::backend::executor::{ExecError, Value};
     use crate::backend::parser::{SqlType, SqlTypeKind};
     use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
-    use crate::include::nodes::datum::ArrayValue;
+    use crate::include::nodes::datum::{ArrayValue, IntervalValue};
 
     #[test]
     fn float4_text_input_rounds_at_float4_width() {
@@ -3622,8 +3699,16 @@ mod tests {
             .unwrap(),
             Value::PgArray(
                 ArrayValue::from_1d(vec![
-                    Value::Text("@ 0 secs".into()),
-                    Value::Text("@ 1 hour 42 mins 20 secs".into()),
+                    Value::Interval(IntervalValue {
+                        time_micros: 0,
+                        days: 0,
+                        months: 0,
+                    }),
+                    Value::Interval(IntervalValue {
+                        time_micros: 6_140_000_000,
+                        days: 0,
+                        months: 0,
+                    }),
                 ])
                 .with_element_type_oid(crate::include::catalog::INTERVAL_TYPE_OID),
             )

@@ -1,5 +1,7 @@
 use super::render_bit_text;
-use super::{compare_order_values, parse_numeric_text, render_datetime_value_text};
+use super::{
+    compare_order_values, parse_numeric_text, render_datetime_value_text, render_interval_text,
+};
 use crate::backend::executor::ExecError;
 use crate::backend::executor::exec_expr::{expect_float8_arg, float8_regr_accum_state};
 use crate::backend::executor::expr_agg_support::execute_scalar_function_value_call;
@@ -1130,6 +1132,7 @@ fn json_object_agg_key(key: &Value) -> String {
         Value::Json(v) => v.to_string(),
         Value::Jsonb(v) => render_jsonb_bytes(v).unwrap_or_else(|_| "null".into()),
         Value::Numeric(v) => v.render(),
+        Value::Interval(v) => render_interval_text(*v),
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
@@ -1178,6 +1181,7 @@ fn value_to_json_text(value: &Value) -> String {
         Value::Money(v) => crate::backend::executor::money_format_text(*v),
         Value::Float64(v) => v.to_string(),
         Value::Numeric(v) => v.render(),
+        Value::Interval(v) => serde_json::to_string(&render_interval_text(*v)).unwrap(),
         Value::Bool(v) => {
             if *v {
                 "true".into()

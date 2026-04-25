@@ -7,7 +7,7 @@ use crate::backend::executor::value_io::builtin_type_oid_for_sql_type;
 use crate::backend::executor::{
     ArrayValue, ExecError, QueryColumn, Value, geometry_input_error_message,
     render_datetime_value_text_with_config, render_geometry_text, render_internal_char_text,
-    render_range_text,
+    render_interval_text, render_range_text,
 };
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::statistics::{
@@ -870,6 +870,11 @@ pub(crate) fn send_typed_data_row(
                 buf.extend_from_slice(&(text.len() as i32).to_be_bytes());
                 buf.extend_from_slice(text.as_bytes());
             }
+            Value::Interval(v) => {
+                let text = render_interval_text(*v);
+                buf.extend_from_slice(&(text.len() as i32).to_be_bytes());
+                buf.extend_from_slice(text.as_bytes());
+            }
             Value::Json(v) => {
                 buf.extend_from_slice(&(v.len() as i32).to_be_bytes());
                 buf.extend_from_slice(v.as_bytes());
@@ -1075,6 +1080,13 @@ fn encode_binary_data_row_value(value: &Value, sql_type: SqlType) -> Result<Vec<
         }
         Value::Timestamp(v) => Ok(v.0.to_be_bytes().to_vec()),
         Value::TimestampTz(v) => Ok(v.0.to_be_bytes().to_vec()),
+        Value::Interval(v) => {
+            let mut out = Vec::with_capacity(16);
+            out.extend_from_slice(&v.time_micros.to_be_bytes());
+            out.extend_from_slice(&v.days.to_be_bytes());
+            out.extend_from_slice(&v.months.to_be_bytes());
+            Ok(out)
+        }
         Value::Record(record)
             if matches!(sql_type.kind, SqlTypeKind::Record | SqlTypeKind::Composite) =>
         {

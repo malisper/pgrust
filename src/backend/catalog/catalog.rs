@@ -21,6 +21,7 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         ScalarType::TimeTz => (12, AttributeAlign::Double),
         ScalarType::Timestamp => (8, AttributeAlign::Double),
         ScalarType::TimestampTz => (8, AttributeAlign::Double),
+        ScalarType::Interval => (16, AttributeAlign::Double),
         ScalarType::BitString => (-1, AttributeAlign::Int),
         ScalarType::Bytea => (-1, AttributeAlign::Int),
         ScalarType::Inet | ScalarType::Cidr => (-1, AttributeAlign::Int),
@@ -146,7 +147,6 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         | SqlTypeKind::JsonPath
         | SqlTypeKind::Xml
         | SqlTypeKind::Tid
-        | SqlTypeKind::Interval
         | SqlTypeKind::TsVector
         | SqlTypeKind::TsQuery
         | SqlTypeKind::Text => AttributeStorage::Extended,
@@ -171,7 +171,8 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         | SqlTypeKind::Box
         | SqlTypeKind::Circle
         | SqlTypeKind::Float4
-        | SqlTypeKind::Float8 => AttributeStorage::Plain,
+        | SqlTypeKind::Float8
+        | SqlTypeKind::Interval => AttributeStorage::Plain,
         SqlTypeKind::Range
         | SqlTypeKind::Int4Range
         | SqlTypeKind::Int8Range
@@ -231,9 +232,8 @@ pub(crate) fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         SqlTypeKind::Int4 => ScalarType::Int32,
         SqlTypeKind::Int8 => ScalarType::Int64,
         SqlTypeKind::Money => ScalarType::Money,
-        // :HACK: tid and interval are currently routed through the text storage
-        // path so ALTER TABLE ADD COLUMN and basic I/O work before we add
-        // dedicated fixed-width runtime representations.
+        // :HACK: tid is currently routed through the text storage path until
+        // it gets a dedicated fixed-width runtime representation.
         SqlTypeKind::Name => ScalarType::Text,
         SqlTypeKind::Oid => ScalarType::Int32,
         SqlTypeKind::RegClass => ScalarType::Int32,
@@ -274,7 +274,7 @@ pub(crate) fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         SqlTypeKind::Date => ScalarType::Date,
         SqlTypeKind::Time => ScalarType::Time,
         SqlTypeKind::TimeTz => ScalarType::TimeTz,
-        SqlTypeKind::Interval => ScalarType::Text,
+        SqlTypeKind::Interval => ScalarType::Interval,
         SqlTypeKind::TsVector => ScalarType::TsVector,
         SqlTypeKind::TsQuery => ScalarType::TsQuery,
         SqlTypeKind::RegConfig | SqlTypeKind::RegDictionary => ScalarType::Int32,

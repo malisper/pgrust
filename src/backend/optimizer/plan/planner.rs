@@ -162,14 +162,16 @@ fn has_windowing(root: &PlannerInfo) -> bool {
 fn expand_window_clause(root: &PlannerInfo, clause: &WindowClause) -> WindowClause {
     let expand_frame_bound = |bound: crate::include::nodes::primnodes::WindowFrameBound| match bound
     {
-        crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(expr) => {
+        crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(offset) => {
+            let expr = expand_join_rte_vars(root, offset.expr.clone());
             crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(
-                expand_join_rte_vars(root, expr),
+                offset.with_expr(expr),
             )
         }
-        crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(expr) => {
+        crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(offset) => {
+            let expr = expand_join_rte_vars(root, offset.expr.clone());
             crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(
-                expand_join_rte_vars(root, expr),
+                offset.with_expr(expr),
             )
         }
         other => other,
