@@ -49,7 +49,7 @@ use crate::backend::utils::misc::stack_depth::{
     MIN_MAX_STACK_DEPTH_KB, StackDepthGuard, max_stack_depth_limit_kb,
 };
 use crate::include::catalog::{
-    PG_CHECKPOINT_OID, PG_EXECUTE_SERVER_PROGRAM_OID, PG_LANGUAGE_SQL_OID,
+    PG_CHECKPOINT_OID, PG_EXECUTE_SERVER_PROGRAM_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID,
     PG_WRITE_SERVER_FILES_OID, PgProcRow,
 };
 use crate::include::nodes::execnodes::ScalarType;
@@ -72,7 +72,7 @@ use crate::pgrust::portal::{
     CursorOptions, CursorViewRow, Portal, PortalFetchDirection, PortalFetchLimit, PortalManager,
     PortalRunResult,
 };
-use crate::pl::plpgsql::execute_do_with_gucs;
+use crate::pl::plpgsql::{execute_do_with_gucs, execute_user_defined_procedure_values};
 use crate::{ClientId, RelFileLocator};
 use parking_lot::RwLock;
 
@@ -1145,18 +1145,23 @@ impl Session {
         &mut self,
         db: &Database,
         call_stmt: &CallStatement,
+        xid: TransactionId,
+        cid: CommandId,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.catalog_lookup(db);
         let proc_row = resolve_call_procedure(call_stmt, &catalog)?;
+        let arg_values = self.evaluate_call_input_args(db, call_stmt, &proc_row)?;
+        if proc_row.prolang == PG_LANGUAGE_PLPGSQL_OID {
+            return self.execute_plpgsql_call(db, &proc_row, &arg_values, xid, cid);
+        }
         if proc_row.prolang != PG_LANGUAGE_SQL_OID {
             return Err(ExecError::DetailedError {
-                message: "only LANGUAGE sql procedures are supported by CALL".into(),
+                message: "only LANGUAGE sql or plpgsql procedures are supported by CALL".into(),
                 detail: Some(format!("language oid = {}", proc_row.prolang)),
                 hint: None,
                 sqlstate: "0A000",
             });
         }
-        let arg_values = self.evaluate_call_input_args(db, call_stmt, &proc_row)?;
         let body = inline_sql_procedure_body(&proc_row, &arg_values)?;
         let statements = split_sql_procedure_body(&body)?;
         let has_output_args = procedure_output_args(&proc_row).next().is_some();
@@ -1186,6 +1191,48 @@ impl Session {
             });
         }
         Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn execute_plpgsql_call(
+        &mut self,
+        db: &Database,
+        proc_row: &PgProcRow,
+        arg_values: &[Value],
+        xid: TransactionId,
+        cid: CommandId,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.catalog_lookup_for_command(db, xid, cid);
+        let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+        let deferred_foreign_keys = self
+            .active_txn
+            .as_ref()
+            .map(|txn| txn.deferred_foreign_keys.clone());
+        let mut ctx = self.executor_context_for_catalog(
+            db,
+            snapshot,
+            cid,
+            &catalog,
+            deferred_foreign_keys,
+            None,
+        );
+        let columns = call_output_columns(proc_row, &catalog);
+        let result =
+            execute_user_defined_procedure_values(proc_row.oid, arg_values, &columns, &mut ctx);
+        self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
+        let slots = result?;
+        if columns.is_empty() {
+            return Ok(StatementResult::AffectedRows(0));
+        }
+        let rows = slots
+            .into_iter()
+            .map(|mut slot| slot.values().map(|values| values.to_vec()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let column_names = columns.iter().map(|column| column.name.clone()).collect();
+        Ok(StatementResult::Query {
+            columns,
+            column_names,
+            rows,
+        })
     }
 
     fn evaluate_call_input_args(
@@ -1247,6 +1294,29 @@ impl Session {
                 sqlstate: "0A000",
             }),
         }
+    }
+
+    fn execute_call_stmt_autocommit(
+        &mut self,
+        db: &Database,
+        stmt: Statement,
+        statement_lock_scope_id: Option<u64>,
+    ) -> Result<StatementResult, ExecError> {
+        self.active_txn = Some(self.active_transaction_without_xid(db));
+        self.stats_state.write().begin_top_level_xact();
+        let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+        let result = result.and_then(|result| {
+            self.validate_constraints_for_active_txn(db, false)?;
+            Ok(result)
+        });
+        let txn = self.active_txn.take().unwrap();
+        let result = self.finalize_taken_transaction(db, txn, result);
+        if result.is_ok() {
+            self.portals.drop_transaction_portals(true);
+        } else {
+            self.portals.drop_transaction_portals(false);
+        }
+        result
     }
 
     fn executor_context_for_catalog(
@@ -1723,7 +1793,9 @@ impl Session {
             Statement::CopyTo(ref copy_stmt) => self
                 .execute_copy_to(db, copy_stmt, None)
                 .map(StatementResult::AffectedRows),
-            Statement::Call(ref call_stmt) => self.execute_call_stmt(db, call_stmt),
+            Statement::Call(_) => {
+                self.execute_call_stmt_autocommit(db, stmt, statement_lock_scope_id)
+            }
             Statement::CreateFunction(ref create_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -4847,7 +4919,7 @@ impl Session {
                     unsupported_stmt.feature, unsupported_stmt.sql
                 ))))
             }
-            Statement::Call(ref call_stmt) => self.execute_call_stmt(db, call_stmt),
+            Statement::Call(ref call_stmt) => self.execute_call_stmt(db, call_stmt, xid, cid),
             Statement::AlterSchemaOwner(ref alter_stmt) => {
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_alter_schema_owner_stmt_in_transaction_with_search_path(

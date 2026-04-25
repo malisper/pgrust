@@ -22669,6 +22669,73 @@ fn call_sql_procedure_returns_out_and_inout_rows() {
 }
 
 #[test]
+fn call_plpgsql_procedure_executes_body() {
+    let base = temp_dir("call_plpgsql_procedure_executes");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table cp_plpgsql (id int4, value text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create procedure plpgsql_add_log(x text) \
+             language plpgsql as $$ \
+             begin \
+                 insert into cp_plpgsql values (1, x); \
+             end $$",
+        )
+        .unwrap();
+    session
+        .execute(&db, "call plpgsql_add_log('value')")
+        .unwrap();
+
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "select id, value from cp_plpgsql order by id",
+    );
+    assert_eq!(
+        rows,
+        vec![vec![Value::Int32(1), Value::Text("value".into())]]
+    );
+}
+
+#[test]
+fn call_plpgsql_procedure_returns_out_and_inout_rows() {
+    let base = temp_dir("call_plpgsql_procedure_out_rows");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create procedure plpgsql_out(inout a int4, out b text) \
+             language plpgsql as $$ \
+             begin \
+                 a := a + 3; \
+                 b := 'done'; \
+             end $$",
+        )
+        .unwrap();
+    let result = session.execute(&db, "call plpgsql_out(4, null)").unwrap();
+
+    match result {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["a", "b"]);
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int32(7), Value::Text("done".into())]]
+            );
+        }
+        other => panic!("expected CALL output row, got {other:?}"),
+    }
+}
+
+#[test]
 fn procedure_catalog_display_helpers_read_pg_proc_metadata() {
     let base = temp_dir("procedure_catalog_display_helpers");
     let db = Database::open(&base, 16).unwrap();

@@ -705,6 +705,25 @@ fn function_return_contract(
     catalog: &dyn CatalogLookup,
     output_slots: &[CompiledOutputSlot],
 ) -> Result<FunctionReturnContract, ParseError> {
+    if row.prokind == 'p' {
+        return if output_slots.is_empty() {
+            Ok(FunctionReturnContract::Scalar {
+                ty: SqlType::new(SqlTypeKind::Void),
+                setof: false,
+                output_slot: None,
+            })
+        } else {
+            Ok(FunctionReturnContract::FixedRow {
+                columns: output_slots
+                    .iter()
+                    .map(|slot| slot.column.clone())
+                    .collect(),
+                setof: false,
+                uses_output_vars: true,
+            })
+        };
+    }
+
     let result_type = catalog
         .type_by_oid(row.prorettype)
         .map(|ty| ty.sql_type)
