@@ -3411,6 +3411,7 @@ fn sql_type_display_name(ty: SqlType) -> String {
         SqlTypeKind::Float4 => "real",
         SqlTypeKind::Float8 => "double precision",
         SqlTypeKind::Money => "money",
+        SqlTypeKind::PgLsn => "pg_lsn",
         SqlTypeKind::Numeric => "numeric",
         SqlTypeKind::Json => "json",
         SqlTypeKind::Jsonb => "jsonb",

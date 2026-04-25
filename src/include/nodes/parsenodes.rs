@@ -2780,6 +2780,7 @@ pub enum SqlTypeKind {
     TsQuery,
     RegConfig,
     RegDictionary,
+    PgLsn,
     Text,
     Bool,
     Point,

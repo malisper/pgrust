@@ -231,6 +231,7 @@ pub(crate) fn sql_type_name(ty: SqlType) -> String {
             SqlTypeKind::TsQuery => "tsquery",
             SqlTypeKind::RegConfig => "regconfig",
             SqlTypeKind::RegDictionary => "regdictionary",
+            SqlTypeKind::PgLsn => "pg_lsn",
             SqlTypeKind::Text => "text",
             SqlTypeKind::Bool => "boolean",
             SqlTypeKind::Point => "point",
@@ -377,6 +378,7 @@ pub(super) fn coerce_unknown_string_literal_type(
             SqlTypeKind::RegProcedure => return SqlType::new(SqlTypeKind::RegProcedure),
             SqlTypeKind::RegConfig => return SqlType::new(SqlTypeKind::RegConfig),
             SqlTypeKind::RegDictionary => return SqlType::new(SqlTypeKind::RegDictionary),
+            SqlTypeKind::PgLsn => return SqlType::new(SqlTypeKind::PgLsn),
             _ => {}
         }
         if peer_type.is_array {

@@ -120,6 +120,7 @@ fn encode_index_value(
             Ok(oid.to_le_bytes().to_vec())
         }
         Value::Int64(v) => Ok(v.to_le_bytes().to_vec()),
+        Value::PgLsn(v) => Ok(v.to_le_bytes().to_vec()),
         Value::Money(v) => Ok(v.to_le_bytes().to_vec()),
         Value::Bool(v) => Ok(vec![u8::from(*v)]),
         Value::Text(v) => Ok(v.as_bytes().to_vec()),
