@@ -568,7 +568,7 @@ impl Catalog {
             0
         };
         let mut next_oid = array_type_oid.saturating_add(1);
-        if relkind == 'r' {
+        if matches!(relkind, 'r' | 'p') {
             allocate_relation_object_oids(&mut desc, &mut next_oid);
         }
         let rel_number = if relkind_has_storage(relkind) {
@@ -1590,7 +1590,7 @@ impl Catalog {
             .get(&name)
             .cloned()
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        if old_entry.relkind != 'r' {
+        if !matches!(old_entry.relkind, 'r' | 'p') {
             return Err(CatalogError::UnknownTable(relation_oid.to_string()));
         }
         let column_index = relation_column_index(&old_entry.desc, column_name)?;

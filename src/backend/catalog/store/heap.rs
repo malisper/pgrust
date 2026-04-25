@@ -3581,14 +3581,46 @@ impl CatalogStore {
         convalidated: bool,
         connoinherit: bool,
         conbin: impl Into<String>,
+        conparentid: u32,
+        conislocal: bool,
+        coninhcount: i16,
         ctx: &CatalogWriteContext,
     ) -> Result<CatalogMutationEffect, CatalogError> {
+        self.create_check_constraint_mvcc_with_row(
+            relation_oid,
+            conname,
+            conenforced,
+            convalidated,
+            connoinherit,
+            conbin,
+            conparentid,
+            conislocal,
+            coninhcount,
+            ctx,
+        )
+        .map(|(_, effect)| effect)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_check_constraint_mvcc_with_row(
+        &mut self,
+        relation_oid: u32,
+        conname: impl Into<String>,
+        conenforced: bool,
+        convalidated: bool,
+        connoinherit: bool,
+        conbin: impl Into<String>,
+        conparentid: u32,
+        conislocal: bool,
+        coninhcount: i16,
+        ctx: &CatalogWriteContext,
+    ) -> Result<(PgConstraintRow, CatalogMutationEffect), CatalogError> {
         let conname = conname.into();
         let conbin = conbin.into();
         let table = self
             .relation_id_get_relation(ctx, relation_oid)?
             .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
-        if table.relkind != 'r' {
+        if !matches!(table.relkind, 'r' | 'p') {
             return Err(CatalogError::UnknownTable(relation_oid.to_string()));
         }
         if relation_constraint_exists_mvcc(self, ctx, relation_oid, &conname, None)? {
@@ -3608,7 +3640,7 @@ impl CatalogStore {
             conrelid: relation_oid,
             contypid: 0,
             conindid: 0,
-            conparentid: 0,
+            conparentid,
             confrelid: 0,
             confupdtype: ' ',
             confdeltype: ' ',
@@ -3621,8 +3653,8 @@ impl CatalogStore {
             confdelsetcols: None,
             conexclop: None,
             conbin: Some(conbin),
-            conislocal: true,
-            coninhcount: 0,
+            conislocal,
+            coninhcount,
             connoinherit,
             conperiod: false,
         };
@@ -3640,6 +3672,51 @@ impl CatalogStore {
         ];
         insert_catalog_rows_subset_mvcc(ctx, &rows, self.scope_db_oid(), &kinds)?;
         self.control = control;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.relation_oids, relation_oid);
+        Ok((constraint, effect))
+    }
+
+    pub fn update_check_constraint_inheritance_mvcc(
+        &mut self,
+        relation_oid: u32,
+        constraint_oid: u32,
+        conparentid: u32,
+        conislocal: bool,
+        coninhcount: i16,
+        connoinherit: bool,
+        ctx: &CatalogWriteContext,
+    ) -> Result<CatalogMutationEffect, CatalogError> {
+        let old_row = relation_constraint_row_by_oid_mvcc(self, ctx, constraint_oid)?
+            .filter(|row| row.conrelid == relation_oid && row.contype == CONSTRAINT_CHECK)
+            .ok_or_else(|| CatalogError::UnknownTable(constraint_oid.to_string()))?;
+        let mut new_row = old_row.clone();
+        new_row.conparentid = conparentid;
+        new_row.conislocal = conislocal;
+        new_row.coninhcount = coninhcount;
+        new_row.connoinherit = connoinherit;
+
+        let kinds = vec![BootstrapCatalogKind::PgConstraint];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                constraints: vec![old_row],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                constraints: vec![new_row],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
 
         let mut effect = CatalogMutationEffect::default();
         effect_record_catalog_kinds(&mut effect, &kinds);
@@ -4645,7 +4722,7 @@ impl CatalogStore {
     ) -> Result<CatalogMutationEffect, CatalogError> {
         let (_old_entry, new_entry, _, kinds) =
             mutate_visible_relation_entry_mvcc(self, relation_oid, ctx, |entry, control| {
-                if entry.relkind != 'r' {
+                if !matches!(entry.relkind, 'r' | 'p') {
                     return Err(CatalogError::UnknownTable(relation_oid.to_string()));
                 }
                 let column_index = relation_column_index_visible(&entry.desc, column_name)?;

@@ -1419,14 +1419,27 @@ impl CreateTableStatement {
     pub fn columns(&self) -> impl Iterator<Item = &ColumnDef> {
         self.elements.iter().filter_map(|element| match element {
             CreateTableElement::Column(column) => Some(column),
-            CreateTableElement::Constraint(_) | CreateTableElement::Like(_) => None,
+            CreateTableElement::PartitionColumnOverride(_)
+            | CreateTableElement::Constraint(_)
+            | CreateTableElement::Like(_) => None,
         })
     }
 
     pub fn constraints(&self) -> impl Iterator<Item = &TableConstraint> {
         self.elements.iter().filter_map(|element| match element {
-            CreateTableElement::Column(_) | CreateTableElement::Like(_) => None,
+            CreateTableElement::Column(_)
+            | CreateTableElement::PartitionColumnOverride(_)
+            | CreateTableElement::Like(_) => None,
             CreateTableElement::Constraint(constraint) => Some(constraint),
+        })
+    }
+
+    pub fn partition_column_overrides(&self) -> impl Iterator<Item = &PartitionColumnOverride> {
+        self.elements.iter().filter_map(|element| match element {
+            CreateTableElement::PartitionColumnOverride(override_) => Some(override_),
+            CreateTableElement::Column(_)
+            | CreateTableElement::Constraint(_)
+            | CreateTableElement::Like(_) => None,
         })
     }
 }
@@ -2725,8 +2738,16 @@ pub struct DomainCheckConstraint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionColumnOverride {
+    pub name: String,
+    pub default_expr: Option<String>,
+    pub constraints: Vec<ColumnConstraint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CreateTableElement {
     Column(ColumnDef),
+    PartitionColumnOverride(PartitionColumnOverride),
     Constraint(TableConstraint),
     Like(CreateTableLikeClause),
 }

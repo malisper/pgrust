@@ -30,6 +30,8 @@ pub struct NotNullConstraintAction {
     pub not_valid: bool,
     pub no_inherit: bool,
     pub primary_key_owned: bool,
+    pub is_local: bool,
+    pub inhcount: i16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +41,9 @@ pub struct CheckConstraintAction {
     pub not_valid: bool,
     pub no_inherit: bool,
     pub enforced: bool,
+    pub parent_constraint_oid: Option<u32>,
+    pub is_local: bool,
+    pub inhcount: i16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -541,6 +546,8 @@ pub fn normalize_create_table_constraints(
             not_valid: constraint.not_valid,
             no_inherit: constraint.no_inherit,
             primary_key_owned: constraint.primary_key_owned,
+            is_local: true,
+            inhcount: 0,
         })
         .collect();
 
@@ -554,6 +561,9 @@ pub fn normalize_create_table_constraints(
             not_valid: constraint.not_valid,
             no_inherit: constraint.no_inherit,
             enforced: constraint.enforced,
+            parent_constraint_oid: None,
+            is_local: true,
+            inhcount: 0,
         })
         .collect();
 
@@ -848,6 +858,8 @@ pub fn normalize_alter_table_add_constraint(
                         not_valid: attributes.not_valid,
                         no_inherit: attributes.no_inherit,
                         primary_key_owned: false,
+                        is_local: true,
+                        inhcount: 0,
                     },
                 ))
             } else {
@@ -886,6 +898,9 @@ pub fn normalize_alter_table_add_constraint(
                     not_valid: attributes.not_valid,
                     no_inherit: attributes.no_inherit,
                     enforced: attributes.enforced.unwrap_or(true),
+                    parent_constraint_oid: None,
+                    is_local: true,
+                    inhcount: 0,
                 },
             ))
         }
@@ -1111,6 +1126,8 @@ pub fn normalize_alter_table_add_column_constraints(
             not_valid: constraint.not_valid,
             no_inherit: constraint.no_inherit,
             primary_key_owned: false,
+            is_local: true,
+            inhcount: 0,
         });
     let checks = checks
         .into_iter()
@@ -1122,6 +1139,9 @@ pub fn normalize_alter_table_add_column_constraints(
             not_valid: constraint.not_valid,
             no_inherit: constraint.no_inherit,
             enforced: constraint.enforced,
+            parent_constraint_oid: None,
+            is_local: true,
+            inhcount: 0,
         })
         .collect();
 
