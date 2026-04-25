@@ -221,6 +221,16 @@ fn resolve_arbiters(
                     )?],
                 });
             }
+            if catalog
+                .index_relations_for_heap(relation_oid)
+                .into_iter()
+                .find(|index| index.relation_oid == row.conindid)
+                .is_some_and(|index| !index.index_meta.indimmediate)
+            {
+                return Err(ParseError::FeatureNotSupported(
+                    "ON CONFLICT does not support deferrable unique constraints as arbiters".into(),
+                ));
+            }
             let index = inferable_unique_indexes(&catalog.index_relations_for_heap(relation_oid))
                 .into_iter()
                 .find(|index| index.relation_oid == row.conindid)
@@ -278,6 +288,7 @@ fn inferable_unique_indexes(indexes: &[BoundIndexRelation]) -> Vec<BoundIndexRel
         .iter()
         .filter(|index| {
             index.index_meta.indisunique
+                && index.index_meta.indimmediate
                 && index.index_meta.indisvalid
                 && index.index_meta.indisready
                 && index.index_meta.am_oid == BTREE_AM_OID
@@ -287,6 +298,11 @@ fn inferable_unique_indexes(indexes: &[BoundIndexRelation]) -> Vec<BoundIndexRel
 }
 
 fn reject_unsupported_arbiter_indexes(indexes: &[BoundIndexRelation]) -> Result<(), ParseError> {
+    if indexes.iter().any(|index| !index.index_meta.indimmediate) {
+        return Err(ParseError::FeatureNotSupported(
+            "ON CONFLICT does not support deferrable unique constraints as arbiters".into(),
+        ));
+    }
     if indexes
         .iter()
         .any(|index| index.index_predicate.as_ref().is_some_and(expr_uses_ctid))

@@ -746,6 +746,7 @@ fn catalog_with_people_id_index() -> Catalog {
                 indisvalid: true,
                 indisready: true,
                 indislive: true,
+                indimmediate: true,
                 indkey: vec![1],
                 indclass: vec![],
                 indcollation: vec![],
@@ -810,6 +811,7 @@ fn catalog_with_people_primary_key_opclass(opclass_oid: u32) -> Catalog {
                 indisvalid: true,
                 indisready: true,
                 indislive: true,
+                indimmediate: true,
                 indkey: vec![1],
                 indclass: vec![opclass_oid],
                 indcollation: vec![0],
@@ -903,6 +905,7 @@ fn catalog_with_people_partial_unique_index() -> Catalog {
                 indisvalid: true,
                 indisready: true,
                 indislive: true,
+                indimmediate: true,
                 indkey: vec![1],
                 indclass: vec![crate::include::catalog::INT4_BTREE_OPCLASS_OID],
                 indcollation: vec![0],
@@ -964,6 +967,7 @@ fn catalog_with_people_ctid_partial_unique_index() -> Catalog {
                 indisvalid: true,
                 indisready: true,
                 indislive: true,
+                indimmediate: true,
                 indkey: vec![1],
                 indclass: vec![crate::include::catalog::INT4_BTREE_OPCLASS_OID],
                 indcollation: vec![0],
@@ -1025,6 +1029,7 @@ fn catalog_with_people_expression_unique_index() -> Catalog {
                 indisvalid: true,
                 indisready: true,
                 indislive: true,
+                indimmediate: true,
                 indkey: vec![0],
                 indclass: vec![crate::include::catalog::TEXT_BTREE_OPCLASS_OID],
                 indcollation: vec![0],
@@ -1201,6 +1206,7 @@ fn bind_expression_index_metadata_does_not_discover_heap_indexes() {
                 indisvalid: true,
                 indisready: true,
                 indislive: true,
+                indimmediate: true,
                 indkey: vec![0],
                 indclass: vec![crate::include::catalog::INT4_BTREE_OPCLASS_OID],
                 indcollation: vec![0],
@@ -1270,6 +1276,7 @@ fn catalog_with_people_name_c_collation_index() -> Catalog {
                 indisvalid: true,
                 indisready: true,
                 indislive: true,
+                indimmediate: true,
                 indkey: vec![2],
                 indclass: vec![crate::include::catalog::TEXT_BTREE_OPCLASS_OID],
                 indcollation: vec![crate::include::catalog::C_COLLATION_OID],
@@ -1339,6 +1346,7 @@ fn catalog_with_text_parent_primary_key() -> Catalog {
                 indisvalid: true,
                 indisready: true,
                 indislive: true,
+                indimmediate: true,
                 indkey: vec![1],
                 indclass: vec![crate::include::catalog::TEXT_BTREE_OPCLASS_OID],
                 indcollation: vec![0],
@@ -1809,6 +1817,28 @@ fn parse_set_statement() {
             is_local: false,
         })
     );
+}
+
+#[test]
+fn parse_set_constraints_statement() {
+    let stmt = parse_statement("set constraints all deferred").unwrap();
+    assert!(matches!(
+        stmt,
+        Statement::SetConstraints(stmt) if stmt.constraints.is_none() && stmt.deferred
+    ));
+
+    let stmt =
+        parse_statement("set constraints public.items_pkey, items_code_key immediate").unwrap();
+    let Statement::SetConstraints(stmt) = stmt else {
+        panic!("expected set constraints");
+    };
+    assert!(!stmt.deferred);
+    let constraints = stmt.constraints.expect("named constraints");
+    assert_eq!(constraints.len(), 2);
+    assert_eq!(constraints[0].schema_name.as_deref(), Some("public"));
+    assert_eq!(constraints[0].name, "items_pkey");
+    assert_eq!(constraints[1].schema_name, None);
+    assert_eq!(constraints[1].name, "items_code_key");
 }
 
 #[test]
@@ -9079,6 +9109,77 @@ fn parse_create_table_primary_key_and_unique_constraints() {
 }
 
 #[test]
+fn parse_create_table_deferrable_key_constraints() {
+    let stmt = parse_statement(
+        "create table items (
+            id int4 primary key initially deferred,
+            code int4,
+            constraint items_code_key unique (code) deferrable initially immediate
+        )",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+
+    let columns = ct.columns().collect::<Vec<_>>();
+    assert_eq!(
+        columns[0].constraints,
+        vec![ColumnConstraint::PrimaryKey {
+            attributes: ConstraintAttributes {
+                deferrable: Some(true),
+                initially_deferred: Some(true),
+                ..attrs()
+            }
+        }]
+    );
+    assert_eq!(
+        ct.constraints().cloned().collect::<Vec<_>>(),
+        vec![TableConstraint::Unique {
+            attributes: ConstraintAttributes {
+                name: Some("items_code_key".into()),
+                deferrable: Some(true),
+                initially_deferred: Some(false),
+                ..attrs()
+            },
+            columns: vec!["code".into()],
+            without_overlaps: None,
+        }]
+    );
+}
+
+#[test]
+fn parse_create_table_rejects_invalid_key_deferrability_clauses() {
+    let err = parse_statement("create table items (id int4 primary key deferrable not deferrable)")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::FeatureNotSupportedMessage(message)
+            if message == "multiple DEFERRABLE/NOT DEFERRABLE clauses not allowed"
+    ));
+
+    let err = parse_statement(
+        "create table items (id int4 primary key initially immediate initially deferred)",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::FeatureNotSupportedMessage(message)
+            if message == "multiple INITIALLY IMMEDIATE/DEFERRED clauses not allowed"
+    ));
+
+    let err = parse_statement(
+        "create table items (id int4 primary key not deferrable initially deferred)",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::FeatureNotSupportedMessage(message)
+            if message == "constraint declared INITIALLY DEFERRED must be DEFERRABLE"
+    ));
+}
+
+#[test]
 fn parse_create_table_named_check_and_not_null_constraints() {
     let stmt = parse_statement(
         "create table items (id int4 constraint id_positive check (id > 0) not valid deferrable initially deferred not enforced, note text, constraint note_present not null note not valid, constraint note_nonempty check (note <> '') not deferrable initially immediate enforced)",
@@ -9259,6 +9360,39 @@ fn lower_create_table_accepts_check_not_enforced() {
     assert_eq!(lowered.check_actions.len(), 1);
     assert_eq!(lowered.check_actions[0].constraint_name, "items_id_check");
     assert!(!lowered.check_actions[0].enforced);
+}
+
+#[test]
+fn lower_create_table_preserves_key_constraint_deferrability() {
+    let stmt = parse_statement(
+        "create table items (
+            id int4 primary key initially deferred,
+            code int4,
+            constraint items_code_key unique (code) deferrable initially immediate
+        )",
+    )
+    .unwrap();
+    let Statement::CreateTable(ct) = stmt else {
+        panic!("expected create table");
+    };
+
+    let lowered = lower_create_table(&ct, &crate::backend::parser::analyze::LiteralDefaultCatalog)
+        .expect("lower create table");
+    assert_eq!(lowered.constraint_actions.len(), 2);
+    assert!(lowered.constraint_actions.iter().any(|action| {
+        action.constraint_name.as_deref() == Some("items_pkey")
+            && action.primary
+            && action.columns == vec!["id".to_string()]
+            && action.deferrable
+            && action.initially_deferred
+    }));
+    assert!(lowered.constraint_actions.iter().any(|action| {
+        action.constraint_name.as_deref() == Some("items_code_key")
+            && !action.primary
+            && action.columns == vec!["code".to_string()]
+            && action.deferrable
+            && !action.initially_deferred
+    }));
 }
 
 #[test]

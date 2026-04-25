@@ -2022,41 +2022,13 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
             .filter_map(|index_oid| {
                 let entry =
                     relation_entry_by_oid(self.db, self.client_id, self.txn_ctx, index_oid)?;
-                let mut index_meta = entry.index.as_ref()?.clone();
                 let class =
                     class_row_by_oid(self.db, self.client_id, self.txn_ctx, entry.relation_oid)?;
-                let (index_exprs, index_predicate) = relation_entry_by_oid(
-                    self.db,
-                    self.client_id,
-                    self.txn_ctx,
-                    index_meta.indrelid,
+                crate::backend::parser::bound_index_relation_from_relcache_entry(
+                    class.relname,
+                    &entry,
+                    self,
                 )
-                .map(|heap| {
-                    let index_exprs = crate::backend::parser::relation_get_index_expressions(
-                        &mut index_meta,
-                        &heap.desc,
-                        self,
-                    )
-                    .unwrap_or_default();
-                    let index_predicate = crate::backend::parser::relation_get_index_predicate(
-                        &mut index_meta,
-                        &heap.desc,
-                        self,
-                    )
-                    .ok()
-                    .flatten();
-                    (index_exprs, index_predicate)
-                })
-                .unwrap_or_default();
-                Some(crate::backend::parser::BoundIndexRelation {
-                    name: class.relname,
-                    rel: entry.rel,
-                    relation_oid: entry.relation_oid,
-                    desc: entry.desc,
-                    index_exprs,
-                    index_predicate,
-                    index_meta,
-                })
             })
             .collect()
     }

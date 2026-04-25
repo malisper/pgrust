@@ -619,6 +619,7 @@ fn int4_btree_options(num_keys: usize, indnullsnotdistinct: bool) -> CatalogInde
         indoption: vec![0; num_keys],
         indnullsnotdistinct,
         indisexclusion: false,
+        indimmediate: true,
         brin_options: None,
         gin_options: None,
         hash_options: None,
