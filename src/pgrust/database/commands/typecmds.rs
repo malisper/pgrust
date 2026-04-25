@@ -1,11 +1,14 @@
 use super::super::*;
 use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::catalog::column_desc;
+use crate::backend::catalog::roles::find_role_by_name;
 use crate::backend::executor::{ColumnDesc, RelationDesc, StatementResult};
 use crate::backend::parser::{
-    CatalogLookup, CreateCompositeTypeStatement, CreateEnumTypeStatement, CreateRangeTypeStatement,
-    CreateTypeStatement, DropTypeStatement, ParseError, resolve_raw_type_name,
+    AlterTypeOwnerStatement, CatalogLookup, CreateCompositeTypeStatement, CreateEnumTypeStatement,
+    CreateRangeTypeStatement, CreateTypeStatement, DropTypeStatement, ParseError, parse_type_name,
+    resolve_raw_type_name,
 };
+use crate::backend::utils::misc::notices::push_notice;
 use crate::pgrust::database::ddl::{
     ensure_relation_owner, is_system_column_name, map_catalog_error, reject_type_with_dependents,
 };
@@ -118,6 +121,49 @@ impl Database {
         }
     }
 
+    pub(crate) fn execute_alter_type_owner_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        stmt: &AlterTypeOwnerStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let search_path = self.effective_search_path(client_id, configured_search_path);
+        let auth_catalog = self
+            .auth_catalog(client_id, None)
+            .map_err(map_catalog_error)?;
+        let new_owner = find_role_by_name(auth_catalog.roles(), &stmt.new_owner)
+            .ok_or_else(|| role_does_not_exist_error(&stmt.new_owner))?;
+        let mut range_types = self.range_types.write();
+        let range_key = range_types
+            .iter()
+            .find(|(_, entry)| {
+                entry.name.eq_ignore_ascii_case(stmt.type_name.as_str())
+                    && namespace_visible_in_search_path(entry.namespace_oid, &search_path)
+            })
+            .map(|(key, _)| key.clone());
+        let Some(range_key) = range_key else {
+            return Err(range_types
+                .values()
+                .find(|entry| {
+                    entry
+                        .multirange_name
+                        .eq_ignore_ascii_case(stmt.type_name.as_str())
+                        && namespace_visible_in_search_path(entry.namespace_oid, &search_path)
+                })
+                .map(|entry| {
+                    cannot_alter_multirange_type_error(&entry.multirange_name, &entry.name)
+                })
+                .unwrap_or_else(|| type_does_not_exist_error(&stmt.type_name)));
+        };
+        let entry = range_types
+            .get_mut(&range_key)
+            .expect("range key found in snapshot");
+        entry.owner_oid = new_owner.oid;
+        entry.owner_usage = true;
+        self.plan_cache.invalidate_all();
+        Ok(StatementResult::AffectedRows(0))
+    }
+
     pub(crate) fn execute_drop_type_stmt_with_search_path(
         &self,
         client_id: ClientId,
@@ -149,12 +195,6 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
-        if drop_stmt.cascade {
-            return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                "DROP TYPE CASCADE is not supported yet".into(),
-            )));
-        }
-
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let interrupts = self.interrupt_state(client_id);
         let mut dropped = 0usize;
@@ -181,13 +221,30 @@ impl Database {
                                 })
                             })?;
                     ensure_relation_owner(self, client_id, &relation, &display_name)?;
-                    reject_type_with_dependents(
-                        self,
-                        client_id,
-                        Some((xid, cid)),
-                        type_oid,
-                        &display_name,
-                    )?;
+                    if drop_stmt.cascade {
+                        let dependent_ranges = self
+                            .range_types
+                            .read()
+                            .iter()
+                            .filter(|(_, entry)| entry.subtype.type_oid == type_oid)
+                            .map(|(key, entry)| (key.clone(), entry.name.clone()))
+                            .collect::<Vec<_>>();
+                        if !dependent_ranges.is_empty() {
+                            let mut range_types = self.range_types.write();
+                            for (key, name) in dependent_ranges {
+                                push_notice(format!("drop cascades to type {name}"));
+                                range_types.remove(&key);
+                            }
+                        }
+                    } else {
+                        reject_type_with_dependents(
+                            self,
+                            client_id,
+                            Some((xid, cid)),
+                            type_oid,
+                            &display_name,
+                        )?;
+                    }
                     let ctx = CatalogWriteContext {
                         pool: self.pool.clone(),
                         txns: self.txns.clone(),
@@ -506,30 +563,44 @@ impl Database {
             .type_oid_for_sql_type(subtype)
             .ok_or_else(|| ExecError::Parse(ParseError::UnsupportedType(stmt.type_name.clone())))?;
         let subtype = subtype.with_identity(subtype_oid, subtype.typrelid);
-        drop(catalog);
         if type_name_exists_in_rows(&base_type_rows, namespace_oid, &object_name)
             || type_name_exists_in_rows(&enum_type_rows, namespace_oid, &object_name)
             || range_type_name_exists_in_snapshot(&range_type_snapshot, namespace_oid, &object_name)
         {
             return Err(type_already_exists_error(&range_type_display_name(stmt)));
         }
+        let manual_multirange_name = stmt.multirange_type_name.is_some();
         let multirange_name = stmt
             .multirange_type_name
             .clone()
             .unwrap_or_else(|| default_multirange_type_name(&object_name));
-        if type_name_exists_in_rows(&base_type_rows, namespace_oid, &multirange_name)
-            || type_name_exists_in_rows(&enum_type_rows, namespace_oid, &multirange_name)
-            || range_type_or_multirange_name_exists_in_snapshot(
+        let multirange_conflict = type_conflict_name_in_rows(
+            &base_type_rows,
+            namespace_oid,
+            &multirange_name,
+            Some(&catalog),
+        )
+        .or_else(|| {
+            type_conflict_name_in_rows(&enum_type_rows, namespace_oid, &multirange_name, None)
+        })
+        .or_else(|| {
+            range_type_or_multirange_conflict_name_in_snapshot(
                 &range_type_snapshot,
                 namespace_oid,
                 &multirange_name,
             )
-        {
-            return Err(multirange_type_already_exists_error(
-                &range_type_display_name(stmt),
-                &multirange_name,
-            ));
+        });
+        if let Some(conflict_name) = multirange_conflict {
+            return if manual_multirange_name {
+                Err(type_already_exists_error(&conflict_name))
+            } else {
+                Err(multirange_type_already_exists_error(
+                    &range_type_display_name(stmt),
+                    &conflict_name,
+                ))
+            };
         }
+        drop(catalog);
         let oid = self.next_dynamic_type_oid(None, Some(&range_type_snapshot))?;
 
         let mut range_types = self.range_types.write();
@@ -542,10 +613,14 @@ impl Database {
                     || entry.name.eq_ignore_ascii_case(&multirange_name)
                     || entry.multirange_name.eq_ignore_ascii_case(&multirange_name))
         }) {
-            return Err(multirange_type_already_exists_error(
-                &range_type_display_name(stmt),
-                &multirange_name,
-            ));
+            return if manual_multirange_name {
+                Err(type_already_exists_error(&multirange_name))
+            } else {
+                Err(multirange_type_already_exists_error(
+                    &range_type_display_name(stmt),
+                    &multirange_name,
+                ))
+            };
         }
         let array_oid = oid.saturating_add(1);
         let multirange_oid = oid.saturating_add(2);
@@ -560,6 +635,9 @@ impl Database {
                 name: object_name,
                 multirange_name,
                 namespace_oid,
+                owner_oid: self.auth_state(client_id).current_user_oid(),
+                public_usage: true,
+                owner_usage: true,
                 subtype,
                 subtype_diff: stmt.subtype_diff.clone(),
                 collation: stmt.collation.clone(),
@@ -725,6 +803,30 @@ fn type_name_exists_in_rows(
     })
 }
 
+fn type_conflict_name_in_rows(
+    rows: &[crate::include::catalog::PgTypeRow],
+    namespace_oid: u32,
+    name: &str,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Option<String> {
+    rows.iter()
+        .find(|row| {
+            row.typelem == 0
+                && (row.typnamespace == namespace_oid || catalog.is_some())
+                && row.typname.eq_ignore_ascii_case(name)
+        })
+        .map(|row| row.typname.clone())
+        .or_else(|| {
+            let catalog = catalog?;
+            let raw_type = parse_type_name(name).ok()?;
+            let sql_type = resolve_raw_type_name(&raw_type, catalog).ok()?;
+            let type_oid = catalog.type_oid_for_sql_type(sql_type)?;
+            rows.iter()
+                .find(|row| row.typelem == 0 && row.oid == type_oid)
+                .map(|row| row.typname.clone())
+        })
+}
+
 fn range_type_name_exists_in_snapshot(
     range_types: &std::collections::BTreeMap<String, RangeTypeEntry>,
     namespace_oid: u32,
@@ -735,15 +837,22 @@ fn range_type_name_exists_in_snapshot(
         .any(|entry| entry.namespace_oid == namespace_oid && entry.name.eq_ignore_ascii_case(name))
 }
 
-fn range_type_or_multirange_name_exists_in_snapshot(
+fn range_type_or_multirange_conflict_name_in_snapshot(
     range_types: &std::collections::BTreeMap<String, RangeTypeEntry>,
     namespace_oid: u32,
     name: &str,
-) -> bool {
-    range_types.values().any(|entry| {
-        entry.namespace_oid == namespace_oid
-            && (entry.name.eq_ignore_ascii_case(name)
-                || entry.multirange_name.eq_ignore_ascii_case(name))
+) -> Option<String> {
+    range_types.values().find_map(|entry| {
+        if entry.namespace_oid != namespace_oid {
+            return None;
+        }
+        if entry.name.eq_ignore_ascii_case(name) {
+            Some(entry.name.clone())
+        } else if entry.multirange_name.eq_ignore_ascii_case(name) {
+            Some(entry.multirange_name.clone())
+        } else {
+            None
+        }
     })
 }
 
@@ -760,13 +869,41 @@ fn multirange_type_already_exists_error(range_name: &str, multirange_name: &str)
     ExecError::DetailedError {
         message: format!("type \"{multirange_name}\" already exists"),
         detail: Some(format!(
-            "Automatic creation of multirange type for range type \"{range_name}\" failed."
+            "Failed while creating a multirange type for type \"{range_name}\"."
         )),
         hint: Some(
-            "Choose a different type name, or supply a multirange type name with multirange_type_name."
+            "You can manually specify a multirange type name using the \"multirange_type_name\" attribute."
                 .into(),
         ),
         sqlstate: "42710",
+    }
+}
+
+fn namespace_visible_in_search_path(namespace_oid: u32, search_path: &[String]) -> bool {
+    search_path.iter().any(|schema| {
+        (schema == "public" && namespace_oid == crate::include::catalog::PUBLIC_NAMESPACE_OID)
+            || (schema == "pg_catalog"
+                && namespace_oid == crate::include::catalog::PG_CATALOG_NAMESPACE_OID)
+    })
+}
+
+fn cannot_alter_multirange_type_error(multirange_name: &str, range_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("cannot alter multirange type {multirange_name}"),
+        detail: None,
+        hint: Some(format!(
+            "You can alter type {range_name}, which will alter the multirange type as well."
+        )),
+        sqlstate: "42809",
+    }
+}
+
+fn role_does_not_exist_error(role_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("role \"{role_name}\" does not exist"),
+        detail: None,
+        hint: None,
+        sqlstate: "42704",
     }
 }
 

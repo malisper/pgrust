@@ -1,12 +1,14 @@
 mod box_ops;
+mod multirange_ops;
 mod network_ops;
 mod point_ops;
 mod range_ops;
 
 // :HACK: The generic GiST core is wired for opclass dispatch, but this module
-// intentionally exposes only the merge-bar families for now: box_ops exact+KNN
-// and range_ops exact search. Additional families and range KNN stay deferred
-// until their support procs/operators are implemented end to end.
+// intentionally exposes only the merge-bar families for now: box_ops exact+KNN,
+// point/network exact search, range_ops exact search, and multirange_ops exact
+// search. Additional families and range KNN stay deferred until their support
+// procs/operators are implemented end to end.
 
 use std::cmp::Ordering;
 
@@ -18,6 +20,9 @@ use crate::include::catalog::{
     GIST_NETWORK_PICKSPLIT_PROC_OID, GIST_NETWORK_SAME_PROC_OID, GIST_NETWORK_UNION_PROC_OID,
     GIST_POINT_CONSISTENT_PROC_OID, GIST_POINT_PENALTY_PROC_OID, GIST_POINT_PICKSPLIT_PROC_OID,
     GIST_POINT_SAME_PROC_OID, GIST_POINT_UNION_PROC_OID, GIST_TRANSLATE_CMPTYPE_COMMON_PROC_OID,
+    MULTIRANGE_GIST_CONSISTENT_PROC_OID, MULTIRANGE_GIST_PENALTY_PROC_OID,
+    MULTIRANGE_GIST_PICKSPLIT_PROC_OID, MULTIRANGE_GIST_SAME_PROC_OID,
+    MULTIRANGE_GIST_UNION_PROC_OID, MULTIRANGE_SORTSUPPORT_PROC_OID,
     RANGE_GIST_CONSISTENT_PROC_OID, RANGE_GIST_PENALTY_PROC_OID, RANGE_GIST_PICKSPLIT_PROC_OID,
     RANGE_GIST_SAME_PROC_OID, RANGE_GIST_UNION_PROC_OID, RANGE_SORTSUPPORT_PROC_OID,
 };
@@ -57,6 +62,9 @@ pub(crate) fn consistent(
         GIST_POINT_CONSISTENT_PROC_OID => point_ops::consistent(strategy, key, query, is_leaf),
         RANGE_GIST_CONSISTENT_PROC_OID => range_ops::consistent(strategy, key, query, is_leaf),
         GIST_NETWORK_CONSISTENT_PROC_OID => network_ops::consistent(strategy, key, query, is_leaf),
+        MULTIRANGE_GIST_CONSISTENT_PROC_OID => {
+            multirange_ops::consistent(strategy, key, query, is_leaf)
+        }
         _ => Err(CatalogError::Io(format!(
             "unsupported GiST consistent proc {proc_oid}"
         ))),
@@ -69,6 +77,7 @@ pub(crate) fn union(proc_oid: u32, values: &[Value]) -> Result<Value, CatalogErr
         GIST_POINT_UNION_PROC_OID => point_ops::union(values),
         RANGE_GIST_UNION_PROC_OID => range_ops::union(values),
         GIST_NETWORK_UNION_PROC_OID => network_ops::union(values),
+        MULTIRANGE_GIST_UNION_PROC_OID => multirange_ops::union(values),
         _ => Err(CatalogError::Io(format!(
             "unsupported GiST union proc {proc_oid}"
         ))),
@@ -85,6 +94,7 @@ pub(crate) fn penalty(
         GIST_POINT_PENALTY_PROC_OID => point_ops::penalty(original, candidate),
         RANGE_GIST_PENALTY_PROC_OID => range_ops::penalty(original, candidate),
         GIST_NETWORK_PENALTY_PROC_OID => network_ops::penalty(original, candidate),
+        MULTIRANGE_GIST_PENALTY_PROC_OID => multirange_ops::penalty(original, candidate),
         _ => Err(CatalogError::Io(format!(
             "unsupported GiST penalty proc {proc_oid}"
         ))),
@@ -100,6 +110,7 @@ pub(crate) fn picksplit(
         GIST_POINT_PICKSPLIT_PROC_OID => point_ops::picksplit(values),
         RANGE_GIST_PICKSPLIT_PROC_OID => range_ops::picksplit(values),
         GIST_NETWORK_PICKSPLIT_PROC_OID => network_ops::picksplit(values),
+        MULTIRANGE_GIST_PICKSPLIT_PROC_OID => multirange_ops::picksplit(values),
         _ => Err(CatalogError::Io(format!(
             "unsupported GiST picksplit proc {proc_oid}"
         ))),
@@ -112,6 +123,7 @@ pub(crate) fn same(proc_oid: u32, left: &Value, right: &Value) -> Result<bool, C
         GIST_POINT_SAME_PROC_OID => point_ops::same(left, right),
         RANGE_GIST_SAME_PROC_OID => range_ops::same(left, right),
         GIST_NETWORK_SAME_PROC_OID => network_ops::same(left, right),
+        MULTIRANGE_GIST_SAME_PROC_OID => multirange_ops::same(left, right),
         _ => Err(CatalogError::Io(format!(
             "unsupported GiST same proc {proc_oid}"
         ))),
@@ -135,6 +147,7 @@ pub(crate) fn distance(
 pub(crate) fn sortsupport(proc_oid: u32) -> Option<GistSortComparator> {
     match proc_oid {
         RANGE_SORTSUPPORT_PROC_OID => Some(range_ops::sort_compare),
+        MULTIRANGE_SORTSUPPORT_PROC_OID => Some(multirange_ops::sort_compare),
         _ => None,
     }
 }

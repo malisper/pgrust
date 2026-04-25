@@ -217,10 +217,17 @@ impl Database {
                     waiter: Some(self.txn_waiter.clone()),
                     interrupts: self.interrupt_state(client_id),
                 };
+                let visible_type_rows = self
+                    .lazy_catalog_lookup(client_id, Some((xid, *cid)), None)
+                    .type_rows();
                 let effect = self
                     .catalog
                     .write()
-                    .drop_relation_by_oid_mvcc(relation_oid, &ctx)
+                    .drop_relation_by_oid_mvcc_with_extra_type_rows(
+                        relation_oid,
+                        &ctx,
+                        &visible_type_rows,
+                    )
                     .map_err(map_catalog_error)?
                     .1;
                 catalog_effects.push(effect);
@@ -508,19 +515,34 @@ impl Database {
             namespace.generation = namespace.generation.saturating_add(1);
             removed
         };
+        let mut next_cid = cid;
+        self.drop_statistics_for_relation_in_transaction(
+            client_id,
+            removed.entry.relation_oid,
+            xid,
+            &mut next_cid,
+            catalog_effects,
+        )?;
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
             xid,
-            cid,
+            cid: next_cid,
             client_id,
             waiter: Some(self.txn_waiter.clone()),
             interrupts,
         };
+        let visible_type_rows = self
+            .lazy_catalog_lookup(client_id, Some((xid, next_cid)), None)
+            .type_rows();
         let effect = self
             .catalog
             .write()
-            .drop_relation_by_oid_mvcc(removed.entry.relation_oid, &ctx)
+            .drop_relation_by_oid_mvcc_with_extra_type_rows(
+                removed.entry.relation_oid,
+                &ctx,
+                &visible_type_rows,
+            )
             .map_err(map_catalog_error)?
             .1;
         self.apply_catalog_mutation_effect_immediate(&effect)?;
