@@ -1,10 +1,11 @@
 use super::*;
-use crate::backend::executor::expr_casts::render_interval_text;
+use crate::backend::executor::expr_casts::{parse_interval_text_value, render_interval_text};
 use crate::backend::storage::page::bufpage::max_align;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::access::htup::AttributeAlign;
 use crate::include::catalog::{
-    builtin_type_rows, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+    INTERVAL_TYPE_OID, builtin_type_rows, multirange_type_ref_for_sql_type,
+    range_type_ref_for_sql_type,
 };
 
 pub(crate) fn encode_array_bytes(
@@ -1236,6 +1237,19 @@ fn format_array_values_nested(
         *offset += 1;
         match item {
             Value::Null => out.push_str("NULL"),
+            Value::Text(text) if array.element_type_oid == Some(INTERVAL_TYPE_OID) => {
+                let rendered = parse_interval_text_value(text)
+                    .map(render_interval_text)
+                    .unwrap_or_else(|_| text.to_string());
+                push_array_text_element(&mut out, &rendered);
+            }
+            Value::TextRef(_, _) if array.element_type_oid == Some(INTERVAL_TYPE_OID) => {
+                let text = item.as_text().unwrap_or_default();
+                let rendered = parse_interval_text_value(text)
+                    .map(render_interval_text)
+                    .unwrap_or_else(|_| text.to_string());
+                push_array_text_element(&mut out, &rendered);
+            }
             Value::Int16(v) => out.push_str(&v.to_string()),
             Value::Int32(v) => out.push_str(&v.to_string()),
             Value::Int64(v) => out.push_str(&v.to_string()),

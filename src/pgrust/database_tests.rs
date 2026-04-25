@@ -13,6 +13,7 @@ use crate::include::catalog::{
     BootstrapCatalogKind, FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID,
     PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
 };
+use crate::include::nodes::datum::IntervalValue;
 use crate::include::nodes::parsenodes::MaintenanceTarget;
 use crate::include::nodes::primnodes::QueryColumn;
 use crate::pl::plpgsql::{clear_notices, take_notices};
@@ -11402,7 +11403,11 @@ fn alter_table_add_column_supports_tid_xid_and_interval() {
                 vec![vec![
                     Value::Text("(1,1)".into()),
                     Value::Int64(512),
-                    Value::Text("@ 1 hour 10 secs".into())
+                    Value::Interval(IntervalValue {
+                        time_micros: 3_610_000_000,
+                        days: 0,
+                        months: 0,
+                    })
                 ]]
             );
         }
