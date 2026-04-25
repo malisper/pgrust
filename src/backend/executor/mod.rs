@@ -124,6 +124,7 @@ use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::interrupts::{
     InterruptReason, InterruptState, check_for_interrupts,
 };
+use crate::backend::utils::misc::stack_depth;
 use crate::include::access::htup::TupleError;
 use crate::pgrust::database::{
     AsyncNotifyRuntime, DatabaseStatsStore, LargeObjectRuntime, PendingNotification,
@@ -243,6 +244,10 @@ pub type SharedExecutorTransactionState = Arc<parking_lot::Mutex<ExecutorTransac
 impl ExecutorContext {
     pub fn check_for_interrupts(&self) -> Result<(), ExecError> {
         check_for_interrupts(&self.interrupts).map_err(ExecError::Interrupted)
+    }
+
+    pub fn check_stack_depth(&self) -> Result<(), ExecError> {
+        stack_depth::check_stack_depth(self.datetime_config.max_stack_depth_kb)
     }
 
     pub fn transaction_xid(&self) -> Option<TransactionId> {

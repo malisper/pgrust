@@ -22,13 +22,14 @@ use crate::backend::libpq::pqformat::{
 };
 use crate::backend::parser::UngroupedColumnClause;
 use crate::backend::parser::comments::sql_is_effectively_empty_after_comments;
-use crate::backend::parser::{CatalogLookup, Statement};
+use crate::backend::parser::{CatalogLookup, SelectStatement, Statement};
 use crate::backend::parser::{SqlType, SqlTypeKind, parse_expr};
 use crate::backend::rewrite::format_view_definition;
 use crate::backend::utils::misc::guc_datetime::{DateTimeConfig, format_datestyle};
 use crate::backend::utils::misc::notices::{
     clear_notices as clear_backend_notices, take_notices as take_backend_notices,
 };
+use crate::backend::utils::misc::stack_depth::StackDepthGuard;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::access::htup::TupleError;
 use crate::include::catalog::RECORD_TYPE_OID;
@@ -866,7 +867,6 @@ fn find_identifier_in_segment(segment: &str, token: &str) -> Option<usize> {
     None
 }
 use crate::ClientId;
-use crate::backend::parser::parse_statement;
 use crate::pgrust::cluster::Cluster;
 use crate::pgrust::database::Database;
 use crate::pgrust::portal::{CursorOptions, PortalFetchDirection, PortalFetchLimit};
@@ -1491,13 +1491,20 @@ fn execute_query_statement(
 
     let parsed = if state.session.standard_conforming_strings() {
         db.plan_cache
-            .get_statement(&sql)
+            .get_statement_with_options(
+                &sql,
+                crate::backend::parser::ParseOptions {
+                    max_stack_depth_kb: state.session.datetime_config().max_stack_depth_kb,
+                    ..crate::backend::parser::ParseOptions::default()
+                },
+            )
             .map_err(|e| io::Error::other(format!("{e:?}")))
     } else {
         crate::backend::parser::parse_statement_with_options(
             &sql,
             crate::backend::parser::ParseOptions {
                 standard_conforming_strings: false,
+                max_stack_depth_kb: state.session.datetime_config().max_stack_depth_kb,
             },
         )
         .map_err(|e| io::Error::other(format!("{e:?}")))
@@ -1513,87 +1520,11 @@ fn execute_query_statement(
     if let Ok(Statement::Select(ref select_stmt)) = parsed
         && !raw_select_contains_pg_notify(select_stmt)
     {
-        clear_backend_notices();
-        clear_notices();
-        match state.session.execute_streaming(db, select_stmt) {
-            Ok(mut guard) => {
-                use crate::backend::executor::exec_next;
-                let mut columns = guard.columns.clone();
-                let catalog = state.session.catalog_lookup(db);
-                let role_names = role_name_map(&catalog);
-                let relation_names = relation_name_map(&catalog);
-                let proc_names = proc_name_map(&catalog);
-                let namespace_names = namespace_name_map(&catalog);
-                annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
-                let mut row_buf = Vec::new();
-                let mut row_count = 0usize;
-                let mut header_sent = false;
-                let mut err = None;
-
-                loop {
-                    match exec_next(&mut guard.state, &mut guard.ctx) {
-                        Ok(Some(slot)) => {
-                            if !header_sent {
-                                send_row_description(stream, &columns)?;
-                                header_sent = true;
-                            }
-                            match slot.values() {
-                                Ok(values) => {
-                                    send_typed_data_row(
-                                        stream,
-                                        values,
-                                        &columns,
-                                        &[],
-                                        &mut row_buf,
-                                        FloatFormatOptions {
-                                            extra_float_digits: state.session.extra_float_digits(),
-                                            bytea_output: state.session.bytea_output(),
-                                            datetime_config: state
-                                                .session
-                                                .datetime_config()
-                                                .clone(),
-                                        },
-                                        Some(&role_names),
-                                        Some(&relation_names),
-                                        Some(&proc_names),
-                                        Some(&namespace_names),
-                                    )?;
-                                    row_count += 1;
-                                }
-                                Err(e) => {
-                                    err = Some(e);
-                                    break;
-                                }
-                            }
-                        }
-                        Ok(None) => break,
-                        Err(e) => {
-                            err = Some(e);
-                            break;
-                        }
-                    }
-                }
-                drop(guard);
-
-                if let Some(e) = err {
-                    send_queued_notices(stream)?;
-                    send_exec_error(stream, &sql, &e)?;
-                    return Ok(QueryStatementFlow::Stop);
-                }
-
-                flush_pending_backend_messages(stream, db, &state.session)?;
-                if !header_sent {
-                    send_row_description(stream, &columns)?;
-                }
-                send_command_complete(stream, &format!("SELECT {row_count}"))?;
-                return Ok(QueryStatementFlow::Continue);
-            }
-            Err(e) => {
-                send_queued_notices(stream)?;
-                send_exec_error(stream, &sql, &e)?;
-                return Ok(QueryStatementFlow::Stop);
-            }
-        }
+        let max_stack_depth_kb = state.session.datetime_config().max_stack_depth_kb;
+        return stacker::grow(32 * 1024 * 1024, || {
+            StackDepthGuard::enter(max_stack_depth_kb)
+                .run(|| execute_streaming_select_statement(stream, db, state, &sql, select_stmt))
+        });
     }
 
     clear_backend_notices();
@@ -1634,6 +1565,93 @@ fn execute_query_statement(
         Err(e) => {
             send_queued_notices(stream)?;
             send_exec_error(stream, &sql, &e)?;
+            Ok(QueryStatementFlow::Stop)
+        }
+    }
+}
+
+fn execute_streaming_select_statement(
+    stream: &mut impl Write,
+    db: &Database,
+    state: &mut ConnectionState,
+    sql: &str,
+    select_stmt: &SelectStatement,
+) -> io::Result<QueryStatementFlow> {
+    clear_backend_notices();
+    clear_notices();
+    match state.session.execute_streaming(db, select_stmt) {
+        Ok(mut guard) => {
+            use crate::backend::executor::exec_next;
+            let mut columns = guard.columns.clone();
+            let catalog = state.session.catalog_lookup(db);
+            let role_names = role_name_map(&catalog);
+            let relation_names = relation_name_map(&catalog);
+            let proc_names = proc_name_map(&catalog);
+            let namespace_names = namespace_name_map(&catalog);
+            annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
+            let mut row_buf = Vec::new();
+            let mut row_count = 0usize;
+            let mut header_sent = false;
+            let mut err = None;
+
+            loop {
+                match exec_next(&mut guard.state, &mut guard.ctx) {
+                    Ok(Some(slot)) => {
+                        if !header_sent {
+                            send_row_description(stream, &columns)?;
+                            header_sent = true;
+                        }
+                        match slot.values() {
+                            Ok(values) => {
+                                send_typed_data_row(
+                                    stream,
+                                    values,
+                                    &columns,
+                                    &[],
+                                    &mut row_buf,
+                                    FloatFormatOptions {
+                                        extra_float_digits: state.session.extra_float_digits(),
+                                        bytea_output: state.session.bytea_output(),
+                                        datetime_config: state.session.datetime_config().clone(),
+                                    },
+                                    Some(&role_names),
+                                    Some(&relation_names),
+                                    Some(&proc_names),
+                                    Some(&namespace_names),
+                                )?;
+                                row_count += 1;
+                            }
+                            Err(e) => {
+                                err = Some(e);
+                                break;
+                            }
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        err = Some(e);
+                        break;
+                    }
+                }
+            }
+            drop(guard);
+
+            if let Some(e) = err {
+                send_queued_notices(stream)?;
+                send_exec_error(stream, sql, &e)?;
+                return Ok(QueryStatementFlow::Stop);
+            }
+
+            flush_pending_backend_messages(stream, db, &state.session)?;
+            if !header_sent {
+                send_row_description(stream, &columns)?;
+            }
+            send_command_complete(stream, &format!("SELECT {row_count}"))?;
+            Ok(QueryStatementFlow::Continue)
+        }
+        Err(e) => {
+            send_queued_notices(stream)?;
+            send_exec_error(stream, sql, &e)?;
             Ok(QueryStatementFlow::Stop)
         }
     }
@@ -4602,7 +4620,15 @@ fn describe_sql(
 ) -> Option<Vec<QueryColumn>> {
     let catalog = session.catalog_lookup(db);
     let sql = rewrite_regression_sql(&substitute_params(sql, params, &catalog)).into_owned();
-    match parse_statement(&sql).ok()? {
+    match crate::backend::parser::parse_statement_with_options(
+        &sql,
+        crate::backend::parser::ParseOptions {
+            max_stack_depth_kb: session.datetime_config().max_stack_depth_kb,
+            ..crate::backend::parser::ParseOptions::default()
+        },
+    )
+    .ok()?
+    {
         Statement::Select(stmt) => crate::backend::parser::pg_plan_query(&stmt, &catalog)
             .ok()
             .map(|planned_stmt| {

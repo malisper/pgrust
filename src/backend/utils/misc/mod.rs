@@ -4,3 +4,4 @@ pub mod guc_datetime;
 pub mod guc_xml;
 pub mod interrupts;
 pub mod notices;
+pub mod stack_depth;

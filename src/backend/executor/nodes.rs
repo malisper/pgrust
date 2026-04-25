@@ -227,10 +227,15 @@ fn finish_eof(stats: &mut NodeExecStats, start: Option<Instant>, ctx: &ExecutorC
     }
 }
 
-fn begin_node(stats: &mut NodeExecStats, ctx: &ExecutorContext) {
+fn begin_node(stats: &mut NodeExecStats, ctx: &ExecutorContext) -> Result<(), ExecError> {
+    if !stats.stack_depth_checked {
+        ctx.check_stack_depth()?;
+        stats.stack_depth_checked = true;
+    }
     if stats.buffer_usage_start.is_none() {
         stats.buffer_usage_start = Some(ctx.pool.usage_stats());
     }
+    Ok(())
 }
 
 fn note_filtered_row(stats: &mut NodeExecStats) {
@@ -477,8 +482,8 @@ impl PlanNode for ResultState {
         } else {
             None
         };
-        begin_node(&mut self.stats, ctx);
-        begin_node(&mut self.stats, ctx);
+        begin_node(&mut self.stats, ctx)?;
+        begin_node(&mut self.stats, ctx)?;
         if self.emitted {
             finish_eof(&mut self.stats, start, ctx);
             Ok(None)
@@ -531,7 +536,7 @@ impl PlanNode for AppendState {
         } else {
             None
         };
-        begin_node(&mut self.stats, ctx);
+        begin_node(&mut self.stats, ctx)?;
         while self.current_child < self.children.len() {
             if let Some(slot) = self.children[self.current_child].exec_proc_node(ctx)? {
                 let child_bindings = ctx.system_bindings.clone();
@@ -606,7 +611,7 @@ impl PlanNode for SeqScanState {
             } else {
                 None
             };
-            begin_node(&mut self.stats, ctx);
+            begin_node(&mut self.stats, ctx)?;
             if self.scan_rows.is_empty() {
                 self.scan_rows = large_object_runtime(ctx)?.metadata_rows();
             }
@@ -644,7 +649,7 @@ impl PlanNode for SeqScanState {
             } else {
                 None
             };
-            begin_node(&mut self.stats, ctx);
+            begin_node(&mut self.stats, ctx)?;
             if self.sequence_emitted {
                 finish_eof(&mut self.stats, start, ctx);
                 return Ok(None);
@@ -714,7 +719,7 @@ impl PlanNode for SeqScanState {
         } else {
             None
         };
-        begin_node(&mut self.stats, ctx);
+        begin_node(&mut self.stats, ctx)?;
 
         loop {
             ctx.check_for_interrupts()?;
@@ -1099,7 +1104,7 @@ impl BitmapIndexScanState {
         } else {
             None
         };
-        begin_node(&mut self.stats, ctx);
+        begin_node(&mut self.stats, ctx)?;
 
         let Some(key_data) = eval_index_scan_keys(&self.keys, ctx, true)? else {
             self.executed = true;
@@ -1275,7 +1280,7 @@ impl PlanNode for BitmapHeapScanState {
         } else {
             None
         };
-        begin_node(&mut self.stats, ctx);
+        begin_node(&mut self.stats, ctx)?;
 
         if self.bitmap_pages.is_empty() && self.current_page_index == 0 {
             self.bitmap_index.fill_bitmap(ctx)?;
@@ -2063,7 +2068,7 @@ impl PlanNode for FilterState {
         } else {
             None
         };
-        begin_node(&mut self.stats, ctx);
+        begin_node(&mut self.stats, ctx)?;
         loop {
             ctx.check_for_interrupts()?;
             let slot = match self.input.exec_proc_node(ctx)? {
@@ -2599,7 +2604,7 @@ impl PlanNode for OrderByState {
         } else {
             None
         };
-        begin_node(&mut self.stats, ctx);
+        begin_node(&mut self.stats, ctx)?;
         if self.rows.is_none() {
             let mut rows = Vec::new();
             while self.input.exec_proc_node(ctx)?.is_some() {
@@ -3173,7 +3178,7 @@ impl PlanNode for WindowAggState {
         } else {
             None
         };
-        begin_node(&mut self.stats, ctx);
+        begin_node(&mut self.stats, ctx)?;
         if self.result_rows.is_none() {
             let mut input_rows = Vec::new();
             while self.input.exec_proc_node(ctx)?.is_some() {
@@ -3479,7 +3484,7 @@ impl PlanNode for WorkTableScanState {
         } else {
             None
         };
-        begin_node(&mut self.stats, ctx);
+        begin_node(&mut self.stats, ctx)?;
         let Some(worktable) = ctx.recursive_worktables.get(&self.worktable_id).cloned() else {
             return Err(ExecError::DetailedError {
                 message: "worktable scan executed without an active recursive union".into(),
@@ -3541,7 +3546,7 @@ impl PlanNode for CteScanState {
         } else {
             None
         };
-        begin_node(&mut self.stats, ctx);
+        begin_node(&mut self.stats, ctx)?;
         let table = ctx
             .cte_tables
             .entry(self.cte_id)
@@ -3617,7 +3622,7 @@ impl PlanNode for RecursiveUnionState {
         } else {
             None
         };
-        begin_node(&mut self.stats, ctx);
+        begin_node(&mut self.stats, ctx)?;
         if self.distinct && !self.distinct_hashable {
             finish_eof(&mut self.stats, start, ctx);
             return Err(ExecError::DetailedError {
@@ -3746,7 +3751,7 @@ impl PlanNode for SetOpState {
         } else {
             None
         };
-        begin_node(&mut self.stats, ctx);
+        begin_node(&mut self.stats, ctx)?;
 
         if self.result_rows.is_none() {
             self.result_rows = Some(set_op_result_rows(self.op, &mut self.children, ctx)?);

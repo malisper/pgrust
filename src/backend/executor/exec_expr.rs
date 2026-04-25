@@ -2685,11 +2685,33 @@ fn eval_bound_tuple_var(
         })
 }
 
+fn expr_requires_stack_check(expr: &Expr) -> bool {
+    !matches!(
+        expr,
+        Expr::Param(_)
+            | Expr::Var(_)
+            | Expr::Const(_)
+            | Expr::CaseTest(_)
+            | Expr::Random
+            | Expr::CurrentDate
+            | Expr::CurrentUser
+            | Expr::SessionUser
+            | Expr::CurrentRole
+            | Expr::CurrentTime { .. }
+            | Expr::CurrentTimestamp { .. }
+            | Expr::LocalTime { .. }
+            | Expr::LocalTimestamp { .. }
+    )
+}
+
 pub fn eval_expr(
     expr: &Expr,
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
+    if expr_requires_stack_check(expr) {
+        ctx.check_stack_depth()?;
+    }
     match expr {
         Expr::Op(op) => eval_op_expr(op, slot, ctx),
         Expr::Bool(bool_expr) => eval_bool_expr(bool_expr, slot, ctx),
@@ -4314,6 +4336,10 @@ fn float8_overflow_error() -> ExecError {
     }
 }
 
+fn pg_version_text() -> String {
+    format!("PostgreSQL-compatible pgrust {}", env!("CARGO_PKG_VERSION"))
+}
+
 fn eval_builtin_function(
     func: BuiltinScalarFunction,
     result_type: Option<SqlType>,
@@ -4677,6 +4703,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::CurrentDatabase => {
             Ok(Value::Text(ctx.current_database_name.clone().into()))
         }
+        BuiltinScalarFunction::Version => Ok(Value::Text(pg_version_text().into())),
         BuiltinScalarFunction::PgBackendPid => Ok(Value::Int32(ctx.client_id as i32)),
         BuiltinScalarFunction::PgColumnCompression => eval_pg_column_compression_values(&values),
         BuiltinScalarFunction::PgColumnSize => eval_pg_column_size_values(&values),

@@ -28,7 +28,8 @@ impl Default for DateTimeConfig {
             date_style_format: DateStyleFormat::Iso,
             date_order: DateOrder::Mdy,
             time_zone: "UTC".into(),
-            max_stack_depth_kb: 100,
+            max_stack_depth_kb:
+                crate::backend::utils::misc::stack_depth::DEFAULT_MAX_STACK_DEPTH_KB,
             xml: XmlConfig::default(),
         }
     }
