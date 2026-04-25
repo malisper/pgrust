@@ -900,17 +900,27 @@ fn make_ordered_rel(
         RelOptKind::UpperRel,
         input_rel.reltarget.clone(),
     );
+    let required_pathkeys = required_query_pathkeys_for_rel(root, &input_rel);
+    let mut extra_presorted_paths = Vec::new();
+    if (root.parse.limit_count.is_some() || root.parse.limit_offset != 0)
+        && let [rtindex] = input_rel.relids.as_slice()
+    {
+        extra_presorted_paths =
+            relation_ordered_index_paths(root, *rtindex, &required_pathkeys, catalog);
+    }
+    let required_matches = |path: &Path| {
+        if pathkeys_are_fully_identified(&root.query_pathkeys) {
+            bestpath::pathkeys_satisfy(&path.pathkeys(), &root.query_pathkeys)
+        } else {
+            let required = required_query_pathkeys_for_path(root, path);
+            bestpath::pathkeys_satisfy(&path.pathkeys(), &required)
+        }
+    };
     let cheapest_presorted = input_rel
         .pathlist
         .iter()
-        .filter(|path| {
-            if pathkeys_are_fully_identified(&root.query_pathkeys) {
-                bestpath::pathkeys_satisfy(&path.pathkeys(), &root.query_pathkeys)
-            } else {
-                let required = required_query_pathkeys_for_path(root, path);
-                bestpath::pathkeys_satisfy(&path.pathkeys(), &required)
-            }
-        })
+        .chain(extra_presorted_paths.iter())
+        .filter(|path| required_matches(path))
         .min_by(|left, right| {
             left.plan_info()
                 .total_cost
@@ -920,6 +930,25 @@ fn make_ordered_rel(
         });
     if let Some(path) = cheapest_presorted {
         rel.add_path(path.clone());
+    }
+    if root.parse.limit_count.is_some() || root.parse.limit_offset != 0 {
+        let cheapest_presorted_startup = input_rel
+            .pathlist
+            .iter()
+            .chain(extra_presorted_paths.iter())
+            .filter(|path| required_matches(path))
+            .min_by(|left, right| {
+                left.plan_info()
+                    .startup_cost
+                    .as_f64()
+                    .partial_cmp(&right.plan_info().startup_cost.as_f64())
+                    .unwrap_or(Ordering::Equal)
+            });
+        if let Some(path) = cheapest_presorted_startup
+            && !rel.pathlist.iter().any(|existing| existing == path)
+        {
+            rel.add_path(path.clone());
+        }
     }
     if let Some(path) = input_rel.cheapest_total_path() {
         let required_pathkeys = required_query_pathkeys_for_path(root, path);
