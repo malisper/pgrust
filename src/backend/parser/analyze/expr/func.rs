@@ -561,6 +561,24 @@ pub(super) fn bind_scalar_function_call(
                 ],
             ))
         }
+        BuiltinScalarFunction::DateBin => {
+            let target_type = match arg_types[1].kind {
+                SqlTypeKind::TimestampTz => SqlType::new(SqlTypeKind::TimestampTz),
+                _ => SqlType::new(SqlTypeKind::Timestamp),
+            };
+            Ok(build_func(
+                false,
+                vec![
+                    coerce_bound_expr(
+                        bound_args[0].clone(),
+                        arg_types[0],
+                        SqlType::new(SqlTypeKind::Interval),
+                    ),
+                    coerce_bound_expr(bound_args[1].clone(), arg_types[1], target_type),
+                    coerce_bound_expr(bound_args[2].clone(), arg_types[2], target_type),
+                ],
+            ))
+        }
         BuiltinScalarFunction::IsFinite => Ok(build_func(false, bound_args)),
         BuiltinScalarFunction::PgColumnSize => Ok(build_func(false, bound_args)),
         BuiltinScalarFunction::MakeDate | BuiltinScalarFunction::MakeTime => {
@@ -587,6 +605,23 @@ pub(super) fn bind_scalar_function_call(
                     .collect(),
             ))
         }
+        BuiltinScalarFunction::MakeTimestamp => Ok(build_func(
+            false,
+            arg_types
+                .into_iter()
+                .zip(bound_args)
+                .enumerate()
+                .map(|(idx, (ty, arg))| {
+                    let target = if idx == 5 {
+                        SqlType::new(SqlTypeKind::Float8)
+                    } else {
+                        SqlType::new(SqlTypeKind::Int4)
+                    };
+                    coerce_bound_expr(arg, ty, target)
+                })
+                .collect(),
+        )),
+        BuiltinScalarFunction::Age => Ok(build_func(false, bound_args)),
         BuiltinScalarFunction::ToTsVector => Ok(build_func(
             false,
             args.iter()
@@ -1840,9 +1875,17 @@ pub(super) fn bind_scalar_function_call(
                 grouped_outer,
                 ctes,
             );
-            if !is_numeric_family(value_type) {
+            if !is_numeric_family(value_type)
+                && !matches!(
+                    value_type.kind,
+                    SqlTypeKind::Date
+                        | SqlTypeKind::Timestamp
+                        | SqlTypeKind::TimestampTz
+                        | SqlTypeKind::Interval
+                )
+            {
                 return Err(ParseError::UnexpectedToken {
-                    expected: "numeric argument",
+                    expected: "numeric or datetime argument",
                     actual: format!("{func:?}({})", sql_type_name(value_type)),
                 });
             }

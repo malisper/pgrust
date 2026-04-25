@@ -5994,6 +5994,73 @@ fn timestamp_subtraction_returns_interval_and_handles_infinity() {
 }
 
 #[test]
+fn timestamp_regression_datetime_builtins_route_and_format() {
+    let base = temp_dir("timestamp_regression_datetime_builtins");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select \
+             to_char(date_trunc('week', timestamp '2004-02-29 15:44:17.71393'), 'YYYY-MM-DD HH24:MI:SS'), \
+             to_char(date_bin('5 min'::interval, timestamp '2020-02-01 01:01:01', timestamp '2020-02-01 00:02:30'), 'YYYY-MM-DD HH24:MI:SS'), \
+             to_char(make_timestamp(1999, 12, 31, 24, 0, 0), 'YYYY-MM-DD HH24:MI:SS')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("2004-02-23 00:00:00".into()),
+            Value::Text("2020-02-01 00:57:30".into()),
+            Value::Text("2000-01-01 00:00:00".into()),
+        ]],
+    );
+}
+
+#[test]
+fn to_char_timestamp_supports_regression_tokens() {
+    let base = temp_dir("to_char_timestamp_regression_tokens");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select \
+             to_char(timestamp '1997-02-10 17:32:01.789012', 'YYYYTH IYYY IW IDDD HH24:MI:SS FF3 MS US'), \
+             to_char(timestamp '0097-02-16 17:32:01 BC', 'YYYY A.D. FMDAY FMMONTH FMRM')",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Text("1997TH 1997 07 043 17:32:01 789 789 789012".into()),
+            Value::Text("0097 B.C. TUESDAY FEBRUARY II".into()),
+        ]],
+    );
+}
+
+#[test]
+fn timestamp_generate_series_accepts_interval_steps() {
+    let base = temp_dir("timestamp_generate_series_interval_steps");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select to_char(generate_series(timestamp '2022-01-01 00:00', timestamp 'infinity', interval '1 month'), 'YYYY-MM-DD') limit 3",
+        )
+        .unwrap(),
+        vec![
+            vec![Value::Text("2022-01-01".into())],
+            vec![Value::Text("2022-02-01".into())],
+            vec![Value::Text("2022-03-01".into())],
+        ],
+    );
+}
+
+#[test]
 fn select_extract_uses_date_part_runtime() {
     let base = temp_dir("select_extract_date_part");
     let txns = TransactionManager::new_durable(&base).unwrap();
