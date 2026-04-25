@@ -1,5 +1,6 @@
 target/
 .bench-target/
+.bench-history/
 __pycache__/
 perl5/
 .DS_Store

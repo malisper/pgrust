@@ -75,6 +75,26 @@ def parse_args() -> argparse.Namespace:
         help="Print a compact report for an existing summary JSON and exit.",
     )
     parser.add_argument(
+        "--history-dir",
+        type=Path,
+        help="Optional local history directory. Records this run under <history-dir>/runs and updates index.json.",
+    )
+    parser.add_argument(
+        "--history-label",
+        help="Optional label stored with --history-dir entries, for example laptop-baseline.",
+    )
+    parser.add_argument(
+        "--report-history",
+        type=Path,
+        help="Print a compact report for a local benchmark history directory and exit.",
+    )
+    parser.add_argument(
+        "--history-limit",
+        type=int,
+        default=10,
+        help="Number of recent history runs to show with --report-history. Default: 10.",
+    )
+    parser.add_argument(
         "--no-report",
         action="store_true",
         help="Do not print the compact report after a benchmark run.",
@@ -270,9 +290,17 @@ class BenchmarkRunner:
                 summary["results"].append(self.run_pgbench_like_suite())
             summary["comparisons"] = build_comparisons(summary["results"])
 
+            history_path = None
+            if self.args.history_dir:
+                history_path = record_history(
+                    summary, self.args.history_dir, self.args.history_label
+                )
+
             self.output_json.write_text(json.dumps(summary, indent=2) + "\n")
             print(f"Results dir: {self.results_dir}")
             print(f"Summary JSON: {self.output_json}")
+            if history_path is not None:
+                print(f"History JSON: {history_path}")
             if not self.args.no_report:
                 print()
                 print_report(summary)
@@ -948,6 +976,228 @@ def build_comparisons(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return comparisons
 
 
+def record_history(
+    summary: dict[str, Any], history_dir: Path, label: str | None
+) -> Path:
+    recorded_at = utc_now()
+    history_dir.mkdir(parents=True, exist_ok=True)
+    runs_dir = history_dir / "runs"
+    runs_dir.mkdir(exist_ok=True)
+
+    run_path = unique_history_path(runs_dir, summary)
+    relative_run_path = run_path.relative_to(history_dir).as_posix()
+    summary["history"] = {
+        "recorded_at": recorded_at,
+        "label": label,
+        "path": relative_run_path,
+    }
+    run_path.write_text(json.dumps(summary, indent=2) + "\n")
+
+    index_path = history_dir / "index.json"
+    index = load_history_index(index_path)
+    entry = build_history_entry(summary, relative_run_path, recorded_at, label)
+    runs = [
+        run
+        for run in index.get("runs", [])
+        if run.get("path") != relative_run_path
+    ]
+    runs.append(entry)
+    runs.sort(key=lambda run: run.get("created_at") or "")
+    index["runs"] = runs
+    index_path.write_text(json.dumps(index, indent=2) + "\n")
+    return run_path
+
+
+def unique_history_path(runs_dir: Path, summary: dict[str, Any]) -> Path:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    commit = str(summary.get("git_commit") or "unknown")[:12]
+    stem = f"{timestamp}-{commit}"
+    path = runs_dir / f"{stem}.json"
+    suffix = 2
+    while path.exists():
+        path = runs_dir / f"{stem}-{suffix}.json"
+        suffix += 1
+    return path
+
+
+def load_history_index(index_path: Path) -> dict[str, Any]:
+    if not index_path.exists():
+        return {"schema_version": 1, "runs": []}
+    try:
+        index = json.loads(index_path.read_text())
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"failed to parse benchmark history index {index_path}: {exc}")
+    if not isinstance(index, dict):
+        raise SystemExit(f"benchmark history index must be a JSON object: {index_path}")
+    index.setdefault("schema_version", 1)
+    index.setdefault("runs", [])
+    return index
+
+
+def build_history_entry(
+    summary: dict[str, Any], relative_run_path: str, recorded_at: str, label: str | None
+) -> dict[str, Any]:
+    config = summary.get("config", {})
+    environment = summary.get("environment", {})
+    results = summary.get("results", [])
+    return {
+        "created_at": summary.get("created_at"),
+        "recorded_at": recorded_at,
+        "label": label,
+        "path": relative_run_path,
+        "git_branch": summary.get("git_branch"),
+        "git_commit": summary.get("git_commit"),
+        "hostname": summary.get("hostname"),
+        "platform": environment.get("platform"),
+        "machine": environment.get("machine"),
+        "suites": config.get("suites", []),
+        "engines": config.get("engines"),
+        "pgbench_workloads": config.get("pgbench_workloads", []),
+        "rows": config.get("rows"),
+        "clients": config.get("clients"),
+        "pgbench_transactions": config.get("pgbench_transactions"),
+        "result_count": len(results),
+        "ok_count": sum(1 for result in results if result.get("status") == "ok"),
+        "error_count": sum(1 for result in results if result.get("status") != "ok"),
+        "comparisons": summarize_history_comparisons(summary.get("comparisons", [])),
+    }
+
+
+def summarize_history_comparisons(
+    comparisons: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    summarized = []
+    for item in comparisons:
+        row = {
+            "suite": item.get("suite"),
+            "workload": item.get("workload"),
+            "throughput_metric": item.get("throughput_metric"),
+            "throughput_ratio": item.get("pgrust_to_postgres_throughput_ratio"),
+            "latency_metric": item.get("latency_metric"),
+            "latency_ratio": item.get("pgrust_to_postgres_latency_ratio"),
+        }
+        summarized.append({key: value for key, value in row.items() if value is not None})
+    return summarized
+
+
+def print_history_report(history_dir: Path, limit: int) -> None:
+    index_path = history_dir / "index.json"
+    if not index_path.exists():
+        raise SystemExit(f"benchmark history index not found: {index_path}")
+
+    index = load_history_index(index_path)
+    runs = index.get("runs", [])
+    if not runs:
+        print("Benchmark History")
+        print(f"  dir:  {history_dir}")
+        print("  runs: 0")
+        return
+
+    runs = sorted(runs, key=lambda run: run.get("created_at") or "")
+    recent = runs[-max(limit, 1) :]
+
+    print("Benchmark History")
+    print(f"  dir:  {history_dir}")
+    print(f"  runs: {len(runs)}")
+    print()
+    print_history_run_table(recent)
+
+    latest = runs[-1]
+    latest_comparisons = latest.get("comparisons") or []
+    if latest_comparisons:
+        print()
+        print_history_comparison_table(latest, runs[:-1])
+
+
+def print_history_run_table(runs: list[dict[str, Any]]) -> None:
+    rows = []
+    for run in reversed(runs):
+        rows.append(
+            [
+                short_time(run.get("created_at")),
+                short_commit(run.get("git_commit")),
+                run.get("label") or "-",
+                ",".join(run.get("suites") or []),
+                str(run.get("engines") or "-"),
+                f"{run.get('ok_count', 0)}/{run.get('result_count', 0)}",
+                str(run.get("error_count", 0)),
+            ]
+        )
+    print_table(["created", "commit", "label", "suites", "engines", "ok", "errors"], rows)
+
+
+def print_history_comparison_table(
+    latest: dict[str, Any], previous_runs: list[dict[str, Any]]
+) -> None:
+    previous_by_key = {}
+    for run in reversed(previous_runs):
+        for item in run.get("comparisons", []):
+            previous_by_key.setdefault(comparison_key(item), item)
+
+    rows = []
+    for item in latest.get("comparisons", []):
+        previous_item = previous_by_key.get(comparison_key(item))
+        rows.append(
+            [
+                comparison_label(item),
+                format_ratio(item.get("throughput_ratio")),
+                format_ratio(previous_item.get("throughput_ratio"))
+                if previous_item
+                else "-",
+                format_percent_delta(
+                    item.get("throughput_ratio"),
+                    previous_item.get("throughput_ratio") if previous_item else None,
+                ),
+                format_ratio(item.get("latency_ratio")),
+                format_ratio(previous_item.get("latency_ratio")) if previous_item else "-",
+                format_percent_delta(
+                    item.get("latency_ratio"),
+                    previous_item.get("latency_ratio") if previous_item else None,
+                ),
+            ]
+        )
+
+    print("Latest Comparison Ratios")
+    print_table(
+        [
+            "workload",
+            "tps ratio",
+            "prev tps",
+            "tps delta",
+            "lat ratio",
+            "prev lat",
+            "lat delta",
+        ],
+        rows,
+    )
+
+
+def comparison_key(item: dict[str, Any]) -> tuple[str | None, str | None]:
+    return (item.get("suite"), item.get("workload"))
+
+
+def comparison_label(item: dict[str, Any]) -> str:
+    return item.get("workload") or item.get("suite") or "-"
+
+
+def short_time(value: Any) -> str:
+    if not isinstance(value, str) or len(value) < 16:
+        return "-"
+    return value[:16].replace("T", " ")
+
+
+def short_commit(value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        return "-"
+    return value[:12]
+
+
+def format_percent_delta(current: Any, previous: Any) -> str:
+    if not is_number(current) or not is_number(previous) or previous == 0:
+        return "-"
+    return f"{((current / previous) - 1.0) * 100.0:+.1f}%"
+
+
 def first_metric(
     pgrust_metrics: dict[str, Any],
     postgres_metrics: dict[str, Any],
@@ -1078,6 +1328,9 @@ if __name__ == "__main__":
     args = parse_args()
     if args.report_json:
         print_report(json.loads(args.report_json.read_text()))
+        sys.exit(0)
+    if args.report_history:
+        print_history_report(args.report_history, args.history_limit)
         sys.exit(0)
 
     runner = BenchmarkRunner(args)
