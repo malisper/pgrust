@@ -1944,6 +1944,20 @@ fn render_explain_const(value: &Value) -> String {
         Value::Text(_) | Value::TextRef(_, _) => {
             format!("'{}'::text", value.as_text().unwrap().replace('\'', "''"))
         }
+        Value::Point(_)
+        | Value::Lseg(_)
+        | Value::Path(_)
+        | Value::Line(_)
+        | Value::Box(_)
+        | Value::Polygon(_)
+        | Value::Circle(_) => match value.sql_type_hint() {
+            Some(sql_type) => format!(
+                "{}::{}",
+                render_explain_literal(value),
+                render_explain_sql_type_name(sql_type)
+            ),
+            None => render_explain_literal(value),
+        },
         Value::Date(date) => format!(
             "'{}'::date",
             format_date_text(*date, &DateTimeConfig::default())
@@ -2052,7 +2066,12 @@ fn render_explain_sql_type_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Date => "date",
         SqlTypeKind::Json => "json",
         SqlTypeKind::Jsonb => "jsonb",
+        SqlTypeKind::Line => "line",
+        SqlTypeKind::Lseg => "lseg",
+        SqlTypeKind::Path => "path",
         SqlTypeKind::Box => "box",
+        SqlTypeKind::Polygon => "polygon",
+        SqlTypeKind::Circle => "circle",
         SqlTypeKind::Point => "point",
         _ => "text",
     }
