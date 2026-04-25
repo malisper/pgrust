@@ -567,6 +567,7 @@ pub enum BuiltinScalarFunction {
     LoCreate,
     LoUnlink,
     DatePart,
+    Extract,
     DateTrunc,
     DateBin,
     TimeZone,
