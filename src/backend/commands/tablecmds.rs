@@ -2495,7 +2495,7 @@ pub fn execute_truncate_table(
 ) -> Result<StatementResult, ExecError> {
     for table_name in stmt.table_names {
         let entry = match catalog.lookup_any_relation(&table_name) {
-            Some(entry) if entry.relkind == 'r' => entry,
+            Some(entry) if entry.relkind == 'r' || entry.relkind == 'p' => entry,
             Some(_) => {
                 return Err(ExecError::Parse(ParseError::WrongObjectType {
                     name: table_name.clone(),
@@ -2508,33 +2508,49 @@ pub fn execute_truncate_table(
                 )));
             }
         };
-        if catalog.has_subclass(entry.relation_oid) {
+        let truncate_targets = if entry.relkind == 'p' {
+            partitioned_truncate_targets(catalog, entry.relation_oid)
+        } else if catalog.has_subclass(entry.relation_oid) {
             return Err(ExecError::Parse(ParseError::FeatureNotSupported(
                 "TRUNCATE on inherited parents is not supported yet".into(),
             )));
+        } else {
+            vec![entry]
+        };
+        for target in truncate_targets {
+            let indexes = catalog.index_relations_for_heap(target.relation_oid);
+            let _ = ctx.pool.invalidate_relation(target.rel);
+            ctx.pool
+                .with_storage_mut(|s| {
+                    s.smgr.truncate(target.rel, ForkNumber::Main, 0)?;
+                    if s.smgr.exists(target.rel, ForkNumber::VisibilityMap) {
+                        s.smgr.truncate(target.rel, ForkNumber::VisibilityMap, 0)?;
+                    }
+                    Ok(())
+                })
+                .map_err(HeapError::Storage)?;
+            for index in indexes
+                .iter()
+                .filter(|index| index.index_meta.indisvalid && index.index_meta.indisready)
+            {
+                reinitialize_index_relation(index, ctx, xid)?;
+            }
+            ctx.session_stats
+                .write()
+                .note_relation_truncate(target.relation_oid);
         }
-        let indexes = catalog.index_relations_for_heap(entry.relation_oid);
-        let _ = ctx.pool.invalidate_relation(entry.rel);
-        ctx.pool
-            .with_storage_mut(|s| {
-                s.smgr.truncate(entry.rel, ForkNumber::Main, 0)?;
-                if s.smgr.exists(entry.rel, ForkNumber::VisibilityMap) {
-                    s.smgr.truncate(entry.rel, ForkNumber::VisibilityMap, 0)?;
-                }
-                Ok(())
-            })
-            .map_err(HeapError::Storage)?;
-        for index in indexes
-            .iter()
-            .filter(|index| index.index_meta.indisvalid && index.index_meta.indisready)
-        {
-            reinitialize_index_relation(index, ctx, xid)?;
-        }
-        ctx.session_stats
-            .write()
-            .note_relation_truncate(entry.relation_oid);
     }
     Ok(StatementResult::AffectedRows(0))
+}
+
+fn partitioned_truncate_targets(catalog: &dyn CatalogLookup, root_oid: u32) -> Vec<BoundRelation> {
+    catalog
+        .find_all_inheritors(root_oid)
+        .into_iter()
+        .filter(|oid| *oid != root_oid)
+        .filter_map(|oid| catalog.relation_by_oid(oid))
+        .filter(|entry| entry.relkind == 'r')
+        .collect()
 }
 
 pub fn execute_insert(
@@ -2721,8 +2737,9 @@ fn execute_insert_rows_with_routing(
     let mut proute = exec_setup_partition_tuple_routing(catalog, &target_relation)?;
     for row in rows {
         let leaf = exec_find_partition(catalog, &mut proute, &target_relation, row, ctx)?;
+        let leaf_row = remap_partition_row(row, &target_relation.desc, &leaf.desc)?;
         match routed.entry(leaf.relation_oid) {
-            Entry::Occupied(mut entry) => entry.get_mut().rows.push(row.clone()),
+            Entry::Occupied(mut entry) => entry.get_mut().rows.push(leaf_row),
             Entry::Vacant(entry) => {
                 let mut result_rel_info = PartitionResultRelInfo::new(
                     catalog,
@@ -2733,7 +2750,7 @@ fn execute_insert_rows_with_routing(
                     toast_index,
                     leaf,
                 )?;
-                result_rel_info.rows.push(row.clone());
+                result_rel_info.rows.push(leaf_row);
                 entry.insert(result_rel_info);
             }
         }
@@ -2758,6 +2775,69 @@ fn execute_insert_rows_with_routing(
         )?);
     }
     Ok(inserted_rows)
+}
+
+fn remap_partition_row(
+    row: &[Value],
+    parent_desc: &RelationDesc,
+    child_desc: &RelationDesc,
+) -> Result<Vec<Value>, ExecError> {
+    let parent_columns = parent_desc
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| !column.dropped)
+        .collect::<Vec<_>>();
+    let child_columns = child_desc
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| !column.dropped)
+        .collect::<Vec<_>>();
+    if parent_columns.len() != child_columns.len() {
+        return Ok(row.to_vec());
+    }
+    let identity_layout = parent_columns.iter().zip(child_columns.iter()).all(
+        |((parent_idx, parent_column), (child_idx, child_column))| {
+            parent_idx == child_idx
+                && parent_column.name.eq_ignore_ascii_case(&child_column.name)
+                && parent_column.sql_type == child_column.sql_type
+        },
+    );
+    if identity_layout {
+        return Ok(row.to_vec());
+    }
+
+    let mut remapped = vec![Value::Null; child_desc.columns.len()];
+    for (child_idx, child_column) in child_columns {
+        let Some((parent_idx, parent_column)) = parent_columns
+            .iter()
+            .find(|(_, column)| column.name.eq_ignore_ascii_case(&child_column.name))
+        else {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "partition column \"{}\" is missing from partitioned table",
+                    child_column.name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        };
+        if parent_column.sql_type != child_column.sql_type {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "partition column \"{}\" has different type than partitioned table",
+                    child_column.name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        }
+        remapped[child_idx] = row.get(*parent_idx).cloned().unwrap_or(Value::Null);
+    }
+    Ok(remapped)
 }
 
 fn parse_tid_text(value: &Value) -> Result<Option<ItemPointerData>, ExecError> {

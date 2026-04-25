@@ -790,7 +790,7 @@ if [[ ! -x "$SERVER_BIN" ]]; then
 fi
 
 # Set up results directory
-mkdir -p "$RESULTS_DIR/output" "$RESULTS_DIR/diff"
+mkdir -p "$RESULTS_DIR/output" "$RESULTS_DIR/diff" "$RESULTS_DIR/results"
 mkdir -p "$RESULTS_DIR/status"
 echo "Regression results dir: $RESULTS_DIR"
 echo "Regression data dir: $DATA_DIR"
@@ -812,6 +812,7 @@ fi
 
 export PGPASSWORD="x"
 export PG_ABS_SRCDIR="$PG_REGRESS_ABS"
+export PG_ABS_BUILDDIR="$RESULTS_DIR"
 export PGRUST_REGRESS_TABLESPACE_DIR="$REGRESS_TABLESPACE_DIR"
 export PGTZ="America/Los_Angeles"
 export PGDATESTYLE="Postgres, MDY"
@@ -820,7 +821,7 @@ export PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c statement_timeout=${STATEMENT_TIME
 # PG18 psql adds a verbose \d+ Compression column by default. Keep the
 # regression client surface aligned with the checked-in expected files until
 # the repo moves those fixtures to the new default shape.
-PG_ARGS=(-X -h 127.0.0.1 -p "$PORT" -U postgres -v "abs_srcdir=$PG_REGRESS_ABS" -v HIDE_TOAST_COMPRESSION=on)
+PG_ARGS=(-X -h 127.0.0.1 -p "$PORT" -U postgres -v "abs_srcdir=$PG_REGRESS_ABS" -v "abs_builddir=$RESULTS_DIR" -v HIDE_TOAST_COMPRESSION=on)
 
 run_bootstrap_setup() {
     local setup_sql=""
