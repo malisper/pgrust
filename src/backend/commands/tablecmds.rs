@@ -2495,7 +2495,7 @@ pub fn execute_truncate_table(
 ) -> Result<StatementResult, ExecError> {
     for table_name in stmt.table_names {
         let entry = match catalog.lookup_any_relation(&table_name) {
-            Some(entry) if entry.relkind == 'r' => entry,
+            Some(entry) if entry.relkind == 'r' || entry.relkind == 'p' => entry,
             Some(_) => {
                 return Err(ExecError::Parse(ParseError::WrongObjectType {
                     name: table_name.clone(),
@@ -2508,33 +2508,49 @@ pub fn execute_truncate_table(
                 )));
             }
         };
-        if catalog.has_subclass(entry.relation_oid) {
+        let truncate_targets = if entry.relkind == 'p' {
+            partitioned_truncate_targets(catalog, entry.relation_oid)
+        } else if catalog.has_subclass(entry.relation_oid) {
             return Err(ExecError::Parse(ParseError::FeatureNotSupported(
                 "TRUNCATE on inherited parents is not supported yet".into(),
             )));
+        } else {
+            vec![entry]
+        };
+        for target in truncate_targets {
+            let indexes = catalog.index_relations_for_heap(target.relation_oid);
+            let _ = ctx.pool.invalidate_relation(target.rel);
+            ctx.pool
+                .with_storage_mut(|s| {
+                    s.smgr.truncate(target.rel, ForkNumber::Main, 0)?;
+                    if s.smgr.exists(target.rel, ForkNumber::VisibilityMap) {
+                        s.smgr.truncate(target.rel, ForkNumber::VisibilityMap, 0)?;
+                    }
+                    Ok(())
+                })
+                .map_err(HeapError::Storage)?;
+            for index in indexes
+                .iter()
+                .filter(|index| index.index_meta.indisvalid && index.index_meta.indisready)
+            {
+                reinitialize_index_relation(index, ctx, xid)?;
+            }
+            ctx.session_stats
+                .write()
+                .note_relation_truncate(target.relation_oid);
         }
-        let indexes = catalog.index_relations_for_heap(entry.relation_oid);
-        let _ = ctx.pool.invalidate_relation(entry.rel);
-        ctx.pool
-            .with_storage_mut(|s| {
-                s.smgr.truncate(entry.rel, ForkNumber::Main, 0)?;
-                if s.smgr.exists(entry.rel, ForkNumber::VisibilityMap) {
-                    s.smgr.truncate(entry.rel, ForkNumber::VisibilityMap, 0)?;
-                }
-                Ok(())
-            })
-            .map_err(HeapError::Storage)?;
-        for index in indexes
-            .iter()
-            .filter(|index| index.index_meta.indisvalid && index.index_meta.indisready)
-        {
-            reinitialize_index_relation(index, ctx, xid)?;
-        }
-        ctx.session_stats
-            .write()
-            .note_relation_truncate(entry.relation_oid);
     }
     Ok(StatementResult::AffectedRows(0))
+}
+
+fn partitioned_truncate_targets(catalog: &dyn CatalogLookup, root_oid: u32) -> Vec<BoundRelation> {
+    catalog
+        .find_all_inheritors(root_oid)
+        .into_iter()
+        .filter(|oid| *oid != root_oid)
+        .filter_map(|oid| catalog.relation_by_oid(oid))
+        .filter(|entry| entry.relkind == 'r')
+        .collect()
 }
 
 pub fn execute_insert(

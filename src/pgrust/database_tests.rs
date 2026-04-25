@@ -6468,6 +6468,58 @@ fn inherited_scan_tableoid_tracks_physical_child_relation() {
 }
 
 #[test]
+fn partitioned_scan_tableoid_groups_by_target_ordinals() {
+    let dir = temp_dir("partitioned_tableoid_group_ordinals");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table parted_oid (id int4 not null) partition by list ((id % 2))",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table parted_oid_even partition of parted_oid for values in (0)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table parted_oid_odd partition of parted_oid for values in (1)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into parted_oid values (1), (2), (3), (4)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select tableoid::regclass::text, id % 2 = 0 is_even, count(*)
+             from parted_oid
+             group by 1, 2
+             order by 1",
+        ),
+        vec![
+            vec![
+                Value::Text("parted_oid_even".into()),
+                Value::Bool(true),
+                Value::Int64(2),
+            ],
+            vec![
+                Value::Text("parted_oid_odd".into()),
+                Value::Bool(false),
+                Value::Int64(2),
+            ],
+        ]
+    );
+}
+
+#[test]
 fn base_table_scan_exposes_ctid_system_column() {
     let dir = temp_dir("scan_ctid");
     let db = Database::open(&dir, 128).unwrap();
@@ -23016,6 +23068,339 @@ fn copy_to_rejects_header_match() {
 }
 
 #[test]
+fn copy_errors_include_copy_context() {
+    let base = temp_dir("copy_error_context");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table copy_context (a int4, b int4)")
+        .unwrap();
+    let copy = crate::pgrust::session::parse_copy_command(
+        "copy copy_context from stdin with (header match)",
+    )
+    .unwrap()
+    .unwrap();
+    match session.copy_from_text(&db, &copy, "a\twrong\n1\t2\n") {
+        Err(ExecError::WithContext { source, context }) => {
+            assert_eq!(
+                context,
+                "COPY copy_context, line 1: \"a\twrong\"".to_string()
+            );
+            assert!(matches!(
+                *source,
+                ExecError::DetailedError { ref message, .. }
+                    if message.contains("column name mismatch")
+            ));
+        }
+        other => panic!("expected COPY header context, got {other:?}"),
+    }
+
+    let plain_copy = crate::pgrust::session::parse_copy_command("copy copy_context(a) from stdin")
+        .unwrap()
+        .unwrap();
+    match session.copy_from_text(&db, &plain_copy, "line1\nfoo\\.\n\\.") {
+        Err(ExecError::WithContext { source, context }) => {
+            assert_eq!(context, "COPY copy_context, line 2".to_string());
+            assert!(matches!(
+                *source,
+                ExecError::DetailedError { ref message, .. }
+                    if message == "end-of-copy marker is not alone on its line"
+            ));
+        }
+        other => panic!("expected COPY data context, got {other:?}"),
+    }
+}
+
+#[test]
+fn copy_to_unpopulated_materialized_view_uses_copy_error() {
+    let base = temp_dir("copy_unpopulated_matview");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create materialized view copy_mv as select 1 as id with no data",
+        )
+        .unwrap();
+    let copy = crate::pgrust::session::parse_copy_command("copy copy_mv to stdout with (header)")
+        .unwrap()
+        .unwrap();
+    match session.execute_copy_command(&db, &copy) {
+        Err(ExecError::DetailedError { message, hint, .. }) => {
+            assert_eq!(
+                message,
+                "cannot copy from unpopulated materialized view \"copy_mv\""
+            );
+            assert_eq!(
+                hint.as_deref(),
+                Some("Use the REFRESH MATERIALIZED VIEW command.")
+            );
+        }
+        other => panic!("expected unpopulated matview COPY error, got {other:?}"),
+    }
+}
+
+#[test]
+fn copy_csv_file_treats_copy_marker_as_data() {
+    let base = temp_dir("copy_csv_file_marker");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table copy_marker_data (test text)")
+        .unwrap();
+    let file_copy = crate::pgrust::session::parse_copy_command(
+        "copy copy_marker_data from '/tmp/copy.csv' csv",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        session
+            .copy_from_text(&db, &file_copy, "line1\n\\.\nline2\n")
+            .unwrap(),
+        3
+    );
+    match session
+        .execute(
+            &db,
+            "select test from copy_marker_data order by test collate \"C\"",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Text("\\.".into())],
+                    vec![Value::Text("line1".into())],
+                    vec![Value::Text("line2".into())],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+
+    let stdin_copy =
+        crate::pgrust::session::parse_copy_command("copy copy_marker_data from stdin csv")
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        session
+            .copy_from_text(&db, &stdin_copy, "line3\n\\.\nline4\n")
+            .unwrap(),
+        2
+    );
+}
+
+#[test]
+fn copy_from_uses_defaults_for_omitted_columns() {
+    let base = temp_dir("copy_from_defaults");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table copy_defaults (a int4, b int4 default 7)")
+        .unwrap();
+    let copy = crate::pgrust::session::parse_copy_command("copy copy_defaults(a) from stdin")
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.copy_from_text(&db, &copy, "1\n\\.").unwrap(), 1);
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select a, b from copy_defaults"),
+        vec![vec![Value::Int32(1), Value::Int32(7)]]
+    );
+}
+
+#[test]
+fn copy_from_partitioned_table_uses_parent_defaults() {
+    let base = temp_dir("copy_partition_defaults");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table copy_part_defaults (id int4, data text, rand float8 default random()) partition by list ((id % 2))",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table copy_part_defaults_even partition of copy_part_defaults for values in (0)",
+        )
+        .unwrap();
+    assert_eq!(
+        session
+            .catalog_lookup(&db)
+            .lookup_any_relation("copy_part_defaults")
+            .unwrap()
+            .desc
+            .columns[2]
+            .default_expr
+            .as_deref(),
+        Some("random()")
+    );
+    let copy =
+        crate::pgrust::session::parse_copy_command("copy copy_part_defaults(id, data) from stdin")
+            .unwrap()
+            .unwrap();
+    assert_eq!(session.copy_from_text(&db, &copy, "2\tok\n\\.").unwrap(), 1);
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select rand is not null from copy_part_defaults"
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn copy_from_validates_overlong_defaults() {
+    let base = temp_dir("copy_from_overlong_defaults");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create temp table copy_overlong (a varchar(5) default 'more than 5 chars', b varchar(5))",
+        )
+        .unwrap();
+    assert_eq!(
+        session
+            .catalog_lookup(&db)
+            .lookup_any_relation("copy_overlong")
+            .unwrap()
+            .desc
+            .columns[0]
+            .default_expr
+            .as_deref(),
+        Some("'more than 5 chars'")
+    );
+    let omitted = crate::pgrust::session::parse_copy_command("copy copy_overlong(b) from stdin")
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        omitted.relation,
+        crate::pgrust::session::CopyRelation::Table {
+            ref columns,
+            ..
+        } if columns.as_ref() == Some(&vec!["b".to_string()])
+    ));
+    let desc = session
+        .catalog_lookup(&db)
+        .lookup_any_relation("copy_overlong")
+        .unwrap()
+        .desc;
+    assert_eq!(desc.visible_column_indexes(), vec![0, 1]);
+    assert!(matches!(
+        session.validate_copy_from_stdin_start(&db, &omitted),
+        Err(ExecError::StringDataRightTruncation { .. })
+    ));
+    match session.copy_from_text(&db, &omitted, "\\.") {
+        Err(ExecError::StringDataRightTruncation { ty }) => {
+            assert_eq!(ty, "character varying(5)");
+        }
+        other => panic!("expected overlong default error, got {other:?}"),
+    }
+    assert!(matches!(
+        session.copy_from_text(&db, &omitted, ""),
+        Err(ExecError::StringDataRightTruncation { .. })
+    ));
+
+    let default_marker =
+        crate::pgrust::session::parse_copy_command("copy copy_overlong from stdin (default '')")
+            .unwrap()
+            .unwrap();
+    assert!(matches!(
+        session.validate_copy_from_stdin_start(&db, &default_marker),
+        Err(ExecError::StringDataRightTruncation { .. })
+    ));
+    assert!(matches!(
+        session.copy_from_text(&db, &default_marker, "\\."),
+        Err(ExecError::StringDataRightTruncation { .. })
+    ));
+}
+
+#[test]
+fn copy_freeze_rejects_foreign_tables() {
+    let base = temp_dir("copy_freeze_foreign_table");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create foreign data wrapper copytest_wrapper")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create server copytest_server foreign data wrapper copytest_wrapper",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create foreign table copytest_foreign_table (a int4) server copytest_server",
+        )
+        .unwrap();
+    assert_eq!(
+        session
+            .catalog_lookup(&db)
+            .lookup_any_relation("copytest_foreign_table")
+            .unwrap()
+            .relkind,
+        'f'
+    );
+    let copy = crate::pgrust::session::parse_copy_command(
+        "copy copytest_foreign_table from stdin (freeze)",
+    )
+    .unwrap()
+    .unwrap();
+    match session.copy_from_text(&db, &copy, "1\n\\.") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(message, "cannot perform COPY FREEZE on a foreign table");
+            assert_eq!(sqlstate, "0A000");
+        }
+        other => panic!("expected foreign-table COPY FREEZE error, got {other:?}"),
+    }
+}
+
+#[test]
+fn plpgsql_cte_select_into_assigns_target() {
+    let base = temp_dir("plpgsql_cte_select_into");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            r#"
+            create function cte_select_into_value() returns int4 language plpgsql as $$
+            declare
+                value int4;
+            begin
+                with src as (select 3 as n) select into value n from src;
+                return value;
+            end
+            $$
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select cte_select_into_value()"),
+        vec![vec![Value::Int32(3)]]
+    );
+}
+
+#[test]
 fn copy_into_partitioned_table_handles_reordered_child_columns() {
     let base = temp_dir("copy_partition_reordered_columns");
     let db = Database::open(&base, 16).unwrap();
@@ -23051,6 +23436,47 @@ fn copy_into_partitioned_table_handles_reordered_child_columns() {
             Value::Int32(1),
             Value::Int32(10)
         ]]
+    );
+}
+
+#[test]
+fn truncate_partitioned_table_clears_leaf_partitions() {
+    let base = temp_dir("truncate_partitioned_copy");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table trunc_parted (a int4, b int4) partition by list (b)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "create table trunc_parted_1 (a int4, b int4)")
+        .unwrap();
+    session
+        .execute(&db, "create table trunc_parted_2 (a int4, b int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table trunc_parted attach partition trunc_parted_1 for values in (1)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table trunc_parted attach partition trunc_parted_2 for values in (2)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into trunc_parted values (10, 1), (20, 2)")
+        .unwrap();
+    session.execute(&db, "truncate trunc_parted").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from trunc_parted"),
+        vec![vec![Value::Int64(0)]]
     );
 }
 

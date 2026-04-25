@@ -2463,7 +2463,7 @@ fn finish_raise(level: &RaiseLevel, message: &str, params: &[Value]) -> Result<(
     let rendered = render_raise_message(message, params)?;
     match level {
         RaiseLevel::Exception => Err(ExecError::RaiseException(rendered)),
-        RaiseLevel::Notice | RaiseLevel::Warning => {
+        RaiseLevel::Info | RaiseLevel::Notice | RaiseLevel::Warning => {
             NOTICE_QUEUE.with(|queue| {
                 queue.borrow_mut().push(PlpgsqlNotice {
                     level: level.clone(),
