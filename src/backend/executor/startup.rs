@@ -4,9 +4,9 @@ use crate::backend::parser::SqlType;
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, CteScanState,
     FilterState, FunctionScanState, HashJoinState, HashState, IndexScanState, LimitState,
-    LockRowsState, NestedLoopJoinState, NodeExecStats, OrderByState, ProjectSetState,
-    ProjectionState, RecursiveUnionState, RecursiveWorkTable, ResultState, SeqScanState,
-    SetOpState, SubqueryScanState, ValuesState, WindowAggState, WorkTableScanState,
+    LockRowsState, MergeJoinState, NestedLoopJoinState, NodeExecStats, OrderByState,
+    ProjectSetState, ProjectionState, RecursiveUnionState, RecursiveWorkTable, ResultState,
+    SeqScanState, SetOpState, SubqueryScanState, ValuesState, WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::parsenodes::SqlTypeKind;
 use crate::include::nodes::primnodes::{Expr, SetReturningCall, set_returning_call_exprs};
@@ -213,6 +213,24 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
                 || plan_uses_outer_columns(right)
                 || hash_clauses.iter().any(expr_uses_outer_columns)
                 || hash_keys.iter().any(expr_uses_outer_columns)
+                || join_qual.iter().any(expr_uses_outer_columns)
+                || qual.iter().any(expr_uses_outer_columns)
+        }
+        Plan::MergeJoin {
+            left,
+            right,
+            merge_clauses,
+            outer_merge_keys,
+            inner_merge_keys,
+            join_qual,
+            qual,
+            ..
+        } => {
+            plan_uses_outer_columns(left)
+                || plan_uses_outer_columns(right)
+                || merge_clauses.iter().any(expr_uses_outer_columns)
+                || outer_merge_keys.iter().any(expr_uses_outer_columns)
+                || inner_merge_keys.iter().any(expr_uses_outer_columns)
                 || join_qual.iter().any(expr_uses_outer_columns)
                 || qual.iter().any(expr_uses_outer_columns)
         }
@@ -625,6 +643,61 @@ pub fn executor_start(plan: Plan) -> PlanState {
                         left_width + right_width
                     },
                 ),
+                current_bindings: Vec::new(),
+                plan_info,
+                stats: NodeExecStats::default(),
+            })
+        }
+        Plan::MergeJoin {
+            plan_info,
+            left,
+            right,
+            kind,
+            merge_clauses,
+            outer_merge_keys,
+            inner_merge_keys,
+            join_qual,
+            qual,
+        } => {
+            assert!(
+                !matches!(kind, crate::include::nodes::primnodes::JoinType::Cross),
+                "merge join does not support cross joins",
+            );
+
+            let left_width = left.column_names().len();
+            let right_width = right.column_names().len();
+            let combined_names: Vec<String> = left
+                .column_names()
+                .into_iter()
+                .chain(right.column_names())
+                .collect();
+            let output_names = if matches!(
+                kind,
+                crate::include::nodes::primnodes::JoinType::Semi
+                    | crate::include::nodes::primnodes::JoinType::Anti
+            ) {
+                left.column_names()
+            } else {
+                combined_names.clone()
+            };
+
+            Box::new(MergeJoinState {
+                left: executor_start(*left),
+                right: executor_start(*right),
+                kind,
+                merge_clauses,
+                outer_merge_keys,
+                inner_merge_keys,
+                join_qual,
+                qual,
+                combined_names,
+                output_names,
+                left_width,
+                right_width,
+                left_rows: None,
+                right_rows: None,
+                output_rows: None,
+                next_output_index: 0,
                 current_bindings: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),

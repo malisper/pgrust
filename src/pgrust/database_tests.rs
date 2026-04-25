@@ -13933,6 +13933,97 @@ fn explain_inner_join_can_reorder_commutative_inputs() {
 }
 
 #[test]
+fn explain_ordered_equijoin_can_choose_merge_join() {
+    std::thread::Builder::new()
+        .name("explain_ordered_equijoin_can_choose_merge_join".into())
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let base = temp_dir("explain_ordered_equijoin_merge_join");
+            let db = Database::open(&base, 16).unwrap();
+            let mut session = Session::new(1);
+
+            session
+                .execute(&db, "set max_stack_depth = '32MB'")
+                .unwrap();
+            session
+                .execute(&db, "create table left_items (id int4 not null, note text)")
+                .unwrap();
+            session
+                .execute(
+                    &db,
+                    "create table right_items (id int4 not null, note text)",
+                )
+                .unwrap();
+
+            for id in 0..96 {
+                session
+                    .execute(
+                        &db,
+                        &format!("insert into left_items values ({id}, 'l{id}')"),
+                    )
+                    .unwrap();
+                session
+                    .execute(
+                        &db,
+                        &format!("insert into right_items values ({id}, 'r{id}')"),
+                    )
+                    .unwrap();
+            }
+
+            session.execute(&db, "analyze left_items").unwrap();
+            session.execute(&db, "analyze right_items").unwrap();
+
+            let lines = match session
+                .execute(
+                    &db,
+                    "explain select l.id, r.note from \
+                     (select id, note from left_items order by id) l \
+                     join (select id, note from right_items order by id) r \
+                       on l.id = r.id \
+                     order by l.id",
+                )
+                .unwrap()
+            {
+                StatementResult::Query { rows, .. } => rows
+                    .into_iter()
+                    .map(|row| match row.first() {
+                        Some(Value::Text(text)) => text.to_string(),
+                        other => panic!("expected explain text row, got {:?}", other),
+                    })
+                    .collect::<Vec<_>>(),
+                other => panic!("expected query result, got {:?}", other),
+            };
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.trim_start().starts_with("Merge Join  ")),
+                "expected ordered equijoin to choose merge join, got {lines:?}"
+            );
+
+            assert_eq!(
+                session_query_rows(
+                    &mut session,
+                    &db,
+                    "select l.id, r.note from \
+                     (select id, note from left_items order by id) l \
+                     join (select id, note from right_items order by id) r \
+                       on l.id = r.id \
+                     where l.id < 3 \
+                     order by l.id",
+                ),
+                vec![
+                    vec![Value::Int32(0), Value::Text("r0".into())],
+                    vec![Value::Int32(1), Value::Text("r1".into())],
+                    vec![Value::Int32(2), Value::Text("r2".into())],
+                ],
+            );
+        })
+        .expect("spawn merge join planner test")
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn explain_cte_self_join_pushes_single_rel_filter_below_join() {
     let base = temp_dir("explain_cte_self_join_filter_pushdown");
     let db = Database::open(&base, 16).unwrap();

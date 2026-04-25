@@ -164,6 +164,14 @@ pub(super) fn extract_hash_join_clauses(
     costsize::extract_hash_join_clauses(restrict_clauses, left_relids, right_relids)
 }
 
+pub(super) fn extract_merge_join_clauses(
+    restrict_clauses: &[RestrictInfo],
+    left_relids: &[usize],
+    right_relids: &[usize],
+) -> Option<crate::backend::optimizer::MergeJoinClauses> {
+    costsize::extract_merge_join_clauses(restrict_clauses, left_relids, right_relids)
+}
+
 pub(super) fn build_index_path_spec(
     filter: Option<&Expr>,
     order_items: Option<&[OrderByEntry]>,
