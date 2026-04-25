@@ -14,7 +14,7 @@ use super::node_types::{NumericValue, Value};
 
 const NUMERIC_MIN_SIG_DIGITS: i32 = 16;
 const NUMERIC_MIN_DISPLAY_SCALE: i32 = 0;
-const NUMERIC_MAX_DISPLAY_SCALE: i32 = 16383;
+const NUMERIC_MAX_DISPLAY_SCALE: i32 = 1000;
 const NUMERIC_MAX_TRANSCENDENTAL_DISPLAY_SCALE: i32 = 1000;
 const NUMERIC_MAX_TRANSCENDENTAL_RESULT_SCALE: i32 = 2000;
 const NUMERIC_MAX_RESULT_WEIGHT: f64 = 131072.0;
@@ -225,16 +225,16 @@ fn approximate_decimal_weight(value: &NumericValue) -> f64 {
 
 fn choose_power_result_scale(base: &NumericValue, exp_dscale: u32, approx_weight: f64) -> u32 {
     let desired = if approx_weight.is_finite() {
-        (NUMERIC_MIN_SIG_DIGITS as f64 - approx_weight).clamp(
-            NUMERIC_MIN_DISPLAY_SCALE as f64,
-            NUMERIC_MAX_DISPLAY_SCALE as f64,
-        )
+        i64::from(NUMERIC_MIN_SIG_DIGITS) - approx_weight as i64
     } else if approx_weight.is_sign_negative() {
-        NUMERIC_MAX_DISPLAY_SCALE as f64
+        i64::from(NUMERIC_MAX_DISPLAY_SCALE)
     } else {
-        NUMERIC_MIN_DISPLAY_SCALE as f64
+        i64::from(NUMERIC_MIN_DISPLAY_SCALE)
     };
-    let mut rscale = desired as i32;
+    let mut rscale = desired.clamp(
+        i64::from(NUMERIC_MIN_DISPLAY_SCALE),
+        i64::from(NUMERIC_MAX_DISPLAY_SCALE),
+    ) as i32;
     rscale = rscale.max(finite_dscale(base) as i32);
     rscale = rscale.max(exp_dscale as i32);
     rscale = rscale.max(NUMERIC_MIN_DISPLAY_SCALE);
@@ -1291,6 +1291,13 @@ fn eval_log_numeric_unary(value: &NumericValue) -> Result<NumericValue, ExecErro
     eval_log_numeric_binary(&NumericValue::from_i64(10), value)
 }
 
+fn with_unary_log_context(error: ExecError) -> ExecError {
+    ExecError::WithContext {
+        source: Box::new(error),
+        context: "SQL function \"log\" statement 1".to_string(),
+    }
+}
+
 fn eval_log_numeric_binary(
     base: &NumericValue,
     value: &NumericValue,
@@ -1356,22 +1363,29 @@ pub(super) fn eval_log_function(values: &[Value]) -> Result<Value, ExecError> {
         [Value::Null] | [_, Value::Null] => Ok(Value::Null),
         [Value::Float64(value)] => {
             if *value == 0.0 {
-                return Err(numeric_domain_error("cannot take logarithm of zero"));
+                return Err(with_unary_log_context(numeric_domain_error(
+                    "cannot take logarithm of zero",
+                )));
             }
             if *value < 0.0 {
-                return Err(numeric_domain_error(
+                return Err(with_unary_log_context(numeric_domain_error(
                     "cannot take logarithm of a negative number",
-                ));
+                )));
             }
             Ok(Value::Float64(value.log10()))
         }
-        [value] => Ok(Value::Numeric(eval_log_numeric_unary(
-            &value_as_numeric(value).ok_or_else(|| ExecError::TypeMismatch {
-                op: "log",
-                left: value.clone(),
-                right: Value::Null,
-            })?,
-        )?)),
+        [value] => Ok(Value::Numeric(
+            eval_log_numeric_unary(
+                &value_as_numeric(value)
+                    .ok_or_else(|| ExecError::TypeMismatch {
+                        op: "log",
+                        left: value.clone(),
+                        right: Value::Null,
+                    })
+                    .map_err(with_unary_log_context)?,
+            )
+            .map_err(with_unary_log_context)?,
+        )),
         [Value::Float64(base), Value::Float64(value)] => {
             if *base == 0.0 || *value == 0.0 {
                 return Err(numeric_domain_error("cannot take logarithm of zero"));
@@ -1855,7 +1869,7 @@ mod tests {
     fn huge_negative_integer_power_underflows_to_zero() {
         assert_eq!(
             numeric_pow_integer(&numeric("10.0"), -2147483648, 0).unwrap(),
-            NumericValue::zero().with_dscale(16383)
+            NumericValue::zero().with_dscale(1000)
         );
     }
 
