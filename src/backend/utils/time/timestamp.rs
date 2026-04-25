@@ -223,9 +223,9 @@ fn parse_date_tokens(
     match tokens {
         [single] => match parse_date_token_with_config(single, config) {
             Ok(Some(date)) => Ok(date),
-            Err(_) | Ok(None) => {
-                parse_two_digit_year_first_timestamp_date(single).ok_or(DateTimeParseError::Invalid)
-            }
+            Err(_) | Ok(None) => parse_two_digit_year_first_timestamp_date(single)
+                .or_else(|| parse_long_compact_timestamp_date(single))
+                .ok_or(DateTimeParseError::Invalid),
         },
         [first, second, third] => {
             if let Some(month) = month_number(first) {
@@ -240,6 +240,17 @@ fn parse_date_tokens(
                     .ok_or(DateTimeParseError::FieldOutOfRange);
             }
             if let Some(month) = month_number(second) {
+                if first.len() > 2 {
+                    let year = first
+                        .parse::<i32>()
+                        .map_err(|_| DateTimeParseError::Invalid)?;
+                    let day = third
+                        .parse::<u32>()
+                        .map_err(|_| DateTimeParseError::Invalid)?;
+                    return days_from_ymd(year, month, day)
+                        .map(|_| (year, month, day))
+                        .ok_or(DateTimeParseError::FieldOutOfRange);
+                }
                 let day = first
                     .parse::<u32>()
                     .map_err(|_| DateTimeParseError::Invalid)?;
@@ -290,6 +301,33 @@ fn is_signed_numeric_timezone_candidate(token: &str) -> bool {
         return false;
     };
     !rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit() || ch == ':')
+}
+
+fn parse_long_compact_timestamp_date(token: &str) -> Option<(i32, u32, u32)> {
+    let trimmed = token.trim();
+    if trimmed.len() <= 8 || !trimmed.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    let year = trimmed[..trimmed.len() - 4].parse::<i32>().ok()?;
+    let month = trimmed[trimmed.len() - 4..trimmed.len() - 2]
+        .parse::<u32>()
+        .ok()?;
+    let day = trimmed[trimmed.len() - 2..].parse::<u32>().ok()?;
+    days_from_ymd(year, month, day)?;
+    Some((year, month, day))
+}
+
+fn parse_removable_timezone_token(token: &str) -> Result<Option<TimeZoneSpec>, DateTimeParseError> {
+    let trimmed = token.trim();
+    if trimmed.is_empty()
+        || trimmed.chars().all(|ch| ch.is_ascii_digit())
+        || month_number(trimmed).is_some()
+        || is_weekday_token(trimmed)
+        || is_bc_token(trimmed)
+    {
+        return Ok(None);
+    }
+    parse_timezone_spec(trimmed)
 }
 
 fn extract_timestamp_parts(
@@ -386,6 +424,16 @@ fn extract_timestamp_parts(
         time_usecs = parsed_time;
         zone = zone.or(inline_zone);
         tokens.remove(index);
+    }
+
+    if zone.is_none() {
+        for index in (0..tokens.len()).rev() {
+            if let Some(spec) = parse_removable_timezone_token(tokens[index])? {
+                zone = Some(spec);
+                tokens.remove(index);
+                break;
+            }
+        }
     }
 
     let (mut year, month, day) = parse_date_tokens(&tokens, config)?;

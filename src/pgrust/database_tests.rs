@@ -20623,6 +20623,88 @@ fn date_trunc_accepts_timestamptz_timezone_argument() {
 }
 
 #[test]
+fn to_char_formats_timestamptz_with_session_timezone() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "set timezone = 'America/Los_Angeles'")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select to_char(timestamptz '2001-02-16 20:38:40+00',
+                    'YYYY-MM-DD HH24:MI:SS DAY Month TZH:TZM OF')",
+        ),
+        vec![vec![Value::Text(
+            "2001-02-16 12:38:40 FRIDAY    February  -08:00 -08".into()
+        )]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select to_char(timestamptz '2018-11-02 12:34:56.789012+00',
+                    'FF1 FF2 FF3 FF4 FF5 FF6 MS US')",
+        ),
+        vec![vec![Value::Text(
+            "7 78 789 7890 78901 789012 789 789012".into()
+        )]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select to_char(timestamptz '2001-02-16 20:38:40+00',
+                    'IYYY IYY IY I IW IDDD ID YYYYTH YYYYth')",
+        ),
+        vec![vec![Value::Text(
+            "2001 001 01 1 07 047 5 2001ST 2001st".into()
+        )]]
+    );
+}
+
+#[test]
+fn timestamp_input_accepts_timezone_before_year() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select ('Wed Jul 11 10:51:14 America/New_York 2001'::timestamptz at time zone 'UTC')::text,
+                    ('Wed Jul 11 10:51:14 GMT-4 2001'::timestamptz at time zone 'UTC')::text,
+                    ('Wed Jul 11 10:51:14 GMT+4 2001'::timestamptz at time zone 'UTC')::text,
+                    ('Wed Jul 11 10:51:14 PST-03:00 2001'::timestamptz at time zone 'UTC')::text,
+                    ('Wed Jul 11 10:51:14 PST+03:00 2001'::timestamptz at time zone 'UTC')::text",
+        ),
+        vec![vec![
+            Value::Text("2001-07-11 14:51:14".into()),
+            Value::Text("2001-07-11 06:51:14".into()),
+            Value::Text("2001-07-11 14:51:14".into()),
+            Value::Text("2001-07-11 07:51:14".into()),
+            Value::Text("2001-07-11 13:51:14".into()),
+        ]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select ('10000 Mar 12 23:58:48 IST'::timestamptz at time zone 'UTC')::text,
+                    ('100000312 23:58:48 IST'::timestamptz at time zone 'UTC')::text,
+                    ('1000000312 23:58:48 IST'::timestamptz at time zone 'UTC')::text",
+        ),
+        vec![vec![
+            Value::Text("10000-03-12 18:28:48".into()),
+            Value::Text("10000-03-12 18:28:48".into()),
+            Value::Text("100000-03-12 18:28:48".into()),
+        ]]
+    );
+}
+
+#[test]
 fn pg_my_temp_schema_filters_temp_pg_stats_rows() {
     let base = temp_dir("pg_my_temp_schema_pg_stats");
     let db = Database::open(&base, 16).unwrap();

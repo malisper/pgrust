@@ -23,7 +23,7 @@ use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::backend::utils::time::datetime::{
     day_of_week_from_julian_day, day_of_year, days_from_ymd, iso_day_of_week_from_julian_day,
     iso_week_and_year, julian_day_from_postgres_date, timestamp_parts_from_usecs,
-    timezone_offset_seconds, ymd_from_days,
+    timezone_offset_seconds_at_utc, ymd_from_days,
 };
 use crate::include::nodes::datetime::{
     DATEVAL_NOBEGIN, DATEVAL_NOEND, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, USECS_PER_DAY,
@@ -110,11 +110,11 @@ const MONTH_NAMES: [&str; 12] = [
 ];
 const DATETIME_TO_CHAR_PATTERNS: &[&str] = &[
     "A.D.", "a.d.", "B.C.", "b.c.", "P.M.", "p.m.", "A.M.", "a.m.", "Y,YYY", "HH24", "HH12",
-    "IYYY", "IDDD", "YYYY", "MONTH", "Month", "month", "DAY", "Day", "day", "SSSS", "FF1", "FF2",
-    "FF3", "FF4", "FF5", "FF6", "ff1", "ff2", "ff3", "ff4", "ff5", "ff6", "IYY", "YYY", "MON",
-    "Mon", "mon", "DY", "Dy", "dy", "HH", "MI", "SS", "MS", "US", "DDD", "YY", "CC", "MM", "WW",
-    "DD", "IW", "IY", "ID", "RM", "rm", "AD", "ad", "BC", "bc", "PM", "pm", "AM", "am", "Y", "I",
-    "Q", "J", "D",
+    "IYYY", "IDDD", "YYYY", "MONTH", "Month", "month", "DAY", "Day", "day", "SSSS", "TZH",
+    "tzh", "TZM", "tzm", "FF1", "FF2", "FF3", "FF4", "FF5", "FF6", "ff1", "ff2", "ff3", "ff4",
+    "ff5", "ff6", "IYY", "YYY", "MON", "Mon", "mon", "DY", "Dy", "dy", "HH", "MI", "SS", "MS",
+    "US", "DDD", "YY", "CC", "MM", "WW", "DD", "IW", "IY", "ID", "RM", "rm", "AD", "ad", "BC",
+    "bc", "PM", "pm", "AM", "am", "OF", "of", "Y", "I", "Q", "J", "D",
 ];
 
 struct TimestampFormatParts {
@@ -135,6 +135,7 @@ struct TimestampFormatParts {
     second: i64,
     seconds_since_midnight: i64,
     micros: i64,
+    offset_seconds: Option<i32>,
 }
 
 fn titlecase_ascii(text: &str) -> String {
@@ -195,7 +196,10 @@ fn timestamp_century(year: i32) -> i32 {
     }
 }
 
-fn timestamp_to_char_parts(timestamp_usecs: i64) -> Option<TimestampFormatParts> {
+fn timestamp_to_char_parts(
+    timestamp_usecs: i64,
+    offset_seconds: Option<i32>,
+) -> Option<TimestampFormatParts> {
     if timestamp_usecs == TIMESTAMP_NOBEGIN || timestamp_usecs == TIMESTAMP_NOEND {
         return None;
     }
@@ -235,6 +239,7 @@ fn timestamp_to_char_parts(timestamp_usecs: i64) -> Option<TimestampFormatParts>
         second,
         seconds_since_midnight: time_usecs / USECS_PER_SEC,
         micros: time_usecs % USECS_PER_SEC,
+        offset_seconds,
     })
 }
 
@@ -286,6 +291,32 @@ fn render_am_pm(parts: &TimestampFormatParts, pattern: &str) -> String {
     } else {
         text.to_string()
     }
+}
+
+fn format_timezone_offset(offset: Option<i32>) -> String {
+    let offset = offset.unwrap_or(0);
+    let sign = if offset < 0 { '-' } else { '+' };
+    let abs = offset.abs();
+    let hour = abs / 3600;
+    let minute = abs % 3600 / 60;
+    let second = abs % 60;
+    if second != 0 {
+        format!("{sign}{hour:02}:{minute:02}:{second:02}")
+    } else if minute != 0 {
+        format!("{sign}{hour:02}:{minute:02}")
+    } else {
+        format!("{sign}{hour:02}")
+    }
+}
+
+fn format_timezone_hour(offset: Option<i32>) -> String {
+    let offset = offset.unwrap_or(0);
+    let sign = if offset < 0 { '-' } else { '+' };
+    format!("{sign}{:02}", offset.abs() / 3600)
+}
+
+fn format_timezone_minute(offset: Option<i32>) -> String {
+    format!("{:02}", offset.unwrap_or(0).abs() % 3600 / 60)
 }
 
 fn render_datetime_to_char_pattern(
@@ -401,6 +432,9 @@ fn render_datetime_to_char_pattern(
             parts.seconds_since_midnight.to_string(),
             Some(parts.seconds_since_midnight.into()),
         ),
+        "TZH" | "tzh" => (format_timezone_hour(parts.offset_seconds), None),
+        "TZM" | "tzm" => (format_timezone_minute(parts.offset_seconds), None),
+        "OF" | "of" => (format_timezone_offset(parts.offset_seconds), None),
         "MS" => (format!("{:03}", parts.micros / 1_000), None),
         "US" => (format!("{:06}", parts.micros), None),
         "FF1" | "FF2" | "FF3" | "FF4" | "FF5" | "FF6" | "ff1" | "ff2" | "ff3" | "ff4" | "ff5"
@@ -444,8 +478,12 @@ fn render_datetime_to_char_pattern(
     }
 }
 
-fn to_char_timestamp_usecs(timestamp_usecs: i64, format: &str) -> String {
-    let Some(parts) = timestamp_to_char_parts(timestamp_usecs) else {
+fn to_char_timestamp_usecs(
+    timestamp_usecs: i64,
+    format: &str,
+    offset_seconds: Option<i32>,
+) -> String {
+    let Some(parts) = timestamp_to_char_parts(timestamp_usecs, offset_seconds) else {
         return String::new();
     };
     let mut out = String::new();
@@ -551,15 +589,22 @@ fn to_char_interval_value(value: IntervalValue, format: &str) -> Option<String> 
     Some(out)
 }
 
-pub(super) fn eval_to_char_function(values: &[Value]) -> Result<Value, ExecError> {
-    eval_to_char_function_with_float4(values, false)
+pub(super) fn eval_to_char_function(
+    values: &[Value],
+    datetime_config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
+    eval_to_char_function_with_float4(values, false, datetime_config)
 }
 
 pub(super) fn eval_to_char_float4_function(values: &[Value]) -> Result<Value, ExecError> {
-    eval_to_char_function_with_float4(values, true)
+    eval_to_char_function_with_float4(values, true, &DateTimeConfig::default())
 }
 
-fn eval_to_char_function_with_float4(values: &[Value], float4: bool) -> Result<Value, ExecError> {
+fn eval_to_char_function_with_float4(
+    values: &[Value],
+    float4: bool,
+    datetime_config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
     let Some(value) = values.first() else {
         return Ok(Value::Null);
     };
@@ -579,14 +624,18 @@ fn eval_to_char_function_with_float4(values: &[Value], float4: bool) -> Result<V
         Value::Float64(v) if float4 => to_char_float4(*v, fmt)?,
         Value::Float64(v) => to_char_float(*v, fmt)?,
         Value::Date(v) if matches!(v.0, DATEVAL_NOBEGIN | DATEVAL_NOEND) => String::new(),
-        Value::Date(v) => to_char_timestamp_usecs(i64::from(v.0) * USECS_PER_DAY, fmt),
-        Value::Timestamp(v) => to_char_timestamp_usecs(v.0, fmt),
+        Value::Date(v) => to_char_timestamp_usecs(i64::from(v.0) * USECS_PER_DAY, fmt, None),
+        Value::Timestamp(v) => to_char_timestamp_usecs(v.0, fmt, None),
         Value::TimestampTz(v) if matches!(v.0, TIMESTAMP_NOBEGIN | TIMESTAMP_NOEND) => {
             String::new()
         }
         Value::TimestampTz(v) => {
-            let offset = i64::from(timezone_offset_seconds(&DateTimeConfig::default()));
-            to_char_timestamp_usecs(v.0 + offset * USECS_PER_SEC, fmt)
+            let offset = timezone_offset_seconds_at_utc(datetime_config, v.0);
+            to_char_timestamp_usecs(
+                v.0 + i64::from(offset) * USECS_PER_SEC,
+                fmt,
+                Some(offset),
+            )
         }
         Value::Interval(v) => {
             to_char_interval_value(*v, fmt).ok_or_else(|| ExecError::TypeMismatch {
