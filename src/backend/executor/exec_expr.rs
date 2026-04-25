@@ -850,6 +850,7 @@ fn function_arguments_text(
                     names.get(index).map(String::as_str),
                     type_oid,
                     catalog,
+                    proc_row.prokind == 'p',
                 )
             })
             .collect::<Vec<_>>()
@@ -866,6 +867,7 @@ fn function_arguments_text(
                 names.get(index).map(String::as_str),
                 type_oid,
                 catalog,
+                proc_row.prokind == 'p',
             )
         })
         .collect::<Vec<_>>()
@@ -877,8 +879,10 @@ fn format_function_arg(
     name: Option<&str>,
     type_oid: u32,
     catalog: &dyn CatalogLookup,
+    include_in_mode: bool,
 ) -> String {
     let mode_text = match mode {
+        b'i' if include_in_mode => Some("IN"),
         b'o' => Some("OUT"),
         b'b' => Some("INOUT"),
         b'v' => Some("VARIADIC"),
@@ -913,14 +917,29 @@ fn function_definition_text(
         .language_row_by_oid(proc_row.prolang)
         .map(|row| row.lanname)
         .unwrap_or_else(|| proc_row.prolang.to_string());
-    let body = proc_row.prosrc.replace("$function$", "$function $");
-    format!(
-        "CREATE OR REPLACE {kind} {}({})\n LANGUAGE {}\nAS $function$\n{}\n$function$\n",
+    let signature = format!(
+        "CREATE OR REPLACE {kind} {}({})\n LANGUAGE {}",
         quote_qualified_identifier(&schema, &proc_row.proname),
         function_arguments_text(proc_row, catalog),
         quote_identifier(&language),
-        body
-    )
+    );
+    if proc_row.prokind == 'p' && sql_standard_procedure_body(&proc_row.prosrc).is_some() {
+        return format!("{signature}\n {}\n", proc_row.prosrc.trim());
+    }
+    let tag = if proc_row.prokind == 'p' {
+        "$procedure$"
+    } else {
+        "$function$"
+    };
+    let body = proc_row.prosrc.replace(tag, &format!("{tag} "));
+    format!("{signature}\nAS {tag}\n{body}\n{tag}\n")
+}
+
+fn sql_standard_procedure_body(body: &str) -> Option<&str> {
+    body.trim_start()
+        .to_ascii_lowercase()
+        .starts_with("begin atomic")
+        .then_some(body.trim())
 }
 
 fn operator_identity_text(

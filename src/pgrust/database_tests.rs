@@ -22762,10 +22762,78 @@ fn procedure_catalog_display_helpers_read_pg_proc_metadata() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0][0], Value::Bool(true));
     assert_eq!(rows[0][1], Value::Null);
-    assert_eq!(rows[0][2], Value::Text("x integer, OUT y text".into()));
+    assert_eq!(rows[0][2], Value::Text("IN x integer, OUT y text".into()));
     let definition = rows[0][3].as_text().unwrap();
     assert!(definition.contains("CREATE OR REPLACE PROCEDURE public.ptest_meta"));
     assert!(definition.contains("LANGUAGE sql"));
+    assert!(definition.contains("AS $procedure$"));
+}
+
+#[test]
+fn sql_standard_procedure_body_displays_and_executes() {
+    let base = temp_dir("sql_standard_procedure_body");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table cp_standard (id int4, value text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create procedure ptest_standard(x text) \
+             language sql \
+             BEGIN ATOMIC \
+                 insert into cp_standard values (1, x); \
+             END",
+        )
+        .unwrap();
+    session.execute(&db, "call ptest_standard('ok')").unwrap();
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "select id, value from cp_standard order by id",
+    );
+    assert_eq!(rows, vec![vec![Value::Int32(1), Value::Text("ok".into())]]);
+
+    let def_rows = session_query_rows(
+        &mut session,
+        &db,
+        "select pg_get_functiondef(oid) from pg_proc where proname = 'ptest_standard'",
+    );
+    let definition = def_rows[0][0].as_text().unwrap();
+    assert!(definition.contains("CREATE OR REPLACE PROCEDURE public.ptest_standard(IN x text)"));
+    assert!(definition.contains("BEGIN ATOMIC"));
+    assert!(!definition.contains("AS $function$"));
+}
+
+#[test]
+fn selecting_procedure_reports_wrong_object_type() {
+    let base = temp_dir("selecting_procedure_wrong_object");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create procedure ptest_select_error(x text) language sql as $$ select 1 $$",
+        )
+        .unwrap();
+    let err = session
+        .execute(&db, "select ptest_select_error('x')")
+        .unwrap_err();
+    match err {
+        ExecError::Parse(ParseError::DetailedError {
+            message,
+            hint: Some(hint),
+            sqlstate: "42809",
+            ..
+        }) => {
+            assert_eq!(message, "ptest_select_error(unknown) is a procedure");
+            assert_eq!(hint, "To call a procedure, use CALL.");
+        }
+        other => panic!("expected wrong-object procedure error, got {other:?}"),
+    }
 }
 
 #[test]

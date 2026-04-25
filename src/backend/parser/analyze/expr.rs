@@ -3290,9 +3290,14 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                             return Err(window_function_requires_over_error(name));
                         }
                         if resolved.prokind != 'f' {
-                            return Err(ParseError::UnexpectedToken {
-                                expected: "supported scalar function",
-                                actual: name.clone(),
+                            return Err(ParseError::DetailedError {
+                                message: format!(
+                                    "{} is a procedure",
+                                    function_call_signature_text(name, args_list, &actual_types)
+                                ),
+                                detail: None,
+                                hint: Some("To call a procedure, use CALL.".into()),
+                                sqlstate: "42809",
                             });
                         }
                         if resolved.proretset {
@@ -4621,6 +4626,25 @@ fn parse_domain_upper_less_than_check(check: &str) -> Option<i32> {
         .to_ascii_lowercase();
     let limit = normalized.strip_prefix("upper(value)<")?;
     limit.parse::<i32>().ok()
+}
+
+fn function_call_signature_text(
+    name: &str,
+    args: &[SqlFunctionArg],
+    actual_types: &[SqlType],
+) -> String {
+    let arg_types = args
+        .iter()
+        .zip(actual_types.iter().copied())
+        .map(|(arg, actual_type)| match &arg.value {
+            SqlExpr::Const(Value::Text(_))
+            | SqlExpr::Const(Value::TextRef(_, _))
+            | SqlExpr::Const(Value::Null) => "unknown".to_string(),
+            _ => sql_type_name(actual_type),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{name}({arg_types})")
 }
 
 fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {

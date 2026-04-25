@@ -553,7 +553,7 @@ fn call_undefined_procedure_error(call_stmt: &CallStatement) -> ExecError {
 }
 
 fn inline_sql_procedure_body(row: &PgProcRow, args: &[Value]) -> Result<String, ExecError> {
-    let body = strip_sql_standard_body_wrapper(row.prosrc.trim());
+    let body = sql_standard_procedure_body_inner(row.prosrc.trim()).unwrap_or(row.prosrc.trim());
     let mut sql = substitute_positional_args(body, args)?;
     if let Some(names) = row.proargnames.as_ref() {
         let input_arg_names = names
@@ -578,31 +578,23 @@ fn inline_sql_procedure_body(row: &PgProcRow, args: &[Value]) -> Result<String, 
     Ok(sql)
 }
 
-fn strip_sql_standard_body_wrapper(body: &str) -> &str {
+fn sql_standard_procedure_body_inner(body: &str) -> Option<&str> {
     let trimmed = body.trim();
-    let Some(after_begin) = strip_keyword_prefix_ci(trimmed, "begin") else {
-        return trimmed;
-    };
-    let Some(after_atomic) = strip_keyword_prefix_ci(after_begin.trim_start(), "atomic") else {
-        return trimmed;
-    };
-    let inner = after_atomic.trim();
-    let lower = inner.to_ascii_lowercase();
-    if let Some(end_index) = lower.rfind("end") {
-        inner[..end_index].trim()
-    } else {
-        inner
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("begin atomic") {
+        return None;
     }
-}
-
-fn strip_keyword_prefix_ci<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
-    input
-        .get(..keyword.len())
-        .is_some_and(|head| head.eq_ignore_ascii_case(keyword))
-        .then(|| &input[keyword.len()..])
+    let mut end = trimmed.len();
+    let without_trailing_semicolon = trimmed.trim_end_matches(';').trim_end();
+    let lowered_without_semicolon = without_trailing_semicolon.to_ascii_lowercase();
+    if lowered_without_semicolon.ends_with("end") {
+        end = without_trailing_semicolon.len().saturating_sub("end".len());
+    }
+    trimmed.get("begin atomic".len()..end).map(str::trim)
 }
 
 fn split_sql_procedure_body(body: &str) -> Result<Vec<String>, ExecError> {
+    let body = sql_standard_procedure_body_inner(body).unwrap_or(body);
     let mut statements = Vec::new();
     let mut start = 0usize;
     let bytes = body.as_bytes();
