@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::backend::commands::tablecmds::{execute_delete, execute_insert, execute_update};
@@ -76,6 +77,14 @@ struct FunctionState {
     rows: Vec<TupleSlot>,
     scalar_return: Option<Value>,
     trigger_return: Option<TriggerFunctionResult>,
+    cursors: HashMap<String, FunctionCursor>,
+}
+
+#[derive(Debug)]
+struct FunctionCursor {
+    columns: Vec<QueryColumn>,
+    rows: Vec<Vec<Value>>,
+    pos: usize,
 }
 
 #[derive(Debug)]
@@ -97,8 +106,16 @@ pub fn clear_notices() {
 }
 
 pub(crate) fn execute_block(block: &CompiledBlock) -> Result<StatementResult, ExecError> {
+    let gucs = HashMap::new();
+    execute_block_with_gucs(block, &gucs)
+}
+
+pub(crate) fn execute_block_with_gucs(
+    block: &CompiledBlock,
+    gucs: &HashMap<String, String>,
+) -> Result<StatementResult, ExecError> {
     let mut values = vec![Value::Null; block.total_slots];
-    exec_do_block(block, &mut values)?;
+    exec_do_block(block, &mut values, gucs)?;
     Ok(StatementResult::AffectedRows(0))
 }
 
@@ -331,10 +348,12 @@ pub fn execute_user_defined_trigger_function(
         rows: Vec::new(),
         scalar_return: None,
         trigger_return: None,
+        cursors: HashMap::new(),
     };
     state.values[compiled.found_slot] = Value::Bool(false);
     seed_trigger_state(bindings, call, &mut state);
-    let _ = exec_function_block(&compiled.body, &compiled, None, &mut state, ctx)?;
+    let _ = exec_function_block(&compiled.body, &compiled, None, &mut state, ctx)
+        .map_err(|err| with_plpgsql_context_if_missing(err, &compiled, "statement"))?;
     state.trigger_return.ok_or_else(|| {
         function_runtime_error(
             "control reached end of trigger procedure without RETURN",
@@ -415,6 +434,7 @@ fn execute_compiled_function(
         rows: Vec::new(),
         scalar_return: None,
         trigger_return: None,
+        cursors: HashMap::new(),
     };
     state.values[compiled.found_slot] = Value::Bool(false);
     for (slot_def, arg_value) in compiled.parameter_slots.iter().zip(arg_values.iter()) {
@@ -427,7 +447,8 @@ fn execute_compiled_function(
         expected_record_shape,
         &mut state,
         ctx,
-    )?;
+    )
+    .map_err(|err| with_plpgsql_context_if_missing(err, compiled, "statement"))?;
 
     match &compiled.return_contract {
         FunctionReturnContract::Scalar {
@@ -473,7 +494,11 @@ fn execute_compiled_function(
     }
 }
 
-fn exec_do_block(block: &CompiledBlock, values: &mut [Value]) -> Result<(), ExecError> {
+fn exec_do_block(
+    block: &CompiledBlock,
+    values: &mut [Value],
+    gucs: &HashMap<String, String>,
+) -> Result<(), ExecError> {
     for local in &block.local_slots {
         values[local.slot] = match &local.default_expr {
             Some(expr) => cast_value(eval_do_expr(expr, values)?, local.ty)?,
@@ -481,8 +506,9 @@ fn exec_do_block(block: &CompiledBlock, values: &mut [Value]) -> Result<(), Exec
         };
     }
     for stmt in &block.statements {
-        if let Err(err) = exec_do_stmt(stmt, values) {
-            return match exec_do_exception_handlers(&block.exception_handlers, &err, values)? {
+        if let Err(err) = exec_do_stmt(stmt, values, gucs) {
+            return match exec_do_exception_handlers(&block.exception_handlers, &err, values, gucs)?
+            {
                 Some(()) => Ok(()),
                 None => Err(err),
             };
@@ -495,6 +521,7 @@ fn exec_do_exception_handlers(
     handlers: &[CompiledExceptionHandler],
     err: &ExecError,
     values: &mut [Value],
+    gucs: &HashMap<String, String>,
 ) -> Result<Option<()>, ExecError> {
     let Some(handler) = handlers
         .iter()
@@ -503,14 +530,18 @@ fn exec_do_exception_handlers(
         return Ok(None);
     };
     for stmt in &handler.statements {
-        exec_do_stmt(stmt, values)?;
+        exec_do_stmt(stmt, values, gucs)?;
     }
     Ok(Some(()))
 }
 
-fn exec_do_stmt(stmt: &CompiledStmt, values: &mut [Value]) -> Result<(), ExecError> {
+fn exec_do_stmt(
+    stmt: &CompiledStmt,
+    values: &mut [Value],
+    gucs: &HashMap<String, String>,
+) -> Result<(), ExecError> {
     match stmt {
-        CompiledStmt::Block(block) => exec_do_block(block, values),
+        CompiledStmt::Block(block) => exec_do_block(block, values, gucs),
         CompiledStmt::Assign { slot, ty, expr } => {
             values[*slot] = cast_value(eval_do_expr(expr, values)?, *ty)?;
             Ok(())
@@ -524,7 +555,7 @@ fn exec_do_stmt(stmt: &CompiledStmt, values: &mut [Value]) -> Result<(), ExecErr
                 match eval_do_expr(condition, values)? {
                     Value::Bool(true) => {
                         for stmt in body {
-                            exec_do_stmt(stmt, values)?;
+                            exec_do_stmt(stmt, values, gucs)?;
                         }
                         return Ok(());
                     }
@@ -533,14 +564,14 @@ fn exec_do_stmt(stmt: &CompiledStmt, values: &mut [Value]) -> Result<(), ExecErr
                 }
             }
             for stmt in else_branch {
-                exec_do_stmt(stmt, values)?;
+                exec_do_stmt(stmt, values, gucs)?;
             }
             Ok(())
         }
         CompiledStmt::While { condition, body } => {
             while eval_plpgsql_condition(&eval_do_expr(condition, values)?)? {
                 for stmt in body {
-                    exec_do_stmt(stmt, values)?;
+                    exec_do_stmt(stmt, values, gucs)?;
                 }
             }
             Ok(())
@@ -581,7 +612,7 @@ fn exec_do_stmt(stmt: &CompiledStmt, values: &mut [Value]) -> Result<(), ExecErr
             for current in start..=end {
                 values[*slot] = Value::Int32(current);
                 for stmt in body {
-                    exec_do_stmt(stmt, values)?;
+                    exec_do_stmt(stmt, values, gucs)?;
                 }
             }
             Ok(())
@@ -598,6 +629,9 @@ fn exec_do_stmt(stmt: &CompiledStmt, values: &mut [Value]) -> Result<(), ExecErr
             finish_raise(level, message, &param_values)
         }
         CompiledStmt::Assert { condition, message } => {
+            if !plpgsql_check_asserts_enabled_from_gucs(Some(gucs)) {
+                return Ok(());
+            }
             let ok = eval_plpgsql_condition(&eval_do_expr(condition, values)?)?;
             if ok {
                 return Ok(());
@@ -608,6 +642,17 @@ fn exec_do_stmt(stmt: &CompiledStmt, values: &mut [Value]) -> Result<(), ExecErr
             };
             Err(assert_failure(message))
         }
+        CompiledStmt::GetDiagnostics { items, .. } => {
+            for (target, item) in items {
+                let value = match item.to_ascii_lowercase().as_str() {
+                    "row_count" => Value::Int64(0),
+                    "found" => Value::Bool(false),
+                    _ => Value::Text(String::new().into()),
+                };
+                values[target.slot] = cast_value(value, target.ty)?;
+            }
+            Ok(())
+        }
         CompiledStmt::Return { .. }
         | CompiledStmt::ReturnNext { .. }
         | CompiledStmt::ReturnTriggerRow { .. }
@@ -617,6 +662,10 @@ fn exec_do_stmt(stmt: &CompiledStmt, values: &mut [Value]) -> Result<(), ExecErr
         | CompiledStmt::ReturnQuery { .. }
         | CompiledStmt::Perform { .. }
         | CompiledStmt::DynamicExecute { .. }
+        | CompiledStmt::OpenCursor { .. }
+        | CompiledStmt::FetchCursor { .. }
+        | CompiledStmt::CloseCursor { .. }
+        | CompiledStmt::UnsupportedTransactionCommand { .. }
         | CompiledStmt::SelectInto { .. }
         | CompiledStmt::ExecInsertInto { .. }
         | CompiledStmt::ExecInsert { .. }
@@ -645,7 +694,9 @@ fn exec_function_block(
         };
     }
     for stmt in &block.statements {
-        match exec_function_stmt(stmt, compiled, expected_record_shape, state, ctx) {
+        match exec_function_stmt(stmt, compiled, expected_record_shape, state, ctx).map_err(|err| {
+            with_plpgsql_context_if_missing(err, compiled, stmt_context_action(stmt))
+        }) {
             Ok(FunctionControl::Continue) => {}
             Ok(FunctionControl::Return) => return Ok(FunctionControl::Return),
             Err(err) => {
@@ -808,6 +859,9 @@ fn exec_function_stmt(
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::Assert { condition, message } => {
+            if !plpgsql_check_asserts_enabled_from_values(Some(ctx)) {
+                return Ok(FunctionControl::Continue);
+            }
             let ok = eval_plpgsql_condition(&eval_function_expr(condition, &state.values, ctx)?)?;
             if ok {
                 return Ok(FunctionControl::Continue);
@@ -818,7 +872,9 @@ fn exec_function_stmt(
             };
             Err(assert_failure(message))
         }
-        CompiledStmt::Return { expr } => exec_function_return(expr.as_ref(), compiled, state, ctx),
+        CompiledStmt::Return { expr } => {
+            exec_function_return(expr.as_ref(), compiled, expected_record_shape, state, ctx)
+        }
         CompiledStmt::ReturnNext { expr } => {
             exec_function_return_next(expr.as_ref(), compiled, state, ctx)?;
             Ok(FunctionControl::Continue)
@@ -858,8 +914,33 @@ fn exec_function_stmt(
             )?;
             Ok(FunctionControl::Continue)
         }
-        CompiledStmt::SelectInto { plan, targets } => {
-            exec_function_select_into(plan, targets, compiled, state, ctx)?;
+        CompiledStmt::GetDiagnostics { stacked, items } => {
+            exec_function_get_diagnostics(*stacked, items, state)?;
+            Ok(FunctionControl::Continue)
+        }
+        CompiledStmt::OpenCursor { slot, name, plan } => {
+            exec_function_open_cursor(*slot, name, plan, compiled, state, ctx)?;
+            Ok(FunctionControl::Continue)
+        }
+        CompiledStmt::FetchCursor { slot, targets } => {
+            exec_function_fetch_cursor(*slot, targets, compiled, state)?;
+            Ok(FunctionControl::Continue)
+        }
+        CompiledStmt::CloseCursor { slot } => {
+            exec_function_close_cursor(*slot, state)?;
+            Ok(FunctionControl::Continue)
+        }
+        CompiledStmt::UnsupportedTransactionCommand { .. } => Err(function_runtime_error(
+            "unsupported transaction command in PL/pgSQL",
+            None,
+            "0A000",
+        )),
+        CompiledStmt::SelectInto {
+            plan,
+            targets,
+            strict,
+        } => {
+            exec_function_select_into(plan, targets, *strict, compiled, state, ctx)?;
             Ok(FunctionControl::Continue)
         }
         CompiledStmt::ExecInsertInto { stmt, targets } => {
@@ -898,7 +979,9 @@ fn exec_function_stmt_list(
 ) -> Result<FunctionControl, ExecError> {
     for stmt in statements {
         if matches!(
-            exec_function_stmt(stmt, compiled, expected_record_shape, state, ctx)?,
+            exec_function_stmt(stmt, compiled, expected_record_shape, state, ctx).map_err(
+                |err| with_plpgsql_context_if_missing(err, compiled, stmt_context_action(stmt)),
+            )?,
             FunctionControl::Return
         ) {
             return Ok(FunctionControl::Return);
@@ -910,6 +993,7 @@ fn exec_function_stmt_list(
 fn exec_function_return(
     expr: Option<&CompiledExpr>,
     compiled: &CompiledFunction,
+    expected_record_shape: Option<&[QueryColumn]>,
     state: &mut FunctionState,
     ctx: &mut ExecutorContext,
 ) -> Result<FunctionControl, ExecError> {
@@ -942,8 +1026,25 @@ fn exec_function_return(
             Ok(FunctionControl::Return)
         }
         FunctionReturnContract::Scalar { setof: true, .. }
-        | FunctionReturnContract::FixedRow { .. }
-        | FunctionReturnContract::AnonymousRecord { .. } => Ok(FunctionControl::Return),
+        | FunctionReturnContract::FixedRow { setof: true, .. }
+        | FunctionReturnContract::AnonymousRecord { setof: true } => Ok(FunctionControl::Return),
+        FunctionReturnContract::FixedRow { setof: false, .. }
+        | FunctionReturnContract::AnonymousRecord { setof: false } => {
+            if let Some(expr) = expr {
+                let value = eval_function_expr(expr, &state.values, ctx)?;
+                let row = match value {
+                    Value::Record(record) => record.fields,
+                    other => vec![other],
+                };
+                state.rows.clear();
+                state.rows.push(coerce_function_result_row(
+                    row,
+                    &compiled.return_contract,
+                    expected_record_shape,
+                )?);
+            }
+            Ok(FunctionControl::Return)
+        }
     }
 }
 
@@ -955,16 +1056,22 @@ fn exec_function_return_next(
 ) -> Result<(), ExecError> {
     match &compiled.return_contract {
         FunctionReturnContract::Scalar {
-            ty, setof: true, ..
+            ty,
+            setof: true,
+            output_slot,
         } => {
-            let expr = expr.ok_or_else(|| {
-                function_runtime_error(
-                    "RETURN NEXT requires an expression for scalar set-returning functions",
-                    None,
-                    "0A000",
-                )
-            })?;
-            let value = cast_value(eval_function_expr(expr, &state.values, ctx)?, *ty)?;
+            let value = match expr {
+                Some(expr) => eval_function_expr(expr, &state.values, ctx)?,
+                None => state.values[output_slot.ok_or_else(|| {
+                    function_runtime_error(
+                        "RETURN NEXT requires an expression for scalar set-returning functions",
+                        None,
+                        "0A000",
+                    )
+                })?]
+                .clone(),
+            };
+            let value = cast_value(value, *ty)?;
             state.rows.push(TupleSlot::virtual_row(vec![value]));
             Ok(())
         }
@@ -1021,28 +1128,51 @@ fn exec_function_perform(
 fn exec_function_select_into(
     plan: &crate::include::nodes::plannodes::PlannedStmt,
     targets: &[CompiledSelectIntoTarget],
+    strict: bool,
     compiled: &CompiledFunction,
     state: &mut FunctionState,
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     let result = execute_function_query_result(plan, compiled, state, ctx)?;
-    assign_query_rows_into_targets(&result.rows, &result.columns, targets, compiled, state)
+    assign_query_rows_into_targets(
+        &result.rows,
+        &result.columns,
+        targets,
+        strict,
+        compiled,
+        state,
+    )
 }
 
 fn assign_query_rows_into_targets(
     rows: &[Vec<Value>],
     columns: &[QueryColumn],
     targets: &[CompiledSelectIntoTarget],
+    strict: bool,
     compiled: &CompiledFunction,
     state: &mut FunctionState,
 ) -> Result<(), ExecError> {
     let Some(row) = rows.first() else {
+        if strict {
+            return Err(function_runtime_error(
+                "query returned no rows",
+                None,
+                "P0002",
+            ));
+        }
         for target in targets {
             state.values[target.slot] = Value::Null;
         }
         state.values[compiled.found_slot] = Value::Bool(false);
         return Ok(());
     };
+    if strict && rows.len() > 1 {
+        return Err(function_runtime_error(
+            "query returned more than one row",
+            None,
+            "P0003",
+        ));
+    }
 
     match targets {
         [CompiledSelectIntoTarget { slot, ty }]
@@ -1169,7 +1299,7 @@ fn exec_function_insert_into(
         ));
     };
     advance_plpgsql_command_id(ctx);
-    assign_query_rows_into_targets(&rows, &columns, targets, compiled, state)
+    assign_query_rows_into_targets(&rows, &columns, targets, false, compiled, state)
 }
 
 fn exec_function_update(
@@ -1223,7 +1353,7 @@ fn exec_function_update_into(
         ));
     };
     advance_plpgsql_command_id(ctx);
-    assign_query_rows_into_targets(&rows, &columns, targets, compiled, state)
+    assign_query_rows_into_targets(&rows, &columns, targets, false, compiled, state)
 }
 
 fn exec_function_delete(
@@ -1275,7 +1405,7 @@ fn exec_function_delete_into(
         ));
     };
     advance_plpgsql_command_id(ctx);
-    assign_query_rows_into_targets(&rows, &columns, targets, compiled, state)
+    assign_query_rows_into_targets(&rows, &columns, targets, false, compiled, state)
 }
 
 fn advance_plpgsql_command_id(ctx: &mut ExecutorContext) {
@@ -1325,7 +1455,14 @@ fn exec_function_dynamic_execute(
                 "XX000",
             ));
         };
-        return assign_query_rows_into_targets(&rows, &columns, into_targets, compiled, state);
+        return assign_query_rows_into_targets(
+            &rows,
+            &columns,
+            into_targets,
+            false,
+            compiled,
+            state,
+        );
     }
     Ok(())
 }
@@ -1463,6 +1600,88 @@ fn statement_result_to_query_result(
         return Err(function_runtime_error(message, None, "XX000"));
     };
     Ok(FunctionQueryResult { columns, rows })
+}
+
+fn cursor_name_for_slot(slot: usize, fallback: &str, state: &FunctionState) -> String {
+    state.values[slot]
+        .as_text()
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn exec_function_open_cursor(
+    slot: usize,
+    name: &str,
+    plan: &crate::include::nodes::plannodes::PlannedStmt,
+    compiled: &CompiledFunction,
+    state: &mut FunctionState,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    let portal_name = cursor_name_for_slot(slot, name, state);
+    let result = execute_function_query_result(plan, compiled, state, ctx)?;
+    state.values[slot] = Value::Text(portal_name.clone().into());
+    state.cursors.insert(
+        portal_name,
+        FunctionCursor {
+            columns: result.columns,
+            rows: result.rows,
+            pos: 0,
+        },
+    );
+    Ok(())
+}
+
+fn exec_function_fetch_cursor(
+    slot: usize,
+    targets: &[CompiledSelectIntoTarget],
+    compiled: &CompiledFunction,
+    state: &mut FunctionState,
+) -> Result<(), ExecError> {
+    let portal_name = cursor_name_for_slot(slot, "", state);
+    let (rows, columns) = {
+        let cursor = state.cursors.get_mut(&portal_name).ok_or_else(|| {
+            function_runtime_error(
+                &format!("cursor \"{portal_name}\" does not exist"),
+                None,
+                "34000",
+            )
+        })?;
+        let row = cursor.rows.get(cursor.pos).cloned();
+        if row.is_some() {
+            cursor.pos += 1;
+        }
+        (row.into_iter().collect::<Vec<_>>(), cursor.columns.clone())
+    };
+    assign_query_rows_into_targets(&rows, &columns, targets, false, compiled, state)
+}
+
+fn exec_function_close_cursor(slot: usize, state: &mut FunctionState) -> Result<(), ExecError> {
+    let portal_name = cursor_name_for_slot(slot, "", state);
+    if state.cursors.remove(&portal_name).is_none() {
+        return Err(function_runtime_error(
+            &format!("cursor \"{portal_name}\" does not exist"),
+            None,
+            "34000",
+        ));
+    }
+    Ok(())
+}
+
+fn exec_function_get_diagnostics(
+    _stacked: bool,
+    items: &[(CompiledSelectIntoTarget, String)],
+    state: &mut FunctionState,
+) -> Result<(), ExecError> {
+    for (target, item) in items {
+        let value = match item.to_ascii_lowercase().as_str() {
+            "row_count" => Value::Int64(0),
+            "found" => Value::Bool(false),
+            _ => Value::Text(String::new().into()),
+        };
+        state.values[target.slot] = cast_value(value, target.ty)?;
+    }
+    Ok(())
 }
 
 fn assign_query_row_to_targets(
@@ -2133,6 +2352,21 @@ fn eval_query_compare(op: QueryCompareOp, left: &Value, right: &Value) -> Result
     })
 }
 
+fn plpgsql_check_asserts_enabled_from_values(ctx: Option<&ExecutorContext>) -> bool {
+    plpgsql_check_asserts_enabled_from_gucs(ctx.map(|ctx| &ctx.gucs))
+}
+
+fn plpgsql_check_asserts_enabled_from_gucs(gucs: Option<&HashMap<String, String>>) -> bool {
+    gucs.and_then(|gucs| gucs.get("plpgsql.check_asserts"))
+        .map(|value| {
+            !matches!(
+                value.to_ascii_lowercase().as_str(),
+                "off" | "false" | "no" | "0"
+            )
+        })
+        .unwrap_or(true)
+}
+
 fn eval_plpgsql_condition(value: &Value) -> Result<bool, ExecError> {
     match value {
         Value::Bool(true) => Ok(true),
@@ -2178,6 +2412,7 @@ fn exception_condition_name_sqlstate(name: &str) -> Option<&'static str> {
 
 fn exec_error_sqlstate(err: &ExecError) -> &'static str {
     match err {
+        ExecError::WithContext { source, .. } => exec_error_sqlstate(source),
         ExecError::RaiseException(_) => "P0001",
         ExecError::DivisionByZero(_) => "22012",
         ExecError::DetailedError { sqlstate, .. } => sqlstate,
@@ -2325,6 +2560,69 @@ fn function_runtime_error(
     }
 }
 
+fn with_plpgsql_context(err: ExecError, compiled: &CompiledFunction, action: &str) -> ExecError {
+    ExecError::WithContext {
+        source: Box::new(err),
+        context: format!("PL/pgSQL function {} line 1 at {action}", compiled.name),
+    }
+}
+
+fn with_plpgsql_context_if_missing(
+    err: ExecError,
+    compiled: &CompiledFunction,
+    action: &str,
+) -> ExecError {
+    if has_plpgsql_context_for(&err, &compiled.name) {
+        err
+    } else {
+        with_plpgsql_context(err, compiled, action)
+    }
+}
+
+fn has_plpgsql_context_for(err: &ExecError, function_name: &str) -> bool {
+    match err {
+        ExecError::WithContext { source, context } => {
+            context.starts_with(&format!("PL/pgSQL function {function_name} "))
+                || has_plpgsql_context_for(source, function_name)
+        }
+        _ => false,
+    }
+}
+
+fn stmt_context_action(stmt: &CompiledStmt) -> &'static str {
+    match stmt {
+        CompiledStmt::Block(_) => "statement block",
+        CompiledStmt::Assign { .. } => "assignment",
+        CompiledStmt::Null => "NULL",
+        CompiledStmt::If { .. } => "IF",
+        CompiledStmt::While { .. } => "WHILE",
+        CompiledStmt::ForInt { .. } => "FOR with integer loop variable",
+        CompiledStmt::ForQuery { .. } => "FOR over SELECT rows",
+        CompiledStmt::Raise { .. } => "RAISE",
+        CompiledStmt::Assert { .. } => "ASSERT",
+        CompiledStmt::Return { .. } => "RETURN",
+        CompiledStmt::ReturnNext { .. } => "RETURN NEXT",
+        CompiledStmt::ReturnQuery { .. } => "RETURN QUERY",
+        CompiledStmt::ReturnTriggerRow { .. }
+        | CompiledStmt::ReturnTriggerNull
+        | CompiledStmt::ReturnTriggerNoValue => "RETURN",
+        CompiledStmt::Perform { .. } => "PERFORM",
+        CompiledStmt::DynamicExecute { .. } => "EXECUTE",
+        CompiledStmt::GetDiagnostics { .. } => "GET DIAGNOSTICS",
+        CompiledStmt::OpenCursor { .. } => "OPEN",
+        CompiledStmt::FetchCursor { .. } => "FETCH",
+        CompiledStmt::CloseCursor { .. } => "CLOSE",
+        CompiledStmt::UnsupportedTransactionCommand { .. }
+        | CompiledStmt::SelectInto { .. }
+        | CompiledStmt::ExecInsertInto { .. }
+        | CompiledStmt::ExecInsert { .. }
+        | CompiledStmt::ExecUpdateInto { .. }
+        | CompiledStmt::ExecUpdate { .. }
+        | CompiledStmt::ExecDeleteInto { .. }
+        | CompiledStmt::ExecDelete { .. } => "SQL statement",
+    }
+}
+
 fn seed_trigger_state(
     bindings: &super::compile::CompiledTriggerBindings,
     call: &TriggerCallContext,
@@ -2465,6 +2763,7 @@ mod tests {
             rows: Vec::new(),
             scalar_return: None,
             trigger_return: None,
+            cursors: HashMap::new(),
         };
 
         seed_trigger_state(&bindings, &call, &mut state);
@@ -2525,6 +2824,7 @@ mod tests {
             rows: Vec::new(),
             scalar_return: None,
             trigger_return: None,
+            cursors: HashMap::new(),
         };
 
         seed_trigger_state(&bindings, &call, &mut state);

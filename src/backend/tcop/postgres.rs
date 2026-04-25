@@ -44,6 +44,7 @@ use crate::pl::plpgsql::{PlpgsqlNotice, RaiseLevel, clear_notices, take_notices}
 
 fn exec_error_sqlstate(e: &ExecError) -> &'static str {
     match e {
+        ExecError::WithContext { source, .. } => exec_error_sqlstate(source),
         ExecError::Regex(err) => err.sqlstate,
         ExecError::JsonInput { sqlstate, .. } => sqlstate,
         ExecError::XmlInput { sqlstate, .. } => sqlstate,
@@ -129,6 +130,7 @@ fn exec_error_sqlstate(e: &ExecError) -> &'static str {
 
 fn exec_error_detail(e: &ExecError) -> Option<&str> {
     match e {
+        ExecError::WithContext { source, .. } => exec_error_detail(source),
         ExecError::Parse(
             crate::backend::parser::ParseError::InvalidPublicationParameterValue {
                 parameter, ..
@@ -153,6 +155,7 @@ fn exec_error_detail(e: &ExecError) -> Option<&str> {
 
 fn exec_error_hint(e: &ExecError) -> Option<&str> {
     match e {
+        ExecError::WithContext { source, .. } => exec_error_hint(source),
         ExecError::Regex(err) => err.hint.as_deref(),
         ExecError::DetailedError { hint, .. } => hint.as_deref(),
         ExecError::Parse(crate::backend::parser::ParseError::DetailedError { hint, .. }) => {
@@ -162,16 +165,23 @@ fn exec_error_hint(e: &ExecError) -> Option<&str> {
     }
 }
 
-fn exec_error_context(e: &ExecError) -> Option<&str> {
+fn exec_error_context(e: &ExecError) -> Option<String> {
     match e {
-        ExecError::JsonInput { context, .. } => context.as_deref(),
-        ExecError::XmlInput { context, .. } => context.as_deref(),
-        ExecError::Regex(err) => err.context.as_deref(),
+        ExecError::WithContext { source, context } => match exec_error_context(source) {
+            Some(inner) => Some(format!("{inner}\n{context}")),
+            None => Some(context.clone()),
+        },
+        ExecError::JsonInput { context, .. } => context.clone(),
+        ExecError::XmlInput { context, .. } => context.clone(),
+        ExecError::Regex(err) => err.context.clone(),
         _ => None,
     }
 }
 
 fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
+    if let ExecError::WithContext { source, .. } = e {
+        return exec_error_position(sql, source);
+    }
     if matches!(e, ExecError::InvalidBooleanInput { .. })
         && sql.to_ascii_lowercase().contains("::text::boolean")
     {
@@ -641,7 +651,7 @@ fn exec_error_response(sql: &str, e: &ExecError) -> ExecErrorResponse {
         message,
         detail: None,
         hint: None,
-        context: exec_error_context(e).map(str::to_string),
+        context: exec_error_context(e),
         position: exec_error_position(sql, e),
     };
 
