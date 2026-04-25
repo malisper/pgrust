@@ -49,7 +49,7 @@ impl HashState {
                 matched: false,
             });
             if let Some(key) = bucket_key {
-                table.buckets.entry(key).or_default().push(index);
+                table.buckets.entry(key).or_default().insert(0, index);
             }
         }
 

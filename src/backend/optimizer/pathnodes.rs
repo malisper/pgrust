@@ -59,6 +59,7 @@ impl Path {
             | Self::Filter { plan_info, .. }
             | Self::NestedLoopJoin { plan_info, .. }
             | Self::HashJoin { plan_info, .. }
+            | Self::MergeJoin { plan_info, .. }
             | Self::Projection { plan_info, .. }
             | Self::OrderBy { plan_info, .. }
             | Self::Limit { plan_info, .. }
@@ -126,9 +127,9 @@ impl Path {
             Self::WorkTableScan { output_columns, .. }
             | Self::RecursiveUnion { output_columns, .. }
             | Self::SetOp { output_columns, .. } => output_columns.clone(),
-            Self::NestedLoopJoin { output_columns, .. } | Self::HashJoin { output_columns, .. } => {
-                output_columns.clone()
-            }
+            Self::NestedLoopJoin { output_columns, .. }
+            | Self::HashJoin { output_columns, .. }
+            | Self::MergeJoin { output_columns, .. } => output_columns.clone(),
             Self::FunctionScan { call, .. } => call.output_columns().to_vec(),
             Self::Values { output_columns, .. } => output_columns.clone(),
             Self::ProjectSet { targets, .. } => targets
@@ -241,6 +242,9 @@ impl Path {
             }
             | Self::HashJoin {
                 left, right, kind, ..
+            }
+            | Self::MergeJoin {
+                left, right, kind, ..
             } => {
                 let mut vars = left.output_vars();
                 if !matches!(kind, JoinType::Semi | JoinType::Anti) {
@@ -302,6 +306,7 @@ impl Path {
             | Self::Filter { pathtarget, .. }
             | Self::NestedLoopJoin { pathtarget, .. }
             | Self::HashJoin { pathtarget, .. }
+            | Self::MergeJoin { pathtarget, .. }
             | Self::Projection { pathtarget, .. }
             | Self::OrderBy { pathtarget, .. }
             | Self::Limit { pathtarget, .. }
@@ -368,6 +373,7 @@ impl Path {
             {
                 left.pathkeys()
             }
+            Self::MergeJoin { pathkeys, .. } => pathkeys.clone(),
             Self::HashJoin { .. } => Vec::new(),
             Self::NestedLoopJoin { .. } => Vec::new(),
         }

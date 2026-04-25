@@ -4,9 +4,9 @@ use crate::backend::parser::SqlType;
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, CteScanState,
     FilterState, FunctionScanState, HashJoinState, HashState, IndexScanState, LimitState,
-    LockRowsState, NestedLoopJoinState, NodeExecStats, OrderByState, ProjectSetState,
-    ProjectionState, RecursiveUnionState, RecursiveWorkTable, ResultState, SeqScanState,
-    SetOpState, SubqueryScanState, ValuesState, WindowAggState, WorkTableScanState,
+    LockRowsState, MergeJoinState, NestedLoopJoinState, NodeExecStats, OrderByState,
+    ProjectSetState, ProjectionState, RecursiveUnionState, RecursiveWorkTable, ResultState,
+    SeqScanState, SetOpState, SubqueryScanState, ValuesState, WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::parsenodes::SqlTypeKind;
 use crate::include::nodes::primnodes::{Expr, SetReturningCall, set_returning_call_exprs};
@@ -215,6 +215,24 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
                 || join_qual.iter().any(expr_uses_outer_columns)
                 || qual.iter().any(expr_uses_outer_columns)
         }
+        Plan::MergeJoin {
+            left,
+            right,
+            merge_clauses,
+            outer_sort_keys,
+            inner_sort_keys,
+            join_qual,
+            qual,
+            ..
+        } => {
+            plan_uses_outer_columns(left)
+                || plan_uses_outer_columns(right)
+                || merge_clauses.iter().any(expr_uses_outer_columns)
+                || outer_sort_keys.iter().any(expr_uses_outer_columns)
+                || inner_sort_keys.iter().any(expr_uses_outer_columns)
+                || join_qual.iter().any(expr_uses_outer_columns)
+                || qual.iter().any(expr_uses_outer_columns)
+        }
         Plan::Filter {
             input, predicate, ..
         } => plan_uses_outer_columns(input) || expr_uses_outer_columns(predicate),
@@ -277,6 +295,33 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
             anchor, recursive, ..
         } => plan_uses_outer_columns(anchor) || plan_uses_outer_columns(recursive),
         Plan::CteScan { cte_plan, .. } => plan_uses_outer_columns(cte_plan),
+    }
+}
+
+fn plan_is_join_relation(plan: &Plan) -> bool {
+    match plan {
+        Plan::NestedLoopJoin { .. } | Plan::HashJoin { .. } | Plan::MergeJoin { .. } => true,
+        Plan::BitmapHeapScan { bitmapqual, .. }
+        | Plan::Hash {
+            input: bitmapqual, ..
+        } => plan_is_join_relation(bitmapqual),
+        Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::ProjectSet { input, .. } => plan_is_join_relation(input),
+        Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
+            children.iter().any(plan_is_join_relation)
+        }
+        Plan::CteScan { cte_plan, .. } => plan_is_join_relation(cte_plan),
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => plan_is_join_relation(anchor) || plan_is_join_relation(recursive),
+        _ => false,
     }
 }
 
@@ -494,16 +539,12 @@ pub fn executor_start(plan: Plan) -> PlanState {
         } => {
             let right_plan = *right;
             let right_uses_outer = !nest_params.is_empty();
-            let cross_right_outer =
-                matches!(kind, crate::include::nodes::primnodes::JoinType::Cross)
-                    && !right_uses_outer
-                    && !matches!(
-                        &*left,
-                        Plan::NestedLoopJoin {
-                            kind: crate::include::nodes::primnodes::JoinType::Cross,
-                            ..
-                        }
-                    );
+            let cross_right_outer = matches!(
+                kind,
+                crate::include::nodes::primnodes::JoinType::Cross
+                    | crate::include::nodes::primnodes::JoinType::Inner
+            ) && !right_uses_outer
+                && !plan_is_join_relation(&left);
             let left_width = left.column_names().len();
             let right_width = right_plan.column_names().len();
             let combined_names: Vec<String> = left
@@ -624,6 +665,50 @@ pub fn executor_start(plan: Plan) -> PlanState {
                         left_width + right_width
                     },
                 ),
+                current_bindings: Vec::new(),
+                plan_info,
+                stats: NodeExecStats::default(),
+            })
+        }
+        Plan::MergeJoin {
+            plan_info,
+            left,
+            right,
+            kind,
+            merge_clauses,
+            outer_sort_keys,
+            inner_sort_keys,
+            join_qual,
+            qual,
+        } => {
+            assert!(
+                matches!(kind, crate::include::nodes::primnodes::JoinType::Inner),
+                "merge join currently supports inner joins",
+            );
+            let left_width = left.column_names().len();
+            let right_width = right.column_names().len();
+            let combined_names: Vec<String> = left
+                .column_names()
+                .into_iter()
+                .chain(right.column_names())
+                .collect();
+            let output_names = combined_names.clone();
+            Box::new(MergeJoinState {
+                left: executor_start(*left),
+                right: executor_start(*right),
+                kind,
+                merge_clauses,
+                outer_sort_keys,
+                inner_sort_keys,
+                join_qual,
+                qual,
+                combined_names,
+                output_names,
+                left_width,
+                right_width,
+                rows: None,
+                next_index: 0,
+                slot: TupleSlot::empty(left_width + right_width),
                 current_bindings: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),

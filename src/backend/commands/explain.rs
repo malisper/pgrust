@@ -425,6 +425,41 @@ fn push_verbose_plan_details(
                 lines.push(format!("{prefix}Filter: {rendered}"));
             }
         }
+        Plan::MergeJoin {
+            left,
+            right,
+            merge_clauses,
+            join_qual,
+            qual,
+            ..
+        } => {
+            let left_names = verbose_plan_output_exprs(left, ctx, true);
+            let right_names = verbose_plan_output_exprs(right, ctx, true);
+            if !merge_clauses.is_empty() {
+                let rendered = merge_clauses
+                    .iter()
+                    .map(|expr| render_verbose_join_expr(expr, &left_names, &right_names, ctx))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                lines.push(format!("{prefix}Merge Cond: {rendered}"));
+            }
+            if !join_qual.is_empty() {
+                let rendered = join_qual
+                    .iter()
+                    .map(|expr| render_verbose_join_expr(expr, &left_names, &right_names, ctx))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                lines.push(format!("{prefix}Join Filter: {rendered}"));
+            }
+            if !qual.is_empty() {
+                let rendered = qual
+                    .iter()
+                    .map(|expr| render_verbose_join_expr(expr, &left_names, &right_names, ctx))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                lines.push(format!("{prefix}Filter: {rendered}"));
+            }
+        }
         _ => {}
     }
 }
@@ -584,7 +619,7 @@ fn verbose_plan_output_exprs(
             output.extend(verbose_plan_output_exprs(right, &right_ctx, for_parent_ref));
             output
         }
-        Plan::HashJoin { left, right, .. } => {
+        Plan::HashJoin { left, right, .. } | Plan::MergeJoin { left, right, .. } => {
             let mut output = verbose_plan_output_exprs(left, ctx, for_parent_ref);
             output.extend(verbose_plan_output_exprs(right, ctx, for_parent_ref));
             output
@@ -868,6 +903,7 @@ fn direct_plan_children(plan: &Plan) -> Vec<&Plan> {
         Plan::Filter { input, .. } => vec![input.as_ref()],
         Plan::NestedLoopJoin { left, right, .. }
         | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. }
         | Plan::RecursiveUnion {
             anchor: left,
             recursive: right,
@@ -920,6 +956,24 @@ fn direct_plan_subplans(plan: &Plan) -> Vec<&SubPlan> {
                 collect_direct_expr_subplans(expr, &mut found);
             }
             for expr in qual {
+                collect_direct_expr_subplans(expr, &mut found);
+            }
+        }
+        Plan::MergeJoin {
+            merge_clauses,
+            outer_sort_keys,
+            inner_sort_keys,
+            join_qual,
+            qual,
+            ..
+        } => {
+            for expr in merge_clauses
+                .iter()
+                .chain(outer_sort_keys.iter())
+                .chain(inner_sort_keys.iter())
+                .chain(join_qual.iter())
+                .chain(qual.iter())
+            {
                 collect_direct_expr_subplans(expr, &mut found);
             }
         }

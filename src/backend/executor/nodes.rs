@@ -9,6 +9,7 @@ use crate::backend::access::index::indexam;
 use crate::backend::commands::explain::format_explain_lines_with_costs;
 use crate::backend::executor::exec_expr::{compare_order_by_keys, eval_expr};
 use crate::backend::executor::expr_geometry::render_geometry_text;
+use crate::backend::executor::expr_ops::compare_order_values;
 use crate::backend::executor::pg_regex::explain_similar_pattern;
 use crate::backend::executor::srf::{
     eval_project_set_returning_call, eval_set_returning_call, set_returning_call_label,
@@ -31,10 +32,10 @@ use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, CteScanState,
     FilterState, FunctionScanState, IndexScanState, LimitState, LockRowsState, MaterializedRow,
-    NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, PlanState, ProjectSetState,
-    ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SetOpState, SlotKind,
-    SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot, ValuesState, WindowAggState,
-    WorkTableScanState,
+    MergeJoinState, NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, PlanState,
+    ProjectSetState, ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SetOpState,
+    SlotKind, SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot, ValuesState,
+    WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::plannodes::{IndexScanKey, IndexScanKeyArgument};
 use crate::include::nodes::primnodes::{
@@ -2173,7 +2174,7 @@ impl PlanNode for NestedLoopJoinState {
         if self.right_plan.is_some() {
             return exec_lateral_join(self, ctx, start);
         }
-        if matches!(self.kind, JoinType::Cross) && self.cross_right_outer {
+        if self.cross_right_outer {
             return exec_cross_join(self, ctx, start);
         }
 
@@ -2611,6 +2612,238 @@ fn exec_cross_join<'a>(
 
         state.current_right = None;
     }
+}
+
+#[derive(Debug)]
+struct KeyedMergeRow {
+    keys: Vec<Value>,
+    row: MaterializedRow,
+}
+
+impl PlanNode for MergeJoinState {
+    fn exec_proc_node<'a>(
+        &'a mut self,
+        ctx: &mut ExecutorContext,
+    ) -> Result<Option<&'a mut TupleSlot>, ExecError> {
+        let start = if ctx.timed {
+            Some(Instant::now())
+        } else {
+            None
+        };
+        begin_node(&mut self.stats, ctx);
+        if self.rows.is_none() {
+            self.rows = Some(build_merge_join_rows(self, ctx)?);
+        }
+
+        let rows = self.rows.as_ref().expect("merge join rows initialized");
+        if self.next_index >= rows.len() {
+            finish_eof(&mut self.stats, start, ctx);
+            return Ok(None);
+        }
+
+        let idx = self.next_index;
+        self.next_index += 1;
+        self.slot = rows[idx].slot.clone();
+        self.current_bindings = rows[idx].system_bindings.clone();
+        set_active_system_bindings(ctx, &self.current_bindings);
+        finish_row(&mut self.stats, start);
+        Ok(Some(&mut self.slot))
+    }
+
+    fn current_slot(&mut self) -> Option<&mut TupleSlot> {
+        Some(&mut self.slot)
+    }
+
+    fn current_system_bindings(&self) -> &[SystemVarBinding] {
+        &self.current_bindings
+    }
+
+    fn column_names(&self) -> &[String] {
+        &self.output_names
+    }
+
+    fn node_stats(&self) -> &NodeExecStats {
+        &self.stats
+    }
+
+    fn node_stats_mut(&mut self) -> &mut NodeExecStats {
+        &mut self.stats
+    }
+
+    fn plan_info(&self) -> crate::include::nodes::plannodes::PlanEstimate {
+        self.plan_info
+    }
+
+    fn node_label(&self) -> String {
+        match self.kind {
+            JoinType::Inner => "Merge Join".into(),
+            JoinType::Left => "Merge Left Join".into(),
+            JoinType::Right => "Merge Right Join".into(),
+            JoinType::Full => "Merge Full Join".into(),
+            JoinType::Semi => "Merge Semi Join".into(),
+            JoinType::Anti => "Merge Anti Join".into(),
+            JoinType::Cross => "Merge Join".into(),
+        }
+    }
+
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        let prefix = "  ".repeat(indent + 1);
+        let (left_names, right_names) = self.combined_names.split_at(self.left_width);
+        if !self.merge_clauses.is_empty() {
+            lines.push(format!(
+                "{prefix}Merge Cond: {}",
+                render_explain_join_expr(
+                    &format_qual_list(&self.merge_clauses),
+                    left_names,
+                    right_names
+                )
+            ));
+        }
+        if !self.join_qual.is_empty() {
+            lines.push(format!(
+                "{prefix}Join Filter: {}",
+                render_explain_join_expr(
+                    &format_qual_list(&self.join_qual),
+                    left_names,
+                    right_names
+                )
+            ));
+        }
+        if !self.qual.is_empty() {
+            lines.push(format!(
+                "{prefix}Filter: {}",
+                render_explain_join_expr(&format_qual_list(&self.qual), left_names, right_names)
+            ));
+        }
+        format_explain_lines_with_costs(&*self.left, indent + 1, analyze, show_costs, lines);
+        format_explain_lines_with_costs(&*self.right, indent + 1, analyze, show_costs, lines);
+    }
+}
+
+fn build_merge_join_rows(
+    state: &mut MergeJoinState,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<MaterializedRow>, ExecError> {
+    let left_rows = collect_merge_input_rows(&mut state.left, &state.outer_sort_keys, ctx)?;
+    let right_rows = collect_merge_input_rows(&mut state.right, &state.inner_sort_keys, ctx)?;
+    let mut output = Vec::new();
+    let mut left_index = 0;
+    let mut right_index = 0;
+    while left_index < left_rows.len() && right_index < right_rows.len() {
+        ctx.check_for_interrupts()?;
+        if merge_key_has_nulls(&left_rows[left_index].keys) {
+            left_index += 1;
+            continue;
+        }
+        if merge_key_has_nulls(&right_rows[right_index].keys) {
+            right_index += 1;
+            continue;
+        }
+        match compare_merge_keys(&left_rows[left_index].keys, &right_rows[right_index].keys)? {
+            std::cmp::Ordering::Less => {
+                left_index = merge_group_end(&left_rows, left_index)?;
+            }
+            std::cmp::Ordering::Greater => {
+                right_index = merge_group_end(&right_rows, right_index)?;
+            }
+            std::cmp::Ordering::Equal => {
+                let left_end = merge_group_end(&left_rows, left_index)?;
+                let right_end = merge_group_end(&right_rows, right_index)?;
+                for left_row in &left_rows[left_index..left_end] {
+                    for right_row in &right_rows[right_index..right_end] {
+                        ctx.check_for_interrupts()?;
+                        if let Some(row) =
+                            merge_join_pair(state, &left_row.row, &right_row.row, ctx)?
+                        {
+                            output.push(row);
+                        }
+                    }
+                }
+                left_index = left_end;
+                right_index = right_end;
+            }
+        }
+    }
+    Ok(output)
+}
+
+fn collect_merge_input_rows(
+    input: &mut PlanState,
+    sort_keys: &[Expr],
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<KeyedMergeRow>, ExecError> {
+    let mut rows = Vec::new();
+    while input.exec_proc_node(ctx)?.is_some() {
+        ctx.check_for_interrupts()?;
+        let mut row = input.materialize_current_row()?;
+        set_active_system_bindings(ctx, &row.system_bindings);
+        set_outer_expr_bindings(ctx, row.slot.tts_values.clone(), &row.system_bindings);
+        let mut keys = Vec::with_capacity(sort_keys.len());
+        for key in sort_keys {
+            keys.push(eval_expr(key, &mut row.slot, ctx)?);
+        }
+        rows.push(KeyedMergeRow { keys, row });
+    }
+    Ok(rows)
+}
+
+fn merge_key_has_nulls(keys: &[Value]) -> bool {
+    keys.iter().any(|value| matches!(value, Value::Null))
+}
+
+fn compare_merge_keys(left: &[Value], right: &[Value]) -> Result<std::cmp::Ordering, ExecError> {
+    for (left_value, right_value) in left.iter().zip(right.iter()) {
+        let ordering = compare_order_values(left_value, right_value, None, Some(false), false)?;
+        if ordering != std::cmp::Ordering::Equal {
+            return Ok(ordering);
+        }
+    }
+    Ok(std::cmp::Ordering::Equal)
+}
+
+fn merge_group_end(rows: &[KeyedMergeRow], start: usize) -> Result<usize, ExecError> {
+    let mut end = start + 1;
+    while end < rows.len()
+        && !merge_key_has_nulls(&rows[end].keys)
+        && compare_merge_keys(&rows[start].keys, &rows[end].keys)? == std::cmp::Ordering::Equal
+    {
+        end += 1;
+    }
+    Ok(end)
+}
+
+fn merge_join_pair(
+    state: &mut MergeJoinState,
+    left: &MaterializedRow,
+    right: &MaterializedRow,
+    ctx: &mut ExecutorContext,
+) -> Result<Option<MaterializedRow>, ExecError> {
+    let mut combined_values = left.slot.tts_values.clone();
+    combined_values.extend(right.slot.tts_values.iter().cloned());
+    state.slot.store_virtual_row(combined_values, None, None);
+    state.current_bindings = merge_system_bindings(&left.system_bindings, &right.system_bindings);
+    set_active_system_bindings(ctx, &state.current_bindings);
+    set_outer_expr_bindings(ctx, left.slot.tts_values.clone(), &left.system_bindings);
+    set_inner_expr_bindings(ctx, right.slot.tts_values.clone(), &right.system_bindings);
+    if !eval_qual_list(&state.merge_clauses, &mut state.slot, ctx)? {
+        return Ok(None);
+    }
+    if !eval_qual_list(&state.join_qual, &mut state.slot, ctx)? {
+        return Ok(None);
+    }
+    if !eval_qual_list(&state.qual, &mut state.slot, ctx)? {
+        return Ok(None);
+    }
+    Ok(Some(MaterializedRow::new(
+        TupleSlot::virtual_row(state.slot.tts_values.clone()),
+        state.current_bindings.clone(),
+    )))
 }
 
 impl PlanNode for OrderByState {

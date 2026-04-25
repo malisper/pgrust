@@ -1159,6 +1159,42 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                 .map(|expr| rebase_expr_subplan_ids(expr, base))
                 .collect(),
         },
+        Plan::MergeJoin {
+            plan_info,
+            left,
+            right,
+            kind,
+            merge_clauses,
+            outer_sort_keys,
+            inner_sort_keys,
+            join_qual,
+            qual,
+        } => Plan::MergeJoin {
+            plan_info,
+            left: Box::new(rebase_plan_subplan_ids(*left, base)),
+            right: Box::new(rebase_plan_subplan_ids(*right, base)),
+            kind,
+            merge_clauses: merge_clauses
+                .into_iter()
+                .map(|expr| rebase_expr_subplan_ids(expr, base))
+                .collect(),
+            outer_sort_keys: outer_sort_keys
+                .into_iter()
+                .map(|expr| rebase_expr_subplan_ids(expr, base))
+                .collect(),
+            inner_sort_keys: inner_sort_keys
+                .into_iter()
+                .map(|expr| rebase_expr_subplan_ids(expr, base))
+                .collect(),
+            join_qual: join_qual
+                .into_iter()
+                .map(|expr| rebase_expr_subplan_ids(expr, base))
+                .collect(),
+            qual: qual
+                .into_iter()
+                .map(|expr| rebase_expr_subplan_ids(expr, base))
+                .collect(),
+        },
         Plan::Filter {
             plan_info,
             input,
@@ -1477,6 +1513,42 @@ pub(super) fn finalize_plan_subqueries(
                 .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
                 .collect(),
             hash_keys: hash_keys
+                .into_iter()
+                .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
+                .collect(),
+            join_qual: join_qual
+                .into_iter()
+                .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
+                .collect(),
+            qual: qual
+                .into_iter()
+                .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
+                .collect(),
+        },
+        Plan::MergeJoin {
+            plan_info,
+            left,
+            right,
+            kind,
+            merge_clauses,
+            outer_sort_keys,
+            inner_sort_keys,
+            join_qual,
+            qual,
+        } => Plan::MergeJoin {
+            plan_info,
+            left: Box::new(finalize_plan_subqueries(*left, catalog, subplans)),
+            right: Box::new(finalize_plan_subqueries(*right, catalog, subplans)),
+            kind,
+            merge_clauses: merge_clauses
+                .into_iter()
+                .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
+                .collect(),
+            outer_sort_keys: outer_sort_keys
+                .into_iter()
+                .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
+                .collect(),
+            inner_sort_keys: inner_sort_keys
                 .into_iter()
                 .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
                 .collect(),
