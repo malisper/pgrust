@@ -486,6 +486,24 @@ pub(super) fn analyze_expr_aggregates_in_clause(
     Ok(summary)
 }
 
+fn resolve_select_order_by_expr<'a>(expr: &'a SqlExpr, targets: &'a [SelectItem]) -> &'a SqlExpr {
+    match expr {
+        SqlExpr::Collate { expr, .. } => resolve_select_order_by_expr(expr, targets),
+        SqlExpr::IntegerLiteral(value) => value
+            .parse::<usize>()
+            .ok()
+            .filter(|ordinal| *ordinal > 0 && *ordinal <= targets.len())
+            .map(|ordinal| &targets[ordinal - 1].expr)
+            .unwrap_or(expr),
+        SqlExpr::Column(name) => targets
+            .iter()
+            .find(|target| target.output_name.eq_ignore_ascii_case(name))
+            .map(|target| &target.expr)
+            .unwrap_or(expr),
+        _ => expr,
+    }
+}
+
 fn analyze_select_usage_with_outer(
     stmt: &SelectStatement,
     catalog: &dyn CatalogLookup,
@@ -584,7 +602,7 @@ fn analyze_select_usage_with_outer(
     }
     for order_by in &stmt.order_by {
         info.merge(analyze_expr_internal(
-            &order_by.expr,
+            resolve_select_order_by_expr(&order_by.expr, &stmt.targets),
             AggregateClauseKind::OrderBy,
             &scope,
             catalog,
@@ -608,6 +626,19 @@ fn analyze_expr_internal(
     ctes: &[BoundCte],
     expanded_views: &[u32],
 ) -> Result<AggregateExprInfo, ParseError> {
+    if matches_grouped_outer_expr(expr, grouped_outer) {
+        return analyze_expr_internal(
+            expr,
+            clause,
+            scope,
+            catalog,
+            outer_scopes,
+            None,
+            ctes,
+            expanded_views,
+        );
+    }
+
     let mut info = AggregateExprInfo::default();
     match expr {
         SqlExpr::Column(name) => {

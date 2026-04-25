@@ -1126,6 +1126,10 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<Expr, ParseError> {
+    if matches_grouped_outer_expr(expr, grouped_outer) {
+        return bind_expr_with_outer_and_ctes(expr, scope, catalog, outer_scopes, None, ctes);
+    }
+
     Ok(match expr {
         SqlExpr::Xml(xml) => {
             return bind_xml_expr(xml, scope, catalog, outer_scopes, grouped_outer, ctes);
