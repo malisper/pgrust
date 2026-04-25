@@ -4613,6 +4613,7 @@ fn explain_partitionwise_join_preserves_hash_cond_and_aliases() {
         &catalog,
         PlannerConfig {
             enable_partitionwise_join: true,
+            ..PlannerConfig::default()
         },
     )
     .unwrap();

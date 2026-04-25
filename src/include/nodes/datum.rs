@@ -9,7 +9,7 @@ use num_bigint::BigInt;
 use num_integer::Integer;
 use num_traits::{Signed, Zero};
 use std::hash::{Hash, Hasher};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BitString {
@@ -60,15 +60,81 @@ impl InetValue {
 
     pub fn render_inet(&self) -> String {
         if self.bits == self.max_bits() {
-            self.addr.to_string()
+            render_ip_addr(&self.addr)
         } else {
-            format!("{}/{}", self.addr, self.bits)
+            format!("{}/{}", render_ip_addr(&self.addr), self.bits)
         }
     }
 
     pub fn render_cidr(&self) -> String {
-        format!("{}/{}", self.addr, self.bits)
+        format!("{}/{}", render_ip_addr(&self.addr), self.bits)
     }
+}
+
+fn render_ip_addr(addr: &IpAddr) -> String {
+    match addr {
+        IpAddr::V4(addr) => addr.to_string(),
+        IpAddr::V6(addr) => render_ipv6_addr(*addr),
+    }
+}
+
+fn render_ipv6_addr(addr: Ipv6Addr) -> String {
+    let segments = addr.segments();
+    if let Some((zero_base, zero_len)) = longest_ipv6_zero_run(&segments)
+        && zero_base == 0
+        && (zero_len == 6
+            || (zero_len == 7 && segments[7] != 1)
+            || (zero_len == 5 && segments[5] == 0xffff))
+    {
+        let octets = addr.octets();
+        if segments[5] == 0xffff {
+            return format!(
+                "::ffff:{}.{}.{}.{}",
+                octets[12], octets[13], octets[14], octets[15]
+            );
+        }
+        return format!(
+            "::{}.{}.{}.{}",
+            octets[12], octets[13], octets[14], octets[15]
+        );
+    }
+    if segments[..5] == [0, 0, 0, 0, 0] && segments[5] == 0xffff {
+        let octets = addr.octets();
+        return format!(
+            "::ffff:{}.{}.{}.{}",
+            octets[12], octets[13], octets[14], octets[15]
+        );
+    }
+    addr.to_string()
+}
+
+fn longest_ipv6_zero_run(segments: &[u16; 8]) -> Option<(usize, usize)> {
+    let mut best_base = None;
+    let mut best_len = 0usize;
+    let mut current_base = None;
+    let mut current_len = 0usize;
+    for (idx, segment) in segments.iter().enumerate() {
+        if *segment == 0 {
+            if current_base.is_none() {
+                current_base = Some(idx);
+                current_len = 0;
+            }
+            current_len += 1;
+        } else if let Some(base) = current_base.take() {
+            if current_len > best_len {
+                best_base = Some(base);
+                best_len = current_len;
+            }
+            current_len = 0;
+        }
+    }
+    if let Some(base) = current_base
+        && current_len > best_len
+    {
+        best_base = Some(base);
+        best_len = current_len;
+    }
+    (best_len >= 2).then(|| (best_base.expect("best zero run has a base"), best_len))
 }
 
 impl RecordDescriptor {
