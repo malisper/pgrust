@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
 import platform
@@ -73,6 +74,42 @@ def parse_args() -> argparse.Namespace:
         "--report-json",
         type=Path,
         help="Print a compact report for an existing summary JSON and exit.",
+    )
+    parser.add_argument(
+        "--history-dir",
+        type=Path,
+        help="Optional local history directory. Records this run under <history-dir>/runs and updates index.json.",
+    )
+    parser.add_argument(
+        "--history-label",
+        help="Optional label stored with --history-dir entries, for example laptop-baseline.",
+    )
+    parser.add_argument(
+        "--report-history",
+        type=Path,
+        help="Print a compact report for a local benchmark history directory and exit.",
+    )
+    parser.add_argument(
+        "--history-limit",
+        type=int,
+        default=10,
+        help="Number of recent history runs to show with --report-history. Default: 10.",
+    )
+    parser.add_argument(
+        "--history-dashboard",
+        type=Path,
+        help="Write a standalone HTML dashboard when used with --report-history.",
+    )
+    parser.add_argument(
+        "--check-history-regressions",
+        type=Path,
+        help="Check latest local history run for pgrust/PostgreSQL ratio regressions and exit.",
+    )
+    parser.add_argument(
+        "--regression-threshold-percent",
+        type=float,
+        default=5.0,
+        help="Percent change needed to flag a history regression. Default: 5.0.",
     )
     parser.add_argument(
         "--no-report",
@@ -270,9 +307,17 @@ class BenchmarkRunner:
                 summary["results"].append(self.run_pgbench_like_suite())
             summary["comparisons"] = build_comparisons(summary["results"])
 
+            history_path = None
+            if self.args.history_dir:
+                history_path = record_history(
+                    summary, self.args.history_dir, self.args.history_label
+                )
+
             self.output_json.write_text(json.dumps(summary, indent=2) + "\n")
             print(f"Results dir: {self.results_dir}")
             print(f"Summary JSON: {self.output_json}")
+            if history_path is not None:
+                print(f"History JSON: {history_path}")
             if not self.args.no_report:
                 print()
                 print_report(summary)
@@ -948,6 +993,667 @@ def build_comparisons(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return comparisons
 
 
+def record_history(
+    summary: dict[str, Any], history_dir: Path, label: str | None
+) -> Path:
+    recorded_at = utc_now()
+    history_dir.mkdir(parents=True, exist_ok=True)
+    runs_dir = history_dir / "runs"
+    runs_dir.mkdir(exist_ok=True)
+
+    run_path = unique_history_path(runs_dir, summary)
+    relative_run_path = run_path.relative_to(history_dir).as_posix()
+    summary["history"] = {
+        "recorded_at": recorded_at,
+        "label": label,
+        "path": relative_run_path,
+    }
+    run_path.write_text(json.dumps(summary, indent=2) + "\n")
+
+    index_path = history_dir / "index.json"
+    index = load_history_index(index_path)
+    entry = build_history_entry(summary, relative_run_path, recorded_at, label)
+    runs = [
+        run
+        for run in index.get("runs", [])
+        if run.get("path") != relative_run_path
+    ]
+    runs.append(entry)
+    runs.sort(key=lambda run: run.get("created_at") or "")
+    index["runs"] = runs
+    index_path.write_text(json.dumps(index, indent=2) + "\n")
+    return run_path
+
+
+def unique_history_path(runs_dir: Path, summary: dict[str, Any]) -> Path:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    commit = str(summary.get("git_commit") or "unknown")[:12]
+    stem = f"{timestamp}-{commit}"
+    path = runs_dir / f"{stem}.json"
+    suffix = 2
+    while path.exists():
+        path = runs_dir / f"{stem}-{suffix}.json"
+        suffix += 1
+    return path
+
+
+def load_history_index(index_path: Path) -> dict[str, Any]:
+    if not index_path.exists():
+        return {"schema_version": 1, "runs": []}
+    try:
+        index = json.loads(index_path.read_text())
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"failed to parse benchmark history index {index_path}: {exc}")
+    if not isinstance(index, dict):
+        raise SystemExit(f"benchmark history index must be a JSON object: {index_path}")
+    index.setdefault("schema_version", 1)
+    index.setdefault("runs", [])
+    return index
+
+
+def load_history_runs(history_dir: Path) -> list[dict[str, Any]]:
+    index_path = history_dir / "index.json"
+    if not index_path.exists():
+        raise SystemExit(f"benchmark history index not found: {index_path}")
+
+    index = load_history_index(index_path)
+    runs = index.get("runs", [])
+    if not isinstance(runs, list):
+        raise SystemExit(f"benchmark history index runs must be a list: {index_path}")
+    return sorted(runs, key=lambda run: run.get("created_at") or "")
+
+
+def build_history_entry(
+    summary: dict[str, Any], relative_run_path: str, recorded_at: str, label: str | None
+) -> dict[str, Any]:
+    config = summary.get("config", {})
+    environment = summary.get("environment", {})
+    results = summary.get("results", [])
+    return {
+        "created_at": summary.get("created_at"),
+        "recorded_at": recorded_at,
+        "label": label,
+        "path": relative_run_path,
+        "git_branch": summary.get("git_branch"),
+        "git_commit": summary.get("git_commit"),
+        "hostname": summary.get("hostname"),
+        "platform": environment.get("platform"),
+        "machine": environment.get("machine"),
+        "suites": config.get("suites", []),
+        "engines": config.get("engines"),
+        "pgbench_workloads": config.get("pgbench_workloads", []),
+        "rows": config.get("rows"),
+        "clients": config.get("clients"),
+        "pgbench_transactions": config.get("pgbench_transactions"),
+        "result_count": len(results),
+        "ok_count": sum(1 for result in results if result.get("status") == "ok"),
+        "error_count": sum(1 for result in results if result.get("status") != "ok"),
+        "comparisons": summarize_history_comparisons(summary.get("comparisons", [])),
+    }
+
+
+def summarize_history_comparisons(
+    comparisons: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    summarized = []
+    for item in comparisons:
+        row = {
+            "suite": item.get("suite"),
+            "workload": item.get("workload"),
+            "throughput_metric": item.get("throughput_metric"),
+            "throughput_ratio": item.get("pgrust_to_postgres_throughput_ratio"),
+            "latency_metric": item.get("latency_metric"),
+            "latency_ratio": item.get("pgrust_to_postgres_latency_ratio"),
+        }
+        summarized.append({key: value for key, value in row.items() if value is not None})
+    return summarized
+
+
+def print_history_report(history_dir: Path, limit: int) -> None:
+    runs = load_history_runs(history_dir)
+    if not runs:
+        print("Benchmark History")
+        print(f"  dir:  {history_dir}")
+        print("  runs: 0")
+        return
+
+    recent = runs[-max(limit, 1) :]
+
+    print("Benchmark History")
+    print(f"  dir:  {history_dir}")
+    print(f"  runs: {len(runs)}")
+    print()
+    print_history_run_table(recent)
+
+    latest = runs[-1]
+    latest_comparisons = latest.get("comparisons") or []
+    if latest_comparisons:
+        print()
+        print_history_comparison_table(latest, runs[:-1])
+
+
+def print_history_run_table(runs: list[dict[str, Any]]) -> None:
+    rows = []
+    for run in reversed(runs):
+        rows.append(
+            [
+                short_time(run.get("created_at")),
+                short_commit(run.get("git_commit")),
+                run.get("label") or "-",
+                ",".join(run.get("suites") or []),
+                str(run.get("engines") or "-"),
+                f"{run.get('ok_count', 0)}/{run.get('result_count', 0)}",
+                str(run.get("error_count", 0)),
+            ]
+        )
+    print_table(["created", "commit", "label", "suites", "engines", "ok", "errors"], rows)
+
+
+def print_history_comparison_table(
+    latest: dict[str, Any], previous_runs: list[dict[str, Any]]
+) -> None:
+    previous_by_key = latest_previous_comparisons(previous_runs)
+    rows = []
+    for item in latest.get("comparisons", []):
+        previous_item = previous_by_key.get(comparison_key(item))
+        rows.append(
+            [
+                comparison_label(item),
+                format_ratio(item.get("throughput_ratio")),
+                format_ratio(previous_item.get("throughput_ratio"))
+                if previous_item
+                else "-",
+                format_percent_delta(
+                    item.get("throughput_ratio"),
+                    previous_item.get("throughput_ratio") if previous_item else None,
+                ),
+                format_ratio(item.get("latency_ratio")),
+                format_ratio(previous_item.get("latency_ratio")) if previous_item else "-",
+                format_percent_delta(
+                    item.get("latency_ratio"),
+                    previous_item.get("latency_ratio") if previous_item else None,
+                ),
+            ]
+        )
+
+    print("Latest Comparison Ratios")
+    print_table(
+        [
+            "workload",
+            "tps ratio",
+            "prev tps",
+            "tps delta",
+            "lat ratio",
+            "prev lat",
+            "lat delta",
+        ],
+        rows,
+    )
+
+
+def comparison_key(item: dict[str, Any]) -> tuple[str | None, str | None]:
+    return (item.get("suite"), item.get("workload"))
+
+
+def comparison_label(item: dict[str, Any]) -> str:
+    return item.get("workload") or item.get("suite") or "-"
+
+
+def short_time(value: Any) -> str:
+    if not isinstance(value, str) or len(value) < 16:
+        return "-"
+    return value[:16].replace("T", " ")
+
+
+def short_commit(value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        return "-"
+    return value[:12]
+
+
+def format_percent_delta(current: Any, previous: Any) -> str:
+    if not is_number(current) or not is_number(previous) or previous == 0:
+        return "-"
+    return f"{((current / previous) - 1.0) * 100.0:+.1f}%"
+
+
+def print_history_regression_check(history_dir: Path, threshold_percent: float) -> int:
+    if threshold_percent <= 0:
+        raise SystemExit("--regression-threshold-percent must be greater than 0")
+
+    runs = load_history_runs(history_dir)
+    if not runs:
+        print("Benchmark Regression Check")
+        print(f"  dir:       {history_dir}")
+        print("  status:    no history")
+        return 0
+
+    latest = runs[-1]
+    previous_runs = runs[:-1]
+    rows, regression_count = build_regression_rows(
+        latest, previous_runs, threshold_percent
+    )
+
+    print("Benchmark Regression Check")
+    print(f"  dir:       {history_dir}")
+    print(f"  latest:    {short_time(latest.get('created_at'))}")
+    print(f"  commit:    {short_commit(latest.get('git_commit'))}")
+    print(f"  threshold: {threshold_percent:.1f}%")
+    print(f"  status:    {'fail' if regression_count else 'pass'}")
+
+    if not rows:
+        print()
+        print("No comparable prior pgrust/PostgreSQL ratio data.")
+        return 0
+
+    print()
+    print_table(
+        ["workload", "metric", "current", "previous", "delta", "status"],
+        rows,
+    )
+    return 1 if regression_count else 0
+
+
+def build_regression_rows(
+    latest: dict[str, Any],
+    previous_runs: list[dict[str, Any]],
+    threshold_percent: float,
+) -> tuple[list[list[str]], int]:
+    previous_by_key = latest_previous_comparisons(previous_runs)
+    rows = []
+    regression_count = 0
+    for item in latest.get("comparisons", []):
+        previous_item = previous_by_key.get(comparison_key(item))
+        if previous_item is None:
+            continue
+
+        workload = comparison_label(item)
+        throughput_row = regression_row(
+            workload,
+            "tps ratio",
+            item.get("throughput_ratio"),
+            previous_item.get("throughput_ratio"),
+            threshold_percent,
+            worse_when="lower",
+        )
+        latency_row = regression_row(
+            workload,
+            "lat ratio",
+            item.get("latency_ratio"),
+            previous_item.get("latency_ratio"),
+            threshold_percent,
+            worse_when="higher",
+        )
+        for row, is_regression in [throughput_row, latency_row]:
+            if row is None:
+                continue
+            rows.append(row)
+            regression_count += 1 if is_regression else 0
+
+    return rows, regression_count
+
+
+def latest_previous_comparisons(
+    previous_runs: list[dict[str, Any]]
+) -> dict[tuple[str | None, str | None], dict[str, Any]]:
+    previous_by_key = {}
+    for run in reversed(previous_runs):
+        for item in run.get("comparisons", []):
+            previous_by_key.setdefault(comparison_key(item), item)
+    return previous_by_key
+
+
+def regression_row(
+    workload: str,
+    metric: str,
+    current: Any,
+    previous: Any,
+    threshold_percent: float,
+    *,
+    worse_when: str,
+) -> tuple[list[str] | None, bool]:
+    if not is_number(current) or not is_number(previous) or previous == 0:
+        return None, False
+
+    delta_percent = ((current / previous) - 1.0) * 100.0
+    is_regression = (
+        delta_percent <= -threshold_percent
+        if worse_when == "lower"
+        else delta_percent >= threshold_percent
+    )
+    return (
+        [
+            workload,
+            metric,
+            format_ratio(current),
+            format_ratio(previous),
+            f"{delta_percent:+.1f}%",
+            "regression" if is_regression else "ok",
+        ],
+        is_regression,
+    )
+
+
+def write_history_dashboard(history_dir: Path, output_path: Path) -> None:
+    runs = load_history_runs(history_dir)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(build_history_dashboard_html(history_dir, runs))
+
+
+def build_history_dashboard_html(
+    history_dir: Path, runs: list[dict[str, Any]]
+) -> str:
+    generated_at = utc_now()
+    latest = runs[-1] if runs else {}
+    series = collect_history_series(runs)
+    cards = "\n".join(render_series_card(key, points) for key, points in series.items())
+    if not cards:
+        cards = '<section class="empty">No pgrust/PostgreSQL comparison ratios yet.</section>'
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>pgrust Benchmark History</title>
+  <style>
+    :root {{
+      --bg: #eef3ec;
+      --ink: #182018;
+      --muted: #5f6d5f;
+      --card: rgba(255, 255, 248, 0.86);
+      --line: #cfd8c8;
+      --accent: #186f65;
+      --accent-2: #b25a27;
+      --shadow: 0 22px 70px rgba(42, 56, 41, 0.14);
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      color: var(--ink);
+      font-family: "Avenir Next", "Trebuchet MS", sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(24, 111, 101, 0.22), transparent 32rem),
+        linear-gradient(135deg, #f7f3e8 0%, var(--bg) 48%, #dce8df 100%);
+    }}
+    main {{
+      width: min(1160px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 48px 0 72px;
+    }}
+    header {{
+      display: grid;
+      gap: 18px;
+      margin-bottom: 28px;
+    }}
+    h1 {{
+      margin: 0;
+      font-size: clamp(2.4rem, 6vw, 5.5rem);
+      letter-spacing: -0.07em;
+      line-height: 0.92;
+    }}
+    h2 {{
+      margin: 0 0 14px;
+      font-size: 1.05rem;
+      letter-spacing: 0.02em;
+    }}
+    .meta-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+    }}
+    .meta, .card, .empty {{
+      background: var(--card);
+      border: 1px solid rgba(207, 216, 200, 0.8);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(10px);
+    }}
+    .meta {{ padding: 16px 18px; }}
+    .label {{
+      display: block;
+      color: var(--muted);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+    }}
+    .value {{
+      display: block;
+      margin-top: 8px;
+      font-size: 1.1rem;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }}
+    .cards {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+      gap: 18px;
+      margin-top: 24px;
+    }}
+    .card {{ padding: 20px; }}
+    .chart-grid {{
+      display: grid;
+      gap: 18px;
+    }}
+    .chart-title {{
+      color: var(--muted);
+      font-size: 0.84rem;
+      font-weight: 700;
+      margin: 8px 0;
+      text-transform: uppercase;
+      letter-spacing: 0.09em;
+    }}
+    svg {{
+      display: block;
+      width: 100%;
+      height: auto;
+      overflow: visible;
+    }}
+    .axis {{ stroke: var(--line); stroke-width: 1; }}
+    .baseline {{ stroke: #8ea08d; stroke-width: 1; stroke-dasharray: 4 6; }}
+    .throughput {{ fill: none; stroke: var(--accent); stroke-width: 4; }}
+    .latency {{ fill: none; stroke: var(--accent-2); stroke-width: 4; }}
+    .dot-throughput {{ fill: var(--accent); }}
+    .dot-latency {{ fill: var(--accent-2); }}
+    .tick {{
+      fill: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 26px;
+      background: rgba(255, 255, 248, 0.7);
+      border-radius: 18px;
+      overflow: hidden;
+    }}
+    th, td {{
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      white-space: nowrap;
+    }}
+    th {{
+      color: var(--muted);
+      font-size: 0.76rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+    }}
+    tr:last-child td {{ border-bottom: 0; }}
+    .empty {{
+      padding: 24px;
+      color: var(--muted);
+    }}
+    @media (max-width: 720px) {{
+      main {{ width: min(100vw - 20px, 1160px); padding-top: 28px; }}
+      .cards {{ grid-template-columns: 1fr; }}
+      table {{ display: block; overflow-x: auto; }}
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Benchmark History</h1>
+      <div class="meta-grid">
+        <div class="meta"><span class="label">History Dir</span><span class="value">{h(history_dir)}</span></div>
+        <div class="meta"><span class="label">Runs</span><span class="value">{len(runs)}</span></div>
+        <div class="meta"><span class="label">Latest Commit</span><span class="value">{h(short_commit(latest.get("git_commit")))}</span></div>
+        <div class="meta"><span class="label">Generated</span><span class="value">{h(generated_at)}</span></div>
+      </div>
+    </header>
+    <section>
+      <h2>pgrust / PostgreSQL Ratios</h2>
+      <p>Throughput above 1.0x means pgrust is faster. Latency below 1.0x means pgrust is faster.</p>
+      <div class="cards">
+        {cards}
+      </div>
+    </section>
+    {render_history_runs_table(runs)}
+  </main>
+</body>
+</html>
+"""
+
+
+def collect_history_series(
+    runs: list[dict[str, Any]]
+) -> dict[tuple[str | None, str | None], list[dict[str, Any]]]:
+    series: dict[tuple[str | None, str | None], list[dict[str, Any]]] = {}
+    for run in runs:
+        for item in run.get("comparisons", []):
+            key = comparison_key(item)
+            series.setdefault(key, []).append(
+                {
+                    "created_at": run.get("created_at"),
+                    "label": run.get("label"),
+                    "git_commit": run.get("git_commit"),
+                    "throughput_ratio": item.get("throughput_ratio"),
+                    "latency_ratio": item.get("latency_ratio"),
+                }
+            )
+    return dict(sorted(series.items(), key=lambda item: comparison_label_from_key(item[0])))
+
+
+def render_series_card(
+    key: tuple[str | None, str | None], points: list[dict[str, Any]]
+) -> str:
+    title = comparison_label_from_key(key)
+    latest = points[-1] if points else {}
+    return f"""<article class="card">
+  <h2>{h(title)}</h2>
+  <div class="meta-grid">
+    <div><span class="label">Latest TPS Ratio</span><span class="value">{h(format_ratio(latest.get("throughput_ratio")))}</span></div>
+    <div><span class="label">Latest Latency Ratio</span><span class="value">{h(format_ratio(latest.get("latency_ratio")))}</span></div>
+  </div>
+  <div class="chart-grid">
+    <div>
+      <div class="chart-title">Throughput ratio</div>
+      {render_ratio_svg(points, "throughput_ratio", "throughput")}
+    </div>
+    <div>
+      <div class="chart-title">Latency ratio</div>
+      {render_ratio_svg(points, "latency_ratio", "latency")}
+    </div>
+  </div>
+</article>"""
+
+
+def render_ratio_svg(
+    points: list[dict[str, Any]], metric: str, css_class: str
+) -> str:
+    values = [point.get(metric) for point in points if is_number(point.get(metric))]
+    if not values:
+        return '<div class="empty">No ratio data.</div>'
+
+    width = 520
+    height = 170
+    pad_x = 38
+    pad_y = 24
+    min_value = min(values + [1.0])
+    max_value = max(values + [1.0])
+    if min_value == max_value:
+        min_value *= 0.9
+        max_value *= 1.1
+    value_range = max_value - min_value
+    usable_width = width - (pad_x * 2)
+    usable_height = height - (pad_y * 2)
+
+    plotted = []
+    for index, point in enumerate(points):
+        value = point.get(metric)
+        if not is_number(value):
+            continue
+        x = pad_x + (usable_width * index / max(len(points) - 1, 1))
+        y = height - pad_y - (((value - min_value) / value_range) * usable_height)
+        plotted.append((x, y, value, point))
+
+    line = " ".join(f"{x:.1f},{y:.1f}" for x, y, _, _ in plotted)
+    baseline_y = height - pad_y - (((1.0 - min_value) / value_range) * usable_height)
+    dots = "\n".join(
+        f'<circle class="dot-{css_class}" cx="{x:.1f}" cy="{y:.1f}" r="4">'
+        f"<title>{h(point_label(point, value))}</title></circle>"
+        for x, y, value, point in plotted
+    )
+    polyline = (
+        f'<polyline class="{css_class}" points="{line}"></polyline>' if len(plotted) > 1 else ""
+    )
+    return f"""<svg viewBox="0 0 {width} {height}" role="img" aria-label="{h(metric)} trend">
+  <line class="axis" x1="{pad_x}" y1="{height - pad_y}" x2="{width - pad_x}" y2="{height - pad_y}"></line>
+  <line class="baseline" x1="{pad_x}" y1="{baseline_y:.1f}" x2="{width - pad_x}" y2="{baseline_y:.1f}"></line>
+  <text class="tick" x="4" y="{baseline_y + 4:.1f}">1.0x</text>
+  <text class="tick" x="4" y="{pad_y + 4}">{h(format_ratio(max_value))}</text>
+  <text class="tick" x="4" y="{height - pad_y + 4}">{h(format_ratio(min_value))}</text>
+  {polyline}
+  {dots}
+</svg>"""
+
+
+def point_label(point: dict[str, Any], value: float) -> str:
+    pieces = [
+        short_time(point.get("created_at")),
+        format_ratio(value),
+        short_commit(point.get("git_commit")),
+    ]
+    if point.get("label"):
+        pieces.append(str(point["label"]))
+    return " | ".join(piece for piece in pieces if piece != "-")
+
+
+def comparison_label_from_key(key: tuple[str | None, str | None]) -> str:
+    suite, workload = key
+    return workload or suite or "-"
+
+
+def render_history_runs_table(runs: list[dict[str, Any]]) -> str:
+    if not runs:
+        return ""
+    rows = "\n".join(
+        f"<tr><td>{h(short_time(run.get('created_at')))}</td>"
+        f"<td>{h(short_commit(run.get('git_commit')))}</td>"
+        f"<td>{h(run.get('label') or '-')}</td>"
+        f"<td>{h(','.join(run.get('suites') or []))}</td>"
+        f"<td>{h(run.get('engines') or '-')}</td>"
+        f"<td>{run.get('ok_count', 0)}/{run.get('result_count', 0)}</td>"
+        f"<td>{run.get('error_count', 0)}</td></tr>"
+        for run in reversed(runs[-20:])
+    )
+    return f"""<section>
+  <h2>Recent Runs</h2>
+  <table>
+    <thead><tr><th>Created</th><th>Commit</th><th>Label</th><th>Suites</th><th>Engines</th><th>OK</th><th>Errors</th></tr></thead>
+    <tbody>
+      {rows}
+    </tbody>
+  </table>
+</section>"""
+
+
+def h(value: Any) -> str:
+    return html.escape(str(value), quote=True)
+
+
 def first_metric(
     pgrust_metrics: dict[str, Any],
     postgres_metrics: dict[str, Any],
@@ -1079,6 +1785,21 @@ if __name__ == "__main__":
     if args.report_json:
         print_report(json.loads(args.report_json.read_text()))
         sys.exit(0)
+    if args.report_history:
+        print_history_report(args.report_history, args.history_limit)
+        if args.history_dashboard:
+            write_history_dashboard(args.report_history, args.history_dashboard)
+            print()
+            print(f"History dashboard: {args.history_dashboard}")
+        sys.exit(0)
+    if args.check_history_regressions:
+        sys.exit(
+            print_history_regression_check(
+                args.check_history_regressions, args.regression_threshold_percent
+            )
+        )
+    if args.history_dashboard:
+        raise SystemExit("--history-dashboard requires --report-history")
 
     runner = BenchmarkRunner(args)
     sys.exit(runner.run())
