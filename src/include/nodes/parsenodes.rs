@@ -3304,6 +3304,7 @@ pub enum SqlExpr {
         name: String,
         args: SqlCallArgs,
         order_by: Vec<OrderByItem>,
+        within_group: Option<Vec<OrderByItem>>,
         distinct: bool,
         func_variadic: bool,
         filter: Option<Box<SqlExpr>>,

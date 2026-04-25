@@ -488,6 +488,7 @@ fn finalize_agg_accum(
     let AggAccum {
         aggfnoid,
         agg_variadic,
+        direct_args,
         args,
         order_by,
         filter,
@@ -497,6 +498,10 @@ fn finalize_agg_accum(
     AggAccum {
         aggfnoid,
         agg_variadic,
+        direct_args: direct_args
+            .into_iter()
+            .map(|arg| finalize_expr_subqueries(arg, catalog, subplans))
+            .collect(),
         args: args
             .into_iter()
             .map(|arg| finalize_expr_subqueries(arg, catalog, subplans))

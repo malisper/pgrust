@@ -15,7 +15,9 @@ use crate::include::catalog::{
     TSTZRANGE_TYPE_OID, TSVECTOR_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_TYPE_OID, XID_TYPE_OID,
     XML_TYPE_OID, aggregate_func_for_dynamic_range_proc_oid,
 };
-use crate::include::nodes::primnodes::{AggFunc, BuiltinScalarFunction, BuiltinWindowFunction};
+use crate::include::nodes::primnodes::{
+    AggFunc, BuiltinScalarFunction, BuiltinWindowFunction, HypotheticalAggFunc,
+};
 use std::sync::OnceLock;
 
 const VOID_TYPE_OID: u32 = 2278;
@@ -538,6 +540,10 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'w',
             'i',
         ),
+        hypothetical_aggregate_proc_row(3986, "rank", INT8_TYPE_OID),
+        hypothetical_aggregate_proc_row(3988, "percent_rank", FLOAT8_TYPE_OID),
+        hypothetical_aggregate_proc_row(3990, "cume_dist", FLOAT8_TYPE_OID),
+        hypothetical_aggregate_proc_row(3992, "dense_rank", INT8_TYPE_OID),
         proc_row(
             3105,
             "ntile",
@@ -3744,6 +3750,27 @@ pub fn proc_oid_for_builtin_aggregate_function(func: AggFunc) -> Option<u32> {
         })
 }
 
+pub fn builtin_hypothetical_aggregate_function_for_proc_oid(
+    oid: u32,
+) -> Option<HypotheticalAggFunc> {
+    bootstrap_pg_proc_rows()
+        .into_iter()
+        .find(|row| row.oid == oid && row.prokind == 'a')
+        .and_then(|row| hypothetical_aggregate_func_for_proname(&row.proname))
+}
+
+pub fn proc_oid_for_builtin_hypothetical_aggregate_function(
+    func: HypotheticalAggFunc,
+) -> Option<u32> {
+    bootstrap_pg_proc_rows()
+        .into_iter()
+        .find(|row| {
+            row.prokind == 'a'
+                && hypothetical_aggregate_func_for_proname(&row.proname) == Some(func)
+        })
+        .map(|row| row.oid)
+}
+
 pub fn proc_oid_for_builtin_window_function(func: BuiltinWindowFunction) -> Option<u32> {
     bootstrap_pg_proc_rows()
         .into_iter()
@@ -3914,6 +3941,16 @@ fn window_func_for_proname(name: &str) -> Option<BuiltinWindowFunction> {
         "first_value" => Some(BuiltinWindowFunction::FirstValue),
         "last_value" => Some(BuiltinWindowFunction::LastValue),
         "nth_value" => Some(BuiltinWindowFunction::NthValue),
+        _ => None,
+    }
+}
+
+fn hypothetical_aggregate_func_for_proname(name: &str) -> Option<HypotheticalAggFunc> {
+    match name.to_ascii_lowercase().as_str() {
+        "rank" => Some(HypotheticalAggFunc::Rank),
+        "dense_rank" => Some(HypotheticalAggFunc::DenseRank),
+        "percent_rank" => Some(HypotheticalAggFunc::PercentRank),
+        "cume_dist" => Some(HypotheticalAggFunc::CumeDist),
         _ => None,
     }
 }
@@ -7726,6 +7763,25 @@ fn variadic_proc_row(
         provolatile,
     );
     row.provariadic = provariadic;
+    row
+}
+
+fn hypothetical_aggregate_proc_row(oid: u32, proname: &str, prorettype: u32) -> PgProcRow {
+    let mut row = variadic_proc_row(
+        oid,
+        proname,
+        prorettype,
+        &oid_argtypes(&[ANYOID]),
+        ANYOID,
+        "aggregate_dummy",
+        1,
+        false,
+        false,
+        'a',
+        'i',
+    );
+    row.proallargtypes = Some(vec![ANYOID]);
+    row.proargmodes = Some(vec![b'v']);
     row
 }
 

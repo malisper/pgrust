@@ -3019,6 +3019,7 @@ impl PlanNode for AggregateState {
                                 .iter()
                                 .map(|accum| accum.distinct.then(HashSet::new))
                                 .collect(),
+                            direct_arg_values: vec![None; self.accumulators.len()],
                             ordered_inputs: vec![Vec::new(); self.accumulators.len()],
                         });
                         groups.len() - 1
@@ -3026,6 +3027,15 @@ impl PlanNode for AggregateState {
 
                 let group = &mut groups[group_idx];
                 for (i, accum) in self.accumulators.iter().enumerate() {
+                    if group.direct_arg_values[i].is_none() && !accum.direct_args.is_empty() {
+                        group.direct_arg_values[i] = Some(
+                            accum
+                                .direct_args
+                                .iter()
+                                .map(|arg| eval_expr(arg, slot, ctx))
+                                .collect::<Result<Vec<_>, _>>()?,
+                        );
+                    }
                     if let Some(filter) = accum.filter.as_ref() {
                         match eval_expr(filter, slot, ctx)? {
                             Value::Bool(true) => {}
@@ -3073,6 +3083,7 @@ impl PlanNode for AggregateState {
                         .iter()
                         .map(|accum| accum.distinct.then(HashSet::new))
                         .collect(),
+                    direct_arg_values: vec![None; self.accumulators.len()],
                     ordered_inputs: vec![Vec::new(); self.accumulators.len()],
                 });
             }
@@ -3116,8 +3127,32 @@ impl PlanNode for AggregateState {
             for group in &groups {
                 ctx.check_for_interrupts()?;
                 let mut row_values = group.key_values.clone();
-                for (runtime, accum_state) in runtimes.iter().zip(group.accum_states.iter()) {
-                    row_values.push(runtime.finalize(accum_state, ctx)?);
+                for (i, ((runtime, accum_state), accum)) in runtimes
+                    .iter()
+                    .zip(group.accum_states.iter())
+                    .zip(self.accumulators.iter())
+                    .enumerate()
+                {
+                    let direct_arg_values =
+                        if let Some(values) = group.direct_arg_values[i].as_ref() {
+                            values.clone()
+                        } else if accum.direct_args.is_empty() {
+                            Vec::new()
+                        } else {
+                            let mut empty_slot = TupleSlot::virtual_row(Vec::new());
+                            accum
+                                .direct_args
+                                .iter()
+                                .map(|expr| eval_expr(expr, &mut empty_slot, ctx))
+                                .collect::<Result<Vec<_>, _>>()?
+                        };
+                    row_values.push(runtime.finalize(
+                        accum,
+                        accum_state,
+                        &group.ordered_inputs[i],
+                        &direct_arg_values,
+                        ctx,
+                    )?);
                 }
 
                 if let Some(having) = &self.having {

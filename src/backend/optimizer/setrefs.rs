@@ -213,6 +213,7 @@ fn aggregate_output_expr(accum: &crate::include::nodes::primnodes::AggAccum, agg
         aggtype: accum.sql_type,
         aggvariadic: accum.agg_variadic,
         aggdistinct: accum.distinct,
+        direct_args: accum.direct_args.clone(),
         args: accum.args.clone(),
         aggorder: accum.order_by.clone(),
         aggfilter: accum.filter.clone(),

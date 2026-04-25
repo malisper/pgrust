@@ -1,11 +1,13 @@
 use super::*;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::{
-    ANYARRAYOID, ANYOID, TEXT_TYPE_OID, bootstrap_pg_proc_rows, builtin_type_rows,
+    ANYARRAYOID, ANYOID, TEXT_TYPE_OID, bootstrap_pg_proc_rows,
+    builtin_hypothetical_aggregate_function_for_proc_oid, builtin_type_rows,
     builtin_window_function_for_proc_oid,
 };
 use crate::include::nodes::primnodes::{
-    BuiltinWindowFunction, JsonRecordFunction, RegexTableFunction, StringTableFunction,
+    BuiltinWindowFunction, HypotheticalAggFunc, JsonRecordFunction, RegexTableFunction,
+    StringTableFunction,
 };
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -61,6 +63,7 @@ pub(super) struct ResolvedFunctionCall {
     pub scalar_impl: Option<BuiltinScalarFunction>,
     pub srf_impl: Option<ResolvedSrfImpl>,
     pub agg_impl: Option<AggFunc>,
+    pub hypothetical_agg_impl: Option<HypotheticalAggFunc>,
     pub window_impl: Option<BuiltinWindowFunction>,
     pub row_shape: ResolvedFunctionRowShape,
 }
@@ -86,6 +89,7 @@ pub(super) fn resolve_function_call(
         let scalar_impl = builtin_scalar_function_for_proc_row(&row);
         let srf_impl = builtin_srf_impl_for_proc_row(&row);
         let agg_impl = aggregate_func_for_proname(&row.proname);
+        let hypothetical_agg_impl = builtin_hypothetical_aggregate_function_for_proc_oid(row.oid);
         let window_impl = builtin_window_function_for_proc_oid(row.oid);
 
         let Some(candidate) = match_proc_signature(catalog, &row, actual_types, func_variadic)
@@ -126,6 +130,7 @@ pub(super) fn resolve_function_call(
             scalar_impl,
             srf_impl,
             agg_impl,
+            hypothetical_agg_impl,
             window_impl,
             row_shape,
         };
@@ -171,6 +176,16 @@ pub(super) fn resolve_scalar_function(name: &str) -> Option<BuiltinScalarFunctio
 
 pub(super) fn resolve_builtin_aggregate(name: &str) -> Option<AggFunc> {
     aggregate_func_for_proname(name)
+}
+
+pub(super) fn resolve_builtin_hypothetical_aggregate(name: &str) -> Option<HypotheticalAggFunc> {
+    match normalize_builtin_function_name(name) {
+        "rank" => Some(HypotheticalAggFunc::Rank),
+        "dense_rank" => Some(HypotheticalAggFunc::DenseRank),
+        "percent_rank" => Some(HypotheticalAggFunc::PercentRank),
+        "cume_dist" => Some(HypotheticalAggFunc::CumeDist),
+        _ => None,
+    }
 }
 
 pub(super) fn resolve_function_cast_type(
