@@ -469,6 +469,13 @@ pub(super) fn flatten_join_alias_vars_query(query: &Query, expr: Expr) -> Expr {
                 .collect(),
             array_type,
         },
+        Expr::Row { descriptor, fields } => Expr::Row {
+            descriptor,
+            fields: fields
+                .into_iter()
+                .map(|(name, expr)| (name, flatten_join_alias_vars_query(query, expr)))
+                .collect(),
+        },
         Expr::Coalesce(left, right) => Expr::Coalesce(
             Box::new(flatten_join_alias_vars_query(query, *left)),
             Box::new(flatten_join_alias_vars_query(query, *right)),

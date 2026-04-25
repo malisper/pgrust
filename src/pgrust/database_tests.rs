@@ -6175,8 +6175,9 @@ fn explain_update_accepts_inherited_update_statement() {
     );
     assert!(
         lines.iter().any(|line| line.contains("f1 =")
-            && line.contains("12::integer")
-            && line.contains("13::integer")),
+            && line.contains("f2 =")
+            && line.contains("12")
+            && line.contains("13")),
         "expected EXPLAIN UPDATE to show index quals, got {lines:?}"
     );
 }

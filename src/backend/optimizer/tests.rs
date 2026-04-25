@@ -179,6 +179,7 @@ fn order_by_path(
         pathtarget,
         input: Box::new(input),
         items,
+        display_items: Vec::new(),
     }
 }
 
@@ -1123,9 +1124,15 @@ fn child_relation_names(plan: &Plan) -> Vec<String> {
 
 fn collect_relation_names(plan: &Plan, names: &mut Vec<String>) {
     match plan {
-        Plan::SeqScan { relation_name, .. } | Plan::IndexOnlyScan { relation_name, .. } => {
-            names.push(relation_name.clone())
-        }
+        Plan::SeqScan { relation_name, .. }
+        | Plan::IndexOnlyScan { relation_name, .. }
+        | Plan::IndexScan { relation_name, .. } => names.push(
+            relation_name
+                .split_once(' ')
+                .map(|(name, _)| name)
+                .unwrap_or(relation_name)
+                .to_string(),
+        ),
         Plan::Append { children, .. }
         | Plan::MergeAppend { children, .. }
         | Plan::SetOp { children, .. } => {
@@ -1162,7 +1169,6 @@ fn collect_relation_names(plan: &Plan, names: &mut Vec<String>) {
             collect_relation_names(right, names);
         }
         Plan::Result { .. }
-        | Plan::IndexScan { .. }
         | Plan::BitmapIndexScan { .. }
         | Plan::Values { .. }
         | Plan::FunctionScan { .. }
@@ -1682,7 +1688,7 @@ fn outer_join_preserved_side_where_qual_pushes_to_base_scan() {
                 Plan::Filter { input, .. }
                     if matches!(
                         input.as_ref(),
-                        Plan::SeqScan { relation_name, .. } if relation_name == "people"
+                        Plan::SeqScan { relation_name, .. } if relation_name.starts_with("people")
                     )
             )
         }),

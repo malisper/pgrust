@@ -81,6 +81,7 @@ pub(super) fn estimate_seqscan_candidate(
         stats,
         filter,
         order_items,
+        None,
     )
 }
 
@@ -106,6 +107,7 @@ pub(super) fn estimate_index_candidate(
         stats,
         spec,
         order_items,
+        None,
         catalog,
     )
 }

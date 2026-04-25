@@ -384,6 +384,7 @@ pub enum Path {
     Append {
         plan_info: PlanEstimate,
         pathtarget: PathTarget,
+        relids: Vec<usize>,
         source_id: usize,
         desc: RelationDesc,
         children: Vec<Path>,
@@ -529,6 +530,7 @@ pub enum Path {
         pathtarget: PathTarget,
         input: Box<Path>,
         items: Vec<OrderByEntry>,
+        display_items: Vec<String>,
     },
     Limit {
         plan_info: PlanEstimate,
