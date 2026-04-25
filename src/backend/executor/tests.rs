@@ -18640,6 +18640,138 @@ fn format_star_with_explicit_width_uses_next_value_argument() {
 }
 
 #[test]
+fn string_builtins_expand_explicit_variadic_arrays() {
+    let base = temp_dir("string_variadic_arrays");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select concat(variadic array[1,2,3]), \
+                concat_ws(',', variadic array[1,2,3]), \
+                format('%s, %s', variadic array['Hello','World']), \
+                format('%2$s, %1$s', variadic array[1,2])",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Text("123".into()),
+                    Value::Text("1,2,3".into()),
+                    Value::Text("Hello, World".into()),
+                    Value::Text("2, 1".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
+fn string_builtins_preserve_variadic_null_array_semantics() {
+    let base = temp_dir("string_variadic_null_arrays");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select concat(variadic NULL::int[]) is NULL, \
+                concat(variadic '{}'::int[]) = '', \
+                format('Hello', variadic NULL::int[])",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Bool(true),
+                    Value::Bool(true),
+                    Value::Text("Hello".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
+fn format_supports_large_explicit_variadic_arrays() {
+    let base = temp_dir("format_large_variadic_array");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select format(string_agg('%s',','), variadic array_agg(i)) \
+         from generate_series(1,10) g(i)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Text("1,2,3,4,5,6,7,8,9,10".into())]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
+fn concat_ws_variadic_scalar_reports_postgres_error() {
+    let base = temp_dir("string_variadic_scalar_error");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select concat_ws(',', variadic 10)",
+    )
+    .unwrap_err();
+    let debug = format!("{err:?}");
+
+    assert!(
+        matches!(
+            err,
+            ExecError::RaiseException(message) if message == "VARIADIC argument must be an array"
+        ),
+        "{debug}"
+    );
+}
+
+#[test]
+fn to_date_supports_numeric_date_templates() {
+    let base = temp_dir("to_date_numeric_templates");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select to_date('20100309','YYYYMMDD'), \
+                to_date('10-03-09','YY-MM-DD'), \
+                concat(1,2,3,'hello',true,false,to_date('20100309','YYYYMMDD'))",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![
+                    Value::Date(DateADT(
+                        crate::backend::utils::time::datetime::days_from_ymd(2010, 3, 9).unwrap()
+                    )),
+                    Value::Date(DateADT(
+                        crate::backend::utils::time::datetime::days_from_ymd(2010, 3, 9).unwrap()
+                    )),
+                    Value::Text("123hellotf2010-03-09".into()),
+                ]]
+            );
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+}
+
+#[test]
 fn lower_supports_grouped_queries() {
     let base = temp_dir("lower_supports_grouped_queries");
     let mut txns = TransactionManager::new_durable(&base).unwrap();

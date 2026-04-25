@@ -1832,6 +1832,14 @@ pub(super) fn bind_scalar_function_call(
                 ],
             ))
         }
+        BuiltinScalarFunction::ToDate => Ok(build_func(
+            func_variadic,
+            arg_types
+                .into_iter()
+                .zip(bound_args)
+                .map(|(ty, arg)| coerce_bound_expr(arg, ty, SqlType::new(SqlTypeKind::Text)))
+                .collect(),
+        )),
         BuiltinScalarFunction::NumericInc
         | BuiltinScalarFunction::Factorial
         | BuiltinScalarFunction::PgLsn => {

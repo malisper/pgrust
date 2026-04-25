@@ -1127,6 +1127,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 | Some(BuiltinScalarFunction::TxidCurrentIfAssigned) => {
                     SqlType::new(SqlTypeKind::Int8)
                 }
+                Some(BuiltinScalarFunction::ToDate) => SqlType::new(SqlTypeKind::Date),
                 Some(BuiltinScalarFunction::ToNumber) => SqlType::new(SqlTypeKind::Numeric),
                 Some(BuiltinScalarFunction::ToChar)
                 | Some(BuiltinScalarFunction::PgInputErrorMessage)

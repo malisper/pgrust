@@ -4486,6 +4486,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("to_oct", BuiltinScalarFunction::ToOct),
         ("to_hex", BuiltinScalarFunction::ToHex),
         ("to_char", BuiltinScalarFunction::ToChar),
+        ("to_date", BuiltinScalarFunction::ToDate),
         ("to_number", BuiltinScalarFunction::ToNumber),
         ("abs", BuiltinScalarFunction::Abs),
         ("log", BuiltinScalarFunction::Log),

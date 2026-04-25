@@ -6,8 +6,9 @@ use crate::backend::utils::time::datetime::{
     unix_days_from_postgres_date, ymd_from_days,
 };
 use crate::include::nodes::datetime::{
-    DATEVAL_NOBEGIN, DATEVAL_NOEND, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeADT, TimeTzADT,
-    TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_HOUR, USECS_PER_MINUTE, USECS_PER_SEC,
+    DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeADT,
+    TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_HOUR, USECS_PER_MINUTE,
+    USECS_PER_SEC,
 };
 
 fn extract_year_number(astronomical_year: i32) -> i32 {
@@ -394,6 +395,127 @@ pub(crate) fn eval_make_date_function(values: &[Value]) -> Result<Value, ExecErr
     let days = days_from_ymd(astronomical_year, month_u32, day_u32)
         .ok_or_else(|| invalid_make_date(year, month, day))?;
     Ok(Value::Date(crate::include::nodes::datetime::DateADT(days)))
+}
+
+fn to_date_parse_error(input: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("invalid input syntax for type date: \"{input}\""),
+        detail: None,
+        hint: None,
+        sqlstate: "22007",
+    }
+}
+
+fn read_fixed_digits(input: &str, pos: &mut usize, width: usize) -> Option<i32> {
+    let end = pos.checked_add(width)?;
+    let bytes = input.as_bytes();
+    if end > bytes.len() || !bytes[*pos..end].iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let value = input[*pos..end].parse().ok()?;
+    *pos = end;
+    Some(value)
+}
+
+fn parse_to_date_numeric_format(input: &str, format: &str) -> Result<DateADT, ExecError> {
+    let normalized = format.to_ascii_uppercase();
+    let mut fmt_pos = 0usize;
+    let mut input_pos = 0usize;
+    let mut year = None;
+    let mut month = None;
+    let mut day = None;
+
+    while fmt_pos < normalized.len() {
+        let remaining = &normalized[fmt_pos..];
+        if remaining.starts_with("YYYY") {
+            year = Some(
+                read_fixed_digits(input, &mut input_pos, 4)
+                    .ok_or_else(|| to_date_parse_error(input))?,
+            );
+            fmt_pos += 4;
+        } else if remaining.starts_with("YY") {
+            let yy = read_fixed_digits(input, &mut input_pos, 2)
+                .ok_or_else(|| to_date_parse_error(input))?;
+            year = Some(if yy < 70 { 2000 + yy } else { 1900 + yy });
+            fmt_pos += 2;
+        } else if remaining.starts_with("MM") {
+            month = Some(
+                read_fixed_digits(input, &mut input_pos, 2)
+                    .ok_or_else(|| to_date_parse_error(input))?,
+            );
+            fmt_pos += 2;
+        } else if remaining.starts_with("DD") {
+            day = Some(
+                read_fixed_digits(input, &mut input_pos, 2)
+                    .ok_or_else(|| to_date_parse_error(input))?,
+            );
+            fmt_pos += 2;
+        } else {
+            let fmt_ch = normalized[fmt_pos..]
+                .chars()
+                .next()
+                .expect("format position points at a char");
+            let input_ch = input[input_pos..]
+                .chars()
+                .next()
+                .ok_or_else(|| to_date_parse_error(input))?;
+            if fmt_ch != input_ch.to_ascii_uppercase() {
+                return Err(to_date_parse_error(input));
+            }
+            fmt_pos += fmt_ch.len_utf8();
+            input_pos += input_ch.len_utf8();
+        }
+    }
+
+    if input_pos != input.len() {
+        return Err(to_date_parse_error(input));
+    }
+    let (Some(year), Some(month), Some(day)) = (year, month, day) else {
+        return Err(ExecError::DetailedError {
+            message: format!("format pattern not supported by to_date: \"{format}\""),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    };
+    if year == 0 {
+        return Err(to_date_parse_error(input));
+    }
+    let astronomical_year = display_year_to_astronomical(year);
+    let month = u32::try_from(month).map_err(|_| to_date_parse_error(input))?;
+    let day = u32::try_from(day).map_err(|_| to_date_parse_error(input))?;
+    let days =
+        days_from_ymd(astronomical_year, month, day).ok_or_else(|| to_date_parse_error(input))?;
+    Ok(DateADT(days))
+}
+
+pub(crate) fn eval_to_date_function(values: &[Value]) -> Result<Value, ExecError> {
+    let [input_value, format_value] = values else {
+        return Err(ExecError::DetailedError {
+            message: "malformed to_date call".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        });
+    };
+    if matches!(input_value, Value::Null) || matches!(format_value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let input = input_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "to_date",
+            left: input_value.clone(),
+            right: Value::Text("".into()),
+        })?;
+    let format = format_value
+        .as_text()
+        .ok_or_else(|| ExecError::TypeMismatch {
+            op: "to_date",
+            left: format_value.clone(),
+            right: Value::Text("".into()),
+        })?;
+    parse_to_date_numeric_format(input, format).map(Value::Date)
 }
 
 #[cfg(test)]

@@ -47,6 +47,10 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
         ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
             expected: "text or bit argument",
             actual,
+        })
+        | ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+            expected: "text, bytea, bit, or tsvector argument",
+            actual,
         }) if actual.starts_with("Length(") => {
             let signature = actual.replace("Length", "length");
             format!("function {signature} does not exist")
@@ -155,6 +159,10 @@ pub(crate) fn format_exec_error_hint(e: &ExecError) -> Option<String> {
         ExecError::WithContext { source, .. } => format_exec_error_hint(source),
         ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
             expected: "text or bit argument",
+            actual,
+        })
+        | ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+            expected: "text, bytea, bit, or tsvector argument",
             actual,
         }) if actual.starts_with("Length(") => Some(
             "No function matches the given name and argument types. You might need to add explicit type casts.".into(),
