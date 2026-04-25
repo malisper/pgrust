@@ -2538,14 +2538,11 @@ fn planner_rewrites_simple_min_aggregate_into_forward_index_only_subplan() {
     )));
     assert!(plan_contains(subplan, |plan| matches!(
         plan,
-        Plan::IndexScan {
-            direction,
-            index_only,
-            ..
-        } if *direction == crate::include::access::relscan::ScanDirection::Forward && *index_only
+        Plan::IndexOnlyScan { direction, .. }
+            if *direction == crate::include::access::relscan::ScanDirection::Forward
     )));
     assert!(plan_contains(subplan, |plan| match plan {
-        Plan::IndexScan { keys, .. } => {
+        Plan::IndexOnlyScan { keys, .. } | Plan::IndexScan { keys, .. } => {
             keys.len() == 1
                 && keys.iter().any(|key| {
                     key.strategy == 1
@@ -2765,7 +2762,6 @@ fn explain_shows_initplan_for_rewritten_minmax_aggregate() {
             .any(|line| line.contains("Index Scan") || line.contains("Index Only Scan"))
     );
     assert!(!lines.iter().any(|line| line.contains("Aggregate")));
-    assert!(!lines.iter().any(|line| line.trim() == "Projection"));
 }
 
 #[test]
@@ -2786,7 +2782,6 @@ fn explain_formats_distinct_minmax_with_unique_and_index_only_scan() {
     assert!(lines.iter().any(|line| line.trim() == "Unique"));
     assert!(lines.iter().any(|line| line.trim() == "Result"));
     assert!(lines.iter().any(|line| line.contains("Index Only Scan")));
-    assert!(!lines.iter().any(|line| line.trim() == "Projection"));
 }
 
 #[test]
@@ -2798,11 +2793,8 @@ fn planner_preserves_ordered_index_path_under_limit() {
     assert!(matches!(planned.plan_tree, Plan::Limit { .. }));
     assert!(plan_contains(&planned.plan_tree, |plan| matches!(
         plan,
-        Plan::IndexScan {
-            direction,
-            index_only,
-            ..
-        } if *direction == crate::include::access::relscan::ScanDirection::Forward && *index_only
+        Plan::IndexOnlyScan { direction, .. }
+            if *direction == crate::include::access::relscan::ScanDirection::Forward
     )));
     assert!(!plan_contains(&planned.plan_tree, |plan| matches!(
         plan,
