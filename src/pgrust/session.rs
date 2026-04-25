@@ -49,11 +49,12 @@ use crate::pgrust::database::{
     AsyncListenAction, AsyncListenOp, Database, PendingNotification, SequenceMutationEffect,
     SessionStatsState, StatsFetchConsistency, TempMutationEffect, TrackFunctionsSetting,
     alter_table_add_constraint_lock_requests, alter_table_validate_constraint_lock_requests,
-    delete_foreign_key_lock_requests, insert_foreign_key_lock_requests,
+    delete_foreign_key_lock_requests, execute_set_constraints, insert_foreign_key_lock_requests,
     merge_pending_notifications, merge_table_lock_requests,
     prepared_insert_foreign_key_lock_requests, queue_pending_notification,
     reject_relation_with_referencing_foreign_keys, relation_foreign_key_lock_requests,
-    update_foreign_key_lock_requests, validate_deferred_foreign_key_constraints,
+    update_foreign_key_lock_requests, validate_deferred_constraints,
+    validate_immediate_constraints,
 };
 use crate::pgrust::portal::{
     CursorOptions, CursorViewRow, Portal, PortalFetchDirection, PortalFetchLimit, PortalManager,
@@ -648,6 +649,7 @@ impl Session {
             Statement::Do(_)
                 | Statement::Show(_)
                 | Statement::Set(_)
+                | Statement::SetConstraints(_)
                 | Statement::Reset(_)
                 | Statement::Checkpoint(_)
                 | Statement::Select(_)
@@ -703,9 +705,10 @@ impl Session {
         merge_pending_notifications(&mut txn.pending_async_notifications, pending);
     }
 
-    fn validate_deferred_foreign_keys_for_active_txn(
+    fn validate_constraints_for_active_txn(
         &self,
         db: &Database,
+        immediate_only: bool,
     ) -> Result<(), ExecError> {
         let Some(txn) = self.active_txn.as_ref() else {
             return Ok(());
@@ -721,16 +724,29 @@ impl Session {
             return Ok(());
         };
         let catalog = self.catalog_lookup_for_command(db, xid, txn.next_command_id);
-        validate_deferred_foreign_key_constraints(
-            db,
-            self.client_id,
-            &catalog,
-            xid,
-            txn.next_command_id,
-            self.interrupts(),
-            &self.datetime_config,
-            &txn.deferred_foreign_keys,
-        )
+        if immediate_only {
+            validate_immediate_constraints(
+                db,
+                self.client_id,
+                &catalog,
+                xid,
+                txn.next_command_id,
+                self.interrupts(),
+                &self.datetime_config,
+                &txn.deferred_foreign_keys,
+            )
+        } else {
+            validate_deferred_constraints(
+                db,
+                self.client_id,
+                &catalog,
+                xid,
+                txn.next_command_id,
+                self.interrupts(),
+                &self.datetime_config,
+                &txn.deferred_foreign_keys,
+            )
+        }
     }
 
     fn finalize_taken_transaction(
@@ -2323,7 +2339,7 @@ impl Session {
                     return Ok(StatementResult::AffectedRows(0));
                 }
                 let result = self
-                    .validate_deferred_foreign_keys_for_active_txn(db)
+                    .validate_constraints_for_active_txn(db, false)
                     .map(|_| StatementResult::AffectedRows(0));
                 let txn = self.active_txn.take().unwrap();
                 let result = self.finalize_taken_transaction(db, txn, result);
@@ -2811,6 +2827,31 @@ impl Session {
             Statement::Do(ref do_stmt) => execute_do_with_gucs(do_stmt, &self.gucs),
             Statement::Show(ref show_stmt) => self.apply_show(db, show_stmt),
             Statement::Set(ref set_stmt) => self.apply_set(db, set_stmt),
+            Statement::SetConstraints(ref set_constraints_stmt) => {
+                let search_path = self.configured_search_path();
+                let catalog = if xid != INVALID_TRANSACTION_ID {
+                    self.catalog_lookup_for_command(db, xid, cid)
+                } else {
+                    db.lazy_catalog_lookup(client_id, None, search_path.as_deref())
+                };
+                let tracker = self
+                    .active_txn
+                    .as_ref()
+                    .expect("SET CONSTRAINTS requires active transaction state")
+                    .deferred_foreign_keys
+                    .clone();
+                execute_set_constraints(
+                    db,
+                    client_id,
+                    &catalog,
+                    (xid != INVALID_TRANSACTION_ID).then_some(xid),
+                    cid,
+                    self.interrupts(),
+                    &self.datetime_config,
+                    &tracker,
+                    set_constraints_stmt,
+                )
+            }
             Statement::Reset(ref reset_stmt) => self.apply_reset(db, reset_stmt),
             Statement::Checkpoint(_) => self.apply_checkpoint(db),
             Statement::CommentOnDomain(ref comment_stmt) => {
@@ -4763,6 +4804,7 @@ impl Session {
         if result.is_ok() {
             self.advance_catalog_command_id_after_statement(cid, effect_start);
             self.process_catalog_command_end(db, effect_start);
+            self.validate_constraints_for_active_txn(db, true)?;
         }
 
         result
@@ -5156,8 +5198,12 @@ impl Session {
                     None,
                 );
                 ctx.interrupts = interrupts;
-                let result = execute_prepared_insert_row(prepared, params, &mut ctx, xid, cid);
+                let result = execute_prepared_insert_row(prepared, params, &mut ctx, xid, cid)
+                    .and_then(|_| self.validate_constraints_for_active_txn(db, true));
                 self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
+                if result.is_err() {
+                    self.mark_transaction_failed();
+                }
                 result
             })
         })
@@ -5434,7 +5480,7 @@ impl Session {
 
                 if started_txn {
                     let result = result.and_then(|n| {
-                        self.validate_deferred_foreign_keys_for_active_txn(db)?;
+                        self.validate_constraints_for_active_txn(db, false)?;
                         Ok(StatementResult::AffectedRows(n))
                     });
                     let txn = self.active_txn.take().unwrap();
@@ -5448,6 +5494,13 @@ impl Session {
                         }
                     })
                 } else {
+                    let result = result.and_then(|n| {
+                        self.validate_constraints_for_active_txn(db, true)
+                            .map(|_| n)
+                    });
+                    if result.is_err() {
+                        self.mark_transaction_failed();
+                    }
                     result
                 }
             })

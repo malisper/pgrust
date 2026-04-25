@@ -130,6 +130,7 @@ use crate::backend::utils::misc::interrupts::{
 };
 use crate::backend::utils::misc::stack_depth;
 use crate::include::access::htup::TupleError;
+use crate::include::access::itemptr::ItemPointerData;
 use crate::pgrust::database::{
     AsyncNotifyRuntime, DatabaseStatsStore, LargeObjectRuntime, PendingNotification,
     SequenceRuntime, SessionStatsState, TransactionWaiter,
@@ -137,7 +138,7 @@ use crate::pgrust::database::{
 use crate::pl::plpgsql::CompiledFunction;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -160,29 +161,147 @@ pub struct ExprEvalBindings {
     pub index_system_bindings: Vec<SystemVarBinding>,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct DeferredForeignKeyTracker {
-    affected_constraint_oids: Arc<parking_lot::Mutex<BTreeSet<u32>>>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConstraintTiming {
+    Immediate,
+    Deferred,
 }
 
-impl DeferredForeignKeyTracker {
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PendingUniqueCheck {
+    pub heap_tid: ItemPointerData,
+    pub key_values: Vec<Value>,
+}
+
+#[derive(Debug, Default)]
+struct DeferredConstraintState {
+    all_override: Option<ConstraintTiming>,
+    named_overrides: BTreeMap<u32, ConstraintTiming>,
+    affected_constraint_oids: BTreeSet<u32>,
+    pending_unique_checks: HashMap<u32, HashSet<PendingUniqueCheck>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DeferredConstraintTracker {
+    state: Arc<parking_lot::Mutex<DeferredConstraintState>>,
+}
+
+pub type DeferredForeignKeyTracker = DeferredConstraintTracker;
+
+impl DeferredConstraintTracker {
     pub fn record(&self, constraint_oid: u32) {
         if constraint_oid == 0 {
             return;
         }
-        self.affected_constraint_oids.lock().insert(constraint_oid);
+        self.state
+            .lock()
+            .affected_constraint_oids
+            .insert(constraint_oid);
+    }
+
+    pub fn record_unique(
+        &self,
+        constraint_oid: u32,
+        heap_tid: ItemPointerData,
+        mut key_values: Vec<Value>,
+    ) {
+        if constraint_oid == 0 {
+            return;
+        }
+        Value::materialize_all(&mut key_values);
+        self.state
+            .lock()
+            .pending_unique_checks
+            .entry(constraint_oid)
+            .or_default()
+            .insert(PendingUniqueCheck {
+                heap_tid,
+                key_values,
+            });
     }
 
     pub fn affected_constraint_oids(&self) -> Vec<u32> {
-        self.affected_constraint_oids
+        self.state
             .lock()
+            .affected_constraint_oids
             .iter()
             .copied()
             .collect()
     }
 
+    pub fn pending_unique_constraint_oids(&self) -> Vec<u32> {
+        self.state
+            .lock()
+            .pending_unique_checks
+            .keys()
+            .copied()
+            .collect()
+    }
+
+    pub fn pending_unique_checks(&self, constraint_oid: u32) -> Vec<PendingUniqueCheck> {
+        self.state
+            .lock()
+            .pending_unique_checks
+            .get(&constraint_oid)
+            .map(|checks| checks.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn clear_foreign_key_constraints(&self, constraint_oids: &BTreeSet<u32>) {
+        let mut state = self.state.lock();
+        for constraint_oid in constraint_oids {
+            state.affected_constraint_oids.remove(constraint_oid);
+        }
+    }
+
+    pub fn clear_unique_constraints(&self, constraint_oids: &BTreeSet<u32>) {
+        let mut state = self.state.lock();
+        for constraint_oid in constraint_oids {
+            state.pending_unique_checks.remove(constraint_oid);
+        }
+    }
+
+    pub fn set_all_timing(&self, timing: ConstraintTiming) {
+        let mut state = self.state.lock();
+        state.named_overrides.clear();
+        state.all_override = Some(timing);
+    }
+
+    pub fn set_constraint_timing(&self, constraint_oid: u32, timing: ConstraintTiming) {
+        if constraint_oid == 0 {
+            return;
+        }
+        self.state
+            .lock()
+            .named_overrides
+            .insert(constraint_oid, timing);
+    }
+
+    pub fn effective_timing(
+        &self,
+        constraint_oid: u32,
+        deferrable: bool,
+        initially_deferred: bool,
+    ) -> ConstraintTiming {
+        if !deferrable {
+            return ConstraintTiming::Immediate;
+        }
+        let state = self.state.lock();
+        state
+            .named_overrides
+            .get(&constraint_oid)
+            .copied()
+            .or(state.all_override)
+            .unwrap_or(if initially_deferred {
+                ConstraintTiming::Deferred
+            } else {
+                ConstraintTiming::Immediate
+            })
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.affected_constraint_oids.lock().is_empty()
+        let state = self.state.lock();
+        state.affected_constraint_oids.is_empty() && state.pending_unique_checks.is_empty()
     }
 }
 
@@ -267,6 +386,22 @@ impl ExecutorContext {
         self.transaction_state
             .as_ref()
             .and_then(|state| state.lock().xid)
+    }
+
+    pub fn constraint_timing(
+        &self,
+        constraint_oid: u32,
+        deferrable: bool,
+        initially_deferred: bool,
+    ) -> ConstraintTiming {
+        self.deferred_foreign_keys
+            .as_ref()
+            .map(|tracker| tracker.effective_timing(constraint_oid, deferrable, initially_deferred))
+            .unwrap_or(if deferrable && initially_deferred {
+                ConstraintTiming::Deferred
+            } else {
+                ConstraintTiming::Immediate
+            })
     }
 
     pub fn ensure_write_xid(&mut self) -> Result<TransactionId, ExecError> {

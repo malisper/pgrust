@@ -144,10 +144,10 @@ pub(crate) use async_notify::{
 pub(crate) use ddl::reject_relation_with_referencing_foreign_keys;
 pub(crate) use foreign_keys::{
     alter_table_add_constraint_lock_requests, alter_table_validate_constraint_lock_requests,
-    delete_foreign_key_lock_requests, insert_foreign_key_lock_requests, merge_table_lock_requests,
-    prepared_insert_foreign_key_lock_requests, relation_foreign_key_lock_requests,
-    table_lock_relations, update_foreign_key_lock_requests,
-    validate_deferred_foreign_key_constraints,
+    delete_foreign_key_lock_requests, execute_set_constraints, insert_foreign_key_lock_requests,
+    merge_table_lock_requests, prepared_insert_foreign_key_lock_requests,
+    relation_foreign_key_lock_requests, table_lock_relations, update_foreign_key_lock_requests,
+    validate_deferred_constraints, validate_immediate_constraints,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
