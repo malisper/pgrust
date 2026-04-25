@@ -1677,6 +1677,44 @@ fn rewrite_query_expands_view_relation_rtes() {
 }
 
 #[test]
+fn rewrite_query_expands_view_relation_rtes_inside_set_operations() {
+    let mut catalog = catalog();
+    let view = people_view_entry();
+    catalog.insert("people_view", view.clone());
+    catalog.rewrites.push(PgRewriteRow {
+        oid: 70000,
+        rulename: "_RETURN".into(),
+        ev_class: view.relation_oid,
+        ev_type: '1',
+        ev_enabled: 'O',
+        is_instead: true,
+        ev_qual: String::new(),
+        ev_action: "select id, name from people".into(),
+    });
+    sort_pg_rewrite_rows(&mut catalog.rewrites);
+
+    let stmt = parse_select("select name from people union select name from people_view").unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[]).unwrap();
+    let set_operation = query.set_operation.as_ref().expect("set operation");
+    assert!(matches!(
+        set_operation.inputs[1].rtable[0].kind,
+        RangeTblEntryKind::Relation { relkind: 'v', .. }
+    ));
+
+    let rewritten = crate::backend::rewrite::pg_rewrite_query(query, &catalog)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let set_operation = rewritten.set_operation.as_ref().expect("set operation");
+    assert!(matches!(
+        set_operation.inputs[1].rtable[0].kind,
+        RangeTblEntryKind::Subquery { .. }
+    ));
+}
+
+#[test]
 fn rewrite_policy_subqueries_apply_nested_row_security() {
     let mut base = Catalog::default();
     base.insert(
@@ -4713,6 +4751,34 @@ fn parse_copy_from_file_statement() {
 }
 
 #[test]
+fn parse_copy_table_to_stdout_with_modern_csv_options() {
+    let stmt = parse_statement(
+        "copy public.items (id, name) to stdout with (format csv, header, delimiter '|', force_quote (name))",
+    )
+    .unwrap();
+    match stmt {
+        Statement::CopyTo(copy) => {
+            assert_eq!(
+                copy.source,
+                CopyToSource::Relation {
+                    table_name: "public.items".into(),
+                    columns: Some(vec!["id".into(), "name".into()]),
+                }
+            );
+            assert_eq!(copy.destination, CopyToDestination::Stdout);
+            assert_eq!(copy.options.format, CopyFormat::Csv);
+            assert_eq!(copy.options.delimiter, "|");
+            assert!(copy.options.header);
+            assert_eq!(
+                copy.options.force_quote,
+                CopyForceQuote::Columns(vec!["name".into()])
+            );
+        }
+        other => panic!("expected COPY TO statement, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_copy_from_file_with_csv_encoding_options() {
     let stmt = parse_statement(
         "copy copy_encoding_tab from '/tmp/copyencoding_utf8.csv' with (format csv, encoding 'LATIN1')",
@@ -4740,16 +4806,46 @@ fn parse_copy_select_to_file_with_csv_encoding_options() {
     .unwrap();
     match stmt {
         Statement::CopyTo(copy) => {
+            assert!(matches!(copy.source, CopyToSource::Query { .. }));
             assert_eq!(
-                copy.target,
-                CopyTarget::File("/tmp/copyencoding_utf8.csv".into())
+                copy.destination,
+                CopyToDestination::File("/tmp/copyencoding_utf8.csv".into())
             );
             assert_eq!(copy.options.format, CopyFormat::Csv);
             assert_eq!(copy.options.encoding.as_deref(), Some("UTF8"));
-            assert_eq!(copy.query.targets.len(), 1);
         }
         other => panic!("expected copy to statement, got {other:?}"),
     }
+}
+
+#[test]
+fn parse_copy_query_to_program_with_legacy_options() {
+    let stmt = parse_statement(
+        "copy (values (1, 'a,b')) to program 'cat >/tmp/copy.out' csv header force quote *",
+    )
+    .unwrap();
+    match stmt {
+        Statement::CopyTo(copy) => {
+            assert!(matches!(copy.source, CopyToSource::Query { .. }));
+            assert_eq!(
+                copy.destination,
+                CopyToDestination::Program("cat >/tmp/copy.out".into())
+            );
+            assert_eq!(copy.options.format, CopyFormat::Csv);
+            assert!(copy.options.header);
+            assert_eq!(copy.options.force_quote, CopyForceQuote::All);
+        }
+        other => panic!("expected COPY TO statement, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_copy_query_rejects_from_direction() {
+    let err = parse_statement("copy (select 1) from '/tmp/in'").unwrap_err();
+    assert!(matches!(
+        err,
+        ParseError::UnexpectedToken { expected: "TO", .. }
+    ));
 }
 
 #[test]
