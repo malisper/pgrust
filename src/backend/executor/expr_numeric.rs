@@ -1,7 +1,11 @@
 use num_bigint::BigInt;
 use num_integer::Integer;
 use num_traits::{Signed, ToPrimitive, Zero};
-use std::cmp::Ordering;
+use std::{
+    cmp::Ordering,
+    collections::HashMap,
+    sync::{LazyLock, Mutex},
+};
 
 use super::ExecError;
 use super::expr_casts::pg_lsn_out_of_range;
@@ -10,7 +14,8 @@ use super::node_types::{NumericValue, Value};
 
 const NUMERIC_MIN_SIG_DIGITS: i32 = 16;
 const NUMERIC_MIN_DISPLAY_SCALE: i32 = 0;
-const NUMERIC_MAX_DISPLAY_SCALE: i32 = 16383;
+const NUMERIC_MAX_DISPLAY_SCALE: i32 = 1000;
+const NUMERIC_DSCALE_MAX: i32 = 16383;
 const NUMERIC_MAX_TRANSCENDENTAL_DISPLAY_SCALE: i32 = 1000;
 const NUMERIC_MAX_TRANSCENDENTAL_RESULT_SCALE: i32 = 2000;
 const NUMERIC_MAX_RESULT_WEIGHT: f64 = 131072.0;
@@ -19,6 +24,8 @@ const LOG10_E: f64 = 0.434294481903252;
 const LOG10_2: f64 = 0.301029995663981;
 const LN_10: f64 = 2.302585092994046;
 const NUMERIC_EXP_LIMIT: i64 = (NUMERIC_MAX_TRANSCENDENTAL_RESULT_SCALE as i64) * 3;
+static POW10_CACHE: LazyLock<Mutex<HashMap<u32, BigInt>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn numeric_domain_error(message: impl Into<String>) -> ExecError {
     ExecError::InvalidStorageValue {
@@ -28,11 +35,23 @@ fn numeric_domain_error(message: impl Into<String>) -> ExecError {
 }
 
 fn pow10_bigint(exp: u32) -> BigInt {
-    let mut value = BigInt::from(1u8);
-    for _ in 0..exp {
-        value *= 10u8;
+    if exp >= 1024 {
+        let mut cache = POW10_CACHE.lock().expect("pow10 cache lock poisoned");
+        if let Some(value) = cache.get(&exp) {
+            return value.clone();
+        }
+        let value = pow10_bigint_uncached(exp);
+        cache.insert(exp, value.clone());
+        return value;
     }
-    value
+    pow10_bigint_uncached(exp)
+}
+
+fn pow10_bigint_uncached(exp: u32) -> BigInt {
+    let mut digits = String::with_capacity(exp as usize + 1);
+    digits.push('1');
+    digits.extend(std::iter::repeat_n('0', exp as usize));
+    BigInt::parse_bytes(digits.as_bytes(), 10).expect("power of ten digits are decimal")
 }
 
 fn trailing_decimal_zeros(coeff: &BigInt, max: u32) -> u32 {
@@ -95,7 +114,8 @@ fn numeric_to_f64(value: &NumericValue) -> Option<f64> {
         NumericValue::NaN => Some(f64::NAN),
         NumericValue::Finite { coeff, scale, .. } => {
             let coeff = coeff.to_f64()?;
-            Some(coeff / 10f64.powi(*scale as i32))
+            let scale = i32::try_from(*scale).ok()?;
+            Some(coeff / 10f64.powi(scale))
         }
     }
 }
@@ -124,7 +144,7 @@ fn finite_dscale(value: &NumericValue) -> u32 {
 }
 
 fn clamp_display_scale(scale: i32) -> u32 {
-    scale.clamp(NUMERIC_MIN_DISPLAY_SCALE, NUMERIC_MAX_DISPLAY_SCALE) as u32
+    scale.clamp(NUMERIC_MIN_DISPLAY_SCALE, NUMERIC_DSCALE_MAX) as u32
 }
 
 fn numeric_sign(value: &NumericValue) -> i32 {
@@ -176,13 +196,13 @@ fn numeric_to_f64_approx(value: &NumericValue) -> f64 {
             let digits = coeff.abs().to_str_radix(10);
             let head_len = digits.len().min(16);
             let head = digits[..head_len].parse::<f64>().unwrap_or(0.0);
-            let exp10 = digits.len() as i32 - head_len as i32 - *scale as i32;
+            let exp10 = digits.len() as i64 - head_len as i64 - i64::from(*scale);
             let magnitude = if exp10 > 308 {
                 f64::INFINITY
             } else if exp10 < -350 {
                 0.0
             } else {
-                head * 10f64.powi(exp10)
+                head * 10f64.powi(exp10 as i32)
             };
             if coeff.is_negative() {
                 -magnitude
@@ -206,9 +226,17 @@ fn approximate_decimal_weight(value: &NumericValue) -> f64 {
 }
 
 fn choose_power_result_scale(base: &NumericValue, exp_dscale: u32, approx_weight: f64) -> u32 {
-    let desired = (NUMERIC_MIN_SIG_DIGITS - approx_weight as i32)
-        .clamp(NUMERIC_MIN_DISPLAY_SCALE, NUMERIC_MAX_DISPLAY_SCALE) as f64;
-    let mut rscale = desired as i32;
+    let desired = if approx_weight.is_finite() {
+        i64::from(NUMERIC_MIN_SIG_DIGITS) - approx_weight as i64
+    } else if approx_weight.is_sign_negative() {
+        i64::from(NUMERIC_MAX_DISPLAY_SCALE)
+    } else {
+        i64::from(NUMERIC_MIN_DISPLAY_SCALE)
+    };
+    let mut rscale = desired.clamp(
+        i64::from(NUMERIC_MIN_DISPLAY_SCALE),
+        i64::from(NUMERIC_MAX_DISPLAY_SCALE),
+    ) as i32;
     rscale = rscale.max(finite_dscale(base) as i32);
     rscale = rscale.max(exp_dscale as i32);
     rscale = rscale.max(NUMERIC_MIN_DISPLAY_SCALE);
@@ -275,7 +303,8 @@ fn floor_div_i32(value: i32, divisor: i32) -> i32 {
 fn decimal_weight(value: &NumericValue) -> i32 {
     match value {
         NumericValue::Finite { coeff, scale, .. } if !coeff.is_zero() => {
-            coeff.abs().to_str_radix(10).len() as i32 - (*scale as i32) - 1
+            let weight = coeff.abs().to_str_radix(10).len() as i64 - i64::from(*scale) - 1;
+            weight.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
         }
         _ => 0,
     }
@@ -313,8 +342,8 @@ fn estimate_ln_dweight(value: &NumericValue) -> i32 {
                 let digits = coeff.abs().to_str_radix(10);
                 let head_len = digits.len().min(16);
                 let head = digits[..head_len].parse::<f64>().unwrap_or(1.0);
-                let dweight = digits.len() as i32 - head_len as i32 - *scale as i32;
-                let ln_approx = head.ln() + f64::from(dweight) * LN_10;
+                let dweight = digits.len() as f64 - head_len as f64 - f64::from(*scale);
+                let ln_approx = head.ln() + dweight * LN_10;
                 if ln_approx == 0.0 {
                     0
                 } else {
@@ -443,6 +472,18 @@ fn numeric_pow_integer(
                 1
             };
             return Ok(NumericValue::from_i64(sign).with_dscale(out_scale));
+        }
+        NumericValue::Finite { coeff, scale, .. }
+            if exp > 0 && *scale == 0 && coeff.abs() == BigInt::from(10u8) =>
+        {
+            if exp >= 131072 {
+                return Err(numeric_domain_error("value overflows numeric format"));
+            }
+            let mut result = pow10_bigint(exp as u32);
+            if coeff.is_negative() && exp % 2 != 0 {
+                result = -result;
+            }
+            return Ok(NumericValue::finite(result, 0).with_dscale(out_scale));
         }
         _ => {}
     }
@@ -773,7 +814,7 @@ fn eval_power_numeric(base: &NumericValue, exp: &NumericValue) -> Result<Numeric
             let ln_num = mul_numeric_clamped(&ln_base, exp, local_rscale);
 
             let mut approx_weight = numeric_to_f64_approx(&ln_num);
-            if approx_weight.abs() > NUMERIC_MAX_DISPLAY_SCALE as f64 * 3.01 {
+            if approx_weight.abs() > NUMERIC_MAX_TRANSCENDENTAL_RESULT_SCALE as f64 * 3.01 {
                 return if approx_weight > 0.0 {
                     Err(numeric_domain_error("value overflows numeric format"))
                 } else {
@@ -810,19 +851,7 @@ fn round_numeric_to_scale(value: &NumericValue, target_scale: i32) -> NumericVal
             .round_to_scale(target_scale as u32)
             .unwrap_or_else(|| value.clone()),
         NumericValue::Finite { coeff, scale, .. } => {
-            let shift = target_scale.unsigned_abs();
-            if negative_scale_rounds_to_zero(coeff, *scale, shift) {
-                return NumericValue::zero();
-            }
-            let factor = pow10_bigint(scale.saturating_add(shift));
-            let (quotient, remainder) = coeff.div_rem(&factor);
-            let twice = remainder.abs() * 2u8;
-            let rounded = if twice >= factor.abs() {
-                quotient + coeff.signum()
-            } else {
-                quotient
-            };
-            NumericValue::finite(rounded * pow10_bigint(shift), 0)
+            round_negative_scale_decimal(coeff, *scale, target_scale.unsigned_abs())
         }
     }
 }
@@ -847,15 +876,69 @@ fn trunc_numeric_to_scale(value: &NumericValue, target_scale: i32) -> NumericVal
             _ => value.clone(),
         },
         NumericValue::Finite { coeff, scale, .. } => {
-            let shift = target_scale.unsigned_abs();
-            if negative_scale_rounds_to_zero(coeff, *scale, shift) {
-                return NumericValue::zero();
-            }
-            let factor = pow10_bigint(scale.saturating_add(shift));
-            let quotient = coeff / &factor;
-            NumericValue::finite(quotient * pow10_bigint(shift), 0)
+            trunc_negative_scale_decimal(coeff, *scale, target_scale.unsigned_abs())
         }
     }
+}
+
+fn round_negative_scale_decimal(coeff: &BigInt, scale: u32, shift: u32) -> NumericValue {
+    if coeff.is_zero() {
+        return NumericValue::zero();
+    }
+
+    let negative = coeff.is_negative();
+    let digits = coeff.abs().to_str_radix(10);
+    let drop = scale as usize + shift as usize;
+    if drop > digits.len() {
+        return NumericValue::zero();
+    }
+
+    let keep_len = digits.len() - drop;
+    let mut rounded = if keep_len == 0 {
+        BigInt::zero()
+    } else {
+        BigInt::parse_bytes(digits[..keep_len].as_bytes(), 10)
+            .expect("coefficient digits are decimal")
+    };
+    if drop > 0 && digits.as_bytes()[keep_len] >= b'5' {
+        rounded += 1u8;
+    }
+    if rounded.is_zero() {
+        return NumericValue::zero();
+    }
+
+    let mut rounded_digits = rounded.to_str_radix(10);
+    rounded_digits.extend(std::iter::repeat_n('0', shift as usize));
+    let mut rounded_coeff = BigInt::parse_bytes(rounded_digits.as_bytes(), 10)
+        .expect("rounded coefficient digits are decimal");
+    if negative {
+        rounded_coeff = -rounded_coeff;
+    }
+    NumericValue::finite(rounded_coeff, 0)
+}
+
+fn trunc_negative_scale_decimal(coeff: &BigInt, scale: u32, shift: u32) -> NumericValue {
+    if coeff.is_zero() {
+        return NumericValue::zero();
+    }
+
+    let negative = coeff.is_negative();
+    let digits = coeff.abs().to_str_radix(10);
+    let drop = scale as usize + shift as usize;
+    if drop >= digits.len() {
+        return NumericValue::zero();
+    }
+
+    let keep_len = digits.len() - drop;
+    let mut truncated_digits = String::with_capacity(keep_len + shift as usize);
+    truncated_digits.push_str(&digits[..keep_len]);
+    truncated_digits.extend(std::iter::repeat_n('0', shift as usize));
+    let mut truncated_coeff = BigInt::parse_bytes(truncated_digits.as_bytes(), 10)
+        .expect("truncated coefficient digits are decimal");
+    if negative {
+        truncated_coeff = -truncated_coeff;
+    }
+    NumericValue::finite(truncated_coeff, 0)
 }
 
 fn numeric_digits_before_decimal(value: &NumericValue) -> u32 {
@@ -871,19 +954,6 @@ fn numeric_digits_before_decimal(value: &NumericValue) -> u32 {
         }
         _ => 0,
     }
-}
-
-fn negative_scale_rounds_to_zero(coeff: &BigInt, scale: u32, shift: u32) -> bool {
-    if coeff.is_zero() {
-        return true;
-    }
-    let digits = coeff
-        .to_str_radix(10)
-        .trim_start_matches('-')
-        .trim_start_matches('0')
-        .len()
-        .max(1) as u32;
-    digits.saturating_sub(scale) < shift
 }
 
 fn ensure_numeric_range(value: NumericValue) -> Result<NumericValue, ExecError> {
@@ -1020,7 +1090,7 @@ pub(super) fn eval_ln_function(values: &[Value]) -> Result<Value, ExecError> {
     }
 }
 
-pub(super) fn eval_power_function(values: &[Value]) -> Result<Value, ExecError> {
+pub(crate) fn eval_power_function(values: &[Value]) -> Result<Value, ExecError> {
     match values {
         [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
         [Value::Float64(base), Value::Float64(exp)] => {
@@ -1124,6 +1194,14 @@ pub(super) fn eval_trim_scale_function(values: &[Value]) -> Result<Value, ExecEr
         [] | [Value::Null] => Ok(Value::Null),
         [value] => match value_as_numeric(value) {
             Some(NumericValue::Finite { coeff, scale, .. }) => {
+                let (coeff, scale) = if scale > 16_383 {
+                    match NumericValue::finite(coeff.clone(), scale).round_to_scale(16_383) {
+                        Some(NumericValue::Finite { coeff, scale, .. }) => (coeff, scale),
+                        _ => (coeff, scale),
+                    }
+                } else {
+                    (coeff, scale)
+                };
                 if coeff.is_zero() {
                     Ok(Value::Numeric(NumericValue::zero()))
                 } else {
@@ -1224,6 +1302,13 @@ fn eval_log_numeric_unary(value: &NumericValue) -> Result<NumericValue, ExecErro
     eval_log_numeric_binary(&NumericValue::from_i64(10), value)
 }
 
+fn with_unary_log_context(error: ExecError) -> ExecError {
+    ExecError::WithContext {
+        source: Box::new(error),
+        context: "SQL function \"log\" statement 1".to_string(),
+    }
+}
+
 fn eval_log_numeric_binary(
     base: &NumericValue,
     value: &NumericValue,
@@ -1289,22 +1374,29 @@ pub(super) fn eval_log_function(values: &[Value]) -> Result<Value, ExecError> {
         [Value::Null] | [_, Value::Null] => Ok(Value::Null),
         [Value::Float64(value)] => {
             if *value == 0.0 {
-                return Err(numeric_domain_error("cannot take logarithm of zero"));
+                return Err(with_unary_log_context(numeric_domain_error(
+                    "cannot take logarithm of zero",
+                )));
             }
             if *value < 0.0 {
-                return Err(numeric_domain_error(
+                return Err(with_unary_log_context(numeric_domain_error(
                     "cannot take logarithm of a negative number",
-                ));
+                )));
             }
             Ok(Value::Float64(value.log10()))
         }
-        [value] => Ok(Value::Numeric(eval_log_numeric_unary(
-            &value_as_numeric(value).ok_or_else(|| ExecError::TypeMismatch {
-                op: "log",
-                left: value.clone(),
-                right: Value::Null,
-            })?,
-        )?)),
+        [value] => Ok(Value::Numeric(
+            eval_log_numeric_unary(
+                &value_as_numeric(value)
+                    .ok_or_else(|| ExecError::TypeMismatch {
+                        op: "log",
+                        left: value.clone(),
+                        right: Value::Null,
+                    })
+                    .map_err(with_unary_log_context)?,
+            )
+            .map_err(with_unary_log_context)?,
+        )),
         [Value::Float64(base), Value::Float64(value)] => {
             if *base == 0.0 || *value == 0.0 {
                 return Err(numeric_domain_error("cannot take logarithm of zero"));
@@ -1740,5 +1832,65 @@ pub(super) fn eval_width_bucket_function(values: &[Value]) -> Result<Value, Exec
             right: right.clone(),
         }),
         _ => Ok(Value::Null),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn numeric(text: &str) -> NumericValue {
+        parse_numeric_text(text).expect("valid numeric literal")
+    }
+
+    #[test]
+    fn negative_scale_round_handles_numeric_regression_limits() {
+        let rounded = round_numeric_to_scale(&numeric("4.4e131071"), -131071);
+        assert_eq!(rounded.render(), format!("4{}", "0".repeat(131071)));
+
+        let rounded = round_numeric_to_scale(&numeric("4.5e131071"), -131071);
+        assert_eq!(rounded.render(), format!("5{}", "0".repeat(131071)));
+
+        assert_eq!(
+            round_numeric_to_scale(&numeric("4.5e131071"), -131072),
+            NumericValue::zero()
+        );
+
+        let rounded = round_numeric_to_scale(&numeric("5.5e131071"), -131072);
+        assert_eq!(numeric_digits_before_decimal(&rounded), 131073);
+
+        assert_eq!(
+            round_numeric_to_scale(&numeric("5.5e131071"), -1000000),
+            NumericValue::zero()
+        );
+    }
+
+    #[test]
+    fn negative_scale_trunc_handles_numeric_regression_limits() {
+        let truncated = trunc_numeric_to_scale(&numeric("5.5e131071"), -131071);
+        assert_eq!(truncated.render(), format!("5{}", "0".repeat(131071)));
+
+        assert_eq!(
+            trunc_numeric_to_scale(&numeric("5.5e131071"), -131072),
+            NumericValue::zero()
+        );
+    }
+
+    #[test]
+    fn huge_negative_integer_power_underflows_to_zero() {
+        assert_eq!(
+            numeric_pow_integer(&numeric("10.0"), -2147483648, 0).unwrap(),
+            NumericValue::zero().with_dscale(1000)
+        );
+    }
+
+    #[test]
+    fn large_integer_power_of_ten_uses_exact_fast_path() {
+        let result = numeric_pow_integer(&numeric("10"), 131071, 0).unwrap();
+        assert_eq!(numeric_digits_before_decimal(&result), 131072);
+        assert!(matches!(
+            numeric_pow_integer(&numeric("10"), 131072, 0),
+            Err(ExecError::InvalidStorageValue { .. })
+        ));
     }
 }

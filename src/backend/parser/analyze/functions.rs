@@ -852,6 +852,8 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::MacAddr8Set7Bit
             | BuiltinScalarFunction::HashMacAddr
             | BuiltinScalarFunction::HashMacAddr8
+            | BuiltinScalarFunction::NetworkHost
+            | BuiltinScalarFunction::NetworkAbbrev
             | BuiltinScalarFunction::BitCount => args.len() == 1,
             BuiltinScalarFunction::Trunc | BuiltinScalarFunction::Round => {
                 matches!(args.len(), 1 | 2)
@@ -860,6 +862,14 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::Power
             | BuiltinScalarFunction::Atan2d
             | BuiltinScalarFunction::FormatType
+            | BuiltinScalarFunction::NetworkSetMasklen
+            | BuiltinScalarFunction::NetworkSameFamily
+            | BuiltinScalarFunction::NetworkMerge
+            | BuiltinScalarFunction::NetworkSubnet
+            | BuiltinScalarFunction::NetworkSubnetEq
+            | BuiltinScalarFunction::NetworkSupernet
+            | BuiltinScalarFunction::NetworkSupernetEq
+            | BuiltinScalarFunction::NetworkOverlap
             | BuiltinScalarFunction::BoolEq
             | BuiltinScalarFunction::BoolNe
             | BuiltinScalarFunction::BoolAndStateFunc
@@ -1053,6 +1063,12 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::GeoIsHorizontal => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::RangeConstructor => matches!(args.len(), 0 | 2 | 3),
             BuiltinScalarFunction::RangeIsEmpty
+            | BuiltinScalarFunction::NetworkBroadcast
+            | BuiltinScalarFunction::NetworkNetwork
+            | BuiltinScalarFunction::NetworkMasklen
+            | BuiltinScalarFunction::NetworkFamily
+            | BuiltinScalarFunction::NetworkNetmask
+            | BuiltinScalarFunction::NetworkHostmask
             | BuiltinScalarFunction::RangeLower
             | BuiltinScalarFunction::RangeUpper
             | BuiltinScalarFunction::RangeLowerInc
@@ -1929,6 +1945,22 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("replace", BuiltinScalarFunction::Replace),
         ("split_part", BuiltinScalarFunction::SplitPart),
         ("translate", BuiltinScalarFunction::Translate),
+        ("host", BuiltinScalarFunction::NetworkHost),
+        ("abbrev", BuiltinScalarFunction::NetworkAbbrev),
+        ("broadcast", BuiltinScalarFunction::NetworkBroadcast),
+        ("network", BuiltinScalarFunction::NetworkNetwork),
+        ("masklen", BuiltinScalarFunction::NetworkMasklen),
+        ("family", BuiltinScalarFunction::NetworkFamily),
+        ("netmask", BuiltinScalarFunction::NetworkNetmask),
+        ("hostmask", BuiltinScalarFunction::NetworkHostmask),
+        ("set_masklen", BuiltinScalarFunction::NetworkSetMasklen),
+        ("inet_same_family", BuiltinScalarFunction::NetworkSameFamily),
+        ("inet_merge", BuiltinScalarFunction::NetworkMerge),
+        ("network_sub", BuiltinScalarFunction::NetworkSubnet),
+        ("network_subeq", BuiltinScalarFunction::NetworkSubnetEq),
+        ("network_sup", BuiltinScalarFunction::NetworkSupernet),
+        ("network_supeq", BuiltinScalarFunction::NetworkSupernetEq),
+        ("network_overlap", BuiltinScalarFunction::NetworkOverlap),
         ("text_to_regclass", BuiltinScalarFunction::TextToRegClass),
         ("to_regproc", BuiltinScalarFunction::ToRegProc),
         ("to_regprocedure", BuiltinScalarFunction::ToRegProcedure),

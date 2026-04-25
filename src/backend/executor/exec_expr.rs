@@ -80,8 +80,9 @@ use super::expr_string::{
     eval_rpad_function, eval_set_bit_bytes, eval_set_byte, eval_sha224_function,
     eval_sha256_function, eval_sha384_function, eval_sha512_function, eval_split_part_function,
     eval_strpos_function, eval_text_overlay, eval_text_substring, eval_to_bin_function,
-    eval_to_char_function, eval_to_hex_function, eval_to_number_function, eval_to_oct_function,
-    eval_translate_function, eval_trim_function, eval_unistr_function,
+    eval_to_char_float4_function, eval_to_char_function, eval_to_hex_function,
+    eval_to_number_function, eval_to_oct_function, eval_translate_function, eval_trim_function,
+    eval_unistr_function,
 };
 use super::expr_txid::eval_txid_builtin_function;
 use super::expr_xml::{eval_xml_comment_function, eval_xml_expr, eval_xml_is_well_formed_function};
@@ -3633,6 +3634,9 @@ fn eval_plpgsql_builtin_function(
     if let Some(result) = eval_range_function(func, &values, result_type, func_variadic) {
         return result;
     }
+    if let Some(result) = crate::backend::executor::eval_network_function(func, &values) {
+        return result;
+    }
     match func {
         BuiltinScalarFunction::ToTsVector
         | BuiltinScalarFunction::JsonbToTsVector
@@ -4571,6 +4575,20 @@ fn eval_builtin_function(
         .iter()
         .map(|arg| eval_expr(arg, slot, ctx))
         .collect::<Result<Vec<_>, _>>()?;
+    if matches!(func, BuiltinScalarFunction::ToChar)
+        && matches!(
+            args.first(),
+            Some(Expr::Cast(
+                _,
+                SqlType {
+                    kind: SqlTypeKind::Float4,
+                    ..
+                }
+            ))
+        )
+    {
+        return eval_to_char_float4_function(&values);
+    }
     if let Some(result) = eval_geometry_function(func, &values) {
         return result;
     }
@@ -4586,6 +4604,9 @@ fn eval_builtin_function(
         return result;
     }
     if let Some(result) = eval_range_function(func, &values, result_type, func_variadic) {
+        return result;
+    }
+    if let Some(result) = crate::backend::executor::eval_network_function(func, &values) {
         return result;
     }
     if let Some(result) = eval_json_builtin_function(

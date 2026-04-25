@@ -434,7 +434,7 @@ similar_suffix = { kw_not? ~ kw_similar ~ kw_to ~ concat_expr ~ escape_clause? }
 escape_clause = { kw_escape ~ concat_expr }
 is_document_suffix = { kw_is ~ kw_not? ~ kw_document }
 json_access_op = { "#>>" | "#>" | "->>" | "->" }
-comp_op = { "<->" | "##" | "?#" | "?||" | "?-|" | "~=" | "&<|" | "|&>" | "<<|" | "|>>" | "&<" | "&>" | "<^" | ">^" | "?-" | "-|-" | "@>" | "<@" | "@?" | "@@" | "?|" | "?&" | "?" | "&&" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "!~" | "~" }
+comp_op = { "<->" | "##" | "?#" | "?||" | "?-|" | "~=" | "&<|" | "|&>" | "<<|" | "|>>" | "<<=" | ">>=" | "&<" | "&>" | "<^" | ">^" | "?-" | "-|-" | "@>" | "<@" | "@?" | "@@" | "?|" | "?&" | "?" | "&&" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "!~" | "~" }
 unary_expr = { positive_expr | negated_expr | primary_expr }
 postfix_expr = { unary_expr ~ (cast_suffix | subscript_suffix | field_select_suffix | collate_suffix | at_time_zone_suffix)* }
 cast_suffix = { "::" ~ cast_type_name }

@@ -11467,6 +11467,7 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
         let mut item_inner = item_pair.into_inner();
         let expr_pair = item_inner.next().ok_or(ParseError::UnexpectedEof)?;
         let expr_is_extract = top_level_extract_expr(expr_pair.clone());
+        let expr_is_power_operator = top_level_power_operator_expr(expr_pair.clone());
         let expr = build_expr(expr_pair)?;
         let output_name = if let Some(alias_pair) = item_inner.next() {
             let alias = alias_pair
@@ -11476,6 +11477,8 @@ fn build_select_list(pair: Pair<'_, Rule>) -> Result<Vec<SelectItem>, ParseError
             build_identifier(alias)
         } else if expr_is_extract {
             "extract".into()
+        } else if expr_is_power_operator {
+            "?column?".into()
         } else {
             select_item_name(&expr, index)
         };
@@ -11521,6 +11524,38 @@ fn top_level_extract_expr(pair: Pair<'_, Rule>) -> bool {
                 return false;
             }
             top_level_extract_expr(first)
+        }
+        _ => false,
+    }
+}
+
+fn top_level_power_operator_expr(pair: Pair<'_, Rule>) -> bool {
+    match pair.as_rule() {
+        Rule::pow_expr => pair.into_inner().any(|part| part.as_rule() == Rule::pow_op),
+        Rule::expr
+        | Rule::or_expr
+        | Rule::and_expr
+        | Rule::not_expr
+        | Rule::cmp_expr
+        | Rule::json_access_expr
+        | Rule::concat_expr
+        | Rule::add_expr
+        | Rule::bit_expr
+        | Rule::shift_expr
+        | Rule::mul_expr
+        | Rule::unary_expr
+        | Rule::positive_expr
+        | Rule::negated_expr
+        | Rule::postfix_expr
+        | Rule::primary_expr => {
+            let mut inner = pair.into_inner();
+            let Some(first) = inner.next() else {
+                return false;
+            };
+            if inner.next().is_some() {
+                return false;
+            }
+            top_level_power_operator_expr(first)
         }
         _ => false,
     }
@@ -13566,6 +13601,16 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                         }
                         "&&" => SqlExpr::BinaryOperator {
                             op: "&&".into(),
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        "<<=" => SqlExpr::BinaryOperator {
+                            op: "<<=".into(),
+                            left: Box::new(left),
+                            right: Box::new(right),
+                        },
+                        ">>=" => SqlExpr::BinaryOperator {
+                            op: ">>=".into(),
                             left: Box::new(left),
                             right: Box::new(right),
                         },

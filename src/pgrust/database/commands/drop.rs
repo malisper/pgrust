@@ -1,5 +1,6 @@
 use super::super::*;
 use super::create::{aggregate_signature_arg_oids, resolve_aggregate_proc_rows};
+use super::dependency_drop::{CatalogDependencyGraph, DropBehavior, ObjectAddress};
 use crate::backend::parser::{parse_type_name, resolve_raw_type_name};
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::misc::notices::{push_notice, push_notice_with_detail};
@@ -152,6 +153,7 @@ struct DropTablePlan {
 
 struct DropTableDependencyContext<'a> {
     catcache: &'a CatCache,
+    graph: &'a CatalogDependencyGraph,
     constraints_by_oid: BTreeMap<u32, PgConstraintRow>,
     rewrites_by_oid: BTreeMap<u32, PgRewriteRow>,
 }
@@ -273,11 +275,8 @@ fn drop_table_direct_dependencies(
     let mut rule_oids = BTreeSet::new();
     let mut deps = Vec::new();
 
-    for row in ctx.catcache.depend_rows() {
-        if row.refclassid != PG_CLASS_RELATION_OID
-            || row.refobjid != relation_oid
-            || row.objsubid != 0
-        {
+    for row in ctx.graph.dependents(ObjectAddress::relation(relation_oid)) {
+        if row.objsubid != 0 {
             continue;
         }
         match row.classid {
@@ -356,8 +355,8 @@ fn drop_table_direct_dependencies(
         }
     }
 
-    for inherit in ctx.catcache.inherit_rows() {
-        if inherit.inhparent != relation_oid || !relation_oids.insert(inherit.inhrelid) {
+    for inherit in ctx.graph.inheritance_children(relation_oid) {
+        if !relation_oids.insert(inherit.inhrelid) {
             continue;
         }
         let Some(class) = ctx.catcache.class_by_oid(inherit.inhrelid) else {
@@ -396,7 +395,7 @@ fn plan_drop_table_relation(
     ctx: &DropTableDependencyContext<'_>,
     relation_oid: u32,
     explicit_relation_oids: &BTreeSet<u32>,
-    cascade: bool,
+    behavior: DropBehavior,
     plan: &mut DropTablePlan,
 ) {
     if !plan.relation_drop_oids.insert(relation_oid) {
@@ -425,18 +424,18 @@ fn plan_drop_table_relation(
                         ctx,
                         dependent_oid,
                         explicit_relation_oids,
-                        cascade,
+                        behavior,
                         plan,
                     );
                     continue;
                 }
-                if cascade {
+                if behavior.is_cascade() {
                     plan.notices.push(dep.cascade_notice());
                     plan_drop_table_relation(
                         ctx,
                         dependent_oid,
                         explicit_relation_oids,
-                        cascade,
+                        behavior,
                         plan,
                     );
                 } else {
@@ -459,7 +458,7 @@ fn plan_drop_table_relation(
                 {
                     continue;
                 }
-                if cascade {
+                if behavior.is_cascade() {
                     plan.notices.push(dep.cascade_notice());
                     plan.constraint_drops.push(constraint.clone());
                 } else {
@@ -482,7 +481,7 @@ fn plan_drop_table_relation(
                 {
                     continue;
                 }
-                if cascade {
+                if behavior.is_cascade() {
                     plan.notices.push(dep.cascade_notice());
                     plan.rule_drops.push(rule.clone());
                 } else {
@@ -740,22 +739,7 @@ impl Database {
             .collect::<Vec<_>>();
         let mut next_cid = cid;
 
-        self.drop_statistics_for_namespace_in_transaction(
-            client_id,
-            schema_oid,
-            xid,
-            &mut next_cid,
-            catalog_effects,
-        )?;
-
         for relation in relation_rows {
-            self.drop_statistics_for_relation_in_transaction(
-                client_id,
-                relation.oid,
-                xid,
-                &mut next_cid,
-                catalog_effects,
-            )?;
             let ctx = CatalogWriteContext {
                 pool: self.pool.clone(),
                 txns: self.txns.clone(),
@@ -896,8 +880,11 @@ impl Database {
         )?;
 
         let result = (|| {
+            let graph = CatalogDependencyGraph::new(&catcache);
+            let behavior = DropBehavior::from_cascade(drop_stmt.cascade);
             let dependency_ctx = DropTableDependencyContext {
                 catcache: &catcache,
+                graph: &graph,
                 constraints_by_oid: catcache
                     .constraint_rows()
                     .into_iter()
@@ -915,7 +902,7 @@ impl Database {
                     &dependency_ctx,
                     relation_oid,
                     &explicit_relation_oids,
-                    drop_stmt.cascade,
+                    behavior,
                     &mut plan,
                 );
             }
@@ -990,13 +977,6 @@ impl Database {
                     .class_by_oid(*relation_oid)
                     .map(|row| (row.relkind, row.relpersistence))
                     .unwrap_or(('r', 'p'));
-                self.drop_statistics_for_relation_in_transaction(
-                    client_id,
-                    *relation_oid,
-                    xid,
-                    &mut next_cid,
-                    catalog_effects,
-                )?;
                 if relpersistence == 't' {
                     let temp_name = self
                         .temp_relation_name_for_oid(client_id, *relation_oid)
@@ -1738,6 +1718,42 @@ mod tests {
         let catcache = db.backend_catcache(1, None).unwrap();
         assert!(catcache.class_by_name("p1").is_none());
         assert!(catcache.class_by_name("c1").is_none());
+    }
+
+    #[test]
+    fn drop_table_drops_many_partition_children_from_dependency_graph() {
+        let base = temp_dir("table_many_partition_children");
+        let db = Database::open(&base, 16).unwrap();
+        let mut session = Session::new(1);
+        session
+            .execute(
+                &db,
+                "create table ddl_heavy_parted (a int4, b text) partition by range (a)",
+            )
+            .unwrap();
+        for idx in 0..12 {
+            session
+                .execute(
+                    &db,
+                    &format!(
+                        "create table ddl_heavy_parted_{idx} partition of ddl_heavy_parted for values from ({}) to ({})",
+                        idx * 100,
+                        (idx + 1) * 100
+                    ),
+                )
+                .unwrap();
+        }
+
+        session.execute(&db, "drop table ddl_heavy_parted").unwrap();
+
+        let remaining = db
+            .backend_catcache(1, None)
+            .unwrap()
+            .class_rows()
+            .into_iter()
+            .filter(|row| row.relname.starts_with("ddl_heavy_parted"))
+            .count();
+        assert_eq!(remaining, 0);
     }
 
     #[test]
