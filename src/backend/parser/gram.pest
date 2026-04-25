@@ -426,7 +426,7 @@ is_not_distinct_suffix = { kw_is ~ kw_not ~ kw_distinct ~ kw_from ~ add_expr }
 in_expr_list_suffix = { kw_not? ~ kw_in ~ "(" ~ expr_list ~ ")" }
 in_subquery_suffix = { kw_not? ~ kw_in ~ "(" ~ select_stmt ~ ")" }
 quantified_suffix = { quantified_comp_op ~ (kw_any | kw_all) ~ "(" ~ (select_stmt | expr) ~ ")" }
-quantified_comp_op = { "@@" | "&&" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "~" }
+quantified_comp_op = { "@@" | "&&" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "!~" | "~" }
 quantified_like_suffix = { kw_not? ~ (kw_ilike | kw_like) ~ (kw_any | kw_all) ~ "(" ~ (select_stmt | expr) ~ ")" }
 quantified_similar_suffix = { kw_not? ~ kw_similar ~ kw_to ~ (kw_any | kw_all) ~ "(" ~ (select_stmt | expr) ~ ")" }
 like_suffix = { kw_not? ~ (kw_ilike | kw_like) ~ concat_expr ~ escape_clause? }
@@ -434,7 +434,7 @@ similar_suffix = { kw_not? ~ kw_similar ~ kw_to ~ concat_expr ~ escape_clause? }
 escape_clause = { kw_escape ~ concat_expr }
 is_document_suffix = { kw_is ~ kw_not? ~ kw_document }
 json_access_op = { "#>>" | "#>" | "->>" | "->" }
-comp_op = { "<->" | "##" | "?#" | "?||" | "?-|" | "~=" | "&<|" | "|&>" | "<<|" | "|>>" | "&<" | "&>" | "<^" | ">^" | "?-" | "-|-" | "@>" | "<@" | "@?" | "@@" | "?|" | "?&" | "?" | "&&" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "~" }
+comp_op = { "<->" | "##" | "?#" | "?||" | "?-|" | "~=" | "&<|" | "|&>" | "<<|" | "|>>" | "&<" | "&>" | "<^" | ">^" | "?-" | "-|-" | "@>" | "<@" | "@?" | "@@" | "?|" | "?&" | "?" | "&&" | "=" | "<>" | "!=" | "<=" | ">=" | "<" | ">" | "!~" | "~" }
 unary_expr = { positive_expr | negated_expr | primary_expr }
 postfix_expr = { unary_expr ~ (cast_suffix | subscript_suffix | field_select_suffix | collate_suffix)* }
 cast_suffix = { "::" ~ cast_type_name }

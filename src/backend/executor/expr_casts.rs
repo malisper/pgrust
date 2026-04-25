@@ -3222,7 +3222,7 @@ pub(super) fn cast_numeric_value(
 
 fn coerce_character_string(text: &str, ty: SqlType, explicit: bool) -> Result<String, ExecError> {
     let max_chars = match ty.kind {
-        SqlTypeKind::Name => return Ok(text.to_string()),
+        SqlTypeKind::Name => return Ok(truncate_name_string(text)),
         SqlTypeKind::Char => match ty.char_len() {
             Some(max_chars) => max_chars,
             None => return Ok(text.to_string()),
@@ -3265,6 +3265,20 @@ fn coerce_character_string(text: &str, ty: SqlType, explicit: bool) -> Result<St
             },
         })
     }
+}
+
+fn truncate_name_string(text: &str) -> String {
+    const NAME_DATA_MAX_BYTES: usize = 63;
+
+    if text.len() <= NAME_DATA_MAX_BYTES {
+        return text.to_string();
+    }
+
+    let mut end = NAME_DATA_MAX_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
 }
 
 fn pad_char_string(text: &str, max_chars: usize) -> String {
