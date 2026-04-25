@@ -4572,6 +4572,16 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
+            Statement::AlterType(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_alter_type_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                )
+            }
             Statement::DropDomain(ref drop_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_drop_domain_stmt_with_search_path(
@@ -5454,6 +5464,7 @@ impl Session {
                                 | ScalarType::Timestamp
                                 | ScalarType::TimestampTz
                                 | ScalarType::Interval
+                                | ScalarType::Enum
                                 | ScalarType::Range(_)
                                 | ScalarType::Multirange(_)
                                 | ScalarType::Point

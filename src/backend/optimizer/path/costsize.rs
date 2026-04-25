@@ -3178,6 +3178,7 @@ pub(super) fn estimate_sql_type_width(sql_type: SqlType) -> usize {
         | SqlTypeKind::AnyCompatibleArray
         | SqlTypeKind::AnyCompatibleRange
         | SqlTypeKind::AnyCompatibleMultirange
+        | SqlTypeKind::AnyEnum
         | SqlTypeKind::Point
         | SqlTypeKind::Lseg
         | SqlTypeKind::Path
@@ -3192,6 +3193,7 @@ pub(super) fn estimate_sql_type_width(sql_type: SqlType) -> usize {
         | SqlTypeKind::Record
         | SqlTypeKind::Composite
         | SqlTypeKind::Trigger => 32,
+        SqlTypeKind::Enum => 4,
         SqlTypeKind::Range
         | SqlTypeKind::Int4Range
         | SqlTypeKind::Int8Range

@@ -263,12 +263,20 @@ pub(crate) struct DomainEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EnumLabelEntry {
+    pub oid: u32,
+    pub label: String,
+    pub sort_order: u32,
+    pub committed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EnumTypeEntry {
     pub oid: u32,
     pub array_oid: u32,
     pub name: String,
     pub namespace_oid: u32,
-    pub labels: Vec<String>,
+    pub labels: Vec<EnumLabelEntry>,
     pub comment: Option<String>,
 }
 
@@ -662,22 +670,19 @@ impl Database {
         let mut rows = enum_types
             .values()
             .flat_map(|entry| {
-                let base_sql_type = SqlType::new(SqlTypeKind::Text).with_identity(entry.oid, 0);
+                let base_sql_type = SqlType::new(SqlTypeKind::Enum).with_identity(entry.oid, 0);
                 [
                     PgTypeRow {
                         oid: entry.oid,
                         typname: entry.name.clone(),
                         typnamespace: entry.namespace_oid,
                         typowner: BOOTSTRAP_SUPERUSER_OID,
-                        typlen: -1,
+                        typlen: 4,
                         typalign: AttributeAlign::Int,
-                        typstorage: AttributeStorage::Extended,
+                        typstorage: AttributeStorage::Plain,
                         typrelid: 0,
                         typelem: 0,
                         typarray: entry.array_oid,
-                        // :HACK: User-defined enums are text-backed for now. This unlocks
-                        // catalog/type resolution and basic storage flow, but does not yet
-                        // enforce label membership or enum ordering semantics.
                         sql_type: base_sql_type,
                     },
                     PgTypeRow {
@@ -708,6 +713,42 @@ impl Database {
             (schema_rank, row.typname.clone())
         });
         rows
+    }
+
+    pub(crate) fn enum_label_oid(&self, type_oid: u32, label: &str) -> Option<u32> {
+        self.enum_types
+            .read()
+            .values()
+            .find(|entry| entry.oid == type_oid)?
+            .labels
+            .iter()
+            .find(|entry| entry.label == label)
+            .map(|entry| entry.oid)
+    }
+
+    pub(crate) fn enum_label(&self, type_oid: u32, label_oid: u32) -> Option<String> {
+        self.enum_types
+            .read()
+            .values()
+            .find(|entry| entry.oid == type_oid)?
+            .labels
+            .iter()
+            .find(|entry| entry.oid == label_oid)
+            .map(|entry| entry.label.clone())
+    }
+
+    pub(crate) fn enum_label_rows_for_catalog(&self) -> Vec<(u32, u32, String)> {
+        self.enum_types
+            .read()
+            .values()
+            .flat_map(|entry| {
+                entry
+                    .labels
+                    .iter()
+                    .map(|label| (entry.oid, label.oid, label.label.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
     pub(crate) fn range_type_rows_for_search_path(&self, search_path: &[String]) -> Vec<PgTypeRow> {

@@ -290,6 +290,7 @@ pub enum Statement {
     CreateAggregate(CreateAggregateStatement),
     CreateTrigger(CreateTriggerStatement),
     CreateType(CreateTypeStatement),
+    AlterType(AlterTypeStatement),
     CreateDatabase(CreateDatabaseStatement),
     CreateSchema(CreateSchemaStatement),
     CreateTablespace(CreateTablespaceStatement),
@@ -722,6 +723,35 @@ pub struct CreateEnumTypeStatement {
     pub schema_name: Option<String>,
     pub type_name: String,
     pub labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterTypeStatement {
+    AddEnumValue(AlterTypeAddEnumValueStatement),
+    RenameEnumValue(AlterTypeRenameEnumValueStatement),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterEnumValuePosition {
+    Before(String),
+    After(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTypeAddEnumValueStatement {
+    pub schema_name: Option<String>,
+    pub type_name: String,
+    pub if_not_exists: bool,
+    pub label: String,
+    pub position: Option<AlterEnumValuePosition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTypeRenameEnumValueStatement {
+    pub schema_name: Option<String>,
+    pub type_name: String,
+    pub old_label: String,
+    pub new_label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2814,8 +2844,10 @@ pub enum SqlTypeKind {
     AnyCompatibleArray,
     AnyCompatibleRange,
     AnyCompatibleMultirange,
+    AnyEnum,
     Record,
     Composite,
+    Enum,
     Void,
     Trigger,
     FdwHandler,

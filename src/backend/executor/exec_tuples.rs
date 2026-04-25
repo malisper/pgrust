@@ -280,6 +280,9 @@ impl CompiledTupleDecoder {
                                     Value::Int32(raw)
                                 }
                             }
+                            ScalarType::Enum => Value::EnumOid(u32::from_le_bytes([
+                                bytes[0], bytes[1], bytes[2], bytes[3],
+                            ])),
                             ScalarType::Int64 => Value::Int64(i64::from_le_bytes([
                                 bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
                                 bytes[6], bytes[7],

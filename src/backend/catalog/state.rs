@@ -2509,8 +2509,10 @@ fn format_sql_type_name(sql_type: SqlType) -> String {
             | SqlTypeKind::AnyCompatible
             | SqlTypeKind::AnyCompatibleArray
             | SqlTypeKind::AnyCompatibleRange
-            | SqlTypeKind::AnyCompatibleMultirange => "unsupported array",
+            | SqlTypeKind::AnyCompatibleMultirange
+            | SqlTypeKind::AnyEnum => "unsupported array",
             SqlTypeKind::AnyArray => "anyarray",
+            SqlTypeKind::Enum => "unsupported array",
             SqlTypeKind::Record => "unsupported array",
             SqlTypeKind::Composite => "_record",
             SqlTypeKind::Internal => "unsupported array",
@@ -2605,6 +2607,8 @@ fn format_sql_type_name(sql_type: SqlType) -> String {
         SqlTypeKind::AnyCompatibleArray => "anycompatiblearray",
         SqlTypeKind::AnyCompatibleRange => "anycompatiblerange",
         SqlTypeKind::AnyCompatibleMultirange => "anycompatiblemultirange",
+        SqlTypeKind::AnyEnum => "anyenum",
+        SqlTypeKind::Enum => return sql_type.type_oid.to_string(),
         SqlTypeKind::Record => "record",
         SqlTypeKind::Composite => "record",
         SqlTypeKind::Internal => "internal",

@@ -85,6 +85,7 @@ pub(crate) fn compare_order_values(
             }
         }
         (Value::Int32(a), Value::Int32(b)) => Ok(a.cmp(b)),
+        (Value::EnumOid(a), Value::EnumOid(b)) => Ok(a.cmp(b)),
         (Value::Int64(a), Value::Int64(b)) => Ok(a.cmp(b)),
         (Value::PgLsn(a), Value::PgLsn(b)) => Ok(a.cmp(b)),
         (Value::Int16(a), Value::Float64(b)) => Ok(pg_float_cmp(f64::from(*a), *b)),
@@ -192,6 +193,7 @@ pub(crate) fn compare_values(
         (Value::Int16(l), Value::Int64(r)) => Ok(Value::Bool((*l as i64) == *r)),
         (Value::Int32(l), Value::Int16(r)) => Ok(Value::Bool(*l == (*r as i32))),
         (Value::Int32(l), Value::Int32(r)) => Ok(Value::Bool(l == r)),
+        (Value::EnumOid(l), Value::EnumOid(r)) => Ok(Value::Bool(l == r)),
         (Value::Int32(l), Value::Int64(r)) => Ok(Value::Bool((*l as i64) == *r)),
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Bool(*l == (*r as i64))),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Bool(*l == (*r as i64))),
@@ -324,6 +326,7 @@ pub(crate) fn values_are_distinct(left: &Value, right: &Value) -> bool {
         (Value::Int16(l), Value::Int32(r)) => (*l as i32) != *r,
         (Value::Int16(l), Value::Int64(r)) => (*l as i64) != *r,
         (Value::Int32(l), Value::Int32(r)) => l != r,
+        (Value::EnumOid(l), Value::EnumOid(r)) => l != r,
         (Value::Int32(l), Value::Int16(r)) => *l != (*r as i32),
         (Value::Int32(l), Value::Int64(r)) => (*l as i64) != *r,
         (Value::Int64(l), Value::Int16(r)) => *l != (*r as i64),
@@ -809,6 +812,7 @@ pub(crate) fn order_values(
         (Value::Int16(l), Value::Int64(r)) => Ok(Value::Bool(compare_ord(*l as i64, *r, op))),
         (Value::Int32(l), Value::Int16(r)) => Ok(Value::Bool(compare_ord(*l, *r as i32, op))),
         (Value::Int32(l), Value::Int32(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
+        (Value::EnumOid(l), Value::EnumOid(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::Int32(l), Value::Int64(r)) => Ok(Value::Bool(compare_ord(*l as i64, *r, op))),
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Bool(compare_ord(*l, *r as i64, op))),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Bool(compare_ord(*l, *r as i64, op))),

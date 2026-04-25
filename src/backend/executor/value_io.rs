@@ -75,6 +75,7 @@ const INTERNAL_VALUE_TAG_CIDR: u8 = 35;
 const INTERNAL_VALUE_TAG_INTERVAL: u8 = 36;
 const INTERNAL_VALUE_TAG_UUID: u8 = 37;
 const INTERNAL_VALUE_TAG_PG_LSN: u8 = 38;
+const INTERNAL_VALUE_TAG_ENUM: u8 = 39;
 const COMPOSITE_DATUM_VERSION: u8 = 1;
 
 pub fn render_uuid_text(value: &[u8; 16]) -> String {
@@ -271,6 +272,7 @@ fn format_failing_row_value(value: &Value, datetime_config: &DateTimeConfig) -> 
         Value::Null => "null".to_string(),
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
+        Value::EnumOid(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
         Value::Money(v) => v.to_string(),
         Value::Float64(v) => v.to_string(),
@@ -360,6 +362,8 @@ fn sql_type_kind_tag(kind: SqlTypeKind) -> u8 {
         SqlTypeKind::AnyCompatibleArray => 59,
         SqlTypeKind::AnyCompatibleRange => 60,
         SqlTypeKind::AnyCompatibleMultirange => 61,
+        SqlTypeKind::AnyEnum => 70,
+        SqlTypeKind::Enum => 71,
         SqlTypeKind::Record => 1,
         SqlTypeKind::Composite => 2,
         SqlTypeKind::Internal => 64,
@@ -817,6 +821,10 @@ fn encode_internal_value(value: &Value) -> Result<Vec<u8>, ExecError> {
             out.push(INTERNAL_VALUE_TAG_INT32);
             out.extend_from_slice(&v.to_le_bytes());
         }
+        Value::EnumOid(v) => {
+            out.push(INTERNAL_VALUE_TAG_ENUM);
+            out.extend_from_slice(&v.to_le_bytes());
+        }
         Value::Int64(v) => {
             out.push(INTERNAL_VALUE_TAG_INT64);
             out.extend_from_slice(&v.to_le_bytes());
@@ -1030,6 +1038,14 @@ fn decode_internal_value(bytes: &[u8]) -> Result<Value, ExecError> {
                 ExecError::InvalidStorageValue {
                     column: "<record>".into(),
                     details: "invalid int32 record payload".into(),
+                }
+            })?))
+        }
+        INTERNAL_VALUE_TAG_ENUM => {
+            Value::EnumOid(u32::from_le_bytes(rest.try_into().map_err(|_| {
+                ExecError::InvalidStorageValue {
+                    column: "<record>".into(),
+                    details: "invalid enum record payload".into(),
                 }
             })?))
         }
@@ -1404,6 +1420,7 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
     match (&column.ty, coerced) {
         (ScalarType::Int16, Value::Int16(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
         (ScalarType::Int32, Value::Int32(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
+        (ScalarType::Enum, Value::EnumOid(v)) => Ok(TupleValue::Bytes(v.to_le_bytes().to_vec())),
         (ScalarType::Int32, Value::Int64(v))
             if matches!(
                 column.sql_type.kind,
@@ -1665,6 +1682,8 @@ pub(crate) fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<
         Value::Null => Ok(Value::Null),
         Value::Int16(v) => cast_text_value(&v.to_string(), target, false),
         Value::Int32(v) => cast_text_value(&v.to_string(), target, false),
+        Value::EnumOid(v) if matches!(target.kind, SqlTypeKind::Enum) => Ok(Value::EnumOid(*v)),
+        Value::EnumOid(v) => cast_text_value(&v.to_string(), target, false),
         Value::Int64(v) => cast_text_value(&v.to_string(), target, false),
         Value::PgLsn(v) => cast_text_value(
             &crate::backend::executor::render_pg_lsn_text(*v),
@@ -1830,6 +1849,23 @@ pub(crate) fn decode_value_with_toast(
             } else {
                 Ok(Value::Int32(raw))
             }
+        }
+        ScalarType::Enum => {
+            if column.storage.attlen != 4 || bytes.len() != 4 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            Ok(Value::EnumOid(u32::from_le_bytes(
+                bytes
+                    .try_into()
+                    .map_err(|_| ExecError::InvalidStorageValue {
+                        column: column.name.clone(),
+                        details: "enum must be exactly 4 bytes".into(),
+                    })?,
+            )))
         }
         ScalarType::Int64 => {
             if column.storage.attlen != 8 || bytes.len() != 8 {

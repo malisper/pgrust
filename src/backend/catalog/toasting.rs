@@ -50,7 +50,8 @@ fn type_maximum_size(column: &crate::backend::executor::ColumnDesc) -> Option<us
         | crate::backend::parser::SqlTypeKind::AnyCompatible
         | crate::backend::parser::SqlTypeKind::AnyCompatibleArray
         | crate::backend::parser::SqlTypeKind::AnyCompatibleRange
-        | crate::backend::parser::SqlTypeKind::AnyCompatibleMultirange => None,
+        | crate::backend::parser::SqlTypeKind::AnyCompatibleMultirange
+        | crate::backend::parser::SqlTypeKind::AnyEnum => None,
         crate::backend::parser::SqlTypeKind::Record
         | crate::backend::parser::SqlTypeKind::Composite => None,
         crate::backend::parser::SqlTypeKind::Internal => Some(column.storage.attlen as usize),
@@ -75,6 +76,7 @@ fn type_maximum_size(column: &crate::backend::executor::ColumnDesc) -> Option<us
                 .map(|len| (len as usize).div_ceil(8) + crate::include::varatt::VARHDRSZ)
         }
         crate::backend::parser::SqlTypeKind::Bool
+        | crate::backend::parser::SqlTypeKind::Enum
         | crate::backend::parser::SqlTypeKind::Int2
         | crate::backend::parser::SqlTypeKind::Int4
         | crate::backend::parser::SqlTypeKind::Int8

@@ -2209,7 +2209,7 @@ fn eval_pg_column_size_values(values: &[Value]) -> Result<Value, ExecError> {
         }
         Value::TextRef(_, _) => value.as_text().unwrap_or_default().len(),
         Value::Int16(_) => 2,
-        Value::Int32(_) | Value::Date(_) | Value::InternalChar(_) => 4,
+        Value::Int32(_) | Value::EnumOid(_) | Value::Date(_) | Value::InternalChar(_) => 4,
         Value::Int64(_)
         | Value::PgLsn(_)
         | Value::Money(_)

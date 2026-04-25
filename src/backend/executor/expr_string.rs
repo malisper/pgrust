@@ -481,6 +481,7 @@ fn value_output_text_with_config(
             crate::backend::executor::render_multirange_text(value).unwrap_or_default()
         }
         Value::InternalChar(byte) => render_internal_char_text(*byte),
+        Value::EnumOid(v) => v.to_string(),
         Value::Date(_)
         | Value::Time(_)
         | Value::TimeTz(_)

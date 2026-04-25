@@ -789,6 +789,7 @@ pub(crate) fn jsonb_from_value(
         Value::InternalChar(v) => {
             JsonbValue::String(crate::backend::executor::render_internal_char_text(*v))
         }
+        Value::EnumOid(v) => JsonbValue::String(v.to_string()),
         Value::Date(_)
         | Value::Time(_)
         | Value::TimeTz(_)
@@ -1074,6 +1075,7 @@ pub(crate) fn jsonb_builder_key(value: &Value) -> Result<String, ExecError> {
         Value::Inet(v) => Ok(v.render_inet()),
         Value::Cidr(v) => Ok(v.render_cidr()),
         Value::InternalChar(v) => Ok(crate::backend::executor::render_internal_char_text(*v)),
+        Value::EnumOid(v) => Ok(v.to_string()),
         Value::JsonPath(text) => Ok(text.to_string()),
         Value::Xml(text) => Ok(text.to_string()),
         Value::Json(text) => Ok(text.to_string()),

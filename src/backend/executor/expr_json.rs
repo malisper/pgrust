@@ -1794,6 +1794,7 @@ fn json_object_key_text(value: &Value, op: &'static str) -> Result<String, ExecE
         Value::Inet(v) => Ok(v.render_inet()),
         Value::Cidr(v) => Ok(v.render_cidr()),
         Value::InternalChar(v) => Ok(crate::backend::executor::render_internal_char_text(*v)),
+        Value::EnumOid(v) => Ok(v.to_string()),
         Value::Int16(v) => Ok(v.to_string()),
         Value::Int32(v) => Ok(v.to_string()),
         Value::Int64(v) => Ok(v.to_string()),
@@ -3067,6 +3068,7 @@ fn value_to_json_serde_with_config(
         Value::InternalChar(v) => {
             SerdeJsonValue::String(crate::backend::executor::render_internal_char_text(*v))
         }
+        Value::EnumOid(v) => SerdeJsonValue::String(v.to_string()),
         Value::Date(_)
         | Value::Time(_)
         | Value::TimeTz(_)
@@ -3186,6 +3188,7 @@ fn render_json_value_text_with_config(
         Value::InternalChar(v) => {
             serde_json::to_string(&crate::backend::executor::render_internal_char_text(*v)).unwrap()
         }
+        Value::EnumOid(v) => serde_json::to_string(&v.to_string()).unwrap(),
         Value::Date(_)
         | Value::Time(_)
         | Value::TimeTz(_)

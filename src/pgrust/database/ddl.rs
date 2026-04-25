@@ -848,6 +848,8 @@ pub(crate) fn format_sql_type_name(sql_type: SqlType) -> String {
         SqlTypeKind::AnyCompatibleArray => "anycompatiblearray",
         SqlTypeKind::AnyCompatibleRange => "anycompatiblerange",
         SqlTypeKind::AnyCompatibleMultirange => "anycompatiblemultirange",
+        SqlTypeKind::AnyEnum => "anyenum",
+        SqlTypeKind::Enum => return sql_type.type_oid.to_string(),
         SqlTypeKind::Record | SqlTypeKind::Composite => "record",
         SqlTypeKind::Internal => "internal",
         SqlTypeKind::Trigger => "trigger",
