@@ -335,6 +335,57 @@ fn drop_function_arg_type_oid(
         .ok_or_else(|| ParseError::UnsupportedType(arg.to_string()))
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DropRoutineArgSpec {
+    mode: Option<u8>,
+    type_oid: u32,
+}
+
+fn drop_routine_arg_spec(
+    arg: &str,
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+) -> Result<DropRoutineArgSpec, ParseError> {
+    let mut text = arg.trim();
+    let lower = text.to_ascii_lowercase();
+    let mut parsed_mode = None;
+    for (mode, code) in [
+        ("inout", b'b'),
+        ("variadic", b'v'),
+        ("in", b'i'),
+        ("out", b'o'),
+    ] {
+        if lower == mode || lower.starts_with(&format!("{mode} ")) {
+            parsed_mode = Some(code);
+            text = text[mode.len()..].trim_start();
+            break;
+        }
+    }
+
+    let raw_type = match parse_type_name(text).and_then(|raw_type| {
+        resolve_raw_type_name(&raw_type, catalog).map(|sql_type| (raw_type, sql_type))
+    }) {
+        Ok((raw_type, _)) => raw_type,
+        Err(first_err) => {
+            let Some(rest) = strip_leading_sql_word(text) else {
+                return Err(first_err);
+            };
+            parse_type_name(rest)?
+        }
+    };
+    let sql_type = resolve_raw_type_name(&raw_type, catalog)?;
+    let type_oid = catalog
+        .type_oid_for_sql_type(sql_type)
+        .or_else(|| {
+            matches!(sql_type.kind, crate::backend::parser::SqlTypeKind::Record)
+                .then_some(crate::include::catalog::RECORD_TYPE_OID)
+        })
+        .ok_or_else(|| ParseError::UnsupportedType(arg.to_string()))?;
+    Ok(DropRoutineArgSpec {
+        mode: parsed_mode,
+        type_oid,
+    })
+}
+
 fn drop_table_direct_dependencies(
     ctx: &DropTableDependencyContext<'_>,
     relation_oid: u32,
@@ -712,20 +763,20 @@ impl Database {
         drop_stmt: &DropProcedureStatement,
         configured_search_path: Option<&[String]>,
     ) -> Result<StatementResult, ExecError> {
-        let function_stmt = DropFunctionStatement {
-            if_exists: drop_stmt.if_exists,
-            schema_name: drop_stmt.schema_name.clone(),
-            function_name: drop_stmt.procedure_name.clone(),
-            arg_types: drop_stmt.arg_types.clone(),
-            cascade: drop_stmt.cascade,
-        };
-        self.execute_drop_function_stmt_with_kind(
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_drop_procedure_stmt_in_transaction_with_search_path(
             client_id,
-            &function_stmt,
+            drop_stmt,
+            xid,
+            0,
             configured_search_path,
-            'p',
-            "procedure",
-        )
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
     }
 
     pub(crate) fn execute_drop_procedure_stmt_in_transaction_with_search_path(
@@ -737,23 +788,26 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
-        let function_stmt = DropFunctionStatement {
-            if_exists: drop_stmt.if_exists,
-            schema_name: drop_stmt.schema_name.clone(),
-            function_name: drop_stmt.procedure_name.clone(),
-            arg_types: drop_stmt.arg_types.clone(),
-            cascade: drop_stmt.cascade,
-        };
-        self.execute_drop_function_stmt_in_transaction_with_kind(
-            client_id,
-            &function_stmt,
-            xid,
-            cid,
-            configured_search_path,
-            catalog_effects,
-            'p',
-            "procedure",
-        )
+        for procedure in &drop_stmt.procedures {
+            let function_stmt = DropFunctionStatement {
+                if_exists: drop_stmt.if_exists,
+                schema_name: procedure.schema_name.clone(),
+                function_name: procedure.routine_name.clone(),
+                arg_types: procedure.arg_types.clone(),
+                cascade: drop_stmt.cascade,
+            };
+            self.execute_drop_function_stmt_in_transaction_with_kind(
+                client_id,
+                &function_stmt,
+                xid,
+                cid,
+                configured_search_path,
+                catalog_effects,
+                'p',
+                "procedure",
+            )?;
+        }
+        Ok(StatementResult::AffectedRows(0))
     }
 
     fn execute_drop_function_stmt_with_kind(
@@ -795,12 +849,11 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let txn_ctx = Some((xid, cid));
         let catalog = self.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
-        let desired_arg_oids = drop_stmt
+        let desired_arg_specs = drop_stmt
             .arg_types
             .iter()
-            .map(|arg| drop_function_arg_type_oid(arg, &catalog))
+            .map(|arg| drop_routine_arg_spec(arg, &catalog))
             .collect::<Result<Vec<_>, _>>()
-            .map(|oids| oids.into_iter().flatten().collect::<Vec<_>>())
             .map_err(ExecError::Parse)?;
         let schema_oid = match &drop_stmt.schema_name {
             Some(schema_name) => Some(
@@ -818,8 +871,19 @@ impl Database {
             .proc_rows_by_name(&drop_stmt.function_name)
             .into_iter()
             .filter(|row| {
-                parse_proc_argtype_oids(&row.proargtypes) == Some(desired_arg_oids.clone())
+                drop_routine_signature_matches(row, &desired_arg_specs, proc_kind)
                     && row.prokind == proc_kind
+                    && schema_oid
+                        .map(|schema_oid| row.pronamespace == schema_oid)
+                        .unwrap_or(true)
+            })
+            .collect::<Vec<_>>();
+        let wrong_kind_matches = catalog
+            .proc_rows_by_name(&drop_stmt.function_name)
+            .into_iter()
+            .filter(|row| {
+                drop_routine_signature_matches(row, &desired_arg_specs, proc_kind)
+                    && row.prokind != proc_kind
                     && schema_oid
                         .map(|schema_oid| row.pronamespace == schema_oid)
                         .unwrap_or(true)
@@ -827,6 +891,19 @@ impl Database {
             .collect::<Vec<_>>();
         let proc_row = match matches.as_slice() {
             [row] => row.clone(),
+            [] if !wrong_kind_matches.is_empty() => {
+                let signature = format!(
+                    "{}({})",
+                    drop_stmt.function_name,
+                    drop_stmt.arg_types.join(", ")
+                );
+                return Err(ExecError::DetailedError {
+                    message: format!("{signature} is not a {object_kind}"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42809",
+                });
+            }
             [] if drop_stmt.if_exists => {
                 let signature = format!(
                     "{}({})",
@@ -1764,6 +1841,38 @@ impl Database {
             result
         }
     }
+}
+
+fn drop_routine_signature_matches(
+    row: &crate::include::catalog::PgProcRow,
+    specs: &[DropRoutineArgSpec],
+    proc_kind: char,
+) -> bool {
+    if specs.is_empty() {
+        return true;
+    }
+    if proc_kind != 'p' || row.proallargtypes.is_none() {
+        let input_oids = parse_proc_argtype_oids(&row.proargtypes).unwrap_or_default();
+        return specs.iter().all(|spec| !matches!(spec.mode, Some(b'o')))
+            && input_oids.len() == specs.len()
+            && input_oids
+                .iter()
+                .zip(specs)
+                .all(|(oid, spec)| *oid == spec.type_oid);
+    }
+
+    let all_oids = row.proallargtypes.as_deref().unwrap_or_default();
+    let modes = row.proargmodes.as_deref().unwrap_or_default();
+    all_oids.len() == specs.len()
+        && all_oids.iter().enumerate().all(|(index, oid)| {
+            let row_mode = modes.get(index).copied().unwrap_or(b'i');
+            let spec = &specs[index];
+            *oid == spec.type_oid
+                && spec
+                    .mode
+                    .map(|mode| mode == row_mode || (mode == b'v' && row.provariadic != 0))
+                    .unwrap_or(true)
+        })
 }
 
 #[cfg(test)]

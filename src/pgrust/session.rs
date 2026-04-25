@@ -49,8 +49,9 @@ use crate::backend::utils::misc::stack_depth::{
     MIN_MAX_STACK_DEPTH_KB, StackDepthGuard, max_stack_depth_limit_kb,
 };
 use crate::include::catalog::{
-    PG_CHECKPOINT_OID, PG_EXECUTE_SERVER_PROGRAM_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID,
-    PG_WRITE_SERVER_FILES_OID, PgProcRow,
+    ANYARRAYOID, ANYELEMENTOID, ANYOID, INT4_TYPE_OID, NUMERIC_TYPE_OID, PG_CHECKPOINT_OID,
+    PG_EXECUTE_SERVER_PROGRAM_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID,
+    PG_WRITE_SERVER_FILES_OID, PgProcRow, TEXT_TYPE_OID,
 };
 use crate::include::nodes::execnodes::ScalarType;
 use crate::include::nodes::pathnodes::PlannerConfig;
@@ -477,27 +478,76 @@ pub enum ByteaOutputFormat {
     Escape,
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedCallProcedure {
+    row: PgProcRow,
+    input_arg_sql: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CallCandidateMatch {
+    row: PgProcRow,
+    input_arg_sql: Vec<String>,
+    cost: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ProcedureParam {
+    input_index: Option<usize>,
+    name: String,
+    type_oid: u32,
+    mode: u8,
+    variadic: bool,
+}
+
+#[derive(Debug, Clone)]
+struct CallActualArg {
+    name: Option<String>,
+    sql: String,
+}
+
 fn resolve_call_procedure(
     call_stmt: &CallStatement,
     catalog: &dyn CatalogLookup,
-) -> Result<PgProcRow, ExecError> {
+) -> Result<ResolvedCallProcedure, ExecError> {
     let rows = catalog
         .proc_rows_by_name(&call_stmt.procedure_name)
         .into_iter()
         .filter(|row| proc_matches_call_schema(row, call_stmt.schema_name.as_deref(), catalog))
         .collect::<Vec<_>>();
-    if let Some(row) = rows.iter().find(|row| {
-        row.prokind == 'p' && proc_accepts_call_arg_count(row, call_stmt.raw_arg_sql.len())
-    }) {
-        return Ok(row.clone());
+    let actuals = call_actual_args(call_stmt);
+    let mut matches = rows
+        .iter()
+        .filter(|row| row.prokind == 'p')
+        .filter_map(|row| match_call_candidate(row, &actuals))
+        .collect::<Vec<_>>();
+    matches.sort_by_key(|candidate| candidate.cost);
+    if matches.len() >= 2 && matches[0].cost == matches[1].cost {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "procedure name \"{}\" is not unique",
+                call_stmt.procedure_name
+            ),
+            detail: None,
+            hint: Some("Could not choose a best candidate procedure. You might need to add explicit type casts.".into()),
+            sqlstate: "42725",
+        });
     }
-    if rows.iter().any(|row| {
-        row.prokind == 'f' && proc_accepts_call_arg_count(row, call_stmt.raw_arg_sql.len())
-    }) {
+    if let Some(candidate) = matches.into_iter().next() {
+        return Ok(ResolvedCallProcedure {
+            row: candidate.row,
+            input_arg_sql: candidate.input_arg_sql,
+        });
+    }
+    if rows
+        .iter()
+        .filter(|row| row.prokind == 'f')
+        .any(|row| match_call_candidate(row, &actuals).is_some())
+    {
         return Err(ExecError::DetailedError {
             message: format!(
                 "{} is not a procedure",
-                call_signature_text(&call_stmt.procedure_name, call_stmt.raw_arg_sql.len())
+                call_signature_text(&call_stmt.procedure_name, &actuals)
             ),
             detail: None,
             hint: Some("To call a function, use SELECT.".into()),
@@ -520,18 +570,26 @@ fn proc_matches_call_schema(
         .is_some_and(|namespace| namespace.nspname.eq_ignore_ascii_case(schema_name))
 }
 
-fn proc_accepts_call_arg_count(row: &PgProcRow, actual: usize) -> bool {
-    let input_count = row.pronargs.max(0) as usize;
-    let all_count = row
-        .proallargtypes
-        .as_ref()
-        .map(Vec::len)
-        .unwrap_or(input_count);
-    actual == input_count || actual == all_count
+fn call_actual_args(call_stmt: &CallStatement) -> Vec<CallActualArg> {
+    call_stmt
+        .raw_arg_sql
+        .iter()
+        .enumerate()
+        .map(|(index, sql)| CallActualArg {
+            name: call_stmt
+                .args
+                .args()
+                .get(index)
+                .and_then(|arg| arg.name.clone()),
+            sql: sql.clone(),
+        })
+        .collect()
 }
 
-fn call_signature_text(name: &str, nargs: usize) -> String {
-    let arg_types = std::iter::repeat_n("unknown", nargs)
+fn call_signature_text(name: &str, actuals: &[CallActualArg]) -> String {
+    let arg_types = actuals
+        .iter()
+        .map(|arg| call_actual_type_name(&arg.sql))
         .collect::<Vec<_>>()
         .join(", ");
     format!("{name}({arg_types})")
@@ -541,7 +599,7 @@ fn call_undefined_procedure_error(call_stmt: &CallStatement) -> ExecError {
     ExecError::DetailedError {
         message: format!(
             "procedure {} does not exist",
-            call_signature_text(&call_stmt.procedure_name, call_stmt.raw_arg_sql.len())
+            call_signature_text(&call_stmt.procedure_name, &call_actual_args(call_stmt))
         ),
         detail: None,
         hint: Some(
@@ -550,6 +608,181 @@ fn call_undefined_procedure_error(call_stmt: &CallStatement) -> ExecError {
         ),
         sqlstate: "42883",
     }
+}
+
+fn procedure_params(row: &PgProcRow) -> Vec<ProcedureParam> {
+    let arg_oids = row
+        .proallargtypes
+        .clone()
+        .unwrap_or_else(|| parse_proc_argtype_oids(&row.proargtypes));
+    let modes = row
+        .proargmodes
+        .clone()
+        .unwrap_or_else(|| std::iter::repeat_n(b'i', arg_oids.len()).collect());
+    let names = row.proargnames.clone().unwrap_or_default();
+    let mut input_index = 0usize;
+    arg_oids
+        .into_iter()
+        .enumerate()
+        .map(|(index, type_oid)| {
+            let mode = modes.get(index).copied().unwrap_or(b'i');
+            let current_input_index = matches!(mode, b'i' | b'b').then(|| {
+                let index = input_index;
+                input_index += 1;
+                index
+            });
+            ProcedureParam {
+                input_index: current_input_index,
+                name: names.get(index).cloned().unwrap_or_default(),
+                type_oid,
+                mode,
+                variadic: row.provariadic != 0
+                    && current_input_index == Some(row.pronargs.max(0).saturating_sub(1) as usize),
+            }
+        })
+        .collect()
+}
+
+fn parse_proc_argtype_oids(argtypes: &str) -> Vec<u32> {
+    argtypes
+        .split_whitespace()
+        .filter_map(|part| part.parse::<u32>().ok())
+        .collect()
+}
+
+fn match_call_candidate(row: &PgProcRow, actuals: &[CallActualArg]) -> Option<CallCandidateMatch> {
+    let params = procedure_params(row);
+    let input_count = row.pronargs.max(0) as usize;
+    let defaults = row.proargdefaults.as_deref().unwrap_or(&[]);
+    let uses_all_slots = params.iter().any(|param| param.input_index.is_none())
+        && actuals.len() > input_count.saturating_sub(row.pronargdefaults.max(0) as usize);
+    let mut assigned = vec![None::<String>; input_count];
+    let mut cost = 0usize;
+    let mut positional_index = 0usize;
+
+    let mut actual_index = 0usize;
+    while actual_index < actuals.len() {
+        let actual = &actuals[actual_index];
+        let param = if let Some(name) = actual.name.as_ref() {
+            params
+                .iter()
+                .find(|param| param.name.eq_ignore_ascii_case(name))?
+        } else if uses_all_slots {
+            let param = params.get(positional_index)?;
+            positional_index += 1;
+            param
+        } else {
+            let param = params
+                .iter()
+                .filter(|param| param.input_index.is_some())
+                .nth(positional_index)?;
+            positional_index += 1;
+            param
+        };
+
+        if param.variadic && actual.name.is_none() {
+            let input_index = param.input_index?;
+            if assigned.get(input_index).is_some_and(Option::is_some) {
+                return None;
+            }
+            let mut variadic_sql = Vec::new();
+            while actual_index < actuals.len() {
+                let actual = &actuals[actual_index];
+                if actual.name.is_some() {
+                    return None;
+                }
+                if !call_actual_matches_type(&actual.sql, row.provariadic) {
+                    return None;
+                }
+                cost += call_actual_match_cost(&actual.sql, row.provariadic);
+                variadic_sql.push(actual.sql.clone());
+                actual_index += 1;
+            }
+            assigned[input_index] = Some(format!("array[{}]", variadic_sql.join(", ")));
+            continue;
+        }
+
+        if !call_actual_matches_type(&actual.sql, param.type_oid) {
+            return None;
+        }
+        cost += call_actual_match_cost(&actual.sql, param.type_oid);
+        if let Some(input_index) = param.input_index {
+            if assigned.get(input_index).is_some_and(Option::is_some) {
+                return None;
+            }
+            assigned[input_index] = Some(actual.sql.clone());
+        } else if !matches!(param.mode, b'o') {
+            return None;
+        }
+        actual_index += 1;
+    }
+
+    for (index, slot) in assigned.iter_mut().enumerate() {
+        if slot.is_some() {
+            continue;
+        }
+        let default = defaults.get(index).filter(|default| !default.is_empty())?;
+        *slot = Some(default.clone());
+        cost += 2;
+    }
+
+    Some(CallCandidateMatch {
+        row: row.clone(),
+        input_arg_sql: assigned.into_iter().collect::<Option<Vec<_>>>()?,
+        cost,
+    })
+}
+
+fn call_actual_matches_type(sql: &str, target_oid: u32) -> bool {
+    if matches!(target_oid, ANYOID | ANYELEMENTOID | ANYARRAYOID) {
+        return true;
+    }
+    let Some(actual_oid) = infer_call_actual_type_oid(sql) else {
+        return true;
+    };
+    actual_oid == target_oid
+        || (actual_oid == INT4_TYPE_OID && target_oid == NUMERIC_TYPE_OID)
+        || (actual_oid == TEXT_TYPE_OID && target_oid != NUMERIC_TYPE_OID)
+}
+
+fn call_actual_match_cost(sql: &str, target_oid: u32) -> usize {
+    match infer_call_actual_type_oid(sql) {
+        Some(actual_oid) if actual_oid == target_oid => 0,
+        Some(_) => 1,
+        None => 1,
+    }
+}
+
+fn call_actual_type_name(sql: &str) -> &'static str {
+    match infer_call_actual_type_oid(sql) {
+        Some(INT4_TYPE_OID) => "integer",
+        Some(NUMERIC_TYPE_OID) => "numeric",
+        Some(TEXT_TYPE_OID) => "unknown",
+        _ => "unknown",
+    }
+}
+
+fn infer_call_actual_type_oid(sql: &str) -> Option<u32> {
+    let trimmed = sql.trim();
+    if trimmed.eq_ignore_ascii_case("null") || trimmed.eq_ignore_ascii_case("default") {
+        return None;
+    }
+    if (trimmed.starts_with('\'') && trimmed.ends_with('\'')) || trimmed.starts_with("least(") {
+        return Some(TEXT_TYPE_OID);
+    }
+    if trimmed.contains('.') {
+        return Some(NUMERIC_TYPE_OID);
+    }
+    if let Some((left, right)) = trimmed.split_once('/')
+        && left.trim().parse::<i32>().is_ok()
+        && right.trim().parse::<i32>().is_ok()
+    {
+        return Some(INT4_TYPE_OID);
+    }
+    if trimmed.parse::<i32>().is_ok() {
+        return Some(INT4_TYPE_OID);
+    }
+    None
 }
 
 fn inline_sql_procedure_body(row: &PgProcRow, args: &[Value]) -> Result<String, ExecError> {
@@ -1141,8 +1374,9 @@ impl Session {
         cid: CommandId,
     ) -> Result<StatementResult, ExecError> {
         let catalog = self.catalog_lookup(db);
-        let proc_row = resolve_call_procedure(call_stmt, &catalog)?;
-        let arg_values = self.evaluate_call_input_args(db, call_stmt, &proc_row)?;
+        let resolved = resolve_call_procedure(call_stmt, &catalog)?;
+        let proc_row = resolved.row;
+        let arg_values = self.evaluate_call_input_args(db, &resolved.input_arg_sql)?;
         if proc_row.prolang == PG_LANGUAGE_PLPGSQL_OID {
             return self.execute_plpgsql_call(db, &proc_row, &arg_values, xid, cid);
         }
@@ -1230,41 +1464,12 @@ impl Session {
     fn evaluate_call_input_args(
         &mut self,
         db: &Database,
-        call_stmt: &CallStatement,
-        proc_row: &PgProcRow,
+        raw_args: &[String],
     ) -> Result<Vec<Value>, ExecError> {
-        let raw_args = &call_stmt.raw_arg_sql;
-        let modes = proc_row.proargmodes.as_deref();
-        let all_arg_count = proc_row
-            .proallargtypes
-            .as_ref()
-            .map(Vec::len)
-            .unwrap_or(raw_args.len());
-        let call_uses_all_slots = raw_args.len() == all_arg_count && modes.is_some();
-        let mut values = Vec::new();
-        let mut input_index = 0usize;
-        if let Some(modes) = modes {
-            for (all_index, mode) in modes.iter().copied().enumerate() {
-                if !matches!(mode, b'i' | b'b') {
-                    continue;
-                }
-                let raw_index = if call_uses_all_slots {
-                    all_index
-                } else {
-                    input_index
-                };
-                input_index += 1;
-                let Some(raw_arg) = raw_args.get(raw_index) else {
-                    return Err(call_undefined_procedure_error(call_stmt));
-                };
-                values.push(self.evaluate_call_arg(db, raw_arg)?);
-            }
-        } else {
-            for raw_arg in raw_args {
-                values.push(self.evaluate_call_arg(db, raw_arg)?);
-            }
-        }
-        Ok(values)
+        raw_args
+            .iter()
+            .map(|raw_arg| self.evaluate_call_arg(db, raw_arg))
+            .collect()
     }
 
     fn evaluate_call_arg(&mut self, db: &Database, raw_arg: &str) -> Result<Value, ExecError> {

@@ -215,6 +215,7 @@ pub struct PgProcRow {
     pub proparallel: char,
     pub pronargs: i16,
     pub pronargdefaults: i16,
+    pub proargdefaults: Option<Vec<String>>,
     pub prorettype: u32,
     pub proargtypes: String,
     pub proallargtypes: Option<Vec<u32>>,
@@ -272,6 +273,11 @@ pub fn pg_proc_desc() -> RelationDesc {
                 true,
             ),
             column_desc("prosrc", SqlType::new(SqlTypeKind::Text), false),
+            column_desc(
+                "proargdefaults",
+                SqlType::array_of(SqlType::new(SqlTypeKind::Text)),
+                true,
+            ),
         ],
     }
 }
@@ -1273,6 +1279,7 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
         ),
         PgProcRow {
             pronargdefaults: 2,
+            proargdefaults: None,
             proargnames: Some(vec!["mean".into(), "stddev".into()]),
             ..proc_row(
                 6342,
@@ -9153,6 +9160,7 @@ fn proc_row_with_parallel(
         proparallel,
         pronargs,
         pronargdefaults: 0,
+        proargdefaults: None,
         prorettype,
         proargtypes: proargtypes.into(),
         proallargtypes: None,

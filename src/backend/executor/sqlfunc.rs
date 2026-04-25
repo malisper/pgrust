@@ -685,6 +685,7 @@ mod tests {
                 .map(|names| names.len() as i16)
                 .unwrap_or(0),
             pronargdefaults: 0,
+            proargdefaults: None,
             prorettype: 25,
             proargtypes: String::new(),
             proallargtypes: None,

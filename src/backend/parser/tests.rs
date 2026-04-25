@@ -4040,6 +4040,8 @@ fn parse_create_function_statement_with_returns_table() {
                 mode: FunctionArgMode::In,
                 name: Some("x".into()),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                default_expr: None,
+                variadic: false,
             }],
             return_spec: CreateFunctionReturnSpec::Table(vec![
                 CreateFunctionTableColumn {
@@ -4079,6 +4081,8 @@ fn parse_create_or_replace_function_statement_with_returns_table() {
                 mode: FunctionArgMode::In,
                 name: Some("x".into()),
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                default_expr: None,
+                variadic: false,
             }],
             return_spec: CreateFunctionReturnSpec::Table(vec![
                 CreateFunctionTableColumn {
@@ -4369,11 +4373,15 @@ fn parse_create_function_statement_with_unnamed_args() {
                     mode: FunctionArgMode::In,
                     name: None,
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                    default_expr: None,
+                    variadic: false,
                 },
                 CreateFunctionArg {
                     mode: FunctionArgMode::In,
                     name: None,
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                    default_expr: None,
+                    variadic: false,
                 }
             ],
             return_spec: CreateFunctionReturnSpec::Type {
@@ -4409,11 +4417,15 @@ fn parse_create_function_statement_with_pg_clauses_and_link_symbol() {
                     mode: FunctionArgMode::In,
                     name: None,
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                    default_expr: None,
+                    variadic: false,
                 },
                 CreateFunctionArg {
                     mode: FunctionArgMode::In,
                     name: None,
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Oid)),
+                    default_expr: None,
+                    variadic: false,
                 }
             ],
             return_spec: CreateFunctionReturnSpec::Type {
@@ -4448,6 +4460,8 @@ fn parse_create_function_statement_with_sql_return_shorthand() {
                 mode: FunctionArgMode::In,
                 name: None,
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bytea)),
+                default_expr: None,
+                variadic: false,
             }],
             return_spec: CreateFunctionReturnSpec::Type {
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
@@ -4481,6 +4495,8 @@ fn parse_create_function_statement_with_cost_clause() {
                 mode: FunctionArgMode::In,
                 name: None,
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+                default_expr: None,
+                variadic: false,
             }],
             return_spec: CreateFunctionReturnSpec::Type {
                 ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool)),
@@ -4549,11 +4565,15 @@ fn parse_create_procedure_statement() {
                     mode: FunctionArgMode::InOut,
                     name: Some("x".into()),
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4)),
+                    default_expr: None,
+                    variadic: false,
                 },
                 CreateFunctionArg {
                     mode: FunctionArgMode::In,
                     name: Some("y".into()),
                     ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Text)),
+                    default_expr: Some("'a'".into()),
+                    variadic: false,
                 },
             ],
             strict: false,
@@ -4587,9 +4607,11 @@ fn parse_drop_and_alter_procedure_statements() {
         parse_statement("drop procedure if exists public.ptest1(text) cascade").unwrap(),
         Statement::DropProcedure(DropProcedureStatement {
             if_exists: true,
-            schema_name: Some("public".into()),
-            procedure_name: "ptest1".into(),
-            arg_types: vec!["text".into()],
+            procedures: vec![DropRoutineItem {
+                schema_name: Some("public".into()),
+                routine_name: "ptest1".into(),
+                arg_types: vec!["text".into()],
+            }],
             cascade: true,
         })
     );

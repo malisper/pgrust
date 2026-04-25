@@ -598,6 +598,8 @@ pub struct CreateFunctionArg {
     pub mode: FunctionArgMode,
     pub name: Option<String>,
     pub ty: RawTypeName,
+    pub default_expr: Option<String>,
+    pub variadic: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2372,11 +2374,16 @@ pub struct DropFunctionStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropRoutineItem {
+    pub schema_name: Option<String>,
+    pub routine_name: String,
+    pub arg_types: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DropProcedureStatement {
     pub if_exists: bool,
-    pub schema_name: Option<String>,
-    pub procedure_name: String,
-    pub arg_types: Vec<String>,
+    pub procedures: Vec<DropRoutineItem>,
     pub cascade: bool,
 }
 

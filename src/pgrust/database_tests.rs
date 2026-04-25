@@ -22669,6 +22669,54 @@ fn call_sql_procedure_returns_out_and_inout_rows() {
 }
 
 #[test]
+fn call_procedure_resolves_defaults_named_args_variadic_and_multi_drop() {
+    let base = temp_dir("call_procedure_resolution");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create procedure p_defaults(out a int4, in b int4 default 5, in c int4 default 2) \
+             language sql as $$ select b + c $$",
+        )
+        .unwrap();
+    let result = session
+        .execute(&db, "call p_defaults(null, c => 4, b => 11)")
+        .unwrap();
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(15)]]);
+        }
+        other => panic!("expected CALL output row, got {other:?}"),
+    }
+
+    session
+        .execute(
+            &db,
+            "create procedure p_variadic(out a int4, variadic b int4[]) \
+             language sql as $$ select b[1] + b[2] $$",
+        )
+        .unwrap();
+    let result = session
+        .execute(&db, "call p_variadic(null, 11, 12, 13)")
+        .unwrap();
+    match result {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(23)]]);
+        }
+        other => panic!("expected CALL output row, got {other:?}"),
+    }
+
+    session
+        .execute(&db, "drop procedure p_defaults, p_variadic")
+        .unwrap();
+    let visible = db.backend_catcache(1, None).unwrap();
+    assert!(visible.proc_rows_by_name("p_defaults").is_empty());
+    assert!(visible.proc_rows_by_name("p_variadic").is_empty());
+}
+
+#[test]
 fn call_plpgsql_procedure_executes_body() {
     let base = temp_dir("call_plpgsql_procedure_executes");
     let db = Database::open(&base, 16).unwrap();

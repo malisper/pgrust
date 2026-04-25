@@ -5130,14 +5130,79 @@ fn build_create_procedure_statement(sql: &str) -> Result<CreateProcedureStatemen
 }
 
 fn build_drop_procedure_statement(sql: &str) -> Result<DropProcedureStatement, ParseError> {
-    let parsed =
-        build_drop_routine_like_statement(sql, "drop procedure", "DROP PROCEDURE name(args)")?;
+    let prefix = "drop procedure";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "DROP PROCEDURE name(args)",
+            actual: sql.into(),
+        });
+    };
+    let mut rest = rest.trim_start();
+    let mut if_exists = false;
+    if let Some(next) = consume_keywords(rest, &["if", "exists"]) {
+        if_exists = true;
+        rest = next.trim_start();
+    }
+    let (routine_list, cascade) = split_drop_routine_suffix(rest)?;
+    let procedures = split_top_level_items(routine_list, ',')?
+        .into_iter()
+        .filter(|item| !item.trim().is_empty())
+        .map(|item| parse_drop_routine_item(&item))
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(DropProcedureStatement {
-        if_exists: parsed.if_exists,
-        schema_name: parsed.schema_name,
-        procedure_name: parsed.function_name,
-        arg_types: parsed.arg_types,
-        cascade: parsed.cascade,
+        if_exists,
+        procedures,
+        cascade,
+    })
+}
+
+fn split_drop_routine_suffix(input: &str) -> Result<(&str, bool), ParseError> {
+    let trimmed = input.trim_end();
+    if let Some(prefix) = trim_keyword_suffix(trimmed, "cascade") {
+        return Ok((prefix.trim_end(), true));
+    }
+    if let Some(prefix) = trim_keyword_suffix(trimmed, "restrict") {
+        return Ok((prefix.trim_end(), false));
+    }
+    Ok((trimmed, false))
+}
+
+fn trim_keyword_suffix<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
+    let index = input.len().checked_sub(keyword.len())?;
+    input[index..].eq_ignore_ascii_case(keyword).then(|| {
+        let prefix = &input[..index];
+        prefix
+            .chars()
+            .last()
+            .is_none_or(|ch| ch.is_whitespace())
+            .then_some(prefix)
+    })?
+}
+
+fn parse_drop_routine_item(input: &str) -> Result<DropRoutineItem, ParseError> {
+    let ((schema_name, routine_name), rest) = parse_qualified_sql_name(input.trim())?;
+    let rest = rest.trim_start();
+    let (arg_types, rest) = if rest.starts_with('(') {
+        let (arg_sql, rest) = take_parenthesized_segment(rest)?;
+        let arg_types = split_comma_separated_sql(&arg_sql)?
+            .into_iter()
+            .filter(|item| !item.trim().is_empty())
+            .map(|item| item.trim().to_string())
+            .collect();
+        (arg_types, rest)
+    } else {
+        (Vec::new(), rest)
+    };
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "comma or end of DROP PROCEDURE list",
+            actual: rest.into(),
+        });
+    }
+    Ok(DropRoutineItem {
+        schema_name,
+        routine_name,
+        arg_types,
     })
 }
 
@@ -5327,23 +5392,54 @@ fn parse_create_procedure_args(input: &str) -> Result<Vec<CreateFunctionArg>, Pa
 }
 
 fn parse_create_procedure_arg(input: &str) -> Result<CreateFunctionArg, ParseError> {
-    let trimmed = strip_create_procedure_arg_default(input.trim())?;
-    let trimmed = if keyword_at_start(trimmed, "variadic") {
+    let (trimmed, default_expr) = split_create_procedure_arg_default(input.trim())?;
+    let prefix_variadic = keyword_at_start(trimmed, "variadic");
+    let trimmed = if prefix_variadic {
         consume_keyword(trimmed, "variadic").trim_start()
     } else {
         trimmed
     };
-    parse_create_function_arg(trimmed)
+    if !prefix_variadic && let Ok((name, rest)) = parse_sql_identifier(trimmed) {
+        let rest = rest.trim_start();
+        let (mode, variadic, type_sql) = if keyword_at_start(rest, "inout") {
+            (
+                FunctionArgMode::InOut,
+                false,
+                consume_keyword(rest, "inout"),
+            )
+        } else if keyword_at_start(rest, "out") {
+            (FunctionArgMode::Out, false, consume_keyword(rest, "out"))
+        } else if keyword_at_start(rest, "in") {
+            (FunctionArgMode::In, false, consume_keyword(rest, "in"))
+        } else if keyword_at_start(rest, "variadic") {
+            (FunctionArgMode::In, true, consume_keyword(rest, "variadic"))
+        } else {
+            (FunctionArgMode::In, false, "")
+        };
+        if !type_sql.trim().is_empty() {
+            return Ok(CreateFunctionArg {
+                mode,
+                name: Some(name),
+                ty: parse_type_name(type_sql.trim())?,
+                default_expr: default_expr.map(str::to_string),
+                variadic,
+            });
+        }
+    }
+    let mut arg = parse_create_function_arg(trimmed)?;
+    arg.default_expr = default_expr.map(str::to_string);
+    arg.variadic = prefix_variadic;
+    Ok(arg)
 }
 
-fn strip_create_procedure_arg_default(input: &str) -> Result<&str, ParseError> {
-    if let Some((arg, _)) = split_optional_keyword(input, "default") {
-        return Ok(arg.trim_end());
+fn split_create_procedure_arg_default(input: &str) -> Result<(&str, Option<&str>), ParseError> {
+    if let Some((arg, default_expr)) = split_optional_keyword(input, "default") {
+        return Ok((arg.trim_end(), default_expr.map(str::trim)));
     }
     if let Some(index) = input.find(":=") {
-        return Ok(input[..index].trim_end());
+        return Ok((input[..index].trim_end(), Some(input[index + 2..].trim())));
     }
-    Ok(input)
+    Ok((input, None))
 }
 
 #[derive(Debug, Default)]
@@ -7679,6 +7775,8 @@ fn parse_create_function_arg(input: &str) -> Result<CreateFunctionArg, ParseErro
             mode,
             name: None,
             ty,
+            default_expr: None,
+            variadic: false,
         });
     }
     let (name, type_sql) = match parse_sql_identifier(rest) {
@@ -7695,6 +7793,8 @@ fn parse_create_function_arg(input: &str) -> Result<CreateFunctionArg, ParseErro
         mode,
         name,
         ty: parse_type_name(type_sql.trim())?,
+        default_expr: None,
+        variadic: false,
     })
 }
 

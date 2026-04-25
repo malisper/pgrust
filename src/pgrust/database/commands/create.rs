@@ -1250,10 +1250,12 @@ impl Database {
         }
 
         let mut callable_arg_oids = Vec::new();
+        let mut callable_arg_defaults = Vec::new();
         let mut all_arg_oids = Vec::new();
         let mut all_arg_modes = Vec::new();
         let mut all_arg_names = Vec::new();
         let mut output_args = Vec::new();
+        let mut provariadic = 0;
 
         for arg in &create_stmt.args {
             let sql_type = resolve_raw_type_name(&arg.ty, &catalog).map_err(ExecError::Parse)?;
@@ -1268,6 +1270,25 @@ impl Database {
 
             if matches!(arg.mode, FunctionArgMode::In | FunctionArgMode::InOut) {
                 callable_arg_oids.push(type_oid);
+                callable_arg_defaults.push(arg.default_expr.clone());
+                if arg.variadic {
+                    provariadic = catalog
+                        .type_rows()
+                        .into_iter()
+                        .find(|row| row.typarray == type_oid)
+                        .map(|row| row.oid)
+                        .or_else(|| {
+                            catalog.type_by_oid(type_oid).map(|row| {
+                                if row.sql_type.is_array {
+                                    row.sql_type.type_oid
+                                } else {
+                                    row.typelem
+                                }
+                            })
+                        })
+                        .filter(|element_oid| *element_oid != 0)
+                        .unwrap_or(type_oid);
+                }
             }
             if matches!(arg.mode, FunctionArgMode::Out | FunctionArgMode::InOut) {
                 output_args.push(QueryColumn {
@@ -1455,7 +1476,7 @@ impl Database {
                 })
                 .unwrap_or(100.0),
             prorows: if proretset { 1000.0 } else { 0.0 },
-            provariadic: 0,
+            provariadic,
             prosupport: 0,
             prokind: proc_kind,
             prosecdef: false,
@@ -1469,7 +1490,16 @@ impl Database {
             },
             proparallel: proc_parallel_code(create_stmt.parallel),
             pronargs: callable_arg_oids.len() as i16,
-            pronargdefaults: 0,
+            pronargdefaults: callable_arg_defaults
+                .iter()
+                .filter(|default_expr| default_expr.is_some())
+                .count() as i16,
+            proargdefaults: callable_arg_defaults.iter().any(Option::is_some).then(|| {
+                callable_arg_defaults
+                    .into_iter()
+                    .map(|default_expr| default_expr.unwrap_or_default())
+                    .collect()
+            }),
             prorettype: if proc_kind == 'p' {
                 VOID_TYPE_OID
             } else {
@@ -1722,6 +1752,7 @@ impl Database {
             proparallel: create_stmt.parallel.map(proc_parallel_code).unwrap_or('u'),
             pronargs: arg_oids.len() as i16,
             pronargdefaults: 0,
+            proargdefaults: None,
             prorettype: result_type_oid,
             proargtypes,
             proallargtypes: None,
