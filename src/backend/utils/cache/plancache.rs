@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use parking_lot::RwLock;
 
 use crate::backend::executor::ExecError;
-use crate::backend::parser::{CatalogLookup, Statement, parse_statement, pg_plan_query};
+use crate::backend::parser::{
+    CatalogLookup, ParseOptions, Statement, parse_statement, parse_statement_with_options,
+    pg_plan_query,
+};
 use crate::include::executor::execdesc::{QueryDesc, create_query_desc};
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 
@@ -29,13 +32,21 @@ impl PlanCache {
     }
 
     pub fn get_statement(&self, sql: &str) -> Result<Statement, ExecError> {
+        self.get_statement_with_options(sql, ParseOptions::default())
+    }
+
+    pub fn get_statement_with_options(
+        &self,
+        sql: &str,
+        options: ParseOptions,
+    ) -> Result<Statement, ExecError> {
         {
             let cache = self.cache.read();
             if let Some(entry) = cache.get(sql) {
                 return Ok(entry.statement.clone());
             }
         }
-        let stmt = parse_statement(sql)?;
+        let stmt = parse_statement_with_options(sql, options)?;
         let mut cache = self.cache.write();
         cache.entry(sql.to_string()).or_insert(CachedEntry {
             statement: stmt.clone(),

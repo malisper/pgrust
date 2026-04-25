@@ -34,6 +34,7 @@ use crate::backend::utils::misc::guc_xml::{
     format_xmlbinary, format_xmloption, parse_xmlbinary, parse_xmloption,
 };
 use crate::backend::utils::misc::interrupts::{InterruptState, StatementInterruptGuard};
+use crate::backend::utils::misc::stack_depth::StackDepthGuard;
 use crate::include::catalog::PG_CHECKPOINT_OID;
 use crate::include::nodes::execnodes::ScalarType;
 use crate::pgrust::auth::AuthState;
@@ -824,7 +825,8 @@ impl Session {
         db.install_temp_backend_id(self.client_id, self.temp_backend_id);
         db.install_stats_state(self.client_id, Arc::clone(&self.stats_state));
         let result = stacker::grow(32 * 1024 * 1024, || {
-            self.execute_internal(db, sql, statement_lock_scope.scope_id())
+            StackDepthGuard::enter(self.datetime_config.max_stack_depth_kb)
+                .run(|| self.execute_internal(db, sql, statement_lock_scope.scope_id()))
         });
         if matches!(result, Err(ExecError::Interrupted(_))) {
             self.interrupts.reset_statement_state();
@@ -856,12 +858,19 @@ impl Session {
             return Ok(StatementResult::AffectedRows(inserted));
         }
         let stmt = if self.standard_conforming_strings() {
-            db.plan_cache.get_statement(sql)?
+            db.plan_cache.get_statement_with_options(
+                sql,
+                ParseOptions {
+                    max_stack_depth_kb: self.datetime_config.max_stack_depth_kb,
+                    ..ParseOptions::default()
+                },
+            )?
         } else {
             crate::backend::parser::parse_statement_with_options(
                 sql,
                 ParseOptions {
                     standard_conforming_strings: false,
+                    max_stack_depth_kb: self.datetime_config.max_stack_depth_kb,
                 },
             )?
         };
@@ -2618,12 +2627,19 @@ impl Session {
         options: CursorOptions,
     ) -> Result<Portal, ExecError> {
         let stmt = if self.standard_conforming_strings() {
-            db.plan_cache.get_statement(&source_text)?
+            db.plan_cache.get_statement_with_options(
+                &source_text,
+                ParseOptions {
+                    max_stack_depth_kb: self.datetime_config.max_stack_depth_kb,
+                    ..ParseOptions::default()
+                },
+            )?
         } else {
             crate::backend::parser::parse_statement_with_options(
                 &source_text,
                 ParseOptions {
                     standard_conforming_strings: false,
+                    max_stack_depth_kb: self.datetime_config.max_stack_depth_kb,
                 },
             )?
         };
@@ -4969,10 +4985,12 @@ impl Session {
         num_params: usize,
     ) -> Result<PreparedInsert, ExecError> {
         stacker::grow(32 * 1024 * 1024, || {
-            let catalog = self.catalog_lookup(db);
-            Ok(bind_insert_prepared(
-                table_name, columns, num_params, &catalog,
-            )?)
+            StackDepthGuard::enter(self.datetime_config.max_stack_depth_kb).run(|| {
+                let catalog = self.catalog_lookup(db);
+                Ok(bind_insert_prepared(
+                    table_name, columns, num_params, &catalog,
+                )?)
+            })
         })
     }
 
@@ -4983,47 +5001,49 @@ impl Session {
         params: &[Value],
     ) -> Result<(), ExecError> {
         stacker::grow(32 * 1024 * 1024, || {
-            if self.active_txn.is_none() {
-                return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "active transaction",
-                    actual: "no active transaction for prepared insert".into(),
-                }));
-            }
-            let xid = self.ensure_active_xid(db);
-            let txn = self.active_txn.as_mut().ok_or_else(|| {
-                ExecError::Parse(ParseError::UnexpectedToken {
-                    expected: "active transaction",
-                    actual: "no active transaction for prepared insert".into(),
-                })
-            })?;
-            let cid = txn.next_command_id;
-            txn.next_command_id = txn.next_command_id.saturating_add(1);
-            let _client_id = self.client_id;
+            StackDepthGuard::enter(self.datetime_config.max_stack_depth_kb).run(|| {
+                if self.active_txn.is_none() {
+                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "active transaction",
+                        actual: "no active transaction for prepared insert".into(),
+                    }));
+                }
+                let xid = self.ensure_active_xid(db);
+                let txn = self.active_txn.as_mut().ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "active transaction",
+                        actual: "no active transaction for prepared insert".into(),
+                    })
+                })?;
+                let cid = txn.next_command_id;
+                txn.next_command_id = txn.next_command_id.saturating_add(1);
+                let _client_id = self.client_id;
 
-            let lock_requests = prepared_insert_foreign_key_lock_requests(prepared);
-            self.lock_table_requests_if_needed(db, &lock_requests)?;
+                let lock_requests = prepared_insert_foreign_key_lock_requests(prepared);
+                self.lock_table_requests_if_needed(db, &lock_requests)?;
 
-            let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
-            let catalog = self.catalog_lookup_for_command(db, xid, cid);
-            let interrupts = self.interrupts();
-            let deferred_foreign_keys = self
-                .active_txn
-                .as_ref()
-                .unwrap()
-                .deferred_foreign_keys
-                .clone();
-            let mut ctx = self.executor_context_for_catalog(
-                db,
-                snapshot,
-                cid,
-                &catalog,
-                Some(deferred_foreign_keys),
-                None,
-            );
-            ctx.interrupts = interrupts;
-            let result = execute_prepared_insert_row(prepared, params, &mut ctx, xid, cid);
-            self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
-            result
+                let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+                let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                let interrupts = self.interrupts();
+                let deferred_foreign_keys = self
+                    .active_txn
+                    .as_ref()
+                    .unwrap()
+                    .deferred_foreign_keys
+                    .clone();
+                let mut ctx = self.executor_context_for_catalog(
+                    db,
+                    snapshot,
+                    cid,
+                    &catalog,
+                    Some(deferred_foreign_keys),
+                    None,
+                );
+                ctx.interrupts = interrupts;
+                let result = execute_prepared_insert_row(prepared, params, &mut ctx, xid, cid);
+                self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
+                result
+            })
         })
     }
 
@@ -5069,96 +5089,104 @@ impl Session {
         null_marker: &str,
     ) -> Result<usize, ExecError> {
         stacker::grow(32 * 1024 * 1024, || {
-            db.install_interrupt_state(self.client_id, self.interrupts());
-            let started_txn = if self.active_txn.is_none() {
-                self.active_txn = Some(self.active_transaction_without_xid(db));
-                self.stats_state.write().begin_top_level_xact();
-                true
-            } else {
-                false
-            };
-
-            let result = (|| -> Result<usize, ExecError> {
-                let xid = self.ensure_active_xid(db);
-                let cid = {
-                    let txn = self.active_txn.as_mut().unwrap();
-                    let cid = txn.next_command_id;
-                    txn.next_command_id = txn.next_command_id.saturating_add(1);
-                    cid
-                };
-
-                let catalog = self.catalog_lookup_for_command(db, xid, cid);
-                let (relation_oid, rel, toast, toast_index, desc, indexes) = {
-                    let entry = catalog.lookup_any_relation(table_name).ok_or_else(|| {
-                        ExecError::Parse(ParseError::UnknownTable(table_name.to_string()))
-                    })?;
-                    if entry.relkind == 'm' {
-                        return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
-                            format!("cannot change materialized view \"{table_name}\""),
-                        )));
-                    }
-                    if relation_has_row_security(entry.relation_oid, &catalog) {
-                        return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
-                            "COPY FROM is not yet supported on tables with row-level security"
-                                .into(),
-                        )));
-                    }
-                    let toast_index = entry.toast.and_then(|toast| {
-                        catalog
-                            .index_relations_for_heap(toast.relation_oid)
-                            .into_iter()
-                            .next()
-                    });
-                    (
-                        entry.relation_oid,
-                        entry.rel,
-                        entry.toast,
-                        toast_index,
-                        entry.desc.clone(),
-                        catalog.index_relations_for_heap(entry.relation_oid),
-                    )
-                };
-                let target_indexes = if let Some(columns) = target_columns {
-                    let mut indexes = Vec::with_capacity(columns.len());
-                    for name in columns {
-                        let Some(index) =
-                            desc.columns.iter().position(|column| column.name == *name)
-                        else {
-                            return Err(ExecError::Parse(ParseError::UnknownColumn(name.clone())));
-                        };
-                        indexes.push(index);
-                    }
-                    indexes
+            StackDepthGuard::enter(self.datetime_config.max_stack_depth_kb).run(|| {
+                db.install_interrupt_state(self.client_id, self.interrupts());
+                let started_txn = if self.active_txn.is_none() {
+                    self.active_txn = Some(self.active_transaction_without_xid(db));
+                    self.stats_state.write().begin_top_level_xact();
+                    true
                 } else {
-                    (0..desc.columns.len()).collect()
+                    false
                 };
 
-                let relation_constraints = crate::backend::parser::bind_relation_constraints(
-                    None,
-                    relation_oid,
-                    &desc,
-                    &catalog,
-                )?;
-                let lock_requests = relation_foreign_key_lock_requests(rel, &relation_constraints);
-                self.lock_table_requests_if_needed(db, &lock_requests)?;
+                let result = (|| -> Result<usize, ExecError> {
+                    let xid = self.ensure_active_xid(db);
+                    let cid = {
+                        let txn = self.active_txn.as_mut().unwrap();
+                        let cid = txn.next_command_id;
+                        txn.next_command_id = txn.next_command_id.saturating_add(1);
+                        cid
+                    };
 
-                let parsed_rows = rows
-                    .iter()
-                    .map(|row| {
-                        if row.len() != target_indexes.len() {
-                            return Err(ExecError::Parse(ParseError::InvalidInsertTargetCount {
-                                expected: target_indexes.len(),
-                                actual: row.len(),
-                            }));
+                    let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                    let (relation_oid, rel, toast, toast_index, desc, indexes) = {
+                        let entry = catalog.lookup_any_relation(table_name).ok_or_else(|| {
+                            ExecError::Parse(ParseError::UnknownTable(table_name.to_string()))
+                        })?;
+                        if entry.relkind == 'm' {
+                            return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+                                format!("cannot change materialized view \"{table_name}\""),
+                            )));
                         }
+                        if relation_has_row_security(entry.relation_oid, &catalog) {
+                            return Err(ExecError::Parse(ParseError::FeatureNotSupportedMessage(
+                                "COPY FROM is not yet supported on tables with row-level security"
+                                    .into(),
+                            )));
+                        }
+                        let toast_index = entry.toast.and_then(|toast| {
+                            catalog
+                                .index_relations_for_heap(toast.relation_oid)
+                                .into_iter()
+                                .next()
+                        });
+                        (
+                            entry.relation_oid,
+                            entry.rel,
+                            entry.toast,
+                            toast_index,
+                            entry.desc.clone(),
+                            catalog.index_relations_for_heap(entry.relation_oid),
+                        )
+                    };
+                    let target_indexes = if let Some(columns) = target_columns {
+                        let mut indexes = Vec::with_capacity(columns.len());
+                        for name in columns {
+                            let Some(index) =
+                                desc.columns.iter().position(|column| column.name == *name)
+                            else {
+                                return Err(ExecError::Parse(ParseError::UnknownColumn(
+                                    name.clone(),
+                                )));
+                            };
+                            indexes.push(index);
+                        }
+                        indexes
+                    } else {
+                        (0..desc.columns.len()).collect()
+                    };
 
-                        let mut values = vec![Value::Null; desc.columns.len()];
-                        for (raw, target_index) in row.iter().zip(target_indexes.iter().copied()) {
-                            let column = &desc.columns[target_index];
-                            let value = if raw == null_marker {
-                                Value::Null
-                            } else {
-                                match column.ty {
+                    let relation_constraints = crate::backend::parser::bind_relation_constraints(
+                        None,
+                        relation_oid,
+                        &desc,
+                        &catalog,
+                    )?;
+                    let lock_requests =
+                        relation_foreign_key_lock_requests(rel, &relation_constraints);
+                    self.lock_table_requests_if_needed(db, &lock_requests)?;
+
+                    let parsed_rows = rows
+                        .iter()
+                        .map(|row| {
+                            if row.len() != target_indexes.len() {
+                                return Err(ExecError::Parse(
+                                    ParseError::InvalidInsertTargetCount {
+                                        expected: target_indexes.len(),
+                                        actual: row.len(),
+                                    },
+                                ));
+                            }
+
+                            let mut values = vec![Value::Null; desc.columns.len()];
+                            for (raw, target_index) in
+                                row.iter().zip(target_indexes.iter().copied())
+                            {
+                                let column = &desc.columns[target_index];
+                                let value = if raw == null_marker {
+                                    Value::Null
+                                } else {
+                                    match column.ty {
                                 ScalarType::Int16 => {
                                     raw.parse::<i16>().map(Value::Int16).map_err(|_| {
                                         ExecError::Parse(ParseError::InvalidInteger(raw.clone()))
@@ -5242,58 +5270,58 @@ impl Session {
                                     parse_text_array_literal(raw, column.sql_type.element_type())?
                                 }
                             }
-                            };
-                            values[target_index] = value;
-                        }
+                                };
+                                values[target_index] = value;
+                            }
 
-                        Ok(values)
-                    })
-                    .collect::<Result<Vec<_>, ExecError>>()?;
+                            Ok(values)
+                        })
+                        .collect::<Result<Vec<_>, ExecError>>()?;
 
-                let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
-                let catalog = self.catalog_lookup_for_command(db, xid, cid);
-                let interrupts = self.interrupts();
-                let deferred_foreign_keys = self
-                    .active_txn
-                    .as_ref()
-                    .unwrap()
-                    .deferred_foreign_keys
-                    .clone();
-                let mut ctx = self.executor_context_for_catalog(
-                    db,
-                    snapshot,
-                    cid,
-                    &catalog,
-                    Some(deferred_foreign_keys),
-                    None,
-                );
-                ctx.interrupts = interrupts;
-                let result = crate::backend::commands::tablecmds::execute_insert_values(
-                    table_name,
-                    relation_oid,
-                    rel,
-                    toast,
-                    toast_index.as_ref(),
-                    &desc,
-                    &relation_constraints,
-                    &[],
-                    &indexes,
-                    &parsed_rows,
-                    &mut ctx,
-                    xid,
-                    cid,
-                );
-                self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
-                result
-            })();
+                    let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
+                    let catalog = self.catalog_lookup_for_command(db, xid, cid);
+                    let interrupts = self.interrupts();
+                    let deferred_foreign_keys = self
+                        .active_txn
+                        .as_ref()
+                        .unwrap()
+                        .deferred_foreign_keys
+                        .clone();
+                    let mut ctx = self.executor_context_for_catalog(
+                        db,
+                        snapshot,
+                        cid,
+                        &catalog,
+                        Some(deferred_foreign_keys),
+                        None,
+                    );
+                    ctx.interrupts = interrupts;
+                    let result = crate::backend::commands::tablecmds::execute_insert_values(
+                        table_name,
+                        relation_oid,
+                        rel,
+                        toast,
+                        toast_index.as_ref(),
+                        &desc,
+                        &relation_constraints,
+                        &[],
+                        &indexes,
+                        &parsed_rows,
+                        &mut ctx,
+                        xid,
+                        cid,
+                    );
+                    self.merge_ctx_pending_async_notifications(&mut ctx, result.is_ok());
+                    result
+                })();
 
-            if started_txn {
-                let result = result.and_then(|n| {
-                    self.validate_deferred_foreign_keys_for_active_txn(db)?;
-                    Ok(StatementResult::AffectedRows(n))
-                });
-                let txn = self.active_txn.take().unwrap();
-                self.finalize_taken_transaction(db, txn, result)
+                if started_txn {
+                    let result = result.and_then(|n| {
+                        self.validate_deferred_foreign_keys_for_active_txn(db)?;
+                        Ok(StatementResult::AffectedRows(n))
+                    });
+                    let txn = self.active_txn.take().unwrap();
+                    self.finalize_taken_transaction(db, txn, result)
                     .map(|result| match result {
                         StatementResult::AffectedRows(rows) => rows as usize,
                         other => {
@@ -5302,9 +5330,10 @@ impl Session {
                             )
                         }
                     })
-            } else {
-                result
-            }
+                } else {
+                    result
+                }
+            })
         })
     }
 
