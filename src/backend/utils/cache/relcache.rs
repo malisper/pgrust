@@ -233,17 +233,25 @@ impl IndexRelCacheEntry {
         procnum: i16,
     ) -> Option<u32> {
         let operand_type_oid = self.indexed_operand_type_oid(desc, column_index);
+        let operator_type_oid = self.indexed_operator_type_oid(desc, column_index);
         let mut best: Option<(u8, u32)> = None;
         for entry in self.amproc_entries.get(column_index)?.iter() {
             if entry.procnum != procnum {
                 continue;
             }
-            let Some(score) = Self::type_match_score(
+            let operand_score = Self::type_match_score(
                 entry.lefttype,
                 entry.righttype,
                 operand_type_oid,
                 operand_type_oid,
-            ) else {
+            );
+            let operator_score = Self::type_match_score(
+                entry.lefttype,
+                entry.righttype,
+                operator_type_oid,
+                operator_type_oid,
+            );
+            let Some(score) = operand_score.or(operator_score) else {
                 continue;
             };
             if best.is_none_or(|(best_score, _)| score > best_score) {
