@@ -1479,10 +1479,11 @@ impl Session {
                     result
                 } else {
                     let search_path = self.configured_search_path();
-                    db.execute_create_schema_stmt_with_search_path(
+                    db.execute_create_schema_stmt_with_search_path_and_maintenance_work_mem(
                         self.client_id,
                         create_stmt,
                         search_path.as_deref(),
+                        self.maintenance_work_mem_kb()?,
                     )
                 }
             }
@@ -4812,13 +4813,15 @@ impl Session {
             }
             Statement::CreateSchema(ref create_stmt) => {
                 let search_path = self.configured_search_path();
+                let maintenance_work_mem_kb = self.maintenance_work_mem_kb()?;
                 let txn = self.active_txn.as_mut().unwrap();
-                db.execute_create_schema_stmt_in_transaction_with_search_path(
+                db.execute_create_schema_stmt_in_transaction_with_search_path_and_maintenance_work_mem(
                     client_id,
                     create_stmt,
                     xid,
                     cid,
                     search_path.as_deref(),
+                    maintenance_work_mem_kb,
                     &mut txn.catalog_effects,
                     &mut txn.temp_effects,
                     &mut txn.sequence_effects,
