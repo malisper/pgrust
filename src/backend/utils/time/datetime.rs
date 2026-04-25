@@ -619,9 +619,14 @@ pub fn parse_timezone_spec(text: &str) -> Result<Option<TimeZoneSpec>, DateTimeP
         if named_timezone_offset_seconds(prefix).is_some()
             && parse_numeric_offset_seconds(suffix).is_some()
         {
-            return Ok(Some(TimeZoneSpec::FixedOffset(
-                parse_numeric_offset_seconds(suffix).expect("checked above"),
-            )));
+            let offset = parse_numeric_offset_seconds(suffix).expect("checked above");
+            if matches!(
+                prefix.to_ascii_lowercase().as_str(),
+                "gmt" | "utc" | "etc/gmt" | "etc/utc"
+            ) {
+                return Ok(Some(TimeZoneSpec::FixedOffset(-offset)));
+            }
+            return Ok(Some(TimeZoneSpec::FixedOffset(offset)));
         }
     }
     if timezone_name_exists(trimmed) {

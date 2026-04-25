@@ -1,4 +1,4 @@
-mod support;
+pub(crate) mod support;
 pub mod wal;
 
 use std::collections::BTreeSet;

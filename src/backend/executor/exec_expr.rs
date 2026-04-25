@@ -5,6 +5,7 @@ use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
 use crate::backend::utils::trigger::format_trigger_definition;
 use crate::include::nodes::primnodes::expr_sql_type_hint;
 use rand::{Rng, RngCore};
+use std::sync::Mutex;
 
 use super::expr_agg_support::{
     execute_builtin_scalar_function_value_call, execute_scalar_function_value_call,
@@ -107,6 +108,7 @@ use crate::backend::statistics::{
 use crate::backend::utils::misc::checkpoint::checkpoint_stats_value;
 use crate::backend::utils::misc::guc::normalize_guc_name;
 use crate::backend::utils::misc::guc::plpgsql_guc_default_value;
+use crate::backend::utils::time::datetime::current_postgres_timestamp_usecs;
 use crate::include::access::toast_compression::ToastCompressionId;
 use crate::include::catalog::{
     BOX_SPGIST_OPCLASS_OID, BRIN_AM_OID, BTREE_AM_OID, BYTEA_TYPE_OID, CONSTRAINT_CHECK,
@@ -2204,7 +2206,7 @@ fn eval_pg_column_size_values(values: &[Value]) -> Result<Value, ExecError> {
         | Value::Timestamp(_)
         | Value::TimestampTz(_) => 8,
         Value::TimeTz(_) => 12,
-        Value::Interval(_) => 16,
+        Value::Interval(_) | Value::Uuid(_) => 16,
         Value::Bool(_) => 1,
         Value::Numeric(numeric) => numeric.render().len(),
         Value::Bit(bits) => bits.bytes.len(),
@@ -4615,6 +4617,23 @@ fn eval_builtin_function(
         | BuiltinScalarFunction::TxidVisibleInSnapshot => {
             eval_txid_builtin_function(func, &values, ctx)
         }
+        BuiltinScalarFunction::UuidIn
+        | BuiltinScalarFunction::UuidOut
+        | BuiltinScalarFunction::UuidRecv
+        | BuiltinScalarFunction::UuidSend
+        | BuiltinScalarFunction::UuidEq
+        | BuiltinScalarFunction::UuidNe
+        | BuiltinScalarFunction::UuidLt
+        | BuiltinScalarFunction::UuidLe
+        | BuiltinScalarFunction::UuidGt
+        | BuiltinScalarFunction::UuidGe
+        | BuiltinScalarFunction::UuidCmp
+        | BuiltinScalarFunction::UuidHash
+        | BuiltinScalarFunction::UuidHashExtended
+        | BuiltinScalarFunction::GenRandomUuid
+        | BuiltinScalarFunction::UuidV7
+        | BuiltinScalarFunction::UuidExtractVersion
+        | BuiltinScalarFunction::UuidExtractTimestamp => eval_uuid_function(func, &values),
         BuiltinScalarFunction::CashLarger => match values.as_slice() {
             [Value::Money(left), Value::Money(right)] => {
                 Ok(Value::Money(money_larger(*left, *right)))
@@ -5372,6 +5391,237 @@ fn eval_random_function(values: &[Value]) -> Result<Value, ExecError> {
             actual: format!("Random({} args)", values.len()),
         })),
     }
+}
+
+fn eval_uuid_function(func: BuiltinScalarFunction, values: &[Value]) -> Result<Value, ExecError> {
+    match func {
+        BuiltinScalarFunction::UuidIn => match values {
+            [Value::Text(text)] => Ok(Value::Uuid(super::expr_casts::parse_uuid_text(text)?)),
+            [Value::Null] => Ok(Value::Null),
+            [value] => Err(ExecError::TypeMismatch {
+                op: "uuid_in",
+                left: value.clone(),
+                right: Value::Text("".into()),
+            }),
+            _ => Err(malformed_expr_error("uuid_in")),
+        },
+        BuiltinScalarFunction::UuidOut => match values {
+            [Value::Uuid(value)] => {
+                Ok(Value::Text(super::value_io::render_uuid_text(value).into()))
+            }
+            [Value::Null] => Ok(Value::Null),
+            [value] => Err(ExecError::TypeMismatch {
+                op: "uuid_out",
+                left: value.clone(),
+                right: Value::Uuid([0; 16]),
+            }),
+            _ => Err(malformed_expr_error("uuid_out")),
+        },
+        BuiltinScalarFunction::UuidRecv => match values {
+            [Value::Bytea(bytes)] if bytes.len() == 16 => {
+                Ok(Value::Uuid(bytes.as_slice().try_into().unwrap()))
+            }
+            [Value::Null] => Ok(Value::Null),
+            [value] => Err(ExecError::TypeMismatch {
+                op: "uuid_recv",
+                left: value.clone(),
+                right: Value::Bytea(vec![0; 16]),
+            }),
+            _ => Err(malformed_expr_error("uuid_recv")),
+        },
+        BuiltinScalarFunction::UuidSend => match values {
+            [Value::Uuid(value)] => Ok(Value::Bytea(value.to_vec())),
+            [Value::Null] => Ok(Value::Null),
+            [value] => Err(ExecError::TypeMismatch {
+                op: "uuid_send",
+                left: value.clone(),
+                right: Value::Uuid([0; 16]),
+            }),
+            _ => Err(malformed_expr_error("uuid_send")),
+        },
+        BuiltinScalarFunction::UuidEq
+        | BuiltinScalarFunction::UuidNe
+        | BuiltinScalarFunction::UuidLt
+        | BuiltinScalarFunction::UuidLe
+        | BuiltinScalarFunction::UuidGt
+        | BuiltinScalarFunction::UuidGe
+        | BuiltinScalarFunction::UuidCmp => match values {
+            [Value::Uuid(left), Value::Uuid(right)] => Ok(match func {
+                BuiltinScalarFunction::UuidEq => Value::Bool(left == right),
+                BuiltinScalarFunction::UuidNe => Value::Bool(left != right),
+                BuiltinScalarFunction::UuidLt => Value::Bool(left < right),
+                BuiltinScalarFunction::UuidLe => Value::Bool(left <= right),
+                BuiltinScalarFunction::UuidGt => Value::Bool(left > right),
+                BuiltinScalarFunction::UuidGe => Value::Bool(left >= right),
+                BuiltinScalarFunction::UuidCmp => Value::Int32(match left.cmp(right) {
+                    std::cmp::Ordering::Less => -1,
+                    std::cmp::Ordering::Equal => 0,
+                    std::cmp::Ordering::Greater => 1,
+                }),
+                _ => unreachable!(),
+            }),
+            [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+            [left, right] => Err(ExecError::TypeMismatch {
+                op: "uuid",
+                left: left.clone(),
+                right: right.clone(),
+            }),
+            _ => Err(malformed_expr_error("uuid")),
+        },
+        BuiltinScalarFunction::UuidHash => match values {
+            [Value::Uuid(value)] => Ok(Value::Int32(uuid_hash(value) as i32)),
+            [Value::Null] => Ok(Value::Null),
+            [value] => Err(ExecError::TypeMismatch {
+                op: "uuid_hash",
+                left: value.clone(),
+                right: Value::Uuid([0; 16]),
+            }),
+            _ => Err(malformed_expr_error("uuid_hash")),
+        },
+        BuiltinScalarFunction::UuidHashExtended => match values {
+            [Value::Uuid(value), Value::Int64(seed)] => {
+                Ok(Value::Int64(uuid_hash_extended(value, *seed as u64) as i64))
+            }
+            [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+            [left, right] => Err(ExecError::TypeMismatch {
+                op: "uuid_hash_extended",
+                left: left.clone(),
+                right: right.clone(),
+            }),
+            _ => Err(malformed_expr_error("uuid_hash_extended")),
+        },
+        BuiltinScalarFunction::GenRandomUuid => match values {
+            [] => Ok(Value::Uuid(generate_uuid_v4())),
+            _ => Err(malformed_expr_error("gen_random_uuid")),
+        },
+        BuiltinScalarFunction::UuidV7 => match values {
+            [] => Ok(Value::Uuid(generate_uuid_v7(0))),
+            [Value::Interval(interval)] => {
+                let shift_millis = interval.time_micros / 1_000
+                    + i64::from(interval.days) * 86_400_000
+                    + i64::from(interval.months) * 30 * 86_400_000;
+                Ok(Value::Uuid(generate_uuid_v7(shift_millis)))
+            }
+            [Value::Null] => Ok(Value::Null),
+            [value] => Err(ExecError::TypeMismatch {
+                op: "uuidv7",
+                left: value.clone(),
+                right: Value::Interval(crate::include::nodes::datum::IntervalValue::zero()),
+            }),
+            _ => Err(malformed_expr_error("uuidv7")),
+        },
+        BuiltinScalarFunction::UuidExtractVersion => match values {
+            [Value::Uuid(value)] => {
+                Ok(uuid_version(value).map(Value::Int16).unwrap_or(Value::Null))
+            }
+            [Value::Null] => Ok(Value::Null),
+            [value] => Err(ExecError::TypeMismatch {
+                op: "uuid_extract_version",
+                left: value.clone(),
+                right: Value::Uuid([0; 16]),
+            }),
+            _ => Err(malformed_expr_error("uuid_extract_version")),
+        },
+        BuiltinScalarFunction::UuidExtractTimestamp => match values {
+            [Value::Uuid(value)] if uuid_version(value) == Some(1) => uuid_v1_timestamp(value)
+                .map_or(Ok(Value::Null), |postgres_usecs| {
+                    Ok(Value::TimestampTz(
+                        crate::include::nodes::datetime::TimestampTzADT(postgres_usecs),
+                    ))
+                }),
+            [Value::Uuid(value)] if uuid_version(value) == Some(7) => Ok(Value::TimestampTz(
+                crate::include::nodes::datetime::TimestampTzADT(uuid_v7_timestamp(value)),
+            )),
+            [Value::Uuid(_)] | [Value::Null] => Ok(Value::Null),
+            [value] => Err(ExecError::TypeMismatch {
+                op: "uuid_extract_timestamp",
+                left: value.clone(),
+                right: Value::Uuid([0; 16]),
+            }),
+            _ => Err(malformed_expr_error("uuid_extract_timestamp")),
+        },
+        _ => unreachable!("uuid dispatcher called for non-uuid builtin"),
+    }
+}
+
+fn generate_uuid_v4() -> [u8; 16] {
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    bytes
+}
+
+static UUID_V7_STATE: Mutex<(u64, u64)> = Mutex::new((0, 0));
+
+fn generate_uuid_v7(shift_millis: i64) -> [u8; 16] {
+    let millis = current_postgres_timestamp_usecs()
+        .saturating_div(1_000)
+        .saturating_add(10_957 * 86_400_000)
+        .saturating_add(shift_millis)
+        .max(0) as u64;
+    let mut bytes = [0u8; 16];
+    bytes[0] = (millis >> 40) as u8;
+    bytes[1] = (millis >> 32) as u8;
+    bytes[2] = (millis >> 24) as u8;
+    bytes[3] = (millis >> 16) as u8;
+    bytes[4] = (millis >> 8) as u8;
+    bytes[5] = millis as u8;
+    rand::thread_rng().fill_bytes(&mut bytes[6..]);
+    let sequence = {
+        let mut state = UUID_V7_STATE.lock().expect("uuidv7 state mutex poisoned");
+        if state.0 == millis {
+            state.1 = state.1.wrapping_add(1) & ((1u64 << 42) - 1);
+        } else {
+            state.0 = millis;
+            state.1 = 0;
+        }
+        state.1
+    };
+    bytes[6] = 0x70 | (((sequence >> 38) as u8) & 0x0f);
+    bytes[7] = (sequence >> 30) as u8;
+    bytes[8] = 0x80 | (((sequence >> 24) as u8) & 0x3f);
+    bytes[9] = (sequence >> 16) as u8;
+    bytes[10] = (sequence >> 8) as u8;
+    bytes[11] = sequence as u8;
+    bytes
+}
+
+fn uuid_version(value: &[u8; 16]) -> Option<i16> {
+    ((value[8] & 0xc0) == 0x80).then_some(i16::from(value[6] >> 4))
+}
+
+fn uuid_v1_timestamp(value: &[u8; 16]) -> Option<i64> {
+    let timestamp_100ns = ((u64::from(value[6] & 0x0f)) << 56)
+        | (u64::from(value[7]) << 48)
+        | (u64::from(value[4]) << 40)
+        | (u64::from(value[5]) << 32)
+        | (u64::from(value[0]) << 24)
+        | (u64::from(value[1]) << 16)
+        | (u64::from(value[2]) << 8)
+        | u64::from(value[3]);
+    let unix_100ns = timestamp_100ns.checked_sub(122_192_928_000_000_000)?;
+    let unix_usecs = i64::try_from(unix_100ns / 10).ok()?;
+    Some(unix_usecs - 10_957 * 86_400_000_000)
+}
+
+fn uuid_v7_timestamp(value: &[u8; 16]) -> i64 {
+    let millis = ((value[0] as i64) << 40)
+        | ((value[1] as i64) << 32)
+        | ((value[2] as i64) << 24)
+        | ((value[3] as i64) << 16)
+        | ((value[4] as i64) << 8)
+        | value[5] as i64;
+    millis * 1_000 - 10_957 * 86_400_000_000
+}
+
+fn uuid_hash(value: &[u8; 16]) -> u32 {
+    let hash = crate::backend::access::hash::support::hash_bytes_extended(value, 0);
+    (hash as u32) ^ ((hash >> 32) as u32)
+}
+
+fn uuid_hash_extended(value: &[u8; 16], seed: u64) -> u64 {
+    crate::backend::access::hash::support::hash_bytes_extended(value, seed)
 }
 
 fn eval_random_normal_function(values: &[Value]) -> Result<Value, ExecError> {

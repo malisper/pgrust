@@ -521,6 +521,16 @@ pub(super) fn bind_scalar_function_call(
                 )],
             ))
         }
+        BuiltinScalarFunction::UuidExtractVersion | BuiltinScalarFunction::UuidExtractTimestamp => {
+            Ok(build_func(
+                false,
+                vec![coerce_bound_expr(
+                    bound_args[0].clone(),
+                    arg_types[0],
+                    SqlType::new(SqlTypeKind::Uuid),
+                )],
+            ))
+        }
         BuiltinScalarFunction::DatePart => Ok(build_func(
             false,
             vec![

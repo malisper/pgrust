@@ -77,6 +77,7 @@ fn render_value(value: &Value) -> String {
         Value::Float64(v) => v.to_string(),
         Value::Numeric(v) => v.render(),
         Value::Interval(v) => format!("{v:?}"),
+        Value::Uuid(v) => pgrust::backend::executor::render_uuid_text(v),
         Value::Json(v) => v.to_string(),
         Value::Jsonb(v) => format!("{:?}", v),
         Value::JsonPath(v) => v.to_string(),

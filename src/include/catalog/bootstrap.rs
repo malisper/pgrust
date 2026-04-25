@@ -68,12 +68,14 @@ pub const PG_PARTITIONED_TABLE_ROWTYPE_OID: u32 = 0;
 
 pub const BOOL_TYPE_OID: u32 = 16;
 pub const BYTEA_TYPE_OID: u32 = 17;
+pub const UUID_TYPE_OID: u32 = 2950;
 pub const INTERNAL_CHAR_TYPE_OID: u32 = 18;
 pub const NAME_TYPE_OID: u32 = 19;
 pub const BIT_TYPE_OID: u32 = 1560;
 pub const VARBIT_TYPE_OID: u32 = 1562;
 pub const BOOL_ARRAY_TYPE_OID: u32 = 1000;
 pub const BYTEA_ARRAY_TYPE_OID: u32 = 1001;
+pub const UUID_ARRAY_TYPE_OID: u32 = 2951;
 pub const INTERNAL_CHAR_ARRAY_TYPE_OID: u32 = 1002;
 pub const NAME_ARRAY_TYPE_OID: u32 = 1003;
 pub const BIT_ARRAY_TYPE_OID: u32 = 1561;

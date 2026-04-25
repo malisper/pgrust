@@ -216,7 +216,7 @@ fn push_explain_state_line(
     show_costs: bool,
     lines: &mut Vec<String>,
 ) {
-    let prefix = "  ".repeat(indent);
+    let prefix = explain_node_prefix(indent, false);
     let label = state.node_label();
     let plan_info = state.plan_info();
     if analyze && show_costs {
@@ -282,7 +282,7 @@ fn push_nonverbose_plan_details(
     ctx: &VerboseExplainContext,
     lines: &mut Vec<String>,
 ) -> bool {
-    let prefix = "  ".repeat(indent + 1);
+    let prefix = explain_detail_prefix(indent);
     match plan {
         Plan::NestedLoopJoin {
             left,
@@ -536,6 +536,14 @@ fn push_explain_plan_line(
     );
 }
 
+fn explain_detail_prefix(indent: usize) -> String {
+    if indent == 0 {
+        "  ".into()
+    } else {
+        format!("{}        ", "  ".repeat(indent - 1))
+    }
+}
+
 fn verbose_plan_label(plan: &Plan) -> Option<String> {
     match plan {
         Plan::Aggregate { strategy, .. } => match strategy {
@@ -602,7 +610,7 @@ fn push_verbose_plan_details(
     ctx: &VerboseExplainContext,
     lines: &mut Vec<String>,
 ) {
-    let prefix = "  ".repeat(indent + 1);
+    let prefix = explain_detail_prefix(indent);
     let output = verbose_plan_output_exprs(plan, ctx, false);
     if !output.is_empty() {
         lines.push(format!("{prefix}Output: {}", output.join(", ")));
@@ -1441,6 +1449,32 @@ fn render_verbose_expr(
                 render_verbose_expr(right, column_names, ctx)
             )
         }
+        Expr::Bool(bool_expr) => match bool_expr.boolop {
+            crate::include::nodes::primnodes::BoolExprType::And => format!(
+                "({})",
+                bool_expr
+                    .args
+                    .iter()
+                    .map(|arg| render_verbose_expr(arg, column_names, ctx))
+                    .collect::<Vec<_>>()
+                    .join(" AND ")
+            ),
+            crate::include::nodes::primnodes::BoolExprType::Or => format!(
+                "({})",
+                bool_expr
+                    .args
+                    .iter()
+                    .map(|arg| render_verbose_expr(arg, column_names, ctx))
+                    .collect::<Vec<_>>()
+                    .join(" OR ")
+            ),
+            crate::include::nodes::primnodes::BoolExprType::Not => {
+                let Some(inner) = bool_expr.args.first() else {
+                    return format!("{expr:?}");
+                };
+                format!("NOT {}", render_verbose_expr(inner, column_names, ctx))
+            }
+        },
         Expr::Aggref(aggref) => render_verbose_aggref(aggref, column_names, ctx),
         _ => strip_outer_parens(&render_explain_expr(expr, column_names)),
     }
@@ -1491,6 +1525,7 @@ fn render_type_name(ty: crate::backend::parser::SqlType) -> &'static str {
         Float4 => "real",
         Float8 => "double precision",
         Numeric => "numeric",
+        Uuid => "uuid",
         _ => "unknown",
     }
 }
