@@ -345,22 +345,27 @@ impl Database {
                     .cloned()
                     .map(crate::backend::parser::IndexColumnDef::from)
                     .collect::<Vec<_>>();
-                let build_options = if action.without_overlaps.is_some() {
-                    self.resolve_temporal_index_build_options(
-                        client_id,
-                        Some((xid, action_cid)),
-                        relation,
-                        &index_columns,
-                    )?
-                } else {
-                    self.resolve_simple_index_build_options(
-                        client_id,
-                        Some((xid, action_cid)),
-                        "btree",
-                        relation,
-                        &index_columns,
-                        &[],
-                    )?
+                let (access_method_oid, access_method_handler, build_options) =
+                    if action.without_overlaps.is_some() {
+                        self.resolve_temporal_index_build_options(
+                            client_id,
+                            Some((xid, action_cid)),
+                            relation,
+                            &index_columns,
+                        )?
+                    } else {
+                        self.resolve_simple_index_build_options(
+                            client_id,
+                            Some((xid, action_cid)),
+                            "btree",
+                            relation,
+                            &index_columns,
+                            &[],
+                        )?
+                    };
+                let build_options = crate::backend::catalog::CatalogIndexBuildOptions {
+                    indimmediate: !action.deferrable,
+                    ..build_options
                 };
                 let index_entry = self.build_simple_index_in_transaction(
                     client_id,
@@ -374,9 +379,9 @@ impl Database {
                     action.nulls_not_distinct,
                     xid,
                     action_cid,
-                    build_options.0,
-                    build_options.1,
-                    &build_options.2,
+                    access_method_oid,
+                    access_method_handler,
+                    &build_options,
                     65_536,
                     catalog_effects,
                 )?;
@@ -430,6 +435,8 @@ impl Database {
                         &primary_key_owned_not_null_oids,
                         action.without_overlaps.is_some(),
                         conexclop,
+                        action.deferrable,
+                        action.initially_deferred,
                         &constraint_ctx,
                     )
                     .map_err(map_catalog_error)?;
@@ -539,6 +546,8 @@ impl Database {
                 .create_foreign_key_constraint_mvcc(
                     relation.relation_oid,
                     action.constraint_name.clone(),
+                    action.deferrable,
+                    action.initially_deferred,
                     action.enforced,
                     action.enforced && !action.not_valid,
                     &local_attnums,

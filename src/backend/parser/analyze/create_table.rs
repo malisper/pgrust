@@ -433,7 +433,11 @@ fn expand_like_clause(
             let Some(columns) = constraint_column_names(row.conkey.as_deref(), &source.desc) else {
                 continue;
             };
-            let attributes = ConstraintAttributes::default();
+            let attributes = ConstraintAttributes {
+                deferrable: row.condeferrable.then_some(true),
+                initially_deferred: row.condeferred.then_some(true),
+                ..ConstraintAttributes::default()
+            };
             let without_overlaps = row.conperiod.then(|| columns.last().cloned()).flatten();
             elements.push(CreateTableElement::Constraint(
                 if row.contype == CONSTRAINT_PRIMARY {

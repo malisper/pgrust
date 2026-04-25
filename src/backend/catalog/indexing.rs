@@ -133,6 +133,7 @@ pub fn system_catalog_index_meta(
         indnullsnotdistinct: false,
         indisprimary: false,
         indisexclusion: false,
+        indimmediate: true,
         indisvalid: true,
         indisready: true,
         indislive: true,

@@ -318,6 +318,12 @@ impl Database {
 
         match stmt {
             Statement::Do(ref do_stmt) => execute_do_with_gucs(do_stmt, gucs),
+            Statement::SetConstraints(_) => {
+                crate::backend::utils::misc::notices::push_warning(
+                    "SET CONSTRAINTS can only be used in transaction blocks",
+                );
+                Ok(StatementResult::AffectedRows(0))
+            }
             Statement::Checkpoint(_) => {
                 let auth = self.auth_state(client_id);
                 let auth_catalog = self.auth_catalog(client_id, None).map_err(|err| {
