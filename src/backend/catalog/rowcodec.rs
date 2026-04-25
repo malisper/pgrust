@@ -940,7 +940,7 @@ pub(crate) fn pg_type_row_from_values(values: Vec<Value>) -> Result<PgTypeRow, C
             } else if typelem != 0 {
                 SqlType::array_of(SqlType::record(typelem))
             } else {
-                SqlType::new(SqlTypeKind::Text)
+                SqlType::new(SqlTypeKind::Shell).with_identity(oid, 0)
             }
         }),
     })

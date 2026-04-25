@@ -103,6 +103,29 @@ pub fn lower_create_table(
                 if sql_type.kind == SqlTypeKind::AnyArray {
                     return Err(ParseError::UnsupportedType("anyarray".into()));
                 }
+                if matches!(sql_type.kind, SqlTypeKind::Cstring) {
+                    return Err(ParseError::DetailedError {
+                        message: format!(
+                            "column \"{}\" has pseudo-type cstring",
+                            column.name
+                        ),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42P16",
+                    });
+                }
+                if matches!(sql_type.kind, SqlTypeKind::Shell) {
+                    let type_name = match &column.ty {
+                        crate::backend::parser::RawTypeName::Named { name, .. } => name.as_str(),
+                        _ => &column.name,
+                    };
+                    return Err(ParseError::DetailedError {
+                        message: format!("type \"{type_name}\" is only a shell"),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "42809",
+                    });
+                }
                 let not_null = not_nulls_by_column.get(&column.name.to_ascii_lowercase());
                 let serial_kind = match column.ty {
                     crate::backend::parser::RawTypeName::Serial(kind) => Some(kind),

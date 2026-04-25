@@ -7,7 +7,8 @@ use crate::backend::parser::{
     AlterEnumValuePosition, AlterTypeAddEnumValueStatement, AlterTypeOwnerStatement,
     AlterTypeRenameEnumValueStatement, AlterTypeRenameTypeStatement, AlterTypeStatement,
     CatalogLookup, CreateCompositeTypeStatement, CreateEnumTypeStatement, CreateRangeTypeStatement,
-    CreateTypeStatement, DropTypeStatement, ParseError, parse_type_name, resolve_raw_type_name,
+    CreateShellTypeStatement, CreateTypeStatement, DropTypeStatement, ParseError, SqlTypeKind,
+    parse_type_name, resolve_raw_type_name,
 };
 use crate::backend::utils::misc::notices::push_notice;
 use crate::pgrust::database::ddl::{
@@ -29,6 +30,10 @@ enum ResolvedDropTypeTarget {
     Range {
         type_oid: u32,
         normalized_name: String,
+        display_name: String,
+    },
+    Shell {
+        type_oid: u32,
         display_name: String,
     },
     Other,
@@ -67,6 +72,14 @@ impl Database {
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
         match create_stmt {
+            CreateTypeStatement::Shell(stmt) => self.execute_create_shell_type_stmt(
+                client_id,
+                stmt,
+                xid,
+                cid,
+                configured_search_path,
+                catalog_effects,
+            ),
             CreateTypeStatement::Composite(stmt) => {
                 let interrupts = self.interrupt_state(client_id);
                 let (type_name, namespace_oid) = self.normalize_create_type_name_with_search_path(
@@ -283,6 +296,42 @@ impl Database {
                         expected: "type",
                     }));
                 }
+                Some(ResolvedDropTypeTarget::Shell {
+                    type_oid,
+                    display_name,
+                }) => {
+                    reject_type_with_dependents(
+                        self,
+                        client_id,
+                        Some((xid, cid)),
+                        type_oid,
+                        &display_name,
+                    )?;
+                    let ctx = CatalogWriteContext {
+                        pool: self.pool.clone(),
+                        txns: self.txns.clone(),
+                        xid,
+                        cid,
+                        client_id,
+                        waiter: Some(self.txn_waiter.clone()),
+                        interrupts: Arc::clone(&interrupts),
+                    };
+                    match self
+                        .catalog
+                        .write()
+                        .drop_shell_type_by_oid_mvcc(type_oid, &ctx)
+                    {
+                        Ok(effect) => {
+                            catalog_effects.push(effect);
+                            dropped += 1;
+                        }
+                        Err(CatalogError::UnknownType(_)) if drop_stmt.if_exists => {}
+                        Err(CatalogError::UnknownType(_)) => {
+                            return Err(type_does_not_exist_error(type_name));
+                        }
+                        Err(err) => return Err(map_catalog_error(err)),
+                    }
+                }
                 Some(ResolvedDropTypeTarget::Enum {
                     type_oid,
                     normalized_name,
@@ -494,6 +543,12 @@ impl Database {
             }
             return Ok(None);
         };
+        if matches!(type_row.sql_type.kind, SqlTypeKind::Shell) {
+            return Ok(Some(ResolvedDropTypeTarget::Shell {
+                type_oid: type_row.oid,
+                display_name: format_name(type_row.typnamespace, &type_row.typname),
+            }));
+        }
         let Some(class_row) = catcache.class_by_oid(type_row.typrelid) else {
             return Ok(Some(ResolvedDropTypeTarget::Other));
         };
@@ -538,6 +593,96 @@ fn lower_create_composite_type_desc(
 }
 
 impl Database {
+    pub(crate) fn create_shell_type_for_name_in_transaction(
+        &self,
+        client_id: ClientId,
+        raw_type_name: &str,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<(u32, String), ExecError> {
+        let (schema_name, type_name) = split_qualified_type_name(raw_type_name);
+        let (normalized_name, namespace_oid) = self
+            .normalize_create_type_name_with_search_path(
+                client_id,
+                Some((xid, cid)),
+                schema_name,
+                type_name,
+                configured_search_path,
+            )
+            .map_err(ExecError::Parse)?;
+        let object_name = type_object_name(&normalized_name);
+        let display_name = qualified_type_display_name(schema_name, type_name);
+        let search_path = self.effective_search_path(client_id, configured_search_path);
+        let base_type_rows = self
+            .backend_catcache(client_id, Some((xid, cid)))
+            .map_err(|err| {
+                ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "catalog lookup",
+                    actual: format!("{err:?}"),
+                })
+            })?
+            .type_rows();
+        let enum_type_rows = self.enum_type_rows_for_search_path(&search_path);
+        let range_type_rows = self.range_type_rows_for_search_path(&search_path);
+        if type_name_exists_in_rows(&base_type_rows, namespace_oid, &object_name)
+            || type_name_exists_in_rows(&enum_type_rows, namespace_oid, &object_name)
+            || type_name_exists_in_rows(&range_type_rows, namespace_oid, &object_name)
+        {
+            return Err(type_already_exists_error(&display_name));
+        }
+        let ctx = CatalogWriteContext {
+            pool: self.pool.clone(),
+            txns: self.txns.clone(),
+            xid,
+            cid,
+            client_id,
+            waiter: None,
+            interrupts: self.interrupt_state(client_id),
+        };
+        match self.catalog.write().create_shell_type_mvcc(
+            normalized_name,
+            namespace_oid,
+            self.auth_state(client_id).current_user_oid(),
+            &ctx,
+        ) {
+            Ok((type_oid, effect)) => {
+                catalog_effects.push(effect);
+                self.plan_cache.invalidate_all();
+                Ok((type_oid, object_name))
+            }
+            Err(CatalogError::TableAlreadyExists(_)) => {
+                Err(type_already_exists_error(&display_name))
+            }
+            Err(err) => Err(map_catalog_error(err)),
+        }
+    }
+
+    fn execute_create_shell_type_stmt(
+        &self,
+        client_id: ClientId,
+        stmt: &CreateShellTypeStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let type_name = match &stmt.schema_name {
+            Some(schema_name) => format!("{schema_name}.{}", stmt.type_name),
+            None => stmt.type_name.clone(),
+        };
+        self.create_shell_type_for_name_in_transaction(
+            client_id,
+            &type_name,
+            xid,
+            cid,
+            configured_search_path,
+            catalog_effects,
+        )?;
+        Ok(StatementResult::AffectedRows(0))
+    }
+
     fn execute_create_enum_type_stmt(
         &self,
         client_id: ClientId,
@@ -1134,6 +1279,28 @@ fn range_type_display_name(stmt: &CreateRangeTypeStatement) -> String {
         Some(schema_name) => format!("{schema_name}.{}", stmt.type_name),
         None => stmt.type_name.clone(),
     }
+}
+
+fn split_qualified_type_name(type_name: &str) -> (Option<&str>, &str) {
+    match type_name.split_once('.') {
+        Some((schema_name, object_name)) => (Some(schema_name), object_name),
+        None => (None, type_name),
+    }
+}
+
+fn qualified_type_display_name(schema_name: Option<&str>, type_name: &str) -> String {
+    match schema_name {
+        Some(schema_name) => format!("{schema_name}.{type_name}"),
+        None => type_name.to_string(),
+    }
+}
+
+fn type_object_name(normalized_name: &str) -> String {
+    normalized_name
+        .rsplit('.')
+        .next()
+        .unwrap_or(normalized_name)
+        .to_string()
 }
 
 fn default_multirange_type_name(range_type_name: &str) -> String {

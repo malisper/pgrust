@@ -14,9 +14,10 @@ use crate::include::nodes::parsenodes::{
     AlterColumnExpressionAction, AlterTableTriggerMode, AlterTableTriggerStateStatement,
     AlterTableTriggerTarget, AlterTriggerRenameStatement, ColumnConstraint, ColumnGeneratedKind,
     CommentOnAggregateStatement, CommentOnFunctionStatement, CompositeTypeAttributeDef,
-    CreateAggregateStatement, CreateCompositeTypeStatement, CreateTriggerStatement,
-    CreateTypeStatement, DropAggregateStatement, DropTriggerStatement, DropTypeStatement,
-    ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege, IndexColumnDef, InsertSource,
+    CreateAggregateStatement, CreateCompositeTypeStatement, CreateShellTypeStatement,
+    CreateTriggerStatement, CreateTypeStatement, DropAggregateStatement, DropTriggerStatement,
+    DropTypeStatement, ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege,
+    IndexColumnDef, InsertSource,
     InsertStatement, JoinTreeNode, PartitionStrategy, PublicationObjectSpec, PublicationOption,
     PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey,
     RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement,
@@ -5335,6 +5336,10 @@ fn parse_standalone_type_names() {
         SqlType::new(SqlTypeKind::Char)
     );
     assert_eq!(
+        parse_type_name("cstring").unwrap(),
+        SqlType::new(SqlTypeKind::Cstring)
+    );
+    assert_eq!(
         parse_type_name("char").unwrap(),
         SqlType::with_char_len(SqlTypeKind::Char, 1)
     );
@@ -10381,11 +10386,15 @@ fn parse_create_and_drop_type_statements() {
 
 #[test]
 fn parse_create_type_supports_enum_and_rejects_other_unsupported_forms() {
-    assert!(matches!(
-        parse_statement("create type myint"),
-        Err(ParseError::FeatureNotSupported(feature))
-            if feature == "shell types are not supported in CREATE TYPE"
-    ));
+    let Statement::CreateType(CreateTypeStatement::Shell(CreateShellTypeStatement {
+        schema_name,
+        type_name,
+    })) = parse_statement("create type myint").unwrap()
+    else {
+        panic!("expected shell create type");
+    };
+    assert_eq!(schema_name, None);
+    assert_eq!(type_name, "myint");
     assert!(matches!(
         parse_statement("create type myint (input = myintin, output = myintout, like = int4)"),
         Err(ParseError::FeatureNotSupported(feature))

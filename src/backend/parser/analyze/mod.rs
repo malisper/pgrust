@@ -1949,6 +1949,8 @@ fn builtin_named_type_alias(name: &str) -> Option<SqlType> {
         Some(SqlType::new(SqlTypeKind::RegNamespace))
     } else if name.eq_ignore_ascii_case("regcollation") {
         Some(SqlType::new(SqlTypeKind::RegCollation))
+    } else if name.eq_ignore_ascii_case("cstring") {
+        Some(SqlType::new(SqlTypeKind::Cstring))
     } else {
         None
     }

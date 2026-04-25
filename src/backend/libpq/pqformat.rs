@@ -510,6 +510,7 @@ fn validate_binary_output_type(sql_type: SqlType) -> Result<(), ExecError> {
                 | SqlTypeKind::Cidr
                 | SqlTypeKind::MacAddr
                 | SqlTypeKind::MacAddr8
+                | SqlTypeKind::Cstring
                 | SqlTypeKind::Text
                 | SqlTypeKind::Varchar
                 | SqlTypeKind::Char
@@ -600,6 +601,8 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Multirange => col.sql_type.type_oid as i32,
             SqlTypeKind::Enum => col.sql_type.type_oid as i32,
             SqlTypeKind::Internal => unreachable!("internal arrays are unsupported"),
+            SqlTypeKind::Shell => unreachable!("shell type arrays are unsupported"),
+            SqlTypeKind::Cstring => crate::include::catalog::CSTRING_ARRAY_TYPE_OID as i32,
             SqlTypeKind::Void => unreachable!("void arrays are unsupported"),
             SqlTypeKind::FdwHandler => unreachable!("fdw_handler arrays are unsupported"),
             SqlTypeKind::Oid => 1028,
@@ -710,6 +713,8 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         ),
         SqlTypeKind::Trigger => (TRIGGER_TYPE_OID as i32, -1, -1),
         SqlTypeKind::Internal => (crate::include::catalog::INTERNAL_TYPE_OID as i32, -1, -1),
+        SqlTypeKind::Shell => (col.sql_type.type_oid as i32, -1, -1),
+        SqlTypeKind::Cstring => (crate::include::catalog::CSTRING_TYPE_OID as i32, -2, -1),
         SqlTypeKind::FdwHandler => (crate::include::catalog::FDW_HANDLER_TYPE_OID as i32, 4, -1),
         SqlTypeKind::Record | SqlTypeKind::Composite => {
             (col.sql_type.type_oid as i32, -1, col.sql_type.typmod)
