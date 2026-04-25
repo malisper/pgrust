@@ -462,10 +462,10 @@ impl RelCache {
             let columns = match attrs
                 .iter()
                 .map(|attr| {
-                    let sql_type = catcache
-                        .type_by_oid(attr.atttypid)
-                        .map(|ty| ty.sql_type)
-                        .or_else(|| extra_types_by_oid.get(&attr.atttypid).copied())
+                    let sql_type = extra_types_by_oid
+                        .get(&attr.atttypid)
+                        .copied()
+                        .or_else(|| catcache.type_by_oid(attr.atttypid).map(|ty| ty.sql_type))
                         .ok_or(CatalogError::Corrupt("unknown atttypid"))?;
                     let mut desc = column_desc(
                         attr.attname.clone(),

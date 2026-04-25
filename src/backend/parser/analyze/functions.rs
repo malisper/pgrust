@@ -2,8 +2,8 @@ use super::*;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLEOID,
-    ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID, TEXT_TYPE_OID,
-    bootstrap_pg_proc_rows, builtin_hypothetical_aggregate_function_for_proc_oid,
+    ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYENUMOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID,
+    TEXT_TYPE_OID, bootstrap_pg_proc_rows, builtin_hypothetical_aggregate_function_for_proc_oid,
     builtin_type_rows, builtin_window_function_for_proc_oid,
 };
 use crate::include::catalog::{
@@ -449,6 +449,17 @@ fn match_proc_arg_type(
         return (actual_type.is_array || actual_type.kind == SqlTypeKind::AnyArray)
             .then_some((2, actual_type));
     }
+    if declared_oid == ANYENUMOID {
+        if !actual_type.is_array
+            && (actual_type.kind == SqlTypeKind::Enum || actual_type.kind == SqlTypeKind::AnyEnum)
+        {
+            return Some((2, actual_type));
+        }
+        if is_text_like_type(actual_type) {
+            return Some((4, SqlType::new(SqlTypeKind::AnyEnum)));
+        }
+        return None;
+    }
     if declared_oid == ANYRANGEOID {
         return (actual_type.is_range() || actual_type.kind == SqlTypeKind::AnyRange)
             .then_some((2, actual_type));
@@ -494,6 +505,7 @@ fn resolve_proc_result_type(
 ) -> Option<SqlType> {
     match row.prorettype {
         ANYOID | ANYELEMENTOID => resolve_anyelement_result_type(row, candidate),
+        ANYENUMOID => resolve_anyenum_result_type(row, candidate),
         ANYARRAYOID => resolve_anyarray_result_type(row, candidate),
         ANYRANGEOID => resolve_anyrange_result_type(row, candidate),
         ANYMULTIRANGEOID => resolve_anymultirange_result_type(row, candidate),
@@ -587,6 +599,7 @@ fn resolve_polymorphic_output_type(
 ) -> Option<SqlType> {
     match type_oid {
         ANYOID | ANYELEMENTOID => resolve_anyelement_result_type(row, candidate),
+        ANYENUMOID => resolve_anyenum_result_type(row, candidate),
         ANYARRAYOID => resolve_anyarray_result_type(row, candidate),
         ANYRANGEOID => resolve_anyrange_result_type(row, candidate),
         ANYMULTIRANGEOID => resolve_anymultirange_result_type(row, candidate),
@@ -612,6 +625,7 @@ fn resolve_anyelement_result_type(
     {
         let inferred = match declared_oid {
             ANYOID | ANYELEMENTOID | ANYCOMPATIBLEOID => Some(actual_type),
+            ANYENUMOID if matches!(actual_type.kind, SqlTypeKind::Enum) => Some(actual_type),
             ANYARRAYOID | ANYCOMPATIBLEARRAYOID if actual_type.is_array => {
                 Some(actual_type.element_type())
             }
@@ -635,6 +649,20 @@ fn resolve_anyelement_result_type(
     resolved
 }
 
+fn resolve_anyenum_result_type(
+    row: &crate::include::catalog::PgProcRow,
+    candidate: &CandidateMatch,
+) -> Option<SqlType> {
+    let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
+    declared_oids
+        .into_iter()
+        .zip(candidate.declared_arg_types.iter().copied())
+        .find_map(|(declared_oid, actual_type)| {
+            (declared_oid == ANYENUMOID && matches!(actual_type.kind, SqlTypeKind::Enum))
+                .then_some(actual_type)
+        })
+}
+
 fn resolve_anyarray_result_type(
     row: &crate::include::catalog::PgProcRow,
     candidate: &CandidateMatch,
@@ -647,6 +675,9 @@ fn resolve_anyarray_result_type(
     {
         let inferred = match declared_oid {
             ANYARRAYOID | ANYCOMPATIBLEARRAYOID if actual_type.is_array => Some(actual_type),
+            ANYENUMOID if matches!(actual_type.kind, SqlTypeKind::Enum) => {
+                Some(SqlType::array_of(actual_type))
+            }
             ANYOID | ANYELEMENTOID | ANYCOMPATIBLEOID
                 if !actual_type.is_array && actual_type.kind != SqlTypeKind::AnyArray =>
             {
@@ -1472,6 +1503,8 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::RangeIntersect
             | BuiltinScalarFunction::RangeDifference
             | BuiltinScalarFunction::RangeMerge => args.len() == 2,
+            BuiltinScalarFunction::EnumFirst | BuiltinScalarFunction::EnumLast => args.len() == 1,
+            BuiltinScalarFunction::EnumRange => matches!(args.len(), 1 | 2),
         });
 
     if valid {
@@ -2327,6 +2360,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("array_remove", BuiltinScalarFunction::ArrayRemove),
         ("array_replace", BuiltinScalarFunction::ArrayReplace),
         ("array_sort", BuiltinScalarFunction::ArraySort),
+        ("enum_first", BuiltinScalarFunction::EnumFirst),
+        ("enum_last", BuiltinScalarFunction::EnumLast),
+        ("enum_range", BuiltinScalarFunction::EnumRange),
+        ("enum_range_bounds", BuiltinScalarFunction::EnumRange),
         ("lower", BuiltinScalarFunction::Lower),
         ("unistr", BuiltinScalarFunction::Unistr),
         ("ascii", BuiltinScalarFunction::Ascii),
@@ -3275,6 +3312,9 @@ fn catalog_builtin_type_oid(catalog: &dyn CatalogLookup, sql_type: SqlType) -> O
 fn catalog_text_input_cast_exists(catalog: &dyn CatalogLookup, target_oid: u32) -> bool {
     if let Some(row) = catalog.type_by_oid(target_oid) {
         if row.sql_type.is_range() || row.sql_type.is_multirange() {
+            return true;
+        }
+        if matches!(row.sql_type.kind, SqlTypeKind::Enum) {
             return true;
         }
         if matches!(

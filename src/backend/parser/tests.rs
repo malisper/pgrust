@@ -9965,8 +9965,9 @@ fn lower_create_table_rejects_cross_type_foreign_keys() {
     };
     assert!(matches!(
         lower_create_table(&ct, &catalog_with_text_parent_primary_key()),
-        Err(ParseError::FeatureNotSupported(feature))
-            if feature == "FOREIGN KEY with cross-type columns"
+        Err(ParseError::DetailedError { message, detail: Some(detail), sqlstate: "42804", .. })
+            if message == "foreign key constraint \"pets_owner_id_fkey\" cannot be implemented"
+                && detail.contains("incompatible types")
     ));
 }
 
@@ -10018,6 +10019,18 @@ fn parse_create_drop_and_comment_on_domain_statements() {
     };
     assert_eq!(comment.domain_name, "dom_int");
     assert_eq!(comment.comment.as_deref(), Some("hello"));
+}
+
+#[test]
+fn parse_alter_type_rename_to_statement() {
+    let Statement::AlterType(AlterTypeStatement::RenameType(rename)) =
+        parse_statement("alter type bogus rename to bogon").unwrap()
+    else {
+        panic!("expected alter type rename");
+    };
+    assert_eq!(rename.schema_name, None);
+    assert_eq!(rename.type_name, "bogus");
+    assert_eq!(rename.new_type_name, "bogon");
 }
 
 #[test]

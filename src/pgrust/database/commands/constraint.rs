@@ -1104,12 +1104,13 @@ impl Database {
                 } else {
                     None
                 };
+                let table_entry = super::index::catalog_entry_from_bound_relation(&relation);
                 let effect = self
                     .catalog
                     .write()
-                    .create_index_backed_constraint_mvcc_with_period(
-                        relation.relation_oid,
-                        index_entry.relation_oid,
+                    .create_index_backed_constraint_for_entries_mvcc_with_period(
+                        &table_entry,
+                        &index_entry,
                         constraint_name,
                         if action.primary {
                             CONSTRAINT_PRIMARY

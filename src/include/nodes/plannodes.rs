@@ -481,9 +481,18 @@ impl Plan {
             Plan::WorkTableScan { output_columns, .. }
             | Plan::RecursiveUnion { output_columns, .. }
             | Plan::SetOp { output_columns, .. } => output_columns.clone(),
-            Plan::NestedLoopJoin { left, right, .. }
-            | Plan::HashJoin { left, right, .. }
-            | Plan::MergeJoin { left, right, .. } => {
+            Plan::NestedLoopJoin {
+                left, right, kind, ..
+            }
+            | Plan::HashJoin {
+                left, right, kind, ..
+            }
+            | Plan::MergeJoin {
+                left, right, kind, ..
+            } => {
+                if matches!(kind, JoinType::Semi | JoinType::Anti) {
+                    return left.columns();
+                }
                 let mut cols = left.columns();
                 cols.extend(right.columns());
                 cols

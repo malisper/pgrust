@@ -3709,8 +3709,12 @@ fn try_parse_create_type_statement(sql: &str) -> Result<Option<Statement>, Parse
         return build_create_type_statement(trimmed).map(|stmt| Some(Statement::CreateType(stmt)));
     }
     if lowered.starts_with("alter type ") {
-        return build_alter_type_owner_statement(trimmed)
-            .map(|stmt| Some(Statement::AlterTypeOwner(stmt)));
+        return match build_alter_type_statement(trimmed) {
+            Ok(stmt) => Ok(Some(Statement::AlterType(stmt))),
+            Err(ParseError::FeatureNotSupported(_)) => build_alter_type_owner_statement(trimmed)
+                .map(|stmt| Some(Statement::AlterTypeOwner(stmt))),
+            Err(err) => Err(err),
+        };
     }
     if lowered.starts_with("drop type ") {
         return build_drop_type_statement(trimmed).map(|stmt| Some(Statement::DropType(stmt)));
@@ -6910,6 +6914,155 @@ fn parse_create_enum_labels(input: &str) -> Result<Vec<String>, ParseError> {
         .collect()
 }
 
+fn parse_enum_label_literal(input: &str) -> Result<(String, &str), ParseError> {
+    let trimmed = input.trim_start();
+    let token_len = scan_string_literal_token_len(trimmed).ok_or(ParseError::UnexpectedToken {
+        expected: "enum label string literal",
+        actual: trimmed.to_string(),
+    })?;
+    let label = decode_string_literal(&trimmed[..token_len])?;
+    Ok((label, &trimmed[token_len..]))
+}
+
+fn build_alter_type_statement(sql: &str) -> Result<AlterTypeStatement, ParseError> {
+    let prefix = "alter type";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ALTER TYPE name",
+            actual: sql.into(),
+        });
+    };
+    let ((schema_name, type_name), rest) = parse_qualified_sql_name(rest.trim_start())?;
+    let mut rest = rest.trim_start();
+    if keyword_at_start(rest, "add") {
+        rest = consume_keyword(rest, "add").trim_start();
+        if !keyword_at_start(rest, "value") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "VALUE",
+                actual: rest.into(),
+            });
+        }
+        rest = consume_keyword(rest, "value").trim_start();
+        let if_not_exists = if keyword_at_start(rest, "if") {
+            rest = consume_keyword(rest, "if").trim_start();
+            if !keyword_at_start(rest, "not") {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "NOT EXISTS",
+                    actual: rest.into(),
+                });
+            }
+            rest = consume_keyword(rest, "not").trim_start();
+            if !keyword_at_start(rest, "exists") {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "EXISTS",
+                    actual: rest.into(),
+                });
+            }
+            rest = consume_keyword(rest, "exists").trim_start();
+            true
+        } else {
+            false
+        };
+        let (label, after_label) = parse_enum_label_literal(rest)?;
+        rest = after_label.trim_start();
+        let position = if rest.is_empty() {
+            None
+        } else if keyword_at_start(rest, "before") {
+            let (neighbor, after_neighbor) =
+                parse_enum_label_literal(consume_keyword(rest, "before"))?;
+            if !after_neighbor.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "end of statement",
+                    actual: after_neighbor.trim().into(),
+                });
+            }
+            Some(AlterEnumValuePosition::Before(neighbor))
+        } else if keyword_at_start(rest, "after") {
+            let (neighbor, after_neighbor) =
+                parse_enum_label_literal(consume_keyword(rest, "after"))?;
+            if !after_neighbor.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "end of statement",
+                    actual: after_neighbor.trim().into(),
+                });
+            }
+            Some(AlterEnumValuePosition::After(neighbor))
+        } else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "BEFORE, AFTER, or end of statement",
+                actual: rest.into(),
+            });
+        };
+        return Ok(AlterTypeStatement::AddEnumValue(
+            AlterTypeAddEnumValueStatement {
+                schema_name,
+                type_name,
+                if_not_exists,
+                label,
+                position,
+            },
+        ));
+    }
+    if keyword_at_start(rest, "rename") {
+        rest = consume_keyword(rest, "rename").trim_start();
+        if keyword_at_start(rest, "to") {
+            let new_name = consume_keyword(rest, "to").trim();
+            if new_name.is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "new type name",
+                    actual: rest.into(),
+                });
+            }
+            if new_name.split_whitespace().count() != 1 || new_name.contains('.') {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "unqualified new type name",
+                    actual: new_name.into(),
+                });
+            }
+            return Ok(AlterTypeStatement::RenameType(
+                AlterTypeRenameTypeStatement {
+                    schema_name,
+                    type_name,
+                    new_type_name: new_name.to_string(),
+                },
+            ));
+        }
+        if !keyword_at_start(rest, "value") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "VALUE",
+                actual: rest.into(),
+            });
+        }
+        rest = consume_keyword(rest, "value").trim_start();
+        let (old_label, after_old) = parse_enum_label_literal(rest)?;
+        rest = after_old.trim_start();
+        if !keyword_at_start(rest, "to") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "TO",
+                actual: rest.into(),
+            });
+        }
+        let (new_label, after_new) = parse_enum_label_literal(consume_keyword(rest, "to"))?;
+        if !after_new.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of statement",
+                actual: after_new.trim().into(),
+            });
+        }
+        return Ok(AlterTypeStatement::RenameEnumValue(
+            AlterTypeRenameEnumValueStatement {
+                schema_name,
+                type_name,
+                old_label,
+                new_label,
+            },
+        ));
+    }
+    Err(ParseError::FeatureNotSupported(
+        "unsupported ALTER TYPE form".into(),
+    ))
+}
+
 fn parse_create_range_type_statement(
     schema_name: Option<String>,
     type_name: String,
@@ -7664,12 +7817,21 @@ fn build_create_domain_statement(sql: &str) -> Result<CreateDomainStatement, Par
     let (type_sql, clauses_sql) = split_create_domain_type_and_clauses(type_sql);
     let normalized_type_sql = normalize_domain_type_sql(type_sql);
     let clauses = parse_create_domain_clauses(clauses_sql)?;
+    let enum_check = clauses.check.as_ref().and_then(|check| {
+        parse_domain_value_in_check_body(check)
+            .ok()
+            .map(|allowed_values| DomainCheckConstraint {
+                name: clauses.check_name.clone(),
+                allowed_values,
+            })
+    });
     Ok(CreateDomainStatement {
         domain_name: domain_name.to_string(),
         ty: parse_type_name(&normalized_type_sql)?,
         default: clauses.default,
         check: clauses.check,
         not_null: clauses.not_null,
+        enum_check,
     })
 }
 
@@ -7677,6 +7839,7 @@ fn build_create_domain_statement(sql: &str) -> Result<CreateDomainStatement, Par
 struct CreateDomainClauses {
     default: Option<String>,
     check: Option<String>,
+    check_name: Option<String>,
     not_null: bool,
 }
 
@@ -7707,24 +7870,28 @@ fn split_create_domain_type_and_clauses(type_sql: &str) -> (&str, &str) {
 
 fn parse_create_domain_clauses(mut input: &str) -> Result<CreateDomainClauses, ParseError> {
     let mut clauses = CreateDomainClauses::default();
+    let mut pending_constraint_name = None;
     input = input.trim_start();
     while !input.is_empty() {
         if keyword_at_boundary(input, 0, "constraint") {
             let after_constraint = input["constraint".len()..].trim_start();
+            let (constraint_name, after_name) = parse_domain_constraint_name(after_constraint)?;
             let Some(next_clause) = find_next_top_level_keyword(
-                after_constraint,
+                after_name,
                 &["default", "check", "not", "null", "collate"],
             ) else {
                 return Err(ParseError::UnexpectedToken {
                     expected: "domain constraint",
-                    actual: after_constraint.into(),
+                    actual: after_name.into(),
                 });
             };
-            input = after_constraint[next_clause..].trim_start();
+            pending_constraint_name = Some(constraint_name);
+            input = after_name[next_clause..].trim_start();
             continue;
         }
         if keyword_at_boundary(input, 0, "check") {
             let (check, rest) = parse_create_domain_check_clause(input)?;
+            clauses.check_name = pending_constraint_name.take();
             clauses.check = Some(check);
             input = rest.trim_start();
             continue;
@@ -7815,6 +7982,173 @@ fn parse_create_domain_check_clause(input: &str) -> Result<(String, &str), Parse
         expected: "closing parenthesis",
         actual: rest.into(),
     })
+}
+
+fn build_transaction_marker_name(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::identifier)
+        .next_back()
+        .map(build_identifier)
+        .ok_or(ParseError::UnexpectedEof)
+}
+
+fn split_domain_type_and_check(
+    sql: &str,
+) -> Result<(&str, Option<DomainCheckConstraint>), ParseError> {
+    let Some(clause_start) = find_domain_constraint_start(sql) else {
+        return Ok((sql, None));
+    };
+    let type_sql = sql[..clause_start].trim_end();
+    let clause_sql = sql[clause_start..].trim_start();
+    if type_sql.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "domain base type",
+            actual: sql.into(),
+        });
+    }
+    let mut rest = clause_sql;
+    let mut name = None;
+    if rest
+        .get(..10)
+        .is_some_and(|s| s.eq_ignore_ascii_case("constraint"))
+        && keyword_end_boundary(rest, 10)
+    {
+        rest = rest[10..].trim_start();
+        let (constraint_name, after_name) = parse_domain_constraint_name(rest)?;
+        name = Some(constraint_name);
+        rest = after_name.trim_start();
+    }
+    let allowed_values = parse_domain_value_in_check(rest)?;
+    Ok((
+        type_sql,
+        Some(DomainCheckConstraint {
+            name,
+            allowed_values,
+        }),
+    ))
+}
+
+fn find_domain_constraint_start(sql: &str) -> Option<usize> {
+    let mut quote = None;
+    let mut parens = 0usize;
+    for (idx, ch) in sql.char_indices() {
+        match quote {
+            Some('\'') if ch == '\'' => quote = None,
+            Some('"') if ch == '"' => quote = None,
+            Some(_) => continue,
+            None if ch == '\'' || ch == '"' => quote = Some(ch),
+            None if ch == '(' => parens = parens.saturating_add(1),
+            None if ch == ')' => parens = parens.saturating_sub(1),
+            None if parens == 0 => {
+                if keyword_starts_at(sql, idx, "constraint") || keyword_starts_at(sql, idx, "check")
+                {
+                    return Some(idx);
+                }
+            }
+            None => {}
+        }
+    }
+    None
+}
+
+fn keyword_starts_at(sql: &str, idx: usize, keyword: &str) -> bool {
+    sql.get(idx..idx + keyword.len())
+        .is_some_and(|part| part.eq_ignore_ascii_case(keyword))
+        && (idx == 0
+            || sql[..idx]
+                .chars()
+                .next_back()
+                .is_none_or(|ch| !(ch.is_ascii_alphanumeric() || ch == '_')))
+        && keyword_end_boundary(&sql[idx..], keyword.len())
+}
+
+fn keyword_end_boundary(sql: &str, end: usize) -> bool {
+    sql.get(end..)
+        .and_then(|slice| slice.chars().next())
+        .is_none_or(|ch| !(ch.is_ascii_alphanumeric() || ch == '_'))
+}
+
+fn parse_domain_constraint_name(input: &str) -> Result<(String, &str), ParseError> {
+    let trimmed = input.trim_start();
+    let end = trimmed
+        .char_indices()
+        .find_map(|(idx, ch)| ch.is_whitespace().then_some(idx))
+        .unwrap_or(trimmed.len());
+    if end == 0 {
+        return Err(ParseError::UnexpectedToken {
+            expected: "domain constraint name",
+            actual: input.into(),
+        });
+    }
+    Ok((
+        trimmed[..end].trim_matches('"').to_string(),
+        &trimmed[end..],
+    ))
+}
+
+fn parse_domain_value_in_check(input: &str) -> Result<Vec<String>, ParseError> {
+    let mut rest = input.trim_start();
+    if !rest
+        .get(..5)
+        .is_some_and(|s| s.eq_ignore_ascii_case("check"))
+        || !keyword_end_boundary(rest, 5)
+    {
+        return Err(ParseError::FeatureNotSupported(
+            "CREATE DOMAIN only supports CHECK (VALUE IN (...)) constraints".into(),
+        ));
+    }
+    rest = rest[5..].trim_start();
+    if !rest.starts_with('(') || !rest.ends_with(')') {
+        return Err(ParseError::FeatureNotSupported(
+            "CREATE DOMAIN only supports CHECK (VALUE IN (...)) constraints".into(),
+        ));
+    }
+    parse_domain_value_in_check_body(rest[1..rest.len() - 1].trim())
+}
+
+fn parse_domain_value_in_check_body(check_body: &str) -> Result<Vec<String>, ParseError> {
+    let mut inner = check_body;
+    if !inner
+        .get(..5)
+        .is_some_and(|s| s.eq_ignore_ascii_case("value"))
+        || !keyword_end_boundary(inner, 5)
+    {
+        return Err(ParseError::FeatureNotSupported(
+            "CREATE DOMAIN only supports CHECK (VALUE IN (...)) constraints".into(),
+        ));
+    }
+    inner = inner[5..].trim_start();
+    if !inner.get(..2).is_some_and(|s| s.eq_ignore_ascii_case("in"))
+        || !keyword_end_boundary(inner, 2)
+    {
+        return Err(ParseError::FeatureNotSupported(
+            "CREATE DOMAIN only supports CHECK (VALUE IN (...)) constraints".into(),
+        ));
+    }
+    inner = inner[2..].trim_start();
+    if !inner.starts_with('(') || !inner.ends_with(')') {
+        return Err(ParseError::FeatureNotSupported(
+            "CREATE DOMAIN only supports CHECK (VALUE IN (...)) constraints".into(),
+        ));
+    }
+    let mut values_sql = inner[1..inner.len() - 1].trim();
+    let mut values = Vec::new();
+    while !values_sql.is_empty() {
+        let (value, rest_after_value) = parse_enum_label_literal(values_sql)?;
+        values.push(value);
+        values_sql = rest_after_value.trim_start();
+        if values_sql.is_empty() {
+            break;
+        }
+        let Some(after_comma) = values_sql.strip_prefix(',') else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "comma-separated domain check values",
+                actual: values_sql.into(),
+            });
+        };
+        values_sql = after_comma.trim_start();
+    }
+    Ok(values)
 }
 
 fn normalize_domain_type_sql(sql: &str) -> String {
@@ -8424,6 +8758,8 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::delete_stmt => Ok(Statement::Delete(build_delete(inner)?)),
         Rule::begin_stmt => Ok(Statement::Begin),
         Rule::commit_stmt => Ok(Statement::Commit),
+        Rule::savepoint_stmt => Ok(Statement::Savepoint(build_transaction_marker_name(inner)?)),
+        Rule::rollback_to_stmt => Ok(Statement::RollbackTo(build_transaction_marker_name(inner)?)),
         Rule::rollback_stmt => Ok(Statement::Rollback),
         _ => Err(ParseError::UnexpectedToken {
             expected: "statement",
@@ -12563,6 +12899,8 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::AnyCompatibleArray => "anycompatiblearray",
         SqlTypeKind::AnyCompatibleRange => "anycompatiblerange",
         SqlTypeKind::AnyCompatibleMultirange => "anycompatiblemultirange",
+        SqlTypeKind::AnyEnum => "anyenum",
+        SqlTypeKind::Enum => "enum",
         SqlTypeKind::Record => "record",
         SqlTypeKind::Composite => "record",
         SqlTypeKind::Trigger => "trigger",

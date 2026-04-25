@@ -11,7 +11,9 @@ use super::expr_bit::{
     concat_bit_strings, shift_left as shift_left_bits, shift_right as shift_right_bits,
 };
 use super::expr_bool::order_bool_values;
-use super::expr_casts::{cast_value, pg_lsn_out_of_range};
+use super::expr_casts::{
+    cast_value, cast_value_with_source_type_catalog_and_config, pg_lsn_out_of_range,
+};
 use super::expr_money::{
     money_add, money_cash_div, money_cmp, money_div_float, money_div_int, money_mul_float,
     money_mul_int, money_sub,
@@ -22,7 +24,8 @@ use super::{compare_multirange_values, expr_range::compare_range_values};
 use crate::backend::executor::jsonb::{
     JsonbValue, compare_jsonb, decode_jsonb, encode_jsonb, jsonb_concat,
 };
-use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::backend::parser::{CatalogLookup, SqlType, SqlTypeKind};
+use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::catalog::{C_COLLATION_OID, DEFAULT_COLLATION_OID, POSIX_COLLATION_OID};
 use crate::include::nodes::datetime::{
     TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeTzADT, USECS_PER_SEC,
@@ -87,6 +90,7 @@ pub(crate) fn compare_order_values(
             }
         }
         (Value::Int32(a), Value::Int32(b)) => Ok(a.cmp(b)),
+        (Value::EnumOid(a), Value::EnumOid(b)) => Ok(a.cmp(b)),
         (Value::Int64(a), Value::Int64(b)) => Ok(a.cmp(b)),
         (Value::PgLsn(a), Value::PgLsn(b)) => Ok(a.cmp(b)),
         (Value::Int16(a), Value::Float64(b)) => Ok(pg_float_cmp(f64::from(*a), *b)),
@@ -196,6 +200,7 @@ pub(crate) fn compare_values(
         (Value::Int16(l), Value::Int64(r)) => Ok(Value::Bool((*l as i64) == *r)),
         (Value::Int32(l), Value::Int16(r)) => Ok(Value::Bool(*l == (*r as i32))),
         (Value::Int32(l), Value::Int32(r)) => Ok(Value::Bool(l == r)),
+        (Value::EnumOid(l), Value::EnumOid(r)) => Ok(Value::Bool(l == r)),
         (Value::Int32(l), Value::Int64(r)) => Ok(Value::Bool((*l as i64) == *r)),
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Bool(*l == (*r as i64))),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Bool(*l == (*r as i64))),
@@ -330,6 +335,7 @@ pub(crate) fn values_are_distinct(left: &Value, right: &Value) -> bool {
         (Value::Int16(l), Value::Int32(r)) => (*l as i32) != *r,
         (Value::Int16(l), Value::Int64(r)) => (*l as i64) != *r,
         (Value::Int32(l), Value::Int32(r)) => l != r,
+        (Value::EnumOid(l), Value::EnumOid(r)) => l != r,
         (Value::Int32(l), Value::Int16(r)) => *l != (*r as i32),
         (Value::Int32(l), Value::Int64(r)) => (*l as i64) != *r,
         (Value::Int64(l), Value::Int16(r)) => *l != (*r as i64),
@@ -793,6 +799,17 @@ pub(crate) fn mod_values(left: Value, right: Value) -> Result<Value, ExecError> 
 }
 
 pub(crate) fn concat_values(left: Value, right: Value) -> Result<Value, ExecError> {
+    concat_values_with_cast_context(left, None, right, None, None, &DateTimeConfig::default())
+}
+
+pub(crate) fn concat_values_with_cast_context(
+    left: Value,
+    left_type: Option<SqlType>,
+    right: Value,
+    right_type: Option<SqlType>,
+    catalog: Option<&dyn CatalogLookup>,
+    config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
     }
@@ -843,8 +860,12 @@ pub(crate) fn concat_values(left: Value, right: Value) -> Result<Value, ExecErro
         }
         _ => {
             let text_type = SqlType::new(SqlTypeKind::Text);
-            let left_text = cast_value(left, text_type)?;
-            let right_text = cast_value(right, text_type)?;
+            let left_text = cast_value_with_source_type_catalog_and_config(
+                left, left_type, text_type, catalog, config,
+            )?;
+            let right_text = cast_value_with_source_type_catalog_and_config(
+                right, right_type, text_type, catalog, config,
+            )?;
             let mut out = String::new();
             out.push_str(left_text.as_text().ok_or_else(|| ExecError::TypeMismatch {
                 op: "||",
@@ -900,6 +921,7 @@ pub(crate) fn order_values(
         (Value::Int16(l), Value::Int64(r)) => Ok(Value::Bool(compare_ord(*l as i64, *r, op))),
         (Value::Int32(l), Value::Int16(r)) => Ok(Value::Bool(compare_ord(*l, *r as i32, op))),
         (Value::Int32(l), Value::Int32(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
+        (Value::EnumOid(l), Value::EnumOid(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::Int32(l), Value::Int64(r)) => Ok(Value::Bool(compare_ord(*l as i64, *r, op))),
         (Value::Int64(l), Value::Int16(r)) => Ok(Value::Bool(compare_ord(*l, *r as i64, op))),
         (Value::Int64(l), Value::Int32(r)) => Ok(Value::Bool(compare_ord(*l, *r as i64, op))),

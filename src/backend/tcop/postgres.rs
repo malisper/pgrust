@@ -1549,6 +1549,7 @@ fn handle_portal_statement(
                         send_command_complete(stream, &format!("MOVE {}", result.processed))?;
                     } else {
                         let catalog = state.session.catalog_lookup(db);
+                        let enum_labels = enum_label_map(&catalog);
                         annotate_query_columns_with_wire_type_oids(&mut result.columns, &catalog);
                         send_query_result(
                             stream,
@@ -1564,6 +1565,7 @@ fn handle_portal_statement(
                             None,
                             None,
                             None,
+                            Some(&enum_labels),
                         )?;
                     }
                 }
@@ -1686,6 +1688,7 @@ fn try_handle_pg_cursors_query(
             bytea_output: state.session.bytea_output(),
             datetime_config: state.session.datetime_config().clone(),
         },
+        None,
         None,
         None,
         None,
@@ -1836,6 +1839,7 @@ fn execute_query_statement(
             let relation_names = relation_name_map(&catalog);
             let proc_names = proc_name_map(&catalog);
             let namespace_names = namespace_name_map(&catalog);
+            let enum_labels = enum_label_map(&catalog);
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
             flush_pending_backend_messages(stream, db, &state.session)?;
             send_query_result(
@@ -1852,6 +1856,7 @@ fn execute_query_statement(
                 Some(&relation_names),
                 Some(&proc_names),
                 Some(&namespace_names),
+                Some(&enum_labels),
             )?;
             Ok(QueryStatementFlow::Continue)
         }
@@ -1930,6 +1935,7 @@ fn try_handle_nonstandard_backslash_select(
             bytea_output: state.session.bytea_output(),
             datetime_config: state.session.datetime_config().clone(),
         },
+        None,
         None,
         None,
         None,
@@ -2076,6 +2082,7 @@ fn execute_streaming_select_statement(
             let relation_names = relation_name_map(&catalog);
             let proc_names = proc_name_map(&catalog);
             let namespace_names = namespace_name_map(&catalog);
+            let enum_labels = enum_label_map(&catalog);
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
             let mut row_buf = Vec::new();
             let mut row_count = 0usize;
@@ -2106,6 +2113,7 @@ fn execute_streaming_select_statement(
                                     Some(&relation_names),
                                     Some(&proc_names),
                                     Some(&namespace_names),
+                                    Some(&enum_labels),
                                 )?;
                                 row_count += 1;
                             }
@@ -2337,6 +2345,19 @@ fn namespace_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
         .unwrap_or_default()
 }
 
+fn enum_label_map(catalog: &dyn CatalogLookup) -> HashMap<(u32, u32), String> {
+    catalog
+        .materialize_visible_catalog()
+        .map(|visible| {
+            visible
+                .enum_rows()
+                .into_iter()
+                .map(|row| ((row.enumtypid, row.oid), row.enumlabel))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn try_handle_psql_describe_query(
     stream: &mut impl Write,
     db: &Database,
@@ -2351,6 +2372,7 @@ fn try_handle_psql_describe_query(
     let relation_names = relation_name_map(&catalog);
     let proc_names = proc_name_map(&catalog);
     let namespace_names = namespace_name_map(&catalog);
+    let enum_labels = enum_label_map(&catalog);
     send_query_result(
         stream,
         &columns,
@@ -2365,6 +2387,7 @@ fn try_handle_psql_describe_query(
         Some(&relation_names),
         Some(&proc_names),
         Some(&namespace_names),
+        Some(&enum_labels),
     )?;
     Ok(true)
 }
@@ -2687,6 +2710,7 @@ fn try_handle_statistics_catalog_query(
     let relation_names = relation_name_map(&catalog);
     let proc_names = proc_name_map(&catalog);
     let namespace_names = namespace_name_map(&catalog);
+    let enum_labels = enum_label_map(&catalog);
     send_query_result(
         stream,
         &columns,
@@ -2701,6 +2725,7 @@ fn try_handle_statistics_catalog_query(
         Some(&relation_names),
         Some(&proc_names),
         Some(&namespace_names),
+        Some(&enum_labels),
     )?;
     Ok(true)
 }
@@ -4626,6 +4651,7 @@ fn handle_execute(
                 let relation_names = relation_name_map(&catalog);
                 let proc_names = proc_name_map(&catalog);
                 let namespace_names = namespace_name_map(&catalog);
+                let enum_labels = enum_label_map(&catalog);
                 let mut row_buf = Vec::new();
                 for row in &result.rows {
                     send_typed_data_row(
@@ -4643,6 +4669,7 @@ fn handle_execute(
                         Some(&relation_names),
                         Some(&proc_names),
                         Some(&namespace_names),
+                        Some(&enum_labels),
                     )?;
                 }
                 if result.completed {

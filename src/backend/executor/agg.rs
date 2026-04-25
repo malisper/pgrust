@@ -1305,6 +1305,7 @@ fn json_object_agg_key(key: &Value) -> String {
         Value::Uuid(v) => crate::backend::executor::value_io::render_uuid_text(v),
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
+        Value::EnumOid(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
         Value::PgLsn(v) => crate::backend::executor::render_pg_lsn_text(*v),
         Value::Money(v) => crate::backend::executor::money_format_text(*v),
@@ -1348,6 +1349,7 @@ fn value_to_json_text(value: &Value) -> String {
         Value::Null => "null".into(),
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
+        Value::EnumOid(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
         Value::PgLsn(v) => {
             serde_json::to_string(&crate::backend::executor::render_pg_lsn_text(*v)).unwrap()

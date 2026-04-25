@@ -87,7 +87,7 @@ use crate::backend::utils::misc::interrupts::InterruptState;
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, CURRENT_DATABASE_NAME, PUBLIC_NAMESPACE_OID, PgConstraintRow,
-    PgRangeRow, PgTypeRow, RangeCanonicalization, system_catalog_indexes,
+    PgEnumRow, PgRangeRow, PgTypeRow, RangeCanonicalization, system_catalog_indexes,
 };
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 pub use crate::pgrust::autovacuum::AutovacuumConfig;
@@ -262,16 +262,33 @@ pub(crate) struct DomainEntry {
     pub default: Option<String>,
     pub check: Option<String>,
     pub not_null: bool,
+    pub enum_check: Option<DomainCheckEntry>,
     pub comment: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DomainCheckEntry {
+    pub name: String,
+    pub allowed_enum_label_oids: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct EnumLabelEntry {
+    pub oid: u32,
+    pub label: String,
+    pub sort_order: f64,
+    pub committed: bool,
+    pub creating_xid: Option<TransactionId>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EnumTypeEntry {
     pub oid: u32,
     pub array_oid: u32,
     pub name: String,
     pub namespace_oid: u32,
-    pub labels: Vec<String>,
+    pub labels: Vec<EnumLabelEntry>,
+    pub creating_xid: Option<TransactionId>,
     pub comment: Option<String>,
 }
 
@@ -291,6 +308,22 @@ pub(crate) struct RangeTypeEntry {
     pub subtype_diff: Option<String>,
     pub collation: Option<String>,
     pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DynamicTypeSnapshot {
+    pub domains: BTreeMap<String, DomainEntry>,
+    pub enum_types: BTreeMap<String, EnumTypeEntry>,
+    pub range_types: BTreeMap<String, RangeTypeEntry>,
+}
+
+fn domain_sql_type(domain: &DomainEntry) -> SqlType {
+    if domain.enum_check.is_some() && matches!(domain.sql_type.kind, SqlTypeKind::Enum) {
+        return domain
+            .sql_type
+            .with_identity(domain.oid, domain.sql_type.type_oid);
+    }
+    domain.sql_type
 }
 
 fn dynamic_range_array_type_names(
@@ -701,7 +734,7 @@ impl Database {
                 typrelid: 0,
                 typelem: 0,
                 typarray: 0,
-                sql_type: domain.sql_type,
+                sql_type: domain_sql_type(domain),
             })
             .collect::<Vec<_>>();
         rows.sort_by_key(|row| {
@@ -722,22 +755,19 @@ impl Database {
         let mut rows = enum_types
             .values()
             .flat_map(|entry| {
-                let base_sql_type = SqlType::new(SqlTypeKind::Text).with_identity(entry.oid, 0);
+                let base_sql_type = SqlType::new(SqlTypeKind::Enum).with_identity(entry.oid, 0);
                 [
                     PgTypeRow {
                         oid: entry.oid,
                         typname: entry.name.clone(),
                         typnamespace: entry.namespace_oid,
                         typowner: BOOTSTRAP_SUPERUSER_OID,
-                        typlen: -1,
+                        typlen: 4,
                         typalign: AttributeAlign::Int,
-                        typstorage: AttributeStorage::Extended,
+                        typstorage: AttributeStorage::Plain,
                         typrelid: 0,
                         typelem: 0,
                         typarray: entry.array_oid,
-                        // :HACK: User-defined enums are text-backed for now. This unlocks
-                        // catalog/type resolution and basic storage flow, but does not yet
-                        // enforce label membership or enum ordering semantics.
                         sql_type: base_sql_type,
                     },
                     PgTypeRow {
@@ -766,6 +796,149 @@ impl Database {
                 })
                 .unwrap_or(usize::MAX);
             (schema_rank, row.typname.clone())
+        });
+        rows
+    }
+
+    pub(crate) fn enum_label_oid(&self, type_oid: u32, label: &str) -> Option<u32> {
+        self.enum_types
+            .read()
+            .values()
+            .find(|entry| entry.oid == type_oid)?
+            .labels
+            .iter()
+            .find(|entry| entry.label == label)
+            .map(|entry| entry.oid)
+    }
+
+    pub(crate) fn enum_label_is_committed(&self, type_oid: u32, label_oid: u32) -> bool {
+        self.enum_types
+            .read()
+            .values()
+            .find(|entry| entry.oid == type_oid)
+            .and_then(|entry| entry.labels.iter().find(|label| label.oid == label_oid))
+            .is_none_or(|label| label.committed)
+    }
+
+    pub(crate) fn uncommitted_enum_label_oids(&self) -> Vec<u32> {
+        self.enum_types
+            .read()
+            .values()
+            .flat_map(|entry| {
+                entry
+                    .labels
+                    .iter()
+                    .filter(|label| !label.committed)
+                    .map(|label| label.oid)
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    pub(crate) fn domain_allowed_enum_label_oids(&self, domain_oid: u32) -> Option<Vec<u32>> {
+        self.domains
+            .read()
+            .values()
+            .find(|domain| domain.oid == domain_oid)?
+            .enum_check
+            .as_ref()
+            .map(|check| check.allowed_enum_label_oids.clone())
+    }
+
+    pub(crate) fn domain_check_name(&self, domain_oid: u32) -> Option<String> {
+        self.domains
+            .read()
+            .values()
+            .find(|domain| domain.oid == domain_oid)?
+            .enum_check
+            .as_ref()
+            .map(|check| check.name.clone())
+    }
+
+    pub(crate) fn domain_checks_for_catalog(&self) -> BTreeMap<u32, (String, Vec<u32>)> {
+        self.domains
+            .read()
+            .values()
+            .filter_map(|domain| {
+                domain.enum_check.as_ref().map(|check| {
+                    (
+                        domain.oid,
+                        (check.name.clone(), check.allowed_enum_label_oids.clone()),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) fn dynamic_type_snapshot(&self) -> DynamicTypeSnapshot {
+        DynamicTypeSnapshot {
+            domains: self.domains.read().clone(),
+            enum_types: self.enum_types.read().clone(),
+            range_types: self.range_types.read().clone(),
+        }
+    }
+
+    pub(crate) fn restore_dynamic_type_snapshot(&self, snapshot: &DynamicTypeSnapshot) {
+        *self.domains.write() = snapshot.domains.clone();
+        *self.enum_types.write() = snapshot.enum_types.clone();
+        *self.range_types.write() = snapshot.range_types.clone();
+        self.plan_cache.invalidate_all();
+    }
+
+    pub(crate) fn commit_enum_labels_created_by(&self, xid: TransactionId) {
+        let mut changed = false;
+        for entry in self.enum_types.write().values_mut() {
+            if entry.creating_xid == Some(xid) {
+                entry.creating_xid = None;
+                changed = true;
+            }
+            for label in &mut entry.labels {
+                if label.creating_xid == Some(xid) {
+                    label.committed = true;
+                    label.creating_xid = None;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.plan_cache.invalidate_all();
+        }
+    }
+
+    pub(crate) fn enum_label(&self, type_oid: u32, label_oid: u32) -> Option<String> {
+        self.enum_types
+            .read()
+            .values()
+            .find(|entry| entry.oid == type_oid)?
+            .labels
+            .iter()
+            .find(|entry| entry.oid == label_oid)
+            .map(|entry| entry.label.clone())
+    }
+
+    pub(crate) fn enum_rows_for_catalog(&self) -> Vec<PgEnumRow> {
+        let mut rows = self
+            .enum_types
+            .read()
+            .values()
+            .flat_map(|entry| {
+                entry
+                    .labels
+                    .iter()
+                    .map(|label| PgEnumRow {
+                        oid: label.oid,
+                        enumtypid: entry.oid,
+                        enumsortorder: label.sort_order,
+                        enumlabel: label.label.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| {
+            left.enumtypid
+                .cmp(&right.enumtypid)
+                .then_with(|| left.enumsortorder.total_cmp(&right.enumsortorder))
+                .then_with(|| left.enumlabel.cmp(&right.enumlabel))
         });
         rows
     }

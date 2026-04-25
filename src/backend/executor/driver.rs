@@ -388,12 +388,18 @@ fn execute_statement_with_source(
             expected: "CREATE CONVERSION handled by database/session layer",
             actual: "CREATE CONVERSION".into(),
         })),
-        Statement::CreateType(_) | Statement::AlterTypeOwner(_) => {
-            Err(ExecError::Parse(ParseError::UnexpectedToken {
+        Statement::CreateType(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE TYPE handled by database/session layer",
             actual: "CREATE TYPE".into(),
-            }))
-        }
+        })),
+        Statement::AlterType(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER TYPE handled by database/session layer",
+            actual: "ALTER TYPE".into(),
+        })),
+        Statement::AlterTypeOwner(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER TYPE OWNER handled by database/session layer",
+            actual: "ALTER TYPE OWNER".into(),
+        })),
         Statement::CreateSequence(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE SEQUENCE handled by database/session layer",
             actual: "CREATE SEQUENCE".into(),
@@ -481,10 +487,14 @@ fn execute_statement_with_source(
         }
         Statement::Delete(stmt) => execute_delete(bind_delete(&stmt, catalog)?, catalog, ctx, xid),
         Statement::Unsupported(stmt) => Err(unsupported_statement_error(&stmt)),
-        Statement::Begin | Statement::Commit | Statement::Rollback => {
+        Statement::Begin
+        | Statement::Commit
+        | Statement::Rollback
+        | Statement::Savepoint(_)
+        | Statement::RollbackTo(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "non-transaction-control statement",
-                actual: "BEGIN/COMMIT/ROLLBACK".into(),
+                actual: "transaction control".into(),
             }))
         }
     };
@@ -658,12 +668,18 @@ pub fn execute_readonly_statement_with_config(
             expected: "read-only statement",
             actual: "CREATE DOMAIN".into(),
         })),
-        Statement::CreateType(_) | Statement::AlterTypeOwner(_) => {
-            Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "read-only statement",
-                actual: "CREATE TYPE".into(),
-            }))
-        }
+        Statement::CreateType(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "CREATE TYPE".into(),
+        })),
+        Statement::AlterType(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "ALTER TYPE".into(),
+        })),
+        Statement::AlterTypeOwner(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "ALTER TYPE OWNER".into(),
+        })),
         Statement::CreateView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE VIEW".into(),
