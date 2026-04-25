@@ -11082,6 +11082,36 @@ fn build_plan_for_select_list_generate_series_uses_project_set() {
 }
 
 #[test]
+fn build_plan_for_table_aliased_generate_series_keeps_direct_function_scan() {
+    let stmt = parse_select("select * from generate_series(1, 3) as g").unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+    match plan {
+        Plan::FunctionScan {
+            call, table_alias, ..
+        } => {
+            assert_eq!(table_alias.as_deref(), Some("g"));
+            assert_eq!(call.output_columns()[0].name, "g");
+        }
+        other => panic!("expected function scan plan, got {other:?}"),
+    }
+}
+
+#[test]
+fn build_plan_for_column_aliased_generate_series_keeps_direct_function_scan() {
+    let stmt = parse_select("select * from generate_series(1, 3) as g(x)").unwrap();
+    let plan = build_plan(&stmt, &catalog()).unwrap();
+    match plan {
+        Plan::FunctionScan {
+            call, table_alias, ..
+        } => {
+            assert_eq!(table_alias.as_deref(), Some("g"));
+            assert_eq!(call.output_columns()[0].name, "x");
+        }
+        other => panic!("expected function scan plan, got {other:?}"),
+    }
+}
+
+#[test]
 fn build_plan_for_select_list_json_each_uses_record_project_set() {
     let stmt = parse_select("select json_each('{\"a\":1}'::json)").unwrap();
     let plan = build_plan(&stmt, &catalog()).unwrap();

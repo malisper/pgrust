@@ -567,6 +567,7 @@ pub enum Path {
         pathtarget: PathTarget,
         slot_id: usize,
         call: SetReturningCall,
+        table_alias: Option<String>,
     },
     SubqueryScan {
         plan_info: PlanEstimate,

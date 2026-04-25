@@ -2301,6 +2301,29 @@ fn synthetic_desc_from_analyzed_from(plan: &AnalyzedFrom) -> RelationDesc {
     plan.desc()
 }
 
+fn apply_function_rte_alias(plan: &mut AnalyzedFrom, alias: &str, desc: &RelationDesc) -> bool {
+    let [rte] = plan.rtable.as_mut_slice() else {
+        return false;
+    };
+    let RangeTblEntryKind::Function { call } = &mut rte.kind else {
+        return false;
+    };
+    let output_columns = desc
+        .columns
+        .iter()
+        .map(|column| QueryColumn {
+            name: column.name.clone(),
+            sql_type: column.sql_type,
+            wire_type_oid: None,
+        })
+        .collect::<Vec<_>>();
+    rte.alias = Some(alias.to_string());
+    rte.desc = desc.clone();
+    call.set_output_columns(output_columns.clone());
+    plan.output_columns = output_columns;
+    true
+}
+
 fn apply_relation_alias(
     mut plan: AnalyzedFrom,
     scope: BoundScope,
@@ -2508,7 +2531,9 @@ fn apply_relation_alias(
         }
     }
 
-    if renamed {
+    let function_alias_applied = apply_function_rte_alias(&mut plan, alias, &desc);
+
+    if renamed && !function_alias_applied {
         plan = plan.with_projection(
             columns
                 .iter()

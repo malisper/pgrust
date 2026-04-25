@@ -826,6 +826,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 pathtarget,
                 call,
                 slot_id,
+                table_alias,
                 ..
             } => {
                 let output_columns = call.output_columns();
@@ -838,6 +839,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     pathtarget,
                     slot_id,
                     call,
+                    table_alias,
                 }
             }
             Path::Values {
