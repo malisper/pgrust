@@ -437,6 +437,18 @@ pub enum Path {
         inner_hash_keys: Vec<Expr>,
         restrict_clauses: Vec<RestrictInfo>,
     },
+    MergeJoin {
+        plan_info: PlanEstimate,
+        pathtarget: PathTarget,
+        output_columns: Vec<QueryColumn>,
+        left: Box<Path>,
+        right: Box<Path>,
+        kind: JoinType,
+        merge_clauses: Vec<RestrictInfo>,
+        outer_merge_keys: Vec<Expr>,
+        inner_merge_keys: Vec<Expr>,
+        restrict_clauses: Vec<RestrictInfo>,
+    },
     Projection {
         plan_info: PlanEstimate,
         pathtarget: PathTarget,

@@ -84,7 +84,9 @@ fn path_relids(path: &Path) -> Vec<usize> {
             relids.dedup();
             relids
         }
-        Path::NestedLoopJoin { left, right, .. } | Path::HashJoin { left, right, .. } => {
+        Path::NestedLoopJoin { left, right, .. }
+        | Path::HashJoin { left, right, .. }
+        | Path::MergeJoin { left, right, .. } => {
             let mut relids = path_relids(left);
             relids.extend(path_relids(right));
             relids.sort_unstable();
@@ -240,6 +242,7 @@ pub(super) fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) ->
             | Path::ProjectSet { .. }
             | Path::NestedLoopJoin { .. }
             | Path::HashJoin { .. }
+            | Path::MergeJoin { .. }
     ) && layout.contains(&expr)
     {
         return expr;
@@ -295,7 +298,9 @@ pub(super) fn rewrite_expr_for_path(expr: Expr, path: &Path, layout: &[Expr]) ->
         | Path::OrderBy { input, .. }
         | Path::Limit { input, .. }
         | Path::LockRows { input, .. } => rewrite_expr_for_path(expr, input, layout),
-        Path::NestedLoopJoin { left, right, .. } | Path::HashJoin { left, right, .. } => {
+        Path::NestedLoopJoin { left, right, .. }
+        | Path::HashJoin { left, right, .. }
+        | Path::MergeJoin { left, right, .. } => {
             let left_layout = left.semantic_output_vars();
             if left_layout.contains(&expr) {
                 return rewrite_expr_for_path(expr, left, &left_layout);
