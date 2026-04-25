@@ -622,6 +622,7 @@ pub struct OrderByState {
     pub(crate) input: PlanState,
     pub(crate) items: Vec<OrderByEntry>,
     pub(crate) display_items: Vec<String>,
+    pub(crate) network_strict_less_tiebreak: bool,
     pub(crate) rows: Option<Vec<MaterializedRow>>,
     pub(crate) next_index: usize,
     pub(crate) current_bindings: Vec<SystemVarBinding>,

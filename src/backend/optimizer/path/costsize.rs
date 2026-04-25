@@ -2,7 +2,9 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use crate::RelFileLocator;
-use crate::backend::executor::{Value, cast_value, compare_order_values};
+use crate::backend::executor::{
+    Value, cast_value, compare_order_values, network_btree_upper_bound, network_prefix,
+};
 use crate::backend::parser::analyze::predicate_implies_index_predicate;
 use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType, SqlTypeKind};
 use crate::backend::storage::page::bufpage::{ITEM_ID_SIZE, MAXALIGN, SIZE_OF_PAGE_HEADER_DATA};
@@ -14,9 +16,9 @@ use crate::include::access::htup::SIZEOF_HEAP_TUPLE_HEADER;
 use crate::include::access::spgist::SPGIST_CONFIG_PROC;
 use crate::include::catalog::{
     BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID, PgStatisticRow,
-    SPG_BOX_QUAD_CONFIG_PROC_OID, SPGIST_AM_OID, bootstrap_pg_operator_rows,
-    builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
-    relkind_has_storage,
+    SPG_BOX_QUAD_CONFIG_PROC_OID, SPG_NETWORK_CONFIG_PROC_OID, SPGIST_AM_OID,
+    bootstrap_pg_operator_rows, builtin_scalar_function_for_proc_oid,
+    proc_oid_for_builtin_scalar_function, relkind_has_storage,
 };
 use crate::include::nodes::datum::ArrayValue;
 use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, PlannerInfo, RestrictInfo};
@@ -1688,7 +1690,7 @@ pub(super) fn estimate_index_candidate(
             pathtarget: plan.semantic_output_target(),
             input: Box::new(plan),
             items,
-            display_items: order_display_items.unwrap_or_default(),
+            display_items: Vec::new(),
         };
     }
 
@@ -3292,6 +3294,7 @@ fn index_supports_index_only_scan(desc: &RelationDesc, index: &BoundIndexRelatio
 fn index_column_can_return(index: &BoundIndexRelation, index_pos: usize) -> bool {
     match index.index_meta.am_oid {
         BTREE_AM_OID => true,
+        GIST_AM_OID => true,
         SPGIST_AM_OID => spgist_index_column_can_return(index, index_pos),
         _ => false,
     }
@@ -3309,7 +3312,10 @@ fn spgist_index_column_can_return(index: &BoundIndexRelation, index_pos: usize) 
 }
 
 fn spgist_config_proc_can_return_data(proc_oid: u32) -> bool {
-    matches!(proc_oid, SPG_BOX_QUAD_CONFIG_PROC_OID)
+    matches!(
+        proc_oid,
+        SPG_BOX_QUAD_CONFIG_PROC_OID | SPG_NETWORK_CONFIG_PROC_OID
+    )
 }
 
 fn index_expression_position(index: &BoundIndexRelation, index_pos: usize) -> Option<usize> {
@@ -3374,6 +3380,11 @@ fn commuted_builtin_function(func: BuiltinScalarFunction) -> Option<BuiltinScala
         BuiltinScalarFunction::RangeAdjacent => BuiltinScalarFunction::RangeAdjacent,
         BuiltinScalarFunction::RangeContains => BuiltinScalarFunction::RangeContainedBy,
         BuiltinScalarFunction::RangeContainedBy => BuiltinScalarFunction::RangeContains,
+        BuiltinScalarFunction::NetworkSubnet => BuiltinScalarFunction::NetworkSupernet,
+        BuiltinScalarFunction::NetworkSubnetEq => BuiltinScalarFunction::NetworkSupernetEq,
+        BuiltinScalarFunction::NetworkSupernet => BuiltinScalarFunction::NetworkSubnet,
+        BuiltinScalarFunction::NetworkSupernetEq => BuiltinScalarFunction::NetworkSubnetEq,
+        BuiltinScalarFunction::NetworkOverlap => BuiltinScalarFunction::NetworkOverlap,
         _ => return None,
     })
 }
@@ -3497,6 +3508,11 @@ fn gist_builtin_strategy(proc_oid: u32, argument: &Value) -> Option<u16> {
             }
         }
         BuiltinScalarFunction::RangeContainedBy => 8,
+        BuiltinScalarFunction::NetworkSubnet => 1,
+        BuiltinScalarFunction::NetworkSubnetEq => 2,
+        BuiltinScalarFunction::NetworkSupernet => 3,
+        BuiltinScalarFunction::NetworkSupernetEq => 4,
+        BuiltinScalarFunction::NetworkOverlap => 5,
         _ => return None,
     })
 }
@@ -3530,7 +3546,7 @@ fn qual_strategy(
             .amop_strategy_for_proc(&index.desc, index_pos, proc_oid, argument_type_oid)
             .or_else(|| {
                 let argument = qual.argument.as_const()?;
-                (index.index_meta.am_oid == GIST_AM_OID)
+                is_gist_like_am(index.index_meta.am_oid)
                     .then(|| gist_builtin_strategy(proc_oid, argument))
                     .flatten()
             }),
@@ -3568,6 +3584,19 @@ fn build_btree_index_keys(
                 argument,
             ));
             continue;
+        }
+        if let Some((qual_idx, range_keys)) =
+            parsed_quals.iter().enumerate().find_map(|(idx, qual)| {
+                if used[idx] || qual.column != Some(column) {
+                    return None;
+                }
+                network_btree_range_keys_for_qual(qual, (index_pos + 1) as i16)
+                    .map(|keys| (idx, keys))
+            })
+        {
+            used[qual_idx] = true;
+            keys.extend(range_keys);
+            break;
         }
         let range_quals = parsed_quals
             .iter()
@@ -3610,6 +3639,37 @@ fn build_btree_index_keys(
     }
 
     (keys, used_qual_indexes, equality_prefix)
+}
+
+fn network_btree_range_keys_for_qual(
+    qual: &IndexableQual,
+    attribute_number: i16,
+) -> Option<Vec<IndexScanKey>> {
+    let super::super::IndexStrategyLookup::Proc(proc_oid) = qual.lookup else {
+        return None;
+    };
+    let builtin = builtin_scalar_function_for_proc_oid(proc_oid)?;
+    let (lower_strategy, upper_strategy) = match builtin {
+        BuiltinScalarFunction::NetworkSubnet => (5, 2),
+        BuiltinScalarFunction::NetworkSubnetEq => (4, 2),
+        _ => return None,
+    };
+    let value = match qual.argument.as_const()? {
+        Value::Inet(value) | Value::Cidr(value) => value,
+        _ => return None,
+    };
+    Some(vec![
+        IndexScanKey::const_value(
+            attribute_number,
+            lower_strategy,
+            Value::Inet(network_prefix(value)),
+        ),
+        IndexScanKey::const_value(
+            attribute_number,
+            upper_strategy,
+            Value::Inet(network_btree_upper_bound(value)),
+        ),
+    ])
 }
 
 fn build_gist_index_keys(

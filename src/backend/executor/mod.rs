@@ -89,7 +89,8 @@ pub(crate) use expr_multirange::{
     range_agg_transition,
 };
 pub(crate) use expr_network::{
-    compare_network_values, encode_network_bytes, parse_cidr_bytes, parse_cidr_text,
+    compare_network_values, encode_network_bytes, eval_network_function, network_btree_upper_bound,
+    network_contains, network_merge, network_prefix, parse_cidr_bytes, parse_cidr_text,
     parse_inet_bytes, parse_inet_text, render_network_text,
 };
 pub use expr_range::render_range_text;

@@ -1149,9 +1149,10 @@ fn set_sort_display_items(path: &mut Path, display_items: &[String]) -> bool {
     match path {
         Path::OrderBy {
             display_items: existing,
+            input,
             ..
         } => {
-            if existing.is_empty() {
+            if existing.is_empty() && !sort_input_is_index_scan(input) {
                 *existing = display_items.to_vec();
             }
             true
@@ -1163,6 +1164,10 @@ fn set_sort_display_items(path: &mut Path, display_items: &[String]) -> bool {
         | Path::LockRows { input, .. } => set_sort_display_items(input, display_items),
         _ => false,
     }
+}
+
+fn sort_input_is_index_scan(path: &Path) -> bool {
+    matches!(path, Path::IndexOnlyScan { .. } | Path::IndexScan { .. })
 }
 
 fn inner_join_equates_exprs(root: &PlannerInfo, left: &Expr, right: &Expr) -> bool {
