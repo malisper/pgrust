@@ -25,7 +25,7 @@ pub(crate) use super::expr_compile::{
 };
 use super::expr_date::{
     eval_date_part_function, eval_date_trunc_function, eval_isfinite_function,
-    eval_make_date_function,
+    eval_make_date_function, eval_to_date_function,
 };
 use super::expr_datetime::{
     current_date_value, current_date_value_with_config, current_time_value,
@@ -3594,9 +3594,21 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::BTrim => eval_trim_function("btrim", &values),
         BuiltinScalarFunction::LTrim => eval_trim_function("ltrim", &values),
         BuiltinScalarFunction::RTrim => eval_trim_function("rtrim", &values),
-        BuiltinScalarFunction::Concat => eval_concat_function(&values),
-        BuiltinScalarFunction::ConcatWs => eval_concat_ws_function(&values),
-        BuiltinScalarFunction::Format => eval_format_function(&values),
+        BuiltinScalarFunction::Concat => eval_concat_function(
+            &values,
+            func_variadic,
+            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        ),
+        BuiltinScalarFunction::ConcatWs => eval_concat_ws_function(
+            &values,
+            func_variadic,
+            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        ),
+        BuiltinScalarFunction::Format => eval_format_function(
+            &values,
+            func_variadic,
+            &crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        ),
         BuiltinScalarFunction::Left => eval_left_function(&values),
         BuiltinScalarFunction::Right => eval_right_function(&values),
         BuiltinScalarFunction::LPad => eval_lpad_function(&values),
@@ -3723,6 +3735,7 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::RegexpSubstr => eval_regexp_substr(&values),
         BuiltinScalarFunction::RegexpSplitToArray => eval_regexp_split_to_array(&values),
         BuiltinScalarFunction::ToChar => eval_to_char_function(&values),
+        BuiltinScalarFunction::ToDate => eval_to_date_function(&values),
         BuiltinScalarFunction::ToNumber => eval_to_number_function(&values),
         BuiltinScalarFunction::Abs => eval_abs_function(&values),
         BuiltinScalarFunction::Gcd => eval_gcd_function(&values),
@@ -4908,9 +4921,15 @@ fn eval_builtin_function(
             Some(Value::Bit(bits)) => Ok(Value::Int32(eval_bit_length(bits))),
             _ => eval_length_function(&values),
         },
-        BuiltinScalarFunction::Concat => eval_concat_function(&values),
-        BuiltinScalarFunction::ConcatWs => eval_concat_ws_function(&values),
-        BuiltinScalarFunction::Format => eval_format_function(&values),
+        BuiltinScalarFunction::Concat => {
+            eval_concat_function(&values, func_variadic, &ctx.datetime_config)
+        }
+        BuiltinScalarFunction::ConcatWs => {
+            eval_concat_ws_function(&values, func_variadic, &ctx.datetime_config)
+        }
+        BuiltinScalarFunction::Format => {
+            eval_format_function(&values, func_variadic, &ctx.datetime_config)
+        }
         BuiltinScalarFunction::Left => eval_left_function(&values),
         BuiltinScalarFunction::Right => eval_right_function(&values),
         BuiltinScalarFunction::LPad => eval_lpad_function(&values),
@@ -5031,6 +5050,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::RegexpSubstr => eval_regexp_substr(&values),
         BuiltinScalarFunction::RegexpSplitToArray => eval_regexp_split_to_array(&values),
         BuiltinScalarFunction::ToChar => eval_to_char_function(&values),
+        BuiltinScalarFunction::ToDate => eval_to_date_function(&values),
         BuiltinScalarFunction::ToNumber => eval_to_number_function(&values),
         _ => unreachable!("json builtins handled by expr_json"),
     }

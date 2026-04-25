@@ -502,6 +502,7 @@ pub enum BuiltinScalarFunction {
     Crc32,
     Crc32c,
     ToChar,
+    ToDate,
     ToNumber,
     Now,
     TransactionTimestamp,
