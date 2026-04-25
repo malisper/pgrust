@@ -2203,7 +2203,7 @@ fn render_explain_expr_inner_with_qualifier(
                     .into_iter()
                     .map(|arg| render_explain_bool_arg(arg, qualifier, column_names))
                     .collect::<Vec<_>>();
-                rendered.join(" AND ")
+                format!("({})", rendered.join(" AND "))
             }
             crate::include::nodes::primnodes::BoolExprType::Or => {
                 let mut args = Vec::new();
@@ -2216,7 +2216,7 @@ fn render_explain_expr_inner_with_qualifier(
                     .into_iter()
                     .map(|arg| render_explain_bool_arg(arg, qualifier, column_names))
                     .collect::<Vec<_>>();
-                rendered.join(" OR ")
+                format!("({})", rendered.join(" OR "))
             }
             crate::include::nodes::primnodes::BoolExprType::Not => {
                 let Some(inner) = bool_expr.args.first() else {
@@ -2365,11 +2365,7 @@ fn render_explain_bool_arg(
     column_names: &[String],
 ) -> String {
     let rendered = render_explain_expr_inner_with_qualifier(expr, qualifier, column_names);
-    if matches!(expr, Expr::Op(_)) {
-        format!("({rendered})")
-    } else {
-        rendered
-    }
+    rendered
 }
 
 fn explain_detail_prefix(indent: usize) -> String {
