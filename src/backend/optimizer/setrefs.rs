@@ -1731,6 +1731,7 @@ fn lower_set_returning_call(
             start,
             stop,
             step,
+            timezone,
             output_columns,
             with_ordinality,
         } => SetReturningCall::GenerateSeries {
@@ -1739,6 +1740,7 @@ fn lower_set_returning_call(
             start: lower_expr(ctx, start, mode),
             stop: lower_expr(ctx, stop, mode),
             step: lower_expr(ctx, step, mode),
+            timezone: timezone.map(|timezone| lower_expr(ctx, timezone, mode)),
             output_columns,
             with_ordinality,
         },
@@ -1913,6 +1915,7 @@ fn fix_set_returning_call_upper_exprs(
             start,
             stop,
             step,
+            timezone,
             output_columns,
             with_ordinality,
         } => SetReturningCall::GenerateSeries {
@@ -1921,6 +1924,8 @@ fn fix_set_returning_call_upper_exprs(
             start: fix_upper_expr_for_input(root, start, path, input_tlist),
             stop: fix_upper_expr_for_input(root, stop, path, input_tlist),
             step: fix_upper_expr_for_input(root, step, path, input_tlist),
+            timezone: timezone
+                .map(|timezone| fix_upper_expr_for_input(root, timezone, path, input_tlist)),
             output_columns,
             with_ordinality,
         },
@@ -2745,11 +2750,18 @@ fn validate_set_returning_call(
 
     match call {
         SetReturningCall::GenerateSeries {
-            start, stop, step, ..
+            start,
+            stop,
+            step,
+            timezone,
+            ..
         } => {
             validate_executable_expr(start, plan_node, field);
             validate_executable_expr(stop, plan_node, field);
             validate_executable_expr(step, plan_node, field);
+            if let Some(timezone) = timezone {
+                validate_executable_expr(timezone, plan_node, field);
+            }
         }
         SetReturningCall::PartitionTree { relid, .. }
         | SetReturningCall::PartitionAncestors { relid, .. } => {
@@ -3156,11 +3168,18 @@ fn validate_planner_set_returning_call(
 
     match call {
         SetReturningCall::GenerateSeries {
-            start, stop, step, ..
+            start,
+            stop,
+            step,
+            timezone,
+            ..
         } => {
             validate_planner_expr(start, path_node, field);
             validate_planner_expr(stop, path_node, field);
             validate_planner_expr(step, path_node, field);
+            if let Some(timezone) = timezone {
+                validate_planner_expr(timezone, path_node, field);
+            }
         }
         SetReturningCall::PartitionTree { relid, .. }
         | SetReturningCall::PartitionAncestors { relid, .. } => {

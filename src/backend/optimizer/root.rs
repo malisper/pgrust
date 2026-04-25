@@ -405,6 +405,7 @@ fn prepare_set_returning_call_for_locking(
             start,
             stop,
             step,
+            timezone,
             output_columns,
             with_ordinality,
         } => SetReturningCall::GenerateSeries {
@@ -413,6 +414,7 @@ fn prepare_set_returning_call_for_locking(
             start: prepare_expr_for_locking(start)?,
             stop: prepare_expr_for_locking(stop)?,
             step: prepare_expr_for_locking(step)?,
+            timezone: timezone.map(prepare_expr_for_locking).transpose()?,
             output_columns,
             with_ordinality,
         },
@@ -2583,11 +2585,18 @@ fn collect_set_returning_call_outer_refs(
 ) {
     match call {
         SetReturningCall::GenerateSeries {
-            start, stop, step, ..
+            start,
+            stop,
+            step,
+            timezone,
+            ..
         } => {
             collect_query_outer_refs_expr(start, levelsup, exprs);
             collect_query_outer_refs_expr(stop, levelsup, exprs);
             collect_query_outer_refs_expr(step, levelsup, exprs);
+            if let Some(timezone) = timezone {
+                collect_query_outer_refs_expr(timezone, levelsup, exprs);
+            }
         }
         SetReturningCall::PartitionTree { relid, .. }
         | SetReturningCall::PartitionAncestors { relid, .. } => {

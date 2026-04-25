@@ -315,6 +315,7 @@ fn finalize_set_returning_call(
             start,
             stop,
             step,
+            timezone,
             output_columns,
             with_ordinality,
         } => SetReturningCall::GenerateSeries {
@@ -323,6 +324,8 @@ fn finalize_set_returning_call(
             start: finalize_expr_subqueries(start, catalog, subplans),
             stop: finalize_expr_subqueries(stop, catalog, subplans),
             step: finalize_expr_subqueries(step, catalog, subplans),
+            timezone: timezone
+                .map(|timezone| finalize_expr_subqueries(timezone, catalog, subplans)),
             output_columns,
             with_ordinality,
         },
@@ -769,6 +772,7 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
             start,
             stop,
             step,
+            timezone,
             output_columns,
             with_ordinality,
         } => SetReturningCall::GenerateSeries {
@@ -777,6 +781,7 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
             start: rebase_expr_subplan_ids(start, base),
             stop: rebase_expr_subplan_ids(stop, base),
             step: rebase_expr_subplan_ids(step, base),
+            timezone: timezone.map(|timezone| rebase_expr_subplan_ids(timezone, base)),
             output_columns,
             with_ordinality,
         },

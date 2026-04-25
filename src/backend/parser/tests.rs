@@ -5617,6 +5617,22 @@ fn parse_datetime_literal_output_names_use_postgres_aliases() {
 }
 
 #[test]
+fn parse_timestamp_output_names_match_postgres_shorthands() {
+    let stmt = parse_select(
+        "select timestamp with time zone '2024-01-02 03:04:05+00', time with time zone '03:04:05+00'",
+    )
+    .unwrap();
+    assert_eq!(stmt.targets[0].output_name, "timestamptz");
+    assert_eq!(stmt.targets[1].output_name, "timetz");
+}
+
+#[test]
+fn parse_at_time_zone_uses_timezone_output_name() {
+    let stmt = parse_select("select '19970210 173201' at time zone 'America/New_York'").unwrap();
+    assert_eq!(stmt.targets[0].output_name, "timezone");
+}
+
+#[test]
 fn parse_interval_typed_string_literals() {
     let stmt = parse_select(
         "select interval '1 day', interval(2) '1 day 01:02:03.456', interval '1-2' year to month, interval '12:34.5678' minute to second(2)",
@@ -6400,6 +6416,37 @@ fn analyze_timestamptz_typed_string_literal_keeps_timestamp_tz_type() {
         Expr::Cast(inner, ty)
             if *ty == SqlType::new(SqlTypeKind::TimestampTz)
                 && matches!(inner.as_ref(), Expr::Const(Value::Text(_)) | Expr::Const(Value::TextRef(_, _)))
+    ));
+}
+
+#[test]
+fn parse_at_time_zone_expression() {
+    let stmt = parse_select("select timestamp '2001-02-16 20:38:40' at time zone 'America/Denver'")
+        .unwrap();
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::AtTimeZone { expr, zone }
+            if matches!(expr.as_ref(), SqlExpr::Cast(_, ty) if *ty == SqlType::new(SqlTypeKind::Timestamp))
+                && matches!(zone.as_ref(), SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _)))
+    ));
+}
+
+#[test]
+fn analyze_at_time_zone_uses_timezone_function_types() {
+    let stmt =
+        parse_select("select timestamptz '2001-02-16 20:38:40+00' at time zone 'America/Denver'")
+            .unwrap();
+    let (query, _) =
+        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+
+    assert!(matches!(
+        &query.target_list[0].expr,
+        Expr::Func(func)
+            if func.implementation == crate::include::nodes::primnodes::ScalarFunctionImpl::Builtin(
+                crate::include::nodes::primnodes::BuiltinScalarFunction::Timezone
+            )
+                && func.funcresulttype == Some(SqlType::new(SqlTypeKind::Timestamp))
+                && func.args.len() == 2
     ));
 }
 

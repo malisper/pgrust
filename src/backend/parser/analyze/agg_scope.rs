@@ -889,6 +889,28 @@ fn analyze_expr_internal(
                 expanded_views,
             )?);
         }
+        SqlExpr::AtTimeZone { expr, zone } => {
+            info.merge(analyze_expr_internal(
+                expr,
+                AggregateClauseKind::Other,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+                expanded_views,
+            )?);
+            info.merge(analyze_expr_internal(
+                zone,
+                AggregateClauseKind::Other,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+                expanded_views,
+            )?);
+        }
         SqlExpr::ArraySubscript { array, subscripts } => {
             info.merge(analyze_expr_internal(
                 array,
