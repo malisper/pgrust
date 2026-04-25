@@ -190,13 +190,6 @@ impl Database {
             Self::temp_namespace_oid(temp_backend_id),
             Self::temp_toast_namespace_oid(temp_backend_id),
         ];
-        self.drop_statistics_for_namespace_in_transaction(
-            client_id,
-            namespace_oids[0],
-            xid,
-            cid,
-            catalog_effects,
-        )?;
         for include_indexes in [false, true] {
             let catcache = self
                 .txn_backend_catcache(client_id, xid, *cid)
@@ -515,19 +508,11 @@ impl Database {
             namespace.generation = namespace.generation.saturating_add(1);
             removed
         };
-        let mut next_cid = cid;
-        self.drop_statistics_for_relation_in_transaction(
-            client_id,
-            removed.entry.relation_oid,
-            xid,
-            &mut next_cid,
-            catalog_effects,
-        )?;
         let ctx = CatalogWriteContext {
             pool: self.pool.clone(),
             txns: self.txns.clone(),
             xid,
-            cid: next_cid,
+            cid,
             client_id,
             waiter: Some(self.txn_waiter.clone()),
             interrupts,
