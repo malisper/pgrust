@@ -426,20 +426,23 @@ fn numeric_gcd(
             NumericValue::Finite {
                 coeff: lcoeff,
                 scale: lscale,
-                ..
+                dscale: ldscale,
             },
             NumericValue::Finite {
                 coeff: rcoeff,
                 scale: rscale,
-                ..
+                dscale: rdscale,
             },
         ) => {
             // Align scales, compute GCD of integer coefficients, then rescale
             let max_scale = (*lscale).max(*rscale);
+            let max_dscale = (*ldscale).max(*rdscale);
             let la = lcoeff * pow10_bigint(max_scale - lscale);
             let ra = rcoeff * pow10_bigint(max_scale - rscale);
             let g = bigint_gcd(&la, &ra);
-            NumericValue::finite(g, max_scale).normalize()
+            NumericValue::finite(g, max_scale)
+                .with_dscale(max_dscale)
+                .normalize()
         }
         _ => NumericValue::NaN,
     }
@@ -448,36 +451,59 @@ fn numeric_gcd(
 fn numeric_lcm(
     left: &crate::include::nodes::datum::NumericValue,
     right: &crate::include::nodes::datum::NumericValue,
-) -> crate::include::nodes::datum::NumericValue {
+) -> Result<crate::include::nodes::datum::NumericValue, ExecError> {
     use crate::include::nodes::datum::NumericValue;
     use num_bigint::BigInt;
     use num_traits::Zero;
     match (left, right) {
-        (NumericValue::NaN, _) | (_, NumericValue::NaN) => NumericValue::NaN,
+        (NumericValue::NaN, _) | (_, NumericValue::NaN) => Ok(NumericValue::NaN),
         (
             NumericValue::Finite {
                 coeff: lcoeff,
                 scale: lscale,
-                ..
+                dscale: ldscale,
             },
             NumericValue::Finite {
                 coeff: rcoeff,
                 scale: rscale,
-                ..
+                dscale: rdscale,
             },
         ) => {
             let max_scale = (*lscale).max(*rscale);
+            let max_dscale = (*ldscale).max(*rdscale);
             let la = lcoeff * pow10_bigint(max_scale - lscale);
             let ra = rcoeff * pow10_bigint(max_scale - rscale);
             if la.is_zero() || ra.is_zero() {
-                return NumericValue::finite(BigInt::from(0), max_scale).normalize();
+                return Ok(NumericValue::finite(BigInt::from(0), max_scale)
+                    .with_dscale(max_dscale)
+                    .normalize());
             }
             let g = bigint_gcd(&la, &ra);
             let lcm = (&la / &g) * &ra;
             let lcm = if lcm < BigInt::from(0) { -lcm } else { lcm };
-            NumericValue::finite(lcm, max_scale).normalize()
+            let result = NumericValue::finite(lcm, max_scale)
+                .with_dscale(max_dscale)
+                .normalize();
+            if numeric_digits_before_decimal(&result) > 131_072 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: String::new(),
+                    details: "value overflows numeric format".into(),
+                });
+            }
+            Ok(result)
         }
-        _ => NumericValue::NaN,
+        _ => Ok(NumericValue::NaN),
+    }
+}
+
+fn numeric_digits_before_decimal(value: &crate::include::nodes::datum::NumericValue) -> i32 {
+    use crate::include::nodes::datum::NumericValue;
+    use num_traits::{Signed, Zero};
+    match value {
+        NumericValue::Finite { coeff, scale, .. } if !coeff.is_zero() => {
+            coeff.abs().to_str_radix(10).len() as i32 - *scale as i32
+        }
+        _ => 0,
     }
 }
 
@@ -602,7 +628,7 @@ pub(super) fn eval_lcm_function(values: &[Value]) -> Result<Value, ExecError> {
                 .map_err(|_| ExecError::Int8OutOfRange)
         }
         [Value::Numeric(left), Value::Numeric(right)] => {
-            Ok(Value::Numeric(numeric_lcm(left, right)))
+            Ok(Value::Numeric(numeric_lcm(left, right)?))
         }
         [left, right] => Err(ExecError::TypeMismatch {
             op: "lcm",
