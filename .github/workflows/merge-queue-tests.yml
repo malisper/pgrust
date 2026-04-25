@@ -69,8 +69,8 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-  cargo-test-run:
-    name: cargo-test-run
+  cargo-test-archive:
+    name: cargo-test-archive
     needs:
       - changes
       - cargo-fmt-check
@@ -99,19 +99,68 @@ jobs:
           # for future merge_group runs to restore from.
           save-if: ${{ github.ref == 'refs/heads/perf-optimization' || github.event_name == 'workflow_dispatch' }}
 
-      - name: Run cargo tests
+      - name: Build nextest archive
         run: |
-          cargo nextest run \
+          mkdir -p target/nextest
+          cargo nextest archive \
             --locked \
             --lib \
             --profile ci \
-            --config-file .config/nextest.toml
+            --config-file .config/nextest.toml \
+            --archive-file target/nextest/pgrust-tests.tar.zst
+
+      - name: Upload nextest archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: nextest-archive
+          path: target/nextest/pgrust-tests.tar.zst
+          if-no-files-found: error
+          retention-days: 1
+
+  cargo-test-run:
+    name: cargo-test-run (${{ matrix.partition }}/2)
+    needs:
+      - changes
+      - cargo-fmt-check
+      - cargo-test-archive
+    if: ${{ github.event_name != 'pull_request' && needs.changes.outputs.code == 'true' }}
+    runs-on:
+      group: large-runners-like-32x-paid
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [1, 2]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.94.1
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Download nextest archive
+        uses: actions/download-artifact@v4
+        with:
+          name: nextest-archive
+          path: target/nextest/archive
+
+      - name: Run cargo tests shard
+        run: |
+          cargo nextest run \
+            --archive-file target/nextest/archive/pgrust-tests.tar.zst \
+            --profile ci \
+            --config-file .config/nextest.toml \
+            --partition count:${{ matrix.partition }}/2
 
       - name: Upload JUnit timing report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit-report
+          name: junit-report-${{ matrix.partition }}
           path: target/nextest/ci/junit.xml
           if-no-files-found: error
           retention-days: 14
@@ -122,6 +171,7 @@ jobs:
     needs:
       - changes
       - cargo-fmt-check
+      - cargo-test-archive
       - cargo-test-run
     if: always()
     steps:
@@ -144,7 +194,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: junit-report
+          pattern: junit-report-*
           merge-multiple: false
 
       - name: Summarize test timings
@@ -167,13 +217,15 @@ jobs:
           event_name = os.environ["EVENT_NAME"]
           code_changed = os.environ["CODE_CHANGED"] == "true"
 
-          # On pull_request, cargo-test-run is intentionally skipped.
-          # On docs-only merges, both test jobs are intentionally skipped.
+          # On pull_request, cargo-test-archive/cargo-test-run are intentionally skipped.
+          # On docs-only merges, test jobs are intentionally skipped.
           # In either case, "skipped" is an expected result, not a failure.
           allowed_skipped = set()
           if event_name == "pull_request":
+              allowed_skipped.add("cargo-test-archive")
               allowed_skipped.add("cargo-test-run")
           if not code_changed:
+              allowed_skipped.add("cargo-test-archive")
               allowed_skipped.add("cargo-test-run")
 
           failed = {}
