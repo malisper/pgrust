@@ -20705,6 +20705,56 @@ fn timestamp_input_accepts_timezone_before_year() {
 }
 
 #[test]
+fn timestamptz_missing_regression_functions_work() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select (date_bin('5 min'::interval,
+                    timestamptz '2020-02-01 01:01:01+00',
+                    timestamptz '2020-02-01 00:02:30+00') at time zone 'UTC')::text",
+        ),
+        vec![vec![Value::Text("2020-02-01 00:57:30".into())]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select (date_add('2022-10-30 00:00:00+01'::timestamptz,
+                    '1 day'::interval) at time zone 'UTC')::text,
+                    (date_subtract('2022-10-30 00:00:00+01'::timestamptz,
+                    '1 day'::interval) at time zone 'UTC')::text,
+                    (date_add('2021-10-31 00:00:00+02'::timestamptz,
+                    '1 day'::interval, 'Europe/Warsaw') at time zone 'UTC')::text",
+        ),
+        vec![vec![
+            Value::Text("2022-10-30 23:00:00".into()),
+            Value::Text("2022-10-28 23:00:00".into()),
+            Value::Text("2021-10-31 23:00:00".into()),
+        ]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select (to_timestamp(0) at time zone 'UTC')::text,
+                    (to_timestamp(1262349296.7890123) at time zone 'UTC')::text,
+                    date_part('year', timestamptz 'infinity'),
+                    date_part('day', timestamptz '-infinity')",
+        ),
+        vec![vec![
+            Value::Text("1970-01-01 00:00:00".into()),
+            Value::Text("2010-01-01 12:34:56.789012".into()),
+            Value::Float64(f64::INFINITY),
+            Value::Null,
+        ]]
+    );
+}
+
+#[test]
 fn pg_my_temp_schema_filters_temp_pg_stats_rows() {
     let base = temp_dir("pg_my_temp_schema_pg_stats");
     let db = Database::open(&base, 16).unwrap();

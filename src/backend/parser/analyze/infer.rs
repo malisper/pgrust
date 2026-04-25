@@ -819,6 +819,11 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     }) => SqlType::new(SqlTypeKind::TimestampTz),
                     _ => SqlType::new(SqlTypeKind::Timestamp),
                 },
+                Some(BuiltinScalarFunction::DateAdd)
+                | Some(BuiltinScalarFunction::DateSubtract)
+                | Some(BuiltinScalarFunction::ToTimestamp) => {
+                    SqlType::new(SqlTypeKind::TimestampTz)
+                }
                 Some(BuiltinScalarFunction::IsFinite) => SqlType::new(SqlTypeKind::Bool),
                 Some(
                     BuiltinScalarFunction::MacAddrEq
