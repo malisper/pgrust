@@ -403,8 +403,20 @@ impl RelCache {
         catcache: &CatCache,
         current_db_oid: u32,
     ) -> Result<Self, CatalogError> {
+        Self::from_catcache_in_db_with_type_rows(catcache, current_db_oid, &[])
+    }
+
+    pub fn from_catcache_in_db_with_type_rows(
+        catcache: &CatCache,
+        current_db_oid: u32,
+        extra_type_rows: &[crate::include::catalog::PgTypeRow],
+    ) -> Result<Self, CatalogError> {
         let mut cache = Self::default();
         let support_lookup = IndexSupportLookup::from_catcache(catcache);
+        let extra_type_by_oid = extra_type_rows
+            .iter()
+            .map(|row| (row.oid, row.sql_type))
+            .collect::<BTreeMap<_, _>>();
         let index_rows = catcache.index_rows();
         let not_null_constraints = catcache
             .constraint_rows()
@@ -436,9 +448,10 @@ impl RelCache {
             let columns = match attrs
                 .iter()
                 .map(|attr| {
-                    let sql_type = catcache
-                        .type_by_oid(attr.atttypid)
-                        .map(|ty| ty.sql_type)
+                    let sql_type = extra_type_by_oid
+                        .get(&attr.atttypid)
+                        .copied()
+                        .or_else(|| catcache.type_by_oid(attr.atttypid).map(|ty| ty.sql_type))
                         .ok_or(CatalogError::Corrupt("unknown atttypid"))?;
                     let mut desc = column_desc(
                         attr.attname.clone(),

@@ -1,7 +1,7 @@
 use super::*;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::catalog::{
-    ANYARRAYOID, ANYOID, TEXT_TYPE_OID, bootstrap_pg_proc_rows,
+    ANYARRAYOID, ANYENUMOID, ANYOID, TEXT_TYPE_OID, bootstrap_pg_proc_rows,
     builtin_hypothetical_aggregate_function_for_proc_oid, builtin_type_rows,
     builtin_window_function_for_proc_oid,
 };
@@ -382,6 +382,12 @@ fn match_proc_arg_type(
         return (actual_type.is_array || actual_type.kind == SqlTypeKind::AnyArray)
             .then_some((2, actual_type));
     }
+    if declared_oid == ANYENUMOID {
+        return (!actual_type.is_array
+            && (actual_type.kind == SqlTypeKind::Enum
+                || actual_type.kind == SqlTypeKind::AnyEnum))
+            .then_some((2, actual_type));
+    }
     let declared_type = catalog.type_by_oid(declared_oid)?.sql_type;
     if is_text_like_type(actual_type) && catalog_text_input_cast_exists(catalog, declared_oid) {
         return Some((3, declared_type));
@@ -403,6 +409,7 @@ fn resolve_proc_result_type(
 ) -> Option<SqlType> {
     match row.prorettype {
         ANYOID => resolve_anyelement_result_type(row, candidate),
+        ANYENUMOID => resolve_anyenum_result_type(row, candidate),
         ANYARRAYOID => resolve_anyarray_result_type(row, candidate),
         _ => catalog.type_by_oid(row.prorettype).map(|row| row.sql_type),
     }
@@ -490,6 +497,7 @@ fn resolve_anyelement_result_type(
     {
         let inferred = match declared_oid {
             ANYOID => Some(actual_type),
+            ANYENUMOID if matches!(actual_type.kind, SqlTypeKind::Enum) => Some(actual_type),
             ANYARRAYOID if actual_type.is_array => Some(actual_type.element_type()),
             _ => None,
         };
@@ -504,6 +512,20 @@ fn resolve_anyelement_result_type(
     resolved
 }
 
+fn resolve_anyenum_result_type(
+    row: &crate::include::catalog::PgProcRow,
+    candidate: &CandidateMatch,
+) -> Option<SqlType> {
+    let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
+    declared_oids
+        .into_iter()
+        .zip(candidate.declared_arg_types.iter().copied())
+        .find_map(|(declared_oid, actual_type)| {
+            (declared_oid == ANYENUMOID && matches!(actual_type.kind, SqlTypeKind::Enum))
+                .then_some(actual_type)
+        })
+}
+
 fn resolve_anyarray_result_type(
     row: &crate::include::catalog::PgProcRow,
     candidate: &CandidateMatch,
@@ -516,6 +538,9 @@ fn resolve_anyarray_result_type(
     {
         let inferred = match declared_oid {
             ANYARRAYOID if actual_type.is_array => Some(actual_type),
+            ANYENUMOID if matches!(actual_type.kind, SqlTypeKind::Enum) => {
+                Some(SqlType::array_of(actual_type))
+            }
             ANYOID if !actual_type.is_array && actual_type.kind != SqlTypeKind::AnyArray => {
                 Some(SqlType::array_of(actual_type))
             }
@@ -1059,6 +1084,8 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::RangeIntersect
             | BuiltinScalarFunction::RangeDifference
             | BuiltinScalarFunction::RangeMerge => args.len() == 2,
+            BuiltinScalarFunction::EnumFirst | BuiltinScalarFunction::EnumLast => args.len() == 1,
+            BuiltinScalarFunction::EnumRange => matches!(args.len(), 1 | 2),
         });
 
     if valid {
@@ -1910,6 +1937,10 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("array_remove", BuiltinScalarFunction::ArrayRemove),
         ("array_replace", BuiltinScalarFunction::ArrayReplace),
         ("array_sort", BuiltinScalarFunction::ArraySort),
+        ("enum_first", BuiltinScalarFunction::EnumFirst),
+        ("enum_last", BuiltinScalarFunction::EnumLast),
+        ("enum_range", BuiltinScalarFunction::EnumRange),
+        ("enum_range_bounds", BuiltinScalarFunction::EnumRange),
         ("lower", BuiltinScalarFunction::Lower),
         ("unistr", BuiltinScalarFunction::Unistr),
         ("ascii", BuiltinScalarFunction::Ascii),

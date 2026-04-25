@@ -48,7 +48,8 @@ use crate::backend::executor::exec_tuples::CompiledTupleDecoder;
 use crate::backend::executor::value_io::{coerce_assignment_value, encode_tuple_values};
 use crate::backend::executor::{
     ExecError, ExecutorContext, Expr, StatementResult, ToastRelationRef,
-    apply_jsonb_subscript_assignment, compare_order_values, create_query_desc, executor_start,
+    apply_jsonb_subscript_assignment, cast_value_with_source_type_catalog_and_config,
+    compare_order_values, create_query_desc, executor_start,
 };
 use crate::include::access::amapi::IndexUniqueCheck;
 use crate::include::access::htup::HeapTuple;
@@ -3294,8 +3295,22 @@ pub(crate) fn apply_assignment_target(
     ctx: &mut ExecutorContext,
 ) -> Result<(), ExecError> {
     let assignment_type = assignment_target_sql_type(desc, target);
-    let value = coerce_assignment_value(&value, assignment_type)
-        .map_err(|err| rewrite_subscripted_assignment_error(desc, target, &value, err))?;
+    let value = if assignment_type.kind == SqlTypeKind::Enum
+        || (assignment_type.is_array && assignment_type.element_type().kind == SqlTypeKind::Enum)
+    {
+        cast_value_with_source_type_catalog_and_config(
+            value.clone(),
+            None,
+            assignment_type,
+            ctx.catalog
+                .as_ref()
+                .map(|catalog| catalog as &dyn CatalogLookup),
+            &ctx.datetime_config,
+        )
+    } else {
+        coerce_assignment_value(&value, assignment_type)
+    }
+    .map_err(|err| rewrite_subscripted_assignment_error(desc, target, &value, err))?;
     let resolved = target
         .subscripts
         .iter()

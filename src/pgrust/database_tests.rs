@@ -13,7 +13,7 @@ use crate::include::catalog::{
     BootstrapCatalogKind, FLOAT8_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID,
     PG_CLASS_RELATION_OID, PG_PROC_RELATION_OID, PG_TYPE_RELATION_OID, PgAggregateRow,
 };
-use crate::include::nodes::datum::IntervalValue;
+use crate::include::nodes::datum::{ArrayValue, IntervalValue};
 use crate::include::nodes::parsenodes::MaintenanceTarget;
 use crate::include::nodes::primnodes::QueryColumn;
 use crate::pl::plpgsql::{clear_notices, take_notices};
@@ -27647,6 +27647,58 @@ fn create_enum_type_exposes_catalog_rows_and_can_back_table_columns() {
             Value::Text("sad".into()),
             Value::Bool(true),
             Value::Bool(false),
+        ]]
+    );
+    db.execute(1, "insert into feelings values ('sad'), ('happy')")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select current_mood from feelings order by current_mood",
+        ),
+        vec![
+            vec![Value::EnumOid(
+                visible.enum_label_oid(mood_type.oid, "sad").unwrap()
+            )],
+            vec![Value::EnumOid(
+                visible.enum_label_oid(mood_type.oid, "happy").unwrap()
+            )],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select 'sad'::mood = 'sad'::mood, 'sad'::mood < 'happy'::mood",
+        ),
+        vec![vec![Value::Bool(true), Value::Bool(true)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select '{sad,fine}'::mood[], enum_first(null::mood), enum_last(null::mood), \
+             enum_range(null::mood)",
+        ),
+        vec![vec![
+            Value::PgArray(
+                ArrayValue::from_1d(vec![
+                    Value::EnumOid(visible.enum_label_oid(mood_type.oid, "sad").unwrap()),
+                    Value::EnumOid(visible.enum_label_oid(mood_type.oid, "fine").unwrap()),
+                ])
+                .with_element_type_oid(mood_type.oid)
+            ),
+            Value::EnumOid(visible.enum_label_oid(mood_type.oid, "sad").unwrap()),
+            Value::EnumOid(visible.enum_label_oid(mood_type.oid, "happy").unwrap()),
+            Value::PgArray(
+                ArrayValue::from_1d(vec![
+                    Value::EnumOid(visible.enum_label_oid(mood_type.oid, "sad").unwrap()),
+                    Value::EnumOid(visible.enum_label_oid(mood_type.oid, "fine").unwrap()),
+                    Value::EnumOid(visible.enum_label_oid(mood_type.oid, "happy").unwrap()),
+                ])
+                .with_element_type_oid(mood_type.oid)
+            ),
         ]]
     );
     assert_eq!(

@@ -933,6 +933,16 @@ pub(crate) fn parse_text_array_literal_with_options(
     op: &'static str,
     explicit: bool,
 ) -> Result<Value, ExecError> {
+    parse_text_array_literal_with_options_and_catalog(raw, element_type, op, explicit, None)
+}
+
+fn parse_text_array_literal_with_options_and_catalog(
+    raw: &str,
+    element_type: SqlType,
+    op: &'static str,
+    explicit: bool,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<Value, ExecError> {
     let (bounds, input) = parse_array_bounds_prefix(raw)?;
     let element_type_oid = array_element_type_oid(element_type);
     if input == "{}" {
@@ -948,7 +958,7 @@ pub(crate) fn parse_text_array_literal_with_options(
             Some("Array value must start with \"{\" or dimension information.".into()),
         ));
     }
-    let mut parser = ArrayTextParser::new(input, element_type, explicit);
+    let mut parser = ArrayTextParser::new(input, element_type, explicit, catalog);
     let value = parser.parse_array()?;
     parser.skip_ws();
     if !parser.is_eof() {
@@ -1088,15 +1098,22 @@ struct ArrayTextParser<'a> {
     offset: usize,
     element_type: SqlType,
     explicit: bool,
+    catalog: Option<&'a dyn CatalogLookup>,
 }
 
 impl<'a> ArrayTextParser<'a> {
-    fn new(input: &'a str, element_type: SqlType, explicit: bool) -> Self {
+    fn new(
+        input: &'a str,
+        element_type: SqlType,
+        explicit: bool,
+        catalog: Option<&'a dyn CatalogLookup>,
+    ) -> Self {
         Self {
             input,
             offset: 0,
             element_type,
             explicit,
+            catalog,
         }
     }
 
@@ -1146,7 +1163,7 @@ impl<'a> ArrayTextParser<'a> {
                         Some("Incorrectly quoted array element.".into()),
                     ));
                 }
-                cast_text_value(&text, self.element_type, self.explicit)
+                self.cast_item_text(&text)
             }
             Some(_) => {
                 let text = self.parse_unquoted_token();
@@ -1167,11 +1184,18 @@ impl<'a> ArrayTextParser<'a> {
                 if text.eq_ignore_ascii_case("NULL") {
                     Ok(Value::Null)
                 } else {
-                    cast_text_value(text.trim_end(), self.element_type, self.explicit)
+                    self.cast_item_text(text.trim_end())
                 }
             }
             None => self.type_mismatch(),
         }
+    }
+
+    fn cast_item_text(&self, text: &str) -> Result<Value, ExecError> {
+        if matches!(self.element_type.kind, SqlTypeKind::Enum) {
+            return cast_text_to_enum(text, self.element_type, self.catalog);
+        }
+        cast_text_value(text, self.element_type, self.explicit)
     }
 
     fn parse_quoted_string(&mut self) -> Result<String, ExecError> {
@@ -1825,10 +1849,22 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                         match ty.element_type().kind {
                             SqlTypeKind::Int2 => parse_int2vector_array_text(text),
                             SqlTypeKind::Oid => parse_oidvector_array_text(text),
-                            _ => parse_text_array_literal(text, ty.element_type()),
+                            _ => parse_text_array_literal_with_options_and_catalog(
+                                text,
+                                ty.element_type(),
+                                "::array",
+                                true,
+                                catalog,
+                            ),
                         }
                     } else {
-                        parse_text_array_literal(text, ty.element_type())
+                        parse_text_array_literal_with_options_and_catalog(
+                            text,
+                            ty.element_type(),
+                            "::array",
+                            true,
+                            catalog,
+                        )
                     }
                 }
                 None => Err(ExecError::TypeMismatch {
