@@ -26,75 +26,51 @@ struct DropRulePlan {
 }
 
 fn catalog_entry_from_bound_relation(
+    catcache: &CatCache,
     relation: &crate::backend::parser::BoundRelation,
 ) -> crate::backend::catalog::CatalogEntry {
+    let class = catcache.class_by_oid(relation.relation_oid);
+    let row_type_oid = class.map(|row| row.reltype).unwrap_or(0);
+    let array_type_oid = if row_type_oid == 0 {
+        0
+    } else {
+        catcache
+            .type_by_oid(row_type_oid)
+            .map(|row| row.typarray)
+            .unwrap_or(0)
+    };
     crate::backend::catalog::CatalogEntry {
         rel: relation.rel,
         relation_oid: relation.relation_oid,
         namespace_oid: relation.namespace_oid,
         owner_oid: relation.owner_oid,
-        relacl: None,
-        row_type_oid: 0,
-        array_type_oid: 0,
+        relacl: class.and_then(|row| row.relacl.clone()),
+        row_type_oid,
+        array_type_oid,
         reltoastrelid: relation.toast.map(|toast| toast.relation_oid).unwrap_or(0),
         relpersistence: relation.relpersistence,
         relkind: relation.relkind,
-        am_oid: crate::include::catalog::relam_for_relkind(relation.relkind),
-        relhassubclass: false,
-        relhastriggers: false,
+        am_oid: class
+            .map(|row| row.relam)
+            .unwrap_or_else(|| crate::include::catalog::relam_for_relkind(relation.relkind)),
+        relhassubclass: class.map(|row| row.relhassubclass).unwrap_or(false),
+        relhastriggers: class.map(|row| row.relhastriggers).unwrap_or(false),
         relispartition: relation.relispartition,
         relispopulated: relation.relispopulated,
         relpartbound: relation.relpartbound.clone(),
-        relrowsecurity: false,
-        relforcerowsecurity: false,
-        relpages: 0,
-        reltuples: 0.0,
-        relallvisible: 0,
-        relallfrozen: 0,
-        relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
+        relrowsecurity: class.map(|row| row.relrowsecurity).unwrap_or(false),
+        relforcerowsecurity: class.map(|row| row.relforcerowsecurity).unwrap_or(false),
+        relpages: class.map(|row| row.relpages).unwrap_or(0),
+        reltuples: class.map(|row| row.reltuples).unwrap_or(0.0),
+        relallvisible: class.map(|row| row.relallvisible).unwrap_or(0),
+        relallfrozen: class.map(|row| row.relallfrozen).unwrap_or(0),
+        relfrozenxid: class
+            .map(|row| row.relfrozenxid)
+            .unwrap_or(crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID),
         desc: relation.desc.clone(),
         partitioned_table: relation.partitioned_table.clone(),
         index_meta: None,
     }
-}
-
-fn collect_visible_relation_drop_entries(
-    catalog: &dyn crate::backend::parser::CatalogLookup,
-    catcache: &CatCache,
-    relation_oid: u32,
-    seen: &mut BTreeSet<u32>,
-    out: &mut Vec<crate::backend::parser::BoundRelation>,
-) -> Result<(), ExecError> {
-    if !seen.insert(relation_oid) {
-        return Ok(());
-    }
-    for row in catcache.depend_rows() {
-        if row.refclassid != PG_CLASS_RELATION_OID
-            || row.refobjid != relation_oid
-            || row.classid != PG_CLASS_RELATION_OID
-            || row.objsubid != 0
-        {
-            continue;
-        }
-        let Some(dependent) = catalog.relation_by_oid(row.objid) else {
-            continue;
-        };
-        if !matches!(dependent.relkind, 'r' | 'i' | 'I' | 't' | 'S') {
-            continue;
-        }
-        collect_visible_relation_drop_entries(
-            catalog,
-            catcache,
-            dependent.relation_oid,
-            seen,
-            out,
-        )?;
-    }
-    let relation = catalog
-        .relation_by_oid(relation_oid)
-        .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(relation_oid.to_string())))?;
-    out.push(relation);
-    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -1078,36 +1054,6 @@ impl Database {
                     waiter: Some(self.txn_waiter.clone()),
                     interrupts: Arc::clone(&interrupts),
                 };
-                if relkind != 'v' && catalog.relation_by_oid(*relation_oid).is_some() {
-                    let mut seen = BTreeSet::new();
-                    let mut entries = Vec::new();
-                    collect_visible_relation_drop_entries(
-                        &catalog,
-                        &catcache,
-                        *relation_oid,
-                        &mut seen,
-                        &mut entries,
-                    )?;
-                    for entry in entries {
-                        let effect = self
-                            .catalog
-                            .write()
-                            .drop_relation_entry_mvcc(
-                                catalog_entry_from_bound_relation(&entry),
-                                &ctx,
-                            )
-                            .map_err(map_catalog_error)?;
-                        self.apply_catalog_mutation_effect_immediate(&effect)?;
-                        if is_drop_table_relkind(entry.relkind) {
-                            self.session_stats_state(client_id)
-                                .write()
-                                .note_relation_drop(entry.relation_oid, &self.stats);
-                        }
-                        catalog_effects.push(effect);
-                    }
-                    next_cid = next_cid.saturating_add(1);
-                    continue;
-                }
                 let effect = match relkind {
                     'v' => self
                         .catalog
@@ -1185,6 +1131,9 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let catcache = self
+            .backend_catcache(client_id, Some((xid, cid)))
+            .map_err(map_catalog_error)?;
         let mut requested_oids = BTreeSet::new();
         let mut rels = Vec::new();
         for index_name in &drop_stmt.index_names {
@@ -1289,7 +1238,10 @@ impl Database {
                 let effect = if let Some(entry) = catalog.relation_by_oid(index_oid) {
                     let mut catalog_guard = self.catalog.write();
                     catalog_guard
-                        .drop_relation_entry_mvcc(catalog_entry_from_bound_relation(&entry), &ctx)
+                        .drop_relation_entry_mvcc(
+                            catalog_entry_from_bound_relation(&catcache, &entry),
+                            &ctx,
+                        )
                         .map_err(|err| match err {
                             CatalogError::UnknownTable(_) => ExecError::Parse(
                                 ParseError::TableDoesNotExist(index_oid.to_string()),
