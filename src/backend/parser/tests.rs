@@ -7237,7 +7237,7 @@ fn plan_merge_uses_join_shape_for_explain() {
     assert_eq!(bound.explain_target_name, "people p");
     assert!(matches!(
         strip_projections(&bound.input_plan.plan_tree),
-        Plan::NestedLoopJoin { .. } | Plan::HashJoin { .. }
+        Plan::NestedLoopJoin { .. } | Plan::HashJoin { .. } | Plan::MergeJoin { .. }
     ));
 }
 
@@ -8713,7 +8713,9 @@ fn build_plan_for_recursive_mixed_cte_query() {
             | Plan::BitmapHeapScan {
                 bitmapqual: input, ..
             } => plan_contains_cte_scan(input),
-            Plan::NestedLoopJoin { left, right, .. } | Plan::HashJoin { left, right, .. } => {
+            Plan::NestedLoopJoin { left, right, .. }
+            | Plan::HashJoin { left, right, .. }
+            | Plan::MergeJoin { left, right, .. } => {
                 plan_contains_cte_scan(left) || plan_contains_cte_scan(right)
             }
             Plan::RecursiveUnion {

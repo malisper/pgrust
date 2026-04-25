@@ -328,6 +328,34 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                 collect_rels_from_expr(expr, rels);
             }
         }
+        Plan::MergeJoin {
+            left,
+            right,
+            merge_clauses,
+            outer_sort_keys,
+            inner_sort_keys,
+            join_qual,
+            qual,
+            ..
+        } => {
+            collect_rels_from_plan(left, rels);
+            collect_rels_from_plan(right, rels);
+            for expr in merge_clauses {
+                collect_rels_from_expr(expr, rels);
+            }
+            for expr in outer_sort_keys {
+                collect_rels_from_expr(expr, rels);
+            }
+            for expr in inner_sort_keys {
+                collect_rels_from_expr(expr, rels);
+            }
+            for expr in join_qual {
+                collect_rels_from_expr(expr, rels);
+            }
+            for expr in qual {
+                collect_rels_from_expr(expr, rels);
+            }
+        }
         Plan::Filter {
             input, predicate, ..
         } => {

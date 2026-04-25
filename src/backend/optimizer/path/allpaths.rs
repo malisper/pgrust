@@ -955,6 +955,17 @@ fn build_join_restrict_clauses(
     clauses
 }
 
+fn has_inter_relation_join_clause(
+    clauses: &[RestrictInfo],
+    left_relids: &[usize],
+    right_relids: &[usize],
+) -> bool {
+    clauses.iter().any(|clause| {
+        relids_overlap(&clause.required_relids, left_relids)
+            && relids_overlap(&clause.required_relids, right_relids)
+    })
+}
+
 #[derive(Clone, Copy)]
 enum LevelRelRef {
     Base(usize),
@@ -1232,12 +1243,22 @@ fn make_join_rel(
             &logical_right_rel.relids,
             &root.inner_join_clauses,
         );
+        let path_kind = if matches!(logical_kind, JoinType::Inner)
+            && !has_inter_relation_join_clause(
+                &join_restrict_clauses,
+                &logical_left_rel.relids,
+                &logical_right_rel.relids,
+            ) {
+            JoinType::Cross
+        } else {
+            logical_kind
+        };
         let mut join_restrict_clauses_for_rel = join_restrict_clauses.clone();
         let mut candidate_paths = collect_join_candidate_paths(
             root,
             logical_left_rel,
             logical_right_rel,
-            logical_kind,
+            path_kind,
             &join_restrict_clauses,
             &reltarget,
             &output_columns,
@@ -1336,9 +1357,6 @@ fn collect_join_candidate_paths(
 fn join_search_one_level(root: &mut PlannerInfo, level: usize, catalog: &dyn CatalogLookup) {
     for left_level in 1..level {
         let right_level = level - left_level;
-        if left_level > right_level {
-            continue;
-        }
         let left_refs = rel_refs_at_level(root, left_level);
         let right_refs = rel_refs_at_level(root, right_level);
         for left_ref in left_refs {

@@ -1346,11 +1346,11 @@ fn manual_hash_join_inner_returns_matching_rows() {
         vec![
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(10)],
+                vec![Value::Int32(1), Value::Int32(11)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(11)],
+                vec![Value::Int32(1), Value::Int32(10)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
@@ -1389,11 +1389,11 @@ fn manual_hash_join_left_emits_null_extended_rows() {
         vec![
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(10)],
+                vec![Value::Int32(1), Value::Int32(11)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(11)],
+                vec![Value::Int32(1), Value::Int32(10)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
@@ -1436,11 +1436,11 @@ fn manual_hash_join_right_emits_unmatched_inner_rows() {
         vec![
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(10)],
+                vec![Value::Int32(1), Value::Int32(11)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(11)],
+                vec![Value::Int32(1), Value::Int32(10)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
@@ -1483,11 +1483,11 @@ fn manual_hash_join_full_emits_unmatched_rows_from_both_sides() {
         vec![
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(10)],
+                vec![Value::Int32(1), Value::Int32(11)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(11)],
+                vec![Value::Int32(1), Value::Int32(10)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
@@ -1655,6 +1655,172 @@ fn manual_hash_join_null_hash_keys_do_not_match_each_other() {
             vec!["id".into(), "id".into()],
             vec![Value::Int32(1), Value::Int32(1)],
         )]
+    );
+}
+
+#[test]
+fn manual_merge_join_emits_duplicate_groups_in_merge_order() {
+    let base = temp_dir("manual_merge_join_duplicate_order");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let int4 = crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4);
+    let output_columns = vec![QueryColumn {
+        name: "id".into(),
+        sql_type: int4,
+        wire_type_oid: None,
+    }];
+
+    let plan = Plan::MergeJoin {
+        plan_info: PlanEstimate::default(),
+        left: Box::new(Plan::Values {
+            plan_info: PlanEstimate::default(),
+            rows: vec![
+                vec![Expr::Const(Value::Int32(0))],
+                vec![Expr::Const(Value::Int32(1))],
+                vec![Expr::Const(Value::Int32(2))],
+                vec![Expr::Const(Value::Int32(2))],
+                vec![Expr::Const(Value::Int32(5))],
+            ],
+            output_columns: output_columns.clone(),
+        }),
+        right: Box::new(Plan::Values {
+            plan_info: PlanEstimate::default(),
+            rows: vec![
+                vec![Expr::Const(Value::Int32(0))],
+                vec![Expr::Const(Value::Int32(2))],
+                vec![Expr::Const(Value::Int32(5))],
+                vec![Expr::Const(Value::Int32(5))],
+            ],
+            output_columns,
+        }),
+        kind: JoinType::Inner,
+        merge_clauses: vec![Expr::op_auto(
+            crate::include::nodes::primnodes::OpExprKind::Eq,
+            vec![local_var(0), local_var(1)],
+        )],
+        outer_sort_keys: vec![local_var(0)],
+        inner_sort_keys: vec![local_var(0)],
+        join_qual: vec![],
+        qual: vec![],
+    };
+
+    let rows = run_plan(&base, &txns, plan).unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                vec!["id".into(), "id".into()],
+                vec![Value::Int32(0), Value::Int32(0)]
+            ),
+            (
+                vec!["id".into(), "id".into()],
+                vec![Value::Int32(2), Value::Int32(2)]
+            ),
+            (
+                vec!["id".into(), "id".into()],
+                vec![Value::Int32(2), Value::Int32(2)]
+            ),
+            (
+                vec!["id".into(), "id".into()],
+                vec![Value::Int32(5), Value::Int32(5)]
+            ),
+            (
+                vec!["id".into(), "id".into()],
+                vec![Value::Int32(5), Value::Int32(5)]
+            ),
+        ]
+    );
+}
+
+#[test]
+fn cross_join_without_order_by_uses_postgres_physical_order() {
+    let mut harness = seed_people_and_pets("cross_join_without_order_by");
+
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select people.id, pets.id from people, pets limit 6",
+            )
+            .unwrap(),
+        vec![
+            vec![Value::Int32(1), Value::Int32(10)],
+            vec![Value::Int32(2), Value::Int32(10)],
+            vec![Value::Int32(3), Value::Int32(10)],
+            vec![Value::Int32(1), Value::Int32(11)],
+            vec![Value::Int32(2), Value::Int32(11)],
+            vec![Value::Int32(3), Value::Int32(11)],
+        ],
+    );
+}
+
+#[test]
+fn three_way_cross_join_keeps_left_join_rel_outer() {
+    let mut harness = seed_people_and_pets("three_way_cross_join_order");
+    harness
+        .execute(INVALID_TRANSACTION_ID, "create table colors (id int)")
+        .unwrap();
+    harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "insert into colors values (100), (200)",
+        )
+        .unwrap();
+
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select people.id, pets.id, colors.id \
+                 from people cross join pets cross join colors",
+            )
+            .unwrap(),
+        vec![
+            vec![Value::Int32(1), Value::Int32(10), Value::Int32(100)],
+            vec![Value::Int32(1), Value::Int32(10), Value::Int32(200)],
+            vec![Value::Int32(2), Value::Int32(10), Value::Int32(100)],
+            vec![Value::Int32(2), Value::Int32(10), Value::Int32(200)],
+            vec![Value::Int32(3), Value::Int32(10), Value::Int32(100)],
+            vec![Value::Int32(3), Value::Int32(10), Value::Int32(200)],
+            vec![Value::Int32(1), Value::Int32(11), Value::Int32(100)],
+            vec![Value::Int32(1), Value::Int32(11), Value::Int32(200)],
+            vec![Value::Int32(2), Value::Int32(11), Value::Int32(100)],
+            vec![Value::Int32(2), Value::Int32(11), Value::Int32(200)],
+            vec![Value::Int32(3), Value::Int32(11), Value::Int32(100)],
+            vec![Value::Int32(3), Value::Int32(11), Value::Int32(200)],
+            vec![Value::Int32(1), Value::Int32(12), Value::Int32(100)],
+            vec![Value::Int32(1), Value::Int32(12), Value::Int32(200)],
+            vec![Value::Int32(2), Value::Int32(12), Value::Int32(100)],
+            vec![Value::Int32(2), Value::Int32(12), Value::Int32(200)],
+            vec![Value::Int32(3), Value::Int32(12), Value::Int32(100)],
+            vec![Value::Int32(3), Value::Int32(12), Value::Int32(200)],
+            vec![Value::Int32(1), Value::Int32(13), Value::Int32(100)],
+            vec![Value::Int32(1), Value::Int32(13), Value::Int32(200)],
+            vec![Value::Int32(2), Value::Int32(13), Value::Int32(100)],
+            vec![Value::Int32(2), Value::Int32(13), Value::Int32(200)],
+            vec![Value::Int32(3), Value::Int32(13), Value::Int32(100)],
+            vec![Value::Int32(3), Value::Int32(13), Value::Int32(200)],
+        ],
+    );
+}
+
+#[test]
+fn non_equi_inner_join_uses_postgres_physical_order() {
+    let mut harness = seed_people_and_pets("non_equi_inner_join_order");
+
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select people.id, pets.id \
+                 from people join pets on people.id <= pets.owner_id",
+            )
+            .unwrap(),
+        vec![
+            vec![Value::Int32(1), Value::Int32(10)],
+            vec![Value::Int32(1), Value::Int32(11)],
+            vec![Value::Int32(1), Value::Int32(12)],
+            vec![Value::Int32(2), Value::Int32(12)],
+        ],
     );
 }
 
@@ -13030,7 +13196,8 @@ fn row_to_json_supports_qualified_star_inside_row_constructor() {
                       y AS c, \
                       ARRAY[ROW(x.*, ARRAY[1,2,3]), ROW(y.*, ARRAY[4,5,6])] AS z \
                FROM generate_series(1,2) x, \
-                    generate_series(4,5) y) q",
+                    generate_series(4,5) y) q \
+         ORDER BY b, c",
     )
     .unwrap()
     {
@@ -13070,7 +13237,7 @@ fn jsonb_agg_supports_whole_row_alias_arguments() {
         &base,
         &txns,
         INVALID_TRANSACTION_ID,
-        "SELECT jsonb_agg(q) \
+        "SELECT jsonb_agg(q ORDER BY b, c) \
          FROM (SELECT $$a$$ || x AS b, \
                       y AS c, \
                       ARRAY[ROW(x.*, ARRAY[1,2,3]), ROW(y.*, ARRAY[4,5,6])] AS z \

@@ -215,6 +215,17 @@ pub enum Plan {
         join_qual: Vec<Expr>,
         qual: Vec<Expr>,
     },
+    MergeJoin {
+        plan_info: PlanEstimate,
+        left: Box<Plan>,
+        right: Box<Plan>,
+        kind: JoinType,
+        merge_clauses: Vec<Expr>,
+        outer_sort_keys: Vec<Expr>,
+        inner_sort_keys: Vec<Expr>,
+        join_qual: Vec<Expr>,
+        qual: Vec<Expr>,
+    },
     Filter {
         plan_info: PlanEstimate,
         input: Box<Plan>,
@@ -314,6 +325,7 @@ impl Plan {
             | Plan::Hash { plan_info, .. }
             | Plan::NestedLoopJoin { plan_info, .. }
             | Plan::HashJoin { plan_info, .. }
+            | Plan::MergeJoin { plan_info, .. }
             | Plan::Filter { plan_info, .. }
             | Plan::OrderBy { plan_info, .. }
             | Plan::Limit { plan_info, .. }
@@ -343,6 +355,7 @@ impl Plan {
             | Plan::Hash { plan_info, .. }
             | Plan::NestedLoopJoin { plan_info, .. }
             | Plan::HashJoin { plan_info, .. }
+            | Plan::MergeJoin { plan_info, .. }
             | Plan::Filter { plan_info, .. }
             | Plan::OrderBy { plan_info, .. }
             | Plan::Limit { plan_info, .. }
@@ -421,7 +434,9 @@ impl Plan {
             Plan::WorkTableScan { output_columns, .. }
             | Plan::RecursiveUnion { output_columns, .. }
             | Plan::SetOp { output_columns, .. } => output_columns.clone(),
-            Plan::NestedLoopJoin { left, right, .. } | Plan::HashJoin { left, right, .. } => {
+            Plan::NestedLoopJoin { left, right, .. }
+            | Plan::HashJoin { left, right, .. }
+            | Plan::MergeJoin { left, right, .. } => {
                 let mut cols = left.columns();
                 cols.extend(right.columns());
                 cols

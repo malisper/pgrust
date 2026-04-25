@@ -516,6 +516,28 @@ pub struct HashJoinState {
 }
 
 #[derive(Debug)]
+pub struct MergeJoinState {
+    pub(crate) left: PlanState,
+    pub(crate) right: PlanState,
+    pub(crate) kind: JoinType,
+    pub(crate) merge_clauses: Vec<Expr>,
+    pub(crate) outer_sort_keys: Vec<Expr>,
+    pub(crate) inner_sort_keys: Vec<Expr>,
+    pub(crate) join_qual: Vec<Expr>,
+    pub(crate) qual: Vec<Expr>,
+    pub(crate) combined_names: Vec<String>,
+    pub(crate) output_names: Vec<String>,
+    pub(crate) left_width: usize,
+    pub(crate) right_width: usize,
+    pub(crate) rows: Option<Vec<MaterializedRow>>,
+    pub(crate) next_index: usize,
+    pub(crate) slot: TupleSlot,
+    pub(crate) current_bindings: Vec<SystemVarBinding>,
+    pub(crate) plan_info: PlanEstimate,
+    pub(crate) stats: NodeExecStats,
+}
+
+#[derive(Debug)]
 pub struct ProjectionState {
     pub(crate) input: PlanState,
     pub(crate) targets: Vec<TargetEntry>,

@@ -98,6 +98,14 @@ struct HashJoinClauses {
     join_clauses: Vec<RestrictInfo>,
 }
 
+#[derive(Debug, Clone)]
+struct MergeJoinClauses {
+    merge_clauses: Vec<RestrictInfo>,
+    outer_sort_keys: Vec<Expr>,
+    inner_sort_keys: Vec<Expr>,
+    join_clauses: Vec<RestrictInfo>,
+}
+
 fn create_plan(
     root: &PlannerInfo,
     path: Path,
@@ -214,7 +222,9 @@ fn path_relids(path: &Path) -> Vec<usize> {
         Path::RecursiveUnion {
             anchor, recursive, ..
         } => relids_union(&path_relids(anchor), &path_relids(recursive)),
-        Path::NestedLoopJoin { left, right, .. } | Path::HashJoin { left, right, .. } => {
+        Path::NestedLoopJoin { left, right, .. }
+        | Path::HashJoin { left, right, .. }
+        | Path::MergeJoin { left, right, .. } => {
             relids_union(&path_relids(left), &path_relids(right))
         }
     }
@@ -354,6 +364,14 @@ fn extract_hash_join_clauses(
     right_relids: &[usize],
 ) -> Option<HashJoinClauses> {
     path::extract_hash_join_clauses(restrict_clauses, left_relids, right_relids)
+}
+
+fn extract_merge_join_clauses(
+    restrict_clauses: &[RestrictInfo],
+    left_relids: &[usize],
+    right_relids: &[usize],
+) -> Option<MergeJoinClauses> {
+    path::extract_merge_join_clauses(restrict_clauses, left_relids, right_relids)
 }
 
 pub(crate) fn planner(

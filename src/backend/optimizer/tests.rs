@@ -594,12 +594,44 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
         } => plan_contains(input, predicate),
         Plan::NestedLoopJoin { left, right, .. }
         | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. }
         | Plan::RecursiveUnion {
             anchor: left,
             recursive: right,
             ..
         } => plan_contains(left, predicate) || plan_contains(right, predicate),
     }
+}
+
+#[test]
+fn cartesian_join_plans_as_cross_join_without_hidden_order_by() {
+    let catalog = catalog_with_people_and_pets();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select p.id, q.owner_id from people p, pets q",
+        &catalog,
+    );
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| {
+            matches!(
+                plan,
+                Plan::NestedLoopJoin {
+                    kind: JoinType::Cross,
+                    ..
+                }
+            )
+        }),
+        "expected cartesian join to stay a cross/nested-loop join, got {:?}",
+        planned.plan_tree
+    );
+    assert!(
+        !plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::OrderBy { .. }
+        )),
+        "unordered cartesian join must not synthesize a final sort, got {:?}",
+        planned.plan_tree
+    );
 }
 
 #[test]
@@ -675,7 +707,9 @@ fn find_seq_scan(plan: &Plan) -> Option<&Plan> {
         Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
             children.iter().find_map(find_seq_scan)
         }
-        Plan::NestedLoopJoin { left, right, .. } | Plan::HashJoin { left, right, .. } => {
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. } => {
             find_seq_scan(left).or_else(|| find_seq_scan(right))
         }
         Plan::Result { .. }
@@ -721,6 +755,7 @@ fn count_plan_nodes(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> us
         } => count_plan_nodes(input, predicate),
         Plan::NestedLoopJoin { left, right, .. }
         | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. }
         | Plan::RecursiveUnion {
             anchor: left,
             recursive: right,
@@ -1579,7 +1614,9 @@ fn planned_lockstep_project_set_keeps_both_visible_targets_as_sets() {
             Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
                 children.iter().find_map(find_project_set)
             }
-            Plan::NestedLoopJoin { left, right, .. } | Plan::HashJoin { left, right, .. } => {
+            Plan::NestedLoopJoin { left, right, .. }
+            | Plan::HashJoin { left, right, .. }
+            | Plan::MergeJoin { left, right, .. } => {
                 find_project_set(left).or_else(|| find_project_set(right))
             }
             Plan::Result { .. }
@@ -1992,6 +2029,11 @@ fn build_join_paths_emits_nested_loop_and_hash_join_for_equijoin() {
             .iter()
             .any(|path| matches!(path, Path::HashJoin { .. }))
     );
+    assert!(
+        paths
+            .iter()
+            .any(|path| matches!(path, Path::MergeJoin { .. }))
+    );
 }
 
 #[test]
@@ -2012,6 +2054,30 @@ fn extract_hash_join_clauses_splits_residual_predicates() {
     );
     assert_eq!(clauses.outer_hash_keys, vec![var(1, 1)]);
     assert_eq!(clauses.inner_hash_keys, vec![var(2, 1)]);
+    assert_eq!(
+        clauses.join_clauses,
+        vec![restrict(gt(var(1, 2), var(2, 2)))]
+    );
+}
+
+#[test]
+fn extract_merge_join_clauses_splits_residual_predicates() {
+    let clauses = super::extract_merge_join_clauses(
+        &[
+            restrict(eq(var(1, 1), var(2, 1))),
+            restrict(gt(var(1, 2), var(2, 2))),
+        ],
+        &[1],
+        &[2],
+    )
+    .expect("merge join clauses");
+
+    assert_eq!(
+        clauses.merge_clauses,
+        vec![restrict(eq(var(1, 1), var(2, 1)))]
+    );
+    assert_eq!(clauses.outer_sort_keys, vec![var(1, 1)]);
+    assert_eq!(clauses.inner_sort_keys, vec![var(2, 1)]);
     assert_eq!(
         clauses.join_clauses,
         vec![restrict(gt(var(1, 2), var(2, 2)))]
@@ -2048,6 +2114,11 @@ fn build_join_paths_skips_hash_join_for_cross_and_non_equi_joins() {
             .iter()
             .any(|path| matches!(path, Path::HashJoin { .. }))
     );
+    assert!(
+        !cross_paths
+            .iter()
+            .any(|path| matches!(path, Path::MergeJoin { .. }))
+    );
 
     let non_equi_paths = super::build_join_paths(
         values_path(1, 1.0, 10.0),
@@ -2061,6 +2132,11 @@ fn build_join_paths_skips_hash_join_for_cross_and_non_equi_joins() {
         !non_equi_paths
             .iter()
             .any(|path| matches!(path, Path::HashJoin { .. }))
+    );
+    assert!(
+        !non_equi_paths
+            .iter()
+            .any(|path| matches!(path, Path::MergeJoin { .. }))
     );
 }
 
@@ -2140,5 +2216,59 @@ fn hash_join_path_lowers_to_hash_join_plan_with_hash_inner() {
             }
         }
         other => panic!("expected hash join, got {:?}", other),
+    }
+}
+
+#[test]
+fn merge_join_path_lowers_sort_keys_and_merge_clauses() {
+    let left = values_path(1, 1.0, 10.0);
+    let right = values_path(2, 2.0, 20.0);
+    let plan = Path::MergeJoin {
+        plan_info: PlanEstimate::new(5.0, 15.0, 10.0, 4),
+        pathtarget: join_pathtarget(&left, &right),
+        output_columns: join_output_columns(&left, &right),
+        left: Box::new(left),
+        right: Box::new(right),
+        kind: JoinType::Inner,
+        merge_clauses: vec![restrict(eq(var(1, 1), var(2, 1)))],
+        outer_sort_keys: vec![var(1, 1)],
+        inner_sort_keys: vec![var(2, 1)],
+        restrict_clauses: vec![
+            restrict(eq(var(1, 1), var(2, 1))),
+            restrict(gt(var(1, 2), var(2, 2))),
+        ],
+        pathkeys: vec![pathkey(var(1, 1))],
+    }
+    .into_plan();
+
+    match plan {
+        Plan::MergeJoin {
+            kind,
+            merge_clauses,
+            outer_sort_keys,
+            inner_sort_keys,
+            join_qual,
+            qual,
+            ..
+        } => {
+            assert_eq!(kind, JoinType::Inner);
+            assert_eq!(outer_sort_keys.len(), 1);
+            assert!(is_special_user_var(&outer_sort_keys[0], OUTER_VAR, 0));
+            assert_eq!(inner_sort_keys.len(), 1);
+            assert!(is_special_user_var(&inner_sort_keys[0], OUTER_VAR, 0));
+            assert_eq!(merge_clauses.len(), 1);
+            match &merge_clauses[0] {
+                Expr::Op(op) => {
+                    assert_eq!(op.op, OpExprKind::Eq);
+                    assert_eq!(op.args.len(), 2);
+                    assert!(is_special_user_var(&op.args[0], OUTER_VAR, 0));
+                    assert!(is_special_user_var(&op.args[1], INNER_VAR, 0));
+                }
+                other => panic!("expected merge clause op, got {other:?}"),
+            }
+            assert_eq!(join_qual.len(), 1);
+            assert!(qual.is_empty());
+        }
+        other => panic!("expected merge join, got {:?}", other),
     }
 }
