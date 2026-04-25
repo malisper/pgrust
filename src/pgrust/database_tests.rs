@@ -4456,6 +4456,65 @@ fn partitioned_primary_keys_support_rename_flow_and_index_tree_metadata() {
 }
 
 #[test]
+fn partitioned_primary_keys_preserve_deferrability_flags() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table part_items (id int4 primary key deferrable initially deferred) partition by range (id)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table part_items_1 partition of part_items for values from (0) to (10)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select rel.relname, con.condeferrable, con.condeferred \
+               from pg_constraint con \
+               join pg_class rel on rel.oid = con.conrelid \
+              where rel.relname in ('part_items', 'part_items_1') \
+                and con.contype = 'p' \
+              order by rel.relname",
+        ),
+        vec![
+            vec![
+                Value::Text("part_items".into()),
+                Value::Bool(true),
+                Value::Bool(true),
+            ],
+            vec![
+                Value::Text("part_items_1".into()),
+                Value::Bool(true),
+                Value::Bool(true),
+            ],
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, i.indimmediate \
+               from pg_index i \
+               join pg_class c on c.oid = i.indexrelid \
+              where c.relname in ('part_items_pkey', 'part_items_1_pkey') \
+              order by c.relname",
+        ),
+        vec![
+            vec![Value::Text("part_items_1_pkey".into()), Value::Bool(false)],
+            vec![Value::Text("part_items_pkey".into()), Value::Bool(false)],
+        ]
+    );
+}
+
+#[test]
 fn create_index_on_partitioned_table_builds_index_tree() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
@@ -4562,6 +4621,34 @@ fn create_index_on_partitioned_table_reuses_only_child_without_recursing() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
 
+    fn relation_oid(db: &Database, name: &str) -> u32 {
+        db.lazy_catalog_lookup(1, None, None)
+            .lookup_any_relation(name)
+            .unwrap_or_else(|| panic!("expected relation {name}"))
+            .relation_oid
+    }
+
+    fn index_summary(db: &Database, index_name: &str) -> (u32, Option<u32>, bool) {
+        let catalog = db.lazy_catalog_lookup(1, None, None);
+        let index_relation = catalog
+            .lookup_any_relation(index_name)
+            .unwrap_or_else(|| panic!("expected index {index_name}"));
+        let index = crate::backend::utils::cache::lsyscache::describe_relation_by_oid(
+            db,
+            1,
+            None,
+            index_relation.relation_oid,
+        )
+        .unwrap_or_else(|| panic!("expected relcache entry for {index_name}"))
+        .index
+        .unwrap_or_else(|| panic!("expected index metadata for {index_name}"));
+        let parent_oid = catalog
+            .inheritance_parents(index_relation.relation_oid)
+            .first()
+            .map(|row| row.inhparent);
+        (index.indrelid, parent_oid, index.indisvalid)
+    }
+
     session
         .execute(&db, "create table idxpart (a int4) partition by range (a)")
         .unwrap();
@@ -4598,44 +4685,28 @@ fn create_index_on_partitioned_table_reuses_only_child_without_recursing() {
     session.execute(&db, "create index on idxpart(a)").unwrap();
 
     assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select idxcls.relname, heap.relname, coalesce(parent.relname, ''), idx.indisvalid \
-               from pg_index idx \
-               join pg_class idxcls on idxcls.oid = idx.indexrelid \
-               join pg_class heap on heap.oid = idx.indrelid \
-               left join pg_inherits inh on inh.inhrelid = idx.indexrelid \
-               left join pg_class parent on parent.oid = inh.inhparent \
-              where idxcls.relname like 'idxpart%' \
-              order by idxcls.relname",
-        ),
-        vec![
-            vec![
-                Value::Text("idxpart1_a_idx".into()),
-                Value::Text("idxpart1".into()),
-                Value::Text("idxpart_a_idx".into()),
-                Value::Bool(true),
-            ],
-            vec![
-                Value::Text("idxpart22_a_idx".into()),
-                Value::Text("idxpart22".into()),
-                Value::Text("".into()),
-                Value::Bool(true),
-            ],
-            vec![
-                Value::Text("idxpart2_a_idx".into()),
-                Value::Text("idxpart2".into()),
-                Value::Text("idxpart_a_idx".into()),
-                Value::Bool(false),
-            ],
-            vec![
-                Value::Text("idxpart_a_idx".into()),
-                Value::Text("idxpart".into()),
-                Value::Text("".into()),
-                Value::Bool(false),
-            ],
-        ]
+        index_summary(&db, "idxpart1_a_idx"),
+        (
+            relation_oid(&db, "idxpart1"),
+            Some(relation_oid(&db, "idxpart_a_idx")),
+            true,
+        )
+    );
+    assert_eq!(
+        index_summary(&db, "idxpart22_a_idx"),
+        (relation_oid(&db, "idxpart22"), None, true)
+    );
+    assert_eq!(
+        index_summary(&db, "idxpart2_a_idx"),
+        (
+            relation_oid(&db, "idxpart2"),
+            Some(relation_oid(&db, "idxpart_a_idx")),
+            false,
+        )
+    );
+    assert_eq!(
+        index_summary(&db, "idxpart_a_idx"),
+        (relation_oid(&db, "idxpart"), None, false)
     );
     assert!(
         query_rows(
@@ -4658,20 +4729,8 @@ fn create_index_on_partitioned_table_reuses_only_child_without_recursing() {
             "alter index idxpart2_a_idx attach partition idxpart22_a_idx",
         )
         .unwrap();
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select relname, indisvalid \
-               from pg_class join pg_index on indexrelid = oid \
-              where relname in ('idxpart2_a_idx', 'idxpart_a_idx') \
-              order by relname",
-        ),
-        vec![
-            vec![Value::Text("idxpart2_a_idx".into()), Value::Bool(false)],
-            vec![Value::Text("idxpart_a_idx".into()), Value::Bool(false)],
-        ]
-    );
+    assert!(!index_summary(&db, "idxpart2_a_idx").2);
+    assert!(!index_summary(&db, "idxpart_a_idx").2);
 
     session
         .execute(&db, "create index on idxpart21(a)")
@@ -4682,22 +4741,10 @@ fn create_index_on_partitioned_table_reuses_only_child_without_recursing() {
             "alter index idxpart2_a_idx attach partition idxpart21_a_idx",
         )
         .unwrap();
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select relname, indisvalid \
-               from pg_class join pg_index on indexrelid = oid \
-              where relname in ('idxpart21_a_idx', 'idxpart22_a_idx', 'idxpart2_a_idx', 'idxpart_a_idx') \
-              order by relname",
-        ),
-        vec![
-            vec![Value::Text("idxpart21_a_idx".into()), Value::Bool(true)],
-            vec![Value::Text("idxpart22_a_idx".into()), Value::Bool(true)],
-            vec![Value::Text("idxpart2_a_idx".into()), Value::Bool(true)],
-            vec![Value::Text("idxpart_a_idx".into()), Value::Bool(true)],
-        ]
-    );
+    assert!(index_summary(&db, "idxpart21_a_idx").2);
+    assert!(index_summary(&db, "idxpart22_a_idx").2);
+    assert!(index_summary(&db, "idxpart2_a_idx").2);
+    assert!(index_summary(&db, "idxpart_a_idx").2);
 }
 
 #[test]
@@ -7029,16 +7076,12 @@ fn assert_explain_uses_index(db: &Database, client_id: u32, sql: &str, index_nam
     let lines = explain_lines(db, client_id, sql);
     assert!(
         lines.iter().any(|line| {
-            line.contains(&format!("Index Scan using rel {relfilenode} "))
-                || line.contains(&format!("Index Scan Backward using rel {relfilenode} "))
-                || line.contains(&format!("Index Scan using {index_name} "))
-                || line.contains(&format!("Index Scan Backward using {index_name} "))
-                || line.contains(&format!("Index Only Scan using rel {relfilenode} "))
-                || line.contains(&format!(
-                    "Index Only Scan Backward using rel {relfilenode} "
-                ))
-                || line.contains(&format!("Index Only Scan using {index_name} "))
-                || line.contains(&format!("Index Only Scan Backward using {index_name} "))
+            (line.contains("Index Scan using ")
+                || line.contains("Index Scan Backward using ")
+                || line.contains("Index Only Scan using ")
+                || line.contains("Index Only Scan Backward using "))
+                && (line.contains(&format!("using rel {relfilenode} "))
+                    || line.contains(&format!("using {index_name} ")))
         }),
         "expected EXPLAIN to use index {index_name} (relfilenode {relfilenode}), got {lines:?}"
     );
@@ -7053,7 +7096,9 @@ fn assert_explain_uses_seqscan(db: &Database, client_id: u32, sql: &str, heap_na
         "expected EXPLAIN to use seq scan on {heap_name}, got {lines:?}"
     );
     assert!(
-        !lines.iter().any(|line| line.contains("Index Scan")),
+        !lines
+            .iter()
+            .any(|line| line.contains("Index Scan") || line.contains("Index Only Scan")),
         "expected no index scan, got {lines:?}"
     );
 }
@@ -15008,6 +15053,56 @@ fn create_table_primary_key_and_unique_constraints_are_enforced_and_persisted() 
 }
 
 #[test]
+fn create_table_like_including_indexes_copies_deferrable_key_flags() {
+    let base = temp_dir("create_table_like_deferrable_keys");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table src_items (
+            id int4 primary key deferrable initially deferred,
+            code int4,
+            constraint src_items_code_key unique (code) deferrable
+        )",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table cloned_items (like src_items including indexes)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select con.contype, con.condeferrable, con.condeferred, i.indimmediate, pg_get_constraintdef(con.oid) \
+               from pg_constraint con \
+               join pg_index i on i.indexrelid = con.conindid \
+              where con.conrelid = (select oid from pg_class where relname = 'cloned_items') \
+                and con.contype in ('p', 'u') \
+              order by con.contype",
+        ),
+        vec![
+            vec![
+                Value::Text("p".into()),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(false),
+                Value::Text("PRIMARY KEY (id) DEFERRABLE INITIALLY DEFERRED".into()),
+            ],
+            vec![
+                Value::Text("u".into()),
+                Value::Bool(true),
+                Value::Bool(false),
+                Value::Bool(false),
+                Value::Text("UNIQUE (code) DEFERRABLE".into()),
+            ],
+        ]
+    );
+}
+
+#[test]
 fn create_table_table_level_primary_key_and_unique_constraints_work() {
     let base = temp_dir("create_table_composite_constraints");
     let db = Database::open(&base, 16).unwrap();
@@ -17296,6 +17391,238 @@ fn alter_table_alter_constraint_deferred_auto_commit_validates_before_implicit_c
         query_rows(&db, 1, "select count(*) from children"),
         vec![vec![Value::Int64(0)]]
     );
+}
+
+#[test]
+fn deferrable_primary_key_initially_immediate_fails_at_statement_end() {
+    let base = temp_dir("deferrable_primary_key_immediate_statement_end");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (id int4 primary key deferrable)")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select con.condeferrable, con.condeferred, i.indimmediate \
+               from pg_constraint con \
+               join pg_index i on i.indexrelid = con.conindid \
+              where con.conname = 'items_pkey'",
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(false),
+        ]]
+    );
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into items values (1)")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select id from items"),
+        vec![vec![Value::Int32(1)]]
+    );
+    match session.execute(&db, "insert into items values (1)") {
+        Err(ExecError::UniqueViolation { constraint, .. }) => {
+            assert_eq!(constraint, "items_pkey");
+        }
+        other => panic!("expected deferred primary-key violation at statement end, got {other:?}"),
+    }
+    session.execute(&db, "rollback").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from items"),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn alter_table_add_deferrable_unique_initially_deferred_fails_at_commit() {
+    let base = temp_dir("alter_table_add_deferrable_unique_commit");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (id int4 primary key, code int4)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table items add constraint items_code_key unique (code) deferrable initially deferred",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select con.condeferrable, con.condeferred, i.indimmediate \
+               from pg_constraint con \
+               join pg_index i on i.indexrelid = con.conindid \
+              where con.conname = 'items_code_key'",
+        ),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(false),
+        ]]
+    );
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into items values (1, 10)")
+        .unwrap();
+    session
+        .execute(&db, "insert into items values (2, 10)")
+        .unwrap();
+    match session.execute(&db, "commit") {
+        Err(ExecError::UniqueViolation { constraint, .. }) => {
+            assert_eq!(constraint, "items_code_key");
+        }
+        other => panic!("expected deferred unique violation at commit, got {other:?}"),
+    }
+
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from items"),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn set_constraints_named_deferred_postpones_deferrable_foreign_key_checks() {
+    let base = temp_dir("set_constraints_named_deferred_fk");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table parents (id int4 primary key)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table children (
+                id int4 primary key,
+                parent_id int4 references parents deferrable
+            )",
+        )
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_get_constraintdef(oid) \
+               from pg_constraint \
+              where conname = 'children_parent_id_fkey'",
+        ),
+        vec![vec![Value::Text(
+            "FOREIGN KEY (parent_id) REFERENCES parents(id) DEFERRABLE".into()
+        )]]
+    );
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "set constraints children_parent_id_fkey deferred")
+        .unwrap();
+    session
+        .execute(&db, "insert into children values (1, 42)")
+        .unwrap();
+    session
+        .execute(&db, "insert into parents values (42)")
+        .unwrap();
+    session.execute(&db, "commit").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select id, parent_id from children order by id"),
+        vec![vec![Value::Int32(1), Value::Int32(42)]]
+    );
+}
+
+#[test]
+fn set_constraints_all_deferred_and_named_immediate_control_unique_checks() {
+    let base = temp_dir("set_constraints_all_deferred_unique");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table items (
+                id int4 primary key,
+                code int4 unique deferrable
+            )",
+        )
+        .unwrap();
+
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "set constraints all deferred")
+        .unwrap();
+    session
+        .execute(&db, "insert into items values (1, 10)")
+        .unwrap();
+    session
+        .execute(&db, "insert into items values (2, 10)")
+        .unwrap();
+    match session.execute(&db, "set constraints items_code_key immediate") {
+        Err(ExecError::UniqueViolation { constraint, .. }) => {
+            assert_eq!(constraint, "items_code_key");
+        }
+        other => panic!(
+            "expected retroactive unique validation failure from SET CONSTRAINTS IMMEDIATE, got {other:?}"
+        ),
+    }
+    session.execute(&db, "rollback").unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from items"),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn set_constraints_outside_transaction_emits_warning() {
+    let base = temp_dir("set_constraints_outside_transaction_warning");
+    let db = Database::open(&base, 16).unwrap();
+
+    clear_backend_notices();
+    db.execute(1, "set constraints all deferred").unwrap();
+
+    let notices = take_backend_notices();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].severity, "WARNING");
+    assert_eq!(notices[0].sqlstate, "01000");
+    assert_eq!(
+        notices[0].message,
+        "SET CONSTRAINTS can only be used in transaction blocks"
+    );
+}
+
+#[test]
+fn on_conflict_rejects_deferrable_unique_arbiters() {
+    let base = temp_dir("on_conflict_rejects_deferrable_arbiter");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table items (id int4 primary key, code int4 unique deferrable)",
+    )
+    .unwrap();
+
+    match db.execute(
+        1,
+        "insert into items values (1, 10) on conflict on constraint items_code_key do nothing",
+    ) {
+        Err(ExecError::Parse(ParseError::FeatureNotSupported(feature))) => {
+            assert_eq!(
+                feature,
+                "ON CONFLICT does not support deferrable unique constraints as arbiters"
+            );
+        }
+        other => panic!("expected ON CONFLICT deferrable-arbiter rejection, got {other:?}"),
+    }
 }
 
 #[test]
@@ -19947,8 +20274,9 @@ fn index_matrix_projection_over_ordered_index_keeps_order_without_sort() {
     let relfilenode = relfilenode_for(&db, 1, "items_a_idx");
     assert!(
         lines.iter().any(|line| {
-            line.contains(&format!("Index Scan using rel {relfilenode} "))
-                || line.contains("Index Scan using items_a_idx ")
+            (line.contains("Index Scan") || line.contains("Index Only Scan"))
+                && (line.contains(&format!("using rel {relfilenode} "))
+                    || line.contains("using items_a_idx "))
         }),
         "expected ordered index scan, got {lines:?}"
     );
@@ -21574,6 +21902,38 @@ fn create_index_supports_temp_tables_when_temp_is_first_visible() {
     let temp_index = db.temp_entry(1, "items_temp_idx").unwrap();
     let index_meta = temp_index.index.as_ref().unwrap();
     assert_eq!(index_meta.indrelid, temp_table.relation_oid);
+}
+
+#[test]
+fn temp_constraint_backed_indexes_preserve_indimmediate() {
+    let base = temp_dir("temp_constraint_backed_indexes_indimmediate");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table items (id int4 primary key)")
+        .unwrap();
+    let immediate_index = db.temp_entry(1, "items_pkey").unwrap();
+    assert!(
+        immediate_index
+            .index
+            .as_ref()
+            .is_some_and(|index| index.indimmediate)
+    );
+
+    session
+        .execute(
+            &db,
+            "create temp table deferred_items (id int4 unique deferrable initially deferred)",
+        )
+        .unwrap();
+    let deferred_index = db.temp_entry(1, "deferred_items_id_key").unwrap();
+    assert!(
+        deferred_index
+            .index
+            .as_ref()
+            .is_some_and(|index| !index.indimmediate)
+    );
 }
 
 #[test]

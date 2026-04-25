@@ -136,6 +136,10 @@ pub struct BoundIndexRelation {
     pub index_meta: crate::backend::utils::cache::relcache::IndexRelCacheEntry,
     pub index_exprs: Vec<Expr>,
     pub index_predicate: Option<Expr>,
+    pub constraint_oid: Option<u32>,
+    pub constraint_name: Option<String>,
+    pub constraint_deferrable: bool,
+    pub constraint_initially_deferred: bool,
 }
 
 fn dedup_proc_rows(rows: &mut Vec<PgProcRow>) {
@@ -1194,6 +1198,17 @@ pub(crate) fn bound_index_relation_from_relcache_entry(
         (Vec::new(), None)
     };
 
+    let backing_constraint = catalog
+        .constraint_rows_for_index(entry.relation_oid)
+        .into_iter()
+        .find(|row| {
+            matches!(
+                row.contype,
+                crate::include::catalog::CONSTRAINT_PRIMARY
+                    | crate::include::catalog::CONSTRAINT_UNIQUE
+            )
+        });
+
     Some(BoundIndexRelation {
         name,
         rel: entry.rel,
@@ -1202,6 +1217,14 @@ pub(crate) fn bound_index_relation_from_relcache_entry(
         index_meta,
         index_exprs,
         index_predicate,
+        constraint_oid: backing_constraint.as_ref().map(|row| row.oid),
+        constraint_name: backing_constraint.as_ref().map(|row| row.conname.clone()),
+        constraint_deferrable: backing_constraint
+            .as_ref()
+            .is_some_and(|row| row.condeferrable),
+        constraint_initially_deferred: backing_constraint
+            .as_ref()
+            .is_some_and(|row| row.condeferred),
     })
 }
 

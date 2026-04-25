@@ -473,6 +473,12 @@ fn run_statement(
     clear_notices();
     let result = match stmt {
         Statement::Do(stmt) => execute_do(&stmt),
+        Statement::SetConstraints(_) => {
+            pgrust::backend::utils::misc::notices::push_warning(
+                "SET CONSTRAINTS can only be used in transaction blocks",
+            );
+            Ok(StatementResult::AffectedRows(0))
+        }
         Statement::Show(_) => Ok(StatementResult::AffectedRows(0)),
         Statement::Set(_)
         | Statement::Reset(_)

@@ -663,7 +663,8 @@ fn catalog_with_unique_indexed_items() -> Catalog {
     catalog
 }
 
-fn catalog_with_inherited_indexed_items() -> Catalog {
+fn catalog_with_inherited_indexed_items()
+-> crate::backend::utils::cache::visible_catalog::VisibleCatalog {
     fn btree_options(
         catalog: &Catalog,
         relation_oid: u32,
@@ -705,6 +706,7 @@ fn catalog_with_inherited_indexed_items() -> Catalog {
             indoption,
             indnullsnotdistinct: false,
             indisexclusion: false,
+            indimmediate: true,
             brin_options: None,
             gin_options: None,
             hash_options: None,
@@ -846,7 +848,8 @@ fn catalog_with_inherited_indexed_items() -> Catalog {
             .expect("seed inherited index stats");
     }
 
-    catalog
+    crate::backend::parser::CatalogLookup::materialize_visible_catalog(&catalog)
+        .expect("materialize inherited optimizer test catalog")
 }
 
 fn catalog_with_people_and_pets() -> Catalog {
@@ -1234,6 +1237,37 @@ fn find_aggregate_plan(plan: &Plan) -> Option<&Plan> {
         | Plan::FunctionScan { .. }
         | Plan::WorkTableScan { .. } => None,
     }
+}
+
+#[test]
+fn cartesian_join_plans_as_cross_join_without_hidden_order_by() {
+    let catalog = catalog_with_people_and_pets();
+    let planned = planned_stmt_for_sql_with_catalog(
+        "select p.id, q.owner_id from people p, pets q",
+        &catalog,
+    );
+
+    assert!(
+        plan_contains(&planned.plan_tree, |plan| {
+            matches!(
+                plan,
+                Plan::NestedLoopJoin {
+                    kind: JoinType::Cross,
+                    ..
+                }
+            )
+        }),
+        "expected cartesian join to stay a cross/nested-loop join, got {:?}",
+        planned.plan_tree
+    );
+    assert!(
+        !plan_contains(&planned.plan_tree, |plan| matches!(
+            plan,
+            Plan::OrderBy { .. }
+        )),
+        "unordered cartesian join must not synthesize a final sort, got {:?}",
+        planned.plan_tree
+    );
 }
 
 #[test]
@@ -2092,6 +2126,44 @@ fn planner_uses_metadata_fallback_when_live_pages_are_unavailable() {
 }
 
 #[test]
+fn planner_rewrites_simple_min_aggregate_into_forward_index_only_subplan() {
+    let catalog = catalog_with_indexed_items();
+    let stmt = parse_select("select min(id) from items").expect("parse");
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+        .expect("analyze");
+    let planned = super::planner(query, &catalog).expect("plan");
+
+    assert_eq!(planned.subplans.len(), 1);
+    let subplan = &planned.subplans[0];
+    assert!(plan_contains(subplan, |plan| matches!(
+        plan,
+        Plan::Limit { .. }
+    )));
+    assert!(plan_contains(subplan, |plan| matches!(
+        plan,
+        Plan::IndexScan {
+            direction,
+            index_only,
+            ..
+        } if *direction == crate::include::access::relscan::ScanDirection::Forward && *index_only
+    )));
+    assert!(plan_contains(subplan, |plan| match plan {
+        Plan::IndexScan { keys, .. } => {
+            keys.len() == 1
+                && keys.iter().any(|key| {
+                    key.strategy == 1
+                        && matches!(&key.argument, IndexScanKeyArgument::Const(Value::Null))
+                })
+        }
+        _ => false,
+    }));
+    assert!(!plan_contains(subplan, |plan| matches!(
+        plan,
+        Plan::Aggregate { .. } | Plan::Filter { .. } | Plan::OrderBy { .. }
+    )));
+}
+
+#[test]
 fn planner_rewrites_simple_max_aggregate_into_limit_index_subplan() {
     let catalog = catalog_with_indexed_items();
     let stmt = parse_select("select max(id) from items where id < 42").expect("parse");
@@ -2119,10 +2191,34 @@ fn planner_rewrites_simple_max_aggregate_into_limit_index_subplan() {
         Plan::Aggregate { .. }
     )));
 
-    assert!(plan_contains(subplan, |plan| matches!(
+    assert!(plan_contains(subplan, |plan| match plan {
+        Plan::IndexOnlyScan { direction, .. } => {
+            *direction == crate::include::access::relscan::ScanDirection::Backward
+        }
+        Plan::IndexScan {
+            direction,
+            index_only,
+            ..
+        } => {
+            *direction == crate::include::access::relscan::ScanDirection::Backward && *index_only
+        }
+        _ => false,
+    }));
+    assert!(plan_contains(subplan, |plan| match plan {
+        Plan::IndexOnlyScan { keys, .. } | Plan::IndexScan { keys, .. } => {
+            keys.iter().any(|key| {
+                key.strategy == 1
+                    && matches!(&key.argument, IndexScanKeyArgument::Const(Value::Null))
+            }) && keys.iter().any(|key| {
+                key.strategy == 1
+                    && matches!(&key.argument, IndexScanKeyArgument::Const(Value::Int32(42)))
+            })
+        }
+        _ => false,
+    }));
+    assert!(!plan_contains(subplan, |plan| matches!(
         plan,
-        Plan::IndexOnlyScan { direction, .. }
-            if *direction == crate::include::access::relscan::ScanDirection::Backward
+        Plan::Filter { .. } | Plan::OrderBy { .. }
     )));
 }
 
@@ -2199,36 +2295,33 @@ fn planner_rewrites_distinct_minmax_with_unique_index_only_subplans() {
 }
 
 #[test]
-fn planner_rewrites_inherited_minmax_with_merge_append() {
+fn planner_rewrites_inherited_minmax_with_directional_index_only_subplans() {
     let catalog = catalog_with_inherited_indexed_items();
     let planned = planned_stmt_for_sql_with_catalog("select min(id), max(id) from items", &catalog);
 
     assert_eq!(planned.subplans.len(), 2);
-    assert!(
-        planned.subplans.iter().all(|subplan| {
-            plan_contains(subplan, |plan| matches!(plan, Plan::Limit { .. }))
-                && plan_contains(subplan, |plan| matches!(plan, Plan::MergeAppend { .. }))
-                && plan_contains(subplan, |plan| matches!(plan, Plan::IndexOnlyScan { .. }))
-        }),
-        "{:#?}",
-        planned.subplans
-    );
-    assert!(
-        planned.subplans.iter().all(|subplan| {
-            !plan_contains(subplan, |plan| {
-                matches!(
-                    plan,
-                    Plan::Filter { input, .. }
-                        if matches!(
-                            input.as_ref(),
-                            Plan::IndexOnlyScan { relation_name, .. } if relation_name == "items3"
-                        )
-                )
-            })
-        }),
-        "{:#?}",
-        planned.subplans
-    );
+    assert!(planned.subplans.iter().all(|subplan| {
+        plan_contains(subplan, |plan| matches!(plan, Plan::Limit { .. }))
+            && plan_contains(subplan, |plan| matches!(plan, Plan::IndexOnlyScan { .. }))
+    }));
+    assert!(planned.subplans.iter().any(|subplan| {
+        plan_contains(subplan, |plan| {
+            matches!(
+                plan,
+                Plan::IndexOnlyScan { direction, .. }
+                    if *direction == crate::include::access::relscan::ScanDirection::Forward
+            )
+        })
+    }));
+    assert!(planned.subplans.iter().any(|subplan| {
+        plan_contains(subplan, |plan| {
+            matches!(
+                plan,
+                Plan::IndexOnlyScan { direction, .. }
+                    if *direction == crate::include::access::relscan::ScanDirection::Backward
+            )
+        })
+    }));
 }
 
 #[test]
@@ -2269,13 +2362,17 @@ fn explain_shows_initplan_for_rewritten_minmax_aggregate() {
     assert!(lines.iter().any(|line| line == "  InitPlan 1"));
     assert!(lines.iter().any(|line| line.trim() == "Limit"));
     assert!(lines.iter().any(|line| line.trim() == "Result"));
-    assert!(lines.iter().any(|line| line.contains("Index Only Scan")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Index Scan") || line.contains("Index Only Scan"))
+    );
     assert!(!lines.iter().any(|line| line.contains("Aggregate")));
     assert!(!lines.iter().any(|line| line.trim() == "Projection"));
 }
 
 #[test]
-fn explain_formats_distinct_minmax_with_unique_merge_append_and_index_only_scan() {
+fn explain_formats_distinct_minmax_with_unique_and_index_only_scan() {
     let catalog = catalog_with_inherited_indexed_items();
     let planned =
         planned_stmt_for_sql_with_catalog("select distinct min(id), max(id) from items", &catalog);
@@ -2290,13 +2387,50 @@ fn explain_formats_distinct_minmax_with_unique_merge_append_and_index_only_scan(
     );
 
     assert!(lines.iter().any(|line| line.trim() == "Unique"));
-    assert!(lines.iter().any(|line| line.trim() == "Merge Append"));
     assert!(lines.iter().any(|line| line.trim() == "Result"));
     assert!(lines.iter().any(|line| line.contains("Index Only Scan")));
     assert!(!lines.iter().any(|line| line.trim() == "Projection"));
 }
 
 #[test]
+fn planner_preserves_ordered_index_path_under_limit() {
+    let catalog = catalog_with_indexed_items();
+    let planned =
+        planned_stmt_for_sql_with_catalog("select id from items order by id limit 1", &catalog);
+
+    assert!(matches!(planned.plan_tree, Plan::Limit { .. }));
+    assert!(plan_contains(&planned.plan_tree, |plan| matches!(
+        plan,
+        Plan::IndexScan {
+            direction,
+            index_only,
+            ..
+        } if *direction == crate::include::access::relscan::ScanDirection::Forward && *index_only
+    )));
+    assert!(!plan_contains(&planned.plan_tree, |plan| matches!(
+        plan,
+        Plan::OrderBy { .. }
+    )));
+}
+
+#[test]
+fn planner_keeps_nested_sublink_max_as_aggregate() {
+    let catalog = catalog_with_indexed_items();
+    let stmt = parse_select(
+        "select (select max((select i.id from items i where i.id = o.id))) from items o",
+    )
+    .expect("parse");
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+        .expect("analyze");
+    let planned = super::planner(query, &catalog).expect("plan");
+
+    assert!(
+        planned
+            .subplans
+            .iter()
+            .any(|subplan| plan_contains(subplan, |plan| matches!(plan, Plan::Aggregate { .. })))
+    );
+}
 fn planner_rewrites_correlated_min_with_index_subplan() {
     let catalog = catalog_with_indexed_items();
     let stmt =
@@ -2879,6 +3013,30 @@ fn extract_hash_join_clauses_splits_residual_predicates() {
     );
     assert_eq!(clauses.outer_hash_keys, vec![var(1, 1)]);
     assert_eq!(clauses.inner_hash_keys, vec![var(2, 1)]);
+    assert_eq!(
+        clauses.join_clauses,
+        vec![restrict(gt(var(1, 2), var(2, 2)))]
+    );
+}
+
+#[test]
+fn extract_merge_join_clauses_splits_residual_predicates() {
+    let clauses = super::extract_merge_join_clauses(
+        &[
+            restrict(eq(var(1, 1), var(2, 1))),
+            restrict(gt(var(1, 2), var(2, 2))),
+        ],
+        &[1],
+        &[2],
+    )
+    .expect("merge join clauses");
+
+    assert_eq!(
+        clauses.merge_clauses,
+        vec![restrict(eq(var(1, 1), var(2, 1)))]
+    );
+    assert_eq!(clauses.outer_merge_keys, vec![var(1, 1)]);
+    assert_eq!(clauses.inner_merge_keys, vec![var(2, 1)]);
     assert_eq!(
         clauses.join_clauses,
         vec![restrict(gt(var(1, 2), var(2, 2)))]

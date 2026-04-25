@@ -103,6 +103,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_trigger_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_set_constraints_statement(&sql)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_set_transaction_statement(&sql)? {
         return Ok(stmt);
     }
@@ -945,6 +948,107 @@ fn try_parse_set_transaction_statement(sql: &str) -> Result<Option<Statement>, P
         value: level.to_ascii_lowercase(),
         is_local: true,
     })))
+}
+
+fn try_parse_set_constraints_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("set constraints ") {
+        return Ok(None);
+    }
+    let mut rest = consume_keyword(trimmed, "set").trim_start();
+    rest = consume_keyword(rest, "constraints").trim_start();
+    if rest.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+
+    let mode_idx =
+        find_constraints_set_mode_start(rest).ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "SET CONSTRAINTS target list and mode",
+            actual: rest.into(),
+        })?;
+    let (constraints_sql, mode_sql) = rest.split_at(mode_idx);
+    let constraints_sql = constraints_sql.trim();
+    let mode_sql = mode_sql.trim_start();
+    let deferred = if keyword_at_start(mode_sql, "deferred")
+        && consume_keyword(mode_sql, "deferred").trim().is_empty()
+    {
+        true
+    } else if keyword_at_start(mode_sql, "immediate")
+        && consume_keyword(mode_sql, "immediate").trim().is_empty()
+    {
+        false
+    } else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "DEFERRED or IMMEDIATE",
+            actual: mode_sql.into(),
+        });
+    };
+
+    let constraints = if keyword_at_start(constraints_sql, "all")
+        && consume_keyword(constraints_sql, "all").trim().is_empty()
+    {
+        None
+    } else {
+        let names = split_top_level_items(constraints_sql, ',')?
+            .into_iter()
+            .map(|item| {
+                let (name, rest) =
+                    parse_qualified_name_ref(item.trim(), "constraint name in SET CONSTRAINTS")?;
+                if !rest.trim().is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "constraint name in SET CONSTRAINTS",
+                        actual: item,
+                    });
+                }
+                Ok(name)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if names.is_empty() {
+            return Err(ParseError::UnexpectedEof);
+        }
+        Some(names)
+    };
+
+    Ok(Some(Statement::SetConstraints(SetConstraintsStatement {
+        constraints,
+        deferred,
+    })))
+}
+
+fn find_constraints_set_mode_start(input: &str) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => {
+                i = parse_delimited_token_end(bytes, i, b'\'');
+                continue;
+            }
+            b'"' => {
+                i = parse_delimited_token_end(bytes, i, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, i) {
+                    i = end;
+                    continue;
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            byte if byte.is_ascii_whitespace() && depth == 0 => {
+                let tail = input[i..].trim_start();
+                if keyword_at_start(tail, "deferred") || keyword_at_start(tail, "immediate") {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 fn try_parse_publication_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
@@ -9924,6 +10028,47 @@ fn set_enforced_attribute(enforced: &mut Option<bool>, value: bool) -> Result<()
     Ok(())
 }
 
+fn set_deferrable_attribute(
+    deferrable: &mut Option<bool>,
+    initially_deferred: Option<bool>,
+    value: bool,
+) -> Result<(), ParseError> {
+    if deferrable.is_some() {
+        return Err(ParseError::FeatureNotSupportedMessage(
+            "multiple DEFERRABLE/NOT DEFERRABLE clauses not allowed".into(),
+        ));
+    }
+    if !value && initially_deferred == Some(true) {
+        return Err(ParseError::FeatureNotSupportedMessage(
+            "constraint declared INITIALLY DEFERRED must be DEFERRABLE".into(),
+        ));
+    }
+    *deferrable = Some(value);
+    Ok(())
+}
+
+fn set_initially_deferred_attribute(
+    initially_deferred: &mut Option<bool>,
+    deferrable: &mut Option<bool>,
+    value: bool,
+) -> Result<(), ParseError> {
+    if initially_deferred.is_some() {
+        return Err(ParseError::FeatureNotSupportedMessage(
+            "multiple INITIALLY IMMEDIATE/DEFERRED clauses not allowed".into(),
+        ));
+    }
+    if value && deferrable == &Some(false) {
+        return Err(ParseError::FeatureNotSupportedMessage(
+            "constraint declared INITIALLY DEFERRED must be DEFERRABLE".into(),
+        ));
+    }
+    if value && deferrable.is_none() {
+        *deferrable = Some(true);
+    }
+    *initially_deferred = Some(value);
+    Ok(())
+}
+
 fn build_constraint_attributes(pair: Pair<'_, Rule>) -> Result<ConstraintAttributes, ParseError> {
     let mut attributes = ConstraintAttributes::default();
     for part in pair.into_inner() {
@@ -9937,14 +10082,26 @@ fn build_constraint_attributes(pair: Pair<'_, Rule>) -> Result<ConstraintAttribu
         match attr.as_rule() {
             Rule::not_valid_constraint_attribute => attributes.not_valid = true,
             Rule::no_inherit_constraint_attribute => attributes.no_inherit = true,
-            Rule::deferrable_constraint_attribute => attributes.deferrable = Some(true),
-            Rule::not_deferrable_constraint_attribute => attributes.deferrable = Some(false),
-            Rule::initially_deferred_constraint_attribute => {
-                attributes.initially_deferred = Some(true)
-            }
-            Rule::initially_immediate_constraint_attribute => {
-                attributes.initially_deferred = Some(false)
-            }
+            Rule::deferrable_constraint_attribute => set_deferrable_attribute(
+                &mut attributes.deferrable,
+                attributes.initially_deferred,
+                true,
+            )?,
+            Rule::not_deferrable_constraint_attribute => set_deferrable_attribute(
+                &mut attributes.deferrable,
+                attributes.initially_deferred,
+                false,
+            )?,
+            Rule::initially_deferred_constraint_attribute => set_initially_deferred_attribute(
+                &mut attributes.initially_deferred,
+                &mut attributes.deferrable,
+                true,
+            )?,
+            Rule::initially_immediate_constraint_attribute => set_initially_deferred_attribute(
+                &mut attributes.initially_deferred,
+                &mut attributes.deferrable,
+                false,
+            )?,
             Rule::enforced_constraint_attribute => {
                 set_enforced_attribute(&mut attributes.enforced, true)?
             }
@@ -11756,13 +11913,25 @@ fn build_alter_table_alter_constraint(
             Rule::alter_table_constraint_action => {
                 for inner in part.into_inner() {
                     match inner.as_rule() {
-                        Rule::deferrable_constraint_attribute => deferrable = Some(true),
-                        Rule::not_deferrable_constraint_attribute => deferrable = Some(false),
+                        Rule::deferrable_constraint_attribute => {
+                            set_deferrable_attribute(&mut deferrable, initially_deferred, true)?
+                        }
+                        Rule::not_deferrable_constraint_attribute => {
+                            set_deferrable_attribute(&mut deferrable, initially_deferred, false)?
+                        }
                         Rule::initially_deferred_constraint_attribute => {
-                            initially_deferred = Some(true)
+                            set_initially_deferred_attribute(
+                                &mut initially_deferred,
+                                &mut deferrable,
+                                true,
+                            )?
                         }
                         Rule::initially_immediate_constraint_attribute => {
-                            initially_deferred = Some(false)
+                            set_initially_deferred_attribute(
+                                &mut initially_deferred,
+                                &mut deferrable,
+                                false,
+                            )?
                         }
                         Rule::enforced_constraint_attribute => {
                             set_enforced_attribute(&mut enforced, true)?

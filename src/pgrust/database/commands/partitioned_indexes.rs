@@ -718,6 +718,7 @@ impl<'a> PartitionedIndexInstaller<'a> {
                 indoption: index.index_meta.indoption.clone(),
                 indnullsnotdistinct: index.index_meta.indnullsnotdistinct,
                 indisexclusion: index.index_meta.indisexclusion,
+                indimmediate: index.index_meta.indimmediate,
                 brin_options: index.index_meta.brin_options.clone(),
                 gin_options: index.index_meta.gin_options.clone(),
                 hash_options: index.index_meta.hash_options,
@@ -769,6 +770,8 @@ impl Database {
                     primary: false,
                     nulls_not_distinct,
                     without_overlaps: None,
+                    deferrable: false,
+                    initially_deferred: false,
                 }],
             )
             .map_err(ExecError::Parse)?;

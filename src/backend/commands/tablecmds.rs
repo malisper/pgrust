@@ -762,39 +762,52 @@ pub(crate) fn build_index_insert_context(
         values: key_values,
         heap_tid,
         unique_check: if index.index_meta.indisunique {
-            IndexUniqueCheck::Yes
+            if index.constraint_oid.is_some() && index.constraint_deferrable {
+                IndexUniqueCheck::Partial
+            } else {
+                IndexUniqueCheck::Yes
+            }
         } else {
             IndexUniqueCheck::No
         },
     }
 }
 
-fn map_index_insert_error(err: crate::backend::catalog::CatalogError) -> ExecError {
-    match err {
-        crate::backend::catalog::CatalogError::UniqueViolation(constraint) => {
-            ExecError::UniqueViolation {
-                constraint,
-                detail: None,
-            }
-        }
-        crate::backend::catalog::CatalogError::Io(message)
-            if message.starts_with("index row size ") =>
-        {
-            ExecError::DetailedError {
-                message,
-                detail: None,
-                hint: Some("Values larger than 1/3 of a buffer page cannot be indexed.".into()),
-                sqlstate: "54000",
-            }
-        }
-        crate::backend::catalog::CatalogError::Interrupted(reason) => {
-            ExecError::Interrupted(reason)
-        }
-        other => ExecError::Parse(ParseError::UnexpectedToken {
-            expected: "index insertion",
-            actual: format!("{other:?}"),
-        }),
+fn record_deferred_unique_check(
+    index: &BoundIndexRelation,
+    insert_ctx: &crate::include::access::amapi::IndexInsertContext,
+    ctx: &ExecutorContext,
+) {
+    if !matches!(insert_ctx.unique_check, IndexUniqueCheck::Partial) {
+        return;
     }
+    let Some(constraint_oid) = index.constraint_oid else {
+        return;
+    };
+    let Some(tracker) = ctx.deferred_foreign_keys.as_ref() else {
+        return;
+    };
+    tracker.record_unique(
+        constraint_oid,
+        insert_ctx.heap_tid,
+        insert_ctx.values.clone(),
+    );
+}
+
+pub(crate) fn build_immediate_index_insert_context(
+    heap_rel: crate::backend::storage::smgr::RelFileLocator,
+    heap_desc: &RelationDesc,
+    index: &BoundIndexRelation,
+    key_values: Vec<Value>,
+    heap_tid: ItemPointerData,
+    ctx: &ExecutorContext,
+) -> crate::include::access::amapi::IndexInsertContext {
+    let mut insert_ctx =
+        build_index_insert_context(heap_rel, heap_desc, index, key_values, heap_tid, ctx);
+    if insert_ctx.unique_check != IndexUniqueCheck::No {
+        insert_ctx.unique_check = IndexUniqueCheck::Yes;
+    }
+    insert_ctx
 }
 
 pub(crate) fn insert_index_key_values(
@@ -821,6 +834,7 @@ pub(crate) fn insert_index_key_values(
         }
         other => map_index_insert_error(other),
     })?;
+    record_deferred_unique_check(index, &insert_ctx, ctx);
     Ok(())
 }
 
@@ -882,6 +896,33 @@ pub(crate) fn maintain_indexes_for_row(
         }
         Ok(())
     })
+}
+fn map_index_insert_error(err: crate::backend::catalog::CatalogError) -> ExecError {
+    match err {
+        crate::backend::catalog::CatalogError::UniqueViolation(constraint) => {
+            ExecError::UniqueViolation {
+                constraint,
+                detail: None,
+            }
+        }
+        crate::backend::catalog::CatalogError::Io(message)
+            if message.starts_with("index row size ") =>
+        {
+            ExecError::DetailedError {
+                message,
+                detail: None,
+                hint: Some("Values larger than 1/3 of a buffer page cannot be indexed.".into()),
+                sqlstate: "54000",
+            }
+        }
+        crate::backend::catalog::CatalogError::Interrupted(reason) => {
+            ExecError::Interrupted(reason)
+        }
+        other => ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "index insertion",
+            actual: format!("{other:?}"),
+        }),
+    }
 }
 
 pub(crate) fn index_key_values_for_row(

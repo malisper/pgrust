@@ -99,6 +99,10 @@ impl IndexBuildKeyProjector {
                 index_meta,
                 index_exprs,
                 index_predicate,
+                constraint_oid: None,
+                constraint_name: None,
+                constraint_deferrable: false,
+                constraint_initially_deferred: false,
             }),
             compiled_predicate,
             exec_ctx: Some(ExecutorContext {

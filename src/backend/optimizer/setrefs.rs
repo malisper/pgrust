@@ -17,6 +17,7 @@ use crate::include::nodes::primnodes::{
     WindowClause, WindowFuncExpr, WindowFuncKind, attrno_index, is_executor_special_varno,
     is_system_attr, set_returning_call_exprs, user_attrno,
 };
+use std::collections::BTreeSet;
 
 #[derive(Clone, Debug)]
 struct IndexedTlistEntry {
@@ -34,18 +35,26 @@ struct IndexedTlist {
 impl IndexedTlist {
     fn search_expr(&self, root: Option<&PlannerInfo>, expr: &Expr) -> Option<&IndexedTlistEntry> {
         match expr {
-            Expr::Var(var) => self.entries.iter().find(|entry| {
-                entry.match_exprs.iter().any(|candidate| match candidate {
-                    Expr::Var(candidate_var) => {
-                        candidate_var == var
-                            || root.is_some_and(|root| {
+            Expr::Var(var) => self
+                .entries
+                .iter()
+                .find(|entry| {
+                    entry
+                        .match_exprs
+                        .iter()
+                        .any(|candidate| matches!(candidate, Expr::Var(candidate_var) if candidate_var == var))
+                })
+                .or_else(|| {
+                    self.entries.iter().find(|entry| {
+                        entry.match_exprs.iter().any(|candidate| match candidate {
+                            Expr::Var(candidate_var) => root.is_some_and(|root| {
                                 flatten_join_alias_vars(root, Expr::Var(candidate_var.clone()))
                                     == flatten_join_alias_vars(root, expr.clone())
-                            })
-                    }
-                    _ => output_component_matches_expr(candidate, expr),
-                })
-            }),
+                            }),
+                            _ => output_component_matches_expr(candidate, expr),
+                        })
+                    })
+                }),
             _ => self.entries.iter().find(|entry| {
                 entry
                     .match_exprs
@@ -2396,6 +2405,172 @@ fn lower_index_scan_keys(
         .collect()
 }
 
+fn index_scan_can_use_index_only(
+    ctx: &SetRefsContext<'_>,
+    source_id: usize,
+    am_oid: u32,
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+) -> bool {
+    let Some(root) = ctx.root else {
+        return false;
+    };
+    if am_oid != crate::include::catalog::BTREE_AM_OID {
+        return false;
+    }
+    let query_relids = root.all_query_relids();
+    if query_relids.len() != 1 || query_relids[0] != source_id {
+        return false;
+    }
+    let covered_columns = index_meta
+        .indkey
+        .iter()
+        .filter_map(|attnum| {
+            (*attnum > 0)
+                .then(|| usize::try_from(*attnum).ok()?.checked_sub(1))
+                .flatten()
+        })
+        .collect::<BTreeSet<_>>();
+    if covered_columns.is_empty() {
+        return false;
+    }
+    root.parse
+        .target_list
+        .iter()
+        .all(|target| expr_uses_only_index_keys(&target.expr, source_id, &covered_columns))
+        && root
+            .parse
+            .where_qual
+            .as_ref()
+            .is_none_or(|expr| expr_uses_only_index_keys(expr, source_id, &covered_columns))
+        && root
+            .parse
+            .sort_clause
+            .iter()
+            .all(|clause| expr_uses_only_index_keys(&clause.expr, source_id, &covered_columns))
+}
+
+fn expr_uses_only_index_keys(
+    expr: &Expr,
+    source_id: usize,
+    covered_columns: &BTreeSet<usize>,
+) -> bool {
+    match expr {
+        Expr::Var(var) => {
+            var.varlevelsup == 0
+                && var.varno == source_id
+                && !is_system_attr(var.varattno)
+                && attrno_index(var.varattno).is_some_and(|attno| covered_columns.contains(&attno))
+        }
+        Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentDate
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => true,
+        Expr::Aggref(_)
+        | Expr::WindowFunc(_)
+        | Expr::SetReturning(_)
+        | Expr::SubLink(_)
+        | Expr::SubPlan(_) => false,
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .all(|arg| expr_uses_only_index_keys(arg, source_id, covered_columns)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .all(|arg| expr_uses_only_index_keys(arg, source_id, covered_columns)),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_ref()
+                .is_none_or(|arg| expr_uses_only_index_keys(arg, source_id, covered_columns))
+                && case_expr.args.iter().all(|arm| {
+                    expr_uses_only_index_keys(&arm.expr, source_id, covered_columns)
+                        && expr_uses_only_index_keys(&arm.result, source_id, covered_columns)
+                })
+                && expr_uses_only_index_keys(&case_expr.defresult, source_id, covered_columns)
+        }
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .all(|arg| expr_uses_only_index_keys(arg, source_id, covered_columns)),
+        Expr::ScalarArrayOp(saop) => {
+            expr_uses_only_index_keys(&saop.left, source_id, covered_columns)
+                && expr_uses_only_index_keys(&saop.right, source_id, covered_columns)
+        }
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .all(|child| expr_uses_only_index_keys(child, source_id, covered_columns)),
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => expr_uses_only_index_keys(inner, source_id, covered_columns),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_uses_only_index_keys(expr, source_id, covered_columns)
+                && expr_uses_only_index_keys(pattern, source_id, covered_columns)
+                && escape
+                    .as_ref()
+                    .is_none_or(|expr| expr_uses_only_index_keys(expr, source_id, covered_columns))
+        }
+        Expr::IsDistinctFrom(left, right) | Expr::IsNotDistinctFrom(left, right) => {
+            expr_uses_only_index_keys(left, source_id, covered_columns)
+                && expr_uses_only_index_keys(right, source_id, covered_columns)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .all(|element| expr_uses_only_index_keys(element, source_id, covered_columns)),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .all(|(_, expr)| expr_uses_only_index_keys(expr, source_id, covered_columns)),
+        Expr::FieldSelect { expr, .. } => {
+            expr_uses_only_index_keys(expr, source_id, covered_columns)
+        }
+        Expr::Coalesce(left, right) => {
+            expr_uses_only_index_keys(left, source_id, covered_columns)
+                && expr_uses_only_index_keys(right, source_id, covered_columns)
+        }
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_uses_only_index_keys(array, source_id, covered_columns)
+                && subscripts.iter().all(|subscript| {
+                    expr_array_subscript_uses_only_index_keys(subscript, source_id, covered_columns)
+                })
+        }
+    }
+}
+
+fn expr_array_subscript_uses_only_index_keys(
+    subscript: &ExprArraySubscript,
+    source_id: usize,
+    covered_columns: &BTreeSet<usize>,
+) -> bool {
+    subscript
+        .lower
+        .as_ref()
+        .is_none_or(|expr| expr_uses_only_index_keys(expr, source_id, covered_columns))
+        && subscript
+            .upper
+            .as_ref()
+            .is_none_or(|expr| expr_uses_only_index_keys(expr, source_id, covered_columns))
+}
+
 fn validate_executable_index_scan_keys(keys: &[IndexScanKey], plan_node: &str, field: &str) {
     for key in keys {
         if let IndexScanKeyArgument::Runtime(expr) = &key.argument {
@@ -3399,6 +3574,7 @@ fn set_index_scan_references(
     order_by_keys: Vec<IndexScanKey>,
     direction: crate::include::access::relscan::ScanDirection,
 ) -> Plan {
+    let index_only = index_scan_can_use_index_only(ctx, source_id, am_oid, &index_meta);
     let keys = lower_index_scan_keys(ctx, keys, LowerMode::Scalar);
     let order_by_keys = lower_index_scan_keys(ctx, order_by_keys, LowerMode::Scalar);
     Plan::IndexScan {
@@ -3417,6 +3593,7 @@ fn set_index_scan_references(
         keys,
         order_by_keys,
         direction,
+        index_only,
     }
 }
 

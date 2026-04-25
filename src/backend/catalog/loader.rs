@@ -446,6 +446,7 @@ pub(crate) fn catalog_from_physical_rows_scoped(
                         indnullsnotdistinct: index.indnullsnotdistinct,
                         indisprimary: index.indisprimary,
                         indisexclusion: index.indisexclusion,
+                        indimmediate: index.indimmediate,
                         indisvalid: index.indisvalid,
                         indisready: index.indisready,
                         indislive: index.indislive,

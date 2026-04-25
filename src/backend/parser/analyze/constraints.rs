@@ -19,6 +19,8 @@ pub struct IndexBackedConstraintAction {
     pub primary: bool,
     pub nulls_not_distinct: bool,
     pub without_overlaps: Option<String>,
+    pub deferrable: bool,
+    pub initially_deferred: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +56,8 @@ pub struct ForeignKeyConstraintAction {
     pub on_delete: ForeignKeyAction,
     pub on_delete_set_columns: Option<Vec<String>>,
     pub on_update: ForeignKeyAction,
+    pub deferrable: bool,
+    pub initially_deferred: bool,
     pub not_valid: bool,
     pub enforced: bool,
 }
@@ -160,6 +164,8 @@ struct PendingIndexConstraint {
     primary: bool,
     nulls_not_distinct: bool,
     without_overlaps: Option<String>,
+    deferrable: bool,
+    initially_deferred: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -194,6 +200,8 @@ struct PendingForeignKeyConstraint {
     on_delete: ForeignKeyAction,
     on_delete_set_columns: Option<Vec<String>>,
     on_update: ForeignKeyAction,
+    deferrable: bool,
+    initially_deferred: bool,
     not_valid: bool,
     enforced: bool,
 }
@@ -276,7 +284,8 @@ pub fn normalize_create_table_constraints(
                     });
                 }
                 ColumnConstraint::PrimaryKey { attributes } => {
-                    validate_key_attributes(attributes, "PRIMARY KEY")?;
+                    let (deferrable, initially_deferred) =
+                        validate_key_attributes(attributes, "PRIMARY KEY")?;
                     index_constraints.push(PendingIndexConstraint {
                         explicit_name: attributes.name.clone(),
                         generated_base: format!("{}_pkey", stmt.table_name),
@@ -284,10 +293,13 @@ pub fn normalize_create_table_constraints(
                         primary: true,
                         nulls_not_distinct: false,
                         without_overlaps: None,
+                        deferrable,
+                        initially_deferred,
                     });
                 }
                 ColumnConstraint::Unique { attributes } => {
-                    validate_key_attributes(attributes, "UNIQUE")?;
+                    let (deferrable, initially_deferred) =
+                        validate_key_attributes(attributes, "UNIQUE")?;
                     index_constraints.push(PendingIndexConstraint {
                         explicit_name: attributes.name.clone(),
                         generated_base: format!("{}_{}_key", stmt.table_name, column.name),
@@ -295,6 +307,8 @@ pub fn normalize_create_table_constraints(
                         primary: false,
                         nulls_not_distinct: attributes.nulls_not_distinct,
                         without_overlaps: None,
+                        deferrable,
+                        initially_deferred,
                     });
                 }
                 ColumnConstraint::References {
@@ -313,6 +327,7 @@ pub fn normalize_create_table_constraints(
                         on_delete_set_columns.as_deref(),
                         *on_update,
                     )?;
+                    let (deferrable, initially_deferred) = foreign_key_deferrability(attributes);
                     foreign_keys.push(PendingForeignKeyConstraint {
                         explicit_name: attributes.name.clone(),
                         generated_base: format!("{}_{}_fkey", stmt.table_name, column.name),
@@ -323,6 +338,8 @@ pub fn normalize_create_table_constraints(
                         on_delete: *on_delete,
                         on_delete_set_columns: on_delete_set_columns.clone(),
                         on_update: *on_update,
+                        deferrable,
+                        initially_deferred,
                         not_valid: attributes.not_valid,
                         enforced: attributes.enforced.unwrap_or(true),
                     });
@@ -363,7 +380,8 @@ pub fn normalize_create_table_constraints(
                 columns: key_columns,
                 without_overlaps,
             } => {
-                validate_key_attributes(attributes, "PRIMARY KEY")?;
+                let (deferrable, initially_deferred) =
+                    validate_key_attributes(attributes, "PRIMARY KEY")?;
                 let resolved = resolve_index_constraint_columns(
                     key_columns,
                     without_overlaps.as_deref(),
@@ -384,6 +402,8 @@ pub fn normalize_create_table_constraints(
                     primary: true,
                     nulls_not_distinct: false,
                     without_overlaps: without_overlaps.clone(),
+                    deferrable,
+                    initially_deferred,
                 });
             }
             TableConstraint::Unique {
@@ -391,7 +411,8 @@ pub fn normalize_create_table_constraints(
                 columns: key_columns,
                 without_overlaps,
             } => {
-                validate_key_attributes(attributes, "UNIQUE")?;
+                let (deferrable, initially_deferred) =
+                    validate_key_attributes(attributes, "UNIQUE")?;
                 let resolved = resolve_index_constraint_columns(
                     key_columns,
                     without_overlaps.as_deref(),
@@ -412,6 +433,8 @@ pub fn normalize_create_table_constraints(
                     primary: false,
                     nulls_not_distinct: attributes.nulls_not_distinct,
                     without_overlaps: without_overlaps.clone(),
+                    deferrable,
+                    initially_deferred,
                 });
             }
             TableConstraint::ForeignKey {
@@ -431,6 +454,7 @@ pub fn normalize_create_table_constraints(
                     on_delete_set_columns.as_deref(),
                     *on_update,
                 )?;
+                let (deferrable, initially_deferred) = foreign_key_deferrability(attributes);
                 let resolved = resolve_constraint_columns(key_columns, &columns, &column_lookup)?;
                 foreign_keys.push(PendingForeignKeyConstraint {
                     explicit_name: attributes.name.clone(),
@@ -442,6 +466,8 @@ pub fn normalize_create_table_constraints(
                     on_delete: *on_delete,
                     on_delete_set_columns: on_delete_set_columns.clone(),
                     on_update: *on_update,
+                    deferrable,
+                    initially_deferred,
                     not_valid: attributes.not_valid,
                     enforced: attributes.enforced.unwrap_or(true),
                 });
@@ -541,6 +567,8 @@ pub fn normalize_create_table_constraints(
             primary: constraint.primary,
             nulls_not_distinct: constraint.nulls_not_distinct,
             without_overlaps: constraint.without_overlaps,
+            deferrable: constraint.deferrable,
+            initially_deferred: constraint.initially_deferred,
         })
         .collect();
 
@@ -618,6 +646,8 @@ pub fn normalize_create_table_constraints(
                     &constraint.columns,
                 )?,
                 on_update: constraint.on_update,
+                deferrable: constraint.deferrable,
+                initially_deferred: constraint.initially_deferred,
                 not_valid: constraint.not_valid,
                 enforced: constraint.enforced,
             })
@@ -847,7 +877,8 @@ pub fn normalize_alter_table_add_constraint(
             columns,
             without_overlaps,
         } => {
-            validate_key_attributes(attributes, "PRIMARY KEY")?;
+            let (deferrable, initially_deferred) =
+                validate_key_attributes(attributes, "PRIMARY KEY")?;
             if existing_constraints
                 .iter()
                 .any(|row| row.contype == crate::include::catalog::CONSTRAINT_PRIMARY)
@@ -881,6 +912,8 @@ pub fn normalize_alter_table_add_constraint(
                     primary: true,
                     nulls_not_distinct: false,
                     without_overlaps: without_overlaps.clone(),
+                    deferrable,
+                    initially_deferred,
                 },
             ))
         }
@@ -889,7 +922,7 @@ pub fn normalize_alter_table_add_constraint(
             columns,
             without_overlaps,
         } => {
-            validate_key_attributes(attributes, "UNIQUE")?;
+            let (deferrable, initially_deferred) = validate_key_attributes(attributes, "UNIQUE")?;
             let resolved = resolve_relation_index_constraint_columns(
                 columns,
                 without_overlaps.as_deref(),
@@ -914,6 +947,8 @@ pub fn normalize_alter_table_add_constraint(
                     primary: false,
                     nulls_not_distinct: attributes.nulls_not_distinct,
                     without_overlaps: without_overlaps.clone(),
+                    deferrable,
+                    initially_deferred,
                 },
             ))
         }
@@ -934,6 +969,7 @@ pub fn normalize_alter_table_add_constraint(
                 on_delete_set_columns.as_deref(),
                 *on_update,
             )?;
+            let (deferrable, initially_deferred) = foreign_key_deferrability(attributes);
             let resolved = resolve_relation_constraint_columns(columns, desc, &column_lookup)?;
             let child_types = resolved
                 .iter()
@@ -979,6 +1015,8 @@ pub fn normalize_alter_table_add_constraint(
                         columns,
                     )?,
                     on_update: *on_update,
+                    deferrable,
+                    initially_deferred,
                     not_valid: attributes.not_valid,
                     enforced: attributes.enforced.unwrap_or(true),
                 },
@@ -1225,13 +1263,28 @@ fn validate_check_attributes(attributes: &ConstraintAttributes) -> Result<(), Pa
 fn validate_key_attributes(
     attributes: &ConstraintAttributes,
     constraint_kind: &'static str,
-) -> Result<(), ParseError> {
+) -> Result<(bool, bool), ParseError> {
     if attributes.not_valid {
         return Err(ParseError::FeatureNotSupported(format!(
             "{constraint_kind} NOT VALID"
         )));
     }
-    validate_not_null_or_check_attributes(attributes, constraint_kind)
+    if attributes.no_inherit {
+        return Err(ParseError::FeatureNotSupported(format!(
+            "{constraint_kind} NO INHERIT"
+        )));
+    }
+    if attributes.enforced.is_some() {
+        return Err(ParseError::FeatureNotSupported(format!(
+            "{constraint_kind} ENFORCED/NOT ENFORCED"
+        )));
+    }
+    let mut deferrable = attributes.deferrable.unwrap_or(false);
+    let initially_deferred = attributes.initially_deferred.unwrap_or(false);
+    if initially_deferred {
+        deferrable = true;
+    }
+    Ok((deferrable, initially_deferred))
 }
 
 fn validate_create_foreign_key(
@@ -1297,6 +1350,15 @@ fn validate_foreign_key(
         ));
     }
     Ok(())
+}
+
+fn foreign_key_deferrability(attributes: &ConstraintAttributes) -> (bool, bool) {
+    let mut deferrable = attributes.deferrable.unwrap_or(false);
+    let initially_deferred = attributes.initially_deferred.unwrap_or(false);
+    if initially_deferred {
+        deferrable = true;
+    }
+    (deferrable, initially_deferred)
 }
 
 fn resolve_foreign_key_delete_set_columns(
