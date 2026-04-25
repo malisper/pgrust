@@ -872,7 +872,11 @@ fn validate_publication_filter_expr(expr: &SqlExpr) -> Result<(), ExecError> {
         | JsonGet(left, right)
         | JsonGetText(left, right)
         | JsonPath(left, right)
-        | JsonPathText(left, right) => {
+        | JsonPathText(left, right)
+        | AtTimeZone {
+            expr: left,
+            zone: right,
+        } => {
             validate_publication_filter_expr(left)?;
             validate_publication_filter_expr(right)?;
         }

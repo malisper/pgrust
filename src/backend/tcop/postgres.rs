@@ -5026,9 +5026,11 @@ fn raw_expr_contains_pg_notify(expr: &crate::backend::parser::SqlExpr) -> bool {
         | crate::backend::parser::SqlExpr::JsonGet(left, right)
         | crate::backend::parser::SqlExpr::JsonGetText(left, right)
         | crate::backend::parser::SqlExpr::JsonPath(left, right)
-        | crate::backend::parser::SqlExpr::JsonPathText(left, right) => {
-            raw_expr_contains_pg_notify(left) || raw_expr_contains_pg_notify(right)
-        }
+        | crate::backend::parser::SqlExpr::JsonPathText(left, right)
+        | crate::backend::parser::SqlExpr::AtTimeZone {
+            expr: left,
+            zone: right,
+        } => raw_expr_contains_pg_notify(left) || raw_expr_contains_pg_notify(right),
         crate::backend::parser::SqlExpr::BinaryOperator { left, right, .. }
         | crate::backend::parser::SqlExpr::GeometryBinaryOp { left, right, .. } => {
             raw_expr_contains_pg_notify(left) || raw_expr_contains_pg_notify(right)

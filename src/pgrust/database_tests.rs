@@ -20437,6 +20437,192 @@ fn set_local_time_zone_updates_timestamptz_json_output() {
 }
 
 #[test]
+fn timestamptz_precision_preserves_infinity_values() {
+    let base = temp_dir("timestamptz_precision_infinity");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table timestamptz_tbl (d1 timestamp(2) with time zone)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into timestamptz_tbl values ('-infinity')")
+        .unwrap();
+    session
+        .execute(&db, "insert into timestamptz_tbl values ('infinity')")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select d1::text from timestamptz_tbl order by d1",
+        ),
+        vec![
+            vec![Value::Text("-infinity".into())],
+            vec![Value::Text("infinity".into())],
+        ]
+    );
+    assert!(
+        session
+            .execute(&db, "select '294277-12-31 16:00:00-08'::timestamptz",)
+            .is_err()
+    );
+}
+
+#[test]
+fn pg_sleep_returns_null() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select pg_sleep(0)"),
+        vec![vec![Value::Null]]
+    );
+}
+
+#[test]
+fn now_and_date_keywords_are_transaction_stable() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "begin").unwrap();
+    let first = session_query_rows(
+        &mut session,
+        &db,
+        "select now()::text, timestamptz 'now'::text, date 'today'::text, date 'tomorrow'::text, date 'yesterday'::text",
+    );
+    session.execute(&db, "select pg_sleep(0.001)").unwrap();
+    let second = session_query_rows(
+        &mut session,
+        &db,
+        "select now()::text, timestamptz 'now'::text, date 'today'::text, date 'tomorrow'::text, date 'yesterday'::text",
+    );
+    session.execute(&db, "rollback").unwrap();
+
+    assert_eq!(first, second);
+}
+
+#[test]
+fn at_time_zone_uses_named_timezone_rules() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select (timestamp '2001-02-16 20:38:40' at time zone 'America/Denver')::text",
+        ),
+        vec![vec![Value::Text("2001-02-17 03:38:40+00".into())]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select (timestamptz '2001-02-16 20:38:40+00' at time zone 'America/Denver')::text",
+        ),
+        vec![vec![Value::Text("2001-02-16 13:38:40".into())]]
+    );
+    session
+        .execute(&db, "set timezone = 'America/Los_Angeles'")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select ('19970210 173201' at time zone 'America/New_York')::text",
+        ),
+        vec![vec![Value::Text("1997-02-10 20:32:01".into())]]
+    );
+}
+
+#[test]
+fn timestamp_at_local_and_timezone_function_use_session_timezone() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "set timezone = 'Europe/Paris'")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select (cast('1978-07-07 19:38 America/New_York' as timestamptz) at local)::text",
+        ),
+        vec![vec![Value::Text("1978-07-08 02:38:00".into())]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select timezone(timestamp '1978-07-07 19:38')::text",
+        ),
+        vec![vec![Value::Text("1978-07-07 19:38:00+02".into())]]
+    );
+}
+
+#[test]
+fn make_timestamptz_and_timezone_abbreviations_work() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select make_timestamptz(2014, 12, 10, 0, 0, 0, 'Europe/Prague') at time zone 'UTC'",
+        ),
+        vec![vec![Value::Timestamp(
+            crate::include::nodes::datetime::TimestampADT(
+                crate::backend::utils::time::datetime::days_from_ymd(2014, 12, 9).unwrap() as i64
+                    * crate::include::nodes::datetime::USECS_PER_DAY
+                    + 23 * 3_600_000_000
+            )
+        )]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select (timestamp '2014-10-26 01:00:00' at time zone 'MSK')::text",
+        ),
+        vec![vec![Value::Text("2014-10-25 22:00:00+00".into())]]
+    );
+
+    session
+        .execute(&db, "set timezone = 'America/Los_Angeles'")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select timestamptz 'Jan 01 00:00:00 2024 LMT'::text",
+        ),
+        vec![vec![Value::Text("2023-12-31 23:52:58-08".into())]]
+    );
+}
+
+#[test]
+fn date_trunc_accepts_timestamptz_timezone_argument() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select date_trunc('day', timestamptz '2001-02-16 20:38:40+00', 'GMT')::text",
+        ),
+        vec![vec![Value::Text("2001-02-16 00:00:00+00".into())]]
+    );
+}
+
+#[test]
 fn pg_my_temp_schema_filters_temp_pg_stats_rows() {
     let base = temp_dir("pg_my_temp_schema_pg_stats");
     let db = Database::open(&base, 16).unwrap();

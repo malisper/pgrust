@@ -18,16 +18,22 @@ pub struct DateTimeConfig {
     pub date_style_format: DateStyleFormat,
     pub date_order: DateOrder,
     pub time_zone: String,
+    pub transaction_timestamp_usecs: Option<i64>,
+    pub statement_timestamp_usecs: Option<i64>,
     pub max_stack_depth_kb: u32,
     pub xml: XmlConfig,
 }
 
 impl Default for DateTimeConfig {
     fn default() -> Self {
+        let (date_style_format, date_order) =
+            parse_datestyle(&default_datestyle()).unwrap_or((DateStyleFormat::Iso, DateOrder::Mdy));
         Self {
-            date_style_format: DateStyleFormat::Iso,
-            date_order: DateOrder::Mdy,
-            time_zone: "UTC".into(),
+            date_style_format,
+            date_order,
+            time_zone: default_timezone(),
+            transaction_timestamp_usecs: None,
+            statement_timestamp_usecs: None,
             max_stack_depth_kb:
                 crate::backend::utils::misc::stack_depth::effective_default_max_stack_depth_kb(),
             xml: XmlConfig::default(),
@@ -35,28 +41,24 @@ impl Default for DateTimeConfig {
     }
 }
 
-pub fn default_datestyle() -> &'static str {
-    "ISO, MDY"
+pub fn default_datestyle() -> String {
+    std::env::var("PGDATESTYLE").unwrap_or_else(|_| "ISO, MDY".into())
 }
 
 pub fn default_datetime_config() -> DateTimeConfig {
     let mut config = DateTimeConfig::default();
-    if let Ok(value) = std::env::var("PGDATESTYLE")
-        && let Some((date_style_format, date_order)) = parse_datestyle(&value)
-    {
+    if let Some((date_style_format, date_order)) = parse_datestyle(&default_datestyle()) {
         config.date_style_format = date_style_format;
         config.date_order = date_order;
     }
-    if let Ok(value) = std::env::var("PGTZ")
-        && let Some(time_zone) = parse_timezone(&value)
-    {
+    if let Some(time_zone) = parse_timezone(&default_timezone()) {
         config.time_zone = time_zone;
     }
     config
 }
 
-pub fn default_timezone() -> &'static str {
-    "UTC"
+pub fn default_timezone() -> String {
+    std::env::var("PGTZ").unwrap_or_else(|_| "UTC".into())
 }
 
 pub fn parse_datestyle(value: &str) -> Option<(DateStyleFormat, DateOrder)> {

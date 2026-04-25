@@ -433,6 +433,7 @@ impl Drop for StatementLockScopeGuard {
 
 struct ActiveTransaction {
     xid: Option<TransactionId>,
+    started_at_usecs: i64,
     advisory_scope_id: u64,
     failed: bool,
     auth_at_start: AuthState,
@@ -907,6 +908,17 @@ impl Session {
                 cid,
             },
         )));
+        let statement_timestamp_usecs =
+            crate::backend::utils::time::datetime::current_postgres_timestamp_usecs();
+        let transaction_timestamp_usecs = self
+            .active_txn
+            .as_ref()
+            .map(|txn| txn.started_at_usecs)
+            .unwrap_or(statement_timestamp_usecs);
+        let mut datetime_config = self.datetime_config.clone();
+        datetime_config.transaction_timestamp_usecs = Some(transaction_timestamp_usecs);
+        datetime_config.statement_timestamp_usecs = Some(statement_timestamp_usecs);
+
         ExecutorContext {
             pool: Arc::clone(&db.pool),
             txns: db.txns.clone(),
@@ -918,9 +930,8 @@ impl Session {
             advisory_locks: Arc::clone(&db.advisory_locks),
             row_locks: Arc::clone(&db.row_locks),
             checkpoint_stats: db.checkpoint_stats_snapshot(),
-            datetime_config: self.datetime_config.clone(),
-            statement_timestamp_usecs:
-                crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
+            datetime_config,
+            statement_timestamp_usecs,
             gucs: self.gucs.clone(),
             interrupts: self.interrupts(),
             stats: Arc::clone(&db.stats),
@@ -957,6 +968,8 @@ impl Session {
     fn active_transaction_without_xid(&self, db: &Database) -> ActiveTransaction {
         ActiveTransaction {
             xid: None,
+            started_at_usecs:
+                crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
             advisory_scope_id: db.allocate_statement_lock_scope_id(),
             failed: false,
             auth_at_start: self.auth.clone(),

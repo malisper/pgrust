@@ -4706,6 +4706,8 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ),
         ("clock_timestamp", BuiltinScalarFunction::ClockTimestamp),
         ("timeofday", BuiltinScalarFunction::TimeOfDay),
+        ("pg_sleep", BuiltinScalarFunction::PgSleep),
+        ("timezone", BuiltinScalarFunction::Timezone),
         ("date_part", BuiltinScalarFunction::DatePart),
         ("extract", BuiltinScalarFunction::Extract),
         ("date_trunc", BuiltinScalarFunction::DateTrunc),
@@ -4715,6 +4717,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("make_date", BuiltinScalarFunction::MakeDate),
         ("make_time", BuiltinScalarFunction::MakeTime),
         ("make_timestamp", BuiltinScalarFunction::MakeTimestamp),
+        ("make_timestamptz", BuiltinScalarFunction::MakeTimestampTz),
         ("age", BuiltinScalarFunction::Age),
         (
             "getdatabaseencoding",

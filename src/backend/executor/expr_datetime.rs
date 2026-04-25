@@ -2,7 +2,7 @@ use crate::backend::utils::misc::guc_datetime::{DateOrder, DateStyleFormat, Date
 use crate::backend::utils::time::date::{format_date_text, format_time_text, format_timetz_text};
 use crate::backend::utils::time::datetime::{
     current_postgres_timestamp_usecs, format_time_usecs, timestamp_parts_from_usecs,
-    timezone_offset_seconds, today_pg_days, ymd_from_days,
+    timezone_offset_seconds, timezone_offset_seconds_at_utc, today_pg_days, ymd_from_days,
 };
 use crate::backend::utils::time::timestamp::{format_timestamp_text, format_timestamptz_text};
 use crate::include::nodes::datetime::{
@@ -34,6 +34,8 @@ fn json_datetime_config(config: &DateTimeConfig) -> DateTimeConfig {
         date_style_format: DateStyleFormat::Iso,
         date_order: DateOrder::Ymd,
         time_zone: config.time_zone.clone(),
+        transaction_timestamp_usecs: config.transaction_timestamp_usecs,
+        statement_timestamp_usecs: config.statement_timestamp_usecs,
         max_stack_depth_kb: config.max_stack_depth_kb,
         xml: config.xml,
     }
@@ -182,9 +184,12 @@ pub(crate) fn current_time_value_with_config(
     precision: Option<i32>,
     with_time_zone: bool,
 ) -> Value {
+    let timestamp_usecs = config
+        .transaction_timestamp_usecs
+        .unwrap_or_else(current_postgres_timestamp_usecs);
     current_time_value_from_timestamp_with_config(
         config,
-        current_postgres_timestamp_usecs(),
+        timestamp_usecs,
         precision,
         with_time_zone,
     )
@@ -196,7 +201,7 @@ pub(crate) fn current_time_value_from_timestamp_with_config(
     precision: Option<i32>,
     with_time_zone: bool,
 ) -> Value {
-    let offset_seconds = timezone_offset_seconds(config);
+    let offset_seconds = timezone_offset_seconds_at_utc(config, timestamp_usecs);
     let local_timestamp = timestamp_usecs + i64::from(offset_seconds) * 1_000_000;
     let (_, time_usecs) = timestamp_parts_from_usecs(local_timestamp);
     let time = TimeADT(rounded_usecs(
@@ -222,9 +227,12 @@ pub(crate) fn current_timestamp_value_with_config(
     precision: Option<i32>,
     with_time_zone: bool,
 ) -> Value {
+    let timestamp_usecs = config
+        .transaction_timestamp_usecs
+        .unwrap_or_else(current_postgres_timestamp_usecs);
     current_timestamp_value_from_timestamp_with_config(
         config,
-        current_postgres_timestamp_usecs(),
+        timestamp_usecs,
         precision,
         with_time_zone,
     )
@@ -239,7 +247,8 @@ pub(crate) fn current_timestamp_value_from_timestamp_with_config(
     if with_time_zone {
         Value::TimestampTz(TimestampTzADT(rounded_usecs(timestamp_usecs, precision)))
     } else {
-        let local = timestamp_usecs + i64::from(timezone_offset_seconds(config)) * 1_000_000;
+        let local =
+            timestamp_usecs + i64::from(timezone_offset_seconds_at_utc(config, timestamp_usecs)) * 1_000_000;
         Value::Timestamp(TimestampADT(rounded_usecs(local, precision)))
     }
 }

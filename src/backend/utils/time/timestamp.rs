@@ -4,30 +4,20 @@ use crate::backend::utils::time::datetime::{
     DateTimeKeyword, DateTimeParseError, TimeZoneSpec, current_postgres_timestamp_usecs,
     current_timezone_name, day_of_week_from_julian_day, days_from_ymd, expand_two_digit_year,
     format_date_ymd, format_offset, format_time_usecs, is_bc_token, is_weekday_token,
-    julian_day_from_postgres_date, month_number, named_timezone_offset_seconds_for_date,
-    parse_date_token_with_config, parse_keyword, parse_time_components, parse_timezone_spec,
-    split_time_and_offset, time_usecs_from_hms, timestamp_parts_from_usecs,
-    timezone_offset_seconds, today_pg_days, ymd_from_days,
+    julian_day_from_postgres_date, month_number, named_timezone_abbreviation_at_utc,
+    named_timezone_offset_seconds, named_timezone_offset_seconds_at_utc,
+    named_timezone_offset_seconds_for_local, parse_date_token_with_config, parse_keyword,
+    parse_time_components, parse_timezone_spec, split_time_and_offset, time_usecs_from_hms,
+    timestamp_parts_from_usecs, timezone_offset_seconds, timezone_offset_seconds_at_utc,
+    today_pg_days, ymd_from_days,
 };
 use crate::include::nodes::datetime::{TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC};
 
-fn timestamp_min_usecs() -> i64 {
-    i64::from(days_from_ymd(-4713, 11, 24).expect("valid timestamp lower bound")) * USECS_PER_DAY
-}
+const MIN_TIMESTAMP_USECS: i64 = -211_813_488_000_000_000;
+const END_TIMESTAMP_USECS: i64 = 9_223_371_331_200_000_000;
 
-fn timestamp_max_exclusive_usecs() -> i64 {
-    i64::from(days_from_ymd(294277, 1, 1).expect("valid timestamp upper bound")) * USECS_PER_DAY
-}
-
-fn checked_timestamp_usecs(days: i32, time_usecs: i64) -> Result<i64, DateTimeParseError> {
-    let value = i64::from(days)
-        .checked_mul(USECS_PER_DAY)
-        .and_then(|days_usecs| days_usecs.checked_add(time_usecs))
-        .ok_or(DateTimeParseError::TimestampOutOfRange)?;
-    if value < timestamp_min_usecs() || value >= timestamp_max_exclusive_usecs() {
-        return Err(DateTimeParseError::TimestampOutOfRange);
-    }
-    Ok(value)
+pub fn is_valid_finite_timestamp_usecs(usecs: i64) -> bool {
+    (MIN_TIMESTAMP_USECS..END_TIMESTAMP_USECS).contains(&usecs)
 }
 
 const WEEKDAY_ABBREV: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -411,17 +401,49 @@ fn extract_timestamp_parts(
 
 fn timezone_spec_offset(
     spec: Option<TimeZoneSpec>,
-    pg_days: i32,
     config: &DateTimeConfig,
+    local_usecs: i64,
 ) -> Result<i32, DateTimeParseError> {
     match spec {
         Some(TimeZoneSpec::FixedOffset(offset)) => Ok(offset),
-        Some(TimeZoneSpec::Named(name)) => named_timezone_offset_seconds_for_date(&name, pg_days)
-            .ok_or(DateTimeParseError::UnknownTimeZone(
-                name.to_ascii_lowercase(),
-            )),
-        None => Ok(timezone_offset_seconds(config)),
+        Some(TimeZoneSpec::Named(name)) => {
+            let normalized = name.to_ascii_lowercase();
+            if normalized == "lmt" {
+                return lmt_offset_seconds_for_local(config, local_usecs).ok_or(
+                    DateTimeParseError::UnknownTimeZone(name.to_ascii_lowercase()),
+                );
+            }
+            named_timezone_offset_seconds_for_local(&name, local_usecs)
+                .or_else(|| named_timezone_offset_seconds(&name))
+                .ok_or(DateTimeParseError::UnknownTimeZone(
+                    name.to_ascii_lowercase(),
+                ))
+        }
+        None => current_timezone_offset_seconds_for_local(config, local_usecs).ok_or_else(|| {
+            DateTimeParseError::UnknownTimeZone(current_timezone_name(config).to_ascii_lowercase())
+        }),
     }
+}
+
+fn lmt_offset_seconds_for_local(config: &DateTimeConfig, local_usecs: i64) -> Option<i32> {
+    match current_timezone_name(config)
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "utc" | "gmt" | "etc/utc" | "etc/gmt" => None,
+        "america/los_angeles" | "pst" | "pdt" => Some(-(7 * 3600 + 52 * 60 + 58)),
+        "europe/london" => Some(-(60 + 15)),
+        _ => named_timezone_offset_seconds_for_local(current_timezone_name(config), local_usecs),
+    }
+}
+
+fn current_timezone_offset_seconds_for_local(
+    config: &DateTimeConfig,
+    local_usecs: i64,
+) -> Option<i32> {
+    named_timezone_offset_seconds_for_local(current_timezone_name(config), local_usecs)
+        .or_else(|| Some(timezone_offset_seconds(config)))
 }
 
 fn timestamp_keyword_value(
@@ -461,7 +483,7 @@ pub fn parse_timestamp_text(
         return value;
     }
     let (days, time_usecs, _) = extract_timestamp_parts(trimmed, config)?;
-    Ok(TimestampADT(checked_timestamp_usecs(days, time_usecs)?))
+    timestamp_usecs_from_parts(days, time_usecs, 0).map(TimestampADT)
 }
 
 pub fn parse_timestamptz_text(
@@ -471,7 +493,11 @@ pub fn parse_timestamptz_text(
     let trimmed = text.trim();
     match parse_keyword(trimmed) {
         Some(DateTimeKeyword::Now) => {
-            return Ok(TimestampTzADT(current_postgres_timestamp_usecs()));
+            return Ok(TimestampTzADT(
+                config
+                    .transaction_timestamp_usecs
+                    .unwrap_or_else(current_postgres_timestamp_usecs),
+            ));
         }
         Some(DateTimeKeyword::Infinity) => {
             return Ok(TimestampTzADT(
@@ -487,14 +513,81 @@ pub fn parse_timestamptz_text(
     }
 
     let (days, time_usecs, zone) = extract_timestamp_parts(trimmed, config)?;
-    let offset_seconds = timezone_spec_offset(zone, days, config)?;
-    let value = checked_timestamp_usecs(days, time_usecs)?
-        .checked_sub(offset_seconds as i64 * USECS_PER_SEC)
-        .ok_or(DateTimeParseError::TimestampOutOfRange)?;
-    if value < timestamp_min_usecs() || value >= timestamp_max_exclusive_usecs() {
+    let local_usecs = timestamp_usecs_from_parts(days, time_usecs, 0)?;
+    let offset_seconds = timezone_spec_offset(zone, config, local_usecs)?;
+    timestamp_usecs_from_parts(days, time_usecs, offset_seconds).map(TimestampTzADT)
+}
+
+pub fn timestamptz_at_time_zone(
+    value: TimestampTzADT,
+    zone: &str,
+) -> Result<TimestampADT, DateTimeParseError> {
+    let offset = named_timezone_offset_seconds_at_utc(zone, value.0)
+        .or_else(|| named_timezone_offset_seconds(zone))
+        .ok_or_else(|| DateTimeParseError::UnknownTimeZone(zone.to_ascii_lowercase()))?;
+    Ok(TimestampADT(value.0 + offset as i64 * USECS_PER_SEC))
+}
+
+pub fn timestamp_at_time_zone(
+    value: TimestampADT,
+    zone: &str,
+) -> Result<TimestampTzADT, DateTimeParseError> {
+    let offset = named_timezone_offset_seconds_for_local(zone, value.0)
+        .or_else(|| named_timezone_offset_seconds(zone))
+        .ok_or_else(|| DateTimeParseError::UnknownTimeZone(zone.to_ascii_lowercase()))?;
+    Ok(TimestampTzADT(value.0 - offset as i64 * USECS_PER_SEC))
+}
+
+pub fn make_timestamptz_from_parts(
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: f64,
+    zone: &str,
+    config: &DateTimeConfig,
+) -> Result<TimestampTzADT, DateTimeParseError> {
+    if year == 0 || !second.is_finite() {
+        return Err(DateTimeParseError::FieldOutOfRange);
+    }
+    let astronomical_year = if year < 0 { year + 1 } else { year };
+    let whole_second = second.trunc();
+    if !(0.0..60.0).contains(&whole_second) {
+        return Err(DateTimeParseError::FieldOutOfRange);
+    }
+    let micros = ((second - whole_second) * USECS_PER_SEC as f64).round() as i64;
+    let mut days =
+        days_from_ymd(astronomical_year, month, day).ok_or(DateTimeParseError::FieldOutOfRange)?;
+    let mut time_usecs = time_usecs_from_hms(hour, minute, whole_second as u32, micros)
+        .ok_or(DateTimeParseError::FieldOutOfRange)?;
+    if time_usecs == USECS_PER_DAY {
+        days = days
+            .checked_add(1)
+            .ok_or(DateTimeParseError::FieldOutOfRange)?;
+        time_usecs = 0;
+    }
+    let local_usecs = timestamp_usecs_from_parts(days, time_usecs, 0)?;
+    let spec = parse_timezone_spec(zone)?
+        .ok_or_else(|| DateTimeParseError::UnknownTimeZone(zone.to_ascii_lowercase()))?;
+    let offset = timezone_spec_offset(Some(spec), config, local_usecs)?;
+    if offset.abs() > 15 * 3600 + 59 * 60 + 59 {
+        return Err(DateTimeParseError::FieldOutOfRange);
+    }
+    timestamp_usecs_from_parts(days, time_usecs, offset).map(TimestampTzADT)
+}
+
+fn timestamp_usecs_from_parts(
+    days: i32,
+    time_usecs: i64,
+    offset_seconds: i32,
+) -> Result<i64, DateTimeParseError> {
+    let usecs = days as i128 * USECS_PER_DAY as i128 + time_usecs as i128
+        - offset_seconds as i128 * USECS_PER_SEC as i128;
+    if usecs < MIN_TIMESTAMP_USECS as i128 || usecs >= END_TIMESTAMP_USECS as i128 {
         return Err(DateTimeParseError::TimestampOutOfRange);
     }
-    Ok(TimestampTzADT(value))
+    Ok(usecs as i64)
 }
 
 pub fn format_timestamp_text(value: TimestampADT, _config: &DateTimeConfig) -> String {
@@ -527,7 +620,9 @@ pub fn format_timestamptz_text(value: TimestampTzADT, config: &DateTimeConfig) -
     if value.0 == crate::include::nodes::datetime::TIMESTAMP_NOBEGIN {
         return "-infinity".into();
     }
-    let offset_seconds = timezone_offset_seconds(config);
+    let offset_seconds =
+        named_timezone_offset_seconds_at_utc(current_timezone_name(config), value.0)
+            .unwrap_or_else(|| timezone_offset_seconds(config));
     let adjusted = value.0 + offset_seconds as i64 * USECS_PER_SEC;
     let (days, time_usecs) = timestamp_parts_from_usecs(adjusted);
     match config.date_style_format {
