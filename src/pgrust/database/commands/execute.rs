@@ -632,12 +632,14 @@ impl Database {
                 let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
                 let bound = crate::backend::parser::plan_merge(merge_stmt, &catalog)?;
                 let xid = self.txns.write().begin();
-                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let guard =
+                    AutoCommitGuard::new_for_client(&self.txns, &self.txn_waiter, xid, client_id);
                 let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
                 let mut ctx = ExecutorContext {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    lock_status_provider: Some(std::sync::Arc::new(self.clone())),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
@@ -831,6 +833,7 @@ impl Database {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    lock_status_provider: Some(std::sync::Arc::new(self.clone())),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
@@ -930,7 +933,8 @@ impl Database {
                 let locked_rels = table_lock_relations(&lock_requests);
 
                 let xid = self.txns.write().begin();
-                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let guard =
+                    AutoCommitGuard::new_for_client(&self.txns, &self.txn_waiter, xid, client_id);
                 let deferred_foreign_keys =
                     crate::backend::executor::DeferredForeignKeyTracker::default();
                 let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
@@ -938,6 +942,7 @@ impl Database {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    lock_status_provider: Some(std::sync::Arc::new(self.clone())),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
@@ -1031,7 +1036,8 @@ impl Database {
                 let locked_rels = table_lock_relations(&lock_requests);
 
                 let xid = self.txns.write().begin();
-                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let guard =
+                    AutoCommitGuard::new_for_client(&self.txns, &self.txn_waiter, xid, client_id);
                 let deferred_foreign_keys =
                     crate::backend::executor::DeferredForeignKeyTracker::default();
                 let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
@@ -1039,6 +1045,7 @@ impl Database {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    lock_status_provider: Some(std::sync::Arc::new(self.clone())),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
@@ -1133,7 +1140,8 @@ impl Database {
                 let locked_rels = table_lock_relations(&lock_requests);
 
                 let xid = self.txns.write().begin();
-                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let guard =
+                    AutoCommitGuard::new_for_client(&self.txns, &self.txn_waiter, xid, client_id);
                 let deferred_foreign_keys =
                     crate::backend::executor::DeferredForeignKeyTracker::default();
                 let snapshot = self.txns.read().snapshot_for_command(xid, 0)?;
@@ -1141,6 +1149,7 @@ impl Database {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    lock_status_provider: Some(std::sync::Arc::new(self.clone())),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
@@ -1301,7 +1310,8 @@ impl Database {
                 ),
             Statement::DropTable(ref drop_stmt) => {
                 let xid = self.txns.write().begin();
-                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let guard =
+                    AutoCommitGuard::new_for_client(&self.txns, &self.txn_waiter, xid, client_id);
                 let mut catalog_effects = Vec::new();
                 let mut temp_effects = Vec::new();
                 let result = self.execute_drop_table_stmt_in_transaction_with_search_path(
@@ -1320,7 +1330,8 @@ impl Database {
             }
             Statement::DropIndex(ref drop_stmt) => {
                 let xid = self.txns.write().begin();
-                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let guard =
+                    AutoCommitGuard::new_for_client(&self.txns, &self.txn_waiter, xid, client_id);
                 let mut catalog_effects = Vec::new();
                 let result = self.execute_drop_index_stmt_in_transaction_with_search_path(
                     client_id,
@@ -1387,7 +1398,8 @@ impl Database {
             ),
             Statement::DropSequence(ref drop_stmt) => {
                 let xid = self.txns.write().begin();
-                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let guard =
+                    AutoCommitGuard::new_for_client(&self.txns, &self.txn_waiter, xid, client_id);
                 let mut catalog_effects = Vec::new();
                 let mut temp_effects = Vec::new();
                 let mut sequence_effects = Vec::new();
@@ -1414,7 +1426,8 @@ impl Database {
             }
             Statement::DropView(ref drop_stmt) => {
                 let xid = self.txns.write().begin();
-                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let guard =
+                    AutoCommitGuard::new_for_client(&self.txns, &self.txn_waiter, xid, client_id);
                 let mut catalog_effects = Vec::new();
                 let result = self.execute_drop_view_stmt_in_transaction_with_search_path(
                     client_id,
@@ -1443,7 +1456,8 @@ impl Database {
             ),
             Statement::DropSchema(ref drop_stmt) => {
                 let xid = self.txns.write().begin();
-                let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+                let guard =
+                    AutoCommitGuard::new_for_client(&self.txns, &self.txn_waiter, xid, client_id);
                 let mut catalog_effects = Vec::new();
                 let result = self.execute_drop_schema_stmt_in_transaction_with_search_path(
                     client_id,
@@ -1505,6 +1519,7 @@ impl Database {
                     pool: std::sync::Arc::clone(&self.pool),
                     txns: self.txns.clone(),
                     txn_waiter: Some(self.txn_waiter.clone()),
+                    lock_status_provider: Some(std::sync::Arc::new(self.clone())),
                     sequences: Some(self.sequences.clone()),
                     large_objects: Some(self.large_objects.clone()),
                     async_notify_runtime: Some(self.async_notify_runtime.clone()),
@@ -1648,6 +1663,7 @@ impl Database {
             pool: std::sync::Arc::clone(&self.pool),
             txns: self.txns.clone(),
             txn_waiter: Some(self.txn_waiter.clone()),
+            lock_status_provider: Some(std::sync::Arc::new(self.clone())),
             sequences: Some(self.sequences.clone()),
             large_objects: Some(self.large_objects.clone()),
             async_notify_runtime: Some(self.async_notify_runtime.clone()),

@@ -790,7 +790,7 @@ pub fn heap_delete_with_waiter(
         match xmax_status {
             Some(TransactionStatus::InProgress) | None => {
                 if let Some((txns_lock, txn_waiter, interrupts)) = waiter {
-                    match txn_waiter.wait_for(txns_lock, xmax, interrupts) {
+                    match txn_waiter.wait_for(txns_lock, xmax, client_id, interrupts) {
                         crate::backend::storage::lmgr::WaitOutcome::Completed => continue,
                         crate::backend::storage::lmgr::WaitOutcome::DeadlockTimeout => {
                             return Err(HeapError::DeadlockDetected);
@@ -1056,7 +1056,7 @@ pub fn heap_update_with_waiter(
             }
             ClaimResult::WaitFor(xwait) => {
                 if let Some((txns_lock, txn_waiter, interrupts)) = waiter {
-                    match txn_waiter.wait_for(txns_lock, xwait, interrupts) {
+                    match txn_waiter.wait_for(txns_lock, xwait, client_id, interrupts) {
                         crate::backend::storage::lmgr::WaitOutcome::Completed => continue,
                         crate::backend::storage::lmgr::WaitOutcome::DeadlockTimeout => {
                             return Err(HeapError::DeadlockDetected);

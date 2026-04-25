@@ -483,6 +483,17 @@ fn rewrite_set_returning_call(
             relid: rewrite_semantic_expr(relid, catalog, expanded_views, active_policy_relations)?,
             output_columns,
         },
+        SetReturningCall::PgLockStatus {
+            func_oid,
+            func_variadic,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::PgLockStatus {
+            func_oid,
+            func_variadic,
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::Unnest {
             func_oid,
             func_variadic,

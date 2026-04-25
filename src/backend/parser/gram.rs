@@ -8574,6 +8574,9 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             let mut with_ordinality = false;
             for part in pair.into_inner() {
                 match part.as_rule() {
+                    Rule::qualified_srf_name if name.is_none() => {
+                        name = Some(build_qualified_srf_name(part)?);
+                    }
                     Rule::identifier if name.is_none() => name = Some(build_identifier(part)),
                     Rule::function_arg_list => {
                         parsed_args = build_function_arg_list(part)?;
@@ -8601,6 +8604,18 @@ fn build_from_item(pair: Pair<'_, Rule>) -> Result<FromItem, ParseError> {
             actual: raw,
         }),
     }
+}
+
+fn build_qualified_srf_name(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
+    let parts = pair
+        .into_inner()
+        .filter(|part| part.as_rule() == Rule::identifier)
+        .map(build_identifier)
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        return Err(ParseError::UnexpectedEof);
+    }
+    Ok(parts.join("."))
 }
 
 fn build_join_clause(

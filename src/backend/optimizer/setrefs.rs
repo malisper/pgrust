@@ -1718,6 +1718,17 @@ fn lower_set_returning_call(
             relid: lower_expr(ctx, relid, mode),
             output_columns,
         },
+        SetReturningCall::PgLockStatus {
+            func_oid,
+            func_variadic,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::PgLockStatus {
+            func_oid,
+            func_variadic,
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::Unnest {
             func_oid,
             func_variadic,
@@ -1888,6 +1899,17 @@ fn fix_set_returning_call_upper_exprs(
             func_variadic,
             relid: fix_upper_expr_for_input(root, relid, path, input_tlist),
             output_columns,
+        },
+        SetReturningCall::PgLockStatus {
+            func_oid,
+            func_variadic,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::PgLockStatus {
+            func_oid,
+            func_variadic,
+            output_columns,
+            with_ordinality,
         },
         SetReturningCall::Unnest {
             func_oid,
@@ -2502,6 +2524,7 @@ fn validate_set_returning_call(
         | SetReturningCall::PartitionAncestors { relid, .. } => {
             validate_executable_expr(relid, plan_node, field);
         }
+        SetReturningCall::PgLockStatus { .. } => {}
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }
@@ -2860,6 +2883,7 @@ fn validate_planner_set_returning_call(
         | SetReturningCall::PartitionAncestors { relid, .. } => {
             validate_planner_expr(relid, path_node, field);
         }
+        SetReturningCall::PgLockStatus { .. } => {}
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }

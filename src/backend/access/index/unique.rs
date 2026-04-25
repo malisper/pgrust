@@ -73,7 +73,7 @@ pub fn probe_unique_conflict(
         let waiter = ctx.txn_waiter.as_ref().ok_or_else(|| {
             CatalogError::Io("btree unique check missing transaction waiter".into())
         })?;
-        match waiter.wait_for(&ctx.txns, xid, ctx.interrupts.as_ref()) {
+        match waiter.wait_for(&ctx.txns, xid, ctx.client_id, ctx.interrupts.as_ref()) {
             crate::backend::storage::lmgr::WaitOutcome::Completed => {}
             crate::backend::storage::lmgr::WaitOutcome::DeadlockTimeout => {
                 return Err(CatalogError::Io(format!(

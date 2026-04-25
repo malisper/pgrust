@@ -629,6 +629,7 @@ fn render_verbose_set_returning_call(
         | SetReturningCall::PartitionAncestors { relid, .. } => {
             vec![render_verbose_function_arg(relid, ctx)]
         }
+        SetReturningCall::PgLockStatus { .. } => Vec::new(),
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }
@@ -1184,6 +1185,7 @@ fn collect_direct_set_returning_call_subplans<'a>(
         | SetReturningCall::PartitionAncestors { relid, .. } => {
             collect_direct_expr_subplans(relid, out);
         }
+        SetReturningCall::PgLockStatus { .. } => {}
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }
