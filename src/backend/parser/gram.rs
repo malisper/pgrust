@@ -12482,6 +12482,8 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
         SqlExpr::Case { .. } => "case".to_string(),
         SqlExpr::Row(_) => "row".to_string(),
         SqlExpr::Random => "random".to_string(),
+        SqlExpr::CurrentCatalog => "current_catalog".to_string(),
+        SqlExpr::CurrentSchema => "current_schema".to_string(),
         SqlExpr::CurrentUser => "current_user".to_string(),
         SqlExpr::SessionUser => "session_user".to_string(),
         SqlExpr::CurrentRole => "current_role".to_string(),
@@ -13920,7 +13922,8 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
                 .map(build_type_len)
                 .transpose()
                 .expect("time precision");
-            let kind = if normalized == "timetz" || normalized.contains("with time zone") {
+            let kind = if normalized.starts_with("timetz") || normalized.contains("with time zone")
+            {
                 SqlTypeKind::TimeTz
             } else {
                 SqlTypeKind::Time
@@ -13944,11 +13947,12 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
                 .map(build_type_len)
                 .transpose()
                 .expect("timestamp precision");
-            let kind = if normalized == "timestamptz" || normalized.contains("with time zone") {
-                SqlTypeKind::TimestampTz
-            } else {
-                SqlTypeKind::Timestamp
-            };
+            let kind =
+                if normalized.starts_with("timestamptz") || normalized.contains("with time zone") {
+                    SqlTypeKind::TimestampTz
+                } else {
+                    SqlTypeKind::Timestamp
+                };
             RawTypeName::Builtin(
                 precision
                     .map(|precision| SqlType::with_time_precision(kind, precision))
@@ -14322,7 +14326,11 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     }
                     Ok(SqlExpr::QuantifiedArray {
                         left: Box::new(left),
-                        op: SubqueryComparisonOp::Eq,
+                        op: if negated {
+                            SubqueryComparisonOp::NotEq
+                        } else {
+                            SubqueryComparisonOp::Eq
+                        },
                         is_all: negated,
                         array: Box::new(SqlExpr::ArrayLiteral(values)),
                     })
@@ -14807,6 +14815,8 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         Rule::kw_true => Ok(SqlExpr::Const(Value::Bool(true))),
         Rule::kw_false => Ok(SqlExpr::Const(Value::Bool(false))),
         Rule::kw_current_date => Ok(SqlExpr::CurrentDate),
+        Rule::kw_current_catalog => Ok(SqlExpr::CurrentCatalog),
+        Rule::kw_current_schema => Ok(SqlExpr::CurrentSchema),
         Rule::kw_current_user => Ok(SqlExpr::CurrentUser),
         Rule::kw_session_user => Ok(SqlExpr::SessionUser),
         Rule::kw_current_role => Ok(SqlExpr::CurrentRole),

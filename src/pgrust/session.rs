@@ -911,6 +911,8 @@ impl Session {
             row_locks: Arc::clone(&db.row_locks),
             checkpoint_stats: db.checkpoint_stats_snapshot(),
             datetime_config: self.datetime_config.clone(),
+            statement_timestamp_usecs:
+                crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
             gucs: self.gucs.clone(),
             interrupts: self.interrupts(),
             stats: Arc::clone(&db.stats),

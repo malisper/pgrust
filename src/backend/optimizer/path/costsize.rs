@@ -2223,6 +2223,8 @@ fn expr_uses_immediate_outer_columns(expr: &Expr) -> bool {
         Expr::Const(_)
         | Expr::Random
         | Expr::CurrentDate
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
         | Expr::CurrentRole
@@ -3258,7 +3260,17 @@ pub(super) fn flatten_and_conjuncts(expr: &Expr) -> Vec<Expr> {
 
 fn strip_casts(expr: &Expr) -> &Expr {
     match expr {
-        Expr::Cast(inner, _) => strip_casts(inner),
+        Expr::Func(func)
+            if matches!(
+                func.implementation,
+                crate::include::nodes::primnodes::ScalarFunctionImpl::Builtin(
+                    BuiltinScalarFunction::BpcharToText
+                )
+            ) && func.args.len() == 1 =>
+        {
+            strip_casts(&func.args[0])
+        }
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => strip_casts(inner),
         other => other,
     }
 }
