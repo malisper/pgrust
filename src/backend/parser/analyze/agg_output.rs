@@ -507,14 +507,7 @@ fn bind_grouped_window_agg_call(
                 agg_list,
                 n_keys,
             )?;
-            let (expr, collation_oid) = finalize_order_by_expr(bound_expr, catalog)?;
-            Ok(OrderByEntry {
-                expr,
-                ressortgroupref: 0,
-                descending: item.descending,
-                nulls_first: item.nulls_first,
-                collation_oid,
-            })
+            build_bound_order_by_entry(item, bound_expr, 0, catalog)
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
     for item in &bound_order_by {
@@ -672,14 +665,7 @@ fn bind_grouped_visible_outer_aggregate_call(
                 None,
                 &visible_ctes,
             )?;
-            let (expr, collation_oid) = finalize_order_by_expr(bound_expr, catalog)?;
-            Ok(OrderByEntry {
-                expr,
-                ressortgroupref: 0,
-                descending: item.descending,
-                nulls_first: item.nulls_first,
-                collation_oid,
-            })
+            build_bound_order_by_entry(item, bound_expr, 0, catalog)
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
     for item in &bound_order_by {
@@ -1080,14 +1066,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                             outer_scopes,
                             grouped_outer,
                         )?;
-                        let (expr, collation_oid) = finalize_order_by_expr(bound_expr, catalog)?;
-                        Ok(OrderByEntry {
-                            expr,
-                            ressortgroupref: 0,
-                            descending: item.descending,
-                            nulls_first: item.nulls_first,
-                            collation_oid,
-                        })
+                        build_bound_order_by_entry(item, bound_expr, 0, catalog)
                     })
                     .collect::<Result<Vec<_>, ParseError>>()?;
                 for item in &bound_order_by {

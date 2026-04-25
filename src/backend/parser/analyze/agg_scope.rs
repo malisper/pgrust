@@ -308,7 +308,7 @@ fn bind_aggregate_match_order_by(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
     ctes: &[BoundCte],
-) -> Result<Vec<(Expr, bool, Option<bool>)>, ParseError> {
+) -> Result<Vec<(Expr, bool, Option<bool>, Option<String>)>, ParseError> {
     order_by
         .iter()
         .map(|item| {
@@ -323,6 +323,7 @@ fn bind_aggregate_match_order_by(
                 )?,
                 item.descending,
                 item.nulls_first,
+                item.using_operator.clone(),
             ))
         })
         .collect()

@@ -58,7 +58,8 @@ empty_select_list = { &kw_from }
 group_by_clause = { kw_group ~ kw_by ~ expr ~ ("," ~ expr)* }
 having_clause = { kw_having ~ expr }
 order_by_clause = { kw_order ~ kw_by ~ order_by_item ~ ("," ~ order_by_item)* }
-order_by_item = { expr ~ (kw_asc | kw_desc)? ~ nulls_ordering? }
+operator_token = @{ ("!" | "#" | "%" | "&" | "*" | "+" | "-" | "/" | "<" | "=" | ">" | "?" | "@" | "^" | "|" | "~")+ }
+order_by_item = { expr ~ ((kw_using ~ operator_token) | (kw_asc | kw_desc))? ~ nulls_ordering? }
 nulls_ordering = { kw_nulls ~ (kw_first | kw_last) }
 limit_clause = { kw_limit ~ integer }
 offset_clause = { kw_offset ~ integer }
