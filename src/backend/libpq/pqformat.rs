@@ -463,6 +463,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::PgLsn => crate::include::catalog::PG_LSN_ARRAY_TYPE_OID as i32,
             SqlTypeKind::Range => col.sql_type.type_oid as i32,
             SqlTypeKind::Multirange => col.sql_type.type_oid as i32,
+            SqlTypeKind::Enum => col.sql_type.type_oid as i32,
             SqlTypeKind::Internal => unreachable!("internal arrays are unsupported"),
             SqlTypeKind::Void => unreachable!("void arrays are unsupported"),
             SqlTypeKind::FdwHandler => unreachable!("fdw_handler arrays are unsupported"),
@@ -530,7 +531,8 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             | SqlTypeKind::AnyCompatible
             | SqlTypeKind::AnyCompatibleArray
             | SqlTypeKind::AnyCompatibleRange
-            | SqlTypeKind::AnyCompatibleMultirange => {
+            | SqlTypeKind::AnyCompatibleMultirange
+            | SqlTypeKind::AnyEnum => {
                 unreachable!("polymorphic pseudo-types are not concrete SQL array types")
             }
             SqlTypeKind::AnyArray => unreachable!("anyarray is not a concrete SQL array type"),
@@ -549,6 +551,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
     }
     match col.sql_type.kind {
         SqlTypeKind::AnyElement => (crate::include::catalog::ANYELEMENTOID as i32, 4, -1),
+        SqlTypeKind::AnyEnum => (crate::include::catalog::ANYENUMOID as i32, 4, -1),
         SqlTypeKind::AnyArray => (2277, -1, -1),
         SqlTypeKind::AnyRange => (crate::include::catalog::ANYRANGEOID as i32, -1, -1),
         SqlTypeKind::AnyMultirange => (crate::include::catalog::ANYMULTIRANGEOID as i32, -1, -1),
@@ -574,6 +577,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Record | SqlTypeKind::Composite => {
             (col.sql_type.type_oid as i32, -1, col.sql_type.typmod)
         }
+        SqlTypeKind::Enum => (col.sql_type.type_oid as i32, 4, col.sql_type.typmod),
         SqlTypeKind::Int2 => (21, 2, -1),
         SqlTypeKind::Int4 => (23, 4, -1),
         SqlTypeKind::Int8 => (20, 8, -1),
@@ -1017,6 +1021,11 @@ pub(crate) fn send_typed_data_row(
             }
             Value::InternalChar(byte) => {
                 let rendered = render_internal_char_text(*byte);
+                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
+                buf.extend_from_slice(rendered.as_bytes());
+            }
+            Value::EnumOid(v) => {
+                let rendered = v.to_string();
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }

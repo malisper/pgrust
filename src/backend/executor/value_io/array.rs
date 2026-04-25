@@ -101,6 +101,7 @@ fn encode_array_element_payload(
         Value::Null => Ok(Vec::new()),
         Value::Int16(v) => Ok(v.to_le_bytes().to_vec()),
         Value::Int32(v) => Ok(v.to_le_bytes().to_vec()),
+        Value::EnumOid(v) => Ok(v.to_le_bytes().to_vec()),
         Value::Int64(v)
             if matches!(
                 element_type.kind,
@@ -509,6 +510,7 @@ fn array_element_layout(
             });
         }
         SqlTypeKind::AnyElement
+        | SqlTypeKind::AnyEnum
         | SqlTypeKind::AnyRange
         | SqlTypeKind::AnyMultirange
         | SqlTypeKind::AnyCompatible
@@ -545,6 +547,7 @@ fn array_element_layout(
         }
         SqlTypeKind::Record | SqlTypeKind::Composite => (-1, AttributeAlign::Double),
         SqlTypeKind::Int2 => (2, AttributeAlign::Short),
+        SqlTypeKind::Enum => (4, AttributeAlign::Int),
         SqlTypeKind::Int4
         | SqlTypeKind::Oid
         | SqlTypeKind::RegProc
@@ -770,6 +773,7 @@ fn infer_sql_type_from_value(value: &Value) -> Option<SqlType> {
         Value::Null => None,
         Value::Int16(_) => Some(SqlType::new(SqlTypeKind::Int2)),
         Value::Int32(_) => Some(SqlType::new(SqlTypeKind::Int4)),
+        Value::EnumOid(_) => Some(SqlType::new(SqlTypeKind::Enum)),
         Value::Int64(_) => Some(SqlType::new(SqlTypeKind::Int8)),
         Value::Money(_) => Some(SqlType::new(SqlTypeKind::Money)),
         Value::Float64(_) => Some(SqlType::new(SqlTypeKind::Float8)),
@@ -843,6 +847,7 @@ fn decode_array_element_value(
             })
         }
         SqlTypeKind::AnyElement
+        | SqlTypeKind::AnyEnum
         | SqlTypeKind::AnyRange
         | SqlTypeKind::AnyMultirange
         | SqlTypeKind::AnyCompatible
@@ -878,6 +883,17 @@ fn decode_array_element_value(
                 });
             }
             Ok(Value::Int16(i16::from_le_bytes(bytes.try_into().unwrap())))
+        }
+        SqlTypeKind::Enum => {
+            if bytes.len() != 4 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: column.into(),
+                    details: "enum array element must be 4 bytes".into(),
+                });
+            }
+            Ok(Value::EnumOid(u32::from_le_bytes(
+                bytes.try_into().unwrap(),
+            )))
         }
         SqlTypeKind::Int4
         | SqlTypeKind::Oid
@@ -1282,6 +1298,7 @@ fn format_array_values_nested(
             }
             Value::Int16(v) => out.push_str(&v.to_string()),
             Value::Int32(v) => out.push_str(&v.to_string()),
+            Value::EnumOid(v) => out.push_str(&v.to_string()),
             Value::Int64(v) => out.push_str(&v.to_string()),
             Value::Money(v) => out.push_str(&crate::backend::executor::money_format_text(*v)),
             Value::Float64(v) => out.push_str(&v.to_string()),

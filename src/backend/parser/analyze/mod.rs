@@ -786,6 +786,14 @@ pub trait CatalogLookup {
             .find(|row| row.rngtypid == oid)
     }
 
+    fn enum_label_oid(&self, _type_oid: u32, _label: &str) -> Option<u32> {
+        None
+    }
+
+    fn enum_label(&self, _type_oid: u32, _label_oid: u32) -> Option<String> {
+        None
+    }
+
     fn type_oid_for_sql_type(&self, sql_type: SqlType) -> Option<u32> {
         if let Some(range_type) = range_type_ref_for_sql_type(sql_type) {
             if sql_type.is_array {
@@ -1169,6 +1177,14 @@ impl CatalogLookup for IndexExpressionCatalogLookup<'_> {
 
     fn range_row_by_type_oid(&self, oid: u32) -> Option<PgRangeRow> {
         self.inner.range_row_by_type_oid(oid)
+    }
+
+    fn enum_label_oid(&self, type_oid: u32, label: &str) -> Option<u32> {
+        self.inner.enum_label_oid(type_oid, label)
+    }
+
+    fn enum_label(&self, type_oid: u32, label_oid: u32) -> Option<String> {
+        self.inner.enum_label(type_oid, label_oid)
     }
 
     fn type_oid_for_sql_type(&self, sql_type: SqlType) -> Option<u32> {

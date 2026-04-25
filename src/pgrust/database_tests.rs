@@ -27586,7 +27586,7 @@ fn create_enum_type_exposes_catalog_rows_and_can_back_table_columns() {
 
     db.execute(1, "create type mood as enum ('sad', 'ok')")
         .unwrap();
-    db.execute(1, "create table feelings(current_mood mood)")
+    db.execute(1, "create table feelings (current_mood mood)")
         .unwrap();
 
     let visible = db.lazy_catalog_lookup(1, None, None);
@@ -27604,7 +27604,8 @@ fn create_enum_type_exposes_catalog_rows_and_can_back_table_columns() {
     assert_eq!(mood_type.typelem, 0);
     assert_eq!(mood_type.typarray, mood_array_type.oid);
     assert_eq!(mood_array_type.typelem, mood_type.oid);
-    assert_eq!(mood_type.sql_type.kind, SqlTypeKind::Text);
+    assert_eq!(mood_type.sql_type.kind, SqlTypeKind::Enum);
+    assert_eq!(mood_type.sql_type.type_oid, mood_type.oid);
 }
 
 #[test]

@@ -3537,6 +3537,9 @@ fn try_parse_create_type_statement(sql: &str) -> Result<Option<Statement>, Parse
     if lowered.starts_with("create type ") {
         return build_create_type_statement(trimmed).map(|stmt| Some(Statement::CreateType(stmt)));
     }
+    if lowered.starts_with("alter type ") {
+        return build_alter_type_statement(trimmed).map(|stmt| Some(Statement::AlterType(stmt)));
+    }
     if lowered.starts_with("drop type ") {
         return build_drop_type_statement(trimmed).map(|stmt| Some(Statement::DropType(stmt)));
     }
@@ -6678,6 +6681,133 @@ fn parse_create_enum_labels(input: &str) -> Result<Vec<String>, ParseError> {
             decode_string_literal(trimmed)
         })
         .collect()
+}
+
+fn parse_enum_label_literal(input: &str) -> Result<(String, &str), ParseError> {
+    let trimmed = input.trim_start();
+    let token_len = scan_string_literal_token_len(trimmed).ok_or(ParseError::UnexpectedToken {
+        expected: "enum label string literal",
+        actual: trimmed.to_string(),
+    })?;
+    let label = decode_string_literal(&trimmed[..token_len])?;
+    Ok((label, &trimmed[token_len..]))
+}
+
+fn build_alter_type_statement(sql: &str) -> Result<AlterTypeStatement, ParseError> {
+    let prefix = "alter type";
+    let Some(rest) = sql.get(prefix.len()..) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "ALTER TYPE name",
+            actual: sql.into(),
+        });
+    };
+    let ((schema_name, type_name), rest) = parse_qualified_sql_name(rest.trim_start())?;
+    let mut rest = rest.trim_start();
+    if keyword_at_start(rest, "add") {
+        rest = consume_keyword(rest, "add").trim_start();
+        if !keyword_at_start(rest, "value") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "VALUE",
+                actual: rest.into(),
+            });
+        }
+        rest = consume_keyword(rest, "value").trim_start();
+        let if_not_exists = if keyword_at_start(rest, "if") {
+            rest = consume_keyword(rest, "if").trim_start();
+            if !keyword_at_start(rest, "not") {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "NOT EXISTS",
+                    actual: rest.into(),
+                });
+            }
+            rest = consume_keyword(rest, "not").trim_start();
+            if !keyword_at_start(rest, "exists") {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "EXISTS",
+                    actual: rest.into(),
+                });
+            }
+            rest = consume_keyword(rest, "exists").trim_start();
+            true
+        } else {
+            false
+        };
+        let (label, after_label) = parse_enum_label_literal(rest)?;
+        rest = after_label.trim_start();
+        let position = if rest.is_empty() {
+            None
+        } else if keyword_at_start(rest, "before") {
+            let (neighbor, after_neighbor) =
+                parse_enum_label_literal(consume_keyword(rest, "before"))?;
+            if !after_neighbor.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "end of statement",
+                    actual: after_neighbor.trim().into(),
+                });
+            }
+            Some(AlterEnumValuePosition::Before(neighbor))
+        } else if keyword_at_start(rest, "after") {
+            let (neighbor, after_neighbor) =
+                parse_enum_label_literal(consume_keyword(rest, "after"))?;
+            if !after_neighbor.trim().is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "end of statement",
+                    actual: after_neighbor.trim().into(),
+                });
+            }
+            Some(AlterEnumValuePosition::After(neighbor))
+        } else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "BEFORE, AFTER, or end of statement",
+                actual: rest.into(),
+            });
+        };
+        return Ok(AlterTypeStatement::AddEnumValue(
+            AlterTypeAddEnumValueStatement {
+                schema_name,
+                type_name,
+                if_not_exists,
+                label,
+                position,
+            },
+        ));
+    }
+    if keyword_at_start(rest, "rename") {
+        rest = consume_keyword(rest, "rename").trim_start();
+        if !keyword_at_start(rest, "value") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "VALUE",
+                actual: rest.into(),
+            });
+        }
+        rest = consume_keyword(rest, "value").trim_start();
+        let (old_label, after_old) = parse_enum_label_literal(rest)?;
+        rest = after_old.trim_start();
+        if !keyword_at_start(rest, "to") {
+            return Err(ParseError::UnexpectedToken {
+                expected: "TO",
+                actual: rest.into(),
+            });
+        }
+        let (new_label, after_new) = parse_enum_label_literal(consume_keyword(rest, "to"))?;
+        if !after_new.trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "end of statement",
+                actual: after_new.trim().into(),
+            });
+        }
+        return Ok(AlterTypeStatement::RenameEnumValue(
+            AlterTypeRenameEnumValueStatement {
+                schema_name,
+                type_name,
+                old_label,
+                new_label,
+            },
+        ));
+    }
+    Err(ParseError::FeatureNotSupported(
+        "unsupported ALTER TYPE form".into(),
+    ))
 }
 
 fn parse_create_range_type_statement(
@@ -12203,6 +12333,8 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::AnyCompatibleArray => "anycompatiblearray",
         SqlTypeKind::AnyCompatibleRange => "anycompatiblerange",
         SqlTypeKind::AnyCompatibleMultirange => "anycompatiblemultirange",
+        SqlTypeKind::AnyEnum => "anyenum",
+        SqlTypeKind::Enum => "enum",
         SqlTypeKind::Record => "record",
         SqlTypeKind::Composite => "record",
         SqlTypeKind::Trigger => "trigger",

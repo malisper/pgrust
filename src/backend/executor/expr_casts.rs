@@ -1752,7 +1752,13 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                         })?;
                     let mut casted = Vec::with_capacity(array.elements.len());
                     for item in array.elements {
-                        casted.push(cast_value_with_config(item, element_type, config)?);
+                        casted.push(cast_value_with_source_type_catalog_and_config(
+                            item,
+                            None,
+                            element_type,
+                            catalog,
+                            config,
+                        )?);
                     }
                     Ok(Value::PgArray(ArrayValue::from_dimensions(
                         array.dimensions,
@@ -1761,7 +1767,13 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 } else {
                     let mut casted = Vec::with_capacity(items.len());
                     for item in items {
-                        casted.push(cast_value_with_config(item, element_type, config)?);
+                        casted.push(cast_value_with_source_type_catalog_and_config(
+                            item,
+                            None,
+                            element_type,
+                            catalog,
+                            config,
+                        )?);
                     }
                     Ok(Value::Array(casted))
                 }
@@ -1770,7 +1782,13 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 let element_type = ty.element_type();
                 let mut casted = Vec::with_capacity(array.elements.len());
                 for item in array.elements {
-                    casted.push(cast_value_with_config(item, element_type, config)?);
+                    casted.push(cast_value_with_source_type_catalog_and_config(
+                        item,
+                        None,
+                        element_type,
+                        catalog,
+                        config,
+                    )?);
                 }
                 Ok(Value::PgArray(ArrayValue::from_dimensions(
                     array.dimensions,
@@ -1832,6 +1850,21 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
 
     match value {
         Value::Null => Ok(Value::Null),
+        Value::EnumOid(v) => match ty.kind {
+            SqlTypeKind::Enum => Ok(Value::EnumOid(v)),
+            SqlTypeKind::Text => {
+                if let Some(source) = source_type
+                    && matches!(source.kind, SqlTypeKind::Enum)
+                    && let Some(label) =
+                        catalog.and_then(|catalog| catalog.enum_label(source.type_oid, v))
+                {
+                    Ok(Value::Text(CompactString::from_owned(label)))
+                } else {
+                    Ok(Value::Text(CompactString::from_owned(v.to_string())))
+                }
+            }
+            _ => cast_text_value(&v.to_string(), ty, true),
+        },
         Value::Int16(v) => match ty {
             ty if ty.is_range() => cast_text_value(&v.to_string(), ty, true),
             ty if ty.is_multirange() => cast_text_value(&v.to_string(), ty, true),
@@ -1920,7 +1953,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::Inet
                     | SqlTypeKind::Cidr
                     | SqlTypeKind::Uuid
-                    | SqlTypeKind::PgLsn,
+                    | SqlTypeKind::PgLsn
+                    | SqlTypeKind::Enum,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -1939,7 +1973,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::AnyCompatible
                     | SqlTypeKind::AnyCompatibleArray
                     | SqlTypeKind::AnyCompatibleRange
-                    | SqlTypeKind::AnyCompatibleMultirange,
+                    | SqlTypeKind::AnyCompatibleMultirange
+                    | SqlTypeKind::AnyEnum,
                 ..
             } => Ok(Value::Text(CompactString::from_owned(v.to_string()))),
             SqlType {
@@ -2060,7 +2095,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::Inet
                     | SqlTypeKind::Cidr
                     | SqlTypeKind::Uuid
-                    | SqlTypeKind::PgLsn,
+                    | SqlTypeKind::PgLsn
+                    | SqlTypeKind::Enum,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -2079,7 +2115,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::AnyCompatible
                     | SqlTypeKind::AnyCompatibleArray
                     | SqlTypeKind::AnyCompatibleRange
-                    | SqlTypeKind::AnyCompatibleMultirange,
+                    | SqlTypeKind::AnyCompatibleMultirange
+                    | SqlTypeKind::AnyEnum,
                 ..
             } => Ok(Value::Text(CompactString::from_owned(v.to_string()))),
             SqlType {
@@ -2156,7 +2193,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::RegDictionary
                     | SqlTypeKind::Inet
                     | SqlTypeKind::Cidr
-                    | SqlTypeKind::PgLsn,
+                    | SqlTypeKind::PgLsn
+                    | SqlTypeKind::Enum,
                 ..
             } => cast_text_value(if v { "true" } else { "false" }, ty, true),
             SqlType {
@@ -2195,7 +2233,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::AnyCompatible
                     | SqlTypeKind::AnyCompatibleArray
                     | SqlTypeKind::AnyCompatibleRange
-                    | SqlTypeKind::AnyCompatibleMultirange,
+                    | SqlTypeKind::AnyCompatibleMultirange
+                    | SqlTypeKind::AnyEnum,
                 ..
             } => Ok(Value::Text(CompactString::new(if v {
                 "true"
@@ -2368,12 +2407,22 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 right: Value::Null,
             }),
         },
-        Value::Text(text) => cast_text_value_with_config(text.as_str(), ty, true, config),
+        Value::Text(text) => {
+            if matches!(ty.kind, SqlTypeKind::Enum) {
+                cast_text_to_enum(text.as_str(), ty, catalog)
+            } else {
+                cast_text_value_with_config(text.as_str(), ty, true, config)
+            }
+        }
         Value::TextRef(ptr, len) => {
             let text = unsafe {
                 std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len as usize))
             };
-            cast_text_value_with_config(text, ty, true, config)
+            if matches!(ty.kind, SqlTypeKind::Enum) {
+                cast_text_to_enum(text, ty, catalog)
+            } else {
+                cast_text_value_with_config(text, ty, true, config)
+            }
         }
         Value::Range(range) => {
             if ty.is_range() {
@@ -2734,7 +2783,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::Inet
                     | SqlTypeKind::Cidr
                     | SqlTypeKind::Uuid
-                    | SqlTypeKind::PgLsn,
+                    | SqlTypeKind::PgLsn
+                    | SqlTypeKind::Enum,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -2753,7 +2803,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::AnyCompatible
                     | SqlTypeKind::AnyCompatibleArray
                     | SqlTypeKind::AnyCompatibleRange
-                    | SqlTypeKind::AnyCompatibleMultirange,
+                    | SqlTypeKind::AnyCompatibleMultirange
+                    | SqlTypeKind::AnyEnum,
                 ..
             } => Ok(Value::Text(CompactString::from_owned(v.to_string()))),
             SqlType {
@@ -2847,7 +2898,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::Inet
                     | SqlTypeKind::Cidr
                     | SqlTypeKind::Uuid
-                    | SqlTypeKind::PgLsn,
+                    | SqlTypeKind::PgLsn
+                    | SqlTypeKind::Enum,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -2901,7 +2953,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::AnyCompatible
                     | SqlTypeKind::AnyCompatibleArray
                     | SqlTypeKind::AnyCompatibleRange
-                    | SqlTypeKind::AnyCompatibleMultirange,
+                    | SqlTypeKind::AnyCompatibleMultirange
+                    | SqlTypeKind::AnyEnum,
                 ..
             } => Ok(Value::Text(CompactString::from_owned(v.to_string()))),
             SqlType {
@@ -3075,6 +3128,22 @@ pub(super) fn cast_text_value(text: &str, ty: SqlType, explicit: bool) -> Result
     cast_text_value_with_config(text, ty, explicit, &DateTimeConfig::default())
 }
 
+fn cast_text_to_enum(
+    text: &str,
+    ty: SqlType,
+    catalog: Option<&dyn CatalogLookup>,
+) -> Result<Value, ExecError> {
+    if let Some(label_oid) = catalog.and_then(|catalog| catalog.enum_label_oid(ty.type_oid, text)) {
+        return Ok(Value::EnumOid(label_oid));
+    }
+    Err(ExecError::DetailedError {
+        message: format!("invalid input value for enum {}: \"{}\"", ty.type_oid, text),
+        detail: None,
+        hint: None,
+        sqlstate: "22P02",
+    })
+}
+
 pub(crate) fn cast_text_value_with_config(
     text: &str,
     ty: SqlType,
@@ -3099,7 +3168,8 @@ pub(crate) fn cast_text_value_with_config(
         | SqlTypeKind::AnyMultirange
         | SqlTypeKind::AnyCompatible
         | SqlTypeKind::AnyCompatibleRange
-        | SqlTypeKind::AnyCompatibleMultirange => Ok(Value::Text(CompactString::new(text))),
+        | SqlTypeKind::AnyCompatibleMultirange
+        | SqlTypeKind::AnyEnum => Ok(Value::Text(CompactString::new(text))),
         SqlTypeKind::Record | SqlTypeKind::Composite => Err(unsupported_record_input()),
         SqlTypeKind::Trigger => Err(unsupported_trigger_input()),
         SqlTypeKind::Internal => Err(ExecError::TypeMismatch {
@@ -3206,6 +3276,10 @@ pub(crate) fn cast_text_value_with_config(
         SqlTypeKind::Int8 => cast_text_to_int8(text),
         SqlTypeKind::Money => money_parse_text(text).map(Value::Money),
         SqlTypeKind::Oid => cast_text_to_oid(text),
+        SqlTypeKind::Enum => cast_text_to_oid(text).map(|value| match value {
+            Value::Int64(v) => Value::EnumOid(v as u32),
+            other => other,
+        }),
         SqlTypeKind::Float4 | SqlTypeKind::Float8 => parse_pg_float(text, ty.kind).map(|v| {
             Value::Float64(if matches!(ty.kind, SqlTypeKind::Float4) {
                 (v as f32) as f64
@@ -3256,9 +3330,8 @@ pub(super) fn cast_numeric_value(
         | SqlTypeKind::AnyMultirange
         | SqlTypeKind::AnyCompatible
         | SqlTypeKind::AnyCompatibleRange
-        | SqlTypeKind::AnyCompatibleMultirange => {
-            Ok(Value::Text(CompactString::from_owned(value.render())))
-        }
+        | SqlTypeKind::AnyCompatibleMultirange
+        | SqlTypeKind::AnyEnum => Ok(Value::Text(CompactString::from_owned(value.render()))),
         SqlTypeKind::Record | SqlTypeKind::Composite => Err(unsupported_record_input()),
         SqlTypeKind::Trigger => Err(unsupported_trigger_input()),
         SqlTypeKind::Internal => Err(ExecError::TypeMismatch {
@@ -3279,6 +3352,7 @@ pub(super) fn cast_numeric_value(
         SqlTypeKind::Numeric => Ok(Value::Numeric(coerce_numeric_value(value, ty)?)),
         SqlTypeKind::Money => money_parse_text(&value.render()).map(Value::Money),
         SqlTypeKind::Text
+        | SqlTypeKind::Enum
         | SqlTypeKind::Int2Vector
         | SqlTypeKind::OidVector
         | SqlTypeKind::Point

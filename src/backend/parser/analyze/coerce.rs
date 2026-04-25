@@ -240,6 +240,8 @@ pub(crate) fn sql_type_name(ty: SqlType) -> String {
             SqlTypeKind::AnyCompatibleArray => "anycompatiblearray",
             SqlTypeKind::AnyCompatibleRange => "anycompatiblerange",
             SqlTypeKind::AnyCompatibleMultirange => "anycompatiblemultirange",
+            SqlTypeKind::AnyEnum => "anyenum",
+            SqlTypeKind::Enum => return ty.type_oid.to_string(),
             SqlTypeKind::Record => "record",
             SqlTypeKind::Composite => "record",
             SqlTypeKind::Internal => "internal",

@@ -1746,6 +1746,14 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         rows
     }
 
+    fn enum_label_oid(&self, type_oid: u32, label: &str) -> Option<u32> {
+        self.db.enum_label_oid(type_oid, label)
+    }
+
+    fn enum_label(&self, type_oid: u32, label_oid: u32) -> Option<String> {
+        self.db.enum_label(type_oid, label_oid)
+    }
+
     fn language_rows(&self) -> Vec<PgLanguageRow> {
         language_rows(self.db, self.client_id, self.txn_ctx)
     }
@@ -2042,10 +2050,13 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
                 relcache.insert(format!("{}.{}", temp_namespace.name, name), entry.entry);
             }
         }
-        Some(VisibleCatalog::with_search_path(
-            relcache.with_search_path(&self.search_path),
-            Some(catcache),
-            self.search_path.clone(),
-        ))
+        Some(
+            VisibleCatalog::with_search_path(
+                relcache.with_search_path(&self.search_path),
+                Some(catcache),
+                self.search_path.clone(),
+            )
+            .with_enum_labels(self.db.enum_label_rows_for_catalog()),
+        )
     }
 }

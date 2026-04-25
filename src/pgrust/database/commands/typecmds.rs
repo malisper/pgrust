@@ -3,13 +3,15 @@ use crate::backend::catalog::CatalogError;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{ColumnDesc, RelationDesc, StatementResult};
 use crate::backend::parser::{
-    CatalogLookup, CreateCompositeTypeStatement, CreateEnumTypeStatement, CreateRangeTypeStatement,
-    CreateTypeStatement, DropTypeStatement, ParseError, resolve_raw_type_name,
+    AlterEnumValuePosition, AlterTypeAddEnumValueStatement, AlterTypeRenameEnumValueStatement,
+    AlterTypeStatement, CatalogLookup, CreateCompositeTypeStatement, CreateEnumTypeStatement,
+    CreateRangeTypeStatement, CreateTypeStatement, DropTypeStatement, ParseError,
+    resolve_raw_type_name,
 };
 use crate::pgrust::database::ddl::{
     ensure_relation_owner, is_system_column_name, map_catalog_error, reject_type_with_dependents,
 };
-use crate::pgrust::database::{EnumTypeEntry, RangeTypeEntry};
+use crate::pgrust::database::{EnumLabelEntry, EnumTypeEntry, RangeTypeEntry};
 
 enum ResolvedDropTypeTarget {
     Composite {
@@ -267,6 +269,53 @@ impl Database {
         Ok(StatementResult::AffectedRows(dropped))
     }
 
+    pub(crate) fn execute_alter_type_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &AlterTypeStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let result = self.execute_alter_type_stmt_in_transaction_with_search_path(
+            client_id,
+            alter_stmt,
+            xid,
+            0,
+            configured_search_path,
+        );
+        let result = self.finish_txn(client_id, xid, result, &[], &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_alter_type_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        alter_stmt: &AlterTypeStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        match alter_stmt {
+            AlterTypeStatement::AddEnumValue(stmt) => self.execute_alter_type_add_enum_value_stmt(
+                client_id,
+                stmt,
+                xid,
+                cid,
+                configured_search_path,
+            ),
+            AlterTypeStatement::RenameEnumValue(stmt) => self
+                .execute_alter_type_rename_enum_value_stmt(
+                    client_id,
+                    stmt,
+                    xid,
+                    cid,
+                    configured_search_path,
+                ),
+        }
+    }
+
     fn resolve_drop_type_target(
         &self,
         client_id: ClientId,
@@ -459,6 +508,17 @@ impl Database {
         }
         let oid = self.next_dynamic_type_oid(Some(&enum_types), None)?;
         let array_oid = oid.saturating_add(1);
+        let labels = stmt
+            .labels
+            .iter()
+            .enumerate()
+            .map(|(index, label)| EnumLabelEntry {
+                oid: oid.saturating_add(2 + index as u32),
+                label: label.clone(),
+                sort_order: (index as u32).saturating_add(1),
+                committed: true,
+            })
+            .collect();
         enum_types.insert(
             normalized,
             EnumTypeEntry {
@@ -466,12 +526,175 @@ impl Database {
                 array_oid,
                 name: object_name,
                 namespace_oid,
-                labels: stmt.labels.clone(),
+                labels,
                 comment: None,
             },
         );
         self.plan_cache.invalidate_all();
         Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn execute_alter_type_add_enum_value_stmt(
+        &self,
+        client_id: ClientId,
+        stmt: &AlterTypeAddEnumValueStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        validate_enum_label_len(&stmt.label)?;
+        let type_oid = self.resolve_enum_type_oid(
+            client_id,
+            Some((xid, cid)),
+            stmt.schema_name.as_deref(),
+            &stmt.type_name,
+            configured_search_path,
+        )?;
+        let mut enum_types = self.enum_types.write();
+        let next_label_oid = enum_types
+            .values()
+            .flat_map(|entry| {
+                std::iter::once(entry.array_oid)
+                    .chain(std::iter::once(entry.oid))
+                    .chain(entry.labels.iter().map(|label| label.oid))
+            })
+            .max()
+            .unwrap_or(type_oid)
+            .saturating_add(1);
+        let entry = enum_types
+            .values_mut()
+            .find(|entry| entry.oid == type_oid)
+            .ok_or_else(|| type_does_not_exist_error(&stmt.type_name))?;
+        if entry.labels.iter().any(|label| label.label == stmt.label) {
+            if stmt.if_not_exists {
+                return Ok(StatementResult::AffectedRows(0));
+            }
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "enum label \"{}\" already exists for enum {}",
+                    stmt.label, entry.name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42710",
+            });
+        }
+        let sort_order = match &stmt.position {
+            None => entry
+                .labels
+                .iter()
+                .map(|label| label.sort_order)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1),
+            Some(AlterEnumValuePosition::Before(neighbor)) => {
+                let index = entry
+                    .labels
+                    .iter()
+                    .position(|label| label.label == *neighbor)
+                    .ok_or_else(|| enum_neighbor_missing_error(&entry.name, neighbor))?;
+                let previous = index
+                    .checked_sub(1)
+                    .and_then(|prev| entry.labels.get(prev))
+                    .map(|label| label.sort_order)
+                    .unwrap_or(0);
+                let current = entry.labels[index].sort_order;
+                midpoint_or_renumber(&mut entry.labels, previous, current)
+            }
+            Some(AlterEnumValuePosition::After(neighbor)) => {
+                let index = entry
+                    .labels
+                    .iter()
+                    .position(|label| label.label == *neighbor)
+                    .ok_or_else(|| enum_neighbor_missing_error(&entry.name, neighbor))?;
+                let current = entry.labels[index].sort_order;
+                let next = entry
+                    .labels
+                    .get(index + 1)
+                    .map(|label| label.sort_order)
+                    .unwrap_or_else(|| current.saturating_add(2));
+                midpoint_or_renumber(&mut entry.labels, current, next)
+            }
+        };
+        entry.labels.push(EnumLabelEntry {
+            oid: next_label_oid,
+            label: stmt.label.clone(),
+            sort_order,
+            committed: false,
+        });
+        entry.labels.sort_by_key(|label| label.sort_order);
+        self.plan_cache.invalidate_all();
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn execute_alter_type_rename_enum_value_stmt(
+        &self,
+        client_id: ClientId,
+        stmt: &AlterTypeRenameEnumValueStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        validate_enum_label_len(&stmt.new_label)?;
+        let type_oid = self.resolve_enum_type_oid(
+            client_id,
+            Some((xid, cid)),
+            stmt.schema_name.as_deref(),
+            &stmt.type_name,
+            configured_search_path,
+        )?;
+        let mut enum_types = self.enum_types.write();
+        let entry = enum_types
+            .values_mut()
+            .find(|entry| entry.oid == type_oid)
+            .ok_or_else(|| type_does_not_exist_error(&stmt.type_name))?;
+        if entry
+            .labels
+            .iter()
+            .any(|label| label.label == stmt.new_label)
+        {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "enum label \"{}\" already exists for enum {}",
+                    stmt.new_label, entry.name
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42710",
+            });
+        }
+        let label = entry
+            .labels
+            .iter_mut()
+            .find(|label| label.label == stmt.old_label)
+            .ok_or_else(|| enum_neighbor_missing_error(&entry.name, &stmt.old_label))?;
+        label.label = stmt.new_label.clone();
+        self.plan_cache.invalidate_all();
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn resolve_enum_type_oid(
+        &self,
+        client_id: ClientId,
+        txn_ctx: CatalogTxnContext,
+        schema_name: Option<&str>,
+        type_name: &str,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<u32, ExecError> {
+        let lookup_name = schema_name
+            .map(|schema| format!("{schema}.{type_name}"))
+            .unwrap_or_else(|| type_name.to_string());
+        let catalog = self.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
+        let row = catalog
+            .type_by_name(&lookup_name)
+            .ok_or_else(|| type_does_not_exist_error(&lookup_name))?;
+        if !matches!(row.sql_type.kind, SqlTypeKind::Enum) {
+            return Err(ExecError::Parse(ParseError::WrongObjectType {
+                name: lookup_name,
+                expected: "enum type",
+            }));
+        }
+        Ok(row.oid)
     }
 
     fn execute_create_range_type_stmt(
@@ -690,6 +913,38 @@ fn enum_type_display_name(stmt: &CreateEnumTypeStatement) -> String {
         Some(schema_name) => format!("{schema_name}.{}", stmt.type_name),
         None => stmt.type_name.clone(),
     }
+}
+
+fn validate_enum_label_len(label: &str) -> Result<(), ExecError> {
+    if label.len() > 63 {
+        return Err(ExecError::DetailedError {
+            message: "invalid enum label".into(),
+            detail: Some("Labels must be 63 bytes or shorter.".into()),
+            hint: None,
+            sqlstate: "42622",
+        });
+    }
+    Ok(())
+}
+
+fn enum_neighbor_missing_error(type_name: &str, label: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("enum label \"{label}\" does not exist for enum {type_name}"),
+        detail: None,
+        hint: None,
+        sqlstate: "42704",
+    }
+}
+
+fn midpoint_or_renumber(labels: &mut [EnumLabelEntry], low: u32, high: u32) -> u32 {
+    if high > low.saturating_add(1) {
+        return low + ((high - low) / 2);
+    }
+    labels.sort_by_key(|label| label.sort_order);
+    for (idx, label) in labels.iter_mut().enumerate() {
+        label.sort_order = ((idx as u32) + 1).saturating_mul(2);
+    }
+    low.saturating_add(1)
 }
 
 fn range_type_display_name(stmt: &CreateRangeTypeStatement) -> String {

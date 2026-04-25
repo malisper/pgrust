@@ -47,6 +47,7 @@ pub enum ScalarType {
     TsQuery,
     PgLsn,
     Text,
+    Enum,
     Record,
     Bool,
     Array(Box<ScalarType>),

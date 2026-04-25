@@ -30,6 +30,7 @@ pub struct VisibleCatalog {
     relcache: RelCache,
     catcache: Option<CatCache>,
     search_path: Vec<String>,
+    enum_labels: Vec<(u32, u32, String)>,
 }
 
 impl VisibleCatalog {
@@ -46,11 +47,17 @@ impl VisibleCatalog {
             relcache,
             catcache,
             search_path,
+            enum_labels: Vec::new(),
         }
     }
 
     pub fn relcache(&self) -> &RelCache {
         &self.relcache
+    }
+
+    pub fn with_enum_labels(mut self, enum_labels: Vec<(u32, u32, String)>) -> Self {
+        self.enum_labels = enum_labels;
+        self
     }
 
     pub fn constraint_rows_for_relation(&self, relation_oid: u32) -> Vec<PgConstraintRow> {
@@ -481,6 +488,20 @@ impl CatalogLookup for VisibleCatalog {
 
     fn range_rows(&self) -> Vec<PgRangeRow> {
         builtin_range_rows()
+    }
+
+    fn enum_label_oid(&self, type_oid: u32, label: &str) -> Option<u32> {
+        self.enum_labels
+            .iter()
+            .find(|(typid, _, enum_label)| *typid == type_oid && enum_label == label)
+            .map(|(_, label_oid, _)| *label_oid)
+    }
+
+    fn enum_label(&self, type_oid: u32, label_oid: u32) -> Option<String> {
+        self.enum_labels
+            .iter()
+            .find(|(typid, oid, _)| *typid == type_oid && *oid == label_oid)
+            .map(|(_, _, label)| label.clone())
     }
 
     fn language_rows(&self) -> Vec<PgLanguageRow> {

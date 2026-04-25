@@ -322,6 +322,7 @@ fn value_checksum(value: &Value) -> i64 {
         Value::Text(v) => v.bytes().map(i64::from).sum(),
         Value::TextRef(_, _) => value.as_text().unwrap().bytes().map(i64::from).sum(),
         Value::InternalChar(v) => i64::from(*v),
+        Value::EnumOid(v) => i64::from(*v),
         Value::Bool(v) => i64::from(*v),
         Value::Array(items) => items.iter().map(value_checksum).sum(),
         Value::PgArray(array) => array.elements.iter().map(value_checksum).sum(),

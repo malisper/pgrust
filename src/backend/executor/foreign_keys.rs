@@ -446,6 +446,7 @@ fn render_key_value(value: &Value) -> String {
         Value::Uuid(v) => crate::backend::executor::value_io::render_uuid_text(v),
         Value::Bool(v) => v.to_string(),
         Value::InternalChar(v) => v.to_string(),
+        Value::EnumOid(v) => v.to_string(),
         Value::TextRef(_, _) | Value::Text(_) | Value::JsonPath(_) => {
             value.as_text().unwrap_or_default().to_string()
         }

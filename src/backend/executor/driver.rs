@@ -390,6 +390,10 @@ fn execute_statement_with_source(
             expected: "CREATE TYPE handled by database/session layer",
             actual: "CREATE TYPE".into(),
         })),
+        Statement::AlterType(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER TYPE handled by database/session layer",
+            actual: "ALTER TYPE".into(),
+        })),
         Statement::CreateSequence(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE SEQUENCE handled by database/session layer",
             actual: "CREATE SEQUENCE".into(),
@@ -657,6 +661,10 @@ pub fn execute_readonly_statement_with_config(
         Statement::CreateType(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "CREATE TYPE".into(),
+        })),
+        Statement::AlterType(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "ALTER TYPE".into(),
         })),
         Statement::CreateView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
