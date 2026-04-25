@@ -12,8 +12,8 @@ use crate::include::catalog::{
     PG_NODE_TREE_TYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, RECORD_TYPE_OID, REGCLASS_TYPE_OID,
     REGCONFIG_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_TYPE_OID,
     TIMESTAMPTZ_TYPE_OID, TIMETZ_TYPE_OID, TRIGGER_TYPE_OID, TSQUERY_TYPE_OID, TSRANGE_TYPE_OID,
-    TSTZRANGE_TYPE_OID, TSVECTOR_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_TYPE_OID, XID_TYPE_OID,
-    XML_TYPE_OID, aggregate_func_for_dynamic_range_proc_oid,
+    TSTZRANGE_TYPE_OID, TSVECTOR_TYPE_OID, TXID_SNAPSHOT_TYPE_OID, VARBIT_TYPE_OID,
+    VARCHAR_TYPE_OID, XID_TYPE_OID, XML_TYPE_OID, aggregate_func_for_dynamic_range_proc_oid,
 };
 use crate::include::nodes::primnodes::{
     AggFunc, BuiltinScalarFunction, BuiltinWindowFunction, HypotheticalAggFunc,
@@ -3673,6 +3673,42 @@ pub fn bootstrap_pg_proc_rows() -> Vec<PgProcRow> {
             'f',
             'i',
         ),
+        proc_row(
+            2943,
+            "txid_current",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[]),
+            "txid_current",
+            0,
+            false,
+            false,
+            'f',
+            's',
+        ),
+        proc_row(
+            3348,
+            "txid_current_if_assigned",
+            INT8_TYPE_OID,
+            &oid_argtypes(&[]),
+            "txid_current_if_assigned",
+            0,
+            false,
+            false,
+            'f',
+            's',
+        ),
+        proc_row(
+            2948,
+            "txid_visible_in_snapshot",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[INT8_TYPE_OID, TXID_SNAPSHOT_TYPE_OID]),
+            "txid_visible_in_snapshot",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
     ];
     rows.extend(geometry_proc_rows());
     rows.extend(range_proc_rows());
@@ -4037,6 +4073,15 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgGetSerialSequence,
         ),
         ("pg_get_acl", BuiltinScalarFunction::PgGetAcl),
+        ("txid_current", BuiltinScalarFunction::TxidCurrent),
+        (
+            "txid_current_if_assigned",
+            BuiltinScalarFunction::TxidCurrentIfAssigned,
+        ),
+        (
+            "txid_visible_in_snapshot",
+            BuiltinScalarFunction::TxidVisibleInSnapshot,
+        ),
         ("pg_size_pretty", BuiltinScalarFunction::PgSizePretty),
         (
             "pg_size_pretty_numeric",

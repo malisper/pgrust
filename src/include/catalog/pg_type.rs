@@ -42,9 +42,10 @@ use crate::include::catalog::{
     TIMETZ_TYPE_OID, TRIGGER_TYPE_OID, TSMULTIRANGE_ARRAY_TYPE_OID, TSMULTIRANGE_TYPE_OID,
     TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSRANGE_ARRAY_TYPE_OID, TSRANGE_TYPE_OID,
     TSTZMULTIRANGE_ARRAY_TYPE_OID, TSTZMULTIRANGE_TYPE_OID, TSTZRANGE_ARRAY_TYPE_OID,
-    TSTZRANGE_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, VARBIT_ARRAY_TYPE_OID,
-    VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, VOID_TYPE_OID, XID_ARRAY_TYPE_OID,
-    XID_TYPE_OID, XML_ARRAY_TYPE_OID, XML_TYPE_OID,
+    TSTZRANGE_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, TXID_SNAPSHOT_ARRAY_TYPE_OID,
+    TXID_SNAPSHOT_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID,
+    VARCHAR_TYPE_OID, VOID_TYPE_OID, XID_ARRAY_TYPE_OID, XID_TYPE_OID, XML_ARRAY_TYPE_OID,
+    XML_TYPE_OID,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,6 +259,19 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             "_xid",
             XID_ARRAY_TYPE_OID,
             SqlType::array_of(SqlType::new(SqlTypeKind::Xid)),
+        ),
+        builtin_type_row(
+            "txid_snapshot",
+            TXID_SNAPSHOT_TYPE_OID,
+            SqlType::new(SqlTypeKind::Text).with_identity(TXID_SNAPSHOT_TYPE_OID, 0),
+        ),
+        builtin_type_row(
+            "_txid_snapshot",
+            TXID_SNAPSHOT_ARRAY_TYPE_OID,
+            SqlType::array_of(
+                SqlType::new(SqlTypeKind::Text).with_identity(TXID_SNAPSHOT_TYPE_OID, 0),
+            )
+            .with_identity(TXID_SNAPSHOT_ARRAY_TYPE_OID, 0),
         ),
         builtin_type_row(
             "oidvector",
