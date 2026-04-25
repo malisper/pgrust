@@ -58,6 +58,45 @@ fn catalog_entry_from_bound_relation(
     }
 }
 
+fn collect_visible_relation_drop_entries(
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+    catcache: &CatCache,
+    relation_oid: u32,
+    seen: &mut BTreeSet<u32>,
+    out: &mut Vec<crate::backend::parser::BoundRelation>,
+) -> Result<(), ExecError> {
+    if !seen.insert(relation_oid) {
+        return Ok(());
+    }
+    for row in catcache.depend_rows() {
+        if row.refclassid != PG_CLASS_RELATION_OID
+            || row.refobjid != relation_oid
+            || row.classid != PG_CLASS_RELATION_OID
+            || row.objsubid != 0
+        {
+            continue;
+        }
+        let Some(dependent) = catalog.relation_by_oid(row.objid) else {
+            continue;
+        };
+        if !matches!(dependent.relkind, 'r' | 'i' | 'I' | 't' | 'S') {
+            continue;
+        }
+        collect_visible_relation_drop_entries(
+            catalog,
+            catcache,
+            dependent.relation_oid,
+            seen,
+            out,
+        )?;
+    }
+    let relation = catalog
+        .relation_by_oid(relation_oid)
+        .ok_or_else(|| ExecError::Parse(ParseError::TableDoesNotExist(relation_oid.to_string())))?;
+    out.push(relation);
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 enum DropTableDependency {
     Relation {
@@ -1039,6 +1078,36 @@ impl Database {
                     waiter: Some(self.txn_waiter.clone()),
                     interrupts: Arc::clone(&interrupts),
                 };
+                if relkind != 'v' && catalog.relation_by_oid(*relation_oid).is_some() {
+                    let mut seen = BTreeSet::new();
+                    let mut entries = Vec::new();
+                    collect_visible_relation_drop_entries(
+                        &catalog,
+                        &catcache,
+                        *relation_oid,
+                        &mut seen,
+                        &mut entries,
+                    )?;
+                    for entry in entries {
+                        let effect = self
+                            .catalog
+                            .write()
+                            .drop_relation_entry_mvcc(
+                                catalog_entry_from_bound_relation(&entry),
+                                &ctx,
+                            )
+                            .map_err(map_catalog_error)?;
+                        self.apply_catalog_mutation_effect_immediate(&effect)?;
+                        if is_drop_table_relkind(entry.relkind) {
+                            self.session_stats_state(client_id)
+                                .write()
+                                .note_relation_drop(entry.relation_oid, &self.stats);
+                        }
+                        catalog_effects.push(effect);
+                    }
+                    next_cid = next_cid.saturating_add(1);
+                    continue;
+                }
                 let effect = match relkind {
                     'v' => self
                         .catalog

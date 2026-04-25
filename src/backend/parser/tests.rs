@@ -9791,8 +9791,9 @@ fn lower_create_table_rejects_cross_type_foreign_keys() {
     };
     assert!(matches!(
         lower_create_table(&ct, &catalog_with_text_parent_primary_key()),
-        Err(ParseError::FeatureNotSupported(feature))
-            if feature == "FOREIGN KEY with cross-type columns"
+        Err(ParseError::DetailedError { message, detail: Some(detail), sqlstate: "42804", .. })
+            if message == "foreign key constraint \"pets_owner_id_fkey\" cannot be implemented"
+                && detail.contains("incompatible types")
     ));
 }
 

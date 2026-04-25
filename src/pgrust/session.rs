@@ -55,15 +55,15 @@ use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::pgrust::auth::AuthState;
 use crate::pgrust::autovacuum::is_autovacuum_guc;
 use crate::pgrust::database::{
-    AsyncListenAction, AsyncListenOp, Database, PendingNotification, SequenceMutationEffect,
-    SessionStatsState, StatsFetchConsistency, TempMutationEffect, TrackFunctionsSetting,
-    alter_table_add_constraint_lock_requests, alter_table_validate_constraint_lock_requests,
-    delete_foreign_key_lock_requests, execute_set_constraints, insert_foreign_key_lock_requests,
-    merge_pending_notifications, merge_table_lock_requests,
-    prepared_insert_foreign_key_lock_requests, queue_pending_notification,
-    reject_relation_with_referencing_foreign_keys, relation_foreign_key_lock_requests,
-    update_foreign_key_lock_requests, validate_deferred_constraints,
-    validate_immediate_constraints,
+    AsyncListenAction, AsyncListenOp, Database, DynamicTypeSnapshot, PendingNotification,
+    SequenceMutationEffect, SessionStatsState, StatsFetchConsistency, TempMutationEffect,
+    TrackFunctionsSetting, alter_table_add_constraint_lock_requests,
+    alter_table_validate_constraint_lock_requests, delete_foreign_key_lock_requests,
+    execute_set_constraints, insert_foreign_key_lock_requests, merge_pending_notifications,
+    merge_table_lock_requests, prepared_insert_foreign_key_lock_requests,
+    queue_pending_notification, reject_relation_with_referencing_foreign_keys,
+    relation_foreign_key_lock_requests, update_foreign_key_lock_requests,
+    validate_deferred_constraints, validate_immediate_constraints,
 };
 use crate::pgrust::portal::{
     CursorOptions, CursorViewRow, Portal, PortalFetchDirection, PortalFetchLimit, PortalManager,
@@ -158,6 +158,13 @@ struct ActiveTransaction {
     deferred_foreign_keys: DeferredForeignKeyTracker,
     async_listen_ops: Vec<AsyncListenOp>,
     pending_async_notifications: Vec<PendingNotification>,
+    dynamic_type_snapshot: DynamicTypeSnapshot,
+    savepoints: Vec<SavepointState>,
+}
+
+struct SavepointState {
+    name: String,
+    dynamic_type_snapshot: DynamicTypeSnapshot,
 }
 
 pub struct Session {
@@ -670,6 +677,8 @@ impl Session {
             deferred_foreign_keys: DeferredForeignKeyTracker::default(),
             async_listen_ops: Vec::new(),
             pending_async_notifications: Vec::new(),
+            dynamic_type_snapshot: db.dynamic_type_snapshot(),
+            savepoints: Vec::new(),
         }
     }
 
@@ -723,6 +732,8 @@ impl Session {
                 | Statement::Begin
                 | Statement::Commit
                 | Statement::Rollback
+                | Statement::Savepoint(_)
+                | Statement::RollbackTo(_)
         )
     }
 
@@ -848,6 +859,7 @@ impl Session {
                         })?;
                         db.txn_waiter.unregister_holder(xid);
                         db.txn_waiter.notify();
+                        db.commit_enum_labels_created_by(xid);
                     } else {
                         debug_assert!(txn.catalog_effects.is_empty());
                         debug_assert!(txn.temp_effects.is_empty());
@@ -894,6 +906,7 @@ impl Session {
             debug_assert!(txn.temp_effects.is_empty());
             debug_assert!(txn.sequence_effects.is_empty());
         }
+        db.restore_dynamic_type_snapshot(&txn.dynamic_type_snapshot);
         db.finalize_aborted_local_catalog_invalidations(
             self.client_id,
             &txn.prior_cmd_catalog_invalidations,
@@ -1017,7 +1030,11 @@ impl Session {
         if self.active_txn.is_some()
             && !matches!(
                 stmt,
-                Statement::Begin | Statement::Commit | Statement::Rollback
+                Statement::Begin
+                    | Statement::Commit
+                    | Statement::Rollback
+                    | Statement::Savepoint(_)
+                    | Statement::RollbackTo(_)
             )
         {
             if self.transaction_failed() {
@@ -2421,6 +2438,45 @@ impl Session {
                 self.portals.drop_transaction_portals(false);
                 Ok(StatementResult::AffectedRows(0))
             }
+            Statement::Savepoint(ref name) => {
+                let Some(txn) = self.active_txn.as_mut() else {
+                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "active transaction",
+                        actual: "SAVEPOINT can only be used in transaction blocks".into(),
+                    }));
+                };
+                txn.savepoints.push(SavepointState {
+                    name: name.clone(),
+                    dynamic_type_snapshot: db.dynamic_type_snapshot(),
+                });
+                Ok(StatementResult::AffectedRows(0))
+            }
+            Statement::RollbackTo(ref name) => {
+                let Some(txn) = self.active_txn.as_mut() else {
+                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "active transaction",
+                        actual: "ROLLBACK TO SAVEPOINT can only be used in transaction blocks"
+                            .into(),
+                    }));
+                };
+                let Some(index) = txn
+                    .savepoints
+                    .iter()
+                    .rposition(|savepoint| savepoint.name.eq_ignore_ascii_case(name))
+                else {
+                    return Err(ExecError::DetailedError {
+                        message: format!("savepoint \"{name}\" does not exist"),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "3B001",
+                    });
+                };
+                let snapshot = txn.savepoints[index].dynamic_type_snapshot.clone();
+                db.restore_dynamic_type_snapshot(&snapshot);
+                txn.savepoints.truncate(index + 1);
+                txn.failed = false;
+                Ok(StatementResult::AffectedRows(0))
+            }
             _ => {
                 if let Some(ref txn) = self.active_txn {
                     if txn.failed {
@@ -2508,6 +2564,7 @@ impl Session {
                 debug_assert!(txn.temp_effects.is_empty());
                 debug_assert!(txn.sequence_effects.is_empty());
             }
+            db.restore_dynamic_type_snapshot(&txn.dynamic_type_snapshot);
             db.finalize_aborted_local_catalog_invalidations(
                 self.client_id,
                 &txn.prior_cmd_catalog_invalidations,
@@ -4879,7 +4936,11 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
-            Statement::Begin | Statement::Commit | Statement::Rollback => {
+            Statement::Begin
+            | Statement::Commit
+            | Statement::Rollback
+            | Statement::Savepoint(_)
+            | Statement::RollbackTo(_) => {
                 unreachable!("handled in Session::execute")
             }
             Statement::DeclareCursor(_)

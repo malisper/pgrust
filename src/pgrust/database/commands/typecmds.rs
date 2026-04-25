@@ -525,6 +525,7 @@ impl Database {
                 label: label.clone(),
                 sort_order: (index as f64) + 1.0,
                 committed: true,
+                creating_xid: None,
             })
             .collect();
         enum_types.insert(
@@ -535,6 +536,7 @@ impl Database {
                 name: object_name,
                 namespace_oid,
                 labels,
+                creating_xid: Some(xid),
                 comment: None,
             },
         );
@@ -631,11 +633,13 @@ impl Database {
                 midpoint_or_renumber(&mut entry.labels, current, next)
             }
         };
+        let immediately_usable = entry.creating_xid == Some(xid);
         entry.labels.push(EnumLabelEntry {
             oid: next_label_oid,
             label: stmt.label.clone(),
             sort_order,
-            committed: false,
+            committed: immediately_usable,
+            creating_xid: (!immediately_usable).then_some(xid),
         });
         entry
             .labels

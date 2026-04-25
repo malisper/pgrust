@@ -7583,6 +7583,7 @@ fn build_create_domain_statement(sql: &str) -> Result<CreateDomainStatement, Par
             actual: sql.into(),
         });
     }
+    let (type_sql, check) = split_domain_type_and_check(type_sql)?;
     let normalized_type_sql = normalize_domain_type_sql(type_sql);
     if normalized_type_sql.split_whitespace().any(|tok| {
         matches!(
@@ -7608,7 +7609,172 @@ fn build_create_domain_statement(sql: &str) -> Result<CreateDomainStatement, Par
     Ok(CreateDomainStatement {
         domain_name: domain_name.to_string(),
         ty: parse_type_name(&normalized_type_sql)?,
+        check,
     })
+}
+
+fn build_transaction_marker_name(pair: Pair<'_, Rule>) -> Result<String, ParseError> {
+    pair.into_inner()
+        .filter(|part| part.as_rule() == Rule::identifier)
+        .next_back()
+        .map(build_identifier)
+        .ok_or(ParseError::UnexpectedEof)
+}
+
+fn split_domain_type_and_check(
+    sql: &str,
+) -> Result<(&str, Option<DomainCheckConstraint>), ParseError> {
+    let Some(clause_start) = find_domain_constraint_start(sql) else {
+        return Ok((sql, None));
+    };
+    let type_sql = sql[..clause_start].trim_end();
+    let clause_sql = sql[clause_start..].trim_start();
+    if type_sql.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "domain base type",
+            actual: sql.into(),
+        });
+    }
+    let mut rest = clause_sql;
+    let mut name = None;
+    if rest
+        .get(..10)
+        .is_some_and(|s| s.eq_ignore_ascii_case("constraint"))
+        && keyword_end_boundary(rest, 10)
+    {
+        rest = rest[10..].trim_start();
+        let (constraint_name, after_name) = parse_domain_constraint_name(rest)?;
+        name = Some(constraint_name);
+        rest = after_name.trim_start();
+    }
+    let allowed_values = parse_domain_value_in_check(rest)?;
+    Ok((
+        type_sql,
+        Some(DomainCheckConstraint {
+            name,
+            allowed_values,
+        }),
+    ))
+}
+
+fn find_domain_constraint_start(sql: &str) -> Option<usize> {
+    let mut quote = None;
+    let mut parens = 0usize;
+    for (idx, ch) in sql.char_indices() {
+        match quote {
+            Some('\'') if ch == '\'' => quote = None,
+            Some('"') if ch == '"' => quote = None,
+            Some(_) => continue,
+            None if ch == '\'' || ch == '"' => quote = Some(ch),
+            None if ch == '(' => parens = parens.saturating_add(1),
+            None if ch == ')' => parens = parens.saturating_sub(1),
+            None if parens == 0 => {
+                if keyword_starts_at(sql, idx, "constraint") || keyword_starts_at(sql, idx, "check")
+                {
+                    return Some(idx);
+                }
+            }
+            None => {}
+        }
+    }
+    None
+}
+
+fn keyword_starts_at(sql: &str, idx: usize, keyword: &str) -> bool {
+    sql.get(idx..idx + keyword.len())
+        .is_some_and(|part| part.eq_ignore_ascii_case(keyword))
+        && (idx == 0
+            || sql[..idx]
+                .chars()
+                .next_back()
+                .is_none_or(|ch| !(ch.is_ascii_alphanumeric() || ch == '_')))
+        && keyword_end_boundary(&sql[idx..], keyword.len())
+}
+
+fn keyword_end_boundary(sql: &str, end: usize) -> bool {
+    sql.get(end..)
+        .and_then(|slice| slice.chars().next())
+        .is_none_or(|ch| !(ch.is_ascii_alphanumeric() || ch == '_'))
+}
+
+fn parse_domain_constraint_name(input: &str) -> Result<(String, &str), ParseError> {
+    let trimmed = input.trim_start();
+    let end = trimmed
+        .char_indices()
+        .find_map(|(idx, ch)| ch.is_whitespace().then_some(idx))
+        .unwrap_or(trimmed.len());
+    if end == 0 {
+        return Err(ParseError::UnexpectedToken {
+            expected: "domain constraint name",
+            actual: input.into(),
+        });
+    }
+    Ok((
+        trimmed[..end].trim_matches('"').to_string(),
+        &trimmed[end..],
+    ))
+}
+
+fn parse_domain_value_in_check(input: &str) -> Result<Vec<String>, ParseError> {
+    let mut rest = input.trim_start();
+    if !rest
+        .get(..5)
+        .is_some_and(|s| s.eq_ignore_ascii_case("check"))
+        || !keyword_end_boundary(rest, 5)
+    {
+        return Err(ParseError::FeatureNotSupported(
+            "CREATE DOMAIN only supports CHECK (VALUE IN (...)) constraints".into(),
+        ));
+    }
+    rest = rest[5..].trim_start();
+    if !rest.starts_with('(') || !rest.ends_with(')') {
+        return Err(ParseError::FeatureNotSupported(
+            "CREATE DOMAIN only supports CHECK (VALUE IN (...)) constraints".into(),
+        ));
+    }
+    let check_body = rest[1..rest.len() - 1].trim();
+    let mut inner = check_body;
+    if !inner
+        .get(..5)
+        .is_some_and(|s| s.eq_ignore_ascii_case("value"))
+        || !keyword_end_boundary(inner, 5)
+    {
+        return Err(ParseError::FeatureNotSupported(
+            "CREATE DOMAIN only supports CHECK (VALUE IN (...)) constraints".into(),
+        ));
+    }
+    inner = inner[5..].trim_start();
+    if !inner.get(..2).is_some_and(|s| s.eq_ignore_ascii_case("in"))
+        || !keyword_end_boundary(inner, 2)
+    {
+        return Err(ParseError::FeatureNotSupported(
+            "CREATE DOMAIN only supports CHECK (VALUE IN (...)) constraints".into(),
+        ));
+    }
+    inner = inner[2..].trim_start();
+    if !inner.starts_with('(') || !inner.ends_with(')') {
+        return Err(ParseError::FeatureNotSupported(
+            "CREATE DOMAIN only supports CHECK (VALUE IN (...)) constraints".into(),
+        ));
+    }
+    let mut values_sql = inner[1..inner.len() - 1].trim();
+    let mut values = Vec::new();
+    while !values_sql.is_empty() {
+        let (value, rest_after_value) = parse_enum_label_literal(values_sql)?;
+        values.push(value);
+        values_sql = rest_after_value.trim_start();
+        if values_sql.is_empty() {
+            break;
+        }
+        let Some(after_comma) = values_sql.strip_prefix(',') else {
+            return Err(ParseError::UnexpectedToken {
+                expected: "comma-separated domain check values",
+                actual: values_sql.into(),
+            });
+        };
+        values_sql = after_comma.trim_start();
+    }
+    Ok(values)
 }
 
 fn normalize_domain_type_sql(sql: &str) -> String {
@@ -8218,6 +8384,8 @@ fn build_statement(pair: Pair<'_, Rule>) -> Result<Statement, ParseError> {
         Rule::delete_stmt => Ok(Statement::Delete(build_delete(inner)?)),
         Rule::begin_stmt => Ok(Statement::Begin),
         Rule::commit_stmt => Ok(Statement::Commit),
+        Rule::savepoint_stmt => Ok(Statement::Savepoint(build_transaction_marker_name(inner)?)),
+        Rule::rollback_to_stmt => Ok(Statement::RollbackTo(build_transaction_marker_name(inner)?)),
         Rule::rollback_stmt => Ok(Statement::Rollback),
         _ => Err(ParseError::UnexpectedToken {
             expected: "statement",

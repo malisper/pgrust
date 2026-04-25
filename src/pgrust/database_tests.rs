@@ -16153,8 +16153,9 @@ fn foreign_keys_reject_unsupported_cross_type_columns() {
         .unwrap();
     assert!(matches!(
         db.execute(1, "create table numeric_children (parent_id numeric references int_parents)"),
-        Err(ExecError::Parse(ParseError::FeatureNotSupported(feature)))
-            if feature == "FOREIGN KEY with cross-type columns"
+        Err(ExecError::Parse(ParseError::DetailedError { message, detail: Some(detail), sqlstate: "42804", .. }))
+            if message == "foreign key constraint \"numeric_children_parent_id_fkey\" cannot be implemented"
+                && detail.contains("incompatible types")
     ));
 }
 
@@ -27794,6 +27795,46 @@ fn create_enum_type_exposes_catalog_rows_and_can_back_table_columns() {
         vec![vec![Value::Text("one".into())]]
     );
     assert!(db.execute(1, "select 'one'::rename_me").is_err());
+}
+
+#[test]
+fn enum_pg_enum_cleanup_query_keeps_select_star_width() {
+    let dir = temp_dir("enum_pg_enum_cleanup_query_width");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create type rainbow as enum ('red', 'green', 'blue')")
+        .unwrap();
+    db.execute(1, "create type planets as enum ('venus', 'earth', 'mars')")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select typname from pg_type where oid = 'planets'::regtype",
+        ),
+        vec![vec![Value::Text("planets".into())]]
+    );
+    db.execute(1, "drop type rainbow").unwrap();
+
+    let result = db
+        .execute(
+            1,
+            "select * from pg_enum where not exists \
+             (select 1 from pg_type where pg_type.oid = enumtypid)",
+        )
+        .unwrap();
+    let StatementResult::Query { columns, rows, .. } = result else {
+        panic!("expected query result");
+    };
+    assert_eq!(
+        columns.len(),
+        4,
+        "columns={:?} rows={:?}",
+        columns.iter().map(|col| &col.name).collect::<Vec<_>>(),
+        rows
+    );
+    assert!(rows.iter().all(|row| row.len() == columns.len()));
+    assert!(rows.is_empty());
 }
 
 #[test]

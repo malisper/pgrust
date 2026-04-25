@@ -189,6 +189,7 @@ impl Database {
                     .unlock_all_transaction(client_id, u64::from(xid));
                 self.row_locks
                     .unlock_all_transaction(client_id, u64::from(xid));
+                self.commit_enum_labels_created_by(xid);
                 self.txn_waiter.unregister_holder(xid);
                 self.txn_waiter.notify();
                 Ok(r)

@@ -1290,7 +1290,14 @@ fn parse_input_type_name(
                         .into_iter()
                         .find(|row| row.typrelid == 0 && row.typname.eq_ignore_ascii_case(&name))
                 })
-                .map(|row| row.sql_type.with_identity(row.oid, row.typrelid));
+                .map(|row| {
+                    let typrelid = if row.sql_type.typrelid != 0 {
+                        row.sql_type.typrelid
+                    } else {
+                        row.typrelid
+                    };
+                    row.sql_type.with_identity(row.oid, typrelid)
+                });
             let base = base.or_else(|| {
                 builtin_type_rows()
                     .into_iter()
@@ -1925,12 +1932,22 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
     match value {
         Value::Null => Ok(Value::Null),
         Value::EnumOid(v) => match ty.kind {
-            SqlTypeKind::Enum | SqlTypeKind::AnyEnum => Ok(Value::EnumOid(v)),
+            SqlTypeKind::Enum => {
+                if let Some(catalog) = catalog {
+                    let enum_type_oid = enum_catalog_type_oid(ty);
+                    ensure_enum_label_safe(catalog, enum_type_oid, v)?;
+                    enforce_enum_domain_constraints(Value::EnumOid(v), ty, catalog)?;
+                }
+                Ok(Value::EnumOid(v))
+            }
+            SqlTypeKind::AnyEnum => Ok(Value::EnumOid(v)),
             SqlTypeKind::Text => {
                 if let Some(label) = source_type
                     .filter(|source| matches!(source.kind, SqlTypeKind::Enum))
                     .and_then(|source| {
-                        catalog.and_then(|catalog| catalog.enum_label(source.type_oid, v))
+                        catalog.and_then(|catalog| {
+                            catalog.enum_label(enum_catalog_type_oid(source), v)
+                        })
                     })
                     .or_else(|| catalog.and_then(|catalog| catalog.enum_label_by_oid(v)))
                 {
@@ -3209,18 +3226,90 @@ fn cast_text_to_enum(
     ty: SqlType,
     catalog: Option<&dyn CatalogLookup>,
 ) -> Result<Value, ExecError> {
-    if let Some(label_oid) = catalog.and_then(|catalog| catalog.enum_label_oid(ty.type_oid, text)) {
+    let enum_type_oid = enum_catalog_type_oid(ty);
+    if let Some(label_oid) = catalog.and_then(|catalog| catalog.enum_label_oid(enum_type_oid, text))
+    {
+        if let Some(catalog) = catalog {
+            ensure_enum_label_safe(catalog, enum_type_oid, label_oid)?;
+            enforce_enum_domain_constraints(Value::EnumOid(label_oid), ty, catalog)?;
+        }
         return Ok(Value::EnumOid(label_oid));
     }
     let type_name = catalog
-        .and_then(|catalog| catalog.type_by_oid(ty.type_oid))
+        .and_then(|catalog| catalog.type_by_oid(enum_type_oid))
         .map(|row| row.typname)
-        .unwrap_or_else(|| ty.type_oid.to_string());
+        .unwrap_or_else(|| enum_type_oid.to_string());
     Err(ExecError::DetailedError {
         message: format!("invalid input value for enum {type_name}: \"{text}\""),
         detail: None,
         hint: None,
         sqlstate: "22P02",
+    })
+}
+
+fn enum_catalog_type_oid(ty: SqlType) -> u32 {
+    if matches!(ty.kind, SqlTypeKind::Enum) && ty.typrelid != 0 {
+        ty.typrelid
+    } else {
+        ty.type_oid
+    }
+}
+
+fn ensure_enum_label_safe(
+    catalog: &dyn CatalogLookup,
+    enum_type_oid: u32,
+    label_oid: u32,
+) -> Result<(), ExecError> {
+    if catalog.enum_label_is_committed(enum_type_oid, label_oid) {
+        return Ok(());
+    }
+    let label = catalog
+        .enum_label(enum_type_oid, label_oid)
+        .or_else(|| catalog.enum_label_by_oid(label_oid))
+        .unwrap_or_else(|| label_oid.to_string());
+    let type_name = catalog
+        .type_by_oid(enum_type_oid)
+        .map(|row| row.typname)
+        .unwrap_or_else(|| enum_type_oid.to_string());
+    Err(ExecError::DetailedError {
+        message: format!("unsafe use of new value \"{label}\" of enum type {type_name}"),
+        detail: None,
+        hint: Some("New enum values must be committed before they can be used.".into()),
+        sqlstate: "55P04",
+    })
+}
+
+fn enforce_enum_domain_constraints(
+    value: Value,
+    ty: SqlType,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    if !matches!(ty.kind, SqlTypeKind::Enum) || ty.typrelid == 0 {
+        return Ok(());
+    }
+    let Value::EnumOid(label_oid) = value else {
+        return Ok(());
+    };
+    let Some(allowed) = catalog.domain_allowed_enum_label_oids(ty.type_oid) else {
+        return Ok(());
+    };
+    if allowed.contains(&label_oid) {
+        return Ok(());
+    }
+    let domain_name = catalog
+        .type_by_oid(ty.type_oid)
+        .map(|row| row.typname)
+        .unwrap_or_else(|| ty.type_oid.to_string());
+    let check_name = catalog
+        .domain_check_name(ty.type_oid)
+        .unwrap_or_else(|| format!("{domain_name}_check"));
+    Err(ExecError::DetailedError {
+        message: format!(
+            "value for domain {domain_name} violates check constraint \"{check_name}\""
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "23514",
     })
 }
 

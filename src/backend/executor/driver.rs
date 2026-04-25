@@ -481,10 +481,14 @@ fn execute_statement_with_source(
         }
         Statement::Delete(stmt) => execute_delete(bind_delete(&stmt, catalog)?, catalog, ctx, xid),
         Statement::Unsupported(stmt) => Err(unsupported_statement_error(&stmt)),
-        Statement::Begin | Statement::Commit | Statement::Rollback => {
+        Statement::Begin
+        | Statement::Commit
+        | Statement::Rollback
+        | Statement::Savepoint(_)
+        | Statement::RollbackTo(_) => {
             Err(ExecError::Parse(ParseError::UnexpectedToken {
                 expected: "non-transaction-control statement",
-                actual: "BEGIN/COMMIT/ROLLBACK".into(),
+                actual: "transaction control".into(),
             }))
         }
     };

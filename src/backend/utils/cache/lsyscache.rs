@@ -1782,6 +1782,18 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         self.db.enum_rows_for_catalog()
     }
 
+    fn enum_label_is_committed(&self, type_oid: u32, label_oid: u32) -> bool {
+        self.db.enum_label_is_committed(type_oid, label_oid)
+    }
+
+    fn domain_allowed_enum_label_oids(&self, domain_oid: u32) -> Option<Vec<u32>> {
+        self.db.domain_allowed_enum_label_oids(domain_oid)
+    }
+
+    fn domain_check_name(&self, domain_oid: u32) -> Option<String> {
+        self.db.domain_check_name(domain_oid)
+    }
+
     fn language_rows(&self) -> Vec<PgLanguageRow> {
         language_rows(self.db, self.client_id, self.txn_ctx)
     }
@@ -2088,6 +2100,8 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
                 self.search_path.clone(),
             )
             .with_enum_rows(self.db.enum_rows_for_catalog())
+            .with_uncommitted_enum_label_oids(self.db.uncommitted_enum_label_oids())
+            .with_domain_checks(self.db.domain_checks_for_catalog())
             .with_dynamic_type_rows(dynamic_type_rows),
         )
     }
