@@ -1205,12 +1205,17 @@ pub fn relation_get_index_list(
     txn_ctx: Option<(TransactionId, CommandId)>,
     relation_oid: u32,
 ) -> Vec<u32> {
-    index_rows_for_heap(db, client_id, txn_ctx, relation_oid)
+    let mut index_oids = index_rows_for_heap(db, client_id, txn_ctx, relation_oid)
         .into_iter()
         .map(|row| row.indexrelid)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
+        .collect::<BTreeSet<_>>();
+    if let Some(namespace) = db.temp_relations.read().get(&db.temp_backend_id(client_id)) {
+        index_oids.extend(namespace.tables.values().filter_map(|temp| {
+            let index = temp.entry.index.as_ref()?;
+            (index.indrelid == relation_oid).then_some(temp.entry.relation_oid)
+        }));
+    }
+    index_oids.into_iter().collect()
 }
 
 pub fn index_relation_oids_for_heap(

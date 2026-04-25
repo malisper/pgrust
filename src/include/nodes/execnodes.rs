@@ -585,6 +585,7 @@ pub struct LockRowsState {
 pub struct AggregateState {
     pub(crate) input: PlanState,
     pub(crate) group_by: Vec<Expr>,
+    pub(crate) passthrough_exprs: Vec<Expr>,
     pub(crate) accumulators: Vec<AggAccum>,
     pub(crate) having: Option<Expr>,
     pub(crate) output_columns: Vec<String>,

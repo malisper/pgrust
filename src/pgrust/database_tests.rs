@@ -21514,6 +21514,29 @@ fn create_index_supports_temp_tables_when_temp_is_first_visible() {
 }
 
 #[test]
+fn temp_primary_key_indexes_are_visible_through_catalog_lookup() {
+    let base = temp_dir("temp_primary_key_indexes_visible");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create temp table items (id int4 primary key, note int4)",
+        )
+        .unwrap();
+
+    let lookup = db.lazy_catalog_lookup(1, None, None);
+    let relation = lookup.lookup_any_relation("items").unwrap();
+    let indexes = lookup.index_relations_for_heap(relation.relation_oid);
+
+    assert_eq!(indexes.len(), 1);
+    assert!(indexes[0].index_meta.indisprimary);
+    assert!(indexes[0].index_meta.indisready);
+    assert!(indexes[0].index_meta.indisvalid);
+}
+
+#[test]
 fn temp_table_on_commit_actions_apply_at_commit() {
     let base = temp_dir("temp_table_on_commit");
     let db = Database::open(&base, 16).unwrap();

@@ -306,6 +306,12 @@ pub struct UpperRelEntry {
     pub rel: RelOptInfo,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AggregateLayout {
+    pub group_by: Vec<Expr>,
+    pub passthrough_exprs: Vec<Expr>,
+}
+
 #[derive(Debug, Clone)]
 pub struct PlannerInfo {
     pub config: PlannerConfig,
@@ -316,6 +322,7 @@ pub struct PlannerInfo {
     pub upper_rels: Vec<UpperRelEntry>,
     pub join_info_list: Vec<SpecialJoinInfo>,
     pub inner_join_clauses: Vec<RestrictInfo>,
+    pub aggregate_layout: AggregateLayout,
     pub processed_tlist: Vec<TargetEntry>,
     pub scanjoin_target: PathTarget,
     pub group_input_target: PathTarget,
@@ -508,6 +515,7 @@ pub enum Path {
         slot_id: usize,
         input: Box<Path>,
         group_by: Vec<Expr>,
+        passthrough_exprs: Vec<Expr>,
         accumulators: Vec<AggAccum>,
         having: Option<Expr>,
         output_columns: Vec<QueryColumn>,

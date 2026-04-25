@@ -14,6 +14,7 @@ use crate::include::nodes::primnodes::{
 
 use super::super::bestpath;
 use super::super::create_plan_with_param_base;
+use super::super::groupby_rewrite;
 use super::super::has_grouping;
 use super::super::path::{query_planner, relation_ordered_index_paths, residual_where_qual};
 use super::super::pathnodes::{next_synthetic_slot_id, window_output_columns};
@@ -83,8 +84,13 @@ fn make_aggregate_rel(
     );
     for path in input_rel.pathlist {
         let group_by = root
-            .parse
-            .group_by
+            .aggregate_group_by()
+            .iter()
+            .cloned()
+            .map(|expr| expand_join_rte_vars(root, expr))
+            .collect::<Vec<_>>();
+        let passthrough_exprs = root
+            .aggregate_passthrough_exprs()
             .iter()
             .cloned()
             .map(|expr| expand_join_rte_vars(root, expr))
@@ -118,9 +124,14 @@ fn make_aggregate_rel(
                 slot_id,
                 input: Box::new(path),
                 group_by: group_by.clone(),
+                passthrough_exprs: passthrough_exprs.clone(),
                 accumulators: accumulators.clone(),
                 having,
-                output_columns: build_aggregate_output_columns(&group_by, &accumulators),
+                output_columns: build_aggregate_output_columns(
+                    &group_by,
+                    &passthrough_exprs,
+                    &accumulators,
+                ),
             },
             catalog,
         ));
@@ -1021,7 +1032,8 @@ fn standard_planner_with_param_base(
     let mut glob = PlannerGlobal::new();
     let query = root::prepare_query_for_planning(root::prepare_query_for_locking(query)?);
     let query = pull_up_sublinks(query);
-    let mut root = PlannerInfo::new_with_config(query, config);
+    let aggregate_layout = groupby_rewrite::build_aggregate_layout(&query, catalog);
+    let mut root = PlannerInfo::new_with_config(query, aggregate_layout, config);
     let command_type = root.parse.command_type;
     let scanjoin_rel = query_planner(&mut root, catalog);
     let final_rel = grouping_planner(&mut root, scanjoin_rel, catalog);
