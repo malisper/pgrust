@@ -17,7 +17,9 @@ use crate::include::nodes::datum::Value;
 use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerConfig, PlannerInfo, RelOptInfo, RelOptKind,
 };
-use crate::include::nodes::plannodes::{IndexScanKeyArgument, Plan, PlanEstimate};
+use crate::include::nodes::plannodes::{
+    AggregateStrategy, IndexScanKeyArgument, Plan, PlanEstimate,
+};
 use crate::include::nodes::primnodes::{
     Aggref, AttrNumber, Expr, INNER_VAR, JoinType, OUTER_VAR, OpExpr, OpExprKind, OrderByEntry,
     Param, ParamKind, QueryColumn, RelationDesc, TargetEntry, Var, WindowFrameBound, user_attrno,
@@ -969,6 +971,45 @@ fn plan_contains(plan: &Plan, predicate: impl Copy + Fn(&Plan) -> bool) -> bool 
     }
 }
 
+fn find_aggregate_plan(plan: &Plan) -> Option<&Plan> {
+    match plan {
+        Plan::Aggregate { .. } => Some(plan),
+        Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
+            children.iter().find_map(find_aggregate_plan)
+        }
+        Plan::Hash { input, .. }
+        | Plan::Filter { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::ProjectSet { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::BitmapHeapScan {
+            bitmapqual: input, ..
+        }
+        | Plan::CteScan {
+            cte_plan: input, ..
+        } => find_aggregate_plan(input),
+        Plan::NestedLoopJoin { left, right, .. }
+        | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. }
+        | Plan::RecursiveUnion {
+            anchor: left,
+            recursive: right,
+            ..
+        } => find_aggregate_plan(left).or_else(|| find_aggregate_plan(right)),
+        Plan::Result { .. }
+        | Plan::SeqScan { .. }
+        | Plan::IndexScan { .. }
+        | Plan::BitmapIndexScan { .. }
+        | Plan::Values { .. }
+        | Plan::FunctionScan { .. }
+        | Plan::WorkTableScan { .. } => None,
+    }
+}
+
 #[test]
 fn outer_join_preserved_side_where_qual_pushes_to_base_scan() {
     let catalog = catalog_with_people_and_pets();
@@ -1213,6 +1254,80 @@ fn planned_grouped_window_query_keeps_aggregate_below_windowagg() {
         },
         other => panic!("expected final projection, got {other:?}"),
     }
+}
+
+#[test]
+fn distinct_grouped_aggregate_uses_sorted_strategy() {
+    let planned = planned_stmt_for_values_sql(
+        "select grp, sum(distinct val) from (values (2, 1), (1, 1), (2, 2)) as t(grp, val) group by grp",
+    );
+    let aggregate = find_aggregate_plan(&planned.plan_tree).expect("aggregate plan");
+    match aggregate {
+        Plan::Aggregate {
+            strategy, input, ..
+        } => {
+            assert_eq!(*strategy, AggregateStrategy::Sorted);
+            assert!(matches!(input.as_ref(), Plan::OrderBy { .. }));
+        }
+        other => panic!("expected aggregate plan, got {other:?}"),
+    }
+}
+
+#[test]
+fn ordinary_grouped_aggregate_uses_hashed_strategy() {
+    let planned = planned_stmt_for_values_sql(
+        "select grp, count(*) from (values (2), (1), (2)) as t(grp) group by grp",
+    );
+    let aggregate = find_aggregate_plan(&planned.plan_tree).expect("aggregate plan");
+    match aggregate {
+        Plan::Aggregate {
+            strategy, input, ..
+        } => {
+            assert_eq!(*strategy, AggregateStrategy::Hashed);
+            assert!(!matches!(input.as_ref(), Plan::OrderBy { .. }));
+        }
+        other => panic!("expected aggregate plan, got {other:?}"),
+    }
+}
+
+#[test]
+fn aggregate_pathkeys_follow_strategy() {
+    let key = pathkey(var(10, 1));
+    let hashed = Path::Aggregate {
+        plan_info: PlanEstimate::default(),
+        pathtarget: PathTarget::new(vec![var(10, 1)]),
+        slot_id: 20,
+        strategy: AggregateStrategy::Hashed,
+        pathkeys: vec![key.clone()],
+        input: Box::new(values_path(10, 1.0, 1.0)),
+        group_by: vec![var(10, 1)],
+        accumulators: Vec::new(),
+        having: None,
+        output_columns: vec![QueryColumn {
+            name: "grp".into(),
+            sql_type: int4(),
+            wire_type_oid: None,
+        }],
+    };
+    assert!(hashed.pathkeys().is_empty());
+
+    let sorted = Path::Aggregate {
+        plan_info: PlanEstimate::default(),
+        pathtarget: PathTarget::new(vec![var(10, 1)]),
+        slot_id: 20,
+        strategy: AggregateStrategy::Sorted,
+        pathkeys: vec![key.clone()],
+        input: Box::new(values_path(10, 1.0, 1.0)),
+        group_by: vec![var(10, 1)],
+        accumulators: Vec::new(),
+        having: None,
+        output_columns: vec![QueryColumn {
+            name: "grp".into(),
+            sql_type: int4(),
+            wire_type_oid: None,
+        }],
+    };
+    assert_eq!(sorted.pathkeys(), vec![key]);
 }
 
 #[test]
