@@ -166,7 +166,7 @@ jobs:
             echo "Compact regression artifact bundle."
             echo "Source results dir: $REGRESS_RESULTS_DIR"
             echo "Included: summary.json, summary.md, exit_code.txt, output/, diff/, status/, fixtures/"
-            echo "Excluded: workers/ and tablespaces/ database state"
+            echo "Excluded: base/, workers/, and tablespaces/ database state"
             echo
             if [[ -d "$REGRESS_RESULTS_DIR" ]]; then
               du -sh "$REGRESS_RESULTS_DIR" || true
