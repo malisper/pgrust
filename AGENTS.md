@@ -87,8 +87,18 @@ implementation modules. Executor code may depend on `datum`, `plannodes`, and
 ## Token Budget Rules
 
 - Start with `rg` and small `sed -n` ranges. Do not dump whole large files.
+- Keep tool output small. Default `max_output_tokens` to `4000` or less unless
+  there is a concrete reason to raise it.
+- For `write_stdin` polling, use `max_output_tokens <= 2000` and wait at least
+  30s unless actively debugging an interactive failure.
+- Do not run broad `rg` over `/tmp/diffs`, `/tmp`, `.`, `~/.cargo/registry`,
+  or `target`. Narrow searches to specific files or subdirectories.
+- Do not run `rg --files /tmp/diffs`; inspect the task-specific result
+  directory and only the relevant `.diff` or `.out` file.
 - Use `git diff --stat` before full `git diff`; inspect only relevant hunks.
 - Save large logs to `/tmp` and summarize the failing lines.
+- For CI logs, save raw logs to `/tmp` when needed and filter summaries with
+  bounded commands such as `rg -m 100 -C 3`.
 - For regression reruns, copy useful `.diff` artifacts to `/tmp/diffs`.
 - After broad exploration, write a short task note in
   `.codex/task-notes/<task>.md`:
@@ -103,6 +113,8 @@ implementation modules. Executor code may depend on `datum`, `plannodes`, and
 
 - Prefer fresh sessions for unrelated tasks. Resume from the task note instead
   of replaying long chat history.
+- Restart or hand off after noisy test, CI, or log-debugging loops instead of
+  continuing inside a polluted session.
 - Use subagents only for narrow read-only exploration or disjoint file ownership.
   Give them explicit output limits and owned files.
 
