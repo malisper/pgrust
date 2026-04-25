@@ -7,12 +7,13 @@ use crate::backend::parser::{
     pg_partitioned_table_row, resolve_raw_type_name, serialize_partition_bound,
 };
 use crate::include::catalog::{
-    ANYOID, BOOTSTRAP_SUPERUSER_OID, BYTEA_TYPE_OID, INTERNAL_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
+    ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLERANGEOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID,
+    BOOTSTRAP_SUPERUSER_OID, BYTEA_TYPE_OID, INTERNAL_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
     PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID, PgAggregateRow,
     PgProcRow, RECORD_TYPE_OID,
 };
 use crate::include::nodes::parsenodes::{ForeignKeyAction, ForeignKeyMatchType};
-use crate::include::nodes::primnodes::QueryColumn;
+use crate::include::nodes::primnodes::{QueryColumn, RelationDesc};
 use crate::pgrust::database::{
     SequenceData, SequenceRuntime, default_sequence_name_base, format_nextval_default_oid,
     initial_sequence_state, resolve_sequence_options_spec, sequence_type_oid_for_serial_kind,
@@ -238,6 +239,67 @@ fn proc_arg_mode(mode: FunctionArgMode) -> u8 {
         FunctionArgMode::In => b'i',
         FunctionArgMode::Out => b'o',
         FunctionArgMode::InOut => b'b',
+    }
+}
+
+fn validate_range_polymorphic_result(
+    prorettype: u32,
+    proallargtypes: Option<&[u32]>,
+    proargmodes: Option<&[u8]>,
+    callable_arg_oids: &[u32],
+) -> Result<(), ExecError> {
+    let mut output_oids = vec![prorettype];
+    if let (Some(all_argtypes), Some(argmodes)) = (proallargtypes, proargmodes) {
+        output_oids.extend(
+            all_argtypes
+                .iter()
+                .zip(argmodes.iter())
+                .filter_map(|(oid, mode)| matches!(*mode, b'o' | b'b' | b't').then_some(*oid)),
+        );
+    }
+    for output_oid in output_oids {
+        if !is_range_family_polymorphic_oid(output_oid) {
+            continue;
+        }
+        let has_range_family_input = callable_arg_oids
+            .iter()
+            .copied()
+            .any(is_range_family_polymorphic_oid);
+        if !has_range_family_input {
+            return Err(cannot_determine_range_polymorphic_result(output_oid));
+        }
+    }
+    Ok(())
+}
+
+fn is_range_family_polymorphic_oid(oid: u32) -> bool {
+    matches!(
+        oid,
+        ANYRANGEOID | ANYMULTIRANGEOID | ANYCOMPATIBLERANGEOID | ANYCOMPATIBLEMULTIRANGEOID
+    )
+}
+
+fn cannot_determine_range_polymorphic_result(oid: u32) -> ExecError {
+    let (result, inputs) = match oid {
+        ANYRANGEOID => ("anyrange", "anyrange or anymultirange"),
+        ANYMULTIRANGEOID => ("anymultirange", "anyrange or anymultirange"),
+        ANYCOMPATIBLERANGEOID => (
+            "anycompatiblerange",
+            "anycompatiblerange or anycompatiblemultirange",
+        ),
+        ANYCOMPATIBLEMULTIRANGEOID => (
+            "anycompatiblemultirange",
+            "anycompatiblerange or anycompatiblemultirange",
+        ),
+        _ => ("polymorphic", "compatible polymorphic"),
+    };
+    ExecError::DetailedError {
+        message: "cannot determine result data type".into(),
+        detail: Some(format!(
+            "A result of type {result} requires at least one input of type {inputs}."
+        )),
+        hint: None,
+        sqlstate: "42P13",
     }
 }
 
@@ -964,7 +1026,7 @@ impl Database {
         let catalog = self.lazy_catalog_lookup(client_id, None, configured_search_path);
         let sql_type = crate::backend::parser::resolve_raw_type_name(&create_stmt.ty, &catalog)
             .map_err(ExecError::Parse)?;
-        let check = match &create_stmt.check {
+        let enum_check = match &create_stmt.enum_check {
             Some(check) if matches!(sql_type.kind, crate::backend::parser::SqlTypeKind::Enum) => {
                 let mut allowed_enum_label_oids = Vec::with_capacity(check.allowed_values.len());
                 for value in &check.allowed_values {
@@ -993,11 +1055,7 @@ impl Database {
                     allowed_enum_label_oids,
                 })
             }
-            Some(_) => {
-                return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                    "CREATE DOMAIN CHECK constraints are only supported for enum domains".into(),
-                )));
-            }
+            Some(_) => None,
             None => None,
         };
         let (normalized, object_name, namespace_oid) = self
@@ -1024,7 +1082,10 @@ impl Database {
                 name: object_name,
                 namespace_oid,
                 sql_type,
-                check,
+                default: create_stmt.default.clone(),
+                check: create_stmt.check.clone(),
+                not_null: create_stmt.not_null,
+                enum_check,
                 comment: None,
             },
         );
@@ -1260,6 +1321,12 @@ impl Database {
             .map(u32::to_string)
             .collect::<Vec<_>>()
             .join(" ");
+        validate_range_polymorphic_result(
+            prorettype,
+            proallargtypes.as_deref(),
+            proargmodes.as_deref(),
+            &callable_arg_oids,
+        )?;
         let existing_proc = catalog
             .proc_rows_by_name(&function_name)
             .into_iter()
@@ -1691,6 +1758,7 @@ impl Database {
             )?;
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let lowered = lower_create_table_with_catalog(create_stmt, &catalog, persistence)?;
+        self.ensure_create_table_type_usage(client_id, &lowered.relation_desc)?;
         if create_stmt.if_not_exists
             && relation_exists_in_namespace(&catalog, &table_name, namespace_oid)
         {
@@ -2084,6 +2152,43 @@ impl Database {
                 Ok(StatementResult::AffectedRows(0))
             }
         }
+    }
+
+    fn ensure_create_table_type_usage(
+        &self,
+        client_id: ClientId,
+        desc: &RelationDesc,
+    ) -> Result<(), ExecError> {
+        let current_user_oid = self.auth_state(client_id).current_user_oid();
+        let range_types = self.range_types.read();
+        for column in &desc.columns {
+            let ty = column.sql_type.element_type();
+            let Some(entry) = range_types
+                .values()
+                .find(|entry| ty.type_oid == entry.oid || ty.type_oid == entry.multirange_oid)
+            else {
+                continue;
+            };
+            let allowed = if current_user_oid == entry.owner_oid {
+                entry.owner_usage
+            } else {
+                entry.public_usage
+            };
+            if !allowed {
+                let type_name = if ty.type_oid == entry.multirange_oid {
+                    &entry.multirange_name
+                } else {
+                    &entry.name
+                };
+                return Err(ExecError::DetailedError {
+                    message: format!("permission denied for type {type_name}"),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "42501",
+                });
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn execute_create_view_stmt_in_transaction_with_search_path(

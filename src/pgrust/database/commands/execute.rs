@@ -1406,6 +1406,12 @@ impl Database {
                 alter_stmt,
                 configured_search_path,
             ),
+            Statement::AlterTypeOwner(ref alter_stmt) => self
+                .execute_alter_type_owner_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::CreateView(ref create_stmt) => self
                 .execute_create_view_stmt_with_search_path(
                     client_id,

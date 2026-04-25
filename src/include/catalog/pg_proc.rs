@@ -2,22 +2,23 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    ANYARRAYOID, ANYENUMOID, ANYOID, BIT_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID,
-    BOX_TYPE_OID, BPCHAR_TYPE_OID, BYTEA_TYPE_OID, CIRCLE_TYPE_OID, DATE_TYPE_OID,
-    DATERANGE_TYPE_OID, FDW_HANDLER_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_ARRAY_TYPE_OID,
-    FLOAT8_TYPE_OID, INET_TYPE_OID, INT2_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID,
-    INT8_ARRAY_TYPE_OID, INT8_TYPE_OID, INT8RANGE_TYPE_OID, INTERNAL_CHAR_TYPE_OID,
-    INTERVAL_TYPE_OID, JSON_TYPE_OID, JSONB_TYPE_OID, JSONPATH_TYPE_OID, LINE_TYPE_OID,
-    LSEG_TYPE_OID, MACADDR_TYPE_OID, MACADDR8_TYPE_OID, MONEY_TYPE_OID, NAME_TYPE_OID,
-    NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID, OID_TYPE_OID, PATH_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
-    PG_LANGUAGE_INTERNAL_OID, PG_NODE_TREE_TYPE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID,
-    RECORD_TYPE_OID, REGCLASS_TYPE_OID, REGCOLLATION_TYPE_OID, REGCONFIG_TYPE_OID,
-    REGNAMESPACE_TYPE_OID, REGOPER_TYPE_OID, REGOPERATOR_TYPE_OID, REGPROC_TYPE_OID,
-    REGPROCEDURE_TYPE_OID, REGROLE_TYPE_OID, REGTYPE_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
-    TIME_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TIMETZ_TYPE_OID, TRIGGER_TYPE_OID,
-    TSQUERY_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID, TSVECTOR_TYPE_OID,
-    TXID_SNAPSHOT_TYPE_OID, UUID_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_TYPE_OID, XID_TYPE_OID,
-    XML_TYPE_OID, aggregate_func_for_dynamic_range_proc_oid,
+    ANYARRAYOID, ANYENUMOID, ANYMULTIRANGEOID, ANYOID, ARRAYRANGE_TYPE_OID, BIT_TYPE_OID,
+    BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID, BOX_TYPE_OID, BPCHAR_TYPE_OID, BYTEA_TYPE_OID,
+    CIRCLE_TYPE_OID, DATE_TYPE_OID, DATERANGE_TYPE_OID, FDW_HANDLER_TYPE_OID, FLOAT4_TYPE_OID,
+    FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INET_TYPE_OID, INT2_TYPE_OID, INT4_ARRAY_TYPE_OID,
+    INT4_TYPE_OID, INT4RANGE_TYPE_OID, INT8_ARRAY_TYPE_OID, INT8_TYPE_OID, INT8RANGE_TYPE_OID,
+    INTERNAL_CHAR_TYPE_OID, INTERVAL_TYPE_OID, JSON_TYPE_OID, JSONB_TYPE_OID, JSONPATH_TYPE_OID,
+    LINE_TYPE_OID, LSEG_TYPE_OID, MACADDR_TYPE_OID, MACADDR8_TYPE_OID, MONEY_TYPE_OID,
+    NAME_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID, OID_TYPE_OID, PATH_TYPE_OID,
+    PG_CATALOG_NAMESPACE_OID, PG_LANGUAGE_INTERNAL_OID, PG_NODE_TREE_TYPE_OID, POINT_TYPE_OID,
+    POLYGON_TYPE_OID, RECORD_TYPE_OID, REGCLASS_TYPE_OID, REGCOLLATION_TYPE_OID,
+    REGCONFIG_TYPE_OID, REGNAMESPACE_TYPE_OID, REGOPER_TYPE_OID, REGOPERATOR_TYPE_OID,
+    REGPROC_TYPE_OID, REGPROCEDURE_TYPE_OID, REGROLE_TYPE_OID, REGTYPE_TYPE_OID,
+    TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
+    TIMETZ_TYPE_OID, TRIGGER_TYPE_OID, TSQUERY_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID,
+    TSVECTOR_TYPE_OID, TXID_SNAPSHOT_TYPE_OID, UUID_TYPE_OID, VARBIT_TYPE_OID,
+    VARBITRANGE_TYPE_OID, VARCHAR_TYPE_OID, XID_TYPE_OID, XML_TYPE_OID,
+    aggregate_func_for_dynamic_range_proc_oid,
 };
 use crate::include::nodes::primnodes::{
     AggFunc, BuiltinScalarFunction, BuiltinWindowFunction, HypotheticalAggFunc,
@@ -105,6 +106,7 @@ pub const RANGE_GIST_UNION_PROC_OID: u32 = 3876;
 pub const RANGE_GIST_PENALTY_PROC_OID: u32 = 3879;
 pub const RANGE_GIST_PICKSPLIT_PROC_OID: u32 = 3880;
 pub const RANGE_GIST_SAME_PROC_OID: u32 = 3881;
+pub const MULTIRANGE_GIST_CONSISTENT_PROC_OID: u32 = 6154;
 pub const GIST_BOX_DISTANCE_PROC_OID: u32 = 3998;
 pub const GIST_NETWORK_CONSISTENT_PROC_OID: u32 = 76610;
 pub const GIST_NETWORK_UNION_PROC_OID: u32 = 76611;
@@ -146,6 +148,7 @@ pub const HASH_DATE_PROC_OID: u32 = 76515;
 pub const HASH_TIME_PROC_OID: u32 = 76516;
 pub const HASH_TIMETZ_PROC_OID: u32 = 76517;
 pub const HASH_BYTEA_PROC_OID: u32 = 76518;
+pub const HASH_MULTIRANGE_PROC_OID: u32 = 76519;
 pub const HASH_UUID_PROC_OID: u32 = 2963;
 pub const MACADDR_EQ_PROC_OID: u32 = 830;
 pub const MACADDR_LT_PROC_OID: u32 = 831;
@@ -186,6 +189,11 @@ pub const UUID_CMP_GE_PROC_OID: u32 = 2957;
 pub const UUID_CMP_GT_PROC_OID: u32 = 2958;
 pub const UUID_CMP_NE_PROC_OID: u32 = 2959;
 pub const UUID_CMP_PROC_OID: u32 = 2960;
+pub const MULTIRANGE_GIST_UNION_PROC_OID: u32 = 76620;
+pub const MULTIRANGE_GIST_PENALTY_PROC_OID: u32 = 76621;
+pub const MULTIRANGE_GIST_PICKSPLIT_PROC_OID: u32 = 76622;
+pub const MULTIRANGE_GIST_SAME_PROC_OID: u32 = 76623;
+pub const MULTIRANGE_SORTSUPPORT_PROC_OID: u32 = 76624;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PgProcRow {
@@ -6009,6 +6017,8 @@ fn range_proc_rows() -> Vec<PgProcRow> {
         ("daterange", DATERANGE_TYPE_OID, DATE_TYPE_OID),
         ("tsrange", TSRANGE_TYPE_OID, TIMESTAMP_TYPE_OID),
         ("tstzrange", TSTZRANGE_TYPE_OID, TIMESTAMPTZ_TYPE_OID),
+        ("arrayrange", ARRAYRANGE_TYPE_OID, INT4_ARRAY_TYPE_OID),
+        ("varbitrange", VARBITRANGE_TYPE_OID, VARBIT_TYPE_OID),
     ];
     let mut next_oid = 62_100u32;
     let mut rows = Vec::new();
@@ -6463,6 +6473,84 @@ fn gist_support_proc_rows() -> Vec<PgProcRow> {
             'i',
         ),
         proc_row(
+            MULTIRANGE_GIST_CONSISTENT_PROC_OID,
+            "multirange_gist_consistent",
+            BOOL_TYPE_OID,
+            &oid_argtypes(&[
+                INTERNAL_TYPE_OID,
+                ANYMULTIRANGEOID,
+                INT2_TYPE_OID,
+                OID_TYPE_OID,
+                INTERNAL_TYPE_OID,
+            ]),
+            "multirange_gist_consistent",
+            5,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            MULTIRANGE_GIST_UNION_PROC_OID,
+            "multirange_gist_union",
+            ANYMULTIRANGEOID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "multirange_gist_union",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            MULTIRANGE_GIST_PENALTY_PROC_OID,
+            "multirange_gist_penalty",
+            INTERNAL_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "multirange_gist_penalty",
+            3,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            MULTIRANGE_GIST_PICKSPLIT_PROC_OID,
+            "multirange_gist_picksplit",
+            INTERNAL_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID, INTERNAL_TYPE_OID]),
+            "multirange_gist_picksplit",
+            2,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            MULTIRANGE_GIST_SAME_PROC_OID,
+            "multirange_gist_same",
+            INTERNAL_TYPE_OID,
+            &oid_argtypes(&[ANYMULTIRANGEOID, ANYMULTIRANGEOID, INTERNAL_TYPE_OID]),
+            "multirange_gist_same",
+            3,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
+            MULTIRANGE_SORTSUPPORT_PROC_OID,
+            "multirange_sortsupport",
+            VOID_TYPE_OID,
+            &oid_argtypes(&[INTERNAL_TYPE_OID]),
+            "multirange_sortsupport",
+            1,
+            false,
+            false,
+            'f',
+            'i',
+        ),
+        proc_row(
             GIST_TRANSLATE_CMPTYPE_COMMON_PROC_OID,
             "gist_translate_cmptype_common",
             INT2_TYPE_OID,
@@ -6705,6 +6793,11 @@ fn hash_support_proc_rows() -> Vec<PgProcRow> {
         (HASH_TIME_PROC_OID, "hashtime", TIME_TYPE_OID),
         (HASH_TIMETZ_PROC_OID, "hashtimetz", TIMETZ_TYPE_OID),
         (HASH_BYTEA_PROC_OID, "hashbytea", BYTEA_TYPE_OID),
+        (
+            HASH_MULTIRANGE_PROC_OID,
+            "hash_multirange",
+            ANYMULTIRANGEOID,
+        ),
     ]
     .into_iter()
     .map(|(oid, proname, type_oid)| {

@@ -16,8 +16,8 @@ use crate::include::nodes::parsenodes::{
     CommentOnAggregateStatement, CommentOnFunctionStatement, CompositeTypeAttributeDef,
     CreateAggregateStatement, CreateCompositeTypeStatement, CreateTriggerStatement,
     CreateTypeStatement, DropAggregateStatement, DropTriggerStatement, DropTypeStatement,
-    ForeignKeyAction, ForeignKeyMatchType, IndexColumnDef, InsertSource, InsertStatement,
-    JoinTreeNode, PartitionStrategy, PublicationObjectSpec, PublicationOption,
+    ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege, IndexColumnDef, InsertSource,
+    InsertStatement, JoinTreeNode, PartitionStrategy, PublicationObjectSpec, PublicationOption,
     PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey,
     RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement,
     SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel,
@@ -9982,6 +9982,26 @@ fn parse_create_drop_and_comment_on_domain_statements() {
         create.ty,
         RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4))
     );
+    assert_eq!(create.default, None);
+    assert_eq!(create.check, None);
+    assert!(!create.not_null);
+
+    let Statement::CreateDomain(create) = parse_statement(
+        "create domain small_mr as int4multirange default '{}' check (upper(value) < 10) not null",
+    )
+    .unwrap() else {
+        panic!("expected create domain");
+    };
+    assert_eq!(
+        create.ty,
+        RawTypeName::Named {
+            name: "int4multirange".into(),
+            array_bounds: 0,
+        }
+    );
+    assert_eq!(create.default.as_deref(), Some("'{}'"));
+    assert_eq!(create.check.as_deref(), Some("upper(value) < 10"));
+    assert!(create.not_null);
 
     let Statement::DropDomain(drop_stmt) =
         parse_statement("drop domain if exists dom_int cascade").unwrap()
@@ -10204,6 +10224,24 @@ fn parse_create_and_drop_type_statements() {
     assert!(!if_exists);
     assert_eq!(type_names, vec!["complex"]);
     assert!(cascade);
+
+    let Statement::AlterTypeOwner(alter_stmt) =
+        parse_statement("alter type complex owner to app_owner").unwrap()
+    else {
+        panic!("expected alter type owner");
+    };
+    assert_eq!(alter_stmt.type_name, "complex");
+    assert_eq!(alter_stmt.new_owner, "app_owner");
+
+    let Statement::RevokeObject(revoke_stmt) =
+        parse_statement("revoke usage on type complex from public").unwrap()
+    else {
+        panic!("expected revoke type usage");
+    };
+    assert_eq!(revoke_stmt.privilege, GrantObjectPrivilege::UsageOnType);
+    assert_eq!(revoke_stmt.object_names, vec!["complex"]);
+    assert_eq!(revoke_stmt.grantee_names, vec!["public"]);
+    assert!(!revoke_stmt.cascade);
 }
 
 #[test]

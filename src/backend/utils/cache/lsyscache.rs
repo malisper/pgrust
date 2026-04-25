@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use crate::ClientId;
 use crate::backend::access::transam::xact::{CommandId, TransactionId};
 use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
-use crate::backend::parser::{BoundRelation, CatalogLookup};
+use crate::backend::parser::{BoundRelation, CatalogLookup, DomainLookup};
 use crate::backend::storage::smgr::{BLCKSZ, ForkNumber, StorageManager};
 use crate::backend::utils::cache::catcache::normalize_catalog_name;
 use crate::backend::utils::cache::relcache::RelCacheEntry;
@@ -480,6 +480,25 @@ pub(crate) fn dynamic_type_rows_for_search_path(
     rows.extend(db.enum_type_rows_for_search_path(search_path));
     rows.extend(db.range_type_rows_for_search_path(search_path));
     rows
+}
+
+fn visible_domain_by_name(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    search_path: &[String],
+    name: &str,
+) -> Option<DomainLookup> {
+    let type_row = visible_type_row_by_name(db, client_id, txn_ctx, search_path, name)?;
+    let domains = db.domains.read();
+    let domain = domains.values().find(|domain| domain.oid == type_row.oid)?;
+    Some(DomainLookup {
+        name: domain.name.clone(),
+        sql_type: domain.sql_type,
+        default: domain.default.clone(),
+        check: domain.check.clone(),
+        not_null: domain.not_null,
+    })
 }
 
 fn range_proc_type_rows(db: &Database, search_path: &[String]) -> Vec<PgTypeRow> {
@@ -1746,6 +1765,16 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
 
     fn type_by_name(&self, name: &str) -> Option<PgTypeRow> {
         visible_type_row_by_name(
+            self.db,
+            self.client_id,
+            self.txn_ctx,
+            &self.search_path,
+            name,
+        )
+    }
+
+    fn domain_by_name(&self, name: &str) -> Option<DomainLookup> {
+        visible_domain_by_name(
             self.db,
             self.client_id,
             self.txn_ctx,

@@ -797,6 +797,7 @@ pub enum BuiltinScalarFunction {
     PgInputErrorDetail,
     PgInputErrorHint,
     PgInputErrorSqlState,
+    PgRustDomainCheckUpperLessThan,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -885,13 +885,34 @@ impl Database {
         let (normalized, _, _) =
             self.normalize_domain_name_for_create(&drop_stmt.domain_name, configured_search_path)?;
         let mut domains = self.domains.write();
-        if domains.remove(&normalized).is_none() {
+        let Some(domain) = domains.remove(&normalized) else {
             if drop_stmt.if_exists {
                 return Ok(StatementResult::AffectedRows(0));
             }
             return Err(ExecError::Parse(ParseError::UnsupportedType(
                 drop_stmt.domain_name.clone(),
             )));
+        };
+        drop(domains);
+        if drop_stmt.cascade {
+            let default_range_name = format!("{}range", domain.name);
+            let dependent_ranges = self
+                .range_types
+                .read()
+                .iter()
+                .filter(|(_, entry)| {
+                    entry.subtype.type_oid == domain.oid
+                        || entry.name.eq_ignore_ascii_case(&default_range_name)
+                })
+                .map(|(key, entry)| (key.clone(), entry.name.clone()))
+                .collect::<Vec<_>>();
+            if !dependent_ranges.is_empty() {
+                let mut range_types = self.range_types.write();
+                for (key, name) in dependent_ranges {
+                    push_notice(format!("drop cascades to type {name}"));
+                    range_types.remove(&key);
+                }
+            }
         }
         self.plan_cache.invalidate_all();
         Ok(StatementResult::AffectedRows(0))
@@ -912,6 +933,10 @@ impl Database {
         let catcache = self
             .backend_catcache(client_id, Some((xid, cid)))
             .map_err(map_catalog_error)?;
+        let search_path = self.effective_search_path(client_id, configured_search_path);
+        let mut dynamic_type_rows = self.domain_type_rows_for_search_path(&search_path);
+        dynamic_type_rows.extend(self.enum_type_rows_for_search_path(&search_path));
+        dynamic_type_rows.extend(self.range_type_rows_for_search_path(&search_path));
         let mut rels = Vec::new();
         let mut dropped = 0usize;
         let mut explicit_relation_oids = BTreeSet::new();
@@ -1083,7 +1108,11 @@ impl Database {
                     _ => self
                         .catalog
                         .write()
-                        .drop_relation_by_oid_mvcc(*relation_oid, &ctx),
+                        .drop_relation_by_oid_mvcc_with_extra_type_rows(
+                            *relation_oid,
+                            &ctx,
+                            &dynamic_type_rows,
+                        ),
                 }
                 .map_err(map_catalog_error)?;
                 let (dropped_relations, effect) = effect;

@@ -13588,6 +13588,130 @@ fn create_gist_range_index_explain_and_query_use_it() {
 }
 
 #[test]
+fn create_gist_multirange_index_explain_and_query_use_it() {
+    let base = temp_dir("gist_multirange_index_scan_explain");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table spans (id int4 not null, mr int4multirange)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into spans values \
+         (1, int4multirange(int4range(1,5), int4range(10,15))), \
+         (2, int4multirange(int4range(20,30))), \
+         (3, int4multirange(int4range(3,8))), \
+         (4, '{}'::int4multirange)",
+    )
+    .unwrap();
+    db.execute(1, "create index spans_mr_gist on spans using gist (mr)")
+        .unwrap();
+
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select id from spans where mr @> 11",
+        "spans_mr_gist",
+    );
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select id from spans where mr = '{}'::int4multirange",
+        "spans_mr_gist",
+    );
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select id from spans where mr @> 'empty'::int4range",
+        "spans_mr_gist",
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select id from spans where mr @> 11 order by id"),
+        vec![vec![Value::Int32(1)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id from spans where mr && int4range(4,12) order by id",
+        ),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(3)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id from spans where mr @> 'empty'::int4range order by id",
+        ),
+        vec![
+            vec![Value::Int32(1)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(3)],
+            vec![Value::Int32(4)]
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id from spans where mr @> '{}'::int4multirange order by id",
+        ),
+        vec![
+            vec![Value::Int32(1)],
+            vec![Value::Int32(2)],
+            vec![Value::Int32(3)],
+            vec![Value::Int32(4)]
+        ]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id from spans \
+             where mr &< int4multirange(int4range(18,20)) \
+             order by id",
+        ),
+        vec![vec![Value::Int32(1)], vec![Value::Int32(3)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id from spans where mr = '{}'::int4multirange order by id",
+        ),
+        vec![vec![Value::Int32(4)]]
+    );
+}
+
+#[test]
+fn multirange_adjacency_uses_outer_endpoints_only() {
+    let base = temp_dir("multirange_endpoint_adjacency");
+    let db = Database::open(&base, 16).unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select \
+             int4multirange(int4range(1,2), int4range(5,6)) -|- int4range(3,5), \
+             int4multirange(int4range(1,2), int4range(5,6)) -|- int4range(6,7), \
+             int4range(0,1) -|- int4multirange(int4range(1,2), int4range(5,6)), \
+             int4multirange(int4range(1,2), int4range(5,6)) -|- int4multirange(int4range(3,5)), \
+             int4multirange(int4range(1,2), int4range(5,6)) -|- int4multirange(int4range(6,7))",
+        ),
+        vec![vec![
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(true),
+        ]]
+    );
+}
+
+#[test]
 fn create_gist_range_index_with_explicit_opclass_uses_matching_type() {
     let base = temp_dir("gist_range_explicit_opclass");
     let db = Database::open(&base, 16).unwrap();
@@ -21535,6 +21659,70 @@ fn btree_index_supports_builtin_nummultirange_keys() {
 }
 
 #[test]
+fn hash_index_supports_builtin_nummultirange_keys() {
+    let base = temp_dir("hash_nummultirange_keys");
+    let db = Database::open(&base, 16).unwrap();
+
+    let hash =
+        crate::backend::utils::cache::lsyscache::access_method_row_by_name(&db, 1, None, "hash")
+            .unwrap();
+    let multirange_opclass =
+        crate::backend::utils::cache::lsyscache::default_opclass_for_am_and_type(
+            &db,
+            1,
+            None,
+            hash.oid,
+            crate::include::catalog::NUMMULTIRANGE_TYPE_OID,
+        )
+        .unwrap();
+    assert_eq!(
+        multirange_opclass.oid,
+        crate::include::catalog::MULTIRANGE_HASH_OPCLASS_OID
+    );
+
+    db.execute(1, "create table mr_hash_items(nmr nummultirange)")
+        .unwrap();
+    db.execute(
+        1,
+        "create index mr_hash_items_idx on mr_hash_items using hash (nmr)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into mr_hash_items values \
+         (nummultirange(variadic '{}'::numrange[])), \
+         ('{[1.0,2.0)}'), \
+         ('{[1.0,2.0)}')",
+    )
+    .unwrap();
+
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select nmr::text from mr_hash_items where nmr = '{}'::nummultirange",
+        "mr_hash_items_idx",
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select nmr::text from mr_hash_items \
+             where nmr = '{}'::nummultirange",
+        ),
+        vec![vec![Value::Text("{}".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from mr_hash_items \
+             where nmr = '{[1.0,2.0)}'::nummultirange",
+        ),
+        vec![vec![Value::Int64(2)]]
+    );
+}
+
+#[test]
 fn create_operator_class_persists_catalog_rows() {
     let base = temp_dir("create_operator_class_rows");
     let db = Database::open(&base, 16).unwrap();
@@ -28739,6 +28927,413 @@ fn user_defined_ranges_resolve_constructor_and_accessor_calls() {
             Value::Text("3.5".into()),
         ]],
     );
+}
+
+#[test]
+fn user_defined_ranges_support_default_and_manual_multirange_names() {
+    let dir = temp_dir("user_defined_range_multirange_names");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create type intr as range(subtype=int)")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select intr_multirange(intr(1,10))::text"),
+        vec![vec![Value::Text("{[1,10)}".into())]]
+    );
+
+    match db.execute(
+        1,
+        "create type textrange1 as range(subtype=text, multirange_type_name=int, collation=\"C\")",
+    ) {
+        Err(ExecError::DetailedError { message, .. })
+            if message == "type \"int4\" already exists" => {}
+        other => panic!("expected builtin alias name conflict, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "create type textrange1 as range(subtype=text, multirange_type_name=multirange_of_text, collation=\"C\")",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select multirange_of_text(textrange1('a','b'), textrange1('d','e'))::text",
+        ),
+        vec![vec![Value::Text("{[a,b),[d,e)}".into())]]
+    );
+
+    db.execute(
+        1,
+        "create temp table temp_multitext(f1 multirange_of_text[])",
+    )
+    .unwrap();
+    db.execute(1, "drop table temp_multitext").unwrap();
+}
+
+#[test]
+fn explicit_multirange_name_renames_existing_range_array_type() {
+    let dir = temp_dir("explicit_multirange_name_renames_range_array");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create type textrange1 as range(subtype=text, multirange_type_name=multirange_of_text, collation=\"C\")",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create type textrange2 as range(subtype=text, multirange_type_name=_textrange1, collation=\"C\")",
+    )
+    .unwrap();
+
+    let type_rows = db.lazy_catalog_lookup(1, None, None).type_rows();
+    let textrange1 = type_rows
+        .iter()
+        .find(|row| row.typname == "textrange1")
+        .unwrap();
+    let renamed_array = type_rows
+        .iter()
+        .find(|row| row.typname == "__textrange1" && row.typelem == textrange1.oid)
+        .unwrap();
+    let multirange = type_rows
+        .iter()
+        .find(|row| row.typname == "_textrange1" && row.typelem == 0)
+        .unwrap();
+
+    assert_eq!(textrange1.typarray, renamed_array.oid);
+    assert_eq!(multirange.sql_type.kind, SqlTypeKind::Multirange);
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select _textrange1(textrange2('a','z')) @> 'b'::text",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn domain_over_multirange_check_is_enforced_on_cast() {
+    let dir = temp_dir("domain_over_multirange_check");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create domain restrictedmultirange as int4multirange check (upper(value) < 10)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select '{[4,5)}'::restrictedmultirange @> 7",),
+        vec![vec![Value::Bool(false)]]
+    );
+
+    match db.execute(1, "select '{[4,50)}'::restrictedmultirange @> 7") {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "23514");
+            assert_eq!(
+                message,
+                "value for domain restrictedmultirange violates check constraint \"restrictedmultirange_check\""
+            );
+        }
+        other => panic!("expected domain check violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn range_owner_and_usage_privileges_apply_to_multirange_columns() {
+    let dir = temp_dir("range_owner_usage_privileges");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create role regress_multirange_owner login")
+        .unwrap();
+    db.execute(
+        1,
+        "create type textrange1 as range(subtype=text, multirange_type_name=multitextrange1, collation=\"C\")",
+    )
+    .unwrap();
+
+    match db.execute(
+        1,
+        "alter type multitextrange1 owner to regress_multirange_owner",
+    ) {
+        Err(ExecError::DetailedError {
+            message,
+            hint,
+            sqlstate,
+            ..
+        }) => {
+            assert_eq!(sqlstate, "42809");
+            assert_eq!(message, "cannot alter multirange type multitextrange1");
+            assert_eq!(
+                hint.as_deref(),
+                Some(
+                    "You can alter type textrange1, which will alter the multirange type as well."
+                )
+            );
+        }
+        other => panic!("expected multirange alter type error, got {other:?}"),
+    }
+
+    db.execute(1, "alter type textrange1 owner to regress_multirange_owner")
+        .unwrap();
+    let owner_oid = role_oid(&db, "regress_multirange_owner");
+    let type_rows = db.lazy_catalog_lookup(1, None, None).type_rows();
+    assert_eq!(
+        type_rows
+            .iter()
+            .find(|row| row.typname == "textrange1")
+            .unwrap()
+            .typowner,
+        owner_oid
+    );
+    assert_eq!(
+        type_rows
+            .iter()
+            .find(|row| row.typname == "multitextrange1")
+            .unwrap()
+            .typowner,
+        owner_oid
+    );
+
+    db.execute(1, "set role regress_multirange_owner").unwrap();
+
+    match db.execute(1, "revoke usage on type multitextrange1 from public") {
+        Err(ExecError::DetailedError {
+            message,
+            hint,
+            sqlstate,
+            ..
+        }) => {
+            assert_eq!(sqlstate, "42809");
+            assert_eq!(message, "cannot set privileges of multirange types");
+            assert_eq!(
+                hint.as_deref(),
+                Some("Set the privileges of the range type instead.")
+            );
+        }
+        other => panic!("expected multirange privilege error, got {other:?}"),
+    }
+
+    db.execute(1, "revoke usage on type textrange1 from public")
+        .unwrap();
+    db.execute(1, "create temp table owner_can_use(f1 multitextrange1[])")
+        .unwrap();
+    db.execute(
+        1,
+        "revoke usage on type textrange1 from regress_multirange_owner",
+    )
+    .unwrap();
+
+    match db.execute(
+        1,
+        "create temp table owner_cannot_use(f1 multitextrange1[])",
+    ) {
+        Err(ExecError::DetailedError {
+            message, sqlstate, ..
+        }) => {
+            assert_eq!(sqlstate, "42501");
+            assert_eq!(message, "permission denied for type multitextrange1");
+        }
+        other => panic!("expected type usage permission error, got {other:?}"),
+    }
+}
+
+#[test]
+fn polymorphic_sql_functions_accept_anymultirange_arguments() {
+    let dir = temp_dir("polymorphic_sql_anymultirange");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function anyarray_anymultirange_func(a anyarray, r anymultirange) \
+         returns anyelement as 'select $1[1] + lower($2);' language sql",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select anyarray_anymultirange_func(ARRAY[1,2], int4multirange(int4range(10,20)))",
+        ),
+        vec![vec![Value::Int32(11)]]
+    );
+    assert!(
+        db.execute(
+            1,
+            "select anyarray_anymultirange_func(ARRAY[1,2], nummultirange(numrange(10,20)))",
+        )
+        .is_err()
+    );
+
+    db.execute(
+        1,
+        "create function anycompatiblearray_anycompatiblemultirange_func(a anycompatiblearray, mr anycompatiblemultirange) \
+         returns anycompatible as 'select $1[1] + lower($2);' language sql",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select anycompatiblearray_anycompatiblemultirange_func(ARRAY[1,2], multirange(int4range(10,20)))::text",
+        ),
+        vec![vec![Value::Text("11".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select anycompatiblearray_anycompatiblemultirange_func(ARRAY[1,2], multirange(numrange(10,20)))::text",
+        ),
+        vec![vec![Value::Text("11".into())]]
+    );
+    assert!(db
+        .execute(
+            1,
+            "select anycompatiblearray_anycompatiblemultirange_func(ARRAY[1.1,2], multirange(int4range(10,20)))",
+        )
+        .is_err());
+
+    db.execute(
+        1,
+        "create function mr_table_succeed(i anyelement, r anymultirange) returns table(i anyelement, r anymultirange) \
+         as $$ select $1, $2 $$ language sql",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select i, r::text from mr_table_succeed(123, int4multirange(int4range(1,11)))",
+        ),
+        vec![vec![Value::Int32(123), Value::Text("{[1,11)}".into())]]
+    );
+
+    match db.execute(
+        1,
+        "create function mr_table_fail(i anyelement) returns table(i anyelement, r anymultirange) \
+         as $$ select $1, '[1,10]' $$ language sql",
+    ) {
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            sqlstate,
+            ..
+        }) => {
+            assert_eq!(sqlstate, "42P13");
+            assert_eq!(message, "cannot determine result data type");
+            assert_eq!(
+                detail.as_deref(),
+                Some(
+                    "A result of type anymultirange requires at least one input of type anyrange or anymultirange."
+                )
+            );
+        }
+        other => panic!("expected unresolved polymorphic result error, got {other:?}"),
+    }
+
+    db.execute(
+        1,
+        "create function mr_plpgsql(i anyrange) returns anymultirange \
+         as $$ begin return multirange($1); end; $$ language plpgsql",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select mr_plpgsql(int4range(1, 4))::text"),
+        vec![vec![Value::Text("{[1,4)}".into())]]
+    );
+}
+
+#[test]
+fn multiranges_support_array_varbit_and_composite_subtypes() {
+    let dir = temp_dir("multirange_array_varbit_composite_subtypes");
+    let db = Database::open(&dir, 64).unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select \
+                arraymultirange(arrayrange(array[1,2], array[2,1]))::text, \
+                array[1,3] <@ arraymultirange(arrayrange(array[1,2], array[2,1])), \
+                array[1,1] <@ arraymultirange(arrayrange(array[1,2], array[2,1]))",
+        ),
+        vec![vec![
+            Value::Text(r#"{["{1,2}","{2,1}")}"#.into()),
+            Value::Bool(true),
+            Value::Bool(false),
+        ]]
+    );
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select \
+                varbitmultirange(varbitrange(B'01'::varbit, B'10'::varbit))::text, \
+                B'011'::varbit <@ varbitmultirange(varbitrange(B'01'::varbit, B'10'::varbit))",
+        ),
+        vec![vec![Value::Text("{[01,10)}".into()), Value::Bool(true),]]
+    );
+
+    db.execute(1, "create type two_ints as (a int, b int)")
+        .unwrap();
+    db.execute(
+        1,
+        "create type two_ints_range as range (subtype = two_ints)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select \
+                two_ints_multirange(two_ints_range(row(1,2), row(3,4)))::text, \
+                row_to_json(upper(two_ints_range(row(1,2), row(3,4))))::text",
+        ),
+        vec![vec![
+            Value::Text(r#"{["(1,2)","(3,4)")}"#.into()),
+            Value::Text(r#"{"a":3,"b":4}"#.into()),
+        ]]
+    );
+}
+
+#[test]
+fn user_defined_multiranges_can_back_table_columns() {
+    let dir = temp_dir("user_defined_multirange_table_columns");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create type float8range as range (subtype = float8, subtype_diff = float8mi)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create table float8multirange_test(f8mr float8multirange, i int)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into float8multirange_test values \
+         (float8multirange(float8range(-100.00007, '1.111113e9')), 42)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select f8mr::text, i from float8multirange_test",),
+        vec![vec![
+            Value::Text("{[-100.00007,1111113000)}".into()),
+            Value::Int32(42),
+        ]]
+    );
+
+    db.execute(1, "drop table float8multirange_test").unwrap();
 }
 
 #[test]

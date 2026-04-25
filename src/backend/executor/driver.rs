@@ -396,6 +396,10 @@ fn execute_statement_with_source(
             expected: "ALTER TYPE handled by database/session layer",
             actual: "ALTER TYPE".into(),
         })),
+        Statement::AlterTypeOwner(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "ALTER TYPE OWNER handled by database/session layer",
+            actual: "ALTER TYPE OWNER".into(),
+        })),
         Statement::CreateSequence(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "CREATE SEQUENCE handled by database/session layer",
             actual: "CREATE SEQUENCE".into(),
@@ -671,6 +675,10 @@ pub fn execute_readonly_statement_with_config(
         Statement::AlterType(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",
             actual: "ALTER TYPE".into(),
+        })),
+        Statement::AlterTypeOwner(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "read-only statement",
+            actual: "ALTER TYPE OWNER".into(),
         })),
         Statement::CreateView(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "read-only statement",

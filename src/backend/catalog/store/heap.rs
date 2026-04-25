@@ -4269,13 +4269,22 @@ impl CatalogStore {
         relation_oid: u32,
         ctx: &CatalogWriteContext,
     ) -> Result<(Vec<CatalogEntry>, CatalogMutationEffect), CatalogError> {
+        self.drop_relation_by_oid_mvcc_with_extra_type_rows(relation_oid, ctx, &[])
+    }
+
+    pub fn drop_relation_by_oid_mvcc_with_extra_type_rows(
+        &mut self,
+        relation_oid: u32,
+        ctx: &CatalogWriteContext,
+        extra_type_rows: &[PgTypeRow],
+    ) -> Result<(Vec<CatalogEntry>, CatalogMutationEffect), CatalogError> {
         if has_nonpartition_inherited_children_mvcc(self, ctx, relation_oid)? {
             return Err(CatalogError::Corrupt(
                 "DROP TABLE with inherited children requires CASCADE, which is not supported yet",
             ));
         }
         let (rows_to_delete, parent_rows_to_insert, dropped, affected_parent_oids) =
-            drop_relation_entries_mvcc(self, ctx, relation_oid)?;
+            drop_relation_entries_mvcc(self, ctx, relation_oid, extra_type_rows)?;
         let kinds = drop_relation_delete_kinds();
         let control = self.control_state()?;
         self.persist_control_values(control.next_oid, control.next_rel_number)?;
@@ -7471,8 +7480,17 @@ fn catalog_entry_by_oid_mvcc(
     ctx: &CatalogWriteContext,
     relation_oid: u32,
 ) -> Result<CatalogEntry, CatalogError> {
+    catalog_entry_by_oid_mvcc_with_extra_type_rows(store, ctx, relation_oid, &[])
+}
+
+fn catalog_entry_by_oid_mvcc_with_extra_type_rows(
+    store: &CatalogStore,
+    ctx: &CatalogWriteContext,
+    relation_oid: u32,
+    extra_type_rows: &[PgTypeRow],
+) -> Result<CatalogEntry, CatalogError> {
     let relation = store
-        .relation_id_get_relation(ctx, relation_oid)?
+        .relation_id_get_relation_with_extra_type_rows(ctx, relation_oid, extra_type_rows)?
         .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
     let class_row = class_row_by_oid_mvcc(store, ctx, relation_oid)?
         .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
@@ -8036,6 +8054,7 @@ fn drop_relation_entries_mvcc(
     store: &CatalogStore,
     ctx: &CatalogWriteContext,
     relation_oid: u32,
+    extra_type_rows: &[PgTypeRow],
 ) -> Result<
     (
         PhysicalCatalogRows,
@@ -8045,11 +8064,11 @@ fn drop_relation_entries_mvcc(
     ),
     CatalogError,
 > {
-    let oids = drop_relation_oids_by_oid_mvcc(store, ctx, relation_oid)?;
+    let oids = drop_relation_oids_by_oid_mvcc(store, ctx, relation_oid, extra_type_rows)?;
     let dropped = oids
         .iter()
         .copied()
-        .map(|oid| catalog_entry_by_oid_mvcc(store, ctx, oid))
+        .map(|oid| catalog_entry_by_oid_mvcc_with_extra_type_rows(store, ctx, oid, extra_type_rows))
         .collect::<Result<Vec<_>, _>>()?;
     let dropped_oids = dropped
         .iter()
@@ -8172,16 +8191,24 @@ fn drop_relation_oids_by_oid_mvcc(
     store: &CatalogStore,
     ctx: &CatalogWriteContext,
     relation_oid: u32,
+    extra_type_rows: &[PgTypeRow],
 ) -> Result<Vec<u32>, CatalogError> {
     let entry = store
-        .relation_id_get_relation(ctx, relation_oid)?
+        .relation_id_get_relation_with_extra_type_rows(ctx, relation_oid, extra_type_rows)?
         .ok_or_else(|| CatalogError::UnknownTable(relation_oid.to_string()))?;
     if !(relkind_is_droppable_table(entry.relkind) || entry.relkind == 'S') {
         return Err(CatalogError::UnknownTable(relation_oid.to_string()));
     }
     let mut seen = BTreeSet::new();
     let mut order = Vec::new();
-    collect_relation_drop_oids_mvcc(store, ctx, relation_oid, &mut seen, &mut order)?;
+    collect_relation_drop_oids_mvcc(
+        store,
+        ctx,
+        relation_oid,
+        extra_type_rows,
+        &mut seen,
+        &mut order,
+    )?;
     Ok(order)
 }
 
@@ -8225,6 +8252,7 @@ fn collect_relation_drop_oids_mvcc(
     store: &CatalogStore,
     ctx: &CatalogWriteContext,
     relation_oid: u32,
+    extra_type_rows: &[PgTypeRow],
     seen: &mut BTreeSet<u32>,
     order: &mut Vec<u32>,
 ) -> Result<(), CatalogError> {
@@ -8237,11 +8265,20 @@ fn collect_relation_drop_oids_mvcc(
         if row.classid != PG_CLASS_RELATION_OID || row.objsubid != 0 {
             continue;
         }
-        if let Some(dependent) = store.relation_id_get_relation(ctx, row.objid)? {
+        if let Some(dependent) =
+            store.relation_id_get_relation_with_extra_type_rows(ctx, row.objid, extra_type_rows)?
+        {
             if !matches!(dependent.relkind, 'r' | 'i' | 'I' | 't' | 'S') {
                 continue;
             }
-            collect_relation_drop_oids_mvcc(store, ctx, dependent.relation_oid, seen, order)?;
+            collect_relation_drop_oids_mvcc(
+                store,
+                ctx,
+                dependent.relation_oid,
+                extra_type_rows,
+                seen,
+                order,
+            )?;
         }
     }
 

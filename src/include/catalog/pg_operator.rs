@@ -2,17 +2,18 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{
-    BIT_CMP_EQ_PROC_OID, BIT_CMP_GE_PROC_OID, BIT_CMP_GT_PROC_OID, BIT_CMP_LE_PROC_OID,
-    BIT_CMP_LT_PROC_OID, BIT_CMP_NE_PROC_OID, BIT_TYPE_OID, BOOL_CMP_EQ_PROC_OID,
-    BOOL_CMP_GE_PROC_OID, BOOL_CMP_GT_PROC_OID, BOOL_CMP_LE_PROC_OID, BOOL_CMP_LT_PROC_OID,
-    BOOL_CMP_NE_PROC_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID, BOX_TYPE_OID, BPCHAR_TYPE_OID,
-    BYTEA_CMP_EQ_PROC_OID, BYTEA_CMP_GE_PROC_OID, BYTEA_CMP_GT_PROC_OID, BYTEA_CMP_LE_PROC_OID,
-    BYTEA_CMP_LT_PROC_OID, BYTEA_CMP_NE_PROC_OID, BYTEA_TYPE_OID, CIRCLE_TYPE_OID, DATE_TYPE_OID,
-    DATERANGE_TYPE_OID, FLOAT4_TYPE_OID, FLOAT8_TYPE_OID, INT2_TYPE_OID, INT4_CMP_EQ_PROC_OID,
-    INT4_CMP_GE_PROC_OID, INT4_CMP_GT_PROC_OID, INT4_CMP_LE_PROC_OID, INT4_CMP_LT_PROC_OID,
-    INT4_CMP_NE_PROC_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID, INT8RANGE_TYPE_OID,
-    INTERNAL_CHAR_TYPE_OID, JSONB_CMP_EQ_PROC_OID, JSONB_CMP_GE_PROC_OID, JSONB_CMP_GT_PROC_OID,
-    JSONB_CMP_LE_PROC_OID, JSONB_CMP_LT_PROC_OID, JSONB_CMP_NE_PROC_OID, JSONB_CONTAINED_PROC_OID,
+    ANYELEMENTOID, ANYMULTIRANGEOID, ANYRANGEOID, BIT_CMP_EQ_PROC_OID, BIT_CMP_GE_PROC_OID,
+    BIT_CMP_GT_PROC_OID, BIT_CMP_LE_PROC_OID, BIT_CMP_LT_PROC_OID, BIT_CMP_NE_PROC_OID,
+    BIT_TYPE_OID, BOOL_CMP_EQ_PROC_OID, BOOL_CMP_GE_PROC_OID, BOOL_CMP_GT_PROC_OID,
+    BOOL_CMP_LE_PROC_OID, BOOL_CMP_LT_PROC_OID, BOOL_CMP_NE_PROC_OID, BOOL_TYPE_OID,
+    BOOTSTRAP_SUPERUSER_OID, BOX_TYPE_OID, BPCHAR_TYPE_OID, BYTEA_CMP_EQ_PROC_OID,
+    BYTEA_CMP_GE_PROC_OID, BYTEA_CMP_GT_PROC_OID, BYTEA_CMP_LE_PROC_OID, BYTEA_CMP_LT_PROC_OID,
+    BYTEA_CMP_NE_PROC_OID, BYTEA_TYPE_OID, CIRCLE_TYPE_OID, DATE_TYPE_OID, DATERANGE_TYPE_OID,
+    FLOAT4_TYPE_OID, FLOAT8_TYPE_OID, INT2_TYPE_OID, INT4_CMP_EQ_PROC_OID, INT4_CMP_GE_PROC_OID,
+    INT4_CMP_GT_PROC_OID, INT4_CMP_LE_PROC_OID, INT4_CMP_LT_PROC_OID, INT4_CMP_NE_PROC_OID,
+    INT4_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID, INT8RANGE_TYPE_OID, INTERNAL_CHAR_TYPE_OID,
+    JSONB_CMP_EQ_PROC_OID, JSONB_CMP_GE_PROC_OID, JSONB_CMP_GT_PROC_OID, JSONB_CMP_LE_PROC_OID,
+    JSONB_CMP_LT_PROC_OID, JSONB_CMP_NE_PROC_OID, JSONB_CONTAINED_PROC_OID,
     JSONB_CONTAINS_PROC_OID, JSONB_EXISTS_ALL_PROC_OID, JSONB_EXISTS_ANY_PROC_OID,
     JSONB_EXISTS_PROC_OID, JSONB_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID, MACADDR_AND_PROC_OID,
     MACADDR_EQ_PROC_OID, MACADDR_GE_PROC_OID, MACADDR_GT_PROC_OID, MACADDR_LE_PROC_OID,
@@ -30,7 +31,9 @@ use crate::include::catalog::{
     UUID_TYPE_OID, VARBIT_CMP_EQ_PROC_OID, VARBIT_CMP_GE_PROC_OID, VARBIT_CMP_GT_PROC_OID,
     VARBIT_CMP_LE_PROC_OID, VARBIT_CMP_LT_PROC_OID, VARBIT_CMP_NE_PROC_OID, VARBIT_TYPE_OID,
     VARCHAR_CMP_EQ_PROC_OID, VARCHAR_TYPE_OID, bootstrap_pg_proc_rows,
+    proc_oid_for_builtin_scalar_function,
 };
+use crate::include::nodes::primnodes::BuiltinScalarFunction;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgOperatorRow {
@@ -804,6 +807,7 @@ pub fn bootstrap_pg_operator_rows() -> Vec<PgOperatorRow> {
     rows.extend(macaddr_operator_rows());
     rows.extend(geometry_operator_rows());
     rows.extend(range_operator_rows());
+    rows.extend(multirange_operator_rows());
     rows.extend(brin_scalar_comparison_operator_rows(
         &bootstrap_pg_proc_rows(),
     ));
@@ -3247,6 +3251,79 @@ fn range_operator_rows() -> Vec<PgOperatorRow> {
         next_oid += 19;
         next_proc_oid += 32;
     }
+    rows
+}
+
+fn multirange_operator_rows() -> Vec<PgOperatorRow> {
+    fn builtin_proc(func: BuiltinScalarFunction) -> u32 {
+        proc_oid_for_builtin_scalar_function(func).unwrap_or(0)
+    }
+
+    let mut next_oid = 72_200u32;
+    let mut rows = Vec::new();
+    for (name, func, righttype) in [
+        (
+            "<<",
+            BuiltinScalarFunction::RangeStrictLeft,
+            ANYMULTIRANGEOID,
+        ),
+        ("<<", BuiltinScalarFunction::RangeStrictLeft, ANYRANGEOID),
+        ("&<", BuiltinScalarFunction::RangeOverLeft, ANYMULTIRANGEOID),
+        ("&<", BuiltinScalarFunction::RangeOverLeft, ANYRANGEOID),
+        ("&&", BuiltinScalarFunction::RangeOverlap, ANYMULTIRANGEOID),
+        ("&&", BuiltinScalarFunction::RangeOverlap, ANYRANGEOID),
+        (
+            "&>",
+            BuiltinScalarFunction::RangeOverRight,
+            ANYMULTIRANGEOID,
+        ),
+        ("&>", BuiltinScalarFunction::RangeOverRight, ANYRANGEOID),
+        (
+            ">>",
+            BuiltinScalarFunction::RangeStrictRight,
+            ANYMULTIRANGEOID,
+        ),
+        (">>", BuiltinScalarFunction::RangeStrictRight, ANYRANGEOID),
+        (
+            "-|-",
+            BuiltinScalarFunction::RangeAdjacent,
+            ANYMULTIRANGEOID,
+        ),
+        ("-|-", BuiltinScalarFunction::RangeAdjacent, ANYRANGEOID),
+        ("@>", BuiltinScalarFunction::RangeContains, ANYMULTIRANGEOID),
+        ("@>", BuiltinScalarFunction::RangeContains, ANYRANGEOID),
+        (
+            "<@",
+            BuiltinScalarFunction::RangeContainedBy,
+            ANYMULTIRANGEOID,
+        ),
+        ("<@", BuiltinScalarFunction::RangeContainedBy, ANYRANGEOID),
+        ("@>", BuiltinScalarFunction::RangeContains, ANYELEMENTOID),
+    ] {
+        rows.push(operator_row(
+            next_oid,
+            name,
+            ANYMULTIRANGEOID,
+            righttype,
+            0,
+            0,
+            builtin_proc(func),
+            false,
+            false,
+        ));
+        next_oid += 1;
+    }
+    rows.push(operator_row(
+        next_oid,
+        "=",
+        ANYMULTIRANGEOID,
+        ANYMULTIRANGEOID,
+        next_oid,
+        0,
+        0,
+        true,
+        true,
+    ));
     rows
 }
 
