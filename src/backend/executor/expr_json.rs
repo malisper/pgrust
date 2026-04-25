@@ -1797,6 +1797,7 @@ fn json_object_key_text(value: &Value, op: &'static str) -> Result<String, ExecE
         Value::Int16(v) => Ok(v.to_string()),
         Value::Int32(v) => Ok(v.to_string()),
         Value::Int64(v) => Ok(v.to_string()),
+        Value::PgLsn(v) => Ok(crate::backend::executor::render_pg_lsn_text(*v)),
         Value::Money(v) => Ok(crate::backend::executor::money_format_text(*v)),
         Value::Float64(v) => Ok(v.to_string()),
         Value::Numeric(v) => Ok(v.render()),
@@ -3038,6 +3039,7 @@ fn value_to_json_serde_with_config(
         Value::Int16(v) => SerdeJsonValue::from(*v),
         Value::Int32(v) => SerdeJsonValue::from(*v),
         Value::Int64(v) => SerdeJsonValue::from(*v),
+        Value::PgLsn(v) => SerdeJsonValue::String(crate::backend::executor::render_pg_lsn_text(*v)),
         Value::Money(v) => SerdeJsonValue::String(crate::backend::executor::money_format_text(*v)),
         Value::Float64(v) => serde_json::Number::from_f64(*v)
             .map(SerdeJsonValue::Number)
@@ -3148,6 +3150,9 @@ fn render_json_value_text_with_config(
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
+        Value::PgLsn(v) => {
+            serde_json::to_string(&crate::backend::executor::render_pg_lsn_text(*v)).unwrap()
+        }
         Value::Money(v) => crate::backend::executor::money_format_text(*v),
         Value::Float64(v) => v.to_string(),
         Value::Numeric(v) => v.render(),

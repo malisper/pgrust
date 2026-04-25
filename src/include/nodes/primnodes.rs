@@ -44,6 +44,7 @@ pub enum ScalarType {
     Xml,
     TsVector,
     TsQuery,
+    PgLsn,
     Text,
     Record,
     Bool,

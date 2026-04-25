@@ -1277,6 +1277,46 @@ fn input_type_name_supported(parsed: SqlType) -> bool {
     explicit_text_input_target_oids().contains(&type_oid)
 }
 
+pub(crate) fn render_pg_lsn_text(value: u64) -> String {
+    format!("{:X}/{:X}", value >> 32, value & 0xFFFF_FFFF)
+}
+
+pub(crate) fn pg_lsn_out_of_range() -> ExecError {
+    ExecError::DetailedError {
+        message: "pg_lsn out of range".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22003",
+    }
+}
+
+fn invalid_pg_lsn_input(text: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("invalid input syntax for type pg_lsn: \"{text}\""),
+        detail: None,
+        hint: None,
+        sqlstate: "22P02",
+    }
+}
+
+pub(crate) fn parse_pg_lsn_text(text: &str) -> Result<u64, ExecError> {
+    let Some((hi, lo)) = text.split_once('/') else {
+        return Err(invalid_pg_lsn_input(text));
+    };
+    if hi.is_empty()
+        || lo.is_empty()
+        || hi.len() > 8
+        || lo.len() > 8
+        || !hi.bytes().all(|b| b.is_ascii_hexdigit())
+        || !lo.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return Err(invalid_pg_lsn_input(text));
+    }
+    let hi = u64::from_str_radix(hi, 16).map_err(|_| invalid_pg_lsn_input(text))?;
+    let lo = u64::from_str_radix(lo, 16).map_err(|_| invalid_pg_lsn_input(text))?;
+    Ok((hi << 32) | lo)
+}
+
 fn builtin_type_oid(sql_type: SqlType) -> Option<u32> {
     if let Some(row) = builtin_type_rows()
         .into_iter()
@@ -1864,7 +1904,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::RegConfig
                     | SqlTypeKind::RegDictionary
                     | SqlTypeKind::Inet
-                    | SqlTypeKind::Cidr,
+                    | SqlTypeKind::Cidr
+                    | SqlTypeKind::PgLsn,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -2006,7 +2047,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::RegConfig
                     | SqlTypeKind::RegDictionary
                     | SqlTypeKind::Inet
-                    | SqlTypeKind::Cidr,
+                    | SqlTypeKind::Cidr
+                    | SqlTypeKind::PgLsn,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -2105,7 +2147,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::RegConfig
                     | SqlTypeKind::RegDictionary
                     | SqlTypeKind::Inet
-                    | SqlTypeKind::Cidr,
+                    | SqlTypeKind::Cidr
+                    | SqlTypeKind::PgLsn,
                 ..
             } => cast_text_value(if v { "true" } else { "false" }, ty, true),
             SqlType {
@@ -2498,6 +2541,17 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 right: Value::Null,
             }),
         },
+        Value::PgLsn(value) => match ty.kind {
+            SqlTypeKind::PgLsn => Ok(Value::PgLsn(value)),
+            SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar => Ok(
+                Value::Text(CompactString::from_owned(render_pg_lsn_text(value))),
+            ),
+            _ => Err(ExecError::TypeMismatch {
+                op: "::pg_lsn",
+                left: Value::PgLsn(value),
+                right: Value::Null,
+            }),
+        },
         Value::Bytea(bytes) => match ty.kind {
             SqlTypeKind::Bytea => Ok(Value::Bytea(bytes)),
             _ => Err(ExecError::TypeMismatch {
@@ -2649,7 +2703,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::RegConfig
                     | SqlTypeKind::RegDictionary
                     | SqlTypeKind::Inet
-                    | SqlTypeKind::Cidr,
+                    | SqlTypeKind::Cidr
+                    | SqlTypeKind::PgLsn,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -2764,7 +2819,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::RegConfig
                     | SqlTypeKind::RegDictionary
                     | SqlTypeKind::Inet
-                    | SqlTypeKind::Cidr,
+                    | SqlTypeKind::Cidr
+                    | SqlTypeKind::PgLsn,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -3066,6 +3122,7 @@ pub(crate) fn cast_text_value_with_config(
         SqlTypeKind::TsQuery => {
             crate::backend::executor::parse_tsquery_text(text).map(Value::TsQuery)
         }
+        SqlTypeKind::PgLsn => parse_pg_lsn_text(text).map(Value::PgLsn),
         SqlTypeKind::Void => Err(ExecError::TypeMismatch {
             op: "::void",
             left: Value::Text(CompactString::new(text)),
@@ -3202,6 +3259,7 @@ pub(super) fn cast_numeric_value(
         SqlTypeKind::Bit | SqlTypeKind::VarBit => cast_text_value(&value.render(), ty, explicit),
         SqlTypeKind::TsVector
         | SqlTypeKind::TsQuery
+        | SqlTypeKind::PgLsn
         | SqlTypeKind::RegConfig
         | SqlTypeKind::RegDictionary => cast_text_value(&value.render(), ty, explicit),
         SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar => {

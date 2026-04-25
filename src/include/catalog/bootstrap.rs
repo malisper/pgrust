@@ -211,6 +211,8 @@ pub const REGCONFIG_TYPE_OID: u32 = 3734;
 pub const REGCONFIG_ARRAY_TYPE_OID: u32 = 3735;
 pub const REGDICTIONARY_TYPE_OID: u32 = 3769;
 pub const REGDICTIONARY_ARRAY_TYPE_OID: u32 = 3770;
+pub const PG_LSN_TYPE_OID: u32 = 3220;
+pub const PG_LSN_ARRAY_TYPE_OID: u32 = 3221;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BootstrapCatalogRelation {

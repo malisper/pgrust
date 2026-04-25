@@ -5,7 +5,7 @@ use super::exec_expr::parse_numeric_text;
 use super::expr_bit::{coerce_bit_string, render_bit_text};
 use super::expr_casts::{
     cast_numeric_value, cast_text_value, cast_value, parse_text_array_literal_with_options,
-    render_internal_char_text, render_interval_text,
+    render_internal_char_text, render_interval_text, render_pg_lsn_text,
 };
 use super::expr_datetime::{render_datetime_value_text, render_datetime_value_text_with_config};
 use super::expr_geometry::{
@@ -73,6 +73,7 @@ const INTERNAL_VALUE_TAG_MULTIRANGE: u8 = 32;
 const INTERNAL_VALUE_TAG_INET: u8 = 34;
 const INTERNAL_VALUE_TAG_CIDR: u8 = 35;
 const INTERNAL_VALUE_TAG_INTERVAL: u8 = 36;
+const INTERNAL_VALUE_TAG_PG_LSN: u8 = 37;
 const COMPOSITE_DATUM_VERSION: u8 = 1;
 
 pub(crate) fn format_record_text(record: &crate::include::nodes::datum::RecordValue) -> String {
@@ -294,6 +295,7 @@ fn format_failing_row_value(value: &Value, datetime_config: &DateTimeConfig) -> 
         Value::Jsonb(bytes) => render_jsonb_bytes(bytes).unwrap_or_default(),
         Value::TsVector(vector) => crate::backend::executor::render_tsvector_text(vector),
         Value::TsQuery(query) => crate::backend::executor::render_tsquery_text(query),
+        Value::PgLsn(value) => render_pg_lsn_text(*value),
         Value::Point(_)
         | Value::Lseg(_)
         | Value::Path(_)
@@ -356,15 +358,15 @@ fn sql_type_kind_tag(kind: SqlTypeKind) -> u8 {
         SqlTypeKind::Int8 => 6,
         SqlTypeKind::Name => 7,
         SqlTypeKind::Oid => 8,
-        SqlTypeKind::RegProc => 70,
+        SqlTypeKind::RegProc => 73,
         SqlTypeKind::RegClass => 8,
         SqlTypeKind::RegType => 63,
         SqlTypeKind::RegRole => 55,
         SqlTypeKind::RegNamespace => 8,
-        SqlTypeKind::RegOper => 71,
+        SqlTypeKind::RegOper => 74,
         SqlTypeKind::RegOperator => 66,
         SqlTypeKind::RegProcedure => 52,
-        SqlTypeKind::RegCollation => 72,
+        SqlTypeKind::RegCollation => 75,
         SqlTypeKind::Tid => 9,
         SqlTypeKind::Xid => 10,
         SqlTypeKind::OidVector => 11,
@@ -395,6 +397,7 @@ fn sql_type_kind_tag(kind: SqlTypeKind) -> u8 {
         SqlTypeKind::Interval => 31,
         SqlTypeKind::TsVector => 32,
         SqlTypeKind::TsQuery => 33,
+        SqlTypeKind::PgLsn => 70,
         SqlTypeKind::RegConfig => 34,
         SqlTypeKind::RegDictionary => 35,
         SqlTypeKind::Text => 36,
@@ -469,12 +472,12 @@ fn sql_type_kind_from_tag(tag: u8) -> Result<SqlTypeKind, ExecError> {
         6 => SqlTypeKind::Int8,
         7 => SqlTypeKind::Name,
         8 => SqlTypeKind::Oid,
-        70 => SqlTypeKind::RegProc,
+        73 => SqlTypeKind::RegProc,
         63 => SqlTypeKind::RegType,
-        71 => SqlTypeKind::RegOper,
+        74 => SqlTypeKind::RegOper,
         66 => SqlTypeKind::RegOperator,
         52 => SqlTypeKind::RegProcedure,
-        72 => SqlTypeKind::RegCollation,
+        75 => SqlTypeKind::RegCollation,
         9 => SqlTypeKind::Tid,
         10 => SqlTypeKind::Xid,
         11 => SqlTypeKind::OidVector,
@@ -505,6 +508,7 @@ fn sql_type_kind_from_tag(tag: u8) -> Result<SqlTypeKind, ExecError> {
         31 => SqlTypeKind::Interval,
         32 => SqlTypeKind::TsVector,
         33 => SqlTypeKind::TsQuery,
+        70 => SqlTypeKind::PgLsn,
         34 => SqlTypeKind::RegConfig,
         35 => SqlTypeKind::RegDictionary,
         36 => SqlTypeKind::Text,
@@ -946,6 +950,10 @@ fn encode_internal_value(value: &Value) -> Result<Vec<u8>, ExecError> {
                 &mut out,
             );
         }
+        Value::PgLsn(v) => {
+            out.push(INTERNAL_VALUE_TAG_PG_LSN);
+            out.extend_from_slice(&v.to_le_bytes());
+        }
         Value::Text(v) => {
             out.push(INTERNAL_VALUE_TAG_TEXT);
             encode_internal_text(v.as_bytes(), &mut out);
@@ -1289,6 +1297,15 @@ fn decode_internal_value(bytes: &[u8]) -> Result<Value, ExecError> {
                 decode_internal_text(rest, &mut offset)?
             })?)
         }
+        INTERNAL_VALUE_TAG_PG_LSN => {
+            if rest.len() != 8 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: "<record>".into(),
+                    details: "pg_lsn must be exactly 8 bytes".into(),
+                });
+            }
+            Value::PgLsn(u64::from_le_bytes(rest.try_into().unwrap()))
+        }
         INTERNAL_VALUE_TAG_TEXT => Value::Text(CompactString::new(
             std::str::from_utf8({
                 let mut offset = 0usize;
@@ -1478,6 +1495,9 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
         (ScalarType::TsQuery, Value::TsQuery(query)) => Ok(TupleValue::Bytes(
             crate::backend::executor::encode_tsquery_bytes(&query),
         )),
+        (ScalarType::PgLsn, Value::PgLsn(value)) => {
+            Ok(TupleValue::Bytes(value.to_le_bytes().to_vec()))
+        }
         (ScalarType::Text, value) => {
             let text = text_value_for_storage(&value)?;
             Ok(TupleValue::Bytes(text.into_bytes()))
@@ -1616,6 +1636,11 @@ pub(crate) fn coerce_assignment_value(value: &Value, target: SqlType) -> Result<
         Value::Int16(v) => cast_text_value(&v.to_string(), target, false),
         Value::Int32(v) => cast_text_value(&v.to_string(), target, false),
         Value::Int64(v) => cast_text_value(&v.to_string(), target, false),
+        Value::PgLsn(v) => cast_text_value(
+            &crate::backend::executor::render_pg_lsn_text(*v),
+            target,
+            false,
+        ),
         Value::Money(v) => cast_text_value(
             &crate::backend::executor::money_format_text(*v),
             target,
@@ -2140,6 +2165,21 @@ pub(crate) fn decode_value_with_toast(
             Ok(Value::TsQuery(
                 crate::backend::executor::decode_tsquery_bytes(bytes)?,
             ))
+        }
+        ScalarType::PgLsn => {
+            if column.storage.attlen != 8 || bytes.len() != 8 {
+                return Err(ExecError::UnsupportedStorageType {
+                    column: column.name.clone(),
+                    ty: column.ty.clone(),
+                    attlen: column.storage.attlen,
+                });
+            }
+            Ok(Value::PgLsn(u64::from_le_bytes(bytes.try_into().map_err(
+                |_| ExecError::InvalidStorageValue {
+                    column: column.name.clone(),
+                    details: "pg_lsn must be exactly 8 bytes".into(),
+                },
+            )?)))
         }
         ScalarType::Text => {
             if column.storage.attlen != -1 && column.storage.attlen != -2 {
