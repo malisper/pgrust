@@ -201,6 +201,7 @@ pub enum Plan {
         keys: Vec<IndexScanKey>,
         order_by_keys: Vec<IndexScanKey>,
         direction: ScanDirection,
+        index_only: bool,
     },
     BitmapIndexScan {
         plan_info: PlanEstimate,

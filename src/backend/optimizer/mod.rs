@@ -64,6 +64,7 @@ struct IndexableQual {
     lookup: IndexStrategyLookup,
     argument: IndexScanKeyArgument,
     expr: Expr,
+    is_not_null: bool,
 }
 
 #[derive(Debug, Clone)]

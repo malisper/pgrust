@@ -281,6 +281,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 keys,
                 order_by_keys,
                 direction,
+                index_only,
                 pathkeys,
                 ..
             } => {
@@ -313,6 +314,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     keys,
                     order_by_keys,
                     direction,
+                    index_only,
                     pathkeys,
                 }
             }
@@ -1622,6 +1624,7 @@ pub(super) fn estimate_index_candidate(
             keys: spec.keys,
             order_by_keys: spec.order_by_keys,
             direction: spec.direction,
+            index_only: false,
             pathkeys: native_pathkeys,
         }
     };
@@ -1753,8 +1756,13 @@ fn build_join_paths_internal(
     let right_uses_immediate_outer = path_uses_immediate_outer_columns(&right);
     let lateral_orientation_locked = left_uses_immediate_outer ^ right_uses_immediate_outer;
     let allow_default_orientation = !left_uses_immediate_outer || !lateral_orientation_locked;
+    let allow_base_cross_swap = matches!(kind, JoinType::Cross)
+        && !lateral_orientation_locked
+        && path_relids(&left).len() == 1
+        && path_relids(&right).len() == 1;
     let allow_swapped_orientation = matches!(kind, JoinType::Inner)
-        && (!right_uses_immediate_outer || !lateral_orientation_locked);
+        && (!right_uses_immediate_outer || !lateral_orientation_locked)
+        || allow_base_cross_swap;
 
     let mut paths = Vec::new();
     if allow_default_orientation {
@@ -1770,11 +1778,16 @@ fn build_join_paths_internal(
     }
 
     if allow_swapped_orientation {
+        let swapped_kind = if allow_base_cross_swap {
+            JoinType::Inner
+        } else {
+            kind
+        };
         paths.push(estimate_nested_loop_join_internal(
             root,
             right.clone(),
             left.clone(),
-            kind,
+            swapped_kind,
             restrict_clauses.clone(),
             pathtarget.clone(),
             output_columns.clone(),
@@ -1878,6 +1891,13 @@ fn select_best_join_path(paths: Vec<Path>) -> Path {
 }
 
 fn better_join_path(candidate: &Path, current: &Path) -> bool {
+    if let (Some(candidate_left_relids), Some(current_left_relids)) = (
+        cross_join_left_relid_count(candidate),
+        cross_join_left_relid_count(current),
+    ) && candidate_left_relids != current_left_relids
+    {
+        return candidate_left_relids > current_left_relids;
+    }
     let candidate_info = candidate.plan_info();
     let current_info = current.plan_info();
     let total_cmp = candidate_info
@@ -1895,6 +1915,22 @@ fn better_join_path(candidate: &Path, current: &Path) -> bool {
         .unwrap_or(Ordering::Equal);
     startup_cmp == Ordering::Less
         || (startup_cmp == Ordering::Equal && candidate.pathkeys().len() > current.pathkeys().len())
+}
+
+fn cross_join_left_relid_count(path: &Path) -> Option<usize> {
+    match path {
+        Path::NestedLoopJoin {
+            left,
+            kind: JoinType::Cross,
+            ..
+        } => Some(path_relids(left).len()),
+        Path::Filter { input, .. }
+        | Path::Projection { input, .. }
+        | Path::OrderBy { input, .. }
+        | Path::Limit { input, .. }
+        | Path::LockRows { input, .. } => cross_join_left_relid_count(input),
+        _ => None,
+    }
 }
 
 pub(super) fn extract_hash_join_clauses(
@@ -1940,6 +1976,7 @@ pub(super) fn extract_merge_join_clauses(
     for restrict in restrict_clauses {
         if let Some((outer_key, inner_key)) =
             clause_sides_match_join(restrict, left_relids, right_relids)
+            && merge_join_keys_are_orderable(&outer_key, &inner_key)
         {
             merge_clauses.push(restrict.clone());
             outer_merge_keys.push(outer_key);
@@ -1957,6 +1994,48 @@ pub(super) fn extract_merge_join_clauses(
     })
 }
 
+fn merge_join_keys_are_orderable(left: &Expr, right: &Expr) -> bool {
+    is_mergejoinable_sql_type(expr_sql_type(left))
+        && is_mergejoinable_sql_type(expr_sql_type(right))
+}
+
+fn is_mergejoinable_sql_type(sql_type: SqlType) -> bool {
+    if sql_type.is_array {
+        return false;
+    }
+    matches!(
+        sql_type.kind,
+        SqlTypeKind::Int2
+            | SqlTypeKind::Int4
+            | SqlTypeKind::Int8
+            | SqlTypeKind::Oid
+            | SqlTypeKind::RegClass
+            | SqlTypeKind::RegType
+            | SqlTypeKind::RegRole
+            | SqlTypeKind::RegNamespace
+            | SqlTypeKind::RegOperator
+            | SqlTypeKind::RegProcedure
+            | SqlTypeKind::Float4
+            | SqlTypeKind::Float8
+            | SqlTypeKind::Numeric
+            | SqlTypeKind::Money
+            | SqlTypeKind::Date
+            | SqlTypeKind::Time
+            | SqlTypeKind::TimeTz
+            | SqlTypeKind::Timestamp
+            | SqlTypeKind::TimestampTz
+            | SqlTypeKind::Bit
+            | SqlTypeKind::VarBit
+            | SqlTypeKind::Bytea
+            | SqlTypeKind::Inet
+            | SqlTypeKind::Cidr
+            | SqlTypeKind::Name
+            | SqlTypeKind::Text
+            | SqlTypeKind::Char
+            | SqlTypeKind::Varchar
+            | SqlTypeKind::Bool
+    )
+}
 fn clause_exprs(clauses: &[RestrictInfo]) -> Vec<Expr> {
     clauses
         .iter()
@@ -3411,14 +3490,22 @@ fn build_btree_index_keys(
             ));
             continue;
         }
-        if let Some((qual_idx, strategy, argument)) =
-            parsed_quals.iter().enumerate().find_map(|(idx, qual)| {
+        let range_quals = parsed_quals
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, qual)| {
                 if used[idx] || qual.column != Some(column) {
                     return None;
                 }
                 let strategy = qual_strategy(index, index_pos, qual)?;
-                Some((idx, strategy, qual.argument.clone()))
+                Some((idx, strategy, qual.argument.clone(), qual.is_not_null))
             })
+            .collect::<Vec<_>>();
+        if let Some((qual_idx, strategy, argument, _)) = range_quals
+            .iter()
+            .find(|(_, _, _, is_not_null)| !*is_not_null)
+            .cloned()
+            .or_else(|| range_quals.first().cloned())
         {
             used[qual_idx] = true;
             used_qual_indexes.push(qual_idx);
@@ -3427,6 +3514,18 @@ fn build_btree_index_keys(
                 strategy,
                 argument,
             ));
+            for (idx, strategy, argument, is_not_null) in range_quals {
+                if used[idx] || !is_not_null {
+                    continue;
+                }
+                used[idx] = true;
+                used_qual_indexes.push(idx);
+                keys.push(IndexScanKey::new(
+                    (index_pos + 1) as i16,
+                    strategy,
+                    argument,
+                ));
+            }
         }
         break;
     }
@@ -3520,6 +3619,7 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
         lookup: super::super::IndexStrategyLookup,
         argument: IndexScanKeyArgument,
         expr: &Expr,
+        is_not_null: bool,
     ) -> Option<IndexableQual> {
         Some(IndexableQual {
             column: expr_column_index(key_expr),
@@ -3527,6 +3627,7 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
             lookup,
             argument,
             expr: expr.clone(),
+            is_not_null,
         })
     }
 
@@ -3543,6 +3644,7 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
                     },
                     argument,
                     expr,
+                    false,
                 );
             }
             if let Some(argument) = index_key_argument(&op.args[0]) {
@@ -3554,6 +3656,7 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
                     },
                     argument,
                     expr,
+                    false,
                 );
             }
             None
@@ -3567,6 +3670,7 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
                     super::super::IndexStrategyLookup::Proc(func.funcid),
                     argument,
                     expr,
+                    false,
                 );
             }
             if let Some(argument) = index_key_argument(&func.args[0]) {
@@ -3577,10 +3681,21 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
                     )?),
                     argument,
                     expr,
+                    false,
                 );
             }
             None
         }
+        Expr::IsNotNull(inner) => mk(
+            strip_casts(inner),
+            super::super::IndexStrategyLookup::Operator {
+                oid: 0,
+                kind: OpExprKind::Lt,
+            },
+            IndexScanKeyArgument::Const(Value::Null),
+            expr,
+            true,
+        ),
         _ => None,
     }
 }

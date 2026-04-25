@@ -4,7 +4,10 @@ use crate::RelFileLocator;
 use crate::backend::access::heap::heapam::{heap_flush, heap_insert_mvcc, heap_update};
 use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
 use crate::backend::libpq::pqformat::format_exec_error;
-use crate::backend::parser::{Catalog, CatalogEntry, CatalogLookup, IndexColumnDef};
+use crate::backend::parser::{
+    Catalog, CatalogEntry, CatalogLookup, IndexColumnDef, analyze_select_query_with_outer,
+    parse_select,
+};
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 use crate::include::access::htup::TupleValue;
 use crate::include::access::htup::{AttributeDesc, HeapTuple};
@@ -109,6 +112,14 @@ fn t3_rel() -> RelFileLocator {
     }
 }
 
+fn tenk1_rel() -> RelFileLocator {
+    RelFileLocator {
+        spc_oid: 0,
+        db_oid: 1,
+        rel_number: 14023,
+    }
+}
+
 fn relation_desc() -> RelationDesc {
     RelationDesc {
         columns: vec![
@@ -127,6 +138,31 @@ fn relation_desc() -> RelationDesc {
                 crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Text),
                 true,
             ),
+        ],
+    }
+}
+
+fn tenk1_relation_desc() -> RelationDesc {
+    let int4 = crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4);
+    let text = crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Text);
+    RelationDesc {
+        columns: vec![
+            crate::backend::catalog::catalog::column_desc("unique1", int4, false),
+            crate::backend::catalog::catalog::column_desc("unique2", int4, false),
+            crate::backend::catalog::catalog::column_desc("two", int4, false),
+            crate::backend::catalog::catalog::column_desc("four", int4, false),
+            crate::backend::catalog::catalog::column_desc("ten", int4, false),
+            crate::backend::catalog::catalog::column_desc("twenty", int4, false),
+            crate::backend::catalog::catalog::column_desc("hundred", int4, false),
+            crate::backend::catalog::catalog::column_desc("thousand", int4, false),
+            crate::backend::catalog::catalog::column_desc("twothousand", int4, false),
+            crate::backend::catalog::catalog::column_desc("fivethous", int4, false),
+            crate::backend::catalog::catalog::column_desc("tenthous", int4, false),
+            crate::backend::catalog::catalog::column_desc("odd", int4, false),
+            crate::backend::catalog::catalog::column_desc("even", int4, false),
+            crate::backend::catalog::catalog::column_desc("stringu1", text, false),
+            crate::backend::catalog::catalog::column_desc("stringu2", text, false),
+            crate::backend::catalog::catalog::column_desc("string4", text, false),
         ],
     }
 }
@@ -168,15 +204,19 @@ fn catalog() -> Catalog {
     catalog
 }
 
-fn add_ready_people_index(
+fn add_ready_relation_index(
     catalog: &mut Catalog,
+    relation_name: &str,
     index_name: &str,
     unique: bool,
     primary: bool,
     columns: &[IndexColumnDef],
     constraint: Option<(char, &str)>,
 ) {
-    let relation_oid = catalog.lookup_any_relation("people").unwrap().relation_oid;
+    let relation_oid = catalog
+        .lookup_any_relation(relation_name)
+        .unwrap()
+        .relation_oid;
     let entry = catalog
         .create_index_for_relation_with_flags(index_name, relation_oid, unique, primary, columns)
         .unwrap();
@@ -190,6 +230,19 @@ fn add_ready_people_index(
     }
 }
 
+fn add_ready_people_index(
+    catalog: &mut Catalog,
+    index_name: &str,
+    unique: bool,
+    primary: bool,
+    columns: &[IndexColumnDef],
+    constraint: Option<(char, &str)>,
+) {
+    add_ready_relation_index(
+        catalog, "people", index_name, unique, primary, columns, constraint,
+    );
+}
+
 fn catalog_with_people_primary_key() -> Catalog {
     let mut catalog = catalog();
     add_ready_people_index(
@@ -199,6 +252,24 @@ fn catalog_with_people_primary_key() -> Catalog {
         true,
         &[IndexColumnDef::from("id")],
         Some((CONSTRAINT_PRIMARY, "people_pkey")),
+    );
+    catalog
+}
+
+fn catalog_with_tenk1_unique1_index() -> Catalog {
+    let mut catalog = Catalog::default();
+    catalog.insert(
+        "tenk1",
+        test_catalog_entry(tenk1_rel(), tenk1_relation_desc()),
+    );
+    add_ready_relation_index(
+        &mut catalog,
+        "tenk1",
+        "tenk1_unique1",
+        true,
+        false,
+        &[IndexColumnDef::from("unique1")],
+        None,
     );
     catalog
 }
@@ -940,6 +1011,186 @@ fn explain_lines(plan: Plan) -> Vec<String> {
     lines
 }
 
+fn planned_select_with_catalog(
+    sql: &str,
+    catalog: &dyn CatalogLookup,
+) -> crate::include::nodes::plannodes::PlannedStmt {
+    let stmt = parse_select(sql).expect("parse");
+    let (query, _) = analyze_select_query_with_outer(&stmt, catalog, &[], None, None, &[], &[])
+        .expect("analyze");
+    crate::backend::optimizer::planner(query, catalog).expect("plan")
+}
+
+fn first_tuple_slot_kind_for_sql(
+    base: &PathBuf,
+    txns: &TransactionManager,
+    catalog: Catalog,
+    sql: &str,
+) -> &'static str {
+    let base = base.clone();
+    let txns = txns.clone();
+    let sql = sql.to_string();
+    run_with_large_stack_result("executor-test-index-only-slot-kind", move || {
+        let smgr = MdStorageManager::new(&base);
+        let pool = std::sync::Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 8));
+        for (_, entry) in catalog.entries() {
+            create_fork(&pool, entry.rel);
+        }
+        let txns_arc = std::sync::Arc::new(parking_lot::RwLock::new(txns.clone()));
+        let planned = planned_select_with_catalog(&sql, &catalog);
+        let mut ctx = ExecutorContext {
+            pool,
+            txns: txns_arc,
+            txn_waiter: None,
+            lock_status_provider: None,
+            sequences: Some(std::sync::Arc::new(
+                crate::pgrust::database::SequenceRuntime::new_ephemeral(),
+            )),
+            large_objects: Some(std::sync::Arc::new(
+                crate::pgrust::database::LargeObjectRuntime::new_ephemeral(),
+            )),
+            async_notify_runtime: None,
+            advisory_locks: std::sync::Arc::new(
+                crate::backend::storage::lmgr::AdvisoryLockManager::new(),
+            ),
+            row_locks: std::sync::Arc::new(crate::backend::storage::lmgr::RowLockManager::new()),
+            checkpoint_stats:
+                crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
+            datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            gucs: std::collections::HashMap::new(),
+            interrupts: std::sync::Arc::new(
+                crate::backend::utils::misc::interrupts::InterruptState::new(),
+            ),
+            stats: std::sync::Arc::new(parking_lot::RwLock::new(
+                crate::pgrust::database::DatabaseStatsStore::with_default_io_rows(),
+            )),
+            session_stats: std::sync::Arc::new(parking_lot::RwLock::new(
+                crate::pgrust::database::SessionStatsState::default(),
+            )),
+            snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
+            transaction_state: None,
+            client_id: 77,
+            current_database_name: "postgres".to_string(),
+            session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+            current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+            active_role_oid: None,
+            session_replication_role: Default::default(),
+            statement_lock_scope_id: None,
+            transaction_lock_scope_id: None,
+            next_command_id: 0,
+            default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+            expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
+            case_test_values: Vec::new(),
+            system_bindings: Vec::new(),
+            subplans: planned.subplans,
+            timed: false,
+            allow_side_effects: true,
+            pending_async_notifications: Vec::new(),
+            catalog: catalog.materialize_visible_catalog(),
+            compiled_functions: std::collections::HashMap::new(),
+            cte_tables: std::collections::HashMap::new(),
+            cte_producers: std::collections::HashMap::new(),
+            recursive_worktables: std::collections::HashMap::new(),
+            deferred_foreign_keys: None,
+            trigger_depth: 0,
+        };
+        let mut state = executor_start(planned.plan_tree);
+        let slot = exec_next(&mut state, &mut ctx)
+            .expect("execute plan")
+            .expect("first row");
+        match &slot.kind {
+            crate::include::nodes::execnodes::SlotKind::Virtual => "virtual",
+            crate::include::nodes::execnodes::SlotKind::HeapTuple { .. }
+            | crate::include::nodes::execnodes::SlotKind::BufferHeapTuple { .. } => "heap",
+            crate::include::nodes::execnodes::SlotKind::Empty => "empty",
+        }
+    })
+}
+
+fn first_tuple_slot_kind_for_plan(
+    base: &PathBuf,
+    txns: &TransactionManager,
+    plan: Plan,
+) -> &'static str {
+    let base = base.clone();
+    let txns = txns.clone();
+    run_with_large_stack_result("executor-test-plan-slot-kind", move || {
+        let smgr = MdStorageManager::new(&base);
+        let pool = std::sync::Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 8));
+        if let Plan::IndexScan { rel, index_rel, .. } = &plan {
+            create_fork(&pool, *rel);
+            create_fork(&pool, *index_rel);
+        }
+        let txns_arc = std::sync::Arc::new(parking_lot::RwLock::new(txns.clone()));
+        let mut ctx = ExecutorContext {
+            pool,
+            txns: txns_arc,
+            txn_waiter: None,
+            lock_status_provider: None,
+            sequences: Some(std::sync::Arc::new(
+                crate::pgrust::database::SequenceRuntime::new_ephemeral(),
+            )),
+            large_objects: Some(std::sync::Arc::new(
+                crate::pgrust::database::LargeObjectRuntime::new_ephemeral(),
+            )),
+            async_notify_runtime: None,
+            advisory_locks: std::sync::Arc::new(
+                crate::backend::storage::lmgr::AdvisoryLockManager::new(),
+            ),
+            row_locks: std::sync::Arc::new(crate::backend::storage::lmgr::RowLockManager::new()),
+            checkpoint_stats:
+                crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
+            datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            gucs: std::collections::HashMap::new(),
+            interrupts: std::sync::Arc::new(
+                crate::backend::utils::misc::interrupts::InterruptState::new(),
+            ),
+            stats: std::sync::Arc::new(parking_lot::RwLock::new(
+                crate::pgrust::database::DatabaseStatsStore::with_default_io_rows(),
+            )),
+            session_stats: std::sync::Arc::new(parking_lot::RwLock::new(
+                crate::pgrust::database::SessionStatsState::default(),
+            )),
+            snapshot: txns.snapshot(INVALID_TRANSACTION_ID).unwrap(),
+            transaction_state: None,
+            client_id: 77,
+            current_database_name: "postgres".to_string(),
+            session_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+            current_user_oid: crate::include::catalog::BOOTSTRAP_SUPERUSER_OID,
+            active_role_oid: None,
+            session_replication_role: Default::default(),
+            statement_lock_scope_id: None,
+            transaction_lock_scope_id: None,
+            next_command_id: 0,
+            default_toast_compression: crate::include::access::htup::AttributeCompression::Pglz,
+            expr_bindings: crate::backend::executor::ExprEvalBindings::default(),
+            case_test_values: Vec::new(),
+            system_bindings: Vec::new(),
+            subplans: Vec::new(),
+            timed: false,
+            allow_side_effects: true,
+            pending_async_notifications: Vec::new(),
+            catalog: None,
+            compiled_functions: std::collections::HashMap::new(),
+            cte_tables: std::collections::HashMap::new(),
+            cte_producers: std::collections::HashMap::new(),
+            recursive_worktables: std::collections::HashMap::new(),
+            deferred_foreign_keys: None,
+            trigger_depth: 0,
+        };
+        let mut state = executor_start(plan);
+        let slot = exec_next(&mut state, &mut ctx)
+            .expect("execute plan")
+            .expect("first row");
+        match &slot.kind {
+            crate::include::nodes::execnodes::SlotKind::Virtual => "virtual",
+            crate::include::nodes::execnodes::SlotKind::HeapTuple { .. }
+            | crate::include::nodes::execnodes::SlotKind::BufferHeapTuple { .. } => "heap",
+            crate::include::nodes::execnodes::SlotKind::Empty => "empty",
+        }
+    })
+}
+
 fn run_sql(
     base: &PathBuf,
     txns: &TransactionManager,
@@ -1467,11 +1718,11 @@ fn manual_hash_join_inner_returns_matching_rows() {
         vec![
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(10)],
+                vec![Value::Int32(1), Value::Int32(11)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(11)],
+                vec![Value::Int32(1), Value::Int32(10)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
@@ -1510,11 +1761,11 @@ fn manual_hash_join_left_emits_null_extended_rows() {
         vec![
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(10)],
+                vec![Value::Int32(1), Value::Int32(11)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(11)],
+                vec![Value::Int32(1), Value::Int32(10)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
@@ -1557,11 +1808,11 @@ fn manual_hash_join_right_emits_unmatched_inner_rows() {
         vec![
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(10)],
+                vec![Value::Int32(1), Value::Int32(11)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(11)],
+                vec![Value::Int32(1), Value::Int32(10)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
@@ -1604,11 +1855,11 @@ fn manual_hash_join_full_emits_unmatched_rows_from_both_sides() {
         vec![
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(10)],
+                vec![Value::Int32(1), Value::Int32(11)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
-                vec![Value::Int32(1), Value::Int32(11)],
+                vec![Value::Int32(1), Value::Int32(10)],
             ),
             (
                 vec!["person_id".into(), "pet_id".into()],
@@ -1776,6 +2027,172 @@ fn manual_hash_join_null_hash_keys_do_not_match_each_other() {
             vec!["id".into(), "id".into()],
             vec![Value::Int32(1), Value::Int32(1)],
         )]
+    );
+}
+
+#[test]
+fn manual_merge_join_emits_duplicate_groups_in_merge_order() {
+    let base = temp_dir("manual_merge_join_duplicate_order");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    let int4 = crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Int4);
+    let output_columns = vec![QueryColumn {
+        name: "id".into(),
+        sql_type: int4,
+        wire_type_oid: None,
+    }];
+
+    let plan = Plan::MergeJoin {
+        plan_info: PlanEstimate::default(),
+        left: Box::new(Plan::Values {
+            plan_info: PlanEstimate::default(),
+            rows: vec![
+                vec![Expr::Const(Value::Int32(0))],
+                vec![Expr::Const(Value::Int32(1))],
+                vec![Expr::Const(Value::Int32(2))],
+                vec![Expr::Const(Value::Int32(2))],
+                vec![Expr::Const(Value::Int32(5))],
+            ],
+            output_columns: output_columns.clone(),
+        }),
+        right: Box::new(Plan::Values {
+            plan_info: PlanEstimate::default(),
+            rows: vec![
+                vec![Expr::Const(Value::Int32(0))],
+                vec![Expr::Const(Value::Int32(2))],
+                vec![Expr::Const(Value::Int32(5))],
+                vec![Expr::Const(Value::Int32(5))],
+            ],
+            output_columns,
+        }),
+        kind: JoinType::Inner,
+        merge_clauses: vec![Expr::op_auto(
+            crate::include::nodes::primnodes::OpExprKind::Eq,
+            vec![local_var(0), local_var(1)],
+        )],
+        outer_merge_keys: vec![local_var(0)],
+        inner_merge_keys: vec![local_var(0)],
+        join_qual: vec![],
+        qual: vec![],
+    };
+
+    let rows = run_plan(&base, &txns, plan).unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            (
+                vec!["id".into(), "id".into()],
+                vec![Value::Int32(0), Value::Int32(0)]
+            ),
+            (
+                vec!["id".into(), "id".into()],
+                vec![Value::Int32(2), Value::Int32(2)]
+            ),
+            (
+                vec!["id".into(), "id".into()],
+                vec![Value::Int32(2), Value::Int32(2)]
+            ),
+            (
+                vec!["id".into(), "id".into()],
+                vec![Value::Int32(5), Value::Int32(5)]
+            ),
+            (
+                vec!["id".into(), "id".into()],
+                vec![Value::Int32(5), Value::Int32(5)]
+            ),
+        ]
+    );
+}
+
+#[test]
+fn cross_join_without_order_by_uses_postgres_physical_order() {
+    let mut harness = seed_people_and_pets("cross_join_without_order_by");
+
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select people.id, pets.id from people, pets limit 6",
+            )
+            .unwrap(),
+        vec![
+            vec![Value::Int32(1), Value::Int32(10)],
+            vec![Value::Int32(2), Value::Int32(10)],
+            vec![Value::Int32(3), Value::Int32(10)],
+            vec![Value::Int32(1), Value::Int32(11)],
+            vec![Value::Int32(2), Value::Int32(11)],
+            vec![Value::Int32(3), Value::Int32(11)],
+        ],
+    );
+}
+
+#[test]
+fn three_way_cross_join_keeps_left_join_rel_outer() {
+    let mut harness = seed_people_and_pets("three_way_cross_join_order");
+    harness
+        .execute(INVALID_TRANSACTION_ID, "create table colors (id int)")
+        .unwrap();
+    harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "insert into colors values (100), (200)",
+        )
+        .unwrap();
+
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select people.id, pets.id, colors.id \
+                 from people cross join pets cross join colors",
+            )
+            .unwrap(),
+        vec![
+            vec![Value::Int32(1), Value::Int32(10), Value::Int32(100)],
+            vec![Value::Int32(1), Value::Int32(10), Value::Int32(200)],
+            vec![Value::Int32(2), Value::Int32(10), Value::Int32(100)],
+            vec![Value::Int32(2), Value::Int32(10), Value::Int32(200)],
+            vec![Value::Int32(3), Value::Int32(10), Value::Int32(100)],
+            vec![Value::Int32(3), Value::Int32(10), Value::Int32(200)],
+            vec![Value::Int32(1), Value::Int32(11), Value::Int32(100)],
+            vec![Value::Int32(1), Value::Int32(11), Value::Int32(200)],
+            vec![Value::Int32(2), Value::Int32(11), Value::Int32(100)],
+            vec![Value::Int32(2), Value::Int32(11), Value::Int32(200)],
+            vec![Value::Int32(3), Value::Int32(11), Value::Int32(100)],
+            vec![Value::Int32(3), Value::Int32(11), Value::Int32(200)],
+            vec![Value::Int32(1), Value::Int32(12), Value::Int32(100)],
+            vec![Value::Int32(1), Value::Int32(12), Value::Int32(200)],
+            vec![Value::Int32(2), Value::Int32(12), Value::Int32(100)],
+            vec![Value::Int32(2), Value::Int32(12), Value::Int32(200)],
+            vec![Value::Int32(3), Value::Int32(12), Value::Int32(100)],
+            vec![Value::Int32(3), Value::Int32(12), Value::Int32(200)],
+            vec![Value::Int32(1), Value::Int32(13), Value::Int32(100)],
+            vec![Value::Int32(1), Value::Int32(13), Value::Int32(200)],
+            vec![Value::Int32(2), Value::Int32(13), Value::Int32(100)],
+            vec![Value::Int32(2), Value::Int32(13), Value::Int32(200)],
+            vec![Value::Int32(3), Value::Int32(13), Value::Int32(100)],
+            vec![Value::Int32(3), Value::Int32(13), Value::Int32(200)],
+        ],
+    );
+}
+
+#[test]
+fn non_equi_inner_join_uses_postgres_physical_order() {
+    let mut harness = seed_people_and_pets("non_equi_inner_join_order");
+
+    assert_query_rows(
+        harness
+            .execute(
+                INVALID_TRANSACTION_ID,
+                "select people.id, pets.id \
+                 from people join pets on people.id <= pets.owner_id",
+            )
+            .unwrap(),
+        vec![
+            vec![Value::Int32(1), Value::Int32(10)],
+            vec![Value::Int32(1), Value::Int32(11)],
+            vec![Value::Int32(1), Value::Int32(12)],
+            vec![Value::Int32(2), Value::Int32(12)],
+        ],
     );
 }
 
@@ -3221,6 +3638,322 @@ fn explain_scan_filter_renders_single_seq_scan_line() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn explain_rewritten_min_aggregate_uses_index_only_scan() {
+    let mut harness = SeededSqlHarness::new(
+        "explain_rewritten_min_aggregate_uses_index_only_scan",
+        catalog_with_people_primary_key(),
+    );
+    let xid = harness.txns.begin();
+    harness
+        .execute(
+            xid,
+            "insert into people (id, name, note) values (10, 'alice', 'a'), (20, 'bob', null), (30, 'carol', 'c')",
+        )
+        .unwrap();
+    harness.txns.commit(xid).unwrap();
+    harness
+        .execute(INVALID_TRANSACTION_ID, "vacuum analyze people")
+        .unwrap();
+
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "explain (costs off) select min(id) from people",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(rendered.iter().any(|line| line.as_str() == "  InitPlan 1"));
+            assert!(rendered.iter().any(|line| line.trim() == "Limit"));
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.contains("Index Only Scan using people_pkey on people"))
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.contains("Index Cond: (id IS NOT NULL)"))
+            );
+            assert!(!rendered.iter().any(|line| line.contains("Seq Scan")));
+            assert!(!rendered.iter().any(|line| line.contains("Sort")));
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn explain_rewritten_max_aggregate_uses_backward_index_only_scan() {
+    let mut harness = SeededSqlHarness::new(
+        "explain_rewritten_max_aggregate_uses_backward_index_only_scan",
+        catalog_with_people_primary_key(),
+    );
+    let xid = harness.txns.begin();
+    harness
+        .execute(
+            xid,
+            "insert into people (id, name, note) values (10, 'alice', 'a'), (20, 'bob', null), (30, 'carol', 'c')",
+        )
+        .unwrap();
+    harness.txns.commit(xid).unwrap();
+    harness
+        .execute(INVALID_TRANSACTION_ID, "vacuum analyze people")
+        .unwrap();
+
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "explain (costs off) select max(id) from people where id < 42",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(rendered.iter().any(|line| line.as_str() == "  InitPlan 1"));
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line
+                        .contains("Index Only Scan Backward using people_pkey on people"))
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.contains("id IS NOT NULL") && line.contains("id < 42"))
+            );
+            assert!(!rendered.iter().any(|line| line.contains("Seq Scan")));
+            assert!(!rendered.iter().any(|line| line.contains("Sort")));
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+fn seed_tenk1_minmax_rows(harness: &mut SeededSqlHarness, row_count: i32) {
+    let xid = harness.txns.begin();
+    let values = (0..row_count)
+        .map(|i| {
+            format!(
+                "({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, 'u{:05}', 'v{:05}', '{}')",
+                i,
+                row_count - 1 - i,
+                i % 2,
+                i % 4,
+                i % 10,
+                i % 20,
+                i % 100,
+                i % 1000,
+                i % 2000,
+                i % 5000,
+                i,
+                i % 2,
+                (i + 1) % 2,
+                i,
+                row_count - 1 - i,
+                i % 10,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "insert into tenk1 (unique1, unique2, two, four, ten, twenty, hundred, thousand, twothousand, fivethous, tenthous, odd, even, stringu1, stringu2, string4) values {values}"
+    );
+    harness.execute(xid, &sql).unwrap();
+    harness.txns.commit(xid).unwrap();
+    harness
+        .execute(INVALID_TRANSACTION_ID, "vacuum analyze tenk1")
+        .unwrap();
+}
+
+#[test]
+fn explain_rewritten_tenk1_min_aggregate_uses_index_only_scan() {
+    let mut harness = SeededSqlHarness::new(
+        "explain_rewritten_tenk1_min_aggregate_uses_index_only_scan",
+        catalog_with_tenk1_unique1_index(),
+    );
+    seed_tenk1_minmax_rows(&mut harness, 128);
+
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "explain (costs off) select min(unique1) from tenk1",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.contains("Index Only Scan using tenk1_unique1 on tenk1")),
+                "expected index-only min plan, got {rendered:?}"
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.contains("Index Cond: (unique1 IS NOT NULL)")),
+                "expected IS NOT NULL index qual, got {rendered:?}"
+            );
+            assert!(
+                !rendered.iter().any(|line| line.contains("Seq Scan"))
+                    && !rendered.iter().any(|line| line.contains("Sort")),
+                "expected no seq scan or sort, got {rendered:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn explain_rewritten_tenk1_max_aggregate_uses_backward_index_only_scan() {
+    let mut harness = SeededSqlHarness::new(
+        "explain_rewritten_tenk1_max_aggregate_uses_backward_index_only_scan",
+        catalog_with_tenk1_unique1_index(),
+    );
+    seed_tenk1_minmax_rows(&mut harness, 128);
+
+    match harness
+        .execute(
+            INVALID_TRANSACTION_ID,
+            "explain (costs off) select max(unique1) from tenk1 where unique1 < 42",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line
+                        .contains("Index Only Scan Backward using tenk1_unique1 on tenk1")),
+                "expected backward index-only max plan, got {rendered:?}"
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.contains("unique1 IS NOT NULL")
+                        && line.contains("unique1 < 42")),
+                "expected range and IS NOT NULL index quals, got {rendered:?}"
+            );
+            assert!(
+                !rendered.iter().any(|line| line.contains("Seq Scan"))
+                    && !rendered.iter().any(|line| line.contains("Sort")),
+                "expected no seq scan or sort, got {rendered:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn index_only_scan_uses_virtual_slot_and_falls_back_when_visibility_bit_cleared() {
+    let mut harness = SeededSqlHarness::new(
+        "index_only_scan_uses_virtual_slot_and_falls_back_when_visibility_bit_cleared",
+        catalog_with_people_primary_key(),
+    );
+    let xid = harness.txns.begin();
+    harness
+        .execute(
+            xid,
+            "insert into people (id, name, note) values (10, 'alice', 'a'), (20, 'bob', null), (30, 'carol', 'c')",
+        )
+        .unwrap();
+    harness.txns.commit(xid).unwrap();
+
+    harness
+        .execute(INVALID_TRANSACTION_ID, "vacuum analyze people")
+        .unwrap();
+
+    let catalog = catalog_with_people_primary_key();
+    let visible = catalog.materialize_visible_catalog().unwrap();
+    let people = visible.relcache().get_by_name("people").unwrap();
+    let index = visible.relcache().get_by_name("people_pkey").unwrap();
+    let index_meta = index.index.clone().expect("people primary key metadata");
+    let scan_desc = RelationDesc {
+        columns: vec![people.desc.columns[0].clone()],
+    };
+    let index_scan_plan = Plan::IndexScan {
+        plan_info: PlanEstimate::new(0.0, 1.0, 1.0, 1),
+        source_id: 1,
+        rel: people.rel,
+        relation_name: "people".into(),
+        relation_oid: people.relation_oid,
+        index_rel: index.rel,
+        index_name: "people_pkey".into(),
+        am_oid: index_meta.am_oid,
+        toast: None,
+        desc: scan_desc,
+        index_desc: index.desc.clone(),
+        index_meta,
+        keys: Vec::new(),
+        order_by_keys: Vec::new(),
+        direction: crate::include::access::relscan::ScanDirection::Forward,
+        index_only: true,
+    };
+
+    let on_all_visible_page =
+        first_tuple_slot_kind_for_plan(&harness.base, &harness.txns, index_scan_plan.clone());
+    assert_eq!(on_all_visible_page, "virtual");
+
+    {
+        let smgr = MdStorageManager::new(&harness.base);
+        let pool = std::sync::Arc::new(BufferPool::new(SmgrStorageBackend::new(smgr), 8));
+        let nblocks = pool
+            .with_storage_mut(|storage| storage.smgr.nblocks(rel(), ForkNumber::Main))
+            .unwrap();
+        let mut any_cleared = false;
+        for block in 0..nblocks {
+            let mut vmbuf = None;
+            crate::backend::access::heap::visibilitymap::visibilitymap_pin(
+                &pool,
+                rel(),
+                block,
+                &mut vmbuf,
+            )
+            .unwrap();
+            any_cleared |= crate::backend::access::heap::visibilitymap::visibilitymap_clear(
+                &pool,
+                77,
+                rel(),
+                block,
+                &vmbuf,
+                crate::include::access::visibilitymapdefs::VISIBILITYMAP_ALL_VISIBLE
+                    | crate::include::access::visibilitymapdefs::VISIBILITYMAP_ALL_FROZEN,
+            )
+            .unwrap();
+        }
+        assert!(any_cleared);
+    }
+
+    let after_clear = first_tuple_slot_kind_for_plan(&harness.base, &harness.txns, index_scan_plan);
+    assert_eq!(after_clear, "heap");
 }
 
 #[test]
@@ -7417,6 +8150,7 @@ fn index_property_builtins_report_am_and_index_capabilities() {
                 indoption: vec![0],
                 indnullsnotdistinct: false,
                 indisexclusion: false,
+                indimmediate: true,
                 brin_options: None,
                 gin_options: None,
                 hash_options: None,
@@ -7438,6 +8172,7 @@ fn index_property_builtins_report_am_and_index_capabilities() {
                 indoption: vec![0],
                 indnullsnotdistinct: false,
                 indisexclusion: false,
+                indimmediate: true,
                 brin_options: None,
                 gin_options: None,
                 hash_options: None,
@@ -7459,6 +8194,7 @@ fn index_property_builtins_report_am_and_index_capabilities() {
                 indoption: vec![0],
                 indnullsnotdistinct: false,
                 indisexclusion: false,
+                indimmediate: true,
                 brin_options: None,
                 gin_options: None,
                 hash_options: None,
@@ -14176,7 +14912,8 @@ fn row_to_json_supports_qualified_star_inside_row_constructor() {
                       y AS c, \
                       ARRAY[ROW(x.*, ARRAY[1,2,3]), ROW(y.*, ARRAY[4,5,6])] AS z \
                FROM generate_series(1,2) x, \
-                    generate_series(4,5) y) q",
+                    generate_series(4,5) y) q \
+         ORDER BY b, c",
     )
     .unwrap()
     {
@@ -14216,7 +14953,7 @@ fn jsonb_agg_supports_whole_row_alias_arguments() {
         &base,
         &txns,
         INVALID_TRANSACTION_ID,
-        "SELECT jsonb_agg(q) \
+        "SELECT jsonb_agg(q ORDER BY b, c) \
          FROM (SELECT $$a$$ || x AS b, \
                       y AS c, \
                       ARRAY[ROW(x.*, ARRAY[1,2,3]), ROW(y.*, ARRAY[4,5,6])] AS z \

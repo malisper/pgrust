@@ -133,6 +133,7 @@ pub struct IndexVacuumContext {
 pub enum IndexUniqueCheck {
     No,
     Yes,
+    Partial,
 }
 
 pub type AmBuildFn = fn(&IndexBuildContext) -> Result<IndexBuildResult, CatalogError>;
