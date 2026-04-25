@@ -3496,8 +3496,8 @@ mod tests {
 
         assert!(matches!(
             error,
-            ParseError::UnexpectedToken { expected, actual }
-                if expected == "supported function" && actual == "unnest"
+            ParseError::DetailedError { message, sqlstate, .. }
+                if message == "function unnest(anyarray) does not exist" && sqlstate == "42883"
         ));
     }
 
