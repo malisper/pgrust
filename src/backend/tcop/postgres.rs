@@ -6636,6 +6636,24 @@ pub(crate) fn handle_connection(
     handle_connection_with_io(reader, stream, cluster, client_id)
 }
 
+#[cfg(fuzzing)]
+pub fn fuzz_startup_packet(bytes: &[u8]) {
+    if bytes.len() < 8 {
+        return;
+    }
+
+    let declared_len = u32::from_be_bytes(bytes[0..4].try_into().unwrap()) as usize;
+    if declared_len < 8 || declared_len > bytes.len() {
+        return;
+    }
+
+    let payload = &bytes[4..declared_len];
+    let code = i32::from_be_bytes(payload[0..4].try_into().unwrap());
+    if code == PROTOCOL_VERSION_3_0 {
+        let _ = parse_startup_parameters(&payload[4..]);
+    }
+}
+
 fn parse_startup_parameters(payload: &[u8]) -> io::Result<HashMap<String, String>> {
     let mut params = HashMap::new();
     let mut offset = 0usize;

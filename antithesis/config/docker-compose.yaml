@@ -1,0 +1,7 @@
+services: {}
+
+# Placeholder local dry-run layout.
+# Expected eventual services:
+# - pgrust server
+# - workload driver
+# - optional sidecar for log or invariant export
