@@ -1789,7 +1789,9 @@ fn format_index_backed_constraintdef_for_catalog(
     } else {
         "UNIQUE"
     };
-    Some(format!("{prefix} ({})", columns.join(", ")))
+    let mut def = format!("{prefix} ({})", columns.join(", "));
+    append_constraint_deferrability(&mut def, row);
+    Some(def)
 }
 
 fn format_foreign_key_constraintdef_for_catalog(
@@ -1817,7 +1819,21 @@ fn format_foreign_key_constraintdef_for_catalog(
     if row.confupdtype == 'r' {
         def.push_str(" ON UPDATE RESTRICT");
     }
+    append_constraint_deferrability(&mut def, row);
     Some(def)
+}
+
+fn append_constraint_deferrability(
+    def: &mut String,
+    row: &crate::include::catalog::PgConstraintRow,
+) {
+    if !row.condeferrable {
+        return;
+    }
+    def.push_str(" DEFERRABLE");
+    if row.condeferred {
+        def.push_str(" INITIALLY DEFERRED");
+    }
 }
 
 fn eval_pg_get_indexdef(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {

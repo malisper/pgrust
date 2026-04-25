@@ -163,15 +163,20 @@ fn inherited_table_constraints(
                         continue;
                     }
                     let without_overlaps = row.conperiod.then(|| columns.last().cloned()).flatten();
+                    let attributes = ConstraintAttributes {
+                        deferrable: row.condeferrable.then_some(true),
+                        initially_deferred: row.condeferred.then_some(true),
+                        ..ConstraintAttributes::default()
+                    };
                     if row.contype == crate::include::catalog::CONSTRAINT_PRIMARY {
                         constraints.push(TableConstraint::PrimaryKey {
-                            attributes: ConstraintAttributes::default(),
+                            attributes,
                             columns,
                             without_overlaps,
                         });
                     } else {
                         constraints.push(TableConstraint::Unique {
-                            attributes: ConstraintAttributes::default(),
+                            attributes,
                             columns,
                             without_overlaps,
                         });
