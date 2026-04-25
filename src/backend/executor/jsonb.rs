@@ -773,6 +773,9 @@ pub(crate) fn jsonb_from_value(
             JsonbValue::Numeric(v.clone())
         }
         Value::Interval(v) => JsonbValue::String(render_interval_text(*v)),
+        Value::Uuid(v) => {
+            JsonbValue::String(crate::backend::executor::value_io::render_uuid_text(v))
+        }
         Value::Bool(v) => JsonbValue::Bool(*v),
         Value::Bit(v) => JsonbValue::String(render_bit_text(v)),
         Value::JsonPath(text) => JsonbValue::String(text.to_string()),
@@ -1060,6 +1063,7 @@ pub(crate) fn jsonb_builder_key(value: &Value) -> Result<String, ExecError> {
         Value::Float64(v) => Ok(v.to_string()),
         Value::Numeric(v) => Ok(v.render()),
         Value::Interval(v) => Ok(render_interval_text(*v)),
+        Value::Uuid(v) => Ok(crate::backend::executor::value_io::render_uuid_text(v)),
         Value::Bool(v) => Ok(if *v { "true".into() } else { "false".into() }),
         Value::Bit(v) => Ok(render_bit_text(v)),
         Value::Text(text) => Ok(text.to_string()),

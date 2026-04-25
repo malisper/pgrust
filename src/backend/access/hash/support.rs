@@ -162,6 +162,7 @@ pub(crate) fn hash_value_extended(
         Value::Float64(value) => hash_bytes_extended(&value.to_le_bytes(), seed),
         Value::Numeric(value) => hash_bytes_extended(value.render().as_bytes(), seed),
         Value::Bytea(value) => hash_bytes_extended(value, seed),
+        Value::Uuid(value) => hash_bytes_extended(value, seed),
         value if value.as_text().is_some() => {
             let mut text = value.as_text().unwrap();
             if opclass == Some(BPCHAR_HASH_OPCLASS_OID) {

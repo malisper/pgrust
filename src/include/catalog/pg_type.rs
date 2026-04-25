@@ -43,9 +43,9 @@ use crate::include::catalog::{
     TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSRANGE_ARRAY_TYPE_OID, TSRANGE_TYPE_OID,
     TSTZMULTIRANGE_ARRAY_TYPE_OID, TSTZMULTIRANGE_TYPE_OID, TSTZRANGE_ARRAY_TYPE_OID,
     TSTZRANGE_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, TXID_SNAPSHOT_ARRAY_TYPE_OID,
-    TXID_SNAPSHOT_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID,
-    VARCHAR_TYPE_OID, VOID_TYPE_OID, XID_ARRAY_TYPE_OID, XID_TYPE_OID, XML_ARRAY_TYPE_OID,
-    XML_TYPE_OID,
+    TXID_SNAPSHOT_TYPE_OID, UUID_ARRAY_TYPE_OID, UUID_TYPE_OID, VARBIT_ARRAY_TYPE_OID,
+    VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, VOID_TYPE_OID, XID_ARRAY_TYPE_OID,
+    XID_TYPE_OID, XML_ARRAY_TYPE_OID, XML_TYPE_OID,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,6 +143,18 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             "_bytea",
             BYTEA_ARRAY_TYPE_OID,
             SqlType::array_of(SqlType::new(SqlTypeKind::Bytea)),
+        ),
+        fixed_builtin_type_row(
+            "uuid",
+            UUID_TYPE_OID,
+            SqlType::new(SqlTypeKind::Uuid),
+            16,
+            AttributeAlign::Char,
+        ),
+        builtin_type_row(
+            "_uuid",
+            UUID_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::Uuid)),
         ),
         builtin_type_row(
             "\"char\"",

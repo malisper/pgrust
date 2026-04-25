@@ -644,6 +644,7 @@ pub enum Value {
     Interval(IntervalValue),
     Bit(BitString),
     Bytea(Vec<u8>),
+    Uuid([u8; 16]),
     Inet(InetValue),
     Cidr(InetValue),
     Point(GeoPoint),
@@ -1014,6 +1015,7 @@ impl Value {
             Value::Interval(v) => Value::Interval(*v),
             Value::Bit(v) => Value::Bit(v.clone()),
             Value::Bytea(v) => Value::Bytea(v.clone()),
+            Value::Uuid(v) => Value::Uuid(*v),
             Value::Inet(v) => Value::Inet(v.clone()),
             Value::Cidr(v) => Value::Cidr(v.clone()),
             Value::Point(v) => Value::Point(v.clone()),
@@ -1111,6 +1113,7 @@ impl Value {
             Value::Interval(_) => Some(SqlType::new(SqlTypeKind::Interval)),
             Value::Bit(bits) => Some(SqlType::with_bit_len(SqlTypeKind::VarBit, bits.bit_len)),
             Value::Bytea(_) => Some(SqlType::new(SqlTypeKind::Bytea)),
+            Value::Uuid(_) => Some(SqlType::new(SqlTypeKind::Uuid)),
             Value::Inet(_) => Some(SqlType::new(SqlTypeKind::Inet)),
             Value::Cidr(_) => Some(SqlType::new(SqlTypeKind::Cidr)),
             Value::Point(_) => Some(SqlType::new(SqlTypeKind::Point)),
@@ -1180,6 +1183,7 @@ impl PartialEq for Value {
             (Value::Interval(a), Value::Interval(b)) => a == b,
             (Value::Bit(a), Value::Bit(b)) => a == b,
             (Value::Bytea(a), Value::Bytea(b)) => a == b,
+            (Value::Uuid(a), Value::Uuid(b)) => a == b,
             (Value::Inet(a), Value::Inet(b)) => a == b,
             (Value::Cidr(a), Value::Cidr(b)) => a == b,
             (Value::Point(a), Value::Point(b)) => {
@@ -1304,6 +1308,10 @@ impl std::hash::Hash for Value {
             }
             Value::Bytea(v) => {
                 13u8.hash(state);
+                v.hash(state);
+            }
+            Value::Uuid(v) => {
+                38u8.hash(state);
                 v.hash(state);
             }
             Value::Inet(v) => {

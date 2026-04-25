@@ -90,6 +90,9 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
             format!("invalid input syntax for type numeric: \"{value}\"")
         }
         ExecError::InvalidByteaInput { .. } => "invalid input syntax for type bytea".to_string(),
+        ExecError::InvalidUuidInput { value } => {
+            format!("invalid input syntax for type uuid: \"{value}\"")
+        }
         ExecError::InvalidByteaHexDigit { digit, .. } => {
             format!("invalid hexadecimal digit: \"{digit}\"")
         }
@@ -472,6 +475,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Bit => 1561,
             SqlTypeKind::VarBit => 1563,
             SqlTypeKind::Bytea => 1001,
+            SqlTypeKind::Uuid => crate::include::catalog::UUID_ARRAY_TYPE_OID as i32,
             SqlTypeKind::Inet => crate::include::catalog::INET_ARRAY_TYPE_OID as i32,
             SqlTypeKind::Cidr => crate::include::catalog::CIDR_ARRAY_TYPE_OID as i32,
             SqlTypeKind::Float4 => 1021,
@@ -574,6 +578,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Bit => (1560, -1, col.sql_type.typmod),
         SqlTypeKind::VarBit => (1562, -1, col.sql_type.typmod),
         SqlTypeKind::Bytea => (17, -1, -1),
+        SqlTypeKind::Uuid => (crate::include::catalog::UUID_TYPE_OID as i32, 16, -1),
         SqlTypeKind::Inet => (crate::include::catalog::INET_TYPE_OID as i32, -1, -1),
         SqlTypeKind::Cidr => (crate::include::catalog::CIDR_TYPE_OID as i32, -1, -1),
         SqlTypeKind::Float4 => (700, 4, -1),
@@ -825,6 +830,11 @@ pub(crate) fn send_typed_data_row(
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }
+            Value::Uuid(v) => {
+                let rendered = crate::backend::executor::value_io::render_uuid_text(v);
+                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
+                buf.extend_from_slice(rendered.as_bytes());
+            }
             Value::Inet(v) => {
                 let rendered = v.render_inet();
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
@@ -1032,6 +1042,7 @@ fn encode_binary_data_row_value(value: &Value, sql_type: SqlType) -> Result<Vec<
         }
         Value::Bool(v) => Ok(vec![u8::from(*v)]),
         Value::Bytea(bytes) => Ok(bytes.clone()),
+        Value::Uuid(bytes) if matches!(sql_type.kind, SqlTypeKind::Uuid) => Ok(bytes.to_vec()),
         Value::Inet(value) if matches!(sql_type.kind, SqlTypeKind::Inet) => {
             Ok(encode_binary_network_value(value, false))
         }

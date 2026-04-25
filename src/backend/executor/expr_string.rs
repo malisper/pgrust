@@ -437,6 +437,7 @@ fn value_output_text_with_config(
         Value::Float64(v) => v.to_string(),
         Value::Numeric(v) => v.render(),
         Value::Interval(v) => render_interval_text(*v),
+        Value::Uuid(v) => crate::backend::executor::value_io::render_uuid_text(v),
         Value::Bool(v) => {
             if *v {
                 "t".into()

@@ -1352,6 +1352,9 @@ fn input_error_message(err: &ExecError, text: &str) -> String {
             format!("invalid input syntax for type numeric: \"{value}\"")
         }
         ExecError::InvalidByteaInput { .. } => "invalid input syntax for type bytea".to_string(),
+        ExecError::InvalidUuidInput { value } => {
+            format!("invalid input syntax for type uuid: \"{value}\"")
+        }
         ExecError::InvalidByteaHexDigit { digit, .. } => {
             format!("invalid hexadecimal digit: \"{digit}\"")
         }
@@ -1408,6 +1411,7 @@ fn input_error_sqlstate(err: &ExecError) -> &'static str {
         | ExecError::ArrayInput { .. }
         | ExecError::InvalidNumericInput(_)
         | ExecError::InvalidByteaInput { .. }
+        | ExecError::InvalidUuidInput { .. }
         | ExecError::InvalidGeometryInput { .. }
         | ExecError::InvalidBitInput { .. }
         | ExecError::InvalidBooleanInput { .. }
@@ -1815,7 +1819,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::RegConfig
                     | SqlTypeKind::RegDictionary
                     | SqlTypeKind::Inet
-                    | SqlTypeKind::Cidr,
+                    | SqlTypeKind::Cidr
+                    | SqlTypeKind::Uuid,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -1954,7 +1959,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::RegConfig
                     | SqlTypeKind::RegDictionary
                     | SqlTypeKind::Inet
-                    | SqlTypeKind::Cidr,
+                    | SqlTypeKind::Cidr
+                    | SqlTypeKind::Uuid,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -2073,7 +2079,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::Float4
                     | SqlTypeKind::Float8
                     | SqlTypeKind::Money
-                    | SqlTypeKind::Numeric,
+                    | SqlTypeKind::Numeric
+                    | SqlTypeKind::Uuid,
                 ..
             } => Err(ExecError::TypeMismatch {
                 op: "::int4",
@@ -2451,6 +2458,19 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 right: Value::Null,
             }),
         },
+        Value::Uuid(value) => match ty.kind {
+            SqlTypeKind::Uuid => Ok(Value::Uuid(value)),
+            SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar => {
+                Ok(Value::Text(CompactString::from_owned(
+                    crate::backend::executor::value_io::render_uuid_text(&value),
+                )))
+            }
+            _ => Err(ExecError::TypeMismatch {
+                op: "::uuid",
+                left: Value::Uuid(value),
+                right: Value::Null,
+            }),
+        },
         Value::Inet(value) => match ty.kind {
             SqlTypeKind::Inet => Ok(Value::Inet(value)),
             SqlTypeKind::Cidr => parse_cidr_text(&value.render_cidr()).map(Value::Cidr),
@@ -2591,7 +2611,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::RegConfig
                     | SqlTypeKind::RegDictionary
                     | SqlTypeKind::Inet
-                    | SqlTypeKind::Cidr,
+                    | SqlTypeKind::Cidr
+                    | SqlTypeKind::Uuid,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -2706,7 +2727,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::RegConfig
                     | SqlTypeKind::RegDictionary
                     | SqlTypeKind::Inet
-                    | SqlTypeKind::Cidr,
+                    | SqlTypeKind::Cidr
+                    | SqlTypeKind::Uuid,
                 ..
             } => cast_text_value(&v.to_string(), ty, true),
             SqlType {
@@ -2988,6 +3010,7 @@ pub(crate) fn cast_text_value_with_config(
             explicit,
         )?)),
         SqlTypeKind::Bytea => Ok(Value::Bytea(parse_bytea_text(text)?)),
+        SqlTypeKind::Uuid => Ok(Value::Uuid(parse_uuid_text(text)?)),
         SqlTypeKind::Inet => parse_inet_text(text).map(Value::Inet),
         SqlTypeKind::Cidr => parse_cidr_text(text).map(Value::Cidr),
         SqlTypeKind::Json => {
@@ -3208,6 +3231,11 @@ pub(super) fn cast_numeric_value(
             left: Value::Numeric(value),
             right: Value::Bytea(Vec::new()),
         }),
+        SqlTypeKind::Uuid => Err(ExecError::TypeMismatch {
+            op: "::uuid",
+            left: Value::Numeric(value),
+            right: Value::Uuid([0; 16]),
+        }),
         SqlTypeKind::Inet | SqlTypeKind::Cidr => cast_text_value(&value.render(), ty, explicit),
         SqlTypeKind::Range
         | SqlTypeKind::Int4Range
@@ -3218,6 +3246,42 @@ pub(super) fn cast_numeric_value(
         | SqlTypeKind::TimestampTzRange => unreachable!("range handled above"),
         SqlTypeKind::Multirange => unreachable!("multirange handled above"),
     }
+}
+
+pub(crate) fn parse_uuid_text(text: &str) -> Result<[u8; 16], ExecError> {
+    let mut src = text;
+    let has_braces = src.starts_with('{');
+    if has_braces {
+        src = &src[1..];
+    }
+
+    let mut bytes = [0u8; 16];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        if src.len() < 2 {
+            return Err(ExecError::InvalidUuidInput { value: text.into() });
+        }
+        let pair = &src[..2];
+        if !pair.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(ExecError::InvalidUuidInput { value: text.into() });
+        }
+        *byte = u8::from_str_radix(pair, 16)
+            .map_err(|_| ExecError::InvalidUuidInput { value: text.into() })?;
+        src = &src[2..];
+        if src.starts_with('-') && index % 2 == 1 && index < 15 {
+            src = &src[1..];
+        }
+    }
+
+    if has_braces {
+        let Some(rest) = src.strip_prefix('}') else {
+            return Err(ExecError::InvalidUuidInput { value: text.into() });
+        };
+        src = rest;
+    }
+    if !src.is_empty() {
+        return Err(ExecError::InvalidUuidInput { value: text.into() });
+    }
+    Ok(bytes)
 }
 
 fn coerce_character_string(text: &str, ty: SqlType, explicit: bool) -> Result<String, ExecError> {

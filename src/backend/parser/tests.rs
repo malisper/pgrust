@@ -5174,6 +5174,18 @@ fn parse_standalone_type_names() {
         SqlType::new(SqlTypeKind::Bytea)
     );
     assert_eq!(
+        parse_type_name("uuid").unwrap(),
+        SqlType::new(SqlTypeKind::Uuid)
+    );
+    assert_eq!(
+        parse_type_name("pg_catalog.uuid").unwrap(),
+        SqlType::new(SqlTypeKind::Uuid)
+    );
+    assert_eq!(
+        parse_type_name("uuid[]").unwrap(),
+        SqlType::array_of(SqlType::new(SqlTypeKind::Uuid))
+    );
+    assert_eq!(
         parse_type_name("bit").unwrap(),
         SqlType::with_bit_len(SqlTypeKind::Bit, 1)
     );
@@ -5221,6 +5233,24 @@ fn parse_standalone_type_names() {
         parse_type_name("timestamptz").unwrap(),
         SqlType::new(SqlTypeKind::TimestampTz)
     );
+}
+
+#[test]
+fn parse_uuid_type_cast_expressions() {
+    let stmt = parse_select(
+        "select '00000000-0000-0000-0000-000000000001'::uuid, \
+         cast('00000000000000000000000000000002' as pg_catalog.uuid), \
+         uuid('00000000-0000-0000-0000-000000000003')",
+    )
+    .unwrap();
+    match &stmt.targets[0].expr {
+        SqlExpr::Cast(_, ty) => assert_eq!(*ty, SqlType::new(SqlTypeKind::Uuid)),
+        other => panic!("expected uuid cast expression, got {other:?}"),
+    }
+    match &stmt.targets[1].expr {
+        SqlExpr::Cast(_, ty) => assert_eq!(*ty, SqlType::new(SqlTypeKind::Uuid)),
+        other => panic!("expected pg_catalog.uuid cast expression, got {other:?}"),
+    }
 }
 
 #[test]

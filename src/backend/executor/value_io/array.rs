@@ -147,6 +147,7 @@ fn encode_array_element_payload(
             Ok(bytes)
         }
         Value::Bytea(v) => Ok(v),
+        Value::Uuid(v) => Ok(v.to_vec()),
         Value::Inet(v) => Ok(crate::backend::executor::encode_network_bytes(&v, false)),
         Value::Cidr(v) => Ok(crate::backend::executor::encode_network_bytes(&v, true)),
         Value::Bool(v) => Ok(vec![u8::from(v)]),
@@ -563,6 +564,7 @@ fn array_element_layout(
         | SqlTypeKind::TimestampTz
         | SqlTypeKind::Float8 => (8, AttributeAlign::Double),
         SqlTypeKind::Interval => (16, AttributeAlign::Double),
+        SqlTypeKind::Uuid => (16, AttributeAlign::Char),
         SqlTypeKind::TimeTz => (12, AttributeAlign::Double),
         SqlTypeKind::Point => (16, AttributeAlign::Double),
         SqlTypeKind::Line | SqlTypeKind::Circle => (24, AttributeAlign::Double),
@@ -788,6 +790,7 @@ fn infer_sql_type_from_value(value: &Value) -> Option<SqlType> {
         Value::Jsonb(_) => Some(SqlType::new(SqlTypeKind::Jsonb)),
         Value::JsonPath(_) => Some(SqlType::new(SqlTypeKind::JsonPath)),
         Value::Xml(_) => Some(SqlType::new(SqlTypeKind::Xml)),
+        Value::Uuid(_) => Some(SqlType::new(SqlTypeKind::Uuid)),
         Value::Point(_) => Some(SqlType::new(SqlTypeKind::Point)),
         Value::Line(_) => Some(SqlType::new(SqlTypeKind::Line)),
         Value::Lseg(_) => Some(SqlType::new(SqlTypeKind::Lseg)),
@@ -1028,6 +1031,15 @@ fn decode_array_element_value(
             )))
         }
         SqlTypeKind::Bytea => Ok(Value::Bytea(bytes.to_vec())),
+        SqlTypeKind::Uuid => {
+            if bytes.len() != 16 {
+                return Err(ExecError::InvalidStorageValue {
+                    column: column.into(),
+                    details: "uuid array element must be 16 bytes".into(),
+                });
+            }
+            Ok(Value::Uuid(bytes.try_into().unwrap()))
+        }
         SqlTypeKind::Inet => crate::backend::executor::parse_inet_bytes(bytes).map(Value::Inet),
         SqlTypeKind::Cidr => crate::backend::executor::parse_cidr_bytes(bytes).map(Value::Cidr),
         SqlTypeKind::Point => {
@@ -1276,6 +1288,7 @@ fn format_array_values_nested(
                 out.push_str(&rendered);
                 out.push('"');
             }
+            Value::Uuid(v) => push_array_text_element(&mut out, &render_uuid_text(v)),
             Value::Inet(v) => push_array_text_element(&mut out, &v.render_inet()),
             Value::Cidr(v) => push_array_text_element(&mut out, &v.render_cidr()),
             Value::Json(v) => {
