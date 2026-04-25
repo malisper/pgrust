@@ -3254,7 +3254,11 @@ impl PlanNode for AggregateState {
         self.plan_info
     }
     fn node_label(&self) -> String {
-        "Aggregate".into()
+        match self.strategy {
+            crate::include::nodes::plannodes::AggregateStrategy::Plain => "Aggregate".into(),
+            crate::include::nodes::plannodes::AggregateStrategy::Sorted => "GroupAggregate".into(),
+            crate::include::nodes::plannodes::AggregateStrategy::Hashed => "HashAggregate".into(),
+        }
     }
     fn explain_children(
         &self,

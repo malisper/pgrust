@@ -67,6 +67,13 @@ impl IndexScanKeyArgument {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggregateStrategy {
+    Plain,
+    Sorted,
+    Hashed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexScanKey {
     pub attribute_number: i16,
@@ -255,6 +262,7 @@ pub enum Plan {
     },
     Aggregate {
         plan_info: PlanEstimate,
+        strategy: AggregateStrategy,
         input: Box<Plan>,
         group_by: Vec<Expr>,
         accumulators: Vec<AggAccum>,

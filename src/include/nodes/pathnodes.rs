@@ -4,7 +4,7 @@ use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::nodes::parsenodes::SetOperator;
 use crate::include::nodes::parsenodes::{Query, QueryRowMark, RangeTblEntry, RangeTblEntryKind};
-use crate::include::nodes::plannodes::{IndexScanKey, PlanEstimate};
+use crate::include::nodes::plannodes::{AggregateStrategy, IndexScanKey, PlanEstimate};
 use crate::include::nodes::primnodes::{
     AggAccum, Expr, JoinType, OrderByEntry, ProjectSetTarget, QueryColumn, RelationDesc,
     SetReturningCall, SortGroupClause, TargetEntry, ToastRelationRef, Var, WindowClause,
@@ -507,6 +507,8 @@ pub enum Path {
         plan_info: PlanEstimate,
         pathtarget: PathTarget,
         slot_id: usize,
+        strategy: AggregateStrategy,
+        pathkeys: Vec<PathKey>,
         input: Box<Path>,
         group_by: Vec<Expr>,
         accumulators: Vec<AggAccum>,

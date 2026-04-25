@@ -5130,6 +5130,32 @@ fn sum_distinct_with_group_by() {
 }
 
 #[test]
+fn sum_distinct_group_by_uses_group_key_order_without_order_by() {
+    let base = temp_dir("sum_distinct_group_sorted_strategy");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select grp, sum(distinct val) from (values (2, 1), (1, 1), (3, 1), (2, 2)) t(grp, val) group by grp",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Int32(1), Value::Int64(1)],
+                    vec![Value::Int32(2), Value::Int64(3)],
+                    vec![Value::Int32(3), Value::Int64(1)],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn generate_series_basic() {
     let base = temp_dir("gen_series_basic");
     let txns = TransactionManager::new_durable(&base).unwrap();

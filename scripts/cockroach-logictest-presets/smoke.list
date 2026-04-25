@@ -1,0 +1,13 @@
+# Broad-but-small Cockroach logictest smoke set.
+# Cockroach is treated as candidate SQL. Use --postgres-oracle when measuring
+# pgrust PostgreSQL drop-in compatibility.
+select
+float
+insert
+delete
+aggregate
+array
+join
+cast
+case
+distinct

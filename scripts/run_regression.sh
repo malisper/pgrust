@@ -392,6 +392,73 @@ collect_test_dependencies() {
     fi
 }
 
+build_create_index_base_tests() {
+    local schedule_file="$1"
+    local after_create_index=false
+    local group_has_create_index=false
+    local schedule_line=""
+    local test_name=""
+
+    if [[ ! -f "$schedule_file" ]]; then
+        return 0
+    fi
+
+    while IFS= read -r schedule_line; do
+        [[ -n "$schedule_line" ]] || continue
+        group_has_create_index=false
+
+        if [[ "$after_create_index" == true ]]; then
+            for test_name in $schedule_line; do
+                printf '%s\n' "$test_name"
+            done
+        fi
+
+        for test_name in $schedule_line; do
+            if [[ "$test_name" == "create_index" ]]; then
+                group_has_create_index=true
+            fi
+        done
+
+        if [[ "$group_has_create_index" == true ]]; then
+            after_create_index=true
+        fi
+    done < <(
+        awk '
+            /^test:[[:space:]]*/ {
+                sub(/^test:[[:space:]]*/, "");
+                print;
+            }
+        ' "$schedule_file"
+    )
+}
+
+test_uses_create_index_base() {
+    local test_name="$1"
+    local indexed_test=""
+
+    if [[ ${#CREATE_INDEX_BASE_TESTS[@]} -eq 0 ]]; then
+        return 1
+    fi
+
+    for indexed_test in "${CREATE_INDEX_BASE_TESTS[@]}"; do
+        [[ "$indexed_test" == "$test_name" ]] && return 0
+    done
+    return 1
+}
+
+planned_tests_need_create_index_base() {
+    local sql_file=""
+    local test_name=""
+
+    for sql_file in "${TEST_FILES[@]}"; do
+        test_name="$(basename "$sql_file" .sql)"
+        if test_uses_create_index_base "$test_name"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 PORT=5433
 SKIP_BUILD=false
 SKIP_SERVER=false
@@ -410,6 +477,13 @@ STARTUP_WAIT_SECS="${PGRUST_STARTUP_WAIT_SECS:-300}"
 SUMMARY_READY=false
 SUMMARY_WRITTEN=false
 ISOLATED_PARALLEL=false
+REGRESS_BASE_ROOT=""
+TEST_SETUP_BASE_DATA_DIR=""
+TEST_SETUP_BASE_TABLESPACE_DIR=""
+CREATE_INDEX_BASE_DATA_DIR=""
+CREATE_INDEX_BASE_TABLESPACE_DIR=""
+NEEDS_CREATE_INDEX_BASE=false
+CREATE_INDEX_BASE_TESTS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -694,6 +768,194 @@ run_bootstrap_setup() {
     return 0
 }
 
+copy_regression_base_data() {
+    local source_data_dir="$1"
+    local source_tablespace_dir="$2"
+    local target_data_dir="$3"
+    local target_tablespace_dir="$4"
+    local tblspc_entry=""
+    local tblspc_name=""
+
+    rm -rf "$target_data_dir" "$target_tablespace_dir"
+    mkdir -p "$(dirname "$target_data_dir")" "$(dirname "$target_tablespace_dir")"
+    cp -a "$source_data_dir" "$target_data_dir"
+    if [[ -d "$source_tablespace_dir" ]]; then
+        mkdir -p "$target_tablespace_dir"
+        cp -a "$source_tablespace_dir/." "$target_tablespace_dir/"
+    fi
+
+    # Tablespace symlinks are absolute. After cloning a base cluster, relink the
+    # copied worker data dir to that worker's private tablespace directory.
+    if [[ -d "$target_data_dir/pg_tblspc" ]]; then
+        for tblspc_entry in "$target_data_dir"/pg_tblspc/*; do
+            [[ -e "$tblspc_entry" || -L "$tblspc_entry" ]] || continue
+            tblspc_name="$(basename "$tblspc_entry")"
+            rm -rf "$tblspc_entry"
+            ln -s "$target_tablespace_dir" "$target_data_dir/pg_tblspc/$tblspc_name"
+        done
+    fi
+
+    DATA_DIR="$target_data_dir"
+    write_regression_config
+}
+
+build_regression_base_stage() {
+    local stage_name="$1"
+    local stage_data_dir="$2"
+    local stage_tablespace_dir="$3"
+    local setup_output_stem="$4"
+    local saved_data_dir="$DATA_DIR"
+    local saved_tablespace_dir="$REGRESS_TABLESPACE_DIR"
+    local saved_prepared_setup_sql="$PREPARED_SETUP_SQL"
+    local saved_setup_output_stem="${PGRUST_SETUP_OUTPUT_STEM:-}"
+    local saved_server_pid="$SERVER_PID"
+
+    echo "Building isolated regression base: $stage_name"
+    DATA_DIR="$stage_data_dir"
+    REGRESS_TABLESPACE_DIR="$stage_tablespace_dir"
+    PREPARED_SETUP_SQL="$REGRESS_BASE_ROOT/$stage_name/fixtures/test_setup_pgrust.sql"
+    PGRUST_SETUP_OUTPUT_STEM="$setup_output_stem"
+    SERVER_PID=""
+    export PGRUST_REGRESS_TABLESPACE_DIR="$REGRESS_TABLESPACE_DIR"
+
+    rm -rf "$DATA_DIR" "$REGRESS_TABLESPACE_DIR"
+    mkdir -p "$DATA_DIR" "$(dirname "$PREPARED_SETUP_SQL")"
+    write_regression_config
+
+    if ! start_server; then
+        echo "ERROR: failed to start server while building $stage_name base"
+        DATA_DIR="$saved_data_dir"
+        REGRESS_TABLESPACE_DIR="$saved_tablespace_dir"
+        PREPARED_SETUP_SQL="$saved_prepared_setup_sql"
+        PGRUST_SETUP_OUTPUT_STEM="$saved_setup_output_stem"
+        SERVER_PID="$saved_server_pid"
+        export PGRUST_REGRESS_TABLESPACE_DIR="$REGRESS_TABLESPACE_DIR"
+        return 1
+    fi
+
+    if ! run_bootstrap_setup; then
+        echo "ERROR: failed bootstrap while building $stage_name base"
+        stop_server
+        DATA_DIR="$saved_data_dir"
+        REGRESS_TABLESPACE_DIR="$saved_tablespace_dir"
+        PREPARED_SETUP_SQL="$saved_prepared_setup_sql"
+        PGRUST_SETUP_OUTPUT_STEM="$saved_setup_output_stem"
+        SERVER_PID="$saved_server_pid"
+        export PGRUST_REGRESS_TABLESPACE_DIR="$REGRESS_TABLESPACE_DIR"
+        return 1
+    fi
+
+    stop_server
+    DATA_DIR="$saved_data_dir"
+    REGRESS_TABLESPACE_DIR="$saved_tablespace_dir"
+    PREPARED_SETUP_SQL="$saved_prepared_setup_sql"
+    PGRUST_SETUP_OUTPUT_STEM="$saved_setup_output_stem"
+    SERVER_PID="$saved_server_pid"
+    export PGRUST_REGRESS_TABLESPACE_DIR="$REGRESS_TABLESPACE_DIR"
+    return 0
+}
+
+run_base_dependency_setup() {
+    local dependency_name="$1"
+    local base_name="$2"
+    local sql_file="$SQL_DIR/${dependency_name}.sql"
+    local expected_file="$EXPECTED_DIR/${dependency_name}.out"
+    local output_stem="${PGRUST_SETUP_OUTPUT_STEM:-base}_${dependency_name}"
+    local output_file="$RESULTS_DIR/output/${output_stem}.out"
+    local exit_code=0
+
+    if [[ ! -f "$sql_file" ]]; then
+        echo "ERROR: base dependency SQL not found for $base_name: $sql_file" >&2
+        return 1
+    fi
+
+    prepare_test_fixture "$sql_file" "$expected_file" "$dependency_name"
+    mkdir -p "$(dirname "$output_file")"
+    echo "Running base dependency setup for $base_name: $dependency_name"
+    if run_psql_file "$TIMEOUT" "$PREPARED_SQL_FILE" "$output_file" psql "${PG_ARGS[@]}" -a -q; then
+        return 0
+    fi
+
+    exit_code=$?
+    if [[ $exit_code -eq 124 ]]; then
+        echo "TIMEOUT" >> "$output_file"
+    fi
+    echo "ERROR: base dependency setup failed for $base_name: $dependency_name" >&2
+    echo "See: $output_file" >&2
+    return 1
+}
+
+build_isolated_regression_bases() {
+    local original_data_dir="$DATA_DIR"
+    local original_tablespace_dir="$REGRESS_TABLESPACE_DIR"
+    local original_prepared_setup_sql="$PREPARED_SETUP_SQL"
+    local original_setup_output_stem="${PGRUST_SETUP_OUTPUT_STEM:-}"
+    local original_server_pid="$SERVER_PID"
+
+    REGRESS_BASE_ROOT="$RESULTS_DIR/base"
+    TEST_SETUP_BASE_DATA_DIR="$REGRESS_BASE_ROOT/test_setup/data"
+    TEST_SETUP_BASE_TABLESPACE_DIR="$REGRESS_BASE_ROOT/test_setup/tablespaces/regress_tblspace"
+    CREATE_INDEX_BASE_DATA_DIR="$REGRESS_BASE_ROOT/post_create_index/data"
+    CREATE_INDEX_BASE_TABLESPACE_DIR="$REGRESS_BASE_ROOT/post_create_index/tablespaces/regress_tblspace"
+
+    if ! build_regression_base_stage \
+        "test_setup" \
+        "$TEST_SETUP_BASE_DATA_DIR" \
+        "$TEST_SETUP_BASE_TABLESPACE_DIR" \
+        "base_test_setup"; then
+        return 1
+    fi
+
+    if [[ "$NEEDS_CREATE_INDEX_BASE" == true ]]; then
+        echo "Building isolated regression base: post_create_index"
+        copy_regression_base_data \
+            "$TEST_SETUP_BASE_DATA_DIR" \
+            "$TEST_SETUP_BASE_TABLESPACE_DIR" \
+            "$CREATE_INDEX_BASE_DATA_DIR" \
+            "$CREATE_INDEX_BASE_TABLESPACE_DIR"
+
+        DATA_DIR="$CREATE_INDEX_BASE_DATA_DIR"
+        REGRESS_TABLESPACE_DIR="$CREATE_INDEX_BASE_TABLESPACE_DIR"
+        PREPARED_SETUP_SQL="$REGRESS_BASE_ROOT/post_create_index/fixtures/test_setup_pgrust.sql"
+        PGRUST_SETUP_OUTPUT_STEM="base_post_create_index"
+        SERVER_PID=""
+        export PGRUST_REGRESS_TABLESPACE_DIR="$REGRESS_TABLESPACE_DIR"
+        write_regression_config
+
+        if ! start_server; then
+            echo "ERROR: failed to start server while building post_create_index base"
+            DATA_DIR="$original_data_dir"
+            REGRESS_TABLESPACE_DIR="$original_tablespace_dir"
+            PREPARED_SETUP_SQL="$original_prepared_setup_sql"
+            PGRUST_SETUP_OUTPUT_STEM="$original_setup_output_stem"
+            SERVER_PID="$original_server_pid"
+            export PGRUST_REGRESS_TABLESPACE_DIR="$REGRESS_TABLESPACE_DIR"
+            return 1
+        fi
+        if ! run_base_dependency_setup "create_index" "post_create_index"; then
+            echo "ERROR: failed create_index while building post_create_index base"
+            stop_server
+            DATA_DIR="$original_data_dir"
+            REGRESS_TABLESPACE_DIR="$original_tablespace_dir"
+            PREPARED_SETUP_SQL="$original_prepared_setup_sql"
+            PGRUST_SETUP_OUTPUT_STEM="$original_setup_output_stem"
+            SERVER_PID="$original_server_pid"
+            export PGRUST_REGRESS_TABLESPACE_DIR="$REGRESS_TABLESPACE_DIR"
+            return 1
+        fi
+        stop_server
+
+        DATA_DIR="$original_data_dir"
+        REGRESS_TABLESPACE_DIR="$original_tablespace_dir"
+        PREPARED_SETUP_SQL="$original_prepared_setup_sql"
+        PGRUST_SETUP_OUTPUT_STEM="$original_setup_output_stem"
+        SERVER_PID="$original_server_pid"
+        export PGRUST_REGRESS_TABLESPACE_DIR="$REGRESS_TABLESPACE_DIR"
+    fi
+
+    return 0
+}
+
 echo "Per-query statement_timeout: ${STATEMENT_TIMEOUT}s"
 echo "Per-file timeout: ${TIMEOUT}s"
 
@@ -739,6 +1001,25 @@ if [[ -n "$SINGLE_TEST" ]]; then
     for sql_file in "${TEST_FILES[@]}"; do
         TEST_GROUPS+=("$sql_file")
     done
+fi
+
+while IFS= read -r test_name; do
+    [[ -n "$test_name" ]] && CREATE_INDEX_BASE_TESTS+=("$test_name")
+done < <(build_create_index_base_tests "$SCHEDULE_FILE")
+
+if [[ "$ISOLATED_PARALLEL" == true ]] && planned_tests_need_create_index_base; then
+    NEEDS_CREATE_INDEX_BASE=true
+fi
+
+if [[ "$ISOLATED_PARALLEL" == true ]]; then
+    if [[ "$NEEDS_CREATE_INDEX_BASE" == true ]]; then
+        echo "Isolated base staging: test_setup and post-create_index."
+    else
+        echo "Isolated base staging: test_setup."
+    fi
+    if ! build_isolated_regression_bases; then
+        exit 1
+    fi
 fi
 
 TOTAL=0
@@ -1195,6 +1476,7 @@ run_one_regression_test_isolated() (
     local worker_root="$RESULTS_DIR/workers/$worker_name"
     local output_file="$RESULTS_DIR/output/${test_name}.out"
     local status_file="$RESULTS_DIR/status/${test_name}.status"
+    local base_label="test_setup"
 
     PORT=$((PORT + worker_slot + 1))
     if [[ "$DATA_DIR_PROVIDED" == true ]]; then
@@ -1212,8 +1494,23 @@ run_one_regression_test_isolated() (
 
     trap stop_server EXIT
     rm -rf "$worker_root"
-    mkdir -p "$DATA_DIR" "$worker_root/fixtures"
-    write_regression_config
+    mkdir -p "$worker_root/fixtures"
+
+    if test_uses_create_index_base "$test_name" && [[ "$NEEDS_CREATE_INDEX_BASE" == true ]]; then
+        base_label="post_create_index"
+        copy_regression_base_data \
+            "$CREATE_INDEX_BASE_DATA_DIR" \
+            "$CREATE_INDEX_BASE_TABLESPACE_DIR" \
+            "$DATA_DIR" \
+            "$REGRESS_TABLESPACE_DIR"
+    else
+        copy_regression_base_data \
+            "$TEST_SETUP_BASE_DATA_DIR" \
+            "$TEST_SETUP_BASE_TABLESPACE_DIR" \
+            "$DATA_DIR" \
+            "$REGRESS_TABLESPACE_DIR"
+    fi
+    echo "Worker $worker_name using isolated base: $base_label"
 
     if ! start_server; then
         {
@@ -1221,16 +1518,6 @@ run_one_regression_test_isolated() (
             echo "port: $PORT"
             echo "data dir: $DATA_DIR"
         } > "$output_file"
-        write_test_status "$status_file" "error" "$test_name" 0 0 0 0
-        return 1
-    fi
-
-    if ! run_bootstrap_setup; then
-        {
-            echo "ERROR: isolated worker $worker_name failed regression bootstrap"
-            echo "port: $PORT"
-            echo "data dir: $DATA_DIR"
-        } >> "$output_file"
         write_test_status "$status_file" "error" "$test_name" 0 0 0 0
         return 1
     fi

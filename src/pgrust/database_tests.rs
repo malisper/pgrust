@@ -1297,6 +1297,16 @@ fn session_query_rows(session: &mut Session, db: &Database, sql: &str) -> Vec<Ve
     }
 }
 
+fn set_large_test_max_stack_depth(session: &mut Session, db: &Database, requested_kb: u32) {
+    let safe_kb = crate::backend::utils::misc::stack_depth::max_stack_depth_limit_kb()
+        .map(|limit_kb| requested_kb.min(limit_kb))
+        .unwrap_or(requested_kb)
+        .max(crate::backend::utils::misc::stack_depth::MIN_MAX_STACK_DEPTH_KB);
+    session
+        .execute(db, &format!("set max_stack_depth = '{safe_kb}kB'"))
+        .unwrap();
+}
+
 #[test]
 fn materialized_view_create_refresh_metadata_and_drop() {
     let db = Database::open_ephemeral(64).unwrap();
@@ -4210,9 +4220,7 @@ fn enable_partitionwise_join_explains_append_of_child_joins() {
     let dir = temp_dir("partitionwise_join_explain");
     let db = Database::open(&dir, 64).unwrap();
     let mut session = Session::new(1);
-    session
-        .execute(&db, "set max_stack_depth = '32768kB'")
-        .unwrap();
+    set_large_test_max_stack_depth(&mut session, &db, 32 * 1024);
     for sql in [
         "create table pwj_l (k int4, v int4) partition by range (k)",
         "create table pwj_l1 partition of pwj_l for values from (0) to (10)",
@@ -14197,9 +14205,7 @@ fn explain_ordered_equijoin_can_choose_merge_join() {
             let db = Database::open(&base, 16).unwrap();
             let mut session = Session::new(1);
 
-            session
-                .execute(&db, "set max_stack_depth = '32MB'")
-                .unwrap();
+            set_large_test_max_stack_depth(&mut session, &db, 32 * 1024);
             session
                 .execute(&db, "create table left_items (id int4 not null, note text)")
                 .unwrap();
