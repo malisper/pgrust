@@ -1,7 +1,9 @@
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::RelationDesc;
 use crate::backend::parser::{SqlType, SqlTypeKind};
-use crate::include::catalog::bootstrap_pg_proc_rows;
+use crate::include::catalog::{
+    INTERNAL_TYPE_OID, bootstrap_pg_proc_rows, builtin_hypothetical_aggregate_function_for_proc_oid,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgAggregateRow {
@@ -72,8 +74,18 @@ pub fn bootstrap_pg_aggregate_rows() -> Vec<PgAggregateRow> {
         .filter(|row| row.prokind == 'a')
         .map(|row| PgAggregateRow {
             aggfnoid: row.oid,
-            aggkind: 'n',
-            aggnumdirectargs: 0,
+            aggkind: if builtin_hypothetical_aggregate_function_for_proc_oid(row.oid).is_some() {
+                'h'
+            } else {
+                'n'
+            },
+            aggnumdirectargs: if builtin_hypothetical_aggregate_function_for_proc_oid(row.oid)
+                .is_some()
+            {
+                1
+            } else {
+                0
+            },
             // Builtin aggregates still execute through the existing fast path.
             // Use PostgreSQL-shaped metadata rows now so catalog lookup is shared.
             aggtransfn: row.oid,
@@ -89,7 +101,12 @@ pub fn bootstrap_pg_aggregate_rows() -> Vec<PgAggregateRow> {
             aggfinalmodify: 'r',
             aggmfinalmodify: 'r',
             aggsortop: 0,
-            aggtranstype: row.prorettype,
+            aggtranstype: if builtin_hypothetical_aggregate_function_for_proc_oid(row.oid).is_some()
+            {
+                INTERNAL_TYPE_OID
+            } else {
+                row.prorettype
+            },
             aggtransspace: 0,
             aggmtranstype: 0,
             aggmtransspace: 0,
@@ -108,6 +125,9 @@ mod tests {
         let rows = bootstrap_pg_aggregate_rows();
         assert!(rows.iter().any(|row| row.aggfnoid == 6219));
         assert!(rows.iter().any(|row| row.aggfnoid == 6220));
-        assert!(rows.iter().all(|row| row.aggkind == 'n'));
+        assert!(rows.iter().any(|row| {
+            row.aggfnoid == 3986 && row.aggkind == 'h' && row.aggnumdirectargs == 1
+        }));
+        assert!(rows.iter().all(|row| matches!(row.aggkind, 'n' | 'h')));
     }
 }

@@ -59,6 +59,7 @@ fn infer_relation_row_expr_type(
 
 fn infer_visible_outer_aggregate_type(
     name: &str,
+    direct_args: &[SqlFunctionArg],
     args: &SqlCallArgs,
     order_by: &[OrderByItem],
     distinct: bool,
@@ -70,6 +71,7 @@ fn infer_visible_outer_aggregate_type(
 ) -> Option<SqlType> {
     let (_, visible_scope) = match_visible_aggregate_call(
         name,
+        direct_args,
         args,
         order_by,
         distinct,
@@ -95,8 +97,12 @@ fn infer_visible_outer_aggregate_type(
             )
         })
         .collect::<Vec<_>>();
-    resolve_aggregate_call(catalog, name, &arg_types, func_variadic)
-        .map(|resolved| resolved.result_type)
+    if !direct_args.is_empty() {
+        resolve_hypothetical_aggregate_call(name).map(|resolved| resolved.result_type)
+    } else {
+        resolve_aggregate_call(catalog, name, &arg_types, func_variadic)
+            .map(|resolved| resolved.result_type)
+    }
 }
 
 pub(super) fn infer_sql_expr_type_with_ctes(
@@ -489,15 +495,19 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             name,
             args,
             order_by,
+            within_group,
             distinct,
             func_variadic,
             filter,
             ..
         } => {
+            let (direct_args, aggregate_args, aggregate_order_by) =
+                normalize_aggregate_call(args, order_by, within_group.as_deref());
             if let Some(result_type) = infer_visible_outer_aggregate_type(
                 name,
-                args,
-                order_by,
+                &direct_args,
+                &aggregate_args,
+                &aggregate_order_by,
                 *distinct,
                 *func_variadic,
                 filter.as_deref(),
@@ -507,7 +517,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
             ) {
                 return result_type;
             }
-            let aggregate_arg_types = args
+            let aggregate_arg_types = aggregate_args
                 .args()
                 .iter()
                 .map(|arg| {
@@ -521,6 +531,11 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     )
                 })
                 .collect::<Vec<_>>();
+            if within_group.is_some()
+                && let Some(resolved) = resolve_hypothetical_aggregate_call(name)
+            {
+                return resolved.result_type;
+            }
             if let Some(resolved) =
                 resolve_aggregate_call(catalog, name, &aggregate_arg_types, *func_variadic)
             {
