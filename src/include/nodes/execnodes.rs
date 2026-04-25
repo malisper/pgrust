@@ -356,6 +356,7 @@ pub struct IndexScanState {
     pub(crate) keys: Vec<IndexScanKey>,
     pub(crate) order_by_keys: Vec<IndexScanKey>,
     pub(crate) direction: ScanDirection,
+    pub(crate) index_only: bool,
     pub(crate) scan: Option<IndexScanDesc>,
     pub(crate) scan_exhausted: bool,
     pub(crate) slot: TupleSlot,

@@ -173,6 +173,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 keys,
                 order_by_keys,
                 direction,
+                index_only,
                 pathkeys,
                 ..
             } => {
@@ -205,6 +206,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     keys,
                     order_by_keys,
                     direction,
+                    index_only,
                     pathkeys,
                 }
             }
@@ -1491,6 +1493,7 @@ pub(super) fn estimate_index_candidate(
         keys: spec.keys,
         order_by_keys: spec.order_by_keys,
         direction: spec.direction,
+        index_only: false,
         pathkeys: native_pathkeys,
     };
 
@@ -3331,14 +3334,22 @@ fn build_btree_index_keys(
             ));
             continue;
         }
-        if let Some((qual_idx, strategy, argument)) =
-            parsed_quals.iter().enumerate().find_map(|(idx, qual)| {
+        let range_quals = parsed_quals
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, qual)| {
                 if used[idx] || qual.column != Some(column) {
                     return None;
                 }
                 let strategy = qual_strategy(index, index_pos, qual)?;
-                Some((idx, strategy, qual.argument.clone()))
+                Some((idx, strategy, qual.argument.clone(), qual.is_not_null))
             })
+            .collect::<Vec<_>>();
+        if let Some((qual_idx, strategy, argument, _)) = range_quals
+            .iter()
+            .find(|(_, _, _, is_not_null)| !*is_not_null)
+            .cloned()
+            .or_else(|| range_quals.first().cloned())
         {
             used[qual_idx] = true;
             used_qual_indexes.push(qual_idx);
@@ -3347,6 +3358,18 @@ fn build_btree_index_keys(
                 strategy,
                 argument,
             ));
+            for (idx, strategy, argument, is_not_null) in range_quals {
+                if used[idx] || !is_not_null {
+                    continue;
+                }
+                used[idx] = true;
+                used_qual_indexes.push(idx);
+                keys.push(IndexScanKey::new(
+                    (index_pos + 1) as i16,
+                    strategy,
+                    argument,
+                ));
+            }
         }
         break;
     }
@@ -3440,6 +3463,7 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
         lookup: super::super::IndexStrategyLookup,
         argument: IndexScanKeyArgument,
         expr: &Expr,
+        is_not_null: bool,
     ) -> Option<IndexableQual> {
         Some(IndexableQual {
             column: expr_column_index(key_expr),
@@ -3447,6 +3471,7 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
             lookup,
             argument,
             expr: expr.clone(),
+            is_not_null,
         })
     }
 
@@ -3463,6 +3488,7 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
                     },
                     argument,
                     expr,
+                    false,
                 );
             }
             if let Some(argument) = index_key_argument(&op.args[0]) {
@@ -3474,6 +3500,7 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
                     },
                     argument,
                     expr,
+                    false,
                 );
             }
             None
@@ -3487,6 +3514,7 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
                     super::super::IndexStrategyLookup::Proc(func.funcid),
                     argument,
                     expr,
+                    false,
                 );
             }
             if let Some(argument) = index_key_argument(&func.args[0]) {
@@ -3497,10 +3525,21 @@ fn indexable_qual(expr: &Expr) -> Option<IndexableQual> {
                     )?),
                     argument,
                     expr,
+                    false,
                 );
             }
             None
         }
+        Expr::IsNotNull(inner) => mk(
+            strip_casts(inner),
+            super::super::IndexStrategyLookup::Operator {
+                oid: 0,
+                kind: OpExprKind::Lt,
+            },
+            IndexScanKeyArgument::Const(Value::Null),
+            expr,
+            true,
+        ),
         _ => None,
     }
 }

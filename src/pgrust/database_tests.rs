@@ -7076,8 +7076,9 @@ fn assert_explain_uses_index(db: &Database, client_id: u32, sql: &str, index_nam
     let lines = explain_lines(db, client_id, sql);
     assert!(
         lines.iter().any(|line| {
-            line.contains(&format!("Index Scan using rel {relfilenode} "))
-                || line.contains(&format!("Index Scan using {index_name} "))
+            (line.contains("Index Scan") || line.contains("Index Only Scan"))
+                && (line.contains(&format!("using rel {relfilenode} "))
+                    || line.contains(&format!("using {index_name} ")))
         }),
         "expected EXPLAIN to use index {index_name} (relfilenode {relfilenode}), got {lines:?}"
     );
@@ -7092,7 +7093,9 @@ fn assert_explain_uses_seqscan(db: &Database, client_id: u32, sql: &str, heap_na
         "expected EXPLAIN to use seq scan on {heap_name}, got {lines:?}"
     );
     assert!(
-        !lines.iter().any(|line| line.contains("Index Scan")),
+        !lines
+            .iter()
+            .any(|line| line.contains("Index Scan") || line.contains("Index Only Scan")),
         "expected no index scan, got {lines:?}"
     );
 }
@@ -20268,8 +20271,9 @@ fn index_matrix_projection_over_ordered_index_keeps_order_without_sort() {
     let relfilenode = relfilenode_for(&db, 1, "items_a_idx");
     assert!(
         lines.iter().any(|line| {
-            line.contains(&format!("Index Scan using rel {relfilenode} "))
-                || line.contains("Index Scan using items_a_idx ")
+            (line.contains("Index Scan") || line.contains("Index Only Scan"))
+                && (line.contains(&format!("using rel {relfilenode} "))
+                    || line.contains("using items_a_idx "))
         }),
         "expected ordered index scan, got {lines:?}"
     );

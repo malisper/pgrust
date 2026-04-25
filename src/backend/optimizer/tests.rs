@@ -1891,6 +1891,44 @@ fn planner_uses_metadata_fallback_when_live_pages_are_unavailable() {
 }
 
 #[test]
+fn planner_rewrites_simple_min_aggregate_into_forward_index_only_subplan() {
+    let catalog = catalog_with_indexed_items();
+    let stmt = parse_select("select min(id) from items").expect("parse");
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+        .expect("analyze");
+    let planned = super::planner(query, &catalog).expect("plan");
+
+    assert_eq!(planned.subplans.len(), 1);
+    let subplan = &planned.subplans[0];
+    assert!(plan_contains(subplan, |plan| matches!(
+        plan,
+        Plan::Limit { .. }
+    )));
+    assert!(plan_contains(subplan, |plan| matches!(
+        plan,
+        Plan::IndexScan {
+            direction,
+            index_only,
+            ..
+        } if *direction == crate::include::access::relscan::ScanDirection::Forward && *index_only
+    )));
+    assert!(plan_contains(subplan, |plan| match plan {
+        Plan::IndexScan { keys, .. } => {
+            keys.len() == 1
+                && keys.iter().any(|key| {
+                    key.strategy == 1
+                        && matches!(&key.argument, IndexScanKeyArgument::Const(Value::Null))
+                })
+        }
+        _ => false,
+    }));
+    assert!(!plan_contains(subplan, |plan| matches!(
+        plan,
+        Plan::Aggregate { .. } | Plan::Filter { .. } | Plan::OrderBy { .. }
+    )));
+}
+
+#[test]
 fn planner_rewrites_simple_max_aggregate_into_limit_index_subplan() {
     let catalog = catalog_with_indexed_items();
     let stmt = parse_select("select max(id) from items where id < 42").expect("parse");
@@ -1920,8 +1958,29 @@ fn planner_rewrites_simple_max_aggregate_into_limit_index_subplan() {
 
     assert!(plan_contains(subplan, |plan| matches!(
         plan,
-        Plan::IndexScan { direction, .. }
+        Plan::IndexScan {
+            direction,
+            index_only,
+            ..
+        }
             if *direction == crate::include::access::relscan::ScanDirection::Backward
+                && *index_only
+    )));
+    assert!(plan_contains(subplan, |plan| match plan {
+        Plan::IndexScan { keys, .. } => {
+            keys.iter().any(|key| {
+                key.strategy == 1
+                    && matches!(&key.argument, IndexScanKeyArgument::Const(Value::Null))
+            }) && keys.iter().any(|key| {
+                key.strategy == 1
+                    && matches!(&key.argument, IndexScanKeyArgument::Const(Value::Int32(42)))
+            })
+        }
+        _ => false,
+    }));
+    assert!(!plan_contains(subplan, |plan| matches!(
+        plan,
+        Plan::Filter { .. } | Plan::OrderBy { .. }
     )));
 }
 
@@ -1978,11 +2037,53 @@ fn explain_shows_initplan_for_rewritten_minmax_aggregate() {
 
     assert!(lines.iter().any(|line| line == "  InitPlan 1"));
     assert!(lines.iter().any(|line| line.trim() == "Limit"));
-    assert!(lines.iter().any(|line| line.contains("Index Scan")));
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Index Scan") || line.contains("Index Only Scan"))
+    );
     assert!(!lines.iter().any(|line| line.contains("Aggregate")));
 }
 
 #[test]
+fn planner_preserves_ordered_index_path_under_limit() {
+    let catalog = catalog_with_indexed_items();
+    let planned =
+        planned_stmt_for_sql_with_catalog("select id from items order by id limit 1", &catalog);
+
+    assert!(matches!(planned.plan_tree, Plan::Limit { .. }));
+    assert!(plan_contains(&planned.plan_tree, |plan| matches!(
+        plan,
+        Plan::IndexScan {
+            direction,
+            index_only,
+            ..
+        } if *direction == crate::include::access::relscan::ScanDirection::Forward && *index_only
+    )));
+    assert!(!plan_contains(&planned.plan_tree, |plan| matches!(
+        plan,
+        Plan::OrderBy { .. }
+    )));
+}
+
+#[test]
+fn planner_keeps_nested_sublink_max_as_aggregate() {
+    let catalog = catalog_with_indexed_items();
+    let stmt = parse_select(
+        "select (select max((select i.id from items i where i.id = o.id))) from items o",
+    )
+    .expect("parse");
+    let (query, _) = analyze_select_query_with_outer(&stmt, &catalog, &[], None, None, &[], &[])
+        .expect("analyze");
+    let planned = super::planner(query, &catalog).expect("plan");
+
+    assert!(
+        planned
+            .subplans
+            .iter()
+            .any(|subplan| plan_contains(subplan, |plan| matches!(plan, Plan::Aggregate { .. })))
+    );
+}
 fn planner_rewrites_correlated_min_with_index_subplan() {
     let catalog = catalog_with_indexed_items();
     let stmt =
