@@ -15244,6 +15244,82 @@ impl Session {
                     }
                 }
             }
+            Statement::Insert(insert) => {
+                let columns = if insert.returning.is_empty() {
+                    None
+                } else {
+                    let catalog = self.catalog_lookup(db);
+                    let bound = bind_insert(&insert, &catalog)?;
+                    Some(Self::target_entries_to_query_columns(&bound.returning))
+                };
+                Ok(Portal::pending_sql(
+                    name,
+                    source_text,
+                    prep_stmt_name,
+                    result_formats,
+                    options,
+                    created_in_transaction,
+                    created_savepoint_depth,
+                    columns,
+                ))
+            }
+            Statement::Update(update) => {
+                let columns = if update.returning.is_empty() {
+                    None
+                } else {
+                    let catalog = self.catalog_lookup(db);
+                    let bound = bind_update(&update, &catalog)?;
+                    Some(Self::target_entries_to_query_columns(&bound.returning))
+                };
+                Ok(Portal::pending_sql(
+                    name,
+                    source_text,
+                    prep_stmt_name,
+                    result_formats,
+                    options,
+                    created_in_transaction,
+                    created_savepoint_depth,
+                    columns,
+                ))
+            }
+            Statement::Delete(delete) => {
+                let columns = if delete.returning.is_empty() {
+                    None
+                } else {
+                    let catalog = self.catalog_lookup(db);
+                    let bound = bind_delete(&delete, &catalog)?;
+                    Some(Self::target_entries_to_query_columns(&bound.returning))
+                };
+                Ok(Portal::pending_sql(
+                    name,
+                    source_text,
+                    prep_stmt_name,
+                    result_formats,
+                    options,
+                    created_in_transaction,
+                    created_savepoint_depth,
+                    columns,
+                ))
+            }
+            Statement::Merge(merge) => {
+                let columns = if merge.returning.is_empty() {
+                    None
+                } else {
+                    let catalog = self.catalog_lookup(db);
+                    let bound = plan_merge(&merge, &catalog)?;
+                    Some(Self::target_entries_to_query_columns(&bound.returning))
+                };
+                Ok(Portal::pending_sql(
+                    name,
+                    source_text,
+                    prep_stmt_name,
+                    result_formats,
+                    options,
+                    created_in_transaction,
+                    created_savepoint_depth,
+                    columns,
+                ))
+            }
             _ => Ok(Portal::pending_sql(
                 name,
                 source_text,

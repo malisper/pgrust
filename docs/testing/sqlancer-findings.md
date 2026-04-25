@@ -48,12 +48,12 @@ existing blocker. Add one finding row per distinct blocker.
 | SQLANCER-005 | fixed-in-branch | FROM syntax | pgrust now accepts PostgreSQL's legacy `FROM table*` inheritance marker as the same default relation scan behavior pgrust already used for bare table references. Confirmation artifact: `/tmp/pgrust-sqlancer-triage-sqlancer005/seed-1`. |
 | SQLANCER-006 | fixed-in-branch | scalar function | pgrust now resolves and executes `upper(text)` through the builtin scalar-function path. Confirmation artifact: `/tmp/pgrust-sqlancer-triage-sqlancer006/seed-1`. |
 | SQLANCER-007 | robustness | numeric expression | Seed 2 generated huge negative exponent/cast arithmetic that reset the server connection. Artifact: `/tmp/pgrust-sqlancer-triage-next/seed-2`. |
-| SQLANCER-008 | protocol compatibility | extended protocol | DML `RETURNING` needs row descriptions for JDBC extended-protocol execution. Seed 3 artifact: `/tmp/pgrust-sqlancer-triage-next/seed-3`. |
+| SQLANCER-008 | fixed-in-branch | extended protocol | pgrust now describes DML `RETURNING` portals and sends DML command tags for row-returning DML. Confirmation artifact: `/tmp/pgrust-sqlancer-triage-sqlancer008/seed-3`; that seed now advances to `SQLANCER-013`. |
 | SQLANCER-009 | robustness | server execution | Deep generated SQL triggered a pgrust client-thread stack overflow. |
 | SQLANCER-010 | fixed-in-branch | expression syntax | pgrust now rewrites `BETWEEN SYMMETRIC` into the equivalent pair of asymmetric bounds checks. Confirmation artifact: `/tmp/pgrust-sqlancer-triage-sqlancer010/seed-4`. |
 | SQLANCER-011 | common-unsupported / setup-noise | table DDL | Seed 5 generated `CREATE TEMP TABLE ... GENERATED ALWAYS AS ... CHECK ... NO INHERIT`. Split common table features from low-signal generated-column self-reference noise. Artifact: `/tmp/pgrust-sqlancer-triage-next/seed-5`. |
 | SQLANCER-012 | harness classification | scalar function typing | Seed 6 generated `to_hex(text)`, currently reported as a pgrust type mismatch during setup. Decide whether to narrow generator typing or add a compatibility ticket. |
-| SQLANCER-013 | harness classification | JOIN scope error | Generated invalid comma/explicit-JOIN scope references are currently allowlisted in SQLancer because pgrust reports them as qualified missing-column errors. |
+| SQLANCER-013 | harness classification | JOIN scope error | Generated invalid comma/explicit-JOIN scope references should be allowlisted in the pgrust SQLancer adapter because pgrust reports them as qualified missing-column errors. Confirmation artifact: `/tmp/pgrust-sqlancer-triage-sqlancer008/seed-3`. |
 
 ## Next triage pass
 
