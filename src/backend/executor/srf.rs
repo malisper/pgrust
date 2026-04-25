@@ -7,8 +7,16 @@ use crate::backend::commands::partition::{partition_ancestor_oids, partition_tre
 use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::SqlTypeKind;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
-use crate::include::nodes::datum::{NumericValue, RecordValue};
+use crate::backend::utils::time::datetime::{
+    days_from_ymd, days_in_month, timestamp_parts_from_usecs, ymd_from_days,
+};
+use crate::include::nodes::datetime::{
+    TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimestampADT, TimestampTzADT, USECS_PER_DAY,
+};
+use crate::include::nodes::datum::{IntervalValue, NumericValue, RecordValue};
 use crate::pl::plpgsql::execute_user_defined_set_returning_function;
+
+const MAX_UNBOUNDED_TIMESTAMP_SERIES_ROWS: usize = 10_000;
 
 pub(crate) fn eval_set_returning_call(
     call: &SetReturningCall,
@@ -342,6 +350,13 @@ fn eval_generate_series(
     let stop_val = eval_expr(stop, slot, ctx)?;
     let step_val = eval_expr(step, slot, ctx)?;
 
+    if matches!(
+        output_kind,
+        SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz
+    ) {
+        return eval_timestamp_generate_series(start_val, stop_val, step_val, output_kind, ctx);
+    }
+
     if matches!(output_kind, SqlTypeKind::Numeric) {
         let to_numeric = |v: Value, label: &'static str| -> Result<NumericValue, ExecError> {
             match v {
@@ -434,6 +449,110 @@ fn eval_generate_series(
             _ => Value::Int32(current as i32),
         }]));
         current += step;
+    }
+    Ok(rows)
+}
+
+fn timestamp_add_interval(base: i64, step: IntervalValue) -> Option<i64> {
+    if !step.is_finite() || base == i64::MIN || base == i64::MAX {
+        return None;
+    }
+    let (days, time) = timestamp_parts_from_usecs(base);
+    let (year, month, day) = ymd_from_days(days);
+    let month_index = i64::from(year) * 12 + i64::from(month - 1) + i64::from(step.months);
+    let new_year = month_index.div_euclid(12) as i32;
+    let new_month = month_index.rem_euclid(12) as u32 + 1;
+    let new_day = day.min(days_in_month(new_year, new_month));
+    let new_days = days_from_ymd(new_year, new_month, new_day)?;
+    i64::from(new_days)
+        .checked_mul(USECS_PER_DAY)?
+        .checked_add(time)?
+        .checked_add(i64::from(step.days).checked_mul(USECS_PER_DAY)?)?
+        .checked_add(step.time_micros)
+}
+
+fn interval_sign(step: IntervalValue) -> i32 {
+    let key = step.cmp_key();
+    if key > 0 {
+        1
+    } else if key < 0 {
+        -1
+    } else {
+        0
+    }
+}
+
+fn eval_timestamp_generate_series(
+    start_val: Value,
+    stop_val: Value,
+    step_val: Value,
+    output_kind: SqlTypeKind,
+    ctx: &ExecutorContext,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    let (mut current, end) = match (start_val, stop_val, output_kind) {
+        (Value::Timestamp(start), Value::Timestamp(stop), SqlTypeKind::Timestamp) => {
+            (start.0, stop.0)
+        }
+        (Value::TimestampTz(start), Value::TimestampTz(stop), SqlTypeKind::TimestampTz) => {
+            (start.0, stop.0)
+        }
+        (start, stop, _) => {
+            return Err(ExecError::TypeMismatch {
+                op: "generate_series",
+                left: start,
+                right: stop,
+            });
+        }
+    };
+    let Value::Interval(step) = step_val else {
+        return Err(ExecError::TypeMismatch {
+            op: "generate_series step",
+            left: step_val,
+            right: Value::Interval(IntervalValue::zero()),
+        });
+    };
+    if !step.is_finite() {
+        return Err(ExecError::DetailedError {
+            message: "step size cannot be infinite".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "22023",
+        });
+    }
+    let sign = interval_sign(step);
+    if sign == 0 {
+        return Err(ExecError::GenerateSeriesZeroStep);
+    }
+    let mut rows = Vec::new();
+    loop {
+        ctx.check_for_interrupts()?;
+        let done = if sign > 0 {
+            current > end
+        } else {
+            current < end
+        };
+        if done {
+            break;
+        }
+        rows.push(TupleSlot::virtual_row(vec![match output_kind {
+            SqlTypeKind::TimestampTz => Value::TimestampTz(TimestampTzADT(current)),
+            _ => Value::Timestamp(TimestampADT(current)),
+        }]));
+        // :HACK: ProjectSet currently materializes SRF output before an outer LIMIT can stop it.
+        // Bound infinite timestamp series so SELECT-list generate_series(..., 'infinity', ...)
+        // can still be consumed by LIMIT while the executor lacks streaming SRF state.
+        if matches!(end, TIMESTAMP_NOEND | TIMESTAMP_NOBEGIN)
+            && rows.len() >= MAX_UNBOUNDED_TIMESTAMP_SERIES_ROWS
+        {
+            break;
+        }
+        let Some(next) = timestamp_add_interval(current, step) else {
+            break;
+        };
+        if next == current {
+            return Err(ExecError::GenerateSeriesZeroStep);
+        }
+        current = next;
     }
     Ok(rows)
 }

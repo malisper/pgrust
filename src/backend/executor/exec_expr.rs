@@ -25,8 +25,9 @@ pub(crate) use super::expr_compile::{
     CompiledPredicate, compile_predicate, compile_predicate_with_decoder,
 };
 use super::expr_date::{
-    eval_date_part_function, eval_date_trunc_function, eval_isfinite_function,
-    eval_make_date_function, eval_make_time_function, eval_timezone_function,
+    eval_age_function, eval_date_bin_function, eval_date_part_function, eval_date_trunc_function,
+    eval_extract_function, eval_isfinite_function, eval_make_date_function,
+    eval_make_time_function, eval_make_timestamp_function, eval_timezone_function,
     eval_to_date_function,
 };
 use super::expr_datetime::{
@@ -4875,11 +4876,15 @@ fn eval_builtin_function(
             unreachable!("sequence builtins handled earlier");
         }
         BuiltinScalarFunction::DatePart => eval_date_part_function(&values),
+        BuiltinScalarFunction::Extract => eval_extract_function(&values),
         BuiltinScalarFunction::DateTrunc => eval_date_trunc_function(&values, &ctx.datetime_config),
+        BuiltinScalarFunction::DateBin => eval_date_bin_function(&values),
         BuiltinScalarFunction::TimeZone => eval_timezone_function(&values, &ctx.datetime_config),
         BuiltinScalarFunction::IsFinite => eval_isfinite_function(&values),
         BuiltinScalarFunction::MakeDate => eval_make_date_function(&values),
         BuiltinScalarFunction::MakeTime => eval_make_time_function(&values),
+        BuiltinScalarFunction::MakeTimestamp => eval_make_timestamp_function(&values),
+        BuiltinScalarFunction::Age => eval_age_function(&values),
         BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),
         BuiltinScalarFunction::PgMyTempSchema => Ok(Value::Int64(i64::from(
             current_temp_namespace_oid(ctx).unwrap_or(0),

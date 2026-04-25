@@ -14,6 +14,7 @@ pub enum SyntheticSystemViewKind {
     PgStatioUserTables,
     PgStatUserFunctions,
     PgStatIo,
+    PgStatProgressCopy,
     PgLocks,
     InformationSchemaTables,
     InformationSchemaViews,
@@ -104,6 +105,8 @@ const PG_STAT_USER_FUNCTIONS_ALIASES: &[&str] = &[
     "pg_catalog.pg_stat_user_functions",
 ];
 const PG_STAT_IO_ALIASES: &[&str] = &["pg_stat_io", "pg_catalog.pg_stat_io"];
+const PG_STAT_PROGRESS_COPY_ALIASES: &[&str] =
+    &["pg_stat_progress_copy", "pg_catalog.pg_stat_progress_copy"];
 const PG_LOCKS_ALIASES: &[&str] = &["pg_locks", "pg_catalog.pg_locks"];
 const INFORMATION_SCHEMA_TABLES_ALIASES: &[&str] = &["information_schema.tables"];
 const INFORMATION_SCHEMA_VIEWS_ALIASES: &[&str] = &["information_schema.views"];
@@ -346,6 +349,20 @@ const PG_STAT_IO_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::new("stats_reset", SqlType::new(SqlTypeKind::TimestampTz)),
 ];
 
+const PG_STAT_PROGRESS_COPY_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::new("pid", SqlType::new(SqlTypeKind::Int4)),
+    SyntheticSystemViewColumn::new("datid", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("datname", SqlType::new(SqlTypeKind::Name)),
+    SyntheticSystemViewColumn::new("relid", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::text("command"),
+    SyntheticSystemViewColumn::text("type"),
+    SyntheticSystemViewColumn::new("bytes_processed", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("bytes_total", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("tuples_processed", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("tuples_excluded", SqlType::new(SqlTypeKind::Int8)),
+    SyntheticSystemViewColumn::new("tuples_skipped", SqlType::new(SqlTypeKind::Int8)),
+];
+
 const INFORMATION_SCHEMA_TABLES_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::text("table_name"),
     SyntheticSystemViewColumn::text("is_insertable_into"),
@@ -371,7 +388,7 @@ const INFORMATION_SCHEMA_COLUMNS_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::text("is_updatable"),
 ];
 
-const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 16] = [
+const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 17] = [
     SyntheticSystemView {
         kind: SyntheticSystemViewKind::PgViews,
         canonical_name: "pg_catalog.pg_views",
@@ -447,6 +464,13 @@ const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 16] = [
         canonical_name: "pg_catalog.pg_stat_io",
         aliases: PG_STAT_IO_ALIASES,
         columns: PG_STAT_IO_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgStatProgressCopy,
+        canonical_name: "pg_catalog.pg_stat_progress_copy",
+        aliases: PG_STAT_PROGRESS_COPY_ALIASES,
+        columns: PG_STAT_PROGRESS_COPY_COLUMNS,
         view_definition_sql: "",
     },
     SyntheticSystemView {

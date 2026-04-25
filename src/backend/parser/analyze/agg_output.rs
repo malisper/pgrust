@@ -1427,6 +1427,25 @@ pub(super) fn bind_agg_output_expr_in_clause(
             }
         }
         SqlExpr::Column(name) => {
+            if let Some(system_column) =
+                resolve_system_column_with_outer(input_scope, outer_scopes, name)?
+            {
+                for (i, gk) in group_by_exprs.iter().enumerate() {
+                    if let SqlExpr::Column(gk_name) = gk
+                        && let Some(grouped_system_column) =
+                            resolve_system_column_with_outer(input_scope, outer_scopes, gk_name)?
+                        && grouped_system_column.varno == system_column.varno
+                        && grouped_system_column.varattno == system_column.varattno
+                        && grouped_system_column.varlevelsup == system_column.varlevelsup
+                    {
+                        return Ok(grouped_key_expr(group_key_exprs, i));
+                    }
+                }
+                return Err(ParseError::UnexpectedToken {
+                    expected: "system column in GROUP BY",
+                    actual: name.clone(),
+                });
+            }
             let col_index =
                 match resolve_column_with_outer(input_scope, outer_scopes, name, grouped_outer)? {
                     ResolvedColumn::Local(index) => index,

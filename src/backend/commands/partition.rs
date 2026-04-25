@@ -931,10 +931,21 @@ pub(crate) fn validate_partition_relation_compatibility(
             sqlstate: "42P16",
         });
     }
-    for (parent_column, child_column) in parent_columns.iter().zip(child_columns.iter()) {
-        if !parent_column.name.eq_ignore_ascii_case(&child_column.name)
-            || parent_column.sql_type != child_column.sql_type
-        {
+    for parent_column in parent_columns {
+        let Some(child_column) = child_columns
+            .iter()
+            .find(|column| column.name.eq_ignore_ascii_case(&parent_column.name))
+        else {
+            return Err(ExecError::DetailedError {
+                message: format!(
+                    "partition \"{child_name}\" has different column layout than partitioned table \"{parent_name}\""
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42P16",
+            });
+        };
+        if parent_column.sql_type != child_column.sql_type {
             return Err(ExecError::DetailedError {
                 message: format!(
                     "partition \"{child_name}\" has different column layout than partitioned table \"{parent_name}\""

@@ -270,6 +270,26 @@ mod tests {
     }
 
     #[test]
+    fn execute_do_accepts_raise_info() {
+        run_plpgsql_test("execute_do_accepts_raise_info", || {
+            let stmt = DoStatement {
+                language: None,
+                code: "begin raise info 'progress: %', 3; end".into(),
+            };
+
+            let result = execute_do(&stmt).unwrap();
+            assert_eq!(result, StatementResult::AffectedRows(0));
+            assert_eq!(
+                take_notices(),
+                vec![PlpgsqlNotice {
+                    level: RaiseLevel::Info,
+                    message: "progress: 3".into(),
+                }]
+            );
+        });
+    }
+
+    #[test]
     fn execute_do_runs_while_loop() {
         run_plpgsql_test("execute_do_runs_while_loop", || {
             let stmt = DoStatement {

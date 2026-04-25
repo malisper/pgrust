@@ -60,6 +60,14 @@ pub fn default_timezone() -> &'static str {
 }
 
 pub fn parse_datestyle(value: &str) -> Option<(DateStyleFormat, DateOrder)> {
+    parse_datestyle_with_fallback(value, DateStyleFormat::Iso, DateOrder::Mdy)
+}
+
+pub fn parse_datestyle_with_fallback(
+    value: &str,
+    fallback_format: DateStyleFormat,
+    fallback_order: DateOrder,
+) -> Option<(DateStyleFormat, DateOrder)> {
     let mut format = None;
     let mut order = None;
     for part in value
@@ -79,8 +87,8 @@ pub fn parse_datestyle(value: &str) -> Option<(DateStyleFormat, DateOrder)> {
         }
     }
     Some((
-        format.unwrap_or(DateStyleFormat::Iso),
-        order.unwrap_or(DateOrder::Mdy),
+        format.unwrap_or(fallback_format),
+        order.unwrap_or(fallback_order),
     ))
 }
 

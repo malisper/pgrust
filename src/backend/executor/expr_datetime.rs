@@ -129,8 +129,10 @@ fn rounded_usecs(value: i64, precision: Option<i32>) -> i64 {
     let factor = 10_i64.pow((6 - precision) as u32);
     if factor <= 1 {
         value
+    } else if value >= 0 {
+        ((value + factor / 2) / factor) * factor
     } else {
-        value.div_euclid(factor) * factor
+        ((value - factor / 2) / factor) * factor
     }
 }
 
@@ -144,9 +146,11 @@ pub(crate) fn apply_time_precision(value: Value, precision: Option<i32>) -> Valu
                 crate::include::nodes::datetime::TimeADT(rounded_usecs(timetz.time.0, precision));
             Value::TimeTz(timetz)
         }
+        Value::Timestamp(timestamp) if !timestamp.is_finite() => Value::Timestamp(timestamp),
         Value::Timestamp(crate::include::nodes::datetime::TimestampADT(usecs)) => Value::Timestamp(
             crate::include::nodes::datetime::TimestampADT(rounded_usecs(usecs, precision)),
         ),
+        Value::TimestampTz(timestamp) if !timestamp.is_finite() => Value::TimestampTz(timestamp),
         Value::TimestampTz(crate::include::nodes::datetime::TimestampTzADT(usecs)) => {
             Value::TimestampTz(crate::include::nodes::datetime::TimestampTzADT(
                 rounded_usecs(usecs, precision),
