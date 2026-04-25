@@ -232,11 +232,15 @@ fn collect_rels_from_set_returning_call(
             start,
             stop,
             step,
+            timezone,
             ..
         } => {
             collect_rels_from_expr(start, rels);
             collect_rels_from_expr(stop, rels);
             collect_rels_from_expr(step, rels);
+            if let Some(timezone) = timezone {
+                collect_rels_from_expr(timezone, rels);
+            }
         }
         crate::include::nodes::primnodes::SetReturningCall::PartitionTree { relid, .. }
         | crate::include::nodes::primnodes::SetReturningCall::PartitionAncestors {
@@ -437,11 +441,15 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                 start,
                 stop,
                 step,
+                timezone,
                 ..
             } => {
                 collect_rels_from_expr(start, rels);
                 collect_rels_from_expr(stop, rels);
                 collect_rels_from_expr(step, rels);
+                if let Some(timezone) = timezone {
+                    collect_rels_from_expr(timezone, rels);
+                }
             }
             crate::include::nodes::primnodes::SetReturningCall::PartitionTree { relid, .. }
             | crate::include::nodes::primnodes::SetReturningCall::PartitionAncestors {
@@ -507,11 +515,15 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
                                 start,
                                 stop,
                                 step,
+                                timezone,
                                 ..
                             } => {
                                 collect_rels_from_expr(start, rels);
                                 collect_rels_from_expr(stop, rels);
                                 collect_rels_from_expr(step, rels);
+                                if let Some(timezone) = timezone {
+                                    collect_rels_from_expr(timezone, rels);
+                                }
                             }
                             crate::include::nodes::primnodes::SetReturningCall::PartitionTree {
                                 relid, ..

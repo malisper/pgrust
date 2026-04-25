@@ -3,7 +3,7 @@ use crate::include::nodes::datetime::{
     POSTGRES_EPOCH_JDATE, SECS_PER_DAY, USECS_PER_DAY, USECS_PER_HOUR, USECS_PER_MINUTE,
     USECS_PER_SEC,
 };
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Offset, TimeZone};
+use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime, Offset, TimeZone};
 use chrono_tz::{OffsetName, Tz};
 use std::path::Path;
 
@@ -542,12 +542,20 @@ fn parse_numeric_offset_seconds(text: &str) -> Option<i32> {
     let (hour, minute, second) = if rest.contains(':') {
         let parts = rest.split(':').collect::<Vec<_>>();
         let hour = parts.first()?.parse::<i32>().ok()?;
-        let minute = parts
-            .get(1)
-            .map_or(Some(0), |part| part.parse::<i32>().ok())?;
-        let second = parts
-            .get(2)
-            .map_or(Some(0), |part| part.parse::<i32>().ok())?;
+        let minute = parts.get(1).map_or(Some(0), |part| {
+            if part.is_empty() {
+                Some(0)
+            } else {
+                part.parse::<i32>().ok()
+            }
+        })?;
+        let second = parts.get(2).map_or(Some(0), |part| {
+            if part.is_empty() {
+                Some(0)
+            } else {
+                part.parse::<i32>().ok()
+            }
+        })?;
         (hour, minute, second)
     } else if rest.chars().all(|ch| ch.is_ascii_digit()) {
         match rest.len() {
@@ -573,6 +581,35 @@ fn parse_numeric_offset_seconds(text: &str) -> Option<i32> {
     Some(sign * (hour * 3600 + minute * 60 + second))
 }
 
+fn parse_posix_timezone_offset_seconds(text: &str) -> Option<i32> {
+    let trimmed = text.trim();
+    if trimmed.contains('/') {
+        return None;
+    }
+    let offset_start = trimmed
+        .char_indices()
+        .find_map(|(idx, ch)| (ch.is_ascii_digit() || matches!(ch, '+' | '-')).then_some(idx))?;
+    if offset_start < 3
+        || !trimmed[..offset_start]
+            .chars()
+            .all(|ch| ch.is_ascii_alphabetic())
+    {
+        return None;
+    }
+    let offset_rest = &trimmed[offset_start..];
+    let offset_len = offset_rest
+        .char_indices()
+        .take_while(|(_, ch)| ch.is_ascii_digit() || matches!(ch, '+' | '-' | ':'))
+        .map(|(idx, ch)| idx + ch.len_utf8())
+        .last()?;
+    let offset = &offset_rest[..offset_len];
+    if offset.starts_with(['+', '-']) {
+        parse_numeric_offset_seconds(offset).map(|seconds| -seconds)
+    } else {
+        parse_numeric_offset_seconds(&format!("-{offset}"))
+    }
+}
+
 pub fn named_timezone_offset_seconds(name: &str) -> Option<i32> {
     match name.trim().to_ascii_lowercase().as_str() {
         "utc" | "gmt" | "etc/utc" | "etc/gmt" | "z" | "zulu" => Some(0),
@@ -585,6 +622,7 @@ pub fn named_timezone_offset_seconds(name: &str) -> Option<i32> {
         "pst" | "america/los_angeles" => Some(-8 * 3600),
         "pdt" => Some(-7 * 3600),
         "bst" => Some(3600),
+        "vet" => Some(-4 * 3600),
         "mmt" => Some(6 * 3600 + 30 * 60),
         "ist" => Some(5 * 3600 + 30 * 60),
         _ => None,
@@ -631,9 +669,12 @@ pub fn named_timezone_offset_seconds_for_local(name: &str, local_usecs: i64) -> 
     match tz.offset_from_local_datetime(&local) {
         chrono::LocalResult::Single(offset) => Some(offset.fix().local_minus_utc()),
         chrono::LocalResult::Ambiguous(_, late) => Some(late.fix().local_minus_utc()),
-        chrono::LocalResult::None => {
-            Some(tz.offset_from_utc_datetime(&local).fix().local_minus_utc())
-        }
+        chrono::LocalResult::None if name.eq_ignore_ascii_case("msk") => local
+            .checked_add_signed(Duration::days(1))
+            .map(|after| tz.offset_from_utc_datetime(&after).fix().local_minus_utc()),
+        chrono::LocalResult::None => local
+            .checked_sub_signed(Duration::days(1))
+            .map(|before| tz.offset_from_utc_datetime(&before).fix().local_minus_utc()),
     }
 }
 
@@ -688,6 +729,9 @@ pub fn parse_timezone_spec(text: &str) -> Result<Option<TimeZoneSpec>, DateTimeP
                 -parse_numeric_offset_seconds(suffix).expect("checked above"),
             )));
         }
+    }
+    if let Some(offset) = parse_posix_timezone_offset_seconds(trimmed) {
+        return Ok(Some(TimeZoneSpec::FixedOffset(offset)));
     }
     if parse_tz_name(trimmed).is_some() || timezone_name_exists(trimmed) {
         return Ok(Some(TimeZoneSpec::Named(normalize_timezone_name(trimmed))));

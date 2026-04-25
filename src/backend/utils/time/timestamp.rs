@@ -135,13 +135,38 @@ fn last_weekday_of_month(year: i32, month: u32, weekday: u32) -> u32 {
     last_day - ((7 + last_weekday - weekday) % 7)
 }
 
-fn tokenize_timestamp(text: &str) -> Vec<&str> {
+fn split_date_and_offset_token<'a>(
+    token: &'a str,
+    config: &DateTimeConfig,
+) -> Option<(&'a str, &'a str)> {
+    let trimmed = token.trim();
+    for (idx, ch) in trimmed.char_indices().rev() {
+        if idx == 0 {
+            continue;
+        }
+        if !matches!(ch, '+' | '-') {
+            continue;
+        }
+        let (date, zone) = trimmed.split_at(idx);
+        if parse_date_token_with_config(date, config)
+            .ok()
+            .flatten()
+            .is_some()
+            && matches!(parse_timezone_spec(zone), Ok(Some(_)))
+        {
+            return Some((date, zone));
+        }
+    }
+    None
+}
+
+fn tokenize_timestamp<'a>(text: &'a str, config: &DateTimeConfig) -> Vec<&'a str> {
     let mut tokens = Vec::new();
     for token in text.split_whitespace() {
         if let Some((date, time)) = token.split_once('T') {
             if !date.is_empty()
                 && !time.is_empty()
-                && parse_date_token_with_config(date, &DateTimeConfig::default())
+                && parse_date_token_with_config(date, config)
                     .ok()
                     .flatten()
                     .is_some()
@@ -150,6 +175,11 @@ fn tokenize_timestamp(text: &str) -> Vec<&str> {
                 tokens.push(time);
                 continue;
             }
+        }
+        if let Some((date, zone)) = split_date_and_offset_token(token, config) {
+            tokens.push(date);
+            tokens.push(zone);
+            continue;
         }
         tokens.push(token);
     }
@@ -370,7 +400,14 @@ fn parse_removable_timezone_token(token: &str) -> Result<Option<TimeZoneSpec>, D
     {
         return Ok(None);
     }
-    parse_timezone_spec(trimmed)
+    let parsed = parse_timezone_spec(trimmed)?;
+    if parsed.is_none()
+        && matches!(trimmed.as_bytes().first(), Some(b'+') | Some(b'-'))
+        && trimmed[1..].chars().all(|ch| ch.is_ascii_digit())
+    {
+        return Err(DateTimeParseError::FieldOutOfRange);
+    }
+    Ok(parsed)
 }
 
 fn extract_timestamp_parts(
@@ -378,14 +415,19 @@ fn extract_timestamp_parts(
     config: &DateTimeConfig,
 ) -> Result<(i32, i64, Option<TimeZoneSpec>), DateTimeParseError> {
     let normalized = normalize_timestamp_input(text);
-    let mut tokens = tokenize_timestamp(&normalized);
+    let mut tokens = tokenize_timestamp(&normalized, config);
     if tokens.is_empty() {
         return Err(DateTimeParseError::Invalid);
     }
 
     if let Some(keyword) = parse_keyword(tokens[0]) {
+        let mut zone = None;
         for token in &tokens[1..] {
-            if parse_timezone_spec(token)?.is_some() {
+            if let Some(spec) = parse_timezone_spec(token)? {
+                if zone.is_some() {
+                    return Err(DateTimeParseError::Invalid);
+                }
+                zone = Some(spec);
                 continue;
             }
             if is_weekday_token(token) {
@@ -405,11 +447,14 @@ fn extract_timestamp_parts(
             }
         };
         let time_usecs = if matches!(keyword, DateTimeKeyword::Now) {
-            current_postgres_timestamp_usecs().rem_euclid(USECS_PER_DAY)
+            config
+                .transaction_timestamp_usecs
+                .unwrap_or_else(current_postgres_timestamp_usecs)
+                .rem_euclid(USECS_PER_DAY)
         } else {
             0
         };
-        return Ok((days, time_usecs, None));
+        return Ok((days, time_usecs, zone));
     }
 
     tokens.retain(|token| !is_weekday_token(token));
@@ -556,7 +601,11 @@ fn timestamp_keyword_value(
     config: &DateTimeConfig,
 ) -> Option<Result<TimestampADT, DateTimeParseError>> {
     match parse_keyword(trimmed) {
-        Some(DateTimeKeyword::Now) => Some(Ok(TimestampADT(current_postgres_timestamp_usecs()))),
+        Some(DateTimeKeyword::Now) => Some(Ok(TimestampADT(
+            config
+                .transaction_timestamp_usecs
+                .unwrap_or_else(current_postgres_timestamp_usecs),
+        ))),
         Some(DateTimeKeyword::Today) => Some(Ok(TimestampADT(
             today_pg_days(config) as i64 * USECS_PER_DAY,
         ))),
@@ -863,6 +912,39 @@ mod format_tests {
         assert_eq!(
             format_timestamptz_text(ts, &config),
             "Wed Dec 31 16:00:00 1969 PST"
+        );
+    }
+
+    #[test]
+    fn parses_timestamptz_date_with_inline_zone() {
+        let config = DateTimeConfig {
+            time_zone: "America/Los_Angeles".into(),
+            ..DateTimeConfig::default()
+        };
+        assert_eq!(
+            parse_timestamptz_text("2001-01-01+11", &config).unwrap(),
+            parse_timestamptz_text("2001-01-01 00:00 +11", &config).unwrap()
+        );
+    }
+
+    #[test]
+    fn parses_special_dates_with_explicit_timezones() {
+        let transaction_timestamp_usecs = i64::from(days_from_ymd(2024, 1, 15).unwrap())
+            * USECS_PER_DAY
+            + 12 * 60 * 60 * USECS_PER_SEC;
+        let config = DateTimeConfig {
+            time_zone: "America/Los_Angeles".into(),
+            transaction_timestamp_usecs: Some(transaction_timestamp_usecs),
+            ..DateTimeConfig::default()
+        };
+        let tomorrow_days = today_pg_days(&config) + 1;
+        assert_eq!(
+            parse_timestamptz_text("tomorrow EST", &config).unwrap(),
+            TimestampTzADT(timestamp_usecs_from_parts(tomorrow_days, 0, -5 * 3600).unwrap())
+        );
+        assert_eq!(
+            parse_timestamptz_text("tomorrow zulu", &config).unwrap(),
+            TimestampTzADT(timestamp_usecs_from_parts(tomorrow_days, 0, 0).unwrap())
         );
     }
 

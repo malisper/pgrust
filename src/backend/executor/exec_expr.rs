@@ -5166,6 +5166,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::TimeZone => eval_timezone_function(&values, &ctx.datetime_config),
         BuiltinScalarFunction::DateAdd => eval_datetime_add_function(&values, false),
         BuiltinScalarFunction::DateSubtract => eval_datetime_add_function(&values, true),
+        BuiltinScalarFunction::Age => eval_age_function(&values, &ctx.datetime_config),
         BuiltinScalarFunction::IsFinite => eval_isfinite_function(&values),
         BuiltinScalarFunction::MakeDate => eval_make_date_function(&values),
         BuiltinScalarFunction::MakeTime => eval_make_time_function(&values),

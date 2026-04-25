@@ -579,6 +579,7 @@ pub enum BuiltinScalarFunction {
     TimeZone,
     DateAdd,
     DateSubtract,
+    Age,
     IsFinite,
     MakeDate,
     MakeTime,
@@ -884,6 +885,7 @@ pub enum SetReturningCall {
         start: Expr,
         stop: Expr,
         step: Expr,
+        timezone: Option<Expr>,
         output_columns: Vec<QueryColumn>,
         with_ordinality: bool,
     },
@@ -1070,6 +1072,7 @@ impl SetReturningCall {
                 start,
                 stop,
                 step,
+                timezone,
                 output_columns,
                 with_ordinality,
             } => SetReturningCall::GenerateSeries {
@@ -1078,6 +1081,7 @@ impl SetReturningCall {
                 start: map(start),
                 stop: map(stop),
                 step: map(step),
+                timezone: timezone.map(&mut map),
                 output_columns,
                 with_ordinality,
             },
@@ -2040,8 +2044,18 @@ pub fn expr_sql_type_hint(expr: &Expr) -> Option<SqlType> {
 pub fn set_returning_call_exprs(call: &SetReturningCall) -> Vec<&Expr> {
     match call {
         SetReturningCall::GenerateSeries {
-            start, stop, step, ..
-        } => vec![start, stop, step],
+            start,
+            stop,
+            step,
+            timezone,
+            ..
+        } => {
+            let mut exprs = vec![start, stop, step];
+            if let Some(timezone) = timezone {
+                exprs.push(timezone);
+            }
+            exprs
+        }
         SetReturningCall::PartitionTree { relid, .. }
         | SetReturningCall::PartitionAncestors { relid, .. } => vec![relid],
         SetReturningCall::PgLockStatus { .. } => Vec::new(),
