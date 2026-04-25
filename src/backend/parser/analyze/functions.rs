@@ -1087,6 +1087,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::DateAdd | BuiltinScalarFunction::DateSubtract => {
                 matches!(args.len(), 2 | 3)
             }
+            BuiltinScalarFunction::Age => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::IsFinite => args.len() == 1,
             BuiltinScalarFunction::MakeDate | BuiltinScalarFunction::MakeTime => args.len() == 3,
             BuiltinScalarFunction::MakeTimestamp => args.len() == 6,
@@ -1657,6 +1658,9 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         BuiltinScalarFunction::ParseIdent => {
             return Some(SqlType::array_of(SqlType::new(SqlTypeKind::Text)));
         }
+        BuiltinScalarFunction::Age => {
+            return Some(SqlType::new(SqlTypeKind::Interval));
+        }
         _ => {}
     }
     scalar_fixed_return_types()
@@ -1982,6 +1986,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("date_bin", BuiltinScalarFunction::DateBin),
         ("date_add", BuiltinScalarFunction::DateAdd),
         ("date_subtract", BuiltinScalarFunction::DateSubtract),
+        ("age", BuiltinScalarFunction::Age),
         ("isfinite", BuiltinScalarFunction::IsFinite),
         ("make_date", BuiltinScalarFunction::MakeDate),
         ("make_time", BuiltinScalarFunction::MakeTime),
@@ -3172,6 +3177,7 @@ fn supports_fixed_scalar_return_type(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::ToDate
             | BuiltinScalarFunction::ToNumber
             | BuiltinScalarFunction::ToTimestamp
+            | BuiltinScalarFunction::Age
             | BuiltinScalarFunction::RegexpMatch
             | BuiltinScalarFunction::RegexpReplace
             | BuiltinScalarFunction::RegexpCount

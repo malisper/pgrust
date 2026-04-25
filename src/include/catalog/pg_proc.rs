@@ -4716,6 +4716,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("date_bin", BuiltinScalarFunction::DateBin),
         ("date_add", BuiltinScalarFunction::DateAdd),
         ("date_subtract", BuiltinScalarFunction::DateSubtract),
+        ("age", BuiltinScalarFunction::Age),
         ("isfinite", BuiltinScalarFunction::IsFinite),
         ("make_date", BuiltinScalarFunction::MakeDate),
         ("make_time", BuiltinScalarFunction::MakeTime),

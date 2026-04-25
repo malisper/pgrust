@@ -28,7 +28,7 @@ use crate::backend::parser::{CatalogLookup, SqlType, SqlTypeKind};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::include::catalog::{C_COLLATION_OID, DEFAULT_COLLATION_OID, POSIX_COLLATION_OID};
 use crate::include::nodes::datetime::{
-    TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeTzADT, USECS_PER_SEC,
+    TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeTzADT, USECS_PER_DAY, USECS_PER_SEC,
 };
 use crate::pgrust::compact_string::CompactString;
 
@@ -421,6 +421,60 @@ pub(crate) fn add_values(left: Value, right: Value) -> Result<Value, ExecError> 
     }
 }
 
+fn interval_out_of_range_error() -> ExecError {
+    ExecError::DetailedError {
+        message: "interval out of range".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22008",
+    }
+}
+
+fn interval_from_total_usecs(total_usecs: i64) -> Result<IntervalValue, ExecError> {
+    let negative = total_usecs < 0;
+    let magnitude = if negative {
+        -(i128::from(total_usecs))
+    } else {
+        i128::from(total_usecs)
+    };
+    let days = magnitude / i128::from(USECS_PER_DAY);
+    let time_micros = magnitude % i128::from(USECS_PER_DAY);
+    let days = i32::try_from(days).map_err(|_| interval_out_of_range_error())?;
+    let time_micros = i64::try_from(time_micros).map_err(|_| interval_out_of_range_error())?;
+    Ok(if negative {
+        IntervalValue {
+            months: 0,
+            days: -days,
+            time_micros: -time_micros,
+        }
+    } else {
+        IntervalValue {
+            months: 0,
+            days,
+            time_micros,
+        }
+    })
+}
+
+fn timestamp_diff_interval(left: i64, right: i64) -> Result<Value, ExecError> {
+    match (left, right) {
+        (TIMESTAMP_NOEND, TIMESTAMP_NOEND) | (TIMESTAMP_NOBEGIN, TIMESTAMP_NOBEGIN) => {
+            Err(interval_out_of_range_error())
+        }
+        (TIMESTAMP_NOEND, _) | (_, TIMESTAMP_NOBEGIN) => {
+            Ok(Value::Interval(IntervalValue::infinity()))
+        }
+        (TIMESTAMP_NOBEGIN, _) | (_, TIMESTAMP_NOEND) => {
+            Ok(Value::Interval(IntervalValue::neg_infinity()))
+        }
+        _ => left
+            .checked_sub(right)
+            .ok_or_else(interval_out_of_range_error)
+            .and_then(interval_from_total_usecs)
+            .map(Value::Interval),
+    }
+}
+
 pub(crate) fn sub_values(left: Value, right: Value) -> Result<Value, ExecError> {
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         return Ok(Value::Null);
@@ -448,8 +502,8 @@ pub(crate) fn sub_values(left: Value, right: Value) -> Result<Value, ExecError> 
             Ok(Value::PgLsn(sub_pg_lsn_offset(*l, r)?))
         }
         (Value::Date(l), Value::Date(r)) => Ok(Value::Int32(l.0 - r.0)),
-        (Value::Timestamp(l), Value::Timestamp(r)) => timestamp_difference_interval(l.0, r.0),
-        (Value::TimestampTz(l), Value::TimestampTz(r)) => timestamp_difference_interval(l.0, r.0),
+        (Value::Timestamp(l), Value::Timestamp(r)) => timestamp_diff_interval(l.0, r.0),
+        (Value::TimestampTz(l), Value::TimestampTz(r)) => timestamp_diff_interval(l.0, r.0),
         (Value::Money(l), Value::Money(r)) => Ok(Value::Money(money_sub(*l, *r)?)),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Float64(l - r)),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {

@@ -3234,9 +3234,9 @@ fn bind_grouped_generate_series_srf(
     agg_list: &[CollectedAggregate],
     n_keys: usize,
 ) -> Result<Expr, ParseError> {
-    if args.len() < 2 || args.len() > 3 || args.iter().any(|arg| arg.name.is_some()) {
+    if args.len() < 2 || args.len() > 4 || args.iter().any(|arg| arg.name.is_some()) {
         return Err(ParseError::UnexpectedToken {
-            expected: "generate_series(start, stop[, step])",
+            expected: "generate_series(start, stop, step[, timezone])",
             actual: format!("generate_series with {} arguments", args.len()),
         });
     }
@@ -3254,7 +3254,7 @@ fn bind_grouped_generate_series_srf(
         outer_scopes,
         grouped_outer,
     );
-    let step_type = if args.len() == 3 {
+    let step_type = if args.len() >= 3 {
         Some(grouped_infer_sql_expr_type(
             &args[2].value,
             input_scope,
@@ -3265,7 +3265,24 @@ fn bind_grouped_generate_series_srf(
     } else {
         None
     };
+    let timezone_type = if args.len() == 4 {
+        Some(grouped_infer_sql_expr_type(
+            &args[3].value,
+            input_scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+        ))
+    } else {
+        None
+    };
     let common = resolve_generate_series_common_type(start_type, stop_type, step_type)?;
+    if timezone_type.is_some() && !matches!(common.kind, SqlTypeKind::TimestampTz) {
+        return Err(ParseError::UnexpectedToken {
+            expected: "generate_series timestamptz arguments with timezone",
+            actual: sql_type_name(common),
+        });
+    }
     let start = bind_agg_output_expr_in_clause(
         &args[0].value,
         clause.clone(),
@@ -3290,7 +3307,7 @@ fn bind_grouped_generate_series_srf(
         agg_list,
         n_keys,
     )?;
-    let step = if args.len() == 3 {
+    let step = if args.len() >= 3 {
         coerce_bound_expr(
             bind_agg_output_expr_in_clause(
                 &args[2].value,
@@ -3305,7 +3322,14 @@ fn bind_grouped_generate_series_srf(
                 n_keys,
             )?,
             step_type.expect("generate_series step type"),
-            common,
+            if matches!(
+                common.kind,
+                SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz
+            ) {
+                SqlType::new(SqlTypeKind::Interval)
+            } else {
+                common
+            },
         )
     } else {
         match common.kind {
@@ -3315,6 +3339,26 @@ fn bind_grouped_generate_series_srf(
             )),
             _ => Expr::Const(Value::Int32(1)),
         }
+    };
+    let timezone = if args.len() == 4 {
+        Some(coerce_bound_expr(
+            bind_agg_output_expr_in_clause(
+                &args[3].value,
+                clause.clone(),
+                group_by_exprs,
+                group_key_exprs,
+                input_scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                agg_list,
+                n_keys,
+            )?,
+            timezone_type.expect("generate_series timezone type"),
+            SqlType::new(SqlTypeKind::Text),
+        ))
+    } else {
+        None
     };
     let actual_types = args
         .iter()
@@ -3338,6 +3382,7 @@ fn bind_grouped_generate_series_srf(
         start: coerce_bound_expr(start, start_type, common),
         stop: coerce_bound_expr(stop, stop_type, common),
         step,
+        timezone,
         output_columns: vec![QueryColumn {
             name: "generate_series".into(),
             sql_type: common,
