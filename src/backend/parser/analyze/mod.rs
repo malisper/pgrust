@@ -312,6 +312,32 @@ fn resolve_builtin_aggregate_call(
 ) -> Option<ResolvedFunctionCall> {
     if matches!(
         func,
+        AggFunc::RegrCount
+            | AggFunc::RegrSxx
+            | AggFunc::RegrSyy
+            | AggFunc::RegrSxy
+            | AggFunc::RegrAvgX
+            | AggFunc::RegrAvgY
+            | AggFunc::RegrR2
+            | AggFunc::RegrSlope
+            | AggFunc::RegrIntercept
+            | AggFunc::CovarPop
+            | AggFunc::CovarSamp
+            | AggFunc::Corr
+    ) && arg_types.len() == 2
+    {
+        let float8_args = [
+            SqlType::new(SqlTypeKind::Float8),
+            SqlType::new(SqlTypeKind::Float8),
+        ];
+        if let Ok(resolved) =
+            resolve_function_call(catalog, func.name(), &float8_args, func_variadic)
+        {
+            return Some(resolved);
+        }
+    }
+    if matches!(
+        func,
         AggFunc::Sum
             | AggFunc::Avg
             | AggFunc::VarPop
@@ -363,6 +389,11 @@ fn resolve_aggregate_call(
 ) -> Option<ResolvedAggregateCall> {
     if let Some(func) = resolve_builtin_aggregate(name) {
         let resolved = resolve_builtin_aggregate_call(catalog, func, arg_types, func_variadic);
+        let declared_arg_types = resolved
+            .as_ref()
+            .map(|call| call.declared_arg_types.clone())
+            .or_else(|| builtin_aggregate_declared_arg_types(func, arg_types.len()))
+            .unwrap_or_else(|| arg_types.to_vec());
         return Some(ResolvedAggregateCall {
             proc_oid: resolved
                 .as_ref()
@@ -370,10 +401,7 @@ fn resolve_aggregate_call(
                 .or_else(|| proc_oid_for_builtin_aggregate_function(func))
                 .unwrap_or(0),
             result_type: aggregate_sql_type(func, arg_types.first().copied()),
-            declared_arg_types: resolved
-                .as_ref()
-                .map(|call| call.declared_arg_types.clone())
-                .unwrap_or_else(|| arg_types.to_vec()),
+            declared_arg_types,
             func_variadic: resolved
                 .as_ref()
                 .map(|call| call.func_variadic)
@@ -390,6 +418,30 @@ fn resolve_aggregate_call(
         func_variadic: resolved.func_variadic,
         builtin_impl: resolved.agg_impl,
     })
+}
+
+fn builtin_aggregate_declared_arg_types(func: AggFunc, arg_count: usize) -> Option<Vec<SqlType>> {
+    match (func, arg_count) {
+        (
+            AggFunc::RegrCount
+            | AggFunc::RegrSxx
+            | AggFunc::RegrSyy
+            | AggFunc::RegrSxy
+            | AggFunc::RegrAvgX
+            | AggFunc::RegrAvgY
+            | AggFunc::RegrR2
+            | AggFunc::RegrSlope
+            | AggFunc::RegrIntercept
+            | AggFunc::CovarPop
+            | AggFunc::CovarSamp
+            | AggFunc::Corr,
+            2,
+        ) => Some(vec![
+            SqlType::new(SqlTypeKind::Float8),
+            SqlType::new(SqlTypeKind::Float8),
+        ]),
+        _ => None,
+    }
 }
 
 fn validate_distinct_aggregate_order_by(
