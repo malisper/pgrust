@@ -284,6 +284,10 @@ impl CompiledTupleDecoder {
                                 bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
                                 bytes[6], bytes[7],
                             ])),
+                            ScalarType::PgLsn => Value::PgLsn(u64::from_le_bytes([
+                                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
+                                bytes[6], bytes[7],
+                            ])),
                             ScalarType::Money => Value::Money(i64::from_le_bytes([
                                 bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
                                 bytes[6], bytes[7],
@@ -507,6 +511,17 @@ impl CompiledTupleDecoder {
                             }
                             ScalarType::TsQuery => {
                                 values.push(Value::TsQuery(decode_tsquery_bytes(bytes_slice)?));
+                            }
+                            ScalarType::PgLsn => {
+                                if bytes_slice.len() != 8 {
+                                    return Err(ExecError::InvalidStorageValue {
+                                        column: "<tuple>".into(),
+                                        details: "pg_lsn must be exactly 8 bytes".into(),
+                                    });
+                                }
+                                values.push(Value::PgLsn(u64::from_le_bytes(
+                                    bytes_slice.try_into().unwrap(),
+                                )));
                             }
                             ScalarType::BitString => {
                                 if bytes_slice.len() < 4 {
