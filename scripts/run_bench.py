@@ -27,10 +27,16 @@ PGBENCH_WORKLOADS = {
     "scan-count": "pgbench_scan_count.sql",
     "point-select": "pgbench_point_select.sql",
     "range-select": "pgbench_range_select.sql",
+    "activity-count": "pgbench_activity_count.sql",
+    "feed-page": "pgbench_feed_page.sql",
+    "top-touched": "pgbench_top_touched.sql",
+    "event-join": "pgbench_event_join.sql",
     "insert-only": "pgbench_insert_only.sql",
     "read-write": "pgbench_read_write.sql",
     "mixed-oltp": "pgbench_mixed_oltp.sql",
 }
+TOUCHED_INDEX_WORKLOADS = {"activity-count", "top-touched"}
+EVENT_INDEX_WORKLOADS = {"event-join"}
 
 
 def utc_now() -> str:
@@ -754,8 +760,12 @@ class BenchmarkRunner:
         with sql_file.open("w") as handle:
             handle.write("BEGIN;\n")
             for i in range(self.args.rows):
+                touched = i % 10
                 handle.write(
-                    f"INSERT INTO scanbench (id, payload, touched) VALUES ({i + 1}, 'row-{i + 1}', 0);\n"
+                    f"INSERT INTO scanbench (id, payload, touched) VALUES ({i + 1}, 'row-{i + 1}', {touched});\n"
+                )
+                handle.write(
+                    f"INSERT INTO scanbench_events (item_id, event_type) VALUES ({i + 1}, 'seed');\n"
                 )
             handle.write("COMMIT;\n")
 
@@ -769,6 +779,23 @@ class BenchmarkRunner:
             artifact_stem=f"load_scanbench_index_{workload.replace('-', '_')}_{engine}",
             check=True,
         )
+        if workload in TOUCHED_INDEX_WORKLOADS:
+            self.run_command(
+                self.psql_argv(port)
+                + ["-c", "CREATE INDEX scanbench_touched_idx ON scanbench (touched);"],
+                artifact_stem=f"load_scanbench_touched_index_{workload.replace('-', '_')}_{engine}",
+                check=True,
+            )
+        if workload in EVENT_INDEX_WORKLOADS:
+            self.run_command(
+                self.psql_argv(port)
+                + [
+                    "-c",
+                    "CREATE INDEX scanbench_events_item_id_idx ON scanbench_events (item_id);",
+                ],
+                artifact_stem=f"load_scanbench_events_index_{workload.replace('-', '_')}_{engine}",
+                check=True,
+            )
 
     def run_pgbench_like_suite(self) -> dict[str, Any]:
         artifact = "pgbench_like"

@@ -109,6 +109,14 @@ iteration and accept shared state across workloads.
   Single-row lookup by id.
 - `range-select`
   Small range predicate over id.
+- `activity-count`
+  Count rows in an activity bucket, a common dashboard/filter shape.
+- `feed-page`
+  Keyset-style page over increasing ids with `ORDER BY id LIMIT 20`.
+- `top-touched`
+  Top-N ordered read over an activity counter.
+- `event-join`
+  Bounded parent/event join over `scanbench` and `scanbench_events`.
 - `insert-only`
   Append-only event inserts.
 - `read-write`
@@ -118,6 +126,11 @@ iteration and accept shared state across workloads.
 
 These are intentionally simple, common shapes. They are meant to establish a
 fair local comparison loop before adding heavier benchmark families.
+
+The fixture data seeds `scanbench.touched` across 10 buckets and inserts one
+seed event per row in `scanbench_events`. Workloads that need secondary access
+paths create matching indexes for both pgrust and PostgreSQL during the
+per-workload setup.
 
 ## Manual only
 
