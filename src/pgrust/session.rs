@@ -106,6 +106,8 @@ enum CopyOnError {
     Ignore,
 }
 
+const COPY_TEXT_NULL_SENTINEL: &str = "\0pgrust_copy_text_null";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CopyOptions {
     pub format: CopyFormat,
@@ -5618,13 +5620,17 @@ impl Session {
             .where_clause
             .as_ref()
             .and_then(|clause| parse_copy_where_filter(clause));
+        let parsed_null_marker = match copy.options.format {
+            CopyFormat::Text => COPY_TEXT_NULL_SENTINEL,
+            CopyFormat::Csv => &copy.options.null_marker,
+        };
         self.copy_from_rows_into_internal_with_options(
             db,
             name,
             columns.as_deref(),
             &rows,
             CopyInsertOptions {
-                null_marker: &copy.options.null_marker,
+                null_marker: parsed_null_marker,
                 on_error: if copy.options.on_error_ignore {
                     CopyOnError::Ignore
                 } else {
@@ -5669,7 +5675,7 @@ impl Session {
         }
         for (idx, (actual, expected)) in header.iter().zip(expected.iter()).enumerate() {
             if actual != expected {
-                let got = if actual == &options.null_marker {
+                let got = if is_parsed_copy_null(actual, options) {
                     format!("null value (\"{}\")", options.null_marker)
                 } else {
                     format!("\"{actual}\"")
@@ -7102,12 +7108,12 @@ pub(crate) fn parse_copy_input_rows(
     options: &CopyOptions,
 ) -> Result<Vec<Vec<String>>, ExecError> {
     match options.format {
-        CopyFormat::Text => parse_copy_text_rows(text),
+        CopyFormat::Text => parse_copy_text_rows(text, &options.null_marker),
         CopyFormat::Csv => parse_copy_csv_rows(text, options.quote, options.escape),
     }
 }
 
-fn parse_copy_text_rows(text: &str) -> Result<Vec<Vec<String>>, ExecError> {
+fn parse_copy_text_rows(text: &str, null_marker: &str) -> Result<Vec<Vec<String>>, ExecError> {
     let mut rows = Vec::new();
     for (line_idx, line) in text.lines().enumerate() {
         let line = line.trim_end_matches('\r');
@@ -7127,7 +7133,13 @@ fn parse_copy_text_rows(text: &str) -> Result<Vec<Vec<String>>, ExecError> {
         }
         let row = line
             .split('\t')
-            .map(unescape_copy_text_field)
+            .map(|field| {
+                if field == null_marker {
+                    COPY_TEXT_NULL_SENTINEL.to_string()
+                } else {
+                    unescape_copy_text_field(field)
+                }
+            })
             .collect::<Vec<_>>();
         if row.is_empty() && line_idx == 0 {
             continue;
@@ -7135,6 +7147,13 @@ fn parse_copy_text_rows(text: &str) -> Result<Vec<Vec<String>>, ExecError> {
         rows.push(row);
     }
     Ok(rows)
+}
+
+fn is_parsed_copy_null(field: &str, options: &CopyOptions) -> bool {
+    match options.format {
+        CopyFormat::Text => field == COPY_TEXT_NULL_SENTINEL,
+        CopyFormat::Csv => field == options.null_marker,
+    }
 }
 
 fn parse_copy_csv_rows(
