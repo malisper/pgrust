@@ -214,6 +214,7 @@ pub struct Database {
     pub(crate) domains: Arc<RwLock<BTreeMap<String, DomainEntry>>>,
     pub(crate) enum_types: Arc<RwLock<BTreeMap<String, EnumTypeEntry>>>,
     pub(crate) range_types: Arc<RwLock<BTreeMap<String, RangeTypeEntry>>>,
+    pub(crate) base_types: Arc<RwLock<BTreeMap<u32, BaseTypeEntry>>>,
     pub(crate) conversions: Arc<RwLock<BTreeMap<String, ConversionEntry>>>,
     pub(crate) statistics_objects: Arc<RwLock<BTreeMap<String, StatisticsObjectEntry>>>,
     pub(crate) sequences: Arc<SequenceRuntime>,
@@ -272,6 +273,13 @@ pub(crate) struct DomainCheckEntry {
     pub allowed_enum_label_oids: Vec<u32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BaseTypeEntry {
+    pub oid: u32,
+    pub array_oid: u32,
+    pub default: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EnumLabelEntry {
     pub oid: u32,
@@ -315,6 +323,7 @@ pub(crate) struct DynamicTypeSnapshot {
     pub domains: BTreeMap<String, DomainEntry>,
     pub enum_types: BTreeMap<String, EnumTypeEntry>,
     pub range_types: BTreeMap<String, RangeTypeEntry>,
+    pub base_types: BTreeMap<u32, BaseTypeEntry>,
 }
 
 fn domain_sql_type(domain: &DomainEntry) -> SqlType {
@@ -875,6 +884,7 @@ impl Database {
             domains: self.domains.read().clone(),
             enum_types: self.enum_types.read().clone(),
             range_types: self.range_types.read().clone(),
+            base_types: self.base_types.read().clone(),
         }
     }
 
@@ -882,7 +892,15 @@ impl Database {
         *self.domains.write() = snapshot.domains.clone();
         *self.enum_types.write() = snapshot.enum_types.clone();
         *self.range_types.write() = snapshot.range_types.clone();
+        *self.base_types.write() = snapshot.base_types.clone();
         self.plan_cache.invalidate_all();
+    }
+
+    pub(crate) fn base_type_default(&self, type_oid: u32) -> Option<String> {
+        self.base_types
+            .read()
+            .get(&type_oid)
+            .and_then(|entry| entry.default.clone())
     }
 
     pub(crate) fn commit_enum_labels_created_by(&self, xid: TransactionId) {

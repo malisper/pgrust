@@ -2976,6 +2976,122 @@ impl CatalogStore {
         Ok((oid, effect))
     }
 
+    pub fn complete_shell_base_type_mvcc(
+        &mut self,
+        type_oid: u32,
+        typlen: i16,
+        typalign: AttributeAlign,
+        typstorage: AttributeStorage,
+        typelem: u32,
+        support_proc_oids: &[u32],
+        ctx: &CatalogWriteContext,
+    ) -> Result<(u32, CatalogMutationEffect), CatalogError> {
+        let old_row = type_row_by_oid_mvcc(self, ctx, type_oid)?
+            .ok_or_else(|| CatalogError::UnknownType(type_oid.to_string()))?;
+        if !matches!(old_row.sql_type.kind, SqlTypeKind::Shell) {
+            return Err(CatalogError::TableAlreadyExists(old_row.typname.clone()));
+        }
+
+        let array_name = format!("_{}", old_row.typname);
+        if type_row_by_name_namespace_mvcc(self, ctx, &array_name, old_row.typnamespace)?.is_some()
+        {
+            return Err(CatalogError::TableAlreadyExists(array_name));
+        }
+        let array_oid = self.allocate_next_oid(0)?;
+        // :HACK: User-defined base types reuse text storage until registered
+        // input/output functions are wired into value I/O.
+        let base_sql_type = SqlType::new(SqlTypeKind::Text).with_identity(type_oid, 0);
+        let base_row = PgTypeRow {
+            oid: type_oid,
+            typname: old_row.typname.clone(),
+            typnamespace: old_row.typnamespace,
+            typowner: old_row.typowner,
+            typlen,
+            typalign,
+            typstorage,
+            typrelid: 0,
+            typelem,
+            typarray: array_oid,
+            sql_type: base_sql_type,
+        };
+        let array_row = PgTypeRow {
+            oid: array_oid,
+            typname: array_name,
+            typnamespace: old_row.typnamespace,
+            typowner: old_row.typowner,
+            typlen: -1,
+            typalign: AttributeAlign::Int,
+            typstorage: AttributeStorage::Extended,
+            typrelid: 0,
+            typelem: type_oid,
+            typarray: 0,
+            sql_type: SqlType::array_of(base_sql_type),
+        };
+        let mut depends = vec![
+            PgDependRow {
+                classid: PG_TYPE_RELATION_OID,
+                objid: type_oid,
+                objsubid: 0,
+                refclassid: PG_NAMESPACE_RELATION_OID,
+                refobjid: old_row.typnamespace,
+                refobjsubid: 0,
+                deptype: DEPENDENCY_NORMAL,
+            },
+            PgDependRow {
+                classid: PG_TYPE_RELATION_OID,
+                objid: array_oid,
+                objsubid: 0,
+                refclassid: PG_TYPE_RELATION_OID,
+                refobjid: type_oid,
+                refobjsubid: 0,
+                deptype: DEPENDENCY_INTERNAL,
+            },
+        ];
+        depends.extend(
+            support_proc_oids
+                .iter()
+                .copied()
+                .map(|proc_oid| PgDependRow {
+                    classid: PG_TYPE_RELATION_OID,
+                    objid: type_oid,
+                    objsubid: 0,
+                    refclassid: PG_PROC_RELATION_OID,
+                    refobjid: proc_oid,
+                    refobjsubid: 0,
+                    deptype: DEPENDENCY_NORMAL,
+                }),
+        );
+        sort_pg_depend_rows(&mut depends);
+
+        let kinds = [BootstrapCatalogKind::PgType, BootstrapCatalogKind::PgDepend];
+        delete_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                types: vec![old_row.clone()],
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &[BootstrapCatalogKind::PgType],
+        )?;
+        insert_catalog_rows_subset_mvcc(
+            ctx,
+            &PhysicalCatalogRows {
+                types: vec![base_row, array_row],
+                depends,
+                ..PhysicalCatalogRows::default()
+            },
+            self.scope_db_oid(),
+            &kinds,
+        )?;
+
+        let mut effect = CatalogMutationEffect::default();
+        effect_record_catalog_kinds(&mut effect, &kinds);
+        effect_record_oid(&mut effect.namespace_oids, old_row.typnamespace);
+        effect_record_oid(&mut effect.type_oids, type_oid);
+        effect_record_oid(&mut effect.type_oids, array_oid);
+        Ok((array_oid, effect))
+    }
+
     pub fn create_index_for_relation_mvcc(
         &mut self,
         index_name: impl Into<String>,
