@@ -270,6 +270,25 @@ impl AggFunc {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HypotheticalAggFunc {
+    Rank,
+    DenseRank,
+    PercentRank,
+    CumeDist,
+}
+
+impl HypotheticalAggFunc {
+    pub fn name(&self) -> &'static str {
+        match self {
+            HypotheticalAggFunc::Rank => "rank",
+            HypotheticalAggFunc::DenseRank => "dense_rank",
+            HypotheticalAggFunc::PercentRank => "percent_rank",
+            HypotheticalAggFunc::CumeDist => "cume_dist",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinWindowFunction {
     RowNumber,
     Rank,
@@ -1059,6 +1078,7 @@ pub enum ProjectSetTarget {
 pub struct AggAccum {
     pub aggfnoid: u32,
     pub agg_variadic: bool,
+    pub direct_args: Vec<Expr>,
     pub args: Vec<Expr>,
     pub order_by: Vec<OrderByEntry>,
     pub filter: Option<Expr>,
@@ -1072,6 +1092,7 @@ pub struct Aggref {
     pub aggtype: SqlType,
     pub aggvariadic: bool,
     pub aggdistinct: bool,
+    pub direct_args: Vec<Expr>,
     pub args: Vec<Expr>,
     pub aggorder: Vec<OrderByEntry>,
     pub aggfilter: Option<Expr>,
@@ -1598,6 +1619,7 @@ impl Expr {
         aggtype: SqlType,
         aggvariadic: bool,
         aggdistinct: bool,
+        direct_args: Vec<Expr>,
         args: Vec<Expr>,
         aggorder: Vec<OrderByEntry>,
         aggfilter: Option<Expr>,
@@ -1608,6 +1630,7 @@ impl Expr {
             aggtype,
             aggvariadic,
             aggdistinct,
+            direct_args,
             args,
             aggorder,
             aggfilter,
@@ -1878,7 +1901,8 @@ pub fn expr_contains_set_returning(expr: &Expr) -> bool {
     match expr {
         Expr::SetReturning(_) => true,
         Expr::Aggref(aggref) => {
-            aggref.args.iter().any(expr_contains_set_returning)
+            aggref.direct_args.iter().any(expr_contains_set_returning)
+                || aggref.args.iter().any(expr_contains_set_returning)
                 || aggref
                     .aggorder
                     .iter()

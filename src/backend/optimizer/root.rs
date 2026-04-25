@@ -2000,6 +2000,7 @@ fn build_grouped_target(layout: &AggregateLayout, accumulators: &[AggAccum]) -> 
             aggtype: accum.sql_type,
             aggvariadic: accum.agg_variadic,
             aggdistinct: accum.distinct,
+            direct_args: accum.direct_args.clone(),
             args: accum.args.clone(),
             aggorder: accum.order_by.clone(),
             aggfilter: accum.filter.clone(),

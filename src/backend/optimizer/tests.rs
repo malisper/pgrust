@@ -1834,6 +1834,7 @@ fn executable_plan_validator_reports_node_and_field() {
                 aggtype: int4(),
                 aggvariadic: false,
                 aggdistinct: false,
+                direct_args: vec![],
                 args: vec![],
                 aggorder: vec![],
                 aggfilter: None,

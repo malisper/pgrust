@@ -545,6 +545,11 @@ pub(super) fn raise_expr_varlevels(expr: Expr, levels: usize) -> Expr {
         Expr::Aggref(mut aggref) => {
             aggref.agglevelsup += levels;
             Expr::Aggref(Box::new(crate::include::nodes::primnodes::Aggref {
+                direct_args: aggref
+                    .direct_args
+                    .into_iter()
+                    .map(|arg| raise_expr_varlevels(arg, levels))
+                    .collect(),
                 args: aggref
                     .args
                     .into_iter()
@@ -849,6 +854,7 @@ fn bind_window_agg_call(
             .map(|call| call.func_variadic)
             .unwrap_or(func_variadic),
         aggdistinct: distinct,
+        direct_args: Vec::new(),
         args: coerced_args.clone(),
         aggorder: bound_order_by,
         aggfilter: bound_filter,
@@ -866,7 +872,8 @@ fn bind_window_agg_call(
 
 fn bind_visible_outer_aggregate_call(
     name: &str,
-    args: &[SqlFunctionArg],
+    direct_args: &[SqlFunctionArg],
+    args: &SqlCallArgs,
     order_by: &[OrderByItem],
     distinct: bool,
     func_variadic: bool,
@@ -877,9 +884,12 @@ fn bind_visible_outer_aggregate_call(
     _grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<Option<Expr>, ParseError> {
+    let hypothetical =
+        resolve_builtin_hypothetical_aggregate(name).is_some() && !direct_args.is_empty();
     let Some((aggno, visible_scope)) = match_visible_aggregate_call(
         name,
-        &SqlCallArgs::Args(args.to_vec()),
+        direct_args,
+        args,
         order_by,
         distinct,
         func_variadic,
@@ -892,8 +902,12 @@ fn bind_visible_outer_aggregate_call(
     };
     let owner_scope = &visible_scope.input_scope;
     let owner_outer_scopes = outer_scopes.get(visible_scope.levelsup..).unwrap_or(&[]);
-    let arg_values = args.iter().map(|arg| arg.value.clone()).collect::<Vec<_>>();
-    if let Some(func) = resolve_builtin_aggregate(name) {
+    let arg_values = args
+        .args()
+        .iter()
+        .map(|arg| arg.value.clone())
+        .collect::<Vec<_>>();
+    if !hypothetical && let Some(func) = resolve_builtin_aggregate(name) {
         validate_aggregate_arity(func, &arg_values)?;
     }
     let arg_types = arg_values
@@ -909,14 +923,21 @@ fn bind_visible_outer_aggregate_call(
             )
         })
         .collect::<Vec<_>>();
-    let resolved =
-        resolve_aggregate_call(catalog, name, &arg_types, func_variadic).ok_or_else(|| {
-            ParseError::UnexpectedToken {
-                expected: "supported aggregate",
-                actual: name.to_string(),
-            }
-        })?;
-    if resolved.is_custom() {
+    let resolved = if hypothetical {
+        None
+    } else {
+        Some(
+            resolve_aggregate_call(catalog, name, &arg_types, func_variadic).ok_or_else(|| {
+                ParseError::UnexpectedToken {
+                    expected: "supported aggregate",
+                    actual: name.to_string(),
+                }
+            })?,
+        )
+    };
+    if let Some(resolved) = resolved.as_ref()
+        && resolved.is_custom()
+    {
         if distinct {
             return Err(ParseError::FeatureNotSupported(format!(
                 "DISTINCT on custom aggregate {name}"
@@ -947,6 +968,37 @@ fn bind_visible_outer_aggregate_call(
             return Err(set_returning_not_allowed_error("aggregate arguments"));
         }
     }
+    let bound_direct_args = if hypothetical {
+        if aggregate_args_are_named(direct_args) {
+            return Err(ParseError::UnexpectedToken {
+                expected: "aggregate arguments without names",
+                actual: name.to_string(),
+            });
+        }
+        direct_args
+            .iter()
+            .map(|arg| {
+                bind_expr_with_outer_and_ctes(
+                    &arg.value,
+                    owner_scope,
+                    catalog,
+                    owner_outer_scopes,
+                    None,
+                    ctes,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
+    for arg in &bound_direct_args {
+        reject_nested_local_ctes_in_agg_expr(arg)?;
+        if expr_contains_set_returning(arg) {
+            return Err(set_returning_not_allowed_error(
+                "ordered-set aggregate direct arguments",
+            ));
+        }
+    }
     let bound_filter = filter
         .map(|expr| {
             bind_expr_with_outer_and_ctes(
@@ -965,40 +1017,95 @@ fn bind_visible_outer_aggregate_call(
             return Err(set_returning_not_allowed_error("aggregate FILTER"));
         }
     }
-    let bound_order_by = order_by
+    let bound_order_exprs = order_by
         .iter()
         .map(|item| {
-            let bound_expr = bind_expr_with_outer_and_ctes(
+            bind_expr_with_outer_and_ctes(
                 &item.expr,
                 owner_scope,
                 catalog,
                 owner_outer_scopes,
                 None,
                 ctes,
-            )?;
-            build_bound_order_by_entry(item, bound_expr, 0, catalog)
+            )
         })
-        .collect::<Result<Vec<_>, ParseError>>()?;
-    for item in &bound_order_by {
-        reject_nested_local_ctes_in_agg_expr(&item.expr)?;
-        if expr_contains_set_returning(&item.expr) {
+        .collect::<Result<Vec<_>, _>>()?;
+    for item in &bound_order_exprs {
+        reject_nested_local_ctes_in_agg_expr(item)?;
+        if expr_contains_set_returning(item) {
             return Err(set_returning_not_allowed_error("aggregate ORDER BY"));
         }
     }
-    let coerced_args = bound_args
-        .into_iter()
-        .zip(arg_types.iter().copied())
-        .zip(resolved.declared_arg_types.iter().copied())
-        .map(|((arg, actual_type), declared_type)| {
-            coerce_bound_expr(arg, actual_type, declared_type)
-        })
-        .collect();
+    let (coerced_direct_args, coerced_args, bound_order_by) = if hypothetical {
+        let direct_arg_types = direct_args
+            .iter()
+            .map(|arg| {
+                infer_sql_expr_type_with_ctes(
+                    &arg.value,
+                    owner_scope,
+                    catalog,
+                    owner_outer_scopes,
+                    None,
+                    ctes,
+                )
+            })
+            .collect::<Vec<_>>();
+        coerce_hypothetical_aggregate_inputs(
+            name,
+            direct_args,
+            &direct_arg_types,
+            bound_direct_args,
+            args.args(),
+            &arg_types,
+            bound_args,
+            order_by,
+            bound_order_exprs,
+            catalog,
+        )?
+    } else {
+        let bound_order_by = bound_order_exprs
+            .into_iter()
+            .zip(order_by.iter())
+            .map(|(bound_expr, item)| build_bound_order_by_entry(item, bound_expr, 0, catalog))
+            .collect::<Result<Vec<_>, ParseError>>()?;
+        let resolved = resolved
+            .as_ref()
+            .expect("non-hypothetical aggregate resolution should exist");
+        let coerced_args = bound_args
+            .into_iter()
+            .zip(arg_types.iter().copied())
+            .zip(resolved.declared_arg_types.iter().copied())
+            .map(|((arg, actual_type), declared_type)| {
+                coerce_bound_expr(arg, actual_type, declared_type)
+            })
+            .collect();
+        (Vec::new(), coerced_args, bound_order_by)
+    };
+    let (aggfnoid, aggtype, aggvariadic) = if hypothetical {
+        let resolved = resolve_hypothetical_aggregate_call(name).ok_or_else(|| {
+            ParseError::UnexpectedToken {
+                expected: "supported aggregate",
+                actual: name.to_string(),
+            }
+        })?;
+        (resolved.proc_oid, resolved.result_type, false)
+    } else {
+        let resolved = resolved
+            .as_ref()
+            .expect("non-hypothetical aggregate resolution should exist");
+        (
+            resolved.proc_oid,
+            resolved.result_type,
+            resolved.func_variadic,
+        )
+    };
     Ok(Some(Expr::Aggref(Box::new(
         crate::include::nodes::primnodes::Aggref {
-            aggfnoid: resolved.proc_oid,
-            aggtype: resolved.result_type,
-            aggvariadic: resolved.func_variadic,
+            aggfnoid,
+            aggtype,
+            aggvariadic,
             aggdistinct: distinct,
+            direct_args: coerced_direct_args,
             args: coerced_args,
             aggorder: bound_order_by,
             aggfilter: bound_filter,
@@ -2871,12 +2978,24 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             name,
             args,
             order_by,
+            within_group,
             distinct,
             func_variadic,
             filter,
             over,
         } => {
             let args_list = args.args();
+            let (direct_args, aggregate_args, aggregate_order_by) =
+                normalize_aggregate_call(args, order_by, within_group.as_deref());
+            if over.is_none()
+                && within_group.is_none()
+                && resolve_builtin_hypothetical_aggregate(name).is_some()
+            {
+                return Err(ordered_set_requires_within_group_error(name));
+            }
+            if within_group.is_some() && resolve_builtin_hypothetical_aggregate(name).is_none() {
+                return Err(not_ordered_set_aggregate_error(name));
+            }
             if let Some(func) = resolve_builtin_aggregate(name) {
                 if let Some(raw_over) = over {
                     return bind_window_agg_call(
@@ -2896,8 +3015,31 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 }
                 if let Some(bound_outer_agg) = bind_visible_outer_aggregate_call(
                     name,
-                    args_list,
-                    order_by,
+                    &direct_args,
+                    &aggregate_args,
+                    &aggregate_order_by,
+                    *distinct,
+                    *func_variadic,
+                    filter.as_deref(),
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )? {
+                    return Ok(bound_outer_agg);
+                }
+                return Err(ParseError::UnexpectedToken {
+                    expected: "non-aggregate expression",
+                    actual: "aggregate function".into(),
+                });
+            }
+            if within_group.is_some() {
+                if let Some(bound_outer_agg) = bind_visible_outer_aggregate_call(
+                    name,
+                    &direct_args,
+                    &aggregate_args,
+                    &aggregate_order_by,
                     *distinct,
                     *func_variadic,
                     filter.as_deref(),
@@ -3291,12 +3433,14 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 name,
                 args,
                 order_by,
+                within_group,
                 distinct,
                 func_variadic,
                 filter,
                 over,
             } = expr.as_ref()
                 && order_by.is_empty()
+                && within_group.is_none()
                 && !*distinct
                 && filter.is_none()
                 && over.is_none()

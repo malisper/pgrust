@@ -12953,6 +12953,176 @@ fn window_distribution_functions_handle_peer_groups() {
 }
 
 #[test]
+fn hypothetical_set_aggregates_compute_expected_results() {
+    let base = temp_dir("hypothetical_set_aggregates");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select rank(3) within group (order by x)
+             from (values (1),(1),(2),(2),(3),(3),(4)) v(x)",
+        )
+        .unwrap(),
+        vec![vec![Value::Int64(5)]],
+    );
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select cume_dist(3) within group (order by x)
+             from (values (1),(1),(2),(2),(3),(3),(4)) v(x)",
+        )
+        .unwrap(),
+        vec![vec![Value::Float64(0.875)]],
+    );
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select percent_rank(3) within group (order by x)
+             from (values (1),(1),(2),(2),(3),(3),(4),(5)) v(x)",
+        )
+        .unwrap(),
+        vec![vec![Value::Float64(0.5)]],
+    );
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select dense_rank(3) within group (order by x)
+             from (values (1),(1),(2),(2),(3),(3),(4)) v(x)",
+        )
+        .unwrap(),
+        vec![vec![Value::Int64(3)]],
+    );
+}
+
+#[test]
+fn hypothetical_set_aggregates_support_multicolumn_ordering_and_empty_percent_rank() {
+    let base = temp_dir("hypothetical_set_aggregates_multicolumn");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select rank(5, 'm') within group (order by a, b),
+                    dense_rank(5, 'm') within group (order by a, b)
+             from (values (1,'z'),(5,'k'),(5,'z'),(6,'a')) v(a,b)",
+        )
+        .unwrap(),
+        vec![vec![Value::Int64(3), Value::Int64(3)]],
+    );
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select percent_rank(0) within group (order by x)
+             from (values (1)) v(x)
+             where false",
+        )
+        .unwrap(),
+        vec![vec![Value::Float64(0.0)]],
+    );
+}
+
+#[test]
+fn hypothetical_set_aggregates_surface_analysis_errors() {
+    let base = temp_dir("hypothetical_set_aggregates_errors");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select sum(x) within group (order by x) from (values (1)) v(x)",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::DetailedError { message, sqlstate, .. })
+            if message == "sum is not an ordered-set aggregate, so it cannot have WITHIN GROUP"
+                && sqlstate == "42809"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select rank(3) within group (order by x, y) from (values (1, 1)) v(x, y)",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::DetailedError { hint: Some(hint), sqlstate, .. })
+            if hint.contains("number of hypothetical direct arguments")
+                && sqlstate == "42883"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select rank(x) within group (order by x) from (values (1),(2)) v(x)",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::UngroupedColumn { token, .. }) if token == "x"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select rank(sum(x)) within group (order by x) from (values (1),(2)) v(x)",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::DetailedError { message, sqlstate, .. })
+            if message == "aggregate function calls cannot be nested" && sqlstate == "42803"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select rank(3) within group (order by x) from (values ('fred'),('jim')) v(x)",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::DetailedError { message, sqlstate, .. })
+            if message == "WITHIN GROUP types text and integer cannot be matched"
+                && sqlstate == "42804"
+    ));
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select rank('adam'::text collate \"C\") within group (order by x collate \"POSIX\")
+         from (values ('fred'),('jim')) v(x)",
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::DetailedError { message, sqlstate, .. })
+            if message == "collation mismatch between explicit collations \"C\" and \"POSIX\""
+                && sqlstate == "42P21"
+    ));
+}
+
+#[test]
 fn window_ntile_rejects_nonpositive_bucket_count() {
     let base = temp_dir("window_ntile_invalid_bucket_count");
     let mut txns = TransactionManager::new_durable(&base).unwrap();

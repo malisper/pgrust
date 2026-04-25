@@ -10,7 +10,7 @@ use super::comments::{
 use super::parsenodes::*;
 use crate::backend::executor::Value;
 use crate::backend::utils::misc::stack_depth::{
-    DEFAULT_MAX_STACK_DEPTH_KB, StackDepthGuard, check_parse_stack_depth,
+    StackDepthGuard, check_parse_stack_depth, effective_default_max_stack_depth_kb,
 };
 use crate::include::catalog::PolicyCommand;
 use crate::include::nodes::datum::BitString;
@@ -29,12 +29,16 @@ impl Default for ParseOptions {
     fn default() -> Self {
         Self {
             standard_conforming_strings: true,
-            max_stack_depth_kb: DEFAULT_MAX_STACK_DEPTH_KB,
+            max_stack_depth_kb: effective_default_max_stack_depth_kb(),
         }
     }
 }
 
 const PARSER_STACK_DEPTH_FLOOR_KB: u32 = 8 * 1024;
+#[cfg(debug_assertions)]
+const PARSER_THREAD_STACK_BYTES: usize = 64 * 1024 * 1024;
+#[cfg(not(debug_assertions))]
+const PARSER_THREAD_STACK_BYTES: usize = 32 * 1024 * 1024;
 
 pub fn parse_statement(sql: &str) -> Result<Statement, ParseError> {
     parse_statement_with_options(sql, ParseOptions::default())
@@ -1913,7 +1917,7 @@ fn build_create_tablespace_statement(sql: &str) -> Result<CreateTablespaceStatem
 }
 
 pub fn parse_expr(sql: &str) -> Result<SqlExpr, ParseError> {
-    run_with_parser_stack(DEFAULT_MAX_STACK_DEPTH_KB, {
+    run_with_parser_stack(effective_default_max_stack_depth_kb(), {
         let sql = sql.to_string();
         move || {
             let sql = strip_sql_comments_preserving_layout(&sql);
@@ -1998,7 +2002,7 @@ where
     let max_stack_depth_kb = max_stack_depth_kb.max(PARSER_STACK_DEPTH_FLOOR_KB);
     std::thread::Builder::new()
         .name("pgrust-parser".into())
-        .stack_size(32 * 1024 * 1024)
+        .stack_size(PARSER_THREAD_STACK_BYTES)
         .spawn(move || StackDepthGuard::enter(max_stack_depth_kb).run(f))
         .expect("spawn parser thread")
         .join()
@@ -11178,6 +11182,7 @@ fn simple_func_call(name: impl Into<String>, args: Vec<SqlFunctionArg>) -> SqlEx
         name: name.into(),
         args: SqlCallArgs::Args(args),
         order_by: Vec::new(),
+        within_group: None,
         distinct: false,
         func_variadic: false,
         filter: None,
@@ -13553,6 +13558,7 @@ fn build_func_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
     let mut name = None;
     let mut parsed_args = ParsedFunctionArgs::default();
     let mut order_by = Vec::new();
+    let mut within_group = None;
     let mut is_star = false;
     let mut distinct = false;
     let mut filter = None;
@@ -13572,6 +13578,9 @@ fn build_func_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     .map(build_order_by_item)
                     .collect::<Result<Vec<_>, _>>()?;
             }
+            Rule::within_group_clause => {
+                within_group = Some(build_within_group_clause(part)?);
+            }
             Rule::agg_filter_clause => {
                 filter = Some(build_agg_filter_clause(part)?);
             }
@@ -13587,9 +13596,44 @@ fn build_func_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
     } else {
         SqlCallArgs::Args(parsed_args.args)
     };
+    if within_group.is_some() {
+        if !order_by.is_empty() {
+            return Err(ParseError::DetailedError {
+                message: "cannot use multiple ORDER BY clauses with WITHIN GROUP".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42601",
+            });
+        }
+        if distinct {
+            return Err(ParseError::DetailedError {
+                message: "cannot use DISTINCT with WITHIN GROUP".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42601",
+            });
+        }
+        if !is_star && parsed_args.func_variadic {
+            return Err(ParseError::DetailedError {
+                message: "cannot use VARIADIC with WITHIN GROUP".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "42601",
+            });
+        }
+        if over.is_some() {
+            return Err(ParseError::DetailedError {
+                message: format!("OVER is not supported for ordered-set aggregate {name}"),
+                detail: None,
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
+    }
     if name.eq_ignore_ascii_case("random")
         && matches!(&args, SqlCallArgs::Args(args) if args.is_empty())
         && order_by.is_empty()
+        && within_group.is_none()
         && !distinct
         && filter.is_none()
         && over.is_none()
@@ -13600,11 +13644,24 @@ fn build_func_call(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
         name,
         args,
         order_by,
+        within_group,
         distinct,
         func_variadic: !is_star && parsed_args.func_variadic,
         filter: filter.map(Box::new),
         over,
     })
+}
+
+fn build_within_group_clause(pair: Pair<'_, Rule>) -> Result<Vec<OrderByItem>, ParseError> {
+    let order_by_clause = pair
+        .into_inner()
+        .find(|part| part.as_rule() == Rule::agg_order_by_clause)
+        .ok_or(ParseError::UnexpectedEof)?;
+    order_by_clause
+        .into_inner()
+        .filter(|inner| inner.as_rule() == Rule::order_by_item)
+        .map(build_order_by_item)
+        .collect()
 }
 
 fn build_agg_filter_clause(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
