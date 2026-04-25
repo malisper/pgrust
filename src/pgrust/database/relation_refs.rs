@@ -405,12 +405,16 @@ pub(super) fn collect_rels_from_plan(plan: &Plan, rels: &mut BTreeSet<RelFileLoc
         Plan::Aggregate {
             input,
             group_by,
+            passthrough_exprs,
             accumulators,
             having,
             ..
         } => {
             collect_rels_from_plan(input, rels);
             for expr in group_by {
+                collect_rels_from_expr(expr, rels);
+            }
+            for expr in passthrough_exprs {
                 collect_rels_from_expr(expr, rels);
             }
             for accum in accumulators {

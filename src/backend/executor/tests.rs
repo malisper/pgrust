@@ -12638,6 +12638,94 @@ fn explain_shows_aggregate_node() {
 }
 
 #[test]
+fn explain_primary_key_groupby_reduction_hides_trim_projection() {
+    let base = temp_dir("explain_groupby_pk_reduction");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "explain (costs off) select id, name from people group by id, name, note",
+        catalog_with_people_primary_key(),
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.to_string(),
+                    other => panic!("expected text, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered.iter().any(|line| line.trim() == "HashAggregate"),
+                "{}",
+                rendered.join("\n")
+            );
+            assert!(
+                rendered.iter().any(|line| line.trim() == "Group Key: (id)"),
+                "{}",
+                rendered.join("\n")
+            );
+            assert!(
+                !rendered.iter().any(|line| line.contains("Projection")),
+                "{}",
+                rendered.join("\n")
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn aggregate_primary_key_groupby_reduction_preserves_passthrough_columns() {
+    let base = temp_dir("agg_groupby_pk_passthrough");
+    let mut txns = TransactionManager::new_durable(&base).unwrap();
+    let xid = txns.begin();
+    run_sql_with_catalog(
+        &base,
+        &txns,
+        xid,
+        "insert into people (id, name, note) values
+            (1, 'alice', 'x'),
+            (2, 'bob', 'y')",
+        catalog_with_people_primary_key(),
+    )
+    .unwrap();
+    txns.commit(xid).unwrap();
+
+    match run_sql_with_catalog(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select id, name, note from people group by id, name, note order by id",
+        catalog_with_people_primary_key(),
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![
+                        Value::Int32(1),
+                        Value::Text("alice".into()),
+                        Value::Text("x".into()),
+                    ],
+                    vec![
+                        Value::Int32(2),
+                        Value::Text("bob".into()),
+                        Value::Text("y".into()),
+                    ],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn explain_verbose_lateral_aggregate_renders_pg_style_details() {
     let base = temp_dir("explain_verbose_lateral_agg");
     let txns = TransactionManager::new_durable(&base).unwrap();
