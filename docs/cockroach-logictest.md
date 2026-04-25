@@ -128,6 +128,18 @@ scripts/run_cockroach_logic_suite.py \
   --record-replay-jobs 8
 ```
 
+Measure only PostgreSQL-materialized success records:
+
+```bash
+scripts/run_cockroach_logic_suite.py \
+  --cockroach-dir ../cockroach \
+  --sqllogictest-dir ../sqllogictest-rs \
+  --skip-build \
+  --record-replay \
+  --record-replay-expected-success-only \
+  --record-replay-jobs 8
+```
+
 Each test gets its own pgrust data directory, converted `.slt` file, runner
 log, and sqllogictest results directory under the suite results directory.
 Ports are derived from `--base-port` and `--postgres-base-port` plus the test
@@ -177,6 +189,9 @@ This is intentionally opt-in because it starts pgrust once per measured record.
 Use `--record-replay-limit` for quick samples before running a whole manifest.
 Use `--record-replay-jobs N` to run independent record checks in parallel with
 the same fresh-server-per-record isolation semantics.
+Use `--record-replay-expected-success-only` when you want a success-path
+compatibility view that ignores PostgreSQL-expected error records. This avoids
+counting exact error-message differences as SQL success-path failures.
 
 Current `select` 20-record sample on this branch:
 
