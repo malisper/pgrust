@@ -347,6 +347,7 @@ impl Database {
             row_locks: std::sync::Arc::clone(&self.row_locks),
             checkpoint_stats: self.checkpoint_stats_snapshot(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            gucs: std::collections::HashMap::new(),
             interrupts: std::sync::Arc::clone(&interrupts),
             stats: std::sync::Arc::clone(&self.stats),
             session_stats: self.session_stats_state(client_id),

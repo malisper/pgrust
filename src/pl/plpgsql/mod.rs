@@ -3,6 +3,8 @@ mod compile;
 mod exec;
 mod gram;
 
+use std::collections::HashMap;
+
 use crate::backend::executor::{ExecError, StatementResult};
 use crate::backend::parser::{Catalog, DoStatement, ParseError};
 
@@ -19,6 +21,14 @@ pub(crate) use exec::{
 pub use gram::parse_block;
 
 pub fn execute_do(stmt: &DoStatement) -> Result<StatementResult, ExecError> {
+    let gucs = HashMap::new();
+    execute_do_with_gucs(stmt, &gucs)
+}
+
+pub fn execute_do_with_gucs(
+    stmt: &DoStatement,
+    gucs: &HashMap<String, String>,
+) -> Result<StatementResult, ExecError> {
     stacker::maybe_grow(32 * 1024, 32 * 1024 * 1024, || {
         let language = stmt
             .language
@@ -34,7 +44,7 @@ pub fn execute_do(stmt: &DoStatement) -> Result<StatementResult, ExecError> {
         exec::clear_notices();
         let block = parse_block(&stmt.code)?;
         let compiled = compile::compile_do_block(&block, &Catalog::default())?;
-        exec::execute_block(&compiled)
+        exec::execute_block_with_gucs(&compiled, gucs)
     })
 }
 
@@ -207,6 +217,23 @@ mod tests {
     }
 
     #[test]
+    fn execute_do_check_asserts_guc_disables_assert() {
+        run_plpgsql_test("execute_do_check_asserts_guc_disables_assert", || {
+            let stmt = DoStatement {
+                language: None,
+                code: "begin assert false, 'bad assert'; end".into(),
+            };
+            let mut gucs = std::collections::HashMap::new();
+            gucs.insert("plpgsql.check_asserts".into(), "off".into());
+
+            assert_eq!(
+                execute_do_with_gucs(&stmt, &gucs).unwrap(),
+                StatementResult::AffectedRows(0)
+            );
+        });
+    }
+
+    #[test]
     fn execute_do_raise_accepts_dollar_quoted_message() {
         run_plpgsql_test("execute_do_raise_accepts_dollar_quoted_message", || {
             let stmt = DoStatement {
@@ -325,5 +352,46 @@ mod tests {
 
         assert_eq!(block.declarations.len(), 0);
         assert_eq!(block.statements.len(), 1);
+    }
+
+    #[test]
+    fn parse_block_accepts_plpgsql_regression_syntax() {
+        let block = parse_block(
+            r#"
+                declare
+                    c refcursor;
+                    cur cursor for select 1;
+                    x int4 strict;
+                begin
+                    open cur;
+                    fetch cur into x;
+                    close cur;
+                    get diagnostics x = row_count;
+                    perform cast(1 as int4);
+                    perform '{"a": 1}'::jsonb -> 'a';
+                    perform f(a => 1);
+                    savepoint s;
+                end
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(block.declarations.len(), 3);
+        assert!(matches!(
+            &block.declarations[0],
+            Decl::Var(decl) if decl.name == "c" && decl.type_name.eq_ignore_ascii_case("refcursor")
+        ));
+        assert!(matches!(
+            &block.declarations[1],
+            Decl::Cursor(decl) if decl.name == "cur"
+        ));
+        assert!(matches!(
+            &block.declarations[2],
+            Decl::Var(decl) if decl.name == "x" && decl.strict
+        ));
+        assert!(matches!(&block.statements[0], Stmt::OpenCursor { .. }));
+        assert!(matches!(&block.statements[1], Stmt::FetchCursor { .. }));
+        assert!(matches!(&block.statements[2], Stmt::CloseCursor { .. }));
+        assert!(matches!(&block.statements[3], Stmt::GetDiagnostics { .. }));
     }
 }

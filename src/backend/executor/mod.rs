@@ -201,6 +201,7 @@ pub struct ExecutorContext {
     pub row_locks: std::sync::Arc<RowLockManager>,
     pub checkpoint_stats: CheckpointStatsSnapshot,
     pub datetime_config: DateTimeConfig,
+    pub gucs: HashMap<String, String>,
     pub interrupts: std::sync::Arc<InterruptState>,
     pub stats: std::sync::Arc<parking_lot::RwLock<DatabaseStatsStore>>,
     pub session_stats: std::sync::Arc<parking_lot::RwLock<SessionStatsState>>,
@@ -339,6 +340,10 @@ pub struct RegexError {
 
 #[derive(Debug)]
 pub enum ExecError {
+    WithContext {
+        source: Box<ExecError>,
+        context: String,
+    },
     Heap(HeapError),
     Tuple(TupleError),
     Parse(ParseError),

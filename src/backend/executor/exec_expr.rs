@@ -104,6 +104,7 @@ use crate::backend::statistics::{
 };
 use crate::backend::utils::misc::checkpoint::checkpoint_stats_value;
 use crate::backend::utils::misc::guc::normalize_guc_name;
+use crate::backend::utils::misc::guc::plpgsql_guc_default_value;
 use crate::include::access::toast_compression::ToastCompressionId;
 use crate::include::catalog::{
     BOX_SPGIST_OPCLASS_OID, BRIN_AM_OID, BTREE_AM_OID, BYTEA_TYPE_OID, CONSTRAINT_CHECK,
@@ -1106,10 +1107,45 @@ fn eval_current_setting(values: &[Value], ctx: &ExecutorContext) -> Result<Value
         return Ok(Value::Text("none".into()));
     }
 
+    if let Some(value) = ctx
+        .gucs
+        .get(&name)
+        .cloned()
+        .or_else(|| plpgsql_guc_default_value(&name).map(str::to_string))
+    {
+        return Ok(Value::Text(value.into()));
+    }
+
     if missing_ok {
         return Ok(Value::Null);
     }
 
+    Err(ExecError::Parse(ParseError::UnknownConfigurationParameter(
+        name,
+    )))
+}
+
+fn eval_current_setting_without_context(values: &[Value]) -> Result<Value, ExecError> {
+    let (name, missing_ok) = match values {
+        [Value::Text(name)] => (normalize_guc_name(name), false),
+        [Value::Text(name), Value::Bool(missing_ok)] => (normalize_guc_name(name), *missing_ok),
+        [Value::Null] | [Value::Null, _] => return Ok(Value::Null),
+        _ => {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "current_setting(name [, missing_ok])",
+                actual: format!("CurrentSetting({} args)", values.len()),
+            }));
+        }
+    };
+    if name == "role" {
+        return Ok(Value::Text("none".into()));
+    }
+    if let Some(value) = plpgsql_guc_default_value(&name) {
+        return Ok(Value::Text(value.into()));
+    }
+    if missing_ok {
+        return Ok(Value::Null);
+    }
     Err(ExecError::Parse(ParseError::UnknownConfigurationParameter(
         name,
     )))
@@ -3529,12 +3565,7 @@ fn eval_plpgsql_builtin_function(
         | BuiltinScalarFunction::Int8Avg => {
             execute_builtin_scalar_function_value_call(func, &values)
         }
-        BuiltinScalarFunction::CurrentSetting => Err(ExecError::DetailedError {
-            message: "current_setting is not supported in PL/pgSQL expression evaluation".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "0A000",
-        }),
+        BuiltinScalarFunction::CurrentSetting => eval_current_setting_without_context(&values),
         BuiltinScalarFunction::PgColumnCompression => eval_pg_column_compression_values(&values),
         BuiltinScalarFunction::PgColumnSize => eval_pg_column_size_values(&values),
         BuiltinScalarFunction::PgSizePretty => eval_pg_size_pretty_function(&values),
