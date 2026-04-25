@@ -449,6 +449,7 @@ struct ActiveTransaction {
     pending_async_notifications: Vec<PendingNotification>,
     dynamic_type_snapshot: DynamicTypeSnapshot,
     savepoints: Vec<SavepointState>,
+    local_guc_snapshot: Option<(HashMap<String, String>, DateTimeConfig)>,
 }
 
 struct SavepointState {
@@ -985,6 +986,7 @@ impl Session {
             pending_async_notifications: Vec::new(),
             dynamic_type_snapshot: db.dynamic_type_snapshot(),
             savepoints: Vec::new(),
+            local_guc_snapshot: None,
         }
     }
 
@@ -1198,6 +1200,10 @@ impl Session {
         };
         for rel in held_locks {
             db.table_locks.unlock_table(rel, self.client_id);
+        }
+        if let Some((gucs, datetime_config)) = txn.local_guc_snapshot {
+            self.gucs = gucs;
+            self.datetime_config = datetime_config;
         }
         result
     }
@@ -2737,6 +2743,10 @@ impl Session {
                 for rel in held_locks {
                     db.table_locks.unlock_table(rel, self.client_id);
                 }
+                if let Some((gucs, datetime_config)) = txn.local_guc_snapshot {
+                    self.gucs = gucs;
+                    self.datetime_config = datetime_config;
+                }
                 self.portals.drop_transaction_portals(false);
                 Ok(StatementResult::AffectedRows(0))
             }
@@ -2961,6 +2971,16 @@ impl Session {
             .is_none()
             .then(|| db.allocate_statement_lock_scope_id());
         let search_path = self.configured_search_path();
+        let statement_timestamp_usecs =
+            crate::backend::utils::time::datetime::current_postgres_timestamp_usecs();
+        let transaction_timestamp_usecs = self
+            .active_txn
+            .as_ref()
+            .map(|txn| txn.started_at_usecs)
+            .unwrap_or(statement_timestamp_usecs);
+        let mut datetime_config = self.datetime_config.clone();
+        datetime_config.transaction_timestamp_usecs = Some(transaction_timestamp_usecs);
+        datetime_config.statement_timestamp_usecs = Some(statement_timestamp_usecs);
         let mut guard = db.execute_streaming_with_config(
             self.client_id,
             select_stmt,
@@ -2968,7 +2988,7 @@ impl Session {
             statement_lock_scope_id,
             transaction_lock_scope_id,
             search_path.as_deref(),
-            &self.datetime_config,
+            &datetime_config,
             self.planner_config(),
         )?;
         guard.interrupt_guard = Some(self.statement_interrupt_guard()?);
@@ -5328,6 +5348,12 @@ impl Session {
         }
         if is_checkpoint_guc(&name) || is_autovacuum_guc(&name) {
             return Err(ExecError::Parse(ParseError::CantChangeRuntimeParam(name)));
+        }
+        if stmt.is_local
+            && let Some(txn) = self.active_txn.as_mut()
+            && txn.local_guc_snapshot.is_none()
+        {
+            txn.local_guc_snapshot = Some((self.gucs.clone(), self.datetime_config.clone()));
         }
         self.apply_guc_value(&stmt.name, &stmt.value)?;
         if name == "row_security" {

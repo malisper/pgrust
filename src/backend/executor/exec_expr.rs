@@ -5160,7 +5160,9 @@ fn eval_builtin_function(
         BuiltinScalarFunction::DatePart => {
             eval_date_part_function_with_config(&values, &ctx.datetime_config)
         }
-        BuiltinScalarFunction::Extract => eval_extract_function_with_config(&values, &ctx.datetime_config),
+        BuiltinScalarFunction::Extract => {
+            eval_extract_function_with_config(&values, &ctx.datetime_config)
+        }
         BuiltinScalarFunction::DateTrunc => eval_date_trunc_function(&values, &ctx.datetime_config),
         BuiltinScalarFunction::DateBin => eval_date_bin_function(&values),
         BuiltinScalarFunction::TimeZone => eval_timezone_function(&values, &ctx.datetime_config),
