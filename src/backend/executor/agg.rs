@@ -107,6 +107,10 @@ pub(crate) enum AccumState {
         sum_y: f64,
         sum_sq_y: f64,
         sum_xy: f64,
+        first_x: f64,
+        all_x_equal: bool,
+        first_y: f64,
+        all_y_equal: bool,
     },
     JsonAgg {
         values: Vec<Value>,
@@ -283,6 +287,10 @@ impl AccumState {
                 sum_y: 0.0,
                 sum_sq_y: 0.0,
                 sum_xy: 0.0,
+                first_x: 0.0,
+                all_x_equal: true,
+                first_y: 0.0,
+                all_y_equal: true,
             },
             (AggFunc::JsonAgg, _) => AccumState::JsonAgg {
                 values: Vec::new(),
@@ -487,6 +495,10 @@ impl AccumState {
                     sum_y,
                     sum_sq_y,
                     sum_xy,
+                    first_x,
+                    all_x_equal,
+                    first_y,
+                    all_y_equal,
                     ..
                 } = state
                 {
@@ -497,6 +509,15 @@ impl AccumState {
                     }
                     let y = expect_float8_arg("regr aggregate", y)?;
                     let x = expect_float8_arg("regr aggregate", x)?;
+                    if *count == 0.0 {
+                        *first_x = x;
+                        *all_x_equal = !x.is_nan();
+                        *first_y = y;
+                        *all_y_equal = !y.is_nan();
+                    } else {
+                        *all_x_equal &= float8_regr_constant_value_eq(x, *first_x);
+                        *all_y_equal &= float8_regr_constant_value_eq(y, *first_y);
+                    }
                     [*count, *sum_x, *sum_sq_x, *sum_y, *sum_sq_y, *sum_xy] =
                         float8_regr_accum_state(
                             *count, *sum_x, *sum_sq_x, *sum_y, *sum_sq_y, *sum_xy, y, x,
@@ -778,7 +799,20 @@ impl AccumState {
                 sum_y,
                 sum_sq_y,
                 sum_xy,
-            } => finalize_regr_stats(*func, *count, *sum_x, *sum_sq_x, *sum_y, *sum_sq_y, *sum_xy),
+                all_x_equal,
+                all_y_equal,
+                ..
+            } => finalize_regr_stats(
+                *func,
+                *count,
+                *sum_x,
+                *sum_sq_x,
+                *sum_y,
+                *sum_sq_y,
+                *sum_xy,
+                *all_x_equal,
+                *all_y_equal,
+            ),
             AccumState::JsonAgg { values, jsonb } => {
                 if *jsonb {
                     let mut items = Vec::with_capacity(values.len());
@@ -950,6 +984,8 @@ fn finalize_regr_stats(
     sum_y: f64,
     sum_sq_y: f64,
     sum_xy: f64,
+    all_x_equal: bool,
+    all_y_equal: bool,
 ) -> Value {
     match func {
         AggFunc::RegrCount => Value::Int64(count as i64),
@@ -967,30 +1003,31 @@ fn finalize_regr_stats(
             }
         }
         AggFunc::Corr => {
-            if count < 1.0 || sum_sq_x == 0.0 || sum_sq_y == 0.0 {
+            if count < 1.0 || all_x_equal || all_y_equal {
                 Value::Null
             } else {
-                Value::Float64(sum_xy / (sum_sq_x * sum_sq_y).sqrt())
+                Value::Float64(clamp_corr(sum_xy / (sum_sq_x.sqrt() * sum_sq_y.sqrt())))
             }
         }
         AggFunc::RegrR2 => {
-            if count < 1.0 || sum_sq_x == 0.0 {
+            if count < 1.0 || all_x_equal {
                 Value::Null
-            } else if sum_sq_y == 0.0 {
+            } else if all_y_equal {
                 Value::Float64(1.0)
             } else {
-                Value::Float64((sum_xy * sum_xy) / (sum_sq_x * sum_sq_y))
+                let corr = clamp_corr(sum_xy / (sum_sq_x.sqrt() * sum_sq_y.sqrt()));
+                Value::Float64(corr * corr)
             }
         }
         AggFunc::RegrSlope => {
-            if count < 1.0 || sum_sq_x == 0.0 {
+            if count < 1.0 || all_x_equal {
                 Value::Null
             } else {
                 Value::Float64(sum_xy / sum_sq_x)
             }
         }
         AggFunc::RegrIntercept => {
-            if count < 1.0 || sum_sq_x == 0.0 {
+            if count < 1.0 || all_x_equal {
                 Value::Null
             } else {
                 Value::Float64((sum_y - sum_x * sum_xy / sum_sq_x) / count)
@@ -1020,6 +1057,18 @@ fn finalize_regr_stats(
         | AggFunc::RangeAgg
         | AggFunc::XmlAgg
         | AggFunc::RangeIntersectAgg => unreachable!("non-regression aggregate"),
+    }
+}
+
+fn float8_regr_constant_value_eq(value: f64, first: f64) -> bool {
+    !value.is_nan() && !first.is_nan() && value == first
+}
+
+fn clamp_corr(value: f64) -> f64 {
+    if (value.abs() - 1.0).abs() <= 8.0 * f64::EPSILON {
+        value.signum()
+    } else {
+        value
     }
 }
 
