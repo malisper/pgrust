@@ -4706,8 +4706,49 @@ fn parse_copy_from_file_statement() {
             assert_eq!(copy.table_name, "test_tsvector");
             assert_eq!(copy.columns, None);
             assert_eq!(copy.source, CopySource::File("/tmp/tsearch.data".into()));
+            assert_eq!(copy.options, CopyOptions::default());
         }
         other => panic!("expected copy statement, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_copy_from_file_with_csv_encoding_options() {
+    let stmt = parse_statement(
+        "copy copy_encoding_tab from '/tmp/copyencoding_utf8.csv' with (format csv, encoding 'LATIN1')",
+    )
+    .unwrap();
+    match stmt {
+        Statement::CopyFrom(copy) => {
+            assert_eq!(copy.table_name, "copy_encoding_tab");
+            assert_eq!(
+                copy.source,
+                CopySource::File("/tmp/copyencoding_utf8.csv".into())
+            );
+            assert_eq!(copy.options.format, CopyFormat::Csv);
+            assert_eq!(copy.options.encoding.as_deref(), Some("LATIN1"));
+        }
+        other => panic!("expected copy from statement, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_copy_select_to_file_with_csv_encoding_options() {
+    let stmt = parse_statement(
+        "copy (select E'\\u3042') to '/tmp/copyencoding_utf8.csv' with (format csv, encoding 'UTF8')",
+    )
+    .unwrap();
+    match stmt {
+        Statement::CopyTo(copy) => {
+            assert_eq!(
+                copy.target,
+                CopyTarget::File("/tmp/copyencoding_utf8.csv".into())
+            );
+            assert_eq!(copy.options.format, CopyFormat::Csv);
+            assert_eq!(copy.options.encoding.as_deref(), Some("UTF8"));
+            assert_eq!(copy.query.targets.len(), 1);
+        }
+        other => panic!("expected copy to statement, got {other:?}"),
     }
 }
 

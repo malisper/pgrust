@@ -204,6 +204,7 @@ pub(crate) fn infer_command_tag(sql: &str, affected: usize) -> String {
         ("ANALYZE", _) => "ANALYZE".to_string(),
         ("COMMENT", _) => "COMMENT".to_string(),
         ("CHECKPOINT", _) => "CHECKPOINT".to_string(),
+        ("COPY", _) => format!("COPY {affected}"),
         ("DO", _) => "DO".to_string(),
         ("LISTEN", _) => "LISTEN".to_string(),
         ("NOTIFY", _) => "NOTIFY".to_string(),

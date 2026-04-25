@@ -280,6 +280,7 @@ pub enum Statement {
     Select(SelectStatement),
     Values(ValuesStatement),
     CopyFrom(CopyFromStatement),
+    CopyTo(CopyToStatement),
     Analyze(AnalyzeStatement),
     Checkpoint(CheckpointStatement),
     Set(SetStatement),
@@ -887,11 +888,45 @@ pub enum CopySource {
     File(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyFormat {
+    Text,
+    Csv,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopyOptions {
+    pub format: CopyFormat,
+    pub encoding: Option<String>,
+}
+
+impl Default for CopyOptions {
+    fn default() -> Self {
+        Self {
+            format: CopyFormat::Text,
+            encoding: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyFromStatement {
     pub table_name: String,
     pub columns: Option<Vec<String>>,
     pub source: CopySource,
+    pub options: CopyOptions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CopyTarget {
+    File(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopyToStatement {
+    pub query: SelectStatement,
+    pub target: CopyTarget,
+    pub options: CopyOptions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
