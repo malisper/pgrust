@@ -67,7 +67,7 @@ pub(crate) fn network_bitwise_binary(
                     "|" => binary_addr(left.addr, right.addr, |l, r| l | r),
                     _ => return Err(network_arity_error(op)),
                 },
-                bits: left.bits,
+                bits: left.bits.max(right.bits),
             }))
         }
         (left, right) => Err(network_type_mismatch(op, left, right)),
@@ -525,18 +525,24 @@ fn render_cidr_abbrev(value: &InetValue) -> String {
     }
 }
 
-fn network_prefix(value: &InetValue) -> InetValue {
+pub(crate) fn network_prefix(value: &InetValue) -> InetValue {
     InetValue {
         addr: mask_addr(value.addr, value.bits, false),
         bits: value.bits,
     }
 }
 
-fn network_broadcast(value: &InetValue) -> InetValue {
+pub(crate) fn network_broadcast(value: &InetValue) -> InetValue {
     InetValue {
         addr: mask_addr(value.addr, value.bits, true),
         bits: value.bits,
     }
+}
+
+pub(crate) fn network_btree_upper_bound(value: &InetValue) -> InetValue {
+    let mut upper = network_broadcast(value);
+    upper.bits = upper.max_bits();
+    upper
 }
 
 fn network_netmask(value: &InetValue) -> InetValue {

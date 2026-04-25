@@ -80,8 +80,19 @@ fn render_ip_addr(addr: &IpAddr) -> String {
 
 fn render_ipv6_addr(addr: Ipv6Addr) -> String {
     let segments = addr.segments();
-    if segments[..6] == [0, 0, 0, 0, 0, 0] && (segments[6] != 0 || segments[7] != 0) {
+    if let Some((zero_base, zero_len)) = longest_ipv6_zero_run(&segments)
+        && zero_base == 0
+        && (zero_len == 6
+            || (zero_len == 7 && segments[7] != 1)
+            || (zero_len == 5 && segments[5] == 0xffff))
+    {
         let octets = addr.octets();
+        if segments[5] == 0xffff {
+            return format!(
+                "::ffff:{}.{}.{}.{}",
+                octets[12], octets[13], octets[14], octets[15]
+            );
+        }
         return format!(
             "::{}.{}.{}.{}",
             octets[12], octets[13], octets[14], octets[15]
@@ -95,6 +106,35 @@ fn render_ipv6_addr(addr: Ipv6Addr) -> String {
         );
     }
     addr.to_string()
+}
+
+fn longest_ipv6_zero_run(segments: &[u16; 8]) -> Option<(usize, usize)> {
+    let mut best_base = None;
+    let mut best_len = 0usize;
+    let mut current_base = None;
+    let mut current_len = 0usize;
+    for (idx, segment) in segments.iter().enumerate() {
+        if *segment == 0 {
+            if current_base.is_none() {
+                current_base = Some(idx);
+                current_len = 0;
+            }
+            current_len += 1;
+        } else if let Some(base) = current_base.take() {
+            if current_len > best_len {
+                best_base = Some(base);
+                best_len = current_len;
+            }
+            current_len = 0;
+        }
+    }
+    if let Some(base) = current_base
+        && current_len > best_len
+    {
+        best_base = Some(base);
+        best_len = current_len;
+    }
+    (best_len >= 2).then(|| (best_base.expect("best zero run has a base"), best_len))
 }
 
 impl RecordDescriptor {

@@ -373,13 +373,14 @@ fn collect_relation_access_paths(
     desc: RelationDesc,
     filter: Option<Expr>,
     query_order_items: Option<Vec<OrderByEntry>>,
+    config: PlannerConfig,
     catalog: &dyn CatalogLookup,
 ) -> Vec<Path> {
     if relkind == 'p' {
         return Vec::new();
     }
     let stats = relation_stats(catalog, relation_oid, &desc);
-    let mut paths = vec![
+    let mut seq_paths = vec![
         estimate_seqscan_candidate(
             rtindex,
             heap_rel,
@@ -396,7 +397,7 @@ fn collect_relation_access_paths(
         .plan,
     ];
     if let Some(order_items) = query_order_items.clone() {
-        paths.push(
+        seq_paths.push(
             estimate_seqscan_candidate(
                 rtindex,
                 heap_rel,
@@ -413,6 +414,11 @@ fn collect_relation_access_paths(
             .plan,
         );
     }
+    let mut paths = if config.enable_seqscan || relkind != 'r' {
+        seq_paths.clone()
+    } else {
+        Vec::new()
+    };
     if relkind != 'r' {
         return paths;
     }
@@ -462,6 +468,9 @@ fn collect_relation_access_paths(
                 .plan,
             );
         }
+    }
+    if paths.is_empty() {
+        paths = seq_paths;
     }
     paths
 }
@@ -560,6 +569,7 @@ fn cheapest_relation_access_path(
     toast: Option<ToastRelationRef>,
     desc: RelationDesc,
     filter: Option<Expr>,
+    config: PlannerConfig,
     catalog: &dyn CatalogLookup,
 ) -> Path {
     collect_relation_access_paths(
@@ -573,6 +583,7 @@ fn cheapest_relation_access_path(
         desc,
         filter,
         None,
+        config,
         catalog,
     )
     .into_iter()
@@ -860,6 +871,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                     toast,
                     rte.desc.clone(),
                     filter.clone(),
+                    root.config,
                     catalog,
                 ),
                 catalog,
@@ -1034,6 +1046,7 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
             rte.desc.clone(),
             base_filter_expr(rel),
             query_order_items,
+            root.config,
             catalog,
         )),
         RangeTblEntryKind::Values {

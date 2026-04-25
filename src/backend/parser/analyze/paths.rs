@@ -142,6 +142,11 @@ fn commuted_builtin_function(func: BuiltinScalarFunction) -> Option<BuiltinScala
         BuiltinScalarFunction::RangeAdjacent => BuiltinScalarFunction::RangeAdjacent,
         BuiltinScalarFunction::RangeContains => BuiltinScalarFunction::RangeContainedBy,
         BuiltinScalarFunction::RangeContainedBy => BuiltinScalarFunction::RangeContains,
+        BuiltinScalarFunction::NetworkSubnet => BuiltinScalarFunction::NetworkSupernet,
+        BuiltinScalarFunction::NetworkSubnetEq => BuiltinScalarFunction::NetworkSupernetEq,
+        BuiltinScalarFunction::NetworkSupernet => BuiltinScalarFunction::NetworkSubnet,
+        BuiltinScalarFunction::NetworkSupernetEq => BuiltinScalarFunction::NetworkSubnetEq,
+        BuiltinScalarFunction::NetworkOverlap => BuiltinScalarFunction::NetworkOverlap,
         _ => return None,
     })
 }

@@ -531,10 +531,14 @@ pub(super) fn bind_maybe_network_operator(
         infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
     let raw_right_type =
         infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
-    let left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
-    let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+    let mut left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
+    let mut right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
     if !is_network_type(left_type) || !is_network_type(right_type) {
         return None;
+    }
+    if let Some(common) = resolve_common_scalar_type(left_type, right_type) {
+        left_type = common;
+        right_type = common;
     }
 
     Some((|| {

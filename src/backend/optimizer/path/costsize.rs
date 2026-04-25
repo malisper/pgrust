@@ -2,7 +2,9 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use crate::RelFileLocator;
-use crate::backend::executor::{Value, cast_value, compare_order_values};
+use crate::backend::executor::{
+    Value, cast_value, compare_order_values, network_btree_upper_bound, network_prefix,
+};
 use crate::backend::parser::analyze::predicate_implies_index_predicate;
 use crate::backend::parser::{BoundIndexRelation, CatalogLookup, SqlType, SqlTypeKind};
 use crate::backend::storage::page::bufpage::{ITEM_ID_SIZE, MAXALIGN, SIZE_OF_PAGE_HEADER_DATA};
@@ -1689,7 +1691,7 @@ pub(super) fn estimate_index_candidate(
             pathtarget: plan.semantic_output_target(),
             input: Box::new(plan),
             items,
-            display_items: order_display_items.unwrap_or_default(),
+            display_items: Vec::new(),
         };
     }
 
@@ -3379,6 +3381,11 @@ fn commuted_builtin_function(func: BuiltinScalarFunction) -> Option<BuiltinScala
         BuiltinScalarFunction::RangeAdjacent => BuiltinScalarFunction::RangeAdjacent,
         BuiltinScalarFunction::RangeContains => BuiltinScalarFunction::RangeContainedBy,
         BuiltinScalarFunction::RangeContainedBy => BuiltinScalarFunction::RangeContains,
+        BuiltinScalarFunction::NetworkSubnet => BuiltinScalarFunction::NetworkSupernet,
+        BuiltinScalarFunction::NetworkSubnetEq => BuiltinScalarFunction::NetworkSupernetEq,
+        BuiltinScalarFunction::NetworkSupernet => BuiltinScalarFunction::NetworkSubnet,
+        BuiltinScalarFunction::NetworkSupernetEq => BuiltinScalarFunction::NetworkSubnetEq,
+        BuiltinScalarFunction::NetworkOverlap => BuiltinScalarFunction::NetworkOverlap,
         _ => return None,
     })
 }
@@ -3579,6 +3586,19 @@ fn build_btree_index_keys(
             ));
             continue;
         }
+        if let Some((qual_idx, range_keys)) =
+            parsed_quals.iter().enumerate().find_map(|(idx, qual)| {
+                if used[idx] || qual.column != Some(column) {
+                    return None;
+                }
+                network_btree_range_keys_for_qual(qual, (index_pos + 1) as i16)
+                    .map(|keys| (idx, keys))
+            })
+        {
+            used[qual_idx] = true;
+            keys.extend(range_keys);
+            break;
+        }
         let range_quals = parsed_quals
             .iter()
             .enumerate()
@@ -3620,6 +3640,37 @@ fn build_btree_index_keys(
     }
 
     (keys, used_qual_indexes, equality_prefix)
+}
+
+fn network_btree_range_keys_for_qual(
+    qual: &IndexableQual,
+    attribute_number: i16,
+) -> Option<Vec<IndexScanKey>> {
+    let super::super::IndexStrategyLookup::Proc(proc_oid) = qual.lookup else {
+        return None;
+    };
+    let builtin = builtin_scalar_function_for_proc_oid(proc_oid)?;
+    let (lower_strategy, upper_strategy) = match builtin {
+        BuiltinScalarFunction::NetworkSubnet => (5, 2),
+        BuiltinScalarFunction::NetworkSubnetEq => (4, 2),
+        _ => return None,
+    };
+    let value = match qual.argument.as_const()? {
+        Value::Inet(value) | Value::Cidr(value) => value,
+        _ => return None,
+    };
+    Some(vec![
+        IndexScanKey::const_value(
+            attribute_number,
+            lower_strategy,
+            Value::Inet(network_prefix(value)),
+        ),
+        IndexScanKey::const_value(
+            attribute_number,
+            upper_strategy,
+            Value::Inet(network_btree_upper_bound(value)),
+        ),
+    ])
 }
 
 fn build_gist_index_keys(
