@@ -416,6 +416,7 @@ pub enum Path {
         keys: Vec<IndexScanKey>,
         order_by_keys: Vec<IndexScanKey>,
         direction: ScanDirection,
+        index_only: bool,
         pathkeys: Vec<PathKey>,
     },
     BitmapIndexScan {

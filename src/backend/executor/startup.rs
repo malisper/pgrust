@@ -301,6 +301,33 @@ fn plan_uses_outer_columns(plan: &Plan) -> bool {
     }
 }
 
+fn plan_is_join_relation(plan: &Plan) -> bool {
+    match plan {
+        Plan::NestedLoopJoin { .. } | Plan::HashJoin { .. } | Plan::MergeJoin { .. } => true,
+        Plan::BitmapHeapScan { bitmapqual, .. }
+        | Plan::Hash {
+            input: bitmapqual, ..
+        } => plan_is_join_relation(bitmapqual),
+        Plan::Filter { input, .. }
+        | Plan::OrderBy { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. }
+        | Plan::Projection { input, .. }
+        | Plan::Aggregate { input, .. }
+        | Plan::WindowAgg { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::ProjectSet { input, .. } => plan_is_join_relation(input),
+        Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
+            children.iter().any(plan_is_join_relation)
+        }
+        Plan::CteScan { cte_plan, .. } => plan_is_join_relation(cte_plan),
+        Plan::RecursiveUnion {
+            anchor, recursive, ..
+        } => plan_is_join_relation(anchor) || plan_is_join_relation(recursive),
+        _ => false,
+    }
+}
+
 pub fn executor_start(plan: Plan) -> PlanState {
     match plan {
         Plan::Result { plan_info } => Box::new(ResultState {
@@ -384,6 +411,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
             keys,
             order_by_keys,
             direction,
+            index_only,
         } => {
             let column_names: Vec<String> = desc.columns.iter().map(|c| c.name.clone()).collect();
             let desc = Rc::new(desc);
@@ -411,6 +439,7 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 keys,
                 order_by_keys,
                 direction,
+                index_only,
                 scan: None,
                 scan_exhausted: false,
                 slot,
@@ -516,15 +545,11 @@ pub fn executor_start(plan: Plan) -> PlanState {
             let right_plan = *right;
             let right_uses_outer = !nest_params.is_empty();
             let cross_right_outer =
-                matches!(kind, crate::include::nodes::primnodes::JoinType::Cross)
+                (matches!(kind, crate::include::nodes::primnodes::JoinType::Cross)
+                    || (matches!(kind, crate::include::nodes::primnodes::JoinType::Inner)
+                        && !join_qual.is_empty()))
                     && !right_uses_outer
-                    && !matches!(
-                        &*left,
-                        Plan::NestedLoopJoin {
-                            kind: crate::include::nodes::primnodes::JoinType::Cross,
-                            ..
-                        }
-                    );
+                    && !plan_is_join_relation(&left);
             let left_width = left.column_names().len();
             let right_width = right_plan.column_names().len();
             let combined_names: Vec<String> = left
@@ -665,7 +690,6 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 !matches!(kind, crate::include::nodes::primnodes::JoinType::Cross),
                 "merge join does not support cross joins",
             );
-
             let left_width = left.column_names().len();
             let right_width = right.column_names().len();
             let combined_names: Vec<String> = left
@@ -682,7 +706,6 @@ pub fn executor_start(plan: Plan) -> PlanState {
             } else {
                 combined_names.clone()
             };
-
             Box::new(MergeJoinState {
                 left: executor_start(*left),
                 right: executor_start(*right),
@@ -700,6 +723,17 @@ pub fn executor_start(plan: Plan) -> PlanState {
                 right_rows: None,
                 output_rows: None,
                 next_output_index: 0,
+                slot: TupleSlot::empty(
+                    if matches!(
+                        kind,
+                        crate::include::nodes::primnodes::JoinType::Semi
+                            | crate::include::nodes::primnodes::JoinType::Anti
+                    ) {
+                        left_width
+                    } else {
+                        left_width + right_width
+                    },
+                ),
                 current_bindings: Vec::new(),
                 plan_info,
                 stats: NodeExecStats::default(),
