@@ -460,6 +460,65 @@ fn supports_builtin_text_like_comparison(op: &str, left: SqlType, right: SqlType
         && matches!(op, "=" | "<>" | "<" | "<=" | ">" | ">=")
 }
 
+fn supports_pattern_ordering_operator(sql_type: SqlType) -> bool {
+    !sql_type.is_array
+        && matches!(
+            sql_type.kind,
+            SqlTypeKind::Text
+                | SqlTypeKind::Name
+                | SqlTypeKind::Char
+                | SqlTypeKind::Varchar
+                | SqlTypeKind::InternalChar
+        )
+}
+
+pub(super) fn bind_order_by_using_direction(
+    catalog: &dyn CatalogLookup,
+    operator: &str,
+    expr_type: SqlType,
+) -> Result<bool, ParseError> {
+    let (canonical_operator, descending, requires_pattern_type) = match operator {
+        "<" => ("<", false, false),
+        ">" => (">", true, false),
+        "~<~" => ("<", false, true),
+        "~>~" => (">", true, true),
+        _ => {
+            return Err(ParseError::DetailedError {
+                message: format!("operator {operator} is not a valid ordering operator"),
+                detail: None,
+                hint: Some(
+                    "Ordering operators must be \"<\" or \">\" members of supported btree operator families."
+                        .into(),
+                ),
+                sqlstate: "42809",
+            });
+        }
+    };
+    if requires_pattern_type && !supports_pattern_ordering_operator(expr_type) {
+        return Err(ParseError::DetailedError {
+            message: format!("operator {operator} is not a valid ordering operator"),
+            detail: None,
+            hint: Some(
+                "Ordering operators must be \"<\" or \">\" members of supported btree operator families."
+                    .into(),
+            ),
+            sqlstate: "42809",
+        });
+    }
+    if !supports_comparison_operator(catalog, canonical_operator, expr_type, expr_type) {
+        return Err(ParseError::DetailedError {
+            message: format!("operator {operator} is not a valid ordering operator"),
+            detail: None,
+            hint: Some(
+                "Ordering operators must be \"<\" or \">\" members of supported btree operator families."
+                    .into(),
+            ),
+            sqlstate: "42809",
+        });
+    }
+    Ok(descending)
+}
+
 fn is_oid_integer_comparison(left: SqlType, right: SqlType) -> bool {
     !left.is_array
         && !right.is_array

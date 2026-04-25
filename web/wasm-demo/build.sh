@@ -12,7 +12,9 @@ if ! command -v wasm-bindgen >/dev/null 2>&1; then
 fi
 
 cd "$ROOT"
-cargo build --target wasm32-unknown-unknown --release --lib
+# Keep the default crate output lean for normal builds; the wasm demo is the
+# only place that needs a cdylib artifact.
+cargo rustc --target wasm32-unknown-unknown --release --lib --crate-type cdylib
 mkdir -p "$OUT_DIR"
 wasm-bindgen \
   --target web \

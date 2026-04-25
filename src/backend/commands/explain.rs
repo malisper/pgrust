@@ -4,7 +4,7 @@ use crate::backend::executor::{executor_start, render_explain_expr, set_returnin
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::*;
-use crate::include::nodes::plannodes::{Plan, PlanEstimate};
+use crate::include::nodes::plannodes::{AggregateStrategy, Plan, PlanEstimate};
 use crate::include::nodes::primnodes::{
     AggAccum, BuiltinScalarFunction, Expr, ParamKind, ProjectSetTarget, ScalarFunctionImpl,
     SetReturningCall, SubPlan, TargetEntry, WindowClause, WindowFrameBound, WindowFuncKind,
@@ -108,7 +108,9 @@ fn format_explain_plan_with_subplans_inner(
         return;
     }
 
-    if let Some(child) = explain_passthrough_plan_child(plan) {
+    if let Some(child) = explain_passthrough_plan_child(plan)
+        && (!verbose || explain_passthrough_applies_in_verbose(plan))
+    {
         format_explain_plan_with_subplans_inner(
             child, subplans, indent, show_costs, verbose, ctx, lines,
         );
@@ -155,6 +157,10 @@ fn explain_passthrough_plan_child(plan: &Plan) -> Option<&Plan> {
         }
         _ => None,
     }
+}
+
+fn explain_passthrough_applies_in_verbose(plan: &Plan) -> bool {
+    matches!(plan, Plan::Projection { .. })
 }
 
 fn projection_targets_are_explain_passthrough(input: &Plan, targets: &[TargetEntry]) -> bool {
@@ -254,7 +260,11 @@ fn push_explain_plan_line(
 
 fn verbose_plan_label(plan: &Plan) -> Option<String> {
     match plan {
-        Plan::Aggregate { group_by, .. } if !group_by.is_empty() => Some("HashAggregate".into()),
+        Plan::Aggregate { strategy, .. } => match strategy {
+            AggregateStrategy::Plain => Some("Aggregate".into()),
+            AggregateStrategy::Sorted => Some("GroupAggregate".into()),
+            AggregateStrategy::Hashed => Some("HashAggregate".into()),
+        },
         Plan::FunctionScan {
             call, table_alias, ..
         } => Some(verbose_function_scan_label(call, table_alias.as_deref())),

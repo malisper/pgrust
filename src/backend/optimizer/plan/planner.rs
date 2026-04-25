@@ -6,7 +6,7 @@ use crate::include::nodes::pathnodes::{
     Path, PathKey, PathTarget, PlannerConfig, PlannerGlobal, PlannerInfo, RelOptInfo, RelOptKind,
     UpperRelKind,
 };
-use crate::include::nodes::plannodes::{PlanEstimate, PlannedStmt};
+use crate::include::nodes::plannodes::{AggregateStrategy, PlanEstimate, PlannedStmt};
 use crate::include::nodes::primnodes::{
     Expr, ProjectSetTarget, TargetEntry, WindowClause, expr_contains_set_returning,
     set_returning_call_exprs,
@@ -61,6 +61,70 @@ pub(super) fn make_pathtarget_projection_rel(
     rel
 }
 
+fn group_pathkeys(group_by: &[Expr]) -> Vec<PathKey> {
+    group_by
+        .iter()
+        .cloned()
+        .map(|expr| PathKey {
+            expr,
+            ressortgroupref: 0,
+            descending: false,
+            nulls_first: None,
+            collation_oid: None,
+        })
+        .collect()
+}
+
+fn accumulators_require_sorted_grouping(
+    accumulators: &[crate::include::nodes::primnodes::AggAccum],
+) -> bool {
+    accumulators
+        .iter()
+        .any(|accum| accum.distinct || !accum.order_by.is_empty())
+}
+
+fn ordered_group_input(path: Path, group_pathkeys: &[PathKey]) -> Path {
+    if bestpath::pathkeys_satisfy(&path.pathkeys(), group_pathkeys) {
+        path
+    } else {
+        Path::OrderBy {
+            plan_info: PlanEstimate::default(),
+            pathtarget: path.semantic_output_target(),
+            items: pathkeys_to_order_items(group_pathkeys),
+            input: Box::new(path),
+        }
+    }
+}
+
+fn aggregate_path(
+    strategy: AggregateStrategy,
+    pathkeys: Vec<PathKey>,
+    slot_id: usize,
+    input: Path,
+    group_by: Vec<Expr>,
+    accumulators: Vec<crate::include::nodes::primnodes::AggAccum>,
+    having: Option<Expr>,
+    output_columns: Vec<crate::include::nodes::primnodes::QueryColumn>,
+    reltarget: PathTarget,
+    catalog: &dyn CatalogLookup,
+) -> Path {
+    optimize_path(
+        Path::Aggregate {
+            plan_info: PlanEstimate::default(),
+            pathtarget: reltarget,
+            slot_id,
+            strategy,
+            pathkeys,
+            input: Box::new(input),
+            group_by,
+            accumulators,
+            having,
+            output_columns,
+        },
+        catalog,
+    )
+}
+
 fn make_aggregate_rel(
     root: &mut PlannerInfo,
     input_rel: RelOptInfo,
@@ -111,19 +175,67 @@ fn make_aggregate_rel(
             .having_qual
             .clone()
             .map(|expr| expand_join_rte_vars(root, expr));
-        rel.add_path(optimize_path(
-            Path::Aggregate {
-                plan_info: PlanEstimate::default(),
-                pathtarget: root.grouped_target.clone(),
+        let output_columns = build_aggregate_output_columns(&group_by, &accumulators);
+        if group_by.is_empty() {
+            rel.add_path(aggregate_path(
+                AggregateStrategy::Plain,
+                Vec::new(),
                 slot_id,
-                input: Box::new(path),
-                group_by: group_by.clone(),
-                accumulators: accumulators.clone(),
+                path,
+                group_by,
+                accumulators,
                 having,
-                output_columns: build_aggregate_output_columns(&group_by, &accumulators),
-            },
-            catalog,
-        ));
+                output_columns,
+                root.grouped_target.clone(),
+                catalog,
+            ));
+            continue;
+        }
+
+        let group_pathkeys = group_pathkeys(&group_by);
+        if accumulators_require_sorted_grouping(&accumulators) {
+            rel.add_path(aggregate_path(
+                AggregateStrategy::Sorted,
+                group_pathkeys.clone(),
+                slot_id,
+                ordered_group_input(path, &group_pathkeys),
+                group_by,
+                accumulators,
+                having,
+                output_columns,
+                root.grouped_target.clone(),
+                catalog,
+            ));
+        } else {
+            let path_satisfies_group_order =
+                bestpath::pathkeys_satisfy(&path.pathkeys(), &group_pathkeys);
+            rel.add_path(aggregate_path(
+                AggregateStrategy::Hashed,
+                Vec::new(),
+                slot_id,
+                path.clone(),
+                group_by.clone(),
+                accumulators.clone(),
+                having.clone(),
+                output_columns.clone(),
+                root.grouped_target.clone(),
+                catalog,
+            ));
+            if path_satisfies_group_order {
+                rel.add_path(aggregate_path(
+                    AggregateStrategy::Sorted,
+                    group_pathkeys,
+                    slot_id,
+                    path,
+                    group_by,
+                    accumulators,
+                    having,
+                    output_columns,
+                    root.grouped_target.clone(),
+                    catalog,
+                ));
+            }
+        }
     }
     bestpath::set_cheapest(&mut rel);
     root.upper_rels[upper_rel_index].rel = rel.clone();
@@ -1019,7 +1131,7 @@ fn standard_planner_with_param_base(
     config: PlannerConfig,
 ) -> Result<(PlannedStmt, usize), crate::backend::parser::ParseError> {
     let mut glob = PlannerGlobal::new();
-    let query = root::prepare_query_for_planning(root::prepare_query_for_locking(query)?);
+    let query = root::prepare_query_for_planning(root::prepare_query_for_locking(query)?, catalog);
     let query = pull_up_sublinks(query);
     let mut root = PlannerInfo::new_with_config(query, config);
     let command_type = root.parse.command_type;

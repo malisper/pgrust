@@ -8469,11 +8469,13 @@ fn build_order_by_item(pair: Pair<'_, Rule>) -> Result<OrderByItem, ParseError> 
     let mut expr = None;
     let mut descending = false;
     let mut nulls_first = None;
+    let mut using_operator = None;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::expr => expr = Some(build_expr(part)?),
             Rule::kw_desc => descending = true,
             Rule::kw_asc => descending = false,
+            Rule::operator_token => using_operator = Some(part.as_str().to_string()),
             Rule::nulls_ordering => {
                 for item in part.into_inner() {
                     match item.as_rule() {
@@ -8486,11 +8488,24 @@ fn build_order_by_item(pair: Pair<'_, Rule>) -> Result<OrderByItem, ParseError> 
             _ => {}
         }
     }
+    let descending = using_operator
+        .as_deref()
+        .and_then(order_by_using_operator_direction)
+        .unwrap_or(descending);
     Ok(OrderByItem {
         expr: expr.ok_or(ParseError::UnexpectedEof)?,
         descending,
         nulls_first,
+        using_operator,
     })
+}
+
+fn order_by_using_operator_direction(operator: &str) -> Option<bool> {
+    match operator {
+        "<" | "~<~" => Some(false),
+        ">" | "~>~" => Some(true),
+        _ => None,
+    }
 }
 
 fn build_limit_clause(pair: Pair<'_, Rule>) -> Result<usize, ParseError> {
