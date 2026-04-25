@@ -9,8 +9,9 @@ use crate::backend::parser::{
     AlterColumnExpressionAction, BoundRelation, CatalogLookup, CheckConstraintAction, ColumnDef,
     NotNullConstraintAction, OwnedSequenceSpec, ParseError, RawTypeName, SerialKind, SqlExpr,
     SqlType, SqlTypeKind, bind_generated_expr, bind_scalar_expr_in_scope,
-    derive_literal_default_value, expr_references_column,
-    normalize_alter_table_add_column_constraints, raw_type_name_hint, resolve_raw_type_name,
+    derive_literal_default_value, expr_references_column, is_collatable_type,
+    normalize_alter_table_add_column_constraints, raw_type_name_hint, resolve_collation_oid,
+    resolve_raw_type_name, sql_type_name,
 };
 use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
@@ -629,6 +630,20 @@ pub(super) fn validate_alter_table_add_column(
         sql_type,
         serial_kind.is_none() && column.identity.is_none(),
     );
+    if let Some(collation) = column.collation.as_deref() {
+        if !is_collatable_type(sql_type) {
+            return Err(ExecError::Parse(ParseError::DetailedError {
+                message: format!(
+                    "collations are not supported by type {}",
+                    sql_type_name(sql_type)
+                ),
+                detail: None,
+                hint: None,
+                sqlstate: "42804",
+            }));
+        }
+        desc.collation_oid = resolve_collation_oid(collation, catalog).map_err(ExecError::Parse)?;
+    }
     if column.generated.is_some() && column.default_expr.is_some() {
         return Err(ExecError::Parse(ParseError::UnexpectedToken {
             expected: "generated column without DEFAULT",

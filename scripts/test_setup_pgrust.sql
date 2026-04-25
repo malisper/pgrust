@@ -233,6 +233,27 @@ BEGIN
 END
 $$;
 
+-- Deterministic hash partition opclasses used by upstream partition tests.
+CREATE FUNCTION part_hashint4_noop(value int4, seed int8)
+RETURNS int8
+AS $$
+SELECT value + seed;
+$$ LANGUAGE sql STRICT IMMUTABLE PARALLEL SAFE;
+
+CREATE OPERATOR CLASS part_test_int4_ops FOR TYPE int4 USING hash AS
+  OPERATOR 1 =,
+  FUNCTION 2 part_hashint4_noop(int4, int8);
+
+CREATE FUNCTION part_hashtext_length(value text, seed int8)
+RETURNS int8
+AS $$
+SELECT length(coalesce(value, ''))::int8;
+$$ LANGUAGE sql STRICT IMMUTABLE PARALLEL SAFE;
+
+CREATE OPERATOR CLASS part_test_text_ops FOR TYPE text USING hash AS
+  OPERATOR 1 =,
+  FUNCTION 2 part_hashtext_length(text, int8);
+
 --
 -- Shared index-capable fixtures for pgrust regression coverage.
 --

@@ -447,6 +447,7 @@ impl RelCache {
                     desc.attstattarget = attr.attstattarget;
                     desc.attinhcount = attr.attinhcount;
                     desc.attislocal = attr.attislocal;
+                    desc.collation_oid = attr.attcollation;
                     desc.identity =
                         crate::include::nodes::parsenodes::ColumnIdentityKind::from_catalog_char(
                             attr.attidentity,

@@ -10,10 +10,10 @@ use crate::backend::utils::cache::relcache::RelCacheEntry;
 use crate::backend::utils::cache::syscache::{
     SysCacheId, SysCacheTuple, backend_catcache, backend_relcache, ensure_am_rows,
     ensure_attribute_rows, ensure_class_rows, ensure_constraint_rows, ensure_index_rows,
-    ensure_namespace_rows, ensure_proc_rows, ensure_rewrite_rows, ensure_statistic_rows,
-    ensure_type_rows, relation_id_get_relation_db, search_sys_cache_list1_db,
-    search_sys_cache_list2_db, search_sys_cache_list3_db, search_sys_cache1_db,
-    search_sys_cache2_db,
+    ensure_namespace_rows, ensure_opclass_rows, ensure_proc_rows, ensure_rewrite_rows,
+    ensure_statistic_rows, ensure_type_rows, relation_id_get_relation_db,
+    search_sys_cache_list1_db, search_sys_cache_list2_db, search_sys_cache_list3_db,
+    search_sys_cache1_db, search_sys_cache2_db,
 };
 use crate::backend::utils::cache::system_views::{
     build_pg_indexes_rows, build_pg_locks_rows, build_pg_matviews_rows, build_pg_policies_rows,
@@ -1687,6 +1687,10 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
                 &self.range_rows(),
             )
         })
+    }
+
+    fn opclass_rows(&self) -> Vec<PgOpclassRow> {
+        ensure_opclass_rows(self.db, self.client_id, self.txn_ctx)
     }
 
     fn aggregate_by_fnoid(&self, aggfnoid: u32) -> Option<PgAggregateRow> {

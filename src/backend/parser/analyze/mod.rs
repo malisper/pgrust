@@ -68,8 +68,13 @@ use agg::*;
 use agg_output::*;
 use agg_scope::*;
 pub use coerce::is_binary_coercible_type;
+pub(crate) use coerce::sql_type_name;
 use coerce::*;
-use collation::*;
+pub(crate) use collation::{
+    CollationConsumer, bind_explicit_collation, consumer_for_subquery_comparison_op,
+    derive_consumer_collation, finalize_order_by_expr, is_collatable_type, resolve_collation_oid,
+    strip_explicit_collation,
+};
 pub(crate) use constraints::*;
 pub(crate) use constraints::{
     BoundReferencedByForeignKey, BoundRelationConstraints, BoundTemporalConstraint,

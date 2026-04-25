@@ -347,6 +347,7 @@ impl CatCache {
                         .generated
                         .map(|kind| kind.catalog_char())
                         .unwrap_or('\0'),
+                    attcollation: column.collation_oid,
                     sql_type: column.sql_type,
                 })
                 .collect::<Vec<_>>();
