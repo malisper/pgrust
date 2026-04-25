@@ -195,6 +195,13 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
     {
         return None;
     }
+    if matches!(
+        e,
+        ExecError::DetailedError { message, .. }
+            if message.starts_with("string is not a valid identifier: ")
+    ) {
+        return None;
+    }
     let value = match e {
         ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
             expected, ..

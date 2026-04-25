@@ -361,6 +361,7 @@ pub(super) fn coerce_unknown_string_literal_type(
             SqlTypeKind::TimestampTz => return SqlType::new(SqlTypeKind::TimestampTz),
             SqlTypeKind::Jsonb => return SqlType::new(SqlTypeKind::Jsonb),
             SqlTypeKind::InternalChar => return SqlType::new(SqlTypeKind::Text),
+            SqlTypeKind::Name => return SqlType::new(SqlTypeKind::Name),
             SqlTypeKind::TsQuery => return SqlType::new(SqlTypeKind::TsQuery),
             SqlTypeKind::TsVector => return SqlType::new(SqlTypeKind::TsVector),
             SqlTypeKind::Tid => return SqlType::new(SqlTypeKind::Tid),

@@ -472,6 +472,7 @@ pub enum BuiltinScalarFunction {
     Unistr,
     Ascii,
     Chr,
+    ParseIdent,
     QuoteLiteral,
     Replace,
     SplitPart,

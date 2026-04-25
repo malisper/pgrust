@@ -1491,6 +1491,169 @@ pub(super) fn eval_quote_literal_function(values: &[Value]) -> Result<Value, Exe
     ))))
 }
 
+pub(super) fn eval_parse_ident_function(values: &[Value]) -> Result<Value, ExecError> {
+    match values {
+        [Value::Null] | [Value::Null, _] | [_, Value::Null] => Ok(Value::Null),
+        [input] => parse_ident_text(input, true),
+        [input, strict] => {
+            let Value::Bool(strict) = strict else {
+                return Err(ExecError::TypeMismatch {
+                    op: "parse_ident",
+                    left: strict.clone(),
+                    right: Value::Bool(true),
+                });
+            };
+            parse_ident_text(input, *strict)
+        }
+        _ => Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "parse_ident(text [, strict])",
+            actual: format!("ParseIdent({} args)", values.len()),
+        })),
+    }
+}
+
+fn parse_ident_text(input: &Value, strict: bool) -> Result<Value, ExecError> {
+    let input = input.as_text().ok_or_else(|| ExecError::TypeMismatch {
+        op: "parse_ident",
+        left: input.clone(),
+        right: Value::Text("".into()),
+    })?;
+    let parts = parse_ident_parts(input, strict)?;
+    Ok(Value::PgArray(
+        crate::include::nodes::datum::ArrayValue::from_dimensions(
+            vec![crate::include::nodes::datum::ArrayDimension {
+                lower_bound: 1,
+                length: parts.len(),
+            }],
+            parts
+                .into_iter()
+                .map(|part| Value::Text(part.into()))
+                .collect(),
+        ),
+    ))
+}
+
+fn parse_ident_parts(input: &str, strict: bool) -> Result<Vec<String>, ExecError> {
+    let original = input.to_string();
+    let bytes = input.as_bytes();
+    let mut index = 0usize;
+    let mut after_dot = false;
+    let mut parts = Vec::new();
+
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+
+    loop {
+        let mut missing_ident = true;
+
+        if bytes.get(index) == Some(&b'"') {
+            index += 1;
+            let mut current = String::new();
+            loop {
+                let Some(ch) = input[index..].chars().next() else {
+                    return Err(invalid_identifier_error(
+                        &original,
+                        Some("String has unclosed double quotes."),
+                    ));
+                };
+                index += ch.len_utf8();
+                if ch == '"' {
+                    if bytes.get(index) == Some(&b'"') {
+                        current.push('"');
+                        index += 1;
+                        continue;
+                    }
+                    break;
+                }
+                current.push(ch);
+            }
+            if current.is_empty() {
+                return Err(invalid_identifier_error(
+                    &original,
+                    Some("Quoted identifier must not be empty."),
+                ));
+            }
+            parts.push(current);
+            missing_ident = false;
+        } else if let Some(ch) = input[index..]
+            .chars()
+            .next()
+            .filter(|ch| is_ident_start(*ch))
+        {
+            let mut current = String::new();
+            current.push(ch);
+            index += ch.len_utf8();
+            while let Some(ch) = input[index..].chars().next() {
+                if !is_ident_cont(ch) {
+                    break;
+                }
+                current.push(ch);
+                index += ch.len_utf8();
+            }
+            parts.push(current.to_ascii_lowercase());
+            missing_ident = false;
+        }
+
+        if missing_ident {
+            if bytes.get(index) == Some(&b'.') {
+                return Err(invalid_identifier_error(
+                    &original,
+                    Some("No valid identifier before \".\"."),
+                ));
+            }
+            if after_dot {
+                return Err(invalid_identifier_error(
+                    &original,
+                    Some("No valid identifier after \".\"."),
+                ));
+            }
+            return Err(invalid_identifier_error(&original, None));
+        }
+
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+
+        if bytes.get(index) == Some(&b'.') {
+            after_dot = true;
+            index += 1;
+            while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+                index += 1;
+            }
+            continue;
+        }
+
+        if index == bytes.len() {
+            break;
+        }
+
+        if strict {
+            return Err(invalid_identifier_error(&original, None));
+        }
+        break;
+    }
+
+    Ok(parts)
+}
+
+fn invalid_identifier_error(input: &str, detail: Option<&str>) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("string is not a valid identifier: \"{input}\""),
+        detail: detail.map(str::to_string),
+        hint: None,
+        sqlstate: "22023",
+    }
+}
+
+fn is_ident_start(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphabetic() || !ch.is_ascii()
+}
+
+fn is_ident_cont(ch: char) -> bool {
+    is_ident_start(ch) || ch.is_ascii_digit() || ch == '$'
+}
+
 pub(super) fn eval_encode_function(values: &[Value]) -> Result<Value, ExecError> {
     let Some(bytes_value) = values.first() else {
         return Ok(Value::Null);

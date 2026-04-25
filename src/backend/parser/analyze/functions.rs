@@ -731,6 +731,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::PgStatGetXactFunctionCalls
             | BuiltinScalarFunction::PgStatGetXactFunctionTotalTime
             | BuiltinScalarFunction::PgStatGetXactFunctionSelfTime => args.len() == 1,
+            BuiltinScalarFunction::ParseIdent => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::ToJson | BuiltinScalarFunction::ToJsonb => args.len() == 1,
             BuiltinScalarFunction::ArrayLength
             | BuiltinScalarFunction::ArrayLower
@@ -1141,6 +1142,9 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         BuiltinScalarFunction::TxidVisibleInSnapshot => {
             return Some(SqlType::new(SqlTypeKind::Bool));
         }
+        BuiltinScalarFunction::ParseIdent => {
+            return Some(SqlType::array_of(SqlType::new(SqlTypeKind::Text)));
+        }
         _ => {}
     }
     scalar_fixed_return_types()
@@ -1279,6 +1283,11 @@ fn default_sql_expr(default: NamedArgDefault) -> SqlExpr {
 
 fn scalar_named_arg_signature(func: BuiltinScalarFunction) -> Option<NamedArgSignature> {
     match func {
+        BuiltinScalarFunction::ParseIdent => Some(NamedArgSignature {
+            params: &["str", "strict"],
+            required: 1,
+            defaults: &[None, Some(NamedArgDefault::Bool(true))],
+        }),
         BuiltinScalarFunction::RandomNormal => Some(NamedArgSignature {
             params: &["mean", "stddev"],
             required: 0,
@@ -1322,6 +1331,13 @@ fn scalar_named_arg_signature(func: BuiltinScalarFunction) -> Option<NamedArgSig
 }
 
 fn table_function_named_arg_signature(name: &str) -> Option<NamedArgSignature> {
+    if name.eq_ignore_ascii_case("parse_ident") {
+        return Some(NamedArgSignature {
+            params: &["str", "strict"],
+            required: 1,
+            defaults: &[None, Some(NamedArgDefault::Bool(true))],
+        });
+    }
     if name.eq_ignore_ascii_case("generate_series") {
         return Some(NamedArgSignature {
             params: &["start", "stop", "step"],
@@ -1471,6 +1487,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
             BuiltinScalarFunction::PgSizePretty,
         ),
         ("pg_size_bytes", BuiltinScalarFunction::PgSizeBytes),
+        ("parse_ident", BuiltinScalarFunction::ParseIdent),
         ("pg_get_userbyid", BuiltinScalarFunction::PgGetUserById),
         ("obj_description", BuiltinScalarFunction::ObjDescription),
         (
