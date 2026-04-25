@@ -61,6 +61,11 @@ pub const JSONB_EXISTS_OPERATOR_OID: u32 = 3247;
 pub const JSONB_EXISTS_ANY_OPERATOR_OID: u32 = 3248;
 pub const JSONB_EXISTS_ALL_OPERATOR_OID: u32 = 3249;
 pub const JSONB_CONTAINED_OPERATOR_OID: u32 = 3250;
+pub const TEXT_PATTERN_LT_OPERATOR_OID: u32 = 2314;
+pub const TEXT_PATTERN_LE_OPERATOR_OID: u32 = 2315;
+pub const TEXT_PATTERN_GE_OPERATOR_OID: u32 = 2317;
+pub const TEXT_PATTERN_GT_OPERATOR_OID: u32 = 2318;
+pub const TEXT_PREFIX_OPERATOR_OID: u32 = 3877;
 
 pub fn pg_operator_desc() -> RelationDesc {
     RelationDesc {
@@ -828,13 +833,57 @@ pub fn bootstrap_pg_operator_rows() -> Vec<PgOperatorRow> {
             false,
         ),
         operator_row(
-            3877,
+            TEXT_PREFIX_OPERATOR_OID,
             "^@",
             TEXT_TYPE_OID,
             TEXT_TYPE_OID,
             0,
             0,
             TEXT_STARTS_WITH_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            TEXT_PATTERN_LT_OPERATOR_OID,
+            "~<~",
+            TEXT_TYPE_OID,
+            TEXT_TYPE_OID,
+            TEXT_PATTERN_GT_OPERATOR_OID,
+            TEXT_PATTERN_GE_OPERATOR_OID,
+            TEXT_CMP_LT_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            TEXT_PATTERN_LE_OPERATOR_OID,
+            "~<=~",
+            TEXT_TYPE_OID,
+            TEXT_TYPE_OID,
+            TEXT_PATTERN_GE_OPERATOR_OID,
+            TEXT_PATTERN_GT_OPERATOR_OID,
+            TEXT_CMP_LE_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            TEXT_PATTERN_GE_OPERATOR_OID,
+            "~>=~",
+            TEXT_TYPE_OID,
+            TEXT_TYPE_OID,
+            TEXT_PATTERN_LE_OPERATOR_OID,
+            TEXT_PATTERN_LT_OPERATOR_OID,
+            TEXT_CMP_GE_PROC_OID,
+            false,
+            false,
+        ),
+        operator_row(
+            TEXT_PATTERN_GT_OPERATOR_OID,
+            "~>~",
+            TEXT_TYPE_OID,
+            TEXT_TYPE_OID,
+            TEXT_PATTERN_LT_OPERATOR_OID,
+            TEXT_PATTERN_LE_OPERATOR_OID,
+            TEXT_CMP_GT_PROC_OID,
             false,
             false,
         ),

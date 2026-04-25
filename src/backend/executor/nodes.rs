@@ -2337,16 +2337,7 @@ fn render_explain_expr_inner_with_qualifier(
                 let [left, right] = op.args.as_slice() else {
                     return format!("{expr:?}");
                 };
-                let op_text = match op.op {
-                    crate::include::nodes::primnodes::OpExprKind::Eq => "=",
-                    crate::include::nodes::primnodes::OpExprKind::NotEq => "<>",
-                    crate::include::nodes::primnodes::OpExprKind::Lt => "<",
-                    crate::include::nodes::primnodes::OpExprKind::LtEq => "<=",
-                    crate::include::nodes::primnodes::OpExprKind::Gt => ">",
-                    crate::include::nodes::primnodes::OpExprKind::GtEq => ">=",
-                    crate::include::nodes::primnodes::OpExprKind::RegexMatch => "~",
-                    _ => unreachable!(),
-                };
+                let op_text = infix_operator_text(op.opno, op.op).unwrap_or("~");
                 format!(
                     "{} {} {}",
                     render_explain_infix_operand(left, qualifier, column_names),
@@ -2578,6 +2569,41 @@ fn builtin_scalar_function_infix_operator(
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::NetworkSupernet) => Some(">>"),
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::NetworkSupernetEq) => Some(">>="),
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::NetworkOverlap) => Some("&&"),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::TextStartsWith) => Some("^@"),
+        _ => None,
+    }
+}
+
+fn infix_operator_text(
+    opno: u32,
+    op: crate::include::nodes::primnodes::OpExprKind,
+) -> Option<&'static str> {
+    match opno {
+        crate::include::catalog::TEXT_PATTERN_LT_OPERATOR_OID => return Some("~<~"),
+        crate::include::catalog::TEXT_PATTERN_LE_OPERATOR_OID => return Some("~<=~"),
+        crate::include::catalog::TEXT_PATTERN_GE_OPERATOR_OID => return Some("~>=~"),
+        crate::include::catalog::TEXT_PATTERN_GT_OPERATOR_OID => return Some("~>~"),
+        _ => {}
+    }
+    match op {
+        crate::include::nodes::primnodes::OpExprKind::Add => Some("+"),
+        crate::include::nodes::primnodes::OpExprKind::Sub => Some("-"),
+        crate::include::nodes::primnodes::OpExprKind::Mul => Some("*"),
+        crate::include::nodes::primnodes::OpExprKind::Div => Some("/"),
+        crate::include::nodes::primnodes::OpExprKind::Mod => Some("%"),
+        crate::include::nodes::primnodes::OpExprKind::BitAnd => Some("&"),
+        crate::include::nodes::primnodes::OpExprKind::BitOr => Some("|"),
+        crate::include::nodes::primnodes::OpExprKind::BitXor => Some("#"),
+        crate::include::nodes::primnodes::OpExprKind::Shl => Some("<<"),
+        crate::include::nodes::primnodes::OpExprKind::Shr => Some(">>"),
+        crate::include::nodes::primnodes::OpExprKind::Concat => Some("||"),
+        crate::include::nodes::primnodes::OpExprKind::Eq => Some("="),
+        crate::include::nodes::primnodes::OpExprKind::NotEq => Some("<>"),
+        crate::include::nodes::primnodes::OpExprKind::Lt => Some("<"),
+        crate::include::nodes::primnodes::OpExprKind::LtEq => Some("<="),
+        crate::include::nodes::primnodes::OpExprKind::Gt => Some(">"),
+        crate::include::nodes::primnodes::OpExprKind::GtEq => Some(">="),
+        crate::include::nodes::primnodes::OpExprKind::RegexMatch => Some("~"),
         _ => None,
     }
 }

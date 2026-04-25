@@ -17,7 +17,8 @@ use crate::include::access::spgist::SPGIST_CONFIG_PROC;
 use crate::include::catalog::{
     BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, GIST_MULTIRANGE_FAMILY_OID,
     GIST_RANGE_FAMILY_OID, HASH_AM_OID, PgStatisticRow, SPG_BOX_QUAD_CONFIG_PROC_OID,
-    SPG_NETWORK_CONFIG_PROC_OID, SPGIST_AM_OID, bootstrap_pg_operator_rows,
+    SPG_KD_CONFIG_PROC_OID, SPG_NETWORK_CONFIG_PROC_OID, SPG_QUAD_CONFIG_PROC_OID,
+    SPG_TEXT_CONFIG_PROC_OID, SPGIST_AM_OID, SPGIST_TEXT_FAMILY_OID, bootstrap_pg_operator_rows,
     builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
     relkind_has_storage,
 };
@@ -3393,7 +3394,11 @@ fn spgist_index_column_can_return(index: &BoundIndexRelation, index_pos: usize) 
 fn spgist_config_proc_can_return_data(proc_oid: u32) -> bool {
     matches!(
         proc_oid,
-        SPG_BOX_QUAD_CONFIG_PROC_OID | SPG_NETWORK_CONFIG_PROC_OID
+        SPG_BOX_QUAD_CONFIG_PROC_OID
+            | SPG_NETWORK_CONFIG_PROC_OID
+            | SPG_QUAD_CONFIG_PROC_OID
+            | SPG_KD_CONFIG_PROC_OID
+            | SPG_TEXT_CONFIG_PROC_OID
     )
 }
 
@@ -3486,6 +3491,24 @@ fn btree_builtin_strategy(kind: OpExprKind) -> Option<u16> {
         OpExprKind::Eq => 3,
         OpExprKind::GtEq => 4,
         OpExprKind::Gt => 5,
+        _ => return None,
+    })
+}
+
+fn spgist_text_builtin_strategy(
+    index: &BoundIndexRelation,
+    index_pos: usize,
+    kind: OpExprKind,
+) -> Option<u16> {
+    if index.index_meta.opfamily_oids.get(index_pos).copied()? != SPGIST_TEXT_FAMILY_OID {
+        return None;
+    }
+    Some(match kind {
+        OpExprKind::Lt => 11,
+        OpExprKind::LtEq => 12,
+        OpExprKind::Eq => 3,
+        OpExprKind::GtEq => 14,
+        OpExprKind::Gt => 15,
         _ => return None,
     })
 }
@@ -3630,6 +3653,11 @@ fn qual_strategy(
                 (index.index_meta.am_oid == BTREE_AM_OID || index.index_meta.am_oid == BRIN_AM_OID)
                     .then(|| btree_builtin_strategy(kind))
                     .flatten()
+                    .or_else(|| {
+                        (index.index_meta.am_oid == SPGIST_AM_OID)
+                            .then(|| spgist_text_builtin_strategy(index, index_pos, kind))
+                            .flatten()
+                    })
                     .or_else(|| {
                         (index.index_meta.am_oid == HASH_AM_OID && kind == OpExprKind::Eq)
                             .then_some(1)

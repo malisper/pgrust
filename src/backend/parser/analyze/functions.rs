@@ -1374,6 +1374,7 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::Repeat
             | BuiltinScalarFunction::Encode
             | BuiltinScalarFunction::Decode
+            | BuiltinScalarFunction::TextStartsWith
             | BuiltinScalarFunction::ToChar
             | BuiltinScalarFunction::ToDate
             | BuiltinScalarFunction::ToNumber
@@ -1681,6 +1682,9 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
             return Some(SqlType::new(SqlTypeKind::Int8));
         }
         BuiltinScalarFunction::TxidVisibleInSnapshot => {
+            return Some(SqlType::new(SqlTypeKind::Bool));
+        }
+        BuiltinScalarFunction::TextStartsWith => {
             return Some(SqlType::new(SqlTypeKind::Bool));
         }
         BuiltinScalarFunction::ParseIdent => {

@@ -1,6 +1,12 @@
 use super::*;
 use crate::backend::parser::analyze::multiranges::bind_maybe_multirange_overlap_or_adjacent;
 use crate::backend::parser::analyze::ranges::bind_maybe_range_overlap_or_adjacent;
+use crate::include::catalog::{
+    C_COLLATION_OID, TEXT_CMP_GE_PROC_OID, TEXT_CMP_GT_PROC_OID, TEXT_CMP_LE_PROC_OID,
+    TEXT_CMP_LT_PROC_OID, TEXT_PATTERN_GE_OPERATOR_OID, TEXT_PATTERN_GT_OPERATOR_OID,
+    TEXT_PATTERN_LE_OPERATOR_OID, TEXT_PATTERN_LT_OPERATOR_OID,
+};
+use crate::include::nodes::primnodes::OpExpr;
 
 pub(super) fn bind_arithmetic_expr(
     op: &'static str,
@@ -691,6 +697,143 @@ pub(super) fn bind_comparison_expr(
         right_explicit_collation,
         catalog,
     )
+}
+
+fn text_pattern_operator_metadata(
+    op: &'static str,
+) -> Option<(crate::include::nodes::primnodes::OpExprKind, u32, u32)> {
+    Some(match op {
+        "~<~" => (
+            crate::include::nodes::primnodes::OpExprKind::Lt,
+            TEXT_PATTERN_LT_OPERATOR_OID,
+            TEXT_CMP_LT_PROC_OID,
+        ),
+        "~<=~" => (
+            crate::include::nodes::primnodes::OpExprKind::LtEq,
+            TEXT_PATTERN_LE_OPERATOR_OID,
+            TEXT_CMP_LE_PROC_OID,
+        ),
+        "~>=~" => (
+            crate::include::nodes::primnodes::OpExprKind::GtEq,
+            TEXT_PATTERN_GE_OPERATOR_OID,
+            TEXT_CMP_GE_PROC_OID,
+        ),
+        "~>~" => (
+            crate::include::nodes::primnodes::OpExprKind::Gt,
+            TEXT_PATTERN_GT_OPERATOR_OID,
+            TEXT_CMP_GT_PROC_OID,
+        ),
+        _ => return None,
+    })
+}
+
+pub(super) fn bind_text_pattern_comparison_expr(
+    op: &'static str,
+    left: &SqlExpr,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let (kind, operator_oid, proc_oid) =
+        text_pattern_operator_metadata(op).ok_or(ParseError::UnexpectedToken {
+            expected: "text pattern comparison operator",
+            actual: op.into(),
+        })?;
+    let raw_left_type =
+        infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let raw_right_type =
+        infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
+    let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+    if !supports_pattern_ordering_operator(left_type)
+        || !supports_pattern_ordering_operator(right_type)
+    {
+        return Err(ParseError::UndefinedOperator {
+            op,
+            left_type: sql_type_name(left_type),
+            right_type: sql_type_name(right_type),
+        });
+    }
+    let text_type = SqlType::new(SqlTypeKind::Text);
+    let left = coerce_bound_expr(
+        bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?,
+        raw_left_type,
+        text_type,
+    );
+    let right = coerce_bound_expr(
+        bind_expr_with_outer_and_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes)?,
+        raw_right_type,
+        text_type,
+    );
+    Ok(Expr::Op(Box::new(OpExpr {
+        opno: operator_oid,
+        opfuncid: proc_oid,
+        op: kind,
+        opresulttype: SqlType::new(SqlTypeKind::Bool),
+        args: vec![left, right],
+        collation_oid: Some(C_COLLATION_OID),
+    })))
+}
+
+pub(super) fn bind_text_starts_with_expr(
+    left: &SqlExpr,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Result<Expr, ParseError> {
+    let raw_left_type =
+        infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let raw_right_type =
+        infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
+    let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+    if !supports_pattern_ordering_operator(left_type)
+        || !supports_pattern_ordering_operator(right_type)
+    {
+        return Err(ParseError::UndefinedOperator {
+            op: "^@",
+            left_type: sql_type_name(left_type),
+            right_type: sql_type_name(right_type),
+        });
+    }
+    let text_type = SqlType::new(SqlTypeKind::Text);
+    Ok(Expr::builtin_func(
+        BuiltinScalarFunction::TextStartsWith,
+        Some(SqlType::new(SqlTypeKind::Bool)),
+        false,
+        vec![
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    left,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_left_type,
+                text_type,
+            ),
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_right_type,
+                text_type,
+            ),
+        ],
+    ))
 }
 
 pub(super) fn bind_bound_comparison_expr(

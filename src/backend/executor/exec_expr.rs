@@ -93,9 +93,10 @@ use super::expr_string::{
     eval_reverse_function, eval_right_function, eval_rpad_function, eval_set_bit_bytes,
     eval_set_byte, eval_sha224_function, eval_sha256_function, eval_sha384_function,
     eval_sha512_function, eval_split_part_function, eval_strpos_function, eval_text_overlay,
-    eval_text_substring, eval_to_bin_function, eval_to_char_float4_function, eval_to_char_function,
-    eval_to_hex_function, eval_to_number_function, eval_to_oct_function, eval_translate_function,
-    eval_trim_function, eval_unistr_function,
+    eval_text_starts_with_function, eval_text_substring, eval_to_bin_function,
+    eval_to_char_float4_function, eval_to_char_function, eval_to_hex_function,
+    eval_to_number_function, eval_to_oct_function, eval_translate_function, eval_trim_function,
+    eval_unistr_function,
 };
 use super::expr_txid::eval_txid_builtin_function;
 use super::expr_xml::{eval_xml_comment_function, eval_xml_expr, eval_xml_is_well_formed_function};
@@ -131,10 +132,11 @@ use crate::include::catalog::{
     BOX_SPGIST_OPCLASS_OID, BRIN_AM_OID, BTREE_AM_OID, BYTEA_TYPE_OID, CONSTRAINT_CHECK,
     CONSTRAINT_FOREIGN, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE,
     CURRENT_DATABASE_OID, FLOAT8_TYPE_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID,
-    PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_DATABASE_RELATION_OID,
-    PG_DEPENDENCIES_TYPE_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_MCV_LIST_TYPE_OID,
-    PG_NDISTINCT_TYPE_OID, PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID,
-    POLY_SPGIST_OPCLASS_OID, SPGIST_AM_OID, bootstrap_pg_am_rows,
+    INET_SPGIST_OPCLASS_OID, KD_POINT_SPGIST_OPCLASS_OID, PG_CATALOG_NAMESPACE_OID,
+    PG_CLASS_RELATION_OID, PG_DATABASE_RELATION_OID, PG_DEPENDENCIES_TYPE_OID,
+    PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_MCV_LIST_TYPE_OID, PG_NDISTINCT_TYPE_OID,
+    PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID, POLY_SPGIST_OPCLASS_OID,
+    QUAD_POINT_SPGIST_OPCLASS_OID, SPGIST_AM_OID, TEXT_SPGIST_OPCLASS_OID, bootstrap_pg_am_rows,
     builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid,
 };
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
@@ -373,7 +375,7 @@ enum IndexPropertyKind {
 enum IndexReturnability {
     Never,
     Always,
-    SpgistBox,
+    SpgistCanReturnData,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -510,7 +512,7 @@ fn index_am_profile(am_oid: u32) -> Option<IndexAmPropertyProfile> {
             amcaninclude: true,
             amindexscan: true,
             ambitmapscan: true,
-            returnability: IndexReturnability::SpgistBox,
+            returnability: IndexReturnability::SpgistCanReturnData,
         }),
         _ => crate::backend::access::index::amapi::index_am_handler(am_oid).map(|routine| {
             IndexAmPropertyProfile {
@@ -687,10 +689,17 @@ fn eval_pg_index_column_has_property(
                 Some(IndexPropertyKind::Returnable) => Value::Bool(match profile.returnability {
                     IndexReturnability::Never => false,
                     IndexReturnability::Always => true,
-                    IndexReturnability::SpgistBox => {
+                    IndexReturnability::SpgistCanReturnData => {
                         matches!(
                             index_meta.indclass.get(column_index).copied(),
-                            Some(BOX_SPGIST_OPCLASS_OID | POLY_SPGIST_OPCLASS_OID)
+                            Some(
+                                BOX_SPGIST_OPCLASS_OID
+                                    | POLY_SPGIST_OPCLASS_OID
+                                    | INET_SPGIST_OPCLASS_OID
+                                    | QUAD_POINT_SPGIST_OPCLASS_OID
+                                    | KD_POINT_SPGIST_OPCLASS_OID
+                                    | TEXT_SPGIST_OPCLASS_OID
+                            )
                         )
                     }
                 }),
@@ -4352,6 +4361,7 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::ConvertFrom => eval_convert_from_function(&values),
         BuiltinScalarFunction::Md5 => eval_md5_function(&values),
         BuiltinScalarFunction::Reverse => eval_reverse_function(&values),
+        BuiltinScalarFunction::TextStartsWith => eval_text_starts_with_function(&values),
         BuiltinScalarFunction::Encode => eval_encode_function(&values),
         BuiltinScalarFunction::Decode => eval_decode_function(&values),
         BuiltinScalarFunction::Sha224 => eval_sha224_function(&values),
@@ -5907,6 +5917,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::RPad => eval_rpad_function(&values),
         BuiltinScalarFunction::Repeat => eval_repeat_function(&values),
         BuiltinScalarFunction::Lower => eval_lower_function(&values),
+        BuiltinScalarFunction::TextStartsWith => eval_text_starts_with_function(&values),
         BuiltinScalarFunction::Unistr => eval_unistr_function(&values),
         BuiltinScalarFunction::Initcap => eval_initcap_function(&values),
         BuiltinScalarFunction::BTrim => eval_trim_function("btrim", &values),

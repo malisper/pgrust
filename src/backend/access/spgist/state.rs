@@ -8,7 +8,6 @@ use crate::include::access::spgist::{
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::primnodes::RelationDesc;
 
-use super::quad_box;
 use super::support::{self, SpgistConfigResult};
 
 #[derive(Debug, Clone)]
@@ -138,6 +137,6 @@ impl SpgistState {
             .get(attno)
             .ok_or(CatalogError::Corrupt("SP-GiST column state missing"))?;
         let _ = support::inner_consistent(column.inner_consistent_proc, tuple_value, &[])?;
-        quad_box::order_distance(tuple_value, &key.argument)
+        support::order_distance(column.leaf_consistent_proc, tuple_value, &key.argument)
     }
 }

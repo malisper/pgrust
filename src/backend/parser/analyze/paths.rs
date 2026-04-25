@@ -4,8 +4,8 @@ use crate::backend::executor::cast_value;
 use crate::backend::utils::cache::catcache::sql_type_oid;
 use crate::include::catalog::{
     BTREE_AM_OID, GIST_AM_OID, GIST_MULTIRANGE_FAMILY_OID, GIST_RANGE_FAMILY_OID, HASH_AM_OID,
-    SPGIST_AM_OID, bootstrap_pg_operator_rows, builtin_scalar_function_for_proc_oid,
-    proc_oid_for_builtin_scalar_function,
+    SPGIST_AM_OID, SPGIST_TEXT_FAMILY_OID, bootstrap_pg_operator_rows,
+    builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
 };
 use crate::include::nodes::primnodes::{BuiltinScalarFunction, OpExprKind, expr_sql_type_hint};
 
@@ -184,6 +184,24 @@ fn btree_builtin_strategy(kind: OpExprKind) -> Option<u16> {
     })
 }
 
+fn spgist_text_builtin_strategy(
+    index: &BoundIndexRelation,
+    index_pos: usize,
+    kind: OpExprKind,
+) -> Option<u16> {
+    if index.index_meta.opfamily_oids.get(index_pos).copied()? != SPGIST_TEXT_FAMILY_OID {
+        return None;
+    }
+    Some(match kind {
+        OpExprKind::Lt => 11,
+        OpExprKind::LtEq => 12,
+        OpExprKind::Eq => 3,
+        OpExprKind::GtEq => 14,
+        OpExprKind::Gt => 15,
+        _ => return None,
+    })
+}
+
 fn commuted_function_proc_oid(funcid: u32) -> Option<u32> {
     let builtin = builtin_scalar_function_for_proc_oid(funcid)?;
     let commuted = commuted_builtin_function(builtin)?;
@@ -256,6 +274,11 @@ fn qual_strategy(
                 (index.index_meta.am_oid == BTREE_AM_OID)
                     .then(|| btree_builtin_strategy(kind))
                     .flatten()
+                    .or_else(|| {
+                        (index.index_meta.am_oid == SPGIST_AM_OID)
+                            .then(|| spgist_text_builtin_strategy(index, index_pos, kind))
+                            .flatten()
+                    })
                     .or_else(|| {
                         (index.index_meta.am_oid == HASH_AM_OID && kind == OpExprKind::Eq)
                             .then_some(1)

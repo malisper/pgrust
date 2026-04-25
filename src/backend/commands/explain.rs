@@ -1554,7 +1554,7 @@ fn render_verbose_join_expr(
                     right_names,
                 ));
             };
-            let Some(op_text) = verbose_op_text(op.op) else {
+            let Some(op_text) = verbose_op_text(op.opno, op.op) else {
                 return strip_outer_parens(&crate::backend::executor::render_explain_join_expr(
                     expr,
                     left_names,
@@ -1661,7 +1661,7 @@ fn render_verbose_expr(
             let [left, right] = op.args.as_slice() else {
                 return strip_outer_parens(&render_explain_expr(expr, column_names));
             };
-            let Some(op_text) = verbose_op_text(op.op) else {
+            let Some(op_text) = verbose_op_text(op.opno, op.op) else {
                 return strip_outer_parens(&render_explain_expr(expr, column_names));
             };
             format!(
@@ -1703,7 +1703,17 @@ fn render_verbose_expr(
     }
 }
 
-fn verbose_op_text(op: crate::include::nodes::primnodes::OpExprKind) -> Option<&'static str> {
+fn verbose_op_text(
+    opno: u32,
+    op: crate::include::nodes::primnodes::OpExprKind,
+) -> Option<&'static str> {
+    match opno {
+        crate::include::catalog::TEXT_PATTERN_LT_OPERATOR_OID => return Some("~<~"),
+        crate::include::catalog::TEXT_PATTERN_LE_OPERATOR_OID => return Some("~<=~"),
+        crate::include::catalog::TEXT_PATTERN_GE_OPERATOR_OID => return Some("~>=~"),
+        crate::include::catalog::TEXT_PATTERN_GT_OPERATOR_OID => return Some("~>~"),
+        _ => {}
+    }
     match op {
         crate::include::nodes::primnodes::OpExprKind::Add => Some("+"),
         crate::include::nodes::primnodes::OpExprKind::Sub => Some("-"),
