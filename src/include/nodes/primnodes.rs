@@ -568,6 +568,7 @@ pub enum BuiltinScalarFunction {
     LoUnlink,
     DatePart,
     DateTrunc,
+    TimeZone,
     IsFinite,
     MakeDate,
     Abs,

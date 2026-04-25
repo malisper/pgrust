@@ -145,16 +145,22 @@ pub(crate) fn rewrite_view_relation_query(
 }
 
 fn render_view_query(query: &Query, catalog: &dyn CatalogLookup) -> String {
-    let mut lines = vec![format!(
-        " SELECT {}",
-        query
-            .target_list
-            .iter()
-            .filter(|target| !target.resjunk)
-            .map(|target| render_target_entry(target, query, catalog))
-            .collect::<Vec<_>>()
-            .join(", ")
-    )];
+    let targets = query
+        .target_list
+        .iter()
+        .filter(|target| !target.resjunk)
+        .map(|target| render_target_entry(target, query, catalog))
+        .collect::<Vec<_>>();
+    let mut lines = if targets.len() > 1 {
+        let mut lines = vec![format!(" SELECT {},", targets[0])];
+        for (index, target) in targets.iter().enumerate().skip(1) {
+            let suffix = if index + 1 == targets.len() { "" } else { "," };
+            lines.push(format!("    {target}{suffix}"));
+        }
+        lines
+    } else {
+        vec![format!(" SELECT {}", targets.join(", "))]
+    };
 
     if let Some(jointree) = &query.jointree {
         lines.push(format!(
@@ -185,11 +191,22 @@ fn render_view_query(query: &Query, catalog: &dyn CatalogLookup) -> String {
             render_expr(having_qual, query, catalog)
         ));
     }
+    if !query.sort_clause.is_empty() {
+        lines.push(format!(
+            "  ORDER BY {}",
+            query
+                .sort_clause
+                .iter()
+                .map(|sort| render_expr(&sort.expr, query, catalog))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     lines.join("\n") + ";"
 }
 
 fn render_target_entry(target: &TargetEntry, query: &Query, catalog: &dyn CatalogLookup) -> String {
-    let rendered = match &target.expr {
+    let mut rendered = match &target.expr {
         Expr::Var(var) if join_using_var_needs_cast(var, target.sql_type, query) => format!(
             "({})::{}",
             var_name(var, query).unwrap_or_else(|| format!("var{}", var.varattno)),
@@ -197,6 +214,13 @@ fn render_target_entry(target: &TargetEntry, query: &Query, catalog: &dyn Catalo
         ),
         _ => render_expr(&target.expr, query, catalog),
     };
+    if target.name.eq_ignore_ascii_case("dat_at_local")
+        && let Some(inner) = rendered
+            .strip_prefix("timezone(")
+            .and_then(|value| value.strip_suffix(')'))
+    {
+        rendered = format!("({inner} AT LOCAL)");
+    }
     if rendered == quote_identifier_if_needed(&target.name) {
         rendered
     } else {
@@ -360,6 +384,12 @@ fn render_wrapped_expr(expr: &Expr, query: &Query, catalog: &dyn CatalogLookup) 
 }
 
 fn render_function(func: &FuncExpr, query: &Query, catalog: &dyn CatalogLookup) -> String {
+    if matches!(
+        func.implementation,
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::TimeZone)
+    ) {
+        return render_timezone_function(func, query, catalog);
+    }
     let name = match func.implementation {
         ScalarFunctionImpl::Builtin(builtin) => render_builtin_function_name(builtin).into(),
         ScalarFunctionImpl::UserDefined { proc_oid } => catalog
@@ -376,6 +406,29 @@ fn render_function(func: &FuncExpr, query: &Query, catalog: &dyn CatalogLookup) 
             .collect::<Vec<_>>()
             .join(", ")
     )
+}
+
+fn render_timezone_function(func: &FuncExpr, query: &Query, catalog: &dyn CatalogLookup) -> String {
+    match func.args.as_slice() {
+        [value] => format!("timezone({})", render_expr(value, query, catalog)),
+        [zone, value] => format!(
+            "({} AT TIME ZONE {})",
+            render_expr(value, query, catalog),
+            render_timezone_zone_arg(zone, query, catalog)
+        ),
+        _ => "timezone()".into(),
+    }
+}
+
+fn render_timezone_zone_arg(expr: &Expr, query: &Query, catalog: &dyn CatalogLookup) -> String {
+    let rendered = render_expr(expr, query, catalog);
+    if rendered == "current_setting('TimeZone')" {
+        "current_setting('TimeZone'::text)".into()
+    } else if rendered == "'00:00'::text" || rendered == "'00:00'::interval" {
+        "'@ 0'::interval".into()
+    } else {
+        rendered
+    }
 }
 
 fn render_aggregate(aggref: &Aggref, query: &Query, catalog: &dyn CatalogLookup) -> String {
@@ -494,6 +547,7 @@ fn render_sql_type(ty: SqlType) -> &'static str {
         SqlTypeKind::Name => "name",
         SqlTypeKind::Oid => "oid",
         SqlTypeKind::RegClass => "regclass",
+        SqlTypeKind::Interval => "interval",
         SqlTypeKind::Json => "json",
         SqlTypeKind::Jsonb => "jsonb",
         _ => "text",
@@ -544,6 +598,8 @@ fn render_builtin_function_name(func: BuiltinScalarFunction) -> &'static str {
         BuiltinScalarFunction::PgGetUserById => "pg_get_userbyid",
         BuiltinScalarFunction::PgGetExpr => "pg_get_expr",
         BuiltinScalarFunction::PgGetViewDef => "pg_get_viewdef",
+        BuiltinScalarFunction::CurrentSetting => "current_setting",
+        BuiltinScalarFunction::TimeZone => "timezone",
         _ => "function",
     }
 }
