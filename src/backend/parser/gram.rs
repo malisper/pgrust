@@ -13610,7 +13610,8 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
                 .map(build_type_len)
                 .transpose()
                 .expect("time precision");
-            let kind = if normalized == "timetz" || normalized.contains("with time zone") {
+            let kind = if normalized.starts_with("timetz") || normalized.contains("with time zone")
+            {
                 SqlTypeKind::TimeTz
             } else {
                 SqlTypeKind::Time
@@ -13634,11 +13635,12 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
                 .map(build_type_len)
                 .transpose()
                 .expect("timestamp precision");
-            let kind = if normalized == "timestamptz" || normalized.contains("with time zone") {
-                SqlTypeKind::TimestampTz
-            } else {
-                SqlTypeKind::Timestamp
-            };
+            let kind =
+                if normalized.starts_with("timestamptz") || normalized.contains("with time zone") {
+                    SqlTypeKind::TimestampTz
+                } else {
+                    SqlTypeKind::Timestamp
+                };
             RawTypeName::Builtin(
                 precision
                     .map(|precision| SqlType::with_time_precision(kind, precision))
@@ -14012,7 +14014,11 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                     }
                     Ok(SqlExpr::QuantifiedArray {
                         left: Box::new(left),
-                        op: SubqueryComparisonOp::Eq,
+                        op: if negated {
+                            SubqueryComparisonOp::NotEq
+                        } else {
+                            SubqueryComparisonOp::Eq
+                        },
                         is_all: negated,
                         array: Box::new(SqlExpr::ArrayLiteral(values)),
                     })

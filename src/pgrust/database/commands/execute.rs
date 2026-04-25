@@ -716,6 +716,8 @@ impl Database {
                     row_locks: std::sync::Arc::clone(&self.row_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
+                    statement_timestamp_usecs:
+                        crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
                     gucs: gucs.clone(),
                     interrupts: Arc::clone(&interrupts),
                     stats: std::sync::Arc::clone(&self.stats),
@@ -916,6 +918,8 @@ impl Database {
                     row_locks: std::sync::Arc::clone(&self.row_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
+                    statement_timestamp_usecs:
+                        crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
                     gucs: gucs.clone(),
                     interrupts: Arc::clone(&interrupts),
                     stats: std::sync::Arc::clone(&self.stats),
@@ -1031,6 +1035,8 @@ impl Database {
                     row_locks: std::sync::Arc::clone(&self.row_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
+                    statement_timestamp_usecs:
+                        crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
                     gucs: gucs.clone(),
                     interrupts: Arc::clone(&interrupts),
                     stats: std::sync::Arc::clone(&self.stats),
@@ -1135,6 +1141,8 @@ impl Database {
                     row_locks: std::sync::Arc::clone(&self.row_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
+                    statement_timestamp_usecs:
+                        crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
                     gucs: gucs.clone(),
                     interrupts: Arc::clone(&interrupts),
                     stats: std::sync::Arc::clone(&self.stats),
@@ -1240,6 +1248,8 @@ impl Database {
                     row_locks: std::sync::Arc::clone(&self.row_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
+                    statement_timestamp_usecs:
+                        crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
                     gucs: gucs.clone(),
                     interrupts: Arc::clone(&interrupts),
                     stats: std::sync::Arc::clone(&self.stats),
@@ -1611,6 +1621,8 @@ impl Database {
                     row_locks: std::sync::Arc::clone(&self.row_locks),
                     checkpoint_stats: self.checkpoint_stats_snapshot(),
                     datetime_config: datetime_config.clone(),
+                    statement_timestamp_usecs:
+                        crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
                     gucs: gucs.clone(),
                     interrupts: Arc::clone(&interrupts),
                     stats: std::sync::Arc::clone(&self.stats),
@@ -1783,6 +1795,8 @@ impl Database {
             row_locks: std::sync::Arc::clone(&self.row_locks),
             checkpoint_stats: self.checkpoint_stats_snapshot(),
             datetime_config: datetime_config.clone(),
+            statement_timestamp_usecs:
+                crate::backend::utils::time::datetime::current_postgres_timestamp_usecs(),
             gucs: std::collections::HashMap::new(),
             interrupts,
             stats: std::sync::Arc::clone(&self.stats),

@@ -29,11 +29,17 @@ use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::time::date::{
     DateParseError, parse_date_text, parse_time_text, parse_timetz_text,
 };
-use crate::backend::utils::time::datetime::DateTimeParseError;
+use crate::backend::utils::time::datetime::{
+    DateTimeParseError, timestamp_parts_from_usecs, timezone_offset_seconds,
+};
 use crate::backend::utils::time::timestamp::{parse_timestamp_text, parse_timestamptz_text};
 use crate::include::catalog::{
     INT2_TYPE_OID, OID_TYPE_OID, TEXT_TYPE_OID, bootstrap_pg_cast_rows, builtin_type_rows,
     multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+};
+use crate::include::nodes::datetime::{
+    DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT,
+    USECS_PER_DAY, USECS_PER_SEC,
 };
 use crate::include::nodes::datum::ArrayDimension;
 use crate::pgrust::compact_string::CompactString;
@@ -74,6 +80,46 @@ fn unsupported_trigger_input() -> ExecError {
         hint: None,
         sqlstate: "0A000",
     }
+}
+
+fn timestamp_date_part(value: TimestampADT) -> DateADT {
+    if !value.is_finite() {
+        return DateADT(match value.0 {
+            crate::include::nodes::datetime::TIMESTAMP_NOEND => DATEVAL_NOEND,
+            crate::include::nodes::datetime::TIMESTAMP_NOBEGIN => DATEVAL_NOBEGIN,
+            _ => unreachable!("checked finite timestamp above"),
+        });
+    }
+    let (days, _) = timestamp_parts_from_usecs(value.0);
+    DateADT(days)
+}
+
+fn timestamp_time_part(value: TimestampADT) -> Option<TimeADT> {
+    value.is_finite().then(|| {
+        let (_, time_usecs) = timestamp_parts_from_usecs(value.0);
+        TimeADT(time_usecs.rem_euclid(USECS_PER_DAY))
+    })
+}
+
+fn timestamp_to_timestamptz(value: TimestampADT, config: &DateTimeConfig) -> TimestampTzADT {
+    if !value.is_finite() {
+        return TimestampTzADT(value.0);
+    }
+    TimestampTzADT(value.0 - i64::from(timezone_offset_seconds(config)) * USECS_PER_SEC)
+}
+
+fn timestamptz_local_timestamp(value: TimestampTzADT, config: &DateTimeConfig) -> TimestampADT {
+    if !value.is_finite() {
+        return TimestampADT(value.0);
+    }
+    TimestampADT(value.0 + i64::from(timezone_offset_seconds(config)) * USECS_PER_SEC)
+}
+
+fn timestamp_time_tz_part(value: TimestampADT, config: &DateTimeConfig) -> Option<TimeTzADT> {
+    timestamp_time_part(value).map(|time| TimeTzADT {
+        time,
+        offset_seconds: timezone_offset_seconds(config),
+    })
 }
 
 fn jsonb_type_name(value: &JsonbValue) -> &'static str {
@@ -1830,7 +1876,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
         return result;
     }
 
-    match value {
+    let result = match value {
         Value::Null => Ok(Value::Null),
         Value::Int16(v) => match ty {
             ty if ty.is_range() => cast_text_value(&v.to_string(), ty, true),
@@ -2281,14 +2327,14 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
         },
         Value::TimeTz(v) => match ty.kind {
             SqlTypeKind::TimeTz => Ok(Value::TimeTz(v)),
+            SqlTypeKind::Time => Ok(Value::Time(v.time)),
             SqlTypeKind::Text
             | SqlTypeKind::Name
             | SqlTypeKind::Char
             | SqlTypeKind::Varchar
             | SqlTypeKind::Json
             | SqlTypeKind::Jsonb
-            | SqlTypeKind::JsonPath
-            | SqlTypeKind::Time => cast_text_value_with_config(
+            | SqlTypeKind::JsonPath => cast_text_value_with_config(
                 &render_datetime_value_text_with_config(&Value::TimeTz(v), config)
                     .expect("datetime values render"),
                 ty,
@@ -2303,17 +2349,27 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
         },
         Value::Timestamp(v) => match ty.kind {
             SqlTypeKind::Timestamp => Ok(Value::Timestamp(v)),
+            SqlTypeKind::TimestampTz => Ok(Value::TimestampTz(timestamp_to_timestamptz(v, config))),
+            SqlTypeKind::Date => Ok(Value::Date(timestamp_date_part(v))),
+            SqlTypeKind::Time => timestamp_time_part(v).map(Value::Time).ok_or_else(|| {
+                ExecError::InvalidStorageValue {
+                    column: "time".into(),
+                    details: "invalid input syntax for type time".into(),
+                }
+            }),
+            SqlTypeKind::TimeTz => timestamp_time_tz_part(v, config)
+                .map(Value::TimeTz)
+                .ok_or_else(|| ExecError::InvalidStorageValue {
+                    column: "timetz".into(),
+                    details: "invalid input syntax for type time with time zone".into(),
+                }),
             SqlTypeKind::Text
             | SqlTypeKind::Name
             | SqlTypeKind::Char
             | SqlTypeKind::Varchar
             | SqlTypeKind::Json
             | SqlTypeKind::Jsonb
-            | SqlTypeKind::JsonPath
-            | SqlTypeKind::TimestampTz
-            | SqlTypeKind::Date
-            | SqlTypeKind::Time
-            | SqlTypeKind::TimeTz => cast_text_value_with_config(
+            | SqlTypeKind::JsonPath => cast_text_value_with_config(
                 &render_datetime_value_text_with_config(&Value::Timestamp(v), config)
                     .expect("datetime values render"),
                 ty,
@@ -2328,17 +2384,31 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
         },
         Value::TimestampTz(v) => match ty.kind {
             SqlTypeKind::TimestampTz => Ok(Value::TimestampTz(v)),
+            SqlTypeKind::Timestamp => Ok(Value::Timestamp(timestamptz_local_timestamp(v, config))),
+            SqlTypeKind::Date => Ok(Value::Date(timestamp_date_part(
+                timestamptz_local_timestamp(v, config),
+            ))),
+            SqlTypeKind::Time => timestamp_time_part(timestamptz_local_timestamp(v, config))
+                .map(Value::Time)
+                .ok_or_else(|| ExecError::InvalidStorageValue {
+                    column: "time".into(),
+                    details: "invalid input syntax for type time".into(),
+                }),
+            SqlTypeKind::TimeTz => {
+                timestamp_time_tz_part(timestamptz_local_timestamp(v, config), config)
+                    .map(Value::TimeTz)
+                    .ok_or_else(|| ExecError::InvalidStorageValue {
+                        column: "timetz".into(),
+                        details: "invalid input syntax for type time with time zone".into(),
+                    })
+            }
             SqlTypeKind::Text
             | SqlTypeKind::Name
             | SqlTypeKind::Char
             | SqlTypeKind::Varchar
             | SqlTypeKind::Json
             | SqlTypeKind::Jsonb
-            | SqlTypeKind::JsonPath
-            | SqlTypeKind::Timestamp
-            | SqlTypeKind::Date
-            | SqlTypeKind::Time
-            | SqlTypeKind::TimeTz => cast_text_value_with_config(
+            | SqlTypeKind::JsonPath => cast_text_value_with_config(
                 &render_datetime_value_text_with_config(&Value::TimestampTz(v), config)
                     .expect("datetime values render"),
                 ty,
@@ -2996,7 +3066,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             }
             _ => Ok(Value::Record(record)),
         },
-    }
+    }?;
+    Ok(apply_time_precision(result, ty.time_precision()))
 }
 
 fn bytea_to_signed_int(bytes: &[u8], width: usize, ty: &'static str) -> Result<i64, ExecError> {
@@ -3787,6 +3858,9 @@ mod tests {
     use crate::backend::executor::{ExecError, Value};
     use crate::backend::parser::{SqlType, SqlTypeKind};
     use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+    use crate::include::nodes::datetime::{
+        DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC,
+    };
     use crate::include::nodes::datum::{ArrayValue, IntervalValue};
 
     #[test]
@@ -3951,6 +4025,44 @@ mod tests {
                 ])
                 .with_element_type_oid(crate::include::catalog::INTERVAL_TYPE_OID),
             )
+        );
+    }
+
+    #[test]
+    fn timestamp_casts_use_datetime_parts() {
+        let timestamp =
+            TimestampADT(USECS_PER_DAY + (12 * 3600 + 34 * 60 + 56) * USECS_PER_SEC + 789);
+        let timestamptz = TimestampTzADT(timestamp.0);
+        let config = DateTimeConfig::default();
+
+        assert_eq!(
+            cast_value(Value::Timestamp(timestamp), SqlType::new(SqlTypeKind::Date)).unwrap(),
+            Value::Date(DateADT(1))
+        );
+        assert_eq!(
+            cast_value(Value::Timestamp(timestamp), SqlType::new(SqlTypeKind::Time)).unwrap(),
+            Value::Time(TimeADT((12 * 3600 + 34 * 60 + 56) * USECS_PER_SEC + 789))
+        );
+        assert_eq!(
+            cast_value(
+                Value::Timestamp(timestamp),
+                SqlType::new(SqlTypeKind::TimeTz)
+            )
+            .unwrap(),
+            Value::TimeTz(TimeTzADT {
+                time: TimeADT((12 * 3600 + 34 * 60 + 56) * USECS_PER_SEC + 789),
+                offset_seconds: 0,
+            })
+        );
+        assert_eq!(
+            cast_value_with_source_type_and_config(
+                Value::TimestampTz(timestamptz),
+                None,
+                SqlType::new(SqlTypeKind::Timestamp),
+                &config,
+            )
+            .unwrap(),
+            Value::Timestamp(timestamp)
         );
     }
 
