@@ -5289,6 +5289,103 @@ fn regression_aggregate_constant_and_tiny_variance_edges_match_pg() {
 }
 
 #[test]
+fn numeric_regression_remaining_precision_edges_match_pg() {
+    let base = temp_dir("numeric_remaining_precision_edges");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select trim_scale((0.1 - 2e-16383) * (0.1 - 3e-16383))",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Numeric("0.01".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select round(((1 - 1.500012345678e-1000) ^ 1.45e1003) * 1e1000)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Numeric(
+                    "25218976308958387188077465658068501556514992509509282366".into()
+                )]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "with num_variance(a) as (values (0::numeric), (3e-500), (-3e-500), \
+         (4e-500 - 1e-16383), (-4e-500 + 1e-16383)) \
+         select trim_scale(variance(a) * 1e1000) from num_variance",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Numeric("12".into())]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select variance(9e131071 + x) from generate_series(1, 5) x",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![vec![Value::Numeric("2.5000000000000000".into())]]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select (i / (10::numeric ^ 131071))::numeric(1,0) \
+         from generate_series(6 * (10::numeric ^ 131071), \
+                              9 * (10::numeric ^ 131071), \
+                              10::numeric ^ 131071) as a(i)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Numeric("6".into())],
+                    vec![Value::Numeric("7".into())],
+                    vec![Value::Numeric("8".into())],
+                    vec![Value::Numeric("9".into())],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn regression_aggregate_unknown_nan_literals_match_pg() {
     let base = temp_dir("regr_agg_unknown_nan");
     let txns = TransactionManager::new_durable(&base).unwrap();
