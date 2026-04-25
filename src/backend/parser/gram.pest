@@ -1,11 +1,12 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
 statement = { SOI ~ stmt ~ EOI }
-stmt = _{ do_stmt | explain_stmt | declare_cursor_stmt | fetch_stmt | move_stmt | close_portal_stmt | table_stmt | select_into_stmt | select_stmt | values_stmt | copy_stmt | analyze_stmt | checkpoint_stmt | notify_stmt | listen_stmt | unlisten_stmt | show_stmt | set_session_authorization_stmt | reset_session_authorization_stmt | set_role_stmt | reset_role_stmt | set_stmt | reset_stmt | create_role_stmt | alter_role_stmt | alter_group_stmt | create_database_stmt | create_schema_stmt | create_policy_stmt | create_index_stmt | alter_table_add_column_stmt | alter_table_add_constraint_stmt | alter_table_drop_constraint_stmt | alter_table_alter_constraint_stmt | alter_table_rename_constraint_stmt | alter_table_drop_column_stmt | alter_table_alter_column_type_stmt | alter_table_alter_column_expression_stmt | alter_table_alter_column_default_stmt | alter_table_alter_column_compression_stmt | alter_table_alter_column_storage_stmt | alter_table_alter_column_options_stmt | alter_table_alter_column_statistics_stmt | alter_table_owner_stmt | alter_table_rename_column_stmt | alter_table_rename_stmt | alter_view_owner_stmt | alter_schema_owner_stmt | alter_table_set_stmt | alter_table_set_row_security_stmt | alter_policy_stmt | alter_table_set_not_null_stmt | alter_table_drop_not_null_stmt | alter_table_validate_constraint_stmt | alter_table_inherit_stmt | alter_table_no_inherit_stmt | comment_on_role_stmt | comment_on_table_stmt | comment_on_index_stmt | comment_on_rule_stmt | comment_on_trigger_stmt | create_table_stmt | create_materialized_view_stmt | create_view_stmt | create_rule_stmt | refresh_materialized_view_stmt | drop_role_stmt | drop_database_stmt | drop_table_stmt | drop_index_stmt | drop_materialized_view_stmt | drop_view_stmt | drop_rule_stmt | drop_policy_stmt | drop_schema_stmt | drop_owned_stmt | reassign_owned_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | merge_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_to_stmt | rollback_stmt | savepoint_stmt }
+stmt = _{ do_stmt | call_stmt | explain_stmt | declare_cursor_stmt | fetch_stmt | move_stmt | close_portal_stmt | table_stmt | select_into_stmt | select_stmt | values_stmt | copy_stmt | analyze_stmt | checkpoint_stmt | notify_stmt | listen_stmt | unlisten_stmt | show_stmt | set_session_authorization_stmt | reset_session_authorization_stmt | set_role_stmt | reset_role_stmt | set_stmt | reset_stmt | create_role_stmt | alter_role_stmt | alter_group_stmt | create_database_stmt | create_schema_stmt | create_policy_stmt | create_index_stmt | alter_table_add_column_stmt | alter_table_add_constraint_stmt | alter_table_drop_constraint_stmt | alter_table_alter_constraint_stmt | alter_table_rename_constraint_stmt | alter_table_drop_column_stmt | alter_table_alter_column_type_stmt | alter_table_alter_column_expression_stmt | alter_table_alter_column_default_stmt | alter_table_alter_column_compression_stmt | alter_table_alter_column_storage_stmt | alter_table_alter_column_options_stmt | alter_table_alter_column_statistics_stmt | alter_table_owner_stmt | alter_table_rename_column_stmt | alter_table_rename_stmt | alter_view_owner_stmt | alter_schema_owner_stmt | alter_table_set_stmt | alter_table_set_row_security_stmt | alter_policy_stmt | alter_table_set_not_null_stmt | alter_table_drop_not_null_stmt | alter_table_validate_constraint_stmt | alter_table_inherit_stmt | alter_table_no_inherit_stmt | comment_on_role_stmt | comment_on_table_stmt | comment_on_index_stmt | comment_on_rule_stmt | comment_on_trigger_stmt | create_table_stmt | create_materialized_view_stmt | create_view_stmt | create_rule_stmt | refresh_materialized_view_stmt | drop_role_stmt | drop_database_stmt | drop_table_stmt | drop_index_stmt | drop_materialized_view_stmt | drop_view_stmt | drop_rule_stmt | drop_policy_stmt | drop_schema_stmt | drop_owned_stmt | reassign_owned_stmt | truncate_table_stmt | vacuum_stmt | insert_stmt | merge_stmt | update_stmt | delete_stmt | begin_stmt | commit_stmt | rollback_to_stmt | rollback_stmt | savepoint_stmt }
 
 do_stmt = { kw_do ~ do_body ~ do_language_clause? | kw_do ~ do_language_clause ~ do_body }
 do_body = { quoted_string_literal }
 do_language_clause = { kw_language ~ identifier }
+call_stmt = { kw_call ~ identifier ~ ("." ~ identifier)? ~ "(" ~ function_arg_list? ~ ")" }
 
 analyze_stmt = { kw_analyze ~ analyze_option_block? ~ maintenance_target_list? }
 checkpoint_stmt = { kw_checkpoint }
@@ -659,6 +660,7 @@ kw_merge = _{ kw_merge_atom }
 kw_into = _{ kw_into_atom }
 kw_values = _{ kw_values_atom }
 kw_create = _{ kw_create_atom }
+kw_call = _{ kw_call_atom }
 kw_rule = _{ kw_rule_atom }
 kw_trigger = _{ kw_trigger_atom }
 kw_role = _{ kw_role_atom }
@@ -1009,6 +1011,7 @@ kw_merge_atom = @{ ^"merge" ~ keyword_end }
 kw_into_atom = @{ ^"into" ~ keyword_end }
 kw_values_atom = @{ ^"values" ~ keyword_end }
 kw_create_atom = @{ ^"create" ~ keyword_end }
+kw_call_atom = @{ ^"call" ~ keyword_end }
 kw_rule_atom = @{ ^"rule" ~ keyword_end }
 kw_trigger_atom = @{ ^"trigger" ~ keyword_end }
 kw_role_atom = @{ ^"role" ~ keyword_end }

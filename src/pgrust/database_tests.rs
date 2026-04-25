@@ -22558,6 +22558,150 @@ fn drop_function_uses_search_path_and_signature() {
 }
 
 #[test]
+fn create_and_drop_procedure_uses_pg_proc_procedure_kind() {
+    let base = temp_dir("create_drop_procedure_catalog");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session.execute(&db, "create schema tenant_proc").unwrap();
+    session
+        .execute(&db, "set search_path = tenant_proc")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create procedure add_log(x int4, y text default 'a') \
+             language sql as $$ insert into cp_test values (x, y) $$",
+        )
+        .unwrap();
+
+    let visible = db.backend_catcache(1, None).unwrap();
+    let tenant_ns = visible
+        .namespace_by_name("tenant_proc")
+        .expect("tenant namespace")
+        .oid;
+    let proc = visible
+        .proc_rows_by_name("add_log")
+        .into_iter()
+        .find(|row| row.pronamespace == tenant_ns)
+        .expect("procedure row");
+    assert_eq!(proc.prokind, 'p');
+    assert_eq!(proc.pronargs, 2);
+
+    session
+        .execute(&db, "drop procedure add_log(int4, text)")
+        .unwrap();
+    let visible = db.backend_catcache(1, None).unwrap();
+    assert!(
+        visible.proc_rows_by_name("add_log").is_empty(),
+        "expected dropped procedure to be absent from pg_proc"
+    );
+}
+
+#[test]
+fn call_sql_procedure_executes_body_and_rejects_functions() {
+    let base = temp_dir("call_sql_procedure_executes");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table cp_test (id int4, value text)")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create procedure add_log(x int4, y text) \
+             language sql as $$ insert into cp_test values ($1, y) $$",
+        )
+        .unwrap();
+    session
+        .execute(&db, "call add_log(7, 'xy' || 'zzy')")
+        .unwrap();
+
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "select id, value from cp_test order by id",
+    );
+    assert_eq!(
+        rows,
+        vec![vec![Value::Int32(7), Value::Text("xyzzy".into())]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create function add_log_fn(x int4) returns int4 language sql as $$ select x $$",
+        )
+        .unwrap();
+    let err = session.execute(&db, "call add_log_fn(1)").unwrap_err();
+    let message = format!("{err:?}");
+    assert!(message.contains("is not a procedure"), "{message}");
+}
+
+#[test]
+fn call_sql_procedure_returns_out_and_inout_rows() {
+    let base = temp_dir("call_sql_procedure_out_rows");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create procedure ptest_out(inout a int4, out b text) \
+             language sql as $$ select a + 1, 'done' $$",
+        )
+        .unwrap();
+    let result = session.execute(&db, "call ptest_out(4, null)").unwrap();
+
+    match result {
+        StatementResult::Query {
+            column_names, rows, ..
+        } => {
+            assert_eq!(column_names, vec!["a", "b"]);
+            assert_eq!(
+                rows,
+                vec![vec![Value::Int32(5), Value::Text("done".into())]]
+            );
+        }
+        other => panic!("expected CALL output row, got {other:?}"),
+    }
+}
+
+#[test]
+fn procedure_catalog_display_helpers_read_pg_proc_metadata() {
+    let base = temp_dir("procedure_catalog_display_helpers");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create procedure ptest_meta(in x int4, out y text) \
+             language sql as $$ select 'value' $$",
+        )
+        .unwrap();
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "select pg_function_is_visible(oid), \
+                pg_get_function_result(oid), \
+                pg_get_function_arguments(oid), \
+                pg_get_functiondef(oid) \
+          from pg_proc \
+          where proname = 'ptest_meta'",
+    );
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], Value::Bool(true));
+    assert_eq!(rows[0][1], Value::Null);
+    assert_eq!(rows[0][2], Value::Text("x integer, OUT y text".into()));
+    let definition = rows[0][3].as_text().unwrap();
+    assert!(definition.contains("CREATE OR REPLACE PROCEDURE public.ptest_meta"));
+    assert!(definition.contains("LANGUAGE sql"));
+}
+
+#[test]
 fn drop_table_cascade_notice_omits_temp_schema_name() {
     let base = temp_dir("drop_temp_child_notice");
     let db = Database::open(&base, 16).unwrap();

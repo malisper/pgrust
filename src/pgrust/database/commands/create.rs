@@ -2,15 +2,16 @@ use super::super::*;
 use crate::backend::commands::partition::validate_new_partition_bound;
 use crate::backend::parser::{
     AggregateArgType, AggregateSignatureKind, CreateAggregateStatement, CreateFunctionReturnSpec,
-    CreateFunctionStatement, FunctionArgMode, FunctionParallel, FunctionVolatility,
-    OwnedSequenceSpec, PartitionBoundSpec, SequenceOptionsSpec, SqlTypeKind,
-    pg_partitioned_table_row, resolve_raw_type_name, serialize_partition_bound,
+    CreateFunctionStatement, CreateProcedureStatement, FunctionArgMode, FunctionParallel,
+    FunctionVolatility, OwnedSequenceSpec, PartitionBoundSpec, RawTypeName, SequenceOptionsSpec,
+    SqlType, SqlTypeKind, pg_partitioned_table_row, resolve_raw_type_name,
+    serialize_partition_bound,
 };
 use crate::include::catalog::{
     ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLERANGEOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID,
     BOOTSTRAP_SUPERUSER_OID, BYTEA_TYPE_OID, INTERNAL_TYPE_OID, PG_CATALOG_NAMESPACE_OID,
     PG_LANGUAGE_INTERNAL_OID, PG_LANGUAGE_PLPGSQL_OID, PG_LANGUAGE_SQL_OID, PgAggregateRow,
-    PgProcRow, RECORD_TYPE_OID,
+    PgProcRow, RECORD_TYPE_OID, VOID_TYPE_OID,
 };
 use crate::include::nodes::parsenodes::{ForeignKeyAction, ForeignKeyMatchType};
 use crate::include::nodes::primnodes::{QueryColumn, RelationDesc};
@@ -1124,6 +1125,100 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
+        self.execute_create_function_stmt_in_transaction_with_kind(
+            client_id,
+            create_stmt,
+            xid,
+            cid,
+            configured_search_path,
+            catalog_effects,
+            'f',
+            "function",
+        )
+    }
+
+    pub(crate) fn execute_create_procedure_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateProcedureStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_create_procedure_stmt_in_transaction_with_search_path(
+            client_id,
+            create_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    pub(crate) fn execute_create_procedure_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateProcedureStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let function_stmt = CreateFunctionStatement {
+            schema_name: create_stmt.schema_name.clone(),
+            function_name: create_stmt.procedure_name.clone(),
+            replace_existing: create_stmt.replace_existing,
+            cost: None,
+            args: create_stmt.args.clone(),
+            return_spec: if create_stmt
+                .args
+                .iter()
+                .any(|arg| matches!(arg.mode, FunctionArgMode::Out | FunctionArgMode::InOut))
+            {
+                CreateFunctionReturnSpec::DerivedFromOutArgs {
+                    setof_record: false,
+                }
+            } else {
+                CreateFunctionReturnSpec::Type {
+                    ty: RawTypeName::Builtin(SqlType::new(SqlTypeKind::Void)),
+                    setof: false,
+                }
+            },
+            strict: create_stmt.strict,
+            leakproof: false,
+            volatility: create_stmt.volatility,
+            parallel: FunctionParallel::Unsafe,
+            language: create_stmt.language.clone(),
+            body: create_stmt.body.clone(),
+            link_symbol: None,
+        };
+        self.execute_create_function_stmt_in_transaction_with_kind(
+            client_id,
+            &function_stmt,
+            xid,
+            cid,
+            configured_search_path,
+            catalog_effects,
+            'p',
+            "procedure",
+        )
+    }
+
+    fn execute_create_function_stmt_in_transaction_with_kind(
+        &self,
+        client_id: ClientId,
+        create_stmt: &CreateFunctionStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+        proc_kind: char,
+        object_kind: &'static str,
+    ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
         let (function_name, namespace_oid) = normalize_create_proc_name_for_search_path(
@@ -1132,7 +1227,7 @@ impl Database {
             Some((xid, cid)),
             create_stmt.schema_name.as_deref(),
             &create_stmt.function_name,
-            "function",
+            object_kind,
             configured_search_path,
         )?;
 
@@ -1330,11 +1425,18 @@ impl Database {
         let existing_proc = catalog
             .proc_rows_by_name(&function_name)
             .into_iter()
-            .find(|row| row.pronamespace == namespace_oid && row.proargtypes == proargtypes);
+            .find(|row| {
+                row.pronamespace == namespace_oid
+                    && row.proargtypes == proargtypes
+                    && row.prokind == proc_kind
+            });
         if existing_proc.is_some() && !create_stmt.replace_existing {
             return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "unique function signature",
-                actual: format!("function {}({}) already exists", function_name, proargtypes),
+                expected: "unique routine signature",
+                actual: format!(
+                    "{object_kind} {}({}) already exists",
+                    function_name, proargtypes
+                ),
             }));
         }
 
@@ -1355,7 +1457,7 @@ impl Database {
             prorows: if proretset { 1000.0 } else { 0.0 },
             provariadic: 0,
             prosupport: 0,
-            prokind: 'f',
+            prokind: proc_kind,
             prosecdef: false,
             proleakproof: create_stmt.leakproof,
             proisstrict: create_stmt.strict,
@@ -1368,7 +1470,11 @@ impl Database {
             proparallel: proc_parallel_code(create_stmt.parallel),
             pronargs: callable_arg_oids.len() as i16,
             pronargdefaults: 0,
-            prorettype,
+            prorettype: if proc_kind == 'p' {
+                VOID_TYPE_OID
+            } else {
+                prorettype
+            },
             proargtypes,
             proallargtypes,
             proargmodes,

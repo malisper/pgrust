@@ -18,11 +18,12 @@ use crate::backend::executor::{
     DeferredForeignKeyTracker, ExecError, ExecutorContext, ExecutorTransactionState, Expr,
     RelationDesc, SessionReplicationRole, StatementResult, Value, cast_value,
     cast_value_with_source_type_catalog_and_config, execute_planned_stmt,
-    execute_readonly_statement_with_config, parse_bytea_text,
+    execute_readonly_statement_with_config, parse_bytea_text, render_sql_literal,
+    substitute_named_arg, substitute_positional_args,
 };
 use crate::backend::libpq::pqformat::FloatFormatOptions;
 use crate::backend::parser::{
-    CatalogLookup, CopyFormat as ParserCopyFormat, CopyFromStatement,
+    CallStatement, CatalogLookup, CopyFormat as ParserCopyFormat, CopyFromStatement,
     CopyOptions as ParserCopyOptions, CopySource, CopyToDestination, CopyToSource, CopyToStatement,
     DetachPartitionMode, ParseError, ParseOptions, PreparedInsert, SelectStatement, Statement,
     bind_delete, bind_insert, bind_insert_prepared, bind_update, pg_plan_query_with_config,
@@ -48,10 +49,12 @@ use crate::backend::utils::misc::stack_depth::{
     MIN_MAX_STACK_DEPTH_KB, StackDepthGuard, max_stack_depth_limit_kb,
 };
 use crate::include::catalog::{
-    PG_CHECKPOINT_OID, PG_EXECUTE_SERVER_PROGRAM_OID, PG_WRITE_SERVER_FILES_OID,
+    PG_CHECKPOINT_OID, PG_EXECUTE_SERVER_PROGRAM_OID, PG_LANGUAGE_SQL_OID,
+    PG_WRITE_SERVER_FILES_OID, PgProcRow,
 };
 use crate::include::nodes::execnodes::ScalarType;
 use crate::include::nodes::pathnodes::PlannerConfig;
+use crate::include::nodes::primnodes::QueryColumn;
 use crate::pgrust::auth::AuthState;
 use crate::pgrust::autovacuum::is_autovacuum_guc;
 use crate::pgrust::database::{
@@ -474,6 +477,253 @@ pub enum ByteaOutputFormat {
     Escape,
 }
 
+fn resolve_call_procedure(
+    call_stmt: &CallStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<PgProcRow, ExecError> {
+    let rows = catalog
+        .proc_rows_by_name(&call_stmt.procedure_name)
+        .into_iter()
+        .filter(|row| proc_matches_call_schema(row, call_stmt.schema_name.as_deref(), catalog))
+        .collect::<Vec<_>>();
+    if let Some(row) = rows.iter().find(|row| {
+        row.prokind == 'p' && proc_accepts_call_arg_count(row, call_stmt.raw_arg_sql.len())
+    }) {
+        return Ok(row.clone());
+    }
+    if rows.iter().any(|row| {
+        row.prokind == 'f' && proc_accepts_call_arg_count(row, call_stmt.raw_arg_sql.len())
+    }) {
+        return Err(ExecError::DetailedError {
+            message: format!(
+                "{} is not a procedure",
+                call_signature_text(&call_stmt.procedure_name, call_stmt.raw_arg_sql.len())
+            ),
+            detail: None,
+            hint: Some("To call a function, use SELECT.".into()),
+            sqlstate: "42809",
+        });
+    }
+    Err(call_undefined_procedure_error(call_stmt))
+}
+
+fn proc_matches_call_schema(
+    row: &PgProcRow,
+    schema_name: Option<&str>,
+    catalog: &dyn CatalogLookup,
+) -> bool {
+    let Some(schema_name) = schema_name else {
+        return true;
+    };
+    catalog
+        .namespace_row_by_oid(row.pronamespace)
+        .is_some_and(|namespace| namespace.nspname.eq_ignore_ascii_case(schema_name))
+}
+
+fn proc_accepts_call_arg_count(row: &PgProcRow, actual: usize) -> bool {
+    let input_count = row.pronargs.max(0) as usize;
+    let all_count = row
+        .proallargtypes
+        .as_ref()
+        .map(Vec::len)
+        .unwrap_or(input_count);
+    actual == input_count || actual == all_count
+}
+
+fn call_signature_text(name: &str, nargs: usize) -> String {
+    let arg_types = std::iter::repeat_n("unknown", nargs)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{name}({arg_types})")
+}
+
+fn call_undefined_procedure_error(call_stmt: &CallStatement) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "procedure {} does not exist",
+            call_signature_text(&call_stmt.procedure_name, call_stmt.raw_arg_sql.len())
+        ),
+        detail: None,
+        hint: Some(
+            "No procedure matches the given name and argument types. You might need to add explicit type casts."
+                .into(),
+        ),
+        sqlstate: "42883",
+    }
+}
+
+fn inline_sql_procedure_body(row: &PgProcRow, args: &[Value]) -> Result<String, ExecError> {
+    let body = strip_sql_standard_body_wrapper(row.prosrc.trim());
+    let mut sql = substitute_positional_args(body, args)?;
+    if let Some(names) = row.proargnames.as_ref() {
+        let input_arg_names = names
+            .iter()
+            .zip(row.proargmodes.as_deref().unwrap_or(&[]).iter().copied())
+            .filter(|(_, mode)| matches!(*mode, b'i' | b'b'))
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        let names = if input_arg_names.is_empty() {
+            names.iter().collect::<Vec<_>>()
+        } else {
+            input_arg_names
+        };
+        for (index, name) in names.into_iter().enumerate() {
+            if name.is_empty() || index >= args.len() {
+                continue;
+            }
+            let replacement = render_sql_literal(&args[index])?;
+            sql = substitute_named_arg(&sql, name, &replacement);
+        }
+    }
+    Ok(sql)
+}
+
+fn strip_sql_standard_body_wrapper(body: &str) -> &str {
+    let trimmed = body.trim();
+    let Some(after_begin) = strip_keyword_prefix_ci(trimmed, "begin") else {
+        return trimmed;
+    };
+    let Some(after_atomic) = strip_keyword_prefix_ci(after_begin.trim_start(), "atomic") else {
+        return trimmed;
+    };
+    let inner = after_atomic.trim();
+    let lower = inner.to_ascii_lowercase();
+    if let Some(end_index) = lower.rfind("end") {
+        inner[..end_index].trim()
+    } else {
+        inner
+    }
+}
+
+fn strip_keyword_prefix_ci<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
+    input
+        .get(..keyword.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(keyword))
+        .then(|| &input[keyword.len()..])
+}
+
+fn split_sql_procedure_body(body: &str) -> Result<Vec<String>, ExecError> {
+    let mut statements = Vec::new();
+    let mut start = 0usize;
+    let bytes = body.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => {
+                i = scan_sql_delimited_end(bytes, i, b'\'')?;
+                continue;
+            }
+            b'"' => {
+                i = scan_sql_delimited_end(bytes, i, b'"')?;
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_sql_dollar_string_end(body, i) {
+                    i = end;
+                    continue;
+                }
+            }
+            b';' => {
+                let statement = body[start..i].trim();
+                if !statement.is_empty() {
+                    statements.push(statement.to_string());
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let statement = body[start..].trim();
+    if !statement.is_empty() {
+        statements.push(statement.to_string());
+    }
+    Ok(statements)
+}
+
+fn scan_sql_delimited_end(bytes: &[u8], start: usize, delimiter: u8) -> Result<usize, ExecError> {
+    let mut i = start + 1;
+    while i < bytes.len() {
+        if bytes[i] == delimiter {
+            if i + 1 < bytes.len() && bytes[i + 1] == delimiter {
+                i += 2;
+                continue;
+            }
+            return Ok(i + 1);
+        }
+        i += 1;
+    }
+    Err(ExecError::Parse(ParseError::UnexpectedEof))
+}
+
+fn scan_sql_dollar_string_end(input: &str, start: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    if bytes.get(start) != Some(&b'$') {
+        return None;
+    }
+    let mut tag_end = start + 1;
+    while tag_end < bytes.len() {
+        let byte = bytes[tag_end];
+        if byte == b'$' {
+            break;
+        }
+        if !(byte.is_ascii_alphanumeric() || byte == b'_') {
+            return None;
+        }
+        tag_end += 1;
+    }
+    if bytes.get(tag_end) != Some(&b'$') {
+        return None;
+    }
+    let tag = &input[start..=tag_end];
+    input[tag_end + 1..]
+        .find(tag)
+        .map(|offset| tag_end + 1 + offset + tag.len())
+}
+
+fn procedure_output_args(
+    row: &PgProcRow,
+) -> impl Iterator<Item = (usize, Option<String>, u32)> + '_ {
+    let names = row.proargnames.as_deref().unwrap_or(&[]);
+    let modes = row.proargmodes.as_deref().unwrap_or(&[]);
+    let types = row.proallargtypes.as_deref().unwrap_or(&[]);
+    types
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(move |(index, _)| {
+            modes
+                .get(*index)
+                .is_some_and(|mode| matches!(*mode, b'o' | b'b'))
+        })
+        .map(move |(index, type_oid)| {
+            (
+                index,
+                names.get(index).filter(|name| !name.is_empty()).cloned(),
+                type_oid,
+            )
+        })
+}
+
+fn call_output_columns(row: &PgProcRow, catalog: &dyn CatalogLookup) -> Vec<QueryColumn> {
+    procedure_output_args(row)
+        .enumerate()
+        .map(|(output_index, (_, name, type_oid))| {
+            let sql_type = catalog
+                .type_by_oid(type_oid)
+                .map(|row| row.sql_type)
+                .unwrap_or_else(|| {
+                    crate::backend::parser::SqlType::new(crate::backend::parser::SqlTypeKind::Text)
+                });
+            QueryColumn {
+                name: name.unwrap_or_else(|| format!("column{}", output_index + 1)),
+                sql_type,
+                wire_type_oid: Some(type_oid),
+            }
+        })
+        .collect()
+}
+
 fn default_runtime_guc_value(name: &str) -> Option<&'static str> {
     if let Some(value) = plpgsql_guc_default_value(name) {
         return Some(value);
@@ -889,6 +1139,114 @@ impl Session {
         db.install_row_security_enabled(self.client_id, self.row_security_enabled());
         let search_path = self.configured_search_path();
         db.lazy_catalog_lookup(self.client_id, Some((xid, cid)), search_path.as_deref())
+    }
+
+    fn execute_call_stmt(
+        &mut self,
+        db: &Database,
+        call_stmt: &CallStatement,
+    ) -> Result<StatementResult, ExecError> {
+        let catalog = self.catalog_lookup(db);
+        let proc_row = resolve_call_procedure(call_stmt, &catalog)?;
+        if proc_row.prolang != PG_LANGUAGE_SQL_OID {
+            return Err(ExecError::DetailedError {
+                message: "only LANGUAGE sql procedures are supported by CALL".into(),
+                detail: Some(format!("language oid = {}", proc_row.prolang)),
+                hint: None,
+                sqlstate: "0A000",
+            });
+        }
+        let arg_values = self.evaluate_call_input_args(db, call_stmt, &proc_row)?;
+        let body = inline_sql_procedure_body(&proc_row, &arg_values)?;
+        let statements = split_sql_procedure_body(&body)?;
+        let has_output_args = procedure_output_args(&proc_row).next().is_some();
+        let mut last_query = None;
+        for statement in statements {
+            let result = self.execute(db, &statement)?;
+            if matches!(result, StatementResult::Query { .. }) {
+                last_query = Some(result);
+            }
+        }
+        if has_output_args {
+            if let Some(StatementResult::Query { rows, .. }) = last_query {
+                let columns = call_output_columns(&proc_row, &catalog);
+                let column_names = columns.iter().map(|column| column.name.clone()).collect();
+                return Ok(StatementResult::Query {
+                    columns,
+                    column_names,
+                    rows,
+                });
+            }
+            return Ok(StatementResult::Query {
+                columns: call_output_columns(&proc_row, &catalog),
+                column_names: procedure_output_args(&proc_row)
+                    .map(|(_, name, _)| name.unwrap_or_default())
+                    .collect(),
+                rows: Vec::new(),
+            });
+        }
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn evaluate_call_input_args(
+        &mut self,
+        db: &Database,
+        call_stmt: &CallStatement,
+        proc_row: &PgProcRow,
+    ) -> Result<Vec<Value>, ExecError> {
+        let raw_args = &call_stmt.raw_arg_sql;
+        let modes = proc_row.proargmodes.as_deref();
+        let all_arg_count = proc_row
+            .proallargtypes
+            .as_ref()
+            .map(Vec::len)
+            .unwrap_or(raw_args.len());
+        let call_uses_all_slots = raw_args.len() == all_arg_count && modes.is_some();
+        let mut values = Vec::new();
+        let mut input_index = 0usize;
+        if let Some(modes) = modes {
+            for (all_index, mode) in modes.iter().copied().enumerate() {
+                if !matches!(mode, b'i' | b'b') {
+                    continue;
+                }
+                let raw_index = if call_uses_all_slots {
+                    all_index
+                } else {
+                    input_index
+                };
+                input_index += 1;
+                let Some(raw_arg) = raw_args.get(raw_index) else {
+                    return Err(call_undefined_procedure_error(call_stmt));
+                };
+                values.push(self.evaluate_call_arg(db, raw_arg)?);
+            }
+        } else {
+            for raw_arg in raw_args {
+                values.push(self.evaluate_call_arg(db, raw_arg)?);
+            }
+        }
+        Ok(values)
+    }
+
+    fn evaluate_call_arg(&mut self, db: &Database, raw_arg: &str) -> Result<Value, ExecError> {
+        match self.execute(db, &format!("select {raw_arg}"))? {
+            StatementResult::Query { rows, .. } => match rows.as_slice() {
+                [row] if row.len() == 1 => Ok(row[0].clone()),
+                [] => Ok(Value::Null),
+                _ => Err(ExecError::DetailedError {
+                    message: "CALL argument expression returned an unexpected row shape".into(),
+                    detail: Some(raw_arg.into()),
+                    hint: None,
+                    sqlstate: "21000",
+                }),
+            },
+            StatementResult::AffectedRows(_) => Err(ExecError::DetailedError {
+                message: "CALL argument expression did not produce a value".into(),
+                detail: Some(raw_arg.into()),
+                hint: None,
+                sqlstate: "0A000",
+            }),
+        }
     }
 
     fn executor_context_for_catalog(
@@ -1365,6 +1723,7 @@ impl Session {
             Statement::CopyTo(ref copy_stmt) => self
                 .execute_copy_to(db, copy_stmt, None)
                 .map(StatementResult::AffectedRows),
+            Statement::Call(ref call_stmt) => self.execute_call_stmt(db, call_stmt),
             Statement::CreateFunction(ref create_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -1377,6 +1736,24 @@ impl Session {
                 } else {
                     let search_path = self.configured_search_path();
                     db.execute_create_function_stmt_with_search_path(
+                        self.client_id,
+                        create_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::CreateProcedure(ref create_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_create_procedure_stmt_with_search_path(
                         self.client_id,
                         create_stmt,
                         search_path.as_deref(),
@@ -1431,6 +1808,24 @@ impl Session {
                 } else {
                     let search_path = self.configured_search_path();
                     db.execute_drop_function_stmt_with_search_path(
+                        self.client_id,
+                        drop_stmt,
+                        search_path.as_deref(),
+                    )
+                }
+            }
+            Statement::DropProcedure(ref drop_stmt) => {
+                if self.active_txn.is_some() {
+                    let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
+                    if result.is_err() {
+                        if let Some(ref mut txn) = self.active_txn {
+                            txn.failed = true;
+                        }
+                    }
+                    result
+                } else {
+                    let search_path = self.configured_search_path();
+                    db.execute_drop_procedure_stmt_with_search_path(
                         self.client_id,
                         drop_stmt,
                         search_path.as_deref(),
@@ -1837,6 +2232,9 @@ impl Session {
                     )
                 }
             }
+            Statement::AlterProcedure(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "ALTER PROCEDURE".into(),
+            ))),
             Statement::AlterTableRenameColumn(ref rename_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -4449,6 +4847,7 @@ impl Session {
                     unsupported_stmt.feature, unsupported_stmt.sql
                 ))))
             }
+            Statement::Call(ref call_stmt) => self.execute_call_stmt(db, call_stmt),
             Statement::AlterSchemaOwner(ref alter_stmt) => {
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_alter_schema_owner_stmt_in_transaction_with_search_path(
@@ -4845,6 +5244,18 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
+            Statement::CreateProcedure(ref create_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_create_procedure_stmt_in_transaction_with_search_path(
+                    client_id,
+                    create_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
             Statement::CreateAggregate(ref create_stmt) => {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
@@ -4869,6 +5280,9 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
+            Statement::AlterProcedure(_) => Err(ExecError::Parse(ParseError::FeatureNotSupported(
+                "ALTER PROCEDURE".into(),
+            ))),
             Statement::CreateSchema(ref create_stmt) => {
                 let search_path = self.configured_search_path();
                 let maintenance_work_mem_kb = self.maintenance_work_mem_kb()?;
@@ -4967,6 +5381,18 @@ impl Session {
                 let search_path = self.configured_search_path();
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_drop_function_stmt_in_transaction_with_search_path(
+                    client_id,
+                    drop_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                    &mut txn.catalog_effects,
+                )
+            }
+            Statement::DropProcedure(ref drop_stmt) => {
+                let search_path = self.configured_search_path();
+                let txn = self.active_txn.as_mut().unwrap();
+                db.execute_drop_procedure_stmt_in_transaction_with_search_path(
                     client_id,
                     drop_stmt,
                     xid,

@@ -9,7 +9,8 @@ use crate::include::catalog::{
     PG_REWRITE_RELATION_OID, PgConstraintRow, PgRewriteRow,
 };
 use crate::include::nodes::parsenodes::{
-    DropAggregateStatement, DropFunctionStatement, DropIndexStatement, DropSchemaStatement,
+    DropAggregateStatement, DropFunctionStatement, DropIndexStatement, DropProcedureStatement,
+    DropSchemaStatement,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -693,6 +694,105 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
+        self.execute_drop_function_stmt_in_transaction_with_kind(
+            client_id,
+            drop_stmt,
+            xid,
+            cid,
+            configured_search_path,
+            catalog_effects,
+            'f',
+            "function",
+        )
+    }
+
+    pub(crate) fn execute_drop_procedure_stmt_with_search_path(
+        &self,
+        client_id: ClientId,
+        drop_stmt: &DropProcedureStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let function_stmt = DropFunctionStatement {
+            if_exists: drop_stmt.if_exists,
+            schema_name: drop_stmt.schema_name.clone(),
+            function_name: drop_stmt.procedure_name.clone(),
+            arg_types: drop_stmt.arg_types.clone(),
+            cascade: drop_stmt.cascade,
+        };
+        self.execute_drop_function_stmt_with_kind(
+            client_id,
+            &function_stmt,
+            configured_search_path,
+            'p',
+            "procedure",
+        )
+    }
+
+    pub(crate) fn execute_drop_procedure_stmt_in_transaction_with_search_path(
+        &self,
+        client_id: ClientId,
+        drop_stmt: &DropProcedureStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+    ) -> Result<StatementResult, ExecError> {
+        let function_stmt = DropFunctionStatement {
+            if_exists: drop_stmt.if_exists,
+            schema_name: drop_stmt.schema_name.clone(),
+            function_name: drop_stmt.procedure_name.clone(),
+            arg_types: drop_stmt.arg_types.clone(),
+            cascade: drop_stmt.cascade,
+        };
+        self.execute_drop_function_stmt_in_transaction_with_kind(
+            client_id,
+            &function_stmt,
+            xid,
+            cid,
+            configured_search_path,
+            catalog_effects,
+            'p',
+            "procedure",
+        )
+    }
+
+    fn execute_drop_function_stmt_with_kind(
+        &self,
+        client_id: ClientId,
+        drop_stmt: &DropFunctionStatement,
+        configured_search_path: Option<&[String]>,
+        proc_kind: char,
+        object_kind: &'static str,
+    ) -> Result<StatementResult, ExecError> {
+        let xid = self.txns.write().begin();
+        let guard = AutoCommitGuard::new(&self.txns, &self.txn_waiter, xid);
+        let mut catalog_effects = Vec::new();
+        let result = self.execute_drop_function_stmt_in_transaction_with_kind(
+            client_id,
+            drop_stmt,
+            xid,
+            0,
+            configured_search_path,
+            &mut catalog_effects,
+            proc_kind,
+            object_kind,
+        );
+        let result = self.finish_txn(client_id, xid, result, &catalog_effects, &[], &[]);
+        guard.disarm();
+        result
+    }
+
+    fn execute_drop_function_stmt_in_transaction_with_kind(
+        &self,
+        client_id: ClientId,
+        drop_stmt: &DropFunctionStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+        catalog_effects: &mut Vec<CatalogMutationEffect>,
+        proc_kind: char,
+        object_kind: &'static str,
+    ) -> Result<StatementResult, ExecError> {
         let txn_ctx = Some((xid, cid));
         let catalog = self.lazy_catalog_lookup(client_id, txn_ctx, configured_search_path);
         let desired_arg_oids = drop_stmt
@@ -719,6 +819,7 @@ impl Database {
             .into_iter()
             .filter(|row| {
                 parse_proc_argtype_oids(&row.proargtypes) == Some(desired_arg_oids.clone())
+                    && row.prokind == proc_kind
                     && schema_oid
                         .map(|schema_oid| row.pronamespace == schema_oid)
                         .unwrap_or(true)
@@ -732,7 +833,9 @@ impl Database {
                     drop_stmt.function_name,
                     drop_stmt.arg_types.join(", ")
                 );
-                push_notice(format!("function {signature} does not exist, skipping"));
+                push_notice(format!(
+                    "{object_kind} {signature} does not exist, skipping"
+                ));
                 return Ok(StatementResult::AffectedRows(0));
             }
             [] => {
@@ -742,7 +845,7 @@ impl Database {
                     drop_stmt.arg_types.join(", ")
                 );
                 return Err(ExecError::DetailedError {
-                    message: format!("function {signature} does not exist"),
+                    message: format!("{object_kind} {signature} does not exist"),
                     detail: None,
                     hint: None,
                     sqlstate: "42883",
@@ -755,11 +858,11 @@ impl Database {
                     drop_stmt.arg_types.join(", ")
                 );
                 return Err(ExecError::DetailedError {
-                    message: format!("function name \"{signature}\" is not unique"),
+                    message: format!("{object_kind} name \"{signature}\" is not unique"),
                     detail: None,
-                    hint: Some(
-                        "Specify the argument list to select the function unambiguously.".into(),
-                    ),
+                    hint: Some(format!(
+                        "Specify the argument list to select the {object_kind} unambiguously."
+                    )),
                     sqlstate: "42725",
                 });
             }
