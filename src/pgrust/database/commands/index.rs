@@ -105,11 +105,11 @@ pub(super) fn catalog_entry_from_bound_index_relation(
             indclass: index.index_meta.indclass.clone(),
             indcollation: index.index_meta.indcollation.clone(),
             indoption: index.index_meta.indoption.clone(),
-            indexprs: None,
-            indpred: None,
-            brin_options: None,
-            gin_options: None,
-            hash_options: None,
+            indexprs: index.index_meta.indexprs.clone(),
+            indpred: index.index_meta.indpred.clone(),
+            brin_options: index.index_meta.brin_options.clone(),
+            gin_options: index.index_meta.gin_options.clone(),
+            hash_options: index.index_meta.hash_options,
         }),
     }
 }
@@ -170,39 +170,6 @@ fn catalog_type_oid(
                 })
                 .map(|row| row.oid)
         })
-}
-
-fn catalog_entry_from_bound_relation(
-    relation: &crate::backend::parser::BoundRelation,
-) -> crate::backend::catalog::catalog::CatalogEntry {
-    crate::backend::catalog::catalog::CatalogEntry {
-        rel: relation.rel,
-        relation_oid: relation.relation_oid,
-        namespace_oid: relation.namespace_oid,
-        owner_oid: relation.owner_oid,
-        relacl: None,
-        row_type_oid: 0,
-        array_type_oid: 0,
-        reltoastrelid: relation.toast.map(|toast| toast.relation_oid).unwrap_or(0),
-        relpersistence: relation.relpersistence,
-        relkind: relation.relkind,
-        am_oid: 0,
-        relhassubclass: false,
-        relhastriggers: false,
-        relispartition: relation.relispartition,
-        relispopulated: relation.relispopulated,
-        relpartbound: relation.relpartbound.clone(),
-        relrowsecurity: false,
-        relforcerowsecurity: false,
-        relpages: 0,
-        reltuples: -1.0,
-        relallvisible: 0,
-        relallfrozen: 0,
-        relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
-        desc: relation.desc.clone(),
-        partitioned_table: relation.partitioned_table.clone(),
-        index_meta: None,
-    }
 }
 
 fn expression_index_default_name(expr_sql: &str) -> String {

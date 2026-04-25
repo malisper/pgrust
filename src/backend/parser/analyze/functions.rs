@@ -665,7 +665,6 @@ fn resolve_function_row_shape(
     row: &crate::include::catalog::PgProcRow,
     candidate: &CandidateMatch,
     result_type: SqlType,
-    candidate: &CandidateMatch,
 ) -> Option<ResolvedFunctionRowShape> {
     if let Some(row_shape) = resolve_out_parameter_row_shape(catalog, row, candidate) {
         return Some(row_shape);
@@ -758,7 +757,6 @@ fn resolve_polymorphic_output_type(
 fn resolve_anyelement_result_type(
     row: &crate::include::catalog::PgProcRow,
     candidate: &CandidateMatch,
-    compatible: bool,
 ) -> Option<SqlType> {
     let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
     let mut resolved = None;
@@ -809,7 +807,6 @@ fn resolve_anyenum_result_type(
 fn resolve_anyarray_result_type(
     row: &crate::include::catalog::PgProcRow,
     candidate: &CandidateMatch,
-    compatible: bool,
 ) -> Option<SqlType> {
     let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
     let mut resolved = None;
@@ -870,37 +867,11 @@ fn resolve_anyrange_result_type(
             _ => None,
         };
         if let Some(inferred) = inferred {
-            resolved = merge_polymorphic_type(resolved, inferred, compatible)?;
-        }
-    }
-    resolved
-}
-
-fn resolve_anyrange_result_type(
-    row: &crate::include::catalog::PgProcRow,
-    candidate: &CandidateMatch,
-    compatible: bool,
-) -> Option<SqlType> {
-    let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
-    let mut resolved = None;
-    for (declared_oid, actual_type) in declared_oids
-        .into_iter()
-        .zip(candidate.declared_arg_types.iter().copied())
-    {
-        let inferred = match declared_oid {
-            ANYRANGEOID | ANYCOMPATIBLERANGEOID
-                if range_type_ref_for_sql_type(actual_type).is_some() =>
-            {
-                Some(actual_type)
+            match resolved {
+                None => resolved = Some(inferred),
+                Some(existing) if existing == inferred => {}
+                Some(_) => return None,
             }
-            ANYMULTIRANGEOID | ANYCOMPATIBLEMULTIRANGEOID => {
-                multirange_type_ref_for_sql_type(actual_type)
-                    .map(|multirange_type| multirange_type.range_type.sql_type)
-            }
-            _ => None,
-        };
-        if let Some(inferred) = inferred {
-            resolved = merge_polymorphic_type(resolved, inferred, compatible)?;
         }
     }
     resolved
@@ -1103,6 +1074,13 @@ fn canonical_polymorphic_type(mut ty: SqlType) -> SqlType {
         ty.type_oid = 0;
     }
     ty
+}
+
+fn polymorphic_types_match(left: SqlType, right: SqlType) -> bool {
+    left.kind == right.kind
+        && left.is_array == right.is_array
+        && (left.type_oid == 0 || right.type_oid == 0 || left.type_oid == right.type_oid)
+        && (left.typrelid == 0 || right.typrelid == 0 || left.typrelid == right.typrelid)
 }
 
 fn match_variadic_element_type(

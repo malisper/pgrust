@@ -26,6 +26,15 @@ struct DropRulePlan {
     rewrite_oid: u32,
 }
 
+fn domain_has_range_dependents_error(type_name: &str, dependent_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("cannot drop type {type_name} because other objects depend on it"),
+        detail: Some(format!("type {dependent_name} depends on type {type_name}")),
+        hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
+        sqlstate: "2BP01",
+    }
+}
+
 fn catalog_entry_from_bound_relation(
     catcache: &CatCache,
     relation: &crate::backend::parser::BoundRelation,
@@ -885,8 +894,7 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let (normalized, _, _) =
             self.normalize_domain_name_for_create(&drop_stmt.domain_name, configured_search_path)?;
-        let mut domains = self.domains.write();
-        let Some(domain) = domains.remove(&normalized) else {
+        let Some(domain) = self.domains.read().get(&normalized).cloned() else {
             if drop_stmt.if_exists {
                 return Ok(StatementResult::AffectedRows(0));
             }
@@ -894,30 +902,40 @@ impl Database {
                 drop_stmt.domain_name.clone(),
             )));
         };
+        let default_range_name = format!("{}range", domain.name);
+        let dependent_ranges = self
+            .range_types
+            .read()
+            .iter()
+            .filter(|(_, entry)| {
+                entry.subtype_dependency_oid == Some(domain.oid)
+                    || entry.subtype.type_oid == domain.oid
+                    || entry.name.eq_ignore_ascii_case(&default_range_name)
+            })
+            .map(|(key, entry)| (key.clone(), entry.name.clone()))
+            .collect::<Vec<_>>();
+        if !drop_stmt.cascade
+            && let Some((_, dependent_name)) = dependent_ranges.first()
+        {
+            return Err(domain_has_range_dependents_error(
+                &domain.name,
+                dependent_name,
+            ));
+        }
+        let mut domains = self.domains.write();
+        domains.remove(&normalized);
         drop(domains);
         if drop_stmt.cascade {
-            let default_range_name = format!("{}range", domain.name);
-            let dependent_ranges = self
-                .range_types
-                .read()
-                .iter()
-                .filter(|(_, entry)| {
-                    entry.subtype.type_oid == domain.oid
-                        || entry.name.eq_ignore_ascii_case(&default_range_name)
-                })
-                .map(|(key, entry)| (key.clone(), entry.name.clone()))
-                .collect::<Vec<_>>();
             if !dependent_ranges.is_empty() {
                 let mut range_types = self.range_types.write();
                 for (key, name) in dependent_ranges {
                     push_notice(format!("drop cascades to type {name}"));
                     range_types.remove(&key);
                 }
+                save_range_type_entries(&self.cluster.base_dir, self.database_oid, &range_types)?;
             }
         }
 
-        domains.remove(&normalized);
-        drop(domains);
         self.refresh_catalog_store_dynamic_type_rows(client_id, configured_search_path);
         self.invalidate_backend_cache_state(client_id);
         self.plan_cache.invalidate_all();

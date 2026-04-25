@@ -17,9 +17,9 @@ use crate::include::access::spgist::SPGIST_CONFIG_PROC;
 use crate::include::catalog::{
     BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, GIST_MULTIRANGE_FAMILY_OID,
     GIST_RANGE_FAMILY_OID, HASH_AM_OID, PgStatisticRow, SPG_BOX_QUAD_CONFIG_PROC_OID,
-    SPG_NETWORK_CONFIG_PROC_OID, SPGIST_AM_OID, bootstrap_pg_operator_rows,
-    builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
-    relkind_has_storage,
+    SPG_NETWORK_CONFIG_PROC_OID, SPG_RANGE_CONFIG_PROC_OID, SPGIST_AM_OID,
+    bootstrap_pg_operator_rows, builtin_scalar_function_for_proc_oid,
+    proc_oid_for_builtin_scalar_function, range_type_ref_for_sql_type, relkind_has_storage,
 };
 use crate::include::nodes::datum::ArrayValue;
 use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, PlannerInfo, RestrictInfo};

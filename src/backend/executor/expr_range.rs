@@ -6,9 +6,13 @@ use super::expr_datetime::render_datetime_value_text_with_config;
 use super::expr_multirange::eval_multirange_function;
 use super::expr_ops::compare_order_values;
 use super::node_types::{BuiltinScalarFunction, RangeBound, RangeTypeRef, RangeValue, Value};
-use super::value_io::{format_array_value_text_with_config, format_record_text_with_config};
+use super::value_io::{
+    format_array_text, format_array_value_text, format_array_value_text_with_config,
+    format_record_text, format_record_text_with_config,
+};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
+use crate::backend::utils::time::datetime::days_from_ymd;
 use crate::include::catalog::{
     ARRAYRANGE_TYPE_OID, DATE_TYPE_OID, DATERANGE_TYPE_OID, INT4_ARRAY_TYPE_OID, INT4_TYPE_OID,
     INT4RANGE_TYPE_OID, INT8_TYPE_OID, INT8RANGE_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID,
@@ -1021,7 +1025,7 @@ fn encode_bound_value(range_type: RangeTypeRef, value: &Value) -> Result<Vec<u8>
         },
         value,
     )?;
-    Ok(render_bound_text(value, &DateTimeConfig::default()).into_bytes())
+    Ok(render_bound_storage_text(value).into_bytes())
 }
 
 fn decode_bound_value(range_type: RangeTypeRef, bytes: &[u8]) -> Result<Value, ExecError> {

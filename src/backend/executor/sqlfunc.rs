@@ -5,9 +5,11 @@ use crate::backend::executor::{
     render_multirange_text_with_config, render_range_text_with_config,
 };
 use crate::backend::libpq::pqformat::format_bytea_text;
-use crate::backend::parser::{CatalogLookup, ParseOptions, SqlType, parse_statement_with_options};
+use crate::backend::parser::analyze::sql_type_name;
+use crate::backend::parser::{
+    CatalogLookup, ParseOptions, SqlType, SqlTypeKind, parse_statement_with_options,
+};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
-use crate::include::catalog::PG_LANGUAGE_SQL_OID;
 use crate::include::catalog::PgProcRow;
 use crate::include::catalog::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLERANGEOID, ANYRANGEOID, PG_LANGUAGE_SQL_OID,
@@ -15,7 +17,6 @@ use crate::include::catalog::{
     range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datum::{ArrayValue, RecordValue};
-use crate::include::nodes::parsenodes::{SqlType, SqlTypeKind};
 use crate::include::nodes::primnodes::Expr;
 use crate::pgrust::session::ByteaOutputFormat;
 
@@ -30,20 +31,6 @@ pub(crate) fn execute_user_defined_sql_scalar_function(
         .map(|arg| crate::backend::executor::eval_expr(arg, slot, ctx))
         .collect::<Result<Vec<_>, _>>()?;
     execute_user_defined_sql_scalar_function_values(row, &arg_values, ctx)
-}
-
-pub(crate) fn execute_user_defined_sql_set_returning_function(
-    row: &PgProcRow,
-    args: &[Expr],
-    output_column_count: usize,
-    slot: &mut TupleSlot,
-    ctx: &mut ExecutorContext,
-) -> Result<Vec<TupleSlot>, ExecError> {
-    let arg_values = args
-        .iter()
-        .map(|arg| crate::backend::executor::eval_expr(arg, slot, ctx))
-        .collect::<Result<Vec<_>, _>>()?;
-    execute_user_defined_sql_table_function_values(row, &arg_values, output_column_count, ctx)
 }
 
 pub(crate) fn execute_user_defined_sql_scalar_function_values(
@@ -170,6 +157,137 @@ fn execute_known_lightweight_sql_function(
         return append_composite_array_value(arg_values).map(Some);
     }
     Ok(None)
+}
+
+fn validate_sql_polymorphic_runtime_args(
+    row: &PgProcRow,
+    arg_values: &[Value],
+) -> Result<(), ExecError> {
+    let declared_oids = parse_proc_argtype_oids(&row.proargtypes)?;
+    let mut exact_subtype = None;
+    let mut compatible_range_anchor = None;
+    let mut compatible_other_subtypes = Vec::new();
+    for (declared_oid, value) in declared_oids.into_iter().zip(arg_values.iter()) {
+        let Some(actual_type) = value.sql_type_hint() else {
+            continue;
+        };
+        match declared_oid {
+            ANYARRAYOID if actual_type.is_array => {
+                let inferred = actual_type.element_type();
+                if !merge_polymorphic_runtime_subtype(&mut exact_subtype, inferred) {
+                    return Err(sql_function_undefined_runtime_error(row, arg_values));
+                }
+            }
+            ANYRANGEOID | ANYCOMPATIBLERANGEOID => {
+                let Some(range_type) = range_type_ref_for_sql_type(actual_type) else {
+                    return Err(sql_function_undefined_runtime_error(row, arg_values));
+                };
+                if declared_oid == ANYRANGEOID {
+                    if !merge_polymorphic_runtime_subtype(&mut exact_subtype, range_type.subtype) {
+                        return Err(sql_function_undefined_runtime_error(row, arg_values));
+                    }
+                } else if !merge_polymorphic_runtime_subtype(
+                    &mut compatible_range_anchor,
+                    range_type.subtype,
+                ) {
+                    return Err(sql_function_undefined_runtime_error(row, arg_values));
+                }
+            }
+            ANYCOMPATIBLEARRAYOID if actual_type.is_array => {
+                compatible_other_subtypes.push(actual_type.element_type());
+            }
+            _ => {}
+        }
+    }
+    if let Some(anchor) = compatible_range_anchor {
+        for actual in compatible_other_subtypes {
+            if !can_coerce_to_compatible_runtime_anchor(actual, anchor) {
+                return Err(sql_function_undefined_runtime_error(row, arg_values));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn parse_proc_argtype_oids(argtypes: &str) -> Result<Vec<u32>, ExecError> {
+    if argtypes.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    argtypes
+        .split_whitespace()
+        .map(|part| {
+            part.parse::<u32>().map_err(|_| {
+                sql_function_runtime_error(
+                    "invalid SQL function argument metadata",
+                    Some(argtypes.into()),
+                    "XX000",
+                )
+            })
+        })
+        .collect()
+}
+
+fn merge_polymorphic_runtime_subtype(current: &mut Option<SqlType>, inferred: SqlType) -> bool {
+    match *current {
+        None => {
+            *current = Some(inferred);
+            true
+        }
+        Some(existing) => sql_types_match_for_polymorphic_runtime(existing, inferred),
+    }
+}
+
+fn sql_types_match_for_polymorphic_runtime(left: SqlType, right: SqlType) -> bool {
+    left.kind == right.kind
+        && left.is_array == right.is_array
+        && (left.type_oid == 0 || right.type_oid == 0 || left.type_oid == right.type_oid)
+}
+
+fn can_coerce_to_compatible_runtime_anchor(actual: SqlType, target: SqlType) -> bool {
+    if sql_types_match_for_polymorphic_runtime(actual, target) {
+        return true;
+    }
+    if actual.is_array || target.is_array {
+        return false;
+    }
+    matches!(
+        (actual.kind, target.kind),
+        (SqlTypeKind::Int2, SqlTypeKind::Int4)
+            | (SqlTypeKind::Int2, SqlTypeKind::Int8)
+            | (SqlTypeKind::Int2, SqlTypeKind::Numeric)
+            | (SqlTypeKind::Int2, SqlTypeKind::Float4)
+            | (SqlTypeKind::Int2, SqlTypeKind::Float8)
+            | (SqlTypeKind::Int4, SqlTypeKind::Int8)
+            | (SqlTypeKind::Int4, SqlTypeKind::Numeric)
+            | (SqlTypeKind::Int4, SqlTypeKind::Float4)
+            | (SqlTypeKind::Int4, SqlTypeKind::Float8)
+            | (SqlTypeKind::Int8, SqlTypeKind::Numeric)
+            | (SqlTypeKind::Int8, SqlTypeKind::Float4)
+            | (SqlTypeKind::Int8, SqlTypeKind::Float8)
+            | (SqlTypeKind::Float4, SqlTypeKind::Float8)
+    )
+}
+
+fn sql_function_undefined_runtime_error(row: &PgProcRow, arg_values: &[Value]) -> ExecError {
+    let signature = arg_values
+        .iter()
+        .map(|value| {
+            value
+                .sql_type_hint()
+                .map(sql_type_name)
+                .unwrap_or_else(|| "unknown".into())
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    ExecError::DetailedError {
+        message: format!("function {}({signature}) does not exist", row.proname),
+        detail: None,
+        hint: Some(
+            "No function matches the given name and argument types. You might need to add explicit type casts."
+                .into(),
+        ),
+        sqlstate: "42883",
+    }
 }
 
 fn append_composite_array_value(arg_values: &[Value]) -> Result<Value, ExecError> {

@@ -57,11 +57,6 @@ impl VisibleCatalog {
         }
     }
 
-    pub fn with_domain_checks(mut self, domain_checks: BTreeMap<u32, String>) -> Self {
-        self.domain_checks = domain_checks;
-        self
-    }
-
     pub fn relcache(&self) -> &RelCache {
         &self.relcache
     }
@@ -518,7 +513,7 @@ impl CatalogLookup for VisibleCatalog {
     }
 
     fn domain_check_by_type_oid(&self, oid: u32) -> Option<String> {
-        self.domain_checks.get(&oid).cloned()
+        self.domain_checks.get(&oid).map(|(name, _)| name.clone())
     }
 
     fn range_rows(&self) -> Vec<PgRangeRow> {

@@ -1827,6 +1827,10 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         self.db.domain_check_name(domain_oid)
     }
 
+    fn domain_check_by_type_oid(&self, domain_oid: u32) -> Option<String> {
+        self.db.domain_check_by_type_oid(domain_oid)
+    }
+
     fn language_rows(&self) -> Vec<PgLanguageRow> {
         language_rows(self.db, self.client_id, self.txn_ctx)
     }

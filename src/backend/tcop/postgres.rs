@@ -294,6 +294,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if message.starts_with("column \"") && message.contains("WITHOUT OVERLAPS") {
                 return find_without_overlaps_constraint_position(sql);
             }
+            if is_create_type_missing_subtype_diff_function(sql, message) {
+                return None;
+            }
             if let Some(position) = find_function_error_position(sql, message) {
                 return Some(position);
             }
@@ -393,6 +396,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             }
             if message.starts_with("column \"") && message.contains("WITHOUT OVERLAPS") {
                 return find_without_overlaps_constraint_position(sql);
+            }
+            if is_create_type_missing_subtype_diff_function(sql, message) {
+                return None;
             }
             if let Some(position) = find_function_error_position(sql, message) {
                 return Some(position);
@@ -543,6 +549,14 @@ fn find_missing_function_position(sql: &str, message: &str) -> Option<usize> {
         return None;
     }
     find_case_insensitive_token_position(sql, name)
+}
+
+fn is_create_type_missing_subtype_diff_function(sql: &str, message: &str) -> bool {
+    let lowered = sql.trim_start().to_ascii_lowercase();
+    lowered.starts_with("create type ")
+        && lowered.contains("subtype_diff")
+        && message.starts_with("function ")
+        && message.ends_with(" does not exist")
 }
 
 fn publication_where_error_position(

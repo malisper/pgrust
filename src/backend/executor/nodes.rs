@@ -1869,7 +1869,9 @@ fn fallback_index_scan_operator(am_oid: u32, strategy: u16) -> Option<String> {
                 3 => ">>",
                 4 => ">>=",
                 5 => "&&",
-                6 => "=",
+                6 => "-|-",
+                7 => "@>",
+                8 => "<@",
                 _ => return None,
             }
             .into(),

@@ -3713,9 +3713,23 @@ fn try_parse_create_type_statement(sql: &str) -> Result<Option<Statement>, Parse
     if lowered.starts_with("alter type ") {
         return match build_alter_type_statement(trimmed) {
             Ok(stmt) => Ok(Some(Statement::AlterType(stmt))),
-            Err(ParseError::FeatureNotSupported(_)) => build_alter_type_owner_statement(trimmed)
-                .map(|stmt| Some(Statement::AlterTypeOwner(stmt))),
-            Err(err) => Err(err),
+            Err(ParseError::FeatureNotSupported(_)) => {
+                if let Err(err @ ParseError::DetailedError { .. }) =
+                    check_alter_type_add_attribute_statement(trimmed)
+                {
+                    return Err(err);
+                }
+                build_alter_type_owner_statement(trimmed)
+                    .map(|stmt| Some(Statement::AlterTypeOwner(stmt)))
+            }
+            Err(err) => {
+                if let Err(add_attr_err @ ParseError::DetailedError { .. }) =
+                    check_alter_type_add_attribute_statement(trimmed)
+                {
+                    return Err(add_attr_err);
+                }
+                Err(err)
+            }
         };
     }
     if lowered.starts_with("drop type ") {
@@ -7193,7 +7207,7 @@ fn parse_create_type_attribute(input: &str) -> Result<CompositeTypeAttributeDef,
     })
 }
 
-fn build_alter_type_statement(sql: &str) -> Result<Statement, ParseError> {
+fn check_alter_type_add_attribute_statement(sql: &str) -> Result<(), ParseError> {
     let prefix = "alter type";
     let rest = sql
         .get(prefix.len()..)
