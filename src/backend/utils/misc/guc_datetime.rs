@@ -39,6 +39,22 @@ pub fn default_datestyle() -> &'static str {
     "ISO, MDY"
 }
 
+pub fn default_datetime_config() -> DateTimeConfig {
+    let mut config = DateTimeConfig::default();
+    if let Ok(value) = std::env::var("PGDATESTYLE")
+        && let Some((date_style_format, date_order)) = parse_datestyle(&value)
+    {
+        config.date_style_format = date_style_format;
+        config.date_order = date_order;
+    }
+    if let Ok(value) = std::env::var("PGTZ")
+        && let Some(time_zone) = parse_timezone(&value)
+    {
+        config.time_zone = time_zone;
+    }
+    config
+}
+
 pub fn default_timezone() -> &'static str {
     "UTC"
 }
