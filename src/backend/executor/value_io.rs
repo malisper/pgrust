@@ -358,12 +358,15 @@ fn sql_type_kind_tag(kind: SqlTypeKind) -> u8 {
         SqlTypeKind::Int8 => 6,
         SqlTypeKind::Name => 7,
         SqlTypeKind::Oid => 8,
+        SqlTypeKind::RegProc => 73,
         SqlTypeKind::RegClass => 8,
         SqlTypeKind::RegType => 63,
         SqlTypeKind::RegRole => 55,
         SqlTypeKind::RegNamespace => 8,
+        SqlTypeKind::RegOper => 74,
         SqlTypeKind::RegOperator => 66,
         SqlTypeKind::RegProcedure => 52,
+        SqlTypeKind::RegCollation => 75,
         SqlTypeKind::Tid => 9,
         SqlTypeKind::Xid => 10,
         SqlTypeKind::OidVector => 11,
@@ -469,9 +472,12 @@ fn sql_type_kind_from_tag(tag: u8) -> Result<SqlTypeKind, ExecError> {
         6 => SqlTypeKind::Int8,
         7 => SqlTypeKind::Name,
         8 => SqlTypeKind::Oid,
+        73 => SqlTypeKind::RegProc,
         63 => SqlTypeKind::RegType,
+        74 => SqlTypeKind::RegOper,
         66 => SqlTypeKind::RegOperator,
         52 => SqlTypeKind::RegProcedure,
+        75 => SqlTypeKind::RegCollation,
         9 => SqlTypeKind::Tid,
         10 => SqlTypeKind::Xid,
         11 => SqlTypeKind::OidVector,
@@ -1373,12 +1379,15 @@ pub(crate) fn encode_value(column: &ColumnDesc, value: &Value) -> Result<TupleVa
             if matches!(
                 column.sql_type.kind,
                 SqlTypeKind::Oid
+                    | SqlTypeKind::RegProc
                     | SqlTypeKind::RegClass
                     | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
                     | SqlTypeKind::RegNamespace
+                    | SqlTypeKind::RegOper
                     | SqlTypeKind::RegOperator
                     | SqlTypeKind::RegProcedure
+                    | SqlTypeKind::RegCollation
                     | SqlTypeKind::Xid
                     | SqlTypeKind::RegConfig
                     | SqlTypeKind::RegDictionary
@@ -1773,12 +1782,15 @@ pub(crate) fn decode_value_with_toast(
             if matches!(
                 column.sql_type.kind,
                 SqlTypeKind::Oid
+                    | SqlTypeKind::RegProc
                     | SqlTypeKind::RegClass
                     | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
                     | SqlTypeKind::RegNamespace
+                    | SqlTypeKind::RegOper
                     | SqlTypeKind::RegOperator
                     | SqlTypeKind::RegProcedure
+                    | SqlTypeKind::RegCollation
                     | SqlTypeKind::Xid
                     | SqlTypeKind::RegConfig
                     | SqlTypeKind::RegDictionary

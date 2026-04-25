@@ -800,9 +800,23 @@ pub(super) fn validate_scalar_function_arity(
             | BuiltinScalarFunction::BitcastIntegerToFloat4
             | BuiltinScalarFunction::BitcastBigintToFloat8
             | BuiltinScalarFunction::TextToRegClass
+            | BuiltinScalarFunction::ToRegProc
+            | BuiltinScalarFunction::ToRegProcedure
+            | BuiltinScalarFunction::ToRegOper
+            | BuiltinScalarFunction::ToRegOperator
+            | BuiltinScalarFunction::ToRegClass
+            | BuiltinScalarFunction::ToRegType
+            | BuiltinScalarFunction::ToRegTypeMod
+            | BuiltinScalarFunction::ToRegRole
+            | BuiltinScalarFunction::ToRegNamespace
+            | BuiltinScalarFunction::ToRegCollation
+            | BuiltinScalarFunction::RegProcToText
             | BuiltinScalarFunction::RegClassToText
             | BuiltinScalarFunction::RegTypeToText
+            | BuiltinScalarFunction::RegOperToText
+            | BuiltinScalarFunction::RegOperatorToText
             | BuiltinScalarFunction::RegProcedureToText
+            | BuiltinScalarFunction::RegCollationToText
             | BuiltinScalarFunction::RegRoleToText
             | BuiltinScalarFunction::BpcharToText
             | BuiltinScalarFunction::BitCount => args.len() == 1,
@@ -812,6 +826,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::Log => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::Power
             | BuiltinScalarFunction::Atan2d
+            | BuiltinScalarFunction::FormatType
             | BuiltinScalarFunction::BoolEq
             | BuiltinScalarFunction::BoolNe
             | BuiltinScalarFunction::BoolAndStateFunc
@@ -1830,16 +1845,40 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("split_part", BuiltinScalarFunction::SplitPart),
         ("translate", BuiltinScalarFunction::Translate),
         ("text_to_regclass", BuiltinScalarFunction::TextToRegClass),
+        ("to_regproc", BuiltinScalarFunction::ToRegProc),
+        ("to_regprocedure", BuiltinScalarFunction::ToRegProcedure),
+        ("to_regoper", BuiltinScalarFunction::ToRegOper),
+        ("to_regoperator", BuiltinScalarFunction::ToRegOperator),
+        ("to_regclass", BuiltinScalarFunction::ToRegClass),
+        ("to_regtype", BuiltinScalarFunction::ToRegType),
+        ("to_regtypemod", BuiltinScalarFunction::ToRegTypeMod),
+        ("to_regrole", BuiltinScalarFunction::ToRegRole),
+        ("to_regnamespace", BuiltinScalarFunction::ToRegNamespace),
+        ("to_regcollation", BuiltinScalarFunction::ToRegCollation),
+        ("format_type", BuiltinScalarFunction::FormatType),
+        ("regproc_to_text", BuiltinScalarFunction::RegProcToText),
+        ("regprocout", BuiltinScalarFunction::RegProcToText),
         ("regclass_to_text", BuiltinScalarFunction::RegClassToText),
         ("regclassout", BuiltinScalarFunction::RegClassToText),
         ("regtype_to_text", BuiltinScalarFunction::RegTypeToText),
         ("regtypeout", BuiltinScalarFunction::RegTypeToText),
+        ("regoper_to_text", BuiltinScalarFunction::RegOperToText),
+        ("regoperout", BuiltinScalarFunction::RegOperToText),
+        (
+            "regoperator_to_text",
+            BuiltinScalarFunction::RegOperatorToText,
+        ),
+        ("regoperatorout", BuiltinScalarFunction::RegOperatorToText),
         (
             "regprocedure_to_text",
             BuiltinScalarFunction::RegProcedureToText,
         ),
         ("regprocedureout", BuiltinScalarFunction::RegProcedureToText),
-        ("regprocout", BuiltinScalarFunction::RegProcedureToText),
+        (
+            "regcollation_to_text",
+            BuiltinScalarFunction::RegCollationToText,
+        ),
+        ("regcollationout", BuiltinScalarFunction::RegCollationToText),
         ("regrole_to_text", BuiltinScalarFunction::RegRoleToText),
         ("regroleout", BuiltinScalarFunction::RegRoleToText),
         ("pg_get_acl", BuiltinScalarFunction::PgGetAcl),
@@ -2649,10 +2688,15 @@ fn catalog_text_input_cast_exists(catalog: &dyn CatalogLookup, target_oid: u32) 
         }
         if matches!(
             row.sql_type.kind,
-            SqlTypeKind::RegClass
+            SqlTypeKind::RegProc
+                | SqlTypeKind::RegClass
                 | SqlTypeKind::RegRole
+                | SqlTypeKind::RegNamespace
                 | SqlTypeKind::RegType
+                | SqlTypeKind::RegOper
+                | SqlTypeKind::RegOperator
                 | SqlTypeKind::RegProcedure
+                | SqlTypeKind::RegCollation
                 | SqlTypeKind::RegConfig
                 | SqlTypeKind::RegDictionary
         ) {
