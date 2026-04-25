@@ -326,6 +326,67 @@ fn pg_backend_pid_returns_session_client_id() {
 }
 
 #[test]
+fn txid_snapshot_type_round_trips_and_validates_visibility() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table snapshot_test (snap txid_snapshot)")
+        .unwrap();
+    session
+        .execute(&db, "insert into snapshot_test values ('12:16:14,14')")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select snap from snapshot_test"),
+        vec![vec![Value::Text("12:16:14".into())]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select txid_visible_in_snapshot(13, '12:20:13,15,18'::txid_snapshot), \
+                    txid_visible_in_snapshot(14, '12:20:13,15,18'::txid_snapshot), \
+                    pg_input_is_valid('12:16:14,13', 'txid_snapshot')",
+        ),
+        vec![vec![
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(false),
+        ]]
+    );
+}
+
+#[test]
+fn txid_current_and_if_assigned_follow_lazy_xid_assignment() {
+    let db = Database::open_ephemeral(32).expect("open ephemeral database");
+    let mut session = Session::new(1);
+
+    session.execute(&db, "begin").unwrap();
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select txid_current_if_assigned()"),
+        vec![vec![Value::Null]]
+    );
+
+    let rows = session_query_rows(&mut session, &db, "select txid_current()");
+    let txid = match &rows[..] {
+        [row] => match &row[..] {
+            [Value::Int64(txid)] => *txid,
+            other => panic!("expected bigint txid_current result, got {other:?}"),
+        },
+        other => panic!("expected one txid_current row, got {other:?}"),
+    };
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select txid_current_if_assigned()"),
+        vec![vec![Value::Int64(txid)]]
+    );
+
+    session.execute(&db, "commit").unwrap();
+}
+
+#[test]
 fn create_temp_table_accepts_fixed_length_array_column_syntax() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);

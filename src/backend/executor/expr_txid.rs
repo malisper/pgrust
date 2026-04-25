@@ -1,0 +1,188 @@
+use super::{ExecError, ExecutorContext, Value};
+use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
+use crate::include::catalog::TXID_SNAPSHOT_TYPE_OID;
+use crate::include::nodes::primnodes::BuiltinScalarFunction;
+use crate::pgrust::compact_string::CompactString;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TxidSnapshotValue {
+    xmin: u64,
+    xmax: u64,
+    in_progress: Vec<u64>,
+}
+
+impl TxidSnapshotValue {
+    fn render(&self) -> String {
+        let mut rendered = format!("{}:{}:", self.xmin, self.xmax);
+        for (index, xid) in self.in_progress.iter().enumerate() {
+            if index > 0 {
+                rendered.push(',');
+            }
+            rendered.push_str(&xid.to_string());
+        }
+        rendered
+    }
+
+    fn xid_visible(&self, xid: u64) -> bool {
+        if xid < self.xmin {
+            return true;
+        }
+        if xid >= self.xmax {
+            return false;
+        }
+        !self.in_progress.binary_search(&xid).is_ok()
+    }
+}
+
+fn invalid_txid_snapshot_input(text: &str) -> ExecError {
+    ExecError::DetailedError {
+        // PostgreSQL's legacy txid_snapshot input still reports pg_snapshot.
+        message: format!("invalid input syntax for type pg_snapshot: \"{text}\""),
+        detail: None,
+        hint: None,
+        sqlstate: "22P02",
+    }
+}
+
+fn parse_txid_snapshot_number(token: &str, original: &str) -> Result<u64, ExecError> {
+    if token.is_empty() {
+        return Err(invalid_txid_snapshot_input(original));
+    }
+    let value = token
+        .parse::<u64>()
+        .map_err(|_| invalid_txid_snapshot_input(original))?;
+    if value == 0 || value > i64::MAX as u64 {
+        return Err(invalid_txid_snapshot_input(original));
+    }
+    Ok(value)
+}
+
+fn parse_txid_snapshot(text: &str) -> Result<TxidSnapshotValue, ExecError> {
+    let mut parts = text.split(':');
+    let xmin_text = parts
+        .next()
+        .ok_or_else(|| invalid_txid_snapshot_input(text))?;
+    let xmax_text = parts
+        .next()
+        .ok_or_else(|| invalid_txid_snapshot_input(text))?;
+    let xip_text = parts
+        .next()
+        .ok_or_else(|| invalid_txid_snapshot_input(text))?;
+    if parts.next().is_some() {
+        return Err(invalid_txid_snapshot_input(text));
+    }
+
+    let xmin = parse_txid_snapshot_number(xmin_text, text)?;
+    let xmax = parse_txid_snapshot_number(xmax_text, text)?;
+    if xmin > xmax {
+        return Err(invalid_txid_snapshot_input(text));
+    }
+
+    let mut in_progress = Vec::new();
+    let mut previous = None;
+    if !xip_text.is_empty() {
+        for token in xip_text.split(',') {
+            let xid = parse_txid_snapshot_number(token, text)?;
+            if xid < xmin || xid >= xmax {
+                return Err(invalid_txid_snapshot_input(text));
+            }
+            match previous {
+                Some(prev) if xid < prev => return Err(invalid_txid_snapshot_input(text)),
+                Some(prev) if xid == prev => continue,
+                _ => {
+                    in_progress.push(xid);
+                    previous = Some(xid);
+                }
+            }
+        }
+    }
+
+    Ok(TxidSnapshotValue {
+        xmin,
+        xmax,
+        in_progress,
+    })
+}
+
+pub(crate) fn is_txid_snapshot_type_oid(type_oid: u32) -> bool {
+    type_oid == TXID_SNAPSHOT_TYPE_OID
+}
+
+pub(crate) fn cast_text_to_txid_snapshot(text: &str) -> Result<Value, ExecError> {
+    let snapshot = parse_txid_snapshot(text)?;
+    Ok(Value::Text(CompactString::from_owned(snapshot.render())))
+}
+
+pub(crate) fn eval_txid_builtin_function(
+    func: BuiltinScalarFunction,
+    values: &[Value],
+    ctx: &mut ExecutorContext,
+) -> Result<Value, ExecError> {
+    match func {
+        BuiltinScalarFunction::TxidCurrent => Ok(Value::Int64(i64::from(ctx.ensure_write_xid()?))),
+        BuiltinScalarFunction::TxidCurrentIfAssigned => Ok(ctx
+            .transaction_xid()
+            .filter(|xid| *xid != INVALID_TRANSACTION_ID)
+            .map(|xid| Value::Int64(i64::from(xid)))
+            .unwrap_or(Value::Null)),
+        BuiltinScalarFunction::TxidVisibleInSnapshot => match values {
+            [Value::Int64(xid), snapshot] if *xid >= 0 => {
+                let snapshot_text = snapshot.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                    op: "txid_visible_in_snapshot",
+                    left: snapshot.clone(),
+                    right: Value::Text("".into()),
+                })?;
+                let snapshot = parse_txid_snapshot(snapshot_text)?;
+                Ok(Value::Bool(snapshot.xid_visible(*xid as u64)))
+            }
+            [Value::Int32(xid), snapshot] if *xid >= 0 => {
+                let snapshot_text = snapshot.as_text().ok_or_else(|| ExecError::TypeMismatch {
+                    op: "txid_visible_in_snapshot",
+                    left: snapshot.clone(),
+                    right: Value::Text("".into()),
+                })?;
+                let snapshot = parse_txid_snapshot(snapshot_text)?;
+                Ok(Value::Bool(snapshot.xid_visible(*xid as u64)))
+            }
+            [left, right] => Err(ExecError::TypeMismatch {
+                op: "txid_visible_in_snapshot",
+                left: left.clone(),
+                right: right.clone(),
+            }),
+            _ => Err(ExecError::DetailedError {
+                message: "malformed txid builtin call".into(),
+                detail: None,
+                hint: None,
+                sqlstate: "XX000",
+            }),
+        },
+        _ => unreachable!("non-txid builtin dispatched to expr_txid"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn txid_snapshot_input_canonicalizes_duplicates() {
+        let value = cast_text_to_txid_snapshot("12:16:14,14").unwrap();
+        assert_eq!(value, Value::Text("12:16:14".into()));
+    }
+
+    #[test]
+    fn txid_snapshot_input_rejects_unsorted_or_out_of_range_xips() {
+        assert!(cast_text_to_txid_snapshot("12:16:14,13").is_err());
+        assert!(cast_text_to_txid_snapshot("12:13:0").is_err());
+        assert!(cast_text_to_txid_snapshot("31:12:").is_err());
+    }
+
+    #[test]
+    fn txid_snapshot_visibility_matches_snapshot_boundaries() {
+        let snapshot = parse_txid_snapshot("12:20:13,15,18").unwrap();
+        assert!(snapshot.xid_visible(12));
+        assert!(!snapshot.xid_visible(13));
+        assert!(snapshot.xid_visible(14));
+        assert!(!snapshot.xid_visible(20));
+    }
+}
