@@ -12,7 +12,9 @@ use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager
 use crate::include::access::htup::TupleValue;
 use crate::include::access::htup::{AttributeDesc, HeapTuple};
 use crate::include::catalog::{CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE};
-use crate::include::nodes::datetime::{DateADT, TimestampADT, TimestampTzADT};
+use crate::include::nodes::datetime::{
+    DateADT, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimestampADT, TimestampTzADT,
+};
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::primnodes::{OrderByEntry, Var, user_attrno};
 use crate::pgrust::database::{Database, Session};
@@ -5912,6 +5914,83 @@ fn select_date_part_handles_infinity() {
         .unwrap(),
         vec![vec![Value::Null, Value::Float64(f64::INFINITY)]],
     );
+}
+
+#[test]
+fn timestamp_precision_preserves_infinity_sentinels() {
+    let base = temp_dir("timestamp_precision_infinity");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select '-infinity'::timestamp(2), 'infinity'::timestamp(2)",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Timestamp(TimestampADT(TIMESTAMP_NOBEGIN)),
+            Value::Timestamp(TimestampADT(TIMESTAMP_NOEND)),
+        ]],
+    );
+
+    assert_eq!(
+        expr_datetime::apply_time_precision(
+            Value::TimestampTz(TimestampTzADT(TIMESTAMP_NOBEGIN)),
+            Some(2)
+        ),
+        Value::TimestampTz(TimestampTzADT(TIMESTAMP_NOBEGIN))
+    );
+    assert_eq!(
+        expr_datetime::apply_time_precision(
+            Value::TimestampTz(TimestampTzADT(TIMESTAMP_NOEND)),
+            Some(2)
+        ),
+        Value::TimestampTz(TimestampTzADT(TIMESTAMP_NOEND))
+    );
+}
+
+#[test]
+fn timestamp_subtraction_returns_interval_and_handles_infinity() {
+    let base = temp_dir("timestamp_subtraction_interval");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select timestamp '2000-01-03 00:00:01' - timestamp '2000-01-01 00:00:00', timestamp 'infinity' - timestamp '1995-08-06 12:12:12', timestamp '-infinity' - timestamp 'infinity'",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Interval(IntervalValue {
+                time_micros: crate::include::nodes::datetime::USECS_PER_SEC,
+                days: 2,
+                months: 0,
+            }),
+            Value::Interval(IntervalValue::infinity()),
+            Value::Interval(IntervalValue::neg_infinity()),
+        ]],
+    );
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select timestamp 'infinity' - timestamp 'infinity'",
+    )
+    .unwrap_err()
+    {
+        ExecError::DetailedError {
+            message, sqlstate, ..
+        } => {
+            assert_eq!(message, "interval out of range");
+            assert_eq!(sqlstate, "22008");
+        }
+        other => panic!("expected interval out-of-range error, got {other:?}"),
+    }
 }
 
 #[test]

@@ -1505,6 +1505,10 @@ fn datetime_parse_error_details(ty: &'static str, text: &str, err: DateTimeParse
         DateTimeParseError::FieldOutOfRange => {
             format!("date/time field value out of range: \"{text}\"")
         }
+        DateTimeParseError::TimestampOutOfRange => format!("{ty} out of range: \"{text}\""),
+        DateTimeParseError::TimeZoneDisplacementOutOfRange => {
+            format!("time zone displacement out of range: \"{text}\"")
+        }
         DateTimeParseError::UnknownTimeZone(zone) => {
             format!("time zone \"{zone}\" not recognized")
         }

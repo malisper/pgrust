@@ -11,6 +11,25 @@ use crate::backend::utils::time::datetime::{
 };
 use crate::include::nodes::datetime::{TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC};
 
+fn timestamp_min_usecs() -> i64 {
+    i64::from(days_from_ymd(-4713, 11, 24).expect("valid timestamp lower bound")) * USECS_PER_DAY
+}
+
+fn timestamp_max_exclusive_usecs() -> i64 {
+    i64::from(days_from_ymd(294277, 1, 1).expect("valid timestamp upper bound")) * USECS_PER_DAY
+}
+
+fn checked_timestamp_usecs(days: i32, time_usecs: i64) -> Result<i64, DateTimeParseError> {
+    let value = i64::from(days)
+        .checked_mul(USECS_PER_DAY)
+        .and_then(|days_usecs| days_usecs.checked_add(time_usecs))
+        .ok_or(DateTimeParseError::TimestampOutOfRange)?;
+    if value < timestamp_min_usecs() || value >= timestamp_max_exclusive_usecs() {
+        return Err(DateTimeParseError::TimestampOutOfRange);
+    }
+    Ok(value)
+}
+
 const WEEKDAY_ABBREV: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTH_ABBREV: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -275,6 +294,14 @@ fn parse_two_digit_year_first_timestamp_date(token: &str) -> Option<(i32, u32, u
     None
 }
 
+fn is_signed_numeric_timezone_candidate(token: &str) -> bool {
+    let trimmed = token.trim();
+    let Some(rest) = trimmed.strip_prefix(['+', '-']) else {
+        return false;
+    };
+    !rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit() || ch == ':')
+}
+
 fn extract_timestamp_parts(
     text: &str,
     config: &DateTimeConfig,
@@ -332,6 +359,8 @@ fn extract_timestamp_parts(
             if let Some(spec) = parse_timezone_spec(last)? {
                 zone = Some(spec);
                 tokens.pop();
+            } else if is_signed_numeric_timezone_candidate(last) {
+                return Err(DateTimeParseError::TimeZoneDisplacementOutOfRange);
             }
         }
     }
@@ -432,7 +461,7 @@ pub fn parse_timestamp_text(
         return value;
     }
     let (days, time_usecs, _) = extract_timestamp_parts(trimmed, config)?;
-    Ok(TimestampADT(days as i64 * USECS_PER_DAY + time_usecs))
+    Ok(TimestampADT(checked_timestamp_usecs(days, time_usecs)?))
 }
 
 pub fn parse_timestamptz_text(
@@ -459,9 +488,13 @@ pub fn parse_timestamptz_text(
 
     let (days, time_usecs, zone) = extract_timestamp_parts(trimmed, config)?;
     let offset_seconds = timezone_spec_offset(zone, days, config)?;
-    Ok(TimestampTzADT(
-        days as i64 * USECS_PER_DAY + time_usecs - offset_seconds as i64 * USECS_PER_SEC,
-    ))
+    let value = checked_timestamp_usecs(days, time_usecs)?
+        .checked_sub(offset_seconds as i64 * USECS_PER_SEC)
+        .ok_or(DateTimeParseError::TimestampOutOfRange)?;
+    if value < timestamp_min_usecs() || value >= timestamp_max_exclusive_usecs() {
+        return Err(DateTimeParseError::TimestampOutOfRange);
+    }
+    Ok(TimestampTzADT(value))
 }
 
 pub fn format_timestamp_text(value: TimestampADT, _config: &DateTimeConfig) -> String {
@@ -535,6 +568,11 @@ mod format_tests {
         assert_eq!(
             format_timestamp_text(ts, &config),
             "Thu Jan 01 00:00:00 1001"
+        );
+        let bc = TimestampADT(i64::from(days_from_ymd(-96, 2, 16).unwrap()) * USECS_PER_DAY);
+        assert_eq!(
+            format_timestamp_text(bc, &config),
+            "Tue Feb 16 00:00:00 0097 BC"
         );
     }
 
@@ -614,6 +652,32 @@ mod tests {
             Ok(TimestampTzADT(
                 i64::from(july_days) * USECS_PER_DAY + time_usecs + 4 * 60 * 60 * USECS_PER_SEC
             ))
+        );
+    }
+
+    #[test]
+    fn rejects_out_of_range_signed_timezone_displacement() {
+        let config = DateTimeConfig::default();
+        assert_eq!(
+            parse_timestamp_text("Feb 16 17:32:01 -0097", &config),
+            Err(DateTimeParseError::TimeZoneDisplacementOutOfRange)
+        );
+    }
+
+    #[test]
+    fn rejects_timestamp_values_outside_postgres_range() {
+        let config = DateTimeConfig::default();
+        assert_eq!(
+            parse_timestamp_text("Feb 16 17:32:01 5097 BC", &config),
+            Err(DateTimeParseError::TimestampOutOfRange)
+        );
+        assert_eq!(
+            parse_timestamp_text("4714-11-23 23:59:59 BC", &config),
+            Err(DateTimeParseError::TimestampOutOfRange)
+        );
+        assert_eq!(
+            parse_timestamp_text("294277-01-01 00:00:00", &config),
+            Err(DateTimeParseError::TimestampOutOfRange)
         );
     }
 }

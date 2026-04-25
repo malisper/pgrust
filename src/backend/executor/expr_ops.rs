@@ -23,7 +23,9 @@ use crate::backend::executor::jsonb::{
 };
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::catalog::{C_COLLATION_OID, DEFAULT_COLLATION_OID, POSIX_COLLATION_OID};
-use crate::include::nodes::datetime::{TimeTzADT, USECS_PER_SEC};
+use crate::include::nodes::datetime::{
+    TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeTzADT, USECS_PER_SEC,
+};
 use crate::pgrust::compact_string::CompactString;
 
 pub(crate) fn compare_order_by_keys(
@@ -421,6 +423,8 @@ pub(crate) fn sub_values(left: Value, right: Value) -> Result<Value, ExecError> 
             Ok(Value::PgLsn(sub_pg_lsn_offset(*l, r)?))
         }
         (Value::Date(l), Value::Date(r)) => Ok(Value::Int32(l.0 - r.0)),
+        (Value::Timestamp(l), Value::Timestamp(r)) => timestamp_difference_interval(l.0, r.0),
+        (Value::TimestampTz(l), Value::TimestampTz(r)) => timestamp_difference_interval(l.0, r.0),
         (Value::Money(l), Value::Money(r)) => Ok(Value::Money(money_sub(*l, *r)?)),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Float64(l - r)),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
@@ -431,6 +435,41 @@ pub(crate) fn sub_values(left: Value, right: Value) -> Result<Value, ExecError> 
             left,
             right,
         }),
+    }
+}
+
+fn interval_out_of_range() -> ExecError {
+    ExecError::DetailedError {
+        message: "interval out of range".into(),
+        detail: None,
+        hint: None,
+        sqlstate: "22008",
+    }
+}
+
+fn timestamp_difference_interval(left: i64, right: i64) -> Result<Value, ExecError> {
+    match (left, right) {
+        (TIMESTAMP_NOEND, TIMESTAMP_NOEND) | (TIMESTAMP_NOBEGIN, TIMESTAMP_NOBEGIN) => {
+            Err(interval_out_of_range())
+        }
+        (TIMESTAMP_NOEND, TIMESTAMP_NOBEGIN) => Ok(Value::Interval(IntervalValue::infinity())),
+        (TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND) => Ok(Value::Interval(IntervalValue::neg_infinity())),
+        (TIMESTAMP_NOEND, _) | (_, TIMESTAMP_NOBEGIN) => {
+            Ok(Value::Interval(IntervalValue::infinity()))
+        }
+        (TIMESTAMP_NOBEGIN, _) | (_, TIMESTAMP_NOEND) => {
+            Ok(Value::Interval(IntervalValue::neg_infinity()))
+        }
+        _ => {
+            let diff = left.checked_sub(right).ok_or_else(interval_out_of_range)?;
+            let days = diff / crate::include::nodes::datetime::USECS_PER_DAY;
+            let time_micros = diff % crate::include::nodes::datetime::USECS_PER_DAY;
+            Ok(Value::Interval(IntervalValue {
+                time_micros,
+                days: i32::try_from(days).map_err(|_| interval_out_of_range())?,
+                months: 0,
+            }))
+        }
     }
 }
 
