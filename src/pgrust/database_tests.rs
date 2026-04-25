@@ -14048,6 +14048,49 @@ fn explain_heap_seqscan_shows_relation_name() {
 }
 
 #[test]
+fn explain_verbose_count_nonnull_constant_elides_projection() {
+    let base = temp_dir("explain_verbose_count_nonnull_constant");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table agg_simplify (a int4, not_null_col int4 not null, nullable_col int4)",
+    )
+    .unwrap();
+
+    let lines = explain_lines(
+        &db,
+        1,
+        "(verbose, costs off) select count('bananas'::text) from agg_simplify",
+    );
+
+    assert!(
+        lines.iter().any(|line| line == "Aggregate"),
+        "expected aggregate node, got {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line == "  Output: count(*)"),
+        "expected simplified count(*) output, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Seq Scan on agg_simplify")),
+        "expected seq scan on agg_simplify, got {lines:?}"
+    );
+    assert!(
+        lines.iter().all(|line| !line.contains("Projection")),
+        "expected passthrough projection elision, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .all(|line| !line.contains("count('bananas'::text)")),
+        "expected count argument simplification, got {lines:?}"
+    );
+}
+
+#[test]
 fn explain_inner_join_can_reorder_commutative_inputs() {
     let base = temp_dir("explain_inner_join_reorder");
     let db = Database::open(&base, 16).unwrap();
