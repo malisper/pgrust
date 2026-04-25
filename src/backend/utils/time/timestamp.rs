@@ -93,6 +93,21 @@ fn tokenize_timestamp(text: &str) -> Vec<&str> {
     tokens
 }
 
+fn normalize_timestamp_input(text: &str) -> String {
+    let mut normalized = text.replace(',', "");
+    for meridiem in ["AM", "PM", "am", "pm"] {
+        let separated = format!(" {meridiem} ");
+        let attached = format!("{meridiem} ");
+        normalized = normalized.replace(&separated, &attached);
+        let trailing = format!(" {meridiem}");
+        if normalized.ends_with(&trailing) {
+            normalized.truncate(normalized.len() - trailing.len());
+            normalized.push_str(meridiem);
+        }
+    }
+    normalized
+}
+
 fn split_meridiem_suffix(text: &str) -> (&str, Option<&str>) {
     if text.len() >= 2 {
         let suffix = &text[text.len() - 2..];
@@ -253,7 +268,8 @@ fn extract_timestamp_parts(
     text: &str,
     config: &DateTimeConfig,
 ) -> Result<(i32, i64, Option<TimeZoneSpec>), DateTimeParseError> {
-    let mut tokens = tokenize_timestamp(text);
+    let normalized = normalize_timestamp_input(text);
+    let mut tokens = tokenize_timestamp(&normalized);
     if tokens.is_empty() {
         return Err(DateTimeParseError::Invalid);
     }

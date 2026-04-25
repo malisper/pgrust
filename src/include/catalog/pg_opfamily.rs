@@ -16,6 +16,7 @@ pub const BTREE_BOOL_FAMILY_OID: u32 = 424;
 pub const BTREE_NUMERIC_FAMILY_OID: u32 = 1988;
 pub const BTREE_BIT_FAMILY_OID: u32 = 423;
 pub const BTREE_BYTEA_FAMILY_OID: u32 = 428;
+pub const BTREE_UUID_FAMILY_OID: u32 = 2968;
 pub const BTREE_DATETIME_FAMILY_OID: u32 = 434;
 pub const BTREE_FLOAT_FAMILY_OID: u32 = 1970;
 pub const BTREE_VARBIT_FAMILY_OID: u32 = 2002;
@@ -54,6 +55,7 @@ pub const HASH_TIMETZ_FAMILY_OID: u32 = 2001;
 pub const HASH_TIMESTAMP_FAMILY_OID: u32 = 2040;
 pub const HASH_BOOL_FAMILY_OID: u32 = 2222;
 pub const HASH_BYTEA_FAMILY_OID: u32 = 2223;
+pub const HASH_UUID_FAMILY_OID: u32 = 2969;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgOpfamilyRow {
@@ -103,6 +105,13 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
             oid: BTREE_BYTEA_FAMILY_OID,
             opfmethod: BTREE_AM_OID,
             opfname: "bytea_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
+            oid: BTREE_UUID_FAMILY_OID,
+            opfmethod: BTREE_AM_OID,
+            opfname: "uuid_ops".into(),
             opfnamespace: PG_CATALOG_NAMESPACE_OID,
             opfowner: BOOTSTRAP_SUPERUSER_OID,
         },
@@ -258,6 +267,7 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
         hash_row(HASH_TIMESTAMP_FAMILY_OID, "timestamp_ops"),
         hash_row(HASH_BOOL_FAMILY_OID, "bool_ops"),
         hash_row(HASH_BYTEA_FAMILY_OID, "bytea_ops"),
+        hash_row(HASH_UUID_FAMILY_OID, "uuid_ops"),
     ]
 }
 

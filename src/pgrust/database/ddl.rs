@@ -874,6 +874,7 @@ pub(crate) fn format_sql_type_name(sql_type: SqlType) -> String {
         SqlTypeKind::Bit => "bit",
         SqlTypeKind::VarBit => "bit varying",
         SqlTypeKind::Bytea => "bytea",
+        SqlTypeKind::Uuid => "uuid",
         SqlTypeKind::Inet => "inet",
         SqlTypeKind::Cidr => "cidr",
         SqlTypeKind::Float4 => "real",
