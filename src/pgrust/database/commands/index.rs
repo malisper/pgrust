@@ -12,8 +12,9 @@ use crate::include::access::brin::BrinOptions;
 use crate::include::access::gin::GinOptions;
 use crate::include::access::hash::HashOptions;
 use crate::include::catalog::{
-    BRIN_AM_OID, GIN_AM_OID, GIST_AM_OID, GIST_RANGE_FAMILY_OID, HASH_AM_OID, SPGIST_AM_OID,
-    builtin_range_rows, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+    BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, GIST_RANGE_FAMILY_OID, HASH_AM_OID,
+    SPGIST_AM_OID, builtin_range_rows, multirange_type_ref_for_sql_type,
+    range_type_ref_for_sql_type,
 };
 use crate::include::nodes::parsenodes::RelOption;
 use std::collections::BTreeSet;
@@ -187,7 +188,7 @@ impl Database {
             indexrelid,
             indrelid: meta.indrelid,
             indnatts: meta.indkey.len() as i16,
-            indnkeyatts: meta.indkey.len() as i16,
+            indnkeyatts: meta.indclass.len() as i16,
             indisunique: meta.indisunique,
             indnullsnotdistinct: meta.indnullsnotdistinct,
             indisprimary: meta.indisprimary,
@@ -1310,12 +1311,6 @@ impl Database {
             }));
         }
         ensure_relation_owner(self, client_id, &entry, &create_stmt.table_name)?;
-        if !create_stmt.include_columns.is_empty() {
-            return Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "simple index definition",
-                actual: "unsupported CREATE INDEX feature".into(),
-            }));
-        }
         let access_method_name = create_stmt.using_method.as_deref().unwrap_or("btree");
         if access_method_name.eq_ignore_ascii_case("brin") && create_stmt.predicate.is_some() {
             return Err(ExecError::Parse(ParseError::FeatureNotSupported(
@@ -1409,13 +1404,32 @@ impl Database {
                 access_method_name
             ))));
         }
+        if !create_stmt.include_columns.is_empty()
+            && !matches!(
+                access_method_oid,
+                BTREE_AM_OID | GIST_AM_OID | SPGIST_AM_OID
+            )
+        {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "index access method supporting INCLUDE",
+                actual: "unsupported CREATE INDEX feature".into(),
+            }));
+        }
+        let mut storage_columns = index_columns.clone();
+        storage_columns.extend(
+            create_stmt
+                .include_columns
+                .iter()
+                .cloned()
+                .map(crate::backend::parser::IndexColumnDef::from),
+        );
         let index_name = if create_stmt.index_name.is_empty() {
             self.choose_available_relation_name(
                 client_id,
                 xid,
                 cid,
                 entry.namespace_oid,
-                &Self::default_index_base_name(&create_stmt.table_name, &index_columns),
+                &Self::default_index_base_name(&create_stmt.table_name, &storage_columns),
             )?
         } else {
             create_stmt.index_name.clone()
@@ -1425,7 +1439,7 @@ impl Database {
                 client_id,
                 &entry,
                 &index_name,
-                &index_columns,
+                &storage_columns,
                 create_stmt.predicate_sql.as_deref(),
                 create_stmt.unique,
                 create_stmt.nulls_not_distinct,
@@ -1454,7 +1468,7 @@ impl Database {
             &entry,
             &index_name,
             catalog.materialize_visible_catalog(),
-            &index_columns,
+            &storage_columns,
             create_stmt.predicate_sql.as_deref(),
             create_stmt.unique,
             false,

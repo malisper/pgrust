@@ -5901,9 +5901,9 @@ fn build_index_entry_with_relkind(
         index_columns.push(column);
     }
 
-    if resolved_options.indclass.len() != columns.len()
-        || resolved_options.indcollation.len() != columns.len()
-        || resolved_options.indoption.len() != columns.len()
+    if resolved_options.indclass.len() > columns.len()
+        || resolved_options.indcollation.len() != resolved_options.indclass.len()
+        || resolved_options.indoption.len() != resolved_options.indclass.len()
     {
         return Err(CatalogError::Corrupt("index build options length mismatch"));
     }
@@ -6859,7 +6859,7 @@ fn index_row_for_entry(entry: &CatalogEntry) -> Option<crate::include::catalog::
         indexrelid: entry.relation_oid,
         indrelid: index_meta.indrelid,
         indnatts: index_meta.indkey.len() as i16,
-        indnkeyatts: index_meta.indkey.len() as i16,
+        indnkeyatts: index_meta.indclass.len() as i16,
         indisunique: index_meta.indisunique,
         indnullsnotdistinct: index_meta.indnullsnotdistinct,
         indisprimary: index_meta.indisprimary,

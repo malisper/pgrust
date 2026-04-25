@@ -3969,9 +3969,20 @@ pub(crate) fn format_psql_indexdef(
         .filter(|relation| relation.relkind == 'I')
         .map(|_| " ONLY")
         .unwrap_or("");
-    let column_names = psql_index_display_columns(db, session, &index.desc, &index.index_meta)
+    let all_column_names = psql_index_display_columns(db, session, &index.desc, &index.index_meta)
         .into_iter()
         .map(|column| column.definition)
+        .collect::<Vec<_>>();
+    let key_count = usize::try_from(index.index_meta.indnkeyatts.max(0)).unwrap_or_default();
+    let key_column_names = all_column_names
+        .iter()
+        .take(key_count)
+        .cloned()
+        .collect::<Vec<_>>();
+    let include_column_names = all_column_names
+        .iter()
+        .skip(key_count)
+        .cloned()
         .collect::<Vec<_>>();
     let unique = if index.index_meta.indisunique {
         "UNIQUE "
@@ -3983,8 +3994,13 @@ pub(crate) fn format_psql_indexdef(
         index.name,
         table_name,
         amname,
-        column_names.join(", ")
+        key_column_names.join(", ")
     );
+    if !include_column_names.is_empty() {
+        definition.push_str(" INCLUDE (");
+        definition.push_str(&include_column_names.join(", "));
+        definition.push(')');
+    }
     if let Some(predicate) = index
         .index_meta
         .indpred

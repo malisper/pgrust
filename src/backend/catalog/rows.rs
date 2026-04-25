@@ -426,7 +426,7 @@ pub(crate) fn physical_catalog_rows_for_catalog_entry(
             indexrelid: entry.relation_oid,
             indrelid: index_meta.indrelid,
             indnatts: index_meta.indkey.len() as i16,
-            indnkeyatts: index_meta.indkey.len() as i16,
+            indnkeyatts: index_meta.indclass.len() as i16,
             indisunique: index_meta.indisunique,
             indnullsnotdistinct: index_meta.indnullsnotdistinct,
             indisprimary: index_meta.indisprimary,

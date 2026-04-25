@@ -36,7 +36,8 @@ use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
-    PgCollationRow, PgConstraintRow, PgEnumRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
+    PgCollationRow, PgConstraintRow, PgEnumRow, PgIndexRow, PgInheritsRow, PgLanguageRow,
+    PgNamespaceRow,
     PgOpclassRow, PgOperatorRow, PgPartitionedTableRow, PgProcRow, PgRangeRow, PgRewriteRow,
     PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTsConfigRow, PgTsDictRow,
     PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows,
@@ -672,6 +673,10 @@ pub trait CatalogLookup {
 
     fn index_relations_for_heap(&self, _relation_oid: u32) -> Vec<BoundIndexRelation> {
         Vec::new()
+    }
+
+    fn index_row_by_oid(&self, _index_oid: u32) -> Option<PgIndexRow> {
+        None
     }
 
     fn lookup_relation(&self, name: &str) -> Option<BoundRelation> {
@@ -1362,6 +1367,13 @@ impl CatalogLookup for Catalog {
             .collect()
     }
 
+    fn index_row_by_oid(&self, index_oid: u32) -> Option<PgIndexRow> {
+        CatCache::from_catalog(self)
+            .index_rows()
+            .into_iter()
+            .find(|row| row.indexrelid == index_oid)
+    }
+
     fn proc_rows_by_name(&self, name: &str) -> Vec<PgProcRow> {
         let mut rows = CatCache::from_catalog(self)
             .proc_rows_by_name(name)
@@ -1673,6 +1685,34 @@ impl CatalogLookup for RelCache {
                 bound_index_relation_from_relcache_entry(name, entry, self)
             })
             .collect()
+    }
+
+    fn index_row_by_oid(&self, index_oid: u32) -> Option<PgIndexRow> {
+        let entry = self.get_by_oid(index_oid)?;
+        let index = entry.index.as_ref()?;
+        Some(PgIndexRow {
+            indexrelid: entry.relation_oid,
+            indrelid: index.indrelid,
+            indnatts: index.indnatts,
+            indnkeyatts: index.indnkeyatts,
+            indisunique: index.indisunique,
+            indnullsnotdistinct: index.indnullsnotdistinct,
+            indisprimary: index.indisprimary,
+            indisexclusion: index.indisexclusion,
+            indimmediate: index.indimmediate,
+            indisclustered: index.indisclustered,
+            indisvalid: index.indisvalid,
+            indcheckxmin: index.indcheckxmin,
+            indisready: index.indisready,
+            indislive: index.indislive,
+            indisreplident: index.indisreplident,
+            indkey: index.indkey.clone(),
+            indcollation: index.indcollation.clone(),
+            indclass: index.indclass.clone(),
+            indoption: index.indoption.clone(),
+            indexprs: index.indexprs.clone(),
+            indpred: index.indpred.clone(),
+        })
     }
 
     fn type_rows(&self) -> Vec<PgTypeRow> {

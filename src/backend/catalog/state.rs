@@ -89,9 +89,9 @@ fn build_catalog_index_entry(
         column.default_expr = None;
         index_columns.push(column);
     }
-    if options.indclass.len() != columns.len()
-        || options.indcollation.len() != columns.len()
-        || options.indoption.len() != columns.len()
+    if options.indclass.len() > columns.len()
+        || options.indcollation.len() != options.indclass.len()
+        || options.indoption.len() != options.indclass.len()
     {
         return Err(CatalogError::Corrupt("index build options length mismatch"));
     }

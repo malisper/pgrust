@@ -1979,6 +1979,14 @@ fn index_relation_for_oid(
     crate::backend::parser::BoundRelation,
     crate::backend::parser::BoundIndexRelation,
 )> {
+    if let Some(index_row) = catalog.index_row_by_oid(index_oid) {
+        let relation = catalog.lookup_relation_by_oid(index_row.indrelid)?;
+        let index = catalog
+            .index_relations_for_heap(index_row.indrelid)
+            .into_iter()
+            .find(|index| index.relation_oid == index_oid)?;
+        return Some((relation, index));
+    }
     catalog
         .constraint_rows_for_index(index_oid)
         .into_iter()
@@ -2000,14 +2008,19 @@ fn format_indexdef_for_catalog(
 ) -> String {
     let table_name = catalog
         .class_row_by_oid(relation.relation_oid)
-        .map(|class| class.relname)
+        .map(|class| {
+            catalog
+                .namespace_row_by_oid(class.relnamespace)
+                .map(|namespace| format!("{}.{}", namespace.nspname, class.relname))
+                .unwrap_or(class.relname)
+        })
         .unwrap_or_else(|| relation.relation_oid.to_string());
     let amname = bootstrap_pg_am_rows()
         .into_iter()
         .find(|row| row.oid == index.index_meta.am_oid)
         .map(|row| row.amname)
         .unwrap_or_else(|| "btree".into());
-    let columns = index_column_names_for_heap(&relation.desc, &index.index_meta.indkey)
+    let all_columns = index_column_names_for_heap(&relation.desc, &index.index_meta.indkey)
         .unwrap_or_else(|| {
             index
                 .desc
@@ -2016,6 +2029,17 @@ fn format_indexdef_for_catalog(
                 .map(|column| column.name.clone())
                 .collect()
         });
+    let key_count = usize::try_from(index.index_meta.indnkeyatts.max(0)).unwrap_or_default();
+    let key_columns = all_columns
+        .iter()
+        .take(key_count)
+        .cloned()
+        .collect::<Vec<_>>();
+    let include_columns = all_columns
+        .iter()
+        .skip(key_count)
+        .cloned()
+        .collect::<Vec<_>>();
     let unique = if index.index_meta.indisunique {
         "UNIQUE "
     } else {
@@ -2026,8 +2050,13 @@ fn format_indexdef_for_catalog(
         index.name,
         table_name,
         amname,
-        columns.join(", ")
+        key_columns.join(", ")
     );
+    if !include_columns.is_empty() {
+        definition.push_str(" INCLUDE (");
+        definition.push_str(&include_columns.join(", "));
+        definition.push(')');
+    }
     if let Some(predicate) = index
         .index_meta
         .indpred
