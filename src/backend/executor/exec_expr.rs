@@ -40,6 +40,7 @@ use super::expr_json::{
     eval_jsonpath_operator, jsonb_to_tsvector_value,
 };
 use super::expr_locks::eval_advisory_lock_builtin_function;
+use super::expr_mac::eval_macaddr_function;
 use super::expr_math::{
     cosd, cotd, eval_abs_function, eval_acosd, eval_acosh, eval_asind, eval_atanh,
     eval_binary_float_function, eval_bitcast_bigint_to_float8, eval_bitcast_integer_to_float4,
@@ -2233,6 +2234,8 @@ fn eval_pg_column_size_values(values: &[Value]) -> Result<Value, ExecError> {
         Value::Inet(_) | Value::Cidr(_) => crate::backend::executor::render_network_text(value)
             .unwrap_or_default()
             .len(),
+        Value::MacAddr(v) => crate::backend::executor::render_macaddr_text(v).len(),
+        Value::MacAddr8(v) => crate::backend::executor::render_macaddr8_text(v).len(),
         Value::Multirange(_) => super::expr_multirange::render_multirange_text(value)
             .unwrap_or_default()
             .len(),
@@ -3616,6 +3619,9 @@ fn eval_plpgsql_builtin_function(
     if let Some(result) = eval_geometry_function(func, &values) {
         return result;
     }
+    if let Some(result) = eval_macaddr_function(func, &values) {
+        return result;
+    }
     if (result_type.is_some_and(SqlType::is_multirange)
         || values
             .iter()
@@ -4566,6 +4572,9 @@ fn eval_builtin_function(
         .map(|arg| eval_expr(arg, slot, ctx))
         .collect::<Result<Vec<_>, _>>()?;
     if let Some(result) = eval_geometry_function(func, &values) {
+        return result;
+    }
+    if let Some(result) = eval_macaddr_function(func, &values) {
         return result;
     }
     if (result_type.is_some_and(SqlType::is_multirange)

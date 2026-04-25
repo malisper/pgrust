@@ -26,6 +26,8 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         ScalarType::Bytea => (-1, AttributeAlign::Int),
         ScalarType::Uuid => (16, AttributeAlign::Char),
         ScalarType::Inet | ScalarType::Cidr => (-1, AttributeAlign::Int),
+        ScalarType::MacAddr => (6, AttributeAlign::Int),
+        ScalarType::MacAddr8 => (8, AttributeAlign::Int),
         ScalarType::Point => (16, AttributeAlign::Double),
         ScalarType::Lseg => (32, AttributeAlign::Double),
         ScalarType::Path => (-1, AttributeAlign::Int),
@@ -172,6 +174,8 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         | SqlTypeKind::Xid
         | SqlTypeKind::RegConfig
         | SqlTypeKind::RegDictionary
+        | SqlTypeKind::MacAddr
+        | SqlTypeKind::MacAddr8
         | SqlTypeKind::Point
         | SqlTypeKind::Lseg
         | SqlTypeKind::Line
@@ -260,6 +264,8 @@ pub(crate) fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         SqlTypeKind::Uuid => ScalarType::Uuid,
         SqlTypeKind::Inet => ScalarType::Inet,
         SqlTypeKind::Cidr => ScalarType::Cidr,
+        SqlTypeKind::MacAddr => ScalarType::MacAddr,
+        SqlTypeKind::MacAddr8 => ScalarType::MacAddr8,
         SqlTypeKind::Point => ScalarType::Point,
         SqlTypeKind::Lseg => ScalarType::Lseg,
         SqlTypeKind::Path => ScalarType::Path,

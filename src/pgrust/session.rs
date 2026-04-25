@@ -5395,7 +5395,10 @@ impl Session {
                                 ScalarType::BitString => {
                                     cast_value(Value::Text(raw.clone().into()), column.sql_type)?
                                 }
-                                ScalarType::Inet | ScalarType::Cidr => {
+                                ScalarType::Inet
+                                | ScalarType::Cidr
+                                | ScalarType::MacAddr
+                                | ScalarType::MacAddr8 => {
                                     cast_value(Value::Text(raw.clone().into()), column.sql_type)?
                                 }
                                 ScalarType::Float32 | ScalarType::Float64 => raw

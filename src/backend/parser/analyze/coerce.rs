@@ -270,6 +270,8 @@ pub(crate) fn sql_type_name(ty: SqlType) -> String {
             SqlTypeKind::Uuid => "uuid",
             SqlTypeKind::Inet => "inet",
             SqlTypeKind::Cidr => "cidr",
+            SqlTypeKind::MacAddr => "macaddr",
+            SqlTypeKind::MacAddr8 => "macaddr8",
             SqlTypeKind::Float4 => "real",
             SqlTypeKind::Float8 => "double precision",
             SqlTypeKind::Money => "money",
@@ -364,6 +366,10 @@ pub(super) fn is_bit_string_type(ty: SqlType) -> bool {
     !ty.is_array && matches!(ty.kind, SqlTypeKind::Bit | SqlTypeKind::VarBit)
 }
 
+pub(super) fn is_macaddr_type(ty: SqlType) -> bool {
+    !ty.is_array && matches!(ty.kind, SqlTypeKind::MacAddr | SqlTypeKind::MacAddr8)
+}
+
 pub(super) fn is_geometry_type(ty: SqlType) -> bool {
     !ty.is_array
         && matches!(
@@ -420,6 +426,8 @@ pub(super) fn coerce_unknown_string_literal_type(
             SqlTypeKind::Uuid => return SqlType::new(SqlTypeKind::Uuid),
             SqlTypeKind::InternalChar => return SqlType::new(SqlTypeKind::Text),
             SqlTypeKind::Name => return SqlType::new(SqlTypeKind::Name),
+            SqlTypeKind::MacAddr => return SqlType::new(SqlTypeKind::MacAddr),
+            SqlTypeKind::MacAddr8 => return SqlType::new(SqlTypeKind::MacAddr8),
             SqlTypeKind::TsQuery => return SqlType::new(SqlTypeKind::TsQuery),
             SqlTypeKind::TsVector => return SqlType::new(SqlTypeKind::TsVector),
             SqlTypeKind::Tid => return SqlType::new(SqlTypeKind::Tid),

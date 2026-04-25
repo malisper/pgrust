@@ -2258,6 +2258,18 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
         "uuid" | "pg_catalog.uuid" => {
             return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Uuid)));
         }
+        "macaddr" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::MacAddr))),
+        "macaddr8" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::MacAddr8))),
+        "_macaddr" => {
+            return Ok(RawTypeName::Builtin(SqlType::array_of(SqlType::new(
+                SqlTypeKind::MacAddr,
+            ))));
+        }
+        "_macaddr8" => {
+            return Ok(RawTypeName::Builtin(SqlType::array_of(SqlType::new(
+                SqlTypeKind::MacAddr8,
+            ))));
+        }
         "bpchar" | "pg_catalog.bpchar" => {
             return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Char)));
         }
@@ -11603,6 +11615,8 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Xml => "xml",
         SqlTypeKind::Inet => "inet",
         SqlTypeKind::Cidr => "cidr",
+        SqlTypeKind::MacAddr => "macaddr",
+        SqlTypeKind::MacAddr8 => "macaddr8",
         SqlTypeKind::Date => "date",
         SqlTypeKind::DateRange => "daterange",
         SqlTypeKind::Time => "time without time zone",
@@ -12863,6 +12877,8 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
                 "uuid" => SqlType::new(SqlTypeKind::Uuid),
                 "inet" => SqlType::new(SqlTypeKind::Inet),
                 "cidr" => SqlType::new(SqlTypeKind::Cidr),
+                "macaddr" => SqlType::new(SqlTypeKind::MacAddr),
+                "macaddr8" => SqlType::new(SqlTypeKind::MacAddr8),
                 "money" => SqlType::new(SqlTypeKind::Money),
                 "float4" | "real" => SqlType::new(SqlTypeKind::Float4),
                 "float8" => SqlType::new(SqlTypeKind::Float8),
@@ -12911,6 +12927,8 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
         Rule::kw_uuid => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Uuid)),
         Rule::kw_inet => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Inet)),
         Rule::kw_cidr => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Cidr)),
+        Rule::kw_macaddr => RawTypeName::Builtin(SqlType::new(SqlTypeKind::MacAddr)),
+        Rule::kw_macaddr8 => RawTypeName::Builtin(SqlType::new(SqlTypeKind::MacAddr8)),
         Rule::kw_money => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Money)),
         Rule::kw_float4 | Rule::kw_real => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Float4)),
         Rule::kw_float8 | Rule::double_precision_type => {

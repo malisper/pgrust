@@ -107,6 +107,8 @@ pub(crate) fn compare_order_values(
         (Value::Cidr(a), Value::Cidr(b)) => {
             Ok(crate::backend::executor::compare_network_values(a, b))
         }
+        (Value::MacAddr(a), Value::MacAddr(b)) => Ok(a.cmp(b)),
+        (Value::MacAddr8(a), Value::MacAddr8(b)) => Ok(a.cmp(b)),
         (Value::Float64(a), Value::Float64(b)) => Ok(pg_float_cmp(*a, *b)),
         (Value::Money(a), Value::Money(b)) => Ok(money_cmp(*a, *b)),
         (a, b) if parsed_numeric_value(a).is_some() && parsed_numeric_value(b).is_some() => {
@@ -205,6 +207,8 @@ pub(crate) fn compare_values(
         (Value::Uuid(l), Value::Uuid(r)) => Ok(Value::Bool(l == r)),
         (Value::Inet(l), Value::Inet(r)) => Ok(Value::Bool(l == r)),
         (Value::Cidr(l), Value::Cidr(r)) => Ok(Value::Bool(l == r)),
+        (Value::MacAddr(l), Value::MacAddr(r)) => Ok(Value::Bool(l == r)),
+        (Value::MacAddr8(l), Value::MacAddr8(r)) => Ok(Value::Bool(l == r)),
         (Value::Bit(l), Value::Bit(r)) => Ok(Value::Bool(l == r)),
         (Value::Float64(l), Value::Float64(r)) => Ok(Value::Bool(pg_float_eq(*l, *r))),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
@@ -515,6 +519,12 @@ pub(crate) fn bitwise_and_values(left: Value, right: Value) -> Result<Value, Exe
         (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(l & r)),
         (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(l & r)),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l & r)),
+        (Value::MacAddr(l), Value::MacAddr(r)) => {
+            Ok(Value::MacAddr(std::array::from_fn(|idx| l[idx] & r[idx])))
+        }
+        (Value::MacAddr8(l), Value::MacAddr8(r)) => {
+            Ok(Value::MacAddr8(std::array::from_fn(|idx| l[idx] & r[idx])))
+        }
         (l, r) => Err(ExecError::TypeMismatch {
             op: "&",
             left: l,
@@ -529,6 +539,12 @@ pub(crate) fn bitwise_or_values(left: Value, right: Value) -> Result<Value, Exec
         (Value::Int16(l), Value::Int16(r)) => Ok(Value::Int16(l | r)),
         (Value::Int32(l), Value::Int32(r)) => Ok(Value::Int32(l | r)),
         (Value::Int64(l), Value::Int64(r)) => Ok(Value::Int64(l | r)),
+        (Value::MacAddr(l), Value::MacAddr(r)) => {
+            Ok(Value::MacAddr(std::array::from_fn(|idx| l[idx] | r[idx])))
+        }
+        (Value::MacAddr8(l), Value::MacAddr8(r)) => {
+            Ok(Value::MacAddr8(std::array::from_fn(|idx| l[idx] | r[idx])))
+        }
         (l, r) => Err(ExecError::TypeMismatch {
             op: "|",
             left: l,
@@ -557,6 +573,8 @@ pub(crate) fn bitwise_not_value(value: Value) -> Result<Value, ExecError> {
         Value::Int16(v) => Ok(Value::Int16(!v)),
         Value::Int32(v) => Ok(Value::Int32(!v)),
         Value::Int64(v) => Ok(Value::Int64(!v)),
+        Value::MacAddr(v) => Ok(Value::MacAddr(v.map(|byte| !byte))),
+        Value::MacAddr8(v) => Ok(Value::MacAddr8(v.map(|byte| !byte))),
         other => Err(ExecError::TypeMismatch {
             op: "~",
             left: other,
@@ -809,6 +827,8 @@ pub(crate) fn order_values(
                 _ => unreachable!(),
             }))
         }
+        (Value::MacAddr(l), Value::MacAddr(r)) => Ok(Value::Bool(compare_ord(l, r, op))),
+        (Value::MacAddr8(l), Value::MacAddr8(r)) => Ok(Value::Bool(compare_ord(l, r, op))),
         (Value::Date(l), Value::Date(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::Time(l), Value::Time(r)) => Ok(Value::Bool(compare_ord(*l, *r, op))),
         (Value::TimeTz(l), Value::TimeTz(r)) => Ok(Value::Bool(compare_ord(

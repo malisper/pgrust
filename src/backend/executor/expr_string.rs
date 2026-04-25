@@ -9,6 +9,8 @@ use super::expr_format::{to_char_float, to_char_int, to_char_numeric, to_number_
 use super::expr_ops::ensure_builtin_collation_supported;
 use super::expr_range::render_range_text;
 use super::node_types::Value;
+use super::render_macaddr_text;
+use super::render_macaddr8_text;
 use super::value_io::format_array_text;
 use crate::backend::executor::jsonb::render_jsonb_bytes;
 use crate::backend::libpq::pqformat::format_bytea_text;
@@ -455,6 +457,8 @@ fn value_output_text_with_config(
         Value::Bytea(bytes) => format_bytea_text(bytes, ByteaOutputFormat::Hex),
         Value::Inet(v) => v.render_inet(),
         Value::Cidr(v) => v.render_cidr(),
+        Value::MacAddr(v) => render_macaddr_text(v),
+        Value::MacAddr8(v) => render_macaddr8_text(v),
         Value::Point(_)
         | Value::Lseg(_)
         | Value::Path(_)
