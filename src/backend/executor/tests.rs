@@ -15109,8 +15109,12 @@ fn explain_shows_windowagg_node_details() {
                 })
                 .collect::<Vec<_>>();
             assert!(rendered.iter().any(|line| line.contains("WindowAgg")));
-            assert!(rendered.iter().any(|line| line.contains("Partition By:")));
-            assert!(rendered.iter().any(|line| line.contains("Order By:")));
+            assert!(
+                rendered.iter().any(|line| line.contains(
+                    "Window: w1 AS (PARTITION BY note ORDER BY id ROWS UNBOUNDED PRECEDING)"
+                )),
+                "unexpected EXPLAIN output: {rendered:?}"
+            );
         }
         other => panic!("expected query result, got {:?}", other),
     }
