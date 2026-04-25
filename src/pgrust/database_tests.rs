@@ -12953,6 +12953,49 @@ fn create_spgist_box_index_supports_overlap_and_knn_order_by() {
 }
 
 #[test]
+fn create_spgist_polygon_index_uses_default_opclass() {
+    let base = temp_dir("spgist_polygon_overlap_knn");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table polys (id int4 not null, p polygon)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into polys values \
+         (1, '((0,0),(2,0),(1,2))'::polygon), \
+         (2, '((5,5),(7,5),(6,7))'::polygon), \
+         (3, '((10,10),(13,10),(11,13))'::polygon), \
+         (4, '((6,6),(9,6),(8,9))'::polygon)",
+    )
+    .unwrap();
+
+    let overlap_sql = "select id from polys where p && '((6,6),(8,6),(7,8))'::polygon order by id";
+    let expected_overlap = query_rows(&db, 1, overlap_sql);
+    let knn_sql = "select id from polys order by p <-> '(5.5,5.5)'::point limit 3";
+    let expected_knn = query_rows(&db, 1, knn_sql);
+
+    db.execute(1, "create index polys_p_spgist on polys using spgist (p)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select indclass \
+             from pg_index \
+             where indexrelid = (select oid from pg_class where relname = 'polys_p_spgist')",
+        ),
+        vec![vec![Value::Text(
+            crate::include::catalog::POLY_SPGIST_OPCLASS_OID
+                .to_string()
+                .into()
+        )]]
+    );
+    assert_eq!(query_rows(&db, 1, overlap_sql), expected_overlap);
+    assert_eq!(query_rows(&db, 1, knn_sql), expected_knn);
+}
+
+#[test]
 fn spgist_box_index_matches_seq_scan_on_medium_dataset() {
     let base = temp_dir("spgist_box_medium_semantics");
     let db = Database::open(&base, 16).unwrap();

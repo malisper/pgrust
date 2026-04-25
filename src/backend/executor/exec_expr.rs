@@ -116,8 +116,9 @@ use crate::include::catalog::{
     CURRENT_DATABASE_OID, FLOAT8_TYPE_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID,
     PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID, PG_DATABASE_RELATION_OID,
     PG_DEPENDENCIES_TYPE_OID, PG_FOREIGN_DATA_WRAPPER_RELATION_OID, PG_MCV_LIST_TYPE_OID,
-    PG_NDISTINCT_TYPE_OID, PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID, SPGIST_AM_OID,
-    bootstrap_pg_am_rows, builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid,
+    PG_NDISTINCT_TYPE_OID, PG_STATISTIC_EXT_RELATION_OID, PG_TOAST_NAMESPACE_OID,
+    POLY_SPGIST_OPCLASS_OID, SPGIST_AM_OID, bootstrap_pg_am_rows,
+    builtin_scalar_function_for_proc_oid, builtin_type_name_for_oid,
 };
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue};
 use crate::include::nodes::primnodes::{
@@ -670,8 +671,10 @@ fn eval_pg_index_column_has_property(
                     IndexReturnability::Never => false,
                     IndexReturnability::Always => true,
                     IndexReturnability::SpgistBox => {
-                        index_meta.indclass.get(column_index).copied()
-                            == Some(BOX_SPGIST_OPCLASS_OID)
+                        matches!(
+                            index_meta.indclass.get(column_index).copied(),
+                            Some(BOX_SPGIST_OPCLASS_OID | POLY_SPGIST_OPCLASS_OID)
+                        )
                     }
                 }),
                 Some(IndexPropertyKind::SearchArray) => {
