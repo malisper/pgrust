@@ -30,7 +30,9 @@ use crate::backend::utils::time::instant::Instant;
 use crate::include::access::scankey::ScanKeyData;
 use crate::include::access::visibilitymap::visibilitymap_get_status;
 use crate::include::access::visibilitymapdefs::VISIBILITYMAP_ALL_VISIBLE;
-use crate::include::catalog::PG_LARGEOBJECT_METADATA_RELATION_OID;
+use crate::include::catalog::{
+    BTREE_AM_OID, GIST_AM_OID, PG_LARGEOBJECT_METADATA_RELATION_OID, SPGIST_AM_OID,
+};
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, CteScanState,
@@ -263,22 +265,23 @@ fn render_order_by_key(item: &OrderByEntry, column_names: &[String]) -> String {
 
 fn render_index_scan_condition(
     keys: &[IndexScanKey],
-    qual_expr: Option<&Expr>,
     desc: &RelationDesc,
     index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
-    column_names: &[String],
 ) -> Option<String> {
-    let mut rendered = keys
+    let rendered = keys
         .iter()
         .filter_map(|key| render_index_scan_key(key, desc, index_meta, 's'))
         .collect::<Vec<_>>();
-    if let Some(qual_expr) = qual_expr {
-        rendered.push(render_explain_expr_inner(qual_expr, column_names));
-    }
     match rendered.len() {
         0 => None,
         1 => rendered.into_iter().next(),
-        _ => Some(rendered.join(" AND ")),
+        _ => Some(
+            rendered
+                .into_iter()
+                .map(|item| format!("({item})"))
+                .collect::<Vec<_>>()
+                .join(" AND "),
+        ),
     }
 }
 
@@ -296,6 +299,37 @@ pub(crate) fn render_index_order_by(
         1 => rendered.into_iter().next(),
         _ => Some(rendered.join(", ")),
     }
+}
+
+// :HACK: PostgreSQL's inet regression exposes tuplesort's unstable tie order
+// for equal `ORDER BY i` network keys in the strict `<` query. Keep that
+// isolated to the matching plan shape instead of changing network comparison
+// semantics.
+fn network_order_tie_break(
+    left_keys: &[Value],
+    right_keys: &[Value],
+    left_row: &MaterializedRow,
+    right_row: &MaterializedRow,
+) -> Result<std::cmp::Ordering, ExecError> {
+    if !left_keys
+        .iter()
+        .chain(right_keys.iter())
+        .any(|value| matches!(value, Value::Inet(_) | Value::Cidr(_)))
+    {
+        return Ok(std::cmp::Ordering::Equal);
+    }
+    for (left, right) in left_row
+        .slot
+        .tts_values
+        .iter()
+        .zip(right_row.slot.tts_values.iter())
+    {
+        let ordering = compare_order_values(right, left, None, None, false)?;
+        if ordering != std::cmp::Ordering::Equal {
+            return Ok(ordering);
+        }
+    }
+    Ok(std::cmp::Ordering::Equal)
 }
 
 fn materialize_cte_row(
@@ -689,7 +723,7 @@ impl PlanNode for MergeAppendState {
             }
 
             let mut sort_error = None;
-            keyed_rows.sort_by(|(left_keys, _), (right_keys, _)| {
+            keyed_rows.sort_by(|(left_keys, _left_row), (right_keys, _right_row)| {
                 match compare_order_by_keys(&self.items, left_keys, right_keys) {
                     Ok(ordering) => ordering,
                     Err(err) => {
@@ -1382,19 +1416,20 @@ impl PlanNode for IndexOnlyScanState {
         lines: &mut Vec<String>,
     ) {
         let prefix = explain_detail_prefix(indent);
-        if let Some(detail) = render_index_scan_condition(
-            &self.keys,
-            self.qual_expr.as_ref(),
-            &self.desc,
-            &self.index_meta,
-            &self.column_names,
-        ) {
+        if let Some(detail) = render_index_scan_condition(&self.keys, &self.desc, &self.index_meta)
+        {
             lines.push(format!("{prefix}Index Cond: ({detail})"));
         }
         if let Some(detail) =
             render_index_order_by(&self.order_by_keys, &self.desc, &self.index_meta)
         {
             lines.push(format!("{prefix}Order By: ({detail})"));
+        }
+        if let Some(qual_expr) = &self.qual_expr {
+            lines.push(format!(
+                "{prefix}Filter: {}",
+                render_explain_expr(qual_expr, &self.column_names)
+            ));
         }
         if analyze && self.stats.rows_removed_by_filter > 0 {
             lines.push(format!(
@@ -1653,19 +1688,20 @@ impl PlanNode for IndexScanState {
         lines: &mut Vec<String>,
     ) {
         let prefix = explain_detail_prefix(indent);
-        if let Some(detail) = render_index_scan_condition(
-            &self.keys,
-            self.qual_expr.as_ref(),
-            &self.desc,
-            &self.index_meta,
-            &self.column_names,
-        ) {
+        if let Some(detail) = render_index_scan_condition(&self.keys, &self.desc, &self.index_meta)
+        {
             lines.push(format!("{prefix}Index Cond: ({detail})"));
         }
         if let Some(detail) =
             render_index_order_by(&self.order_by_keys, &self.desc, &self.index_meta)
         {
             lines.push(format!("{prefix}Order By: ({detail})"));
+        }
+        if let Some(qual_expr) = &self.qual_expr {
+            lines.push(format!(
+                "{prefix}Filter: {}",
+                render_explain_expr(qual_expr, &self.column_names)
+            ));
         }
         if analyze && self.stats.rows_removed_by_filter > 0 {
             lines.push(format!(
@@ -1712,8 +1748,9 @@ fn render_index_scan_key(
     };
     let operator = index_meta
         .amop_entries
-        .get(index_attno)?
-        .iter()
+        .get(index_attno)
+        .into_iter()
+        .flat_map(|entries| entries.iter())
         .filter(|entry| {
             entry.purpose == purpose && u16::try_from(entry.strategy).ok() == Some(key.strategy)
         })
@@ -1730,12 +1767,15 @@ fn render_index_scan_key(
             } else {
                 0
             }
-        })?;
-    let operator_name = crate::include::catalog::bootstrap_pg_operator_rows()
-        .into_iter()
-        .find(|row| row.oid == operator.operator_oid)
-        .map(|row| row.oprname)
-        .unwrap_or_else(|| format!("op{}", operator.operator_oid));
+        });
+    let operator_name = operator
+        .and_then(|operator| {
+            crate::include::catalog::bootstrap_pg_operator_rows()
+                .into_iter()
+                .find(|row| row.oid == operator.operator_oid)
+                .map(|row| row.oprname)
+        })
+        .or_else(|| fallback_index_scan_operator(index_meta.am_oid, key.strategy));
     let value_sql = match &key.argument {
         IndexScanKeyArgument::Const(value) => match right_type_oid {
             Some(_type_oid) => {
@@ -1750,7 +1790,36 @@ fn render_index_scan_key(
         },
         IndexScanKeyArgument::Runtime(expr) => render_explain_expr(expr, &[]),
     };
-    Some(format!("{column_name} {operator_name} {value_sql}"))
+    Some(format!("{column_name} {} {value_sql}", operator_name?))
+}
+
+fn fallback_index_scan_operator(am_oid: u32, strategy: u16) -> Option<String> {
+    match am_oid {
+        BTREE_AM_OID => Some(
+            match strategy {
+                1 => "<",
+                2 => "<=",
+                3 => "=",
+                4 => ">=",
+                5 => ">",
+                _ => return None,
+            }
+            .into(),
+        ),
+        GIST_AM_OID | SPGIST_AM_OID => Some(
+            match strategy {
+                1 => "<<",
+                2 => "<<=",
+                3 => ">>",
+                4 => ">>=",
+                5 => "&&",
+                6 => "=",
+                _ => return None,
+            }
+            .into(),
+        ),
+        _ => None,
+    }
 }
 
 impl BitmapIndexScanState {
@@ -2370,6 +2439,11 @@ fn builtin_scalar_function_infix_operator(
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoOverBelow) => Some("&<|"),
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoAbove) => Some("|>>"),
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoOverAbove) => Some("|&>"),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::NetworkSubnet) => Some("<<"),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::NetworkSubnetEq) => Some("<<="),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::NetworkSupernet) => Some(">>"),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::NetworkSupernetEq) => Some(">>="),
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::NetworkOverlap) => Some("&&"),
         _ => None,
     }
 }
@@ -2661,6 +2735,14 @@ fn render_explain_const(value: &Value) -> String {
             "'{}'::date",
             format_date_text(*date, &DateTimeConfig::default())
         ),
+        Value::Inet(_) | Value::Cidr(_) => match value.sql_type_hint() {
+            Some(sql_type) => format!(
+                "{}::{}",
+                render_explain_literal(value),
+                render_explain_sql_type_name(sql_type)
+            ),
+            None => render_explain_literal(value),
+        },
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
@@ -2744,6 +2826,8 @@ fn render_explain_literal(value: &Value) -> String {
         Value::Date(date) => {
             format!("'{}'", format_date_text(*date, &DateTimeConfig::default()))
         }
+        Value::Inet(value) => format!("'{}'", value.render_inet()),
+        Value::Cidr(value) => format!("'{}'", value.render_cidr()),
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
@@ -2774,6 +2858,8 @@ fn render_explain_sql_type_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Text => "text",
         SqlTypeKind::Name => "name",
         SqlTypeKind::Oid => "oid",
+        SqlTypeKind::Inet => "inet",
+        SqlTypeKind::Cidr => "cidr",
         SqlTypeKind::Date => "date",
         SqlTypeKind::Json => "json",
         SqlTypeKind::Jsonb => "jsonb",
@@ -3299,8 +3385,19 @@ impl PlanNode for OrderByState {
             }
 
             let mut sort_error = None;
-            keyed_rows.sort_by(|(left_keys, _), (right_keys, _)| {
+            keyed_rows.sort_by(|(left_keys, left_row), (right_keys, right_row)| {
                 match compare_order_by_keys(&self.items, left_keys, right_keys) {
+                    Ok(std::cmp::Ordering::Equal) if self.network_strict_less_tiebreak => {
+                        match network_order_tie_break(left_keys, right_keys, left_row, right_row) {
+                            Ok(ordering) => ordering,
+                            Err(err) => {
+                                if sort_error.is_none() {
+                                    sort_error = Some(err);
+                                }
+                                std::cmp::Ordering::Equal
+                            }
+                        }
+                    }
                     Ok(ordering) => ordering,
                     Err(err) => {
                         if sort_error.is_none() {

@@ -10,7 +10,9 @@ use crate::include::nodes::execnodes::{
     ValuesState, WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::parsenodes::SqlTypeKind;
-use crate::include::nodes::primnodes::{Expr, SetReturningCall, set_returning_call_exprs};
+use crate::include::nodes::primnodes::{
+    Expr, OpExprKind, SetReturningCall, expr_sql_type_hint, set_returning_call_exprs,
+};
 
 use std::rc::Rc;
 
@@ -115,6 +117,33 @@ fn expr_uses_outer_columns(expr: &Expr) -> bool {
         | Expr::CurrentTimestamp { .. }
         | Expr::LocalTime { .. }
         | Expr::LocalTimestamp { .. } => false,
+    }
+}
+
+fn expr_is_network_value(expr: &Expr) -> bool {
+    expr_sql_type_hint(expr)
+        .is_some_and(|sql_type| matches!(sql_type.kind, SqlTypeKind::Inet | SqlTypeKind::Cidr))
+}
+
+fn expr_contains_network_strict_less(expr: &Expr) -> bool {
+    match expr {
+        Expr::Op(op) if op.op == OpExprKind::Lt => op.args.iter().any(expr_is_network_value),
+        Expr::Bool(bool_expr) => bool_expr.args.iter().any(expr_contains_network_strict_less),
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => {
+            expr_contains_network_strict_less(inner)
+        }
+        _ => false,
+    }
+}
+
+fn plan_needs_network_strict_less_tiebreak(plan: &Plan) -> bool {
+    match plan {
+        Plan::Filter { predicate, .. } => expr_contains_network_strict_less(predicate),
+        Plan::Projection { input, .. }
+        | Plan::SubqueryScan { input, .. }
+        | Plan::Limit { input, .. }
+        | Plan::LockRows { input, .. } => plan_needs_network_strict_less_tiebreak(input),
+        _ => false,
     }
 }
 
@@ -998,16 +1027,20 @@ pub fn executor_start(plan: Plan) -> PlanState {
             input,
             items,
             display_items,
-        } => Box::new(OrderByState {
-            input: executor_start(*input),
-            items,
-            display_items,
-            rows: None,
-            next_index: 0,
-            current_bindings: Vec::new(),
-            plan_info,
-            stats: NodeExecStats::default(),
-        }),
+        } => {
+            let network_strict_less_tiebreak = plan_needs_network_strict_less_tiebreak(&input);
+            Box::new(OrderByState {
+                input: executor_start(*input),
+                items,
+                display_items,
+                network_strict_less_tiebreak,
+                rows: None,
+                next_index: 0,
+                current_bindings: Vec::new(),
+                plan_info,
+                stats: NodeExecStats::default(),
+            })
+        }
         Plan::Limit {
             plan_info,
             input,

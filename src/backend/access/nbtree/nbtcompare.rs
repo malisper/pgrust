@@ -1,6 +1,8 @@
 use std::cmp::Ordering;
 
-use crate::backend::executor::{compare_multirange_values, compare_order_values};
+use crate::backend::executor::{
+    compare_multirange_values, compare_network_values, compare_order_values,
+};
 use crate::include::access::itemptr::ItemPointerData;
 use crate::include::nodes::datum::{NumericValue, Value};
 
@@ -39,6 +41,9 @@ pub fn compare_bt_values(left: &Value, right: &Value) -> Ordering {
         }
         (Value::InternalChar(a), Value::InternalChar(b)) => a.cmp(b),
         (Value::Multirange(a), Value::Multirange(b)) => compare_multirange_values(a, b),
+        (Value::Inet(a) | Value::Cidr(a), Value::Inet(b) | Value::Cidr(b)) => {
+            compare_network_values(a, b)
+        }
         (a, b) if numeric_key_value(a).is_some() && numeric_key_value(b).is_some() => {
             numeric_key_value(a)
                 .unwrap()

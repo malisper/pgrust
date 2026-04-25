@@ -5,7 +5,9 @@ use super::expr_casts::{
     render_interval_text,
 };
 use super::expr_datetime::{render_datetime_value_text, render_datetime_value_text_with_config};
-use super::expr_format::{to_char_float, to_char_int, to_char_numeric, to_number_numeric};
+use super::expr_format::{
+    to_char_float, to_char_float4, to_char_int, to_char_numeric, to_number_numeric,
+};
 use super::expr_ops::ensure_builtin_collation_supported;
 use super::expr_range::render_range_text;
 use super::node_types::Value;
@@ -74,6 +76,14 @@ const SIZE_PRETTY_UNITS: [SizePrettyUnit; 6] = [
 ];
 
 pub(super) fn eval_to_char_function(values: &[Value]) -> Result<Value, ExecError> {
+    eval_to_char_function_with_float4(values, false)
+}
+
+pub(super) fn eval_to_char_float4_function(values: &[Value]) -> Result<Value, ExecError> {
+    eval_to_char_function_with_float4(values, true)
+}
+
+fn eval_to_char_function_with_float4(values: &[Value], float4: bool) -> Result<Value, ExecError> {
     let Some(value) = values.first() else {
         return Ok(Value::Null);
     };
@@ -90,6 +100,7 @@ pub(super) fn eval_to_char_function(values: &[Value]) -> Result<Value, ExecError
         Value::Int32(v) => to_char_int(*v as i128, fmt)?,
         Value::Int64(v) => to_char_int(*v as i128, fmt)?,
         Value::Numeric(v) => to_char_numeric(v, fmt)?,
+        Value::Float64(v) if float4 => to_char_float4(*v, fmt)?,
         Value::Float64(v) => to_char_float(*v, fmt)?,
         _ => {
             return Err(ExecError::TypeMismatch {
