@@ -662,6 +662,23 @@ pub(crate) fn parse_interval_text_value(text: &str) -> Result<IntervalValue, Exe
         invalid_interval_text_error(text)
     }
 
+    fn split_compact_interval_token(token: &str) -> Option<(&str, &str)> {
+        let unit_start = token
+            .char_indices()
+            .find_map(|(idx, ch)| ch.is_ascii_alphabetic().then_some(idx))?;
+        let (value, unit) = token.split_at(unit_start);
+        if value.is_empty()
+            || unit.is_empty()
+            || !value
+                .chars()
+                .all(|ch| ch.is_ascii_digit() || matches!(ch, '.' | '+' | '-'))
+            || !unit.chars().all(|ch| ch.is_ascii_alphabetic())
+        {
+            return None;
+        }
+        Some((value, unit))
+    }
+
     let mut rest = text.trim();
     if rest.is_empty() {
         return Err(invalid(text));
@@ -707,7 +724,17 @@ pub(crate) fn parse_interval_text_value(text: &str) -> Result<IntervalValue, Exe
         return Ok(if negative { value.negate() } else { value });
     }
 
-    let tokens = rest.split_whitespace().collect::<Vec<_>>();
+    let raw_tokens = rest.split_whitespace().collect::<Vec<_>>();
+    let mut compact_tokens = Vec::new();
+    for token in &raw_tokens {
+        if let Some((value, unit)) = split_compact_interval_token(token) {
+            compact_tokens.push(value);
+            compact_tokens.push(unit);
+        } else {
+            compact_tokens.push(*token);
+        }
+    }
+    let tokens = compact_tokens;
     if tokens.len() % 2 != 0 {
         return Err(invalid(text));
     }
@@ -717,7 +744,7 @@ pub(crate) fn parse_interval_text_value(text: &str) -> Result<IntervalValue, Exe
     let mut micros = 0i64;
     for pair in tokens.chunks(2) {
         match pair[1].to_ascii_lowercase().as_str() {
-            "year" | "years" => {
+            "y" | "year" | "years" => {
                 let value = pair[0].parse::<i64>().map_err(|_| invalid(text))?;
                 months = months
                     .checked_add(
@@ -731,13 +758,13 @@ pub(crate) fn parse_interval_text_value(text: &str) -> Result<IntervalValue, Exe
                     .checked_add(i32::try_from(value).map_err(|_| invalid(text))?)
                     .ok_or_else(|| invalid(text))?;
             }
-            "day" | "days" => {
+            "d" | "day" | "days" => {
                 let value = pair[0].parse::<i64>().map_err(|_| invalid(text))?;
                 days = days
                     .checked_add(i32::try_from(value).map_err(|_| invalid(text))?)
                     .ok_or_else(|| invalid(text))?;
             }
-            "hour" | "hours" => {
+            "h" | "hour" | "hours" => {
                 let value = pair[0].parse::<i64>().map_err(|_| invalid(text))?;
                 micros = micros
                     .checked_add(
@@ -747,19 +774,37 @@ pub(crate) fn parse_interval_text_value(text: &str) -> Result<IntervalValue, Exe
                     )
                     .ok_or_else(|| invalid(text))?;
             }
-            "min" | "mins" | "minute" | "minutes" => {
+            "m" | "min" | "mins" | "minute" | "minutes" => {
                 let value = pair[0].parse::<i64>().map_err(|_| invalid(text))?;
                 micros = micros
                     .checked_add(value.checked_mul(60_000_000).ok_or_else(|| invalid(text))?)
                     .ok_or_else(|| invalid(text))?;
             }
-            "sec" | "secs" | "second" | "seconds" => {
+            "s" | "sec" | "secs" | "second" | "seconds" => {
                 let value = pair[0].parse::<f64>().map_err(|_| invalid(text))?;
                 if !value.is_finite() {
                     return Err(invalid(text));
                 }
                 micros = micros
                     .checked_add((value * 1_000_000.0).round() as i64)
+                    .ok_or_else(|| invalid(text))?;
+            }
+            "ms" | "msec" | "msecs" | "millisecond" | "milliseconds" => {
+                let value = pair[0].parse::<f64>().map_err(|_| invalid(text))?;
+                if !value.is_finite() {
+                    return Err(invalid(text));
+                }
+                micros = micros
+                    .checked_add((value * 1_000.0).round() as i64)
+                    .ok_or_else(|| invalid(text))?;
+            }
+            "us" | "usec" | "usecs" | "microsecond" | "microseconds" => {
+                let value = pair[0].parse::<f64>().map_err(|_| invalid(text))?;
+                if !value.is_finite() {
+                    return Err(invalid(text));
+                }
+                micros = micros
+                    .checked_add(value.round() as i64)
                     .ok_or_else(|| invalid(text))?;
             }
             _ => return Err(invalid(text)),
@@ -1514,6 +1559,10 @@ fn datetime_parse_error_details(ty: &'static str, text: &str, err: DateTimeParse
         DateTimeParseError::Invalid => format!("invalid input syntax for type {ty}: \"{text}\""),
         DateTimeParseError::FieldOutOfRange => {
             format!("date/time field value out of range: \"{text}\"")
+        }
+        DateTimeParseError::TimestampOutOfRange => format!("{ty} out of range: \"{text}\""),
+        DateTimeParseError::TimeZoneDisplacementOutOfRange => {
+            format!("time zone displacement out of range: \"{text}\"")
         }
         DateTimeParseError::UnknownTimeZone(zone) => {
             format!("time zone \"{zone}\" not recognized")
