@@ -669,6 +669,42 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                     SqlType::new(SqlTypeKind::Money)
                 }
                 Some(BuiltinScalarFunction::CashWords) => SqlType::new(SqlTypeKind::Text),
+                Some(BuiltinScalarFunction::NetworkHost | BuiltinScalarFunction::NetworkAbbrev) => {
+                    SqlType::new(SqlTypeKind::Text)
+                }
+                Some(
+                    BuiltinScalarFunction::NetworkMasklen | BuiltinScalarFunction::NetworkFamily,
+                ) => SqlType::new(SqlTypeKind::Int4),
+                Some(
+                    BuiltinScalarFunction::NetworkSameFamily
+                    | BuiltinScalarFunction::NetworkSubnet
+                    | BuiltinScalarFunction::NetworkSubnetEq
+                    | BuiltinScalarFunction::NetworkSupernet
+                    | BuiltinScalarFunction::NetworkSupernetEq
+                    | BuiltinScalarFunction::NetworkOverlap,
+                ) => SqlType::new(SqlTypeKind::Bool),
+                Some(
+                    BuiltinScalarFunction::NetworkBroadcast
+                    | BuiltinScalarFunction::NetworkNetmask
+                    | BuiltinScalarFunction::NetworkHostmask,
+                ) => SqlType::new(SqlTypeKind::Inet),
+                Some(
+                    BuiltinScalarFunction::NetworkNetwork | BuiltinScalarFunction::NetworkMerge,
+                ) => SqlType::new(SqlTypeKind::Cidr),
+                Some(BuiltinScalarFunction::NetworkSetMasklen) => args
+                    .args()
+                    .first()
+                    .map(|arg| {
+                        infer_sql_expr_type_with_ctes(
+                            &arg.value,
+                            scope,
+                            catalog,
+                            outer_scopes,
+                            grouped_outer,
+                            ctes,
+                        )
+                    })
+                    .unwrap_or(SqlType::new(SqlTypeKind::Inet)),
                 Some(BuiltinScalarFunction::ArrayNdims)
                 | Some(BuiltinScalarFunction::ArrayLower) => SqlType::new(SqlTypeKind::Int4),
                 Some(BuiltinScalarFunction::ArrayDims) => SqlType::new(SqlTypeKind::Text),

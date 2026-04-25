@@ -509,6 +509,154 @@ fn supports_comparison_operator(
     supports_array_comparison_operator(op, left, right)
 }
 
+pub(super) fn bind_maybe_network_operator(
+    op: &'static str,
+    left: &SqlExpr,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Option<Result<Expr, ParseError>> {
+    let func = match op {
+        "<<" => BuiltinScalarFunction::NetworkSubnet,
+        "<<=" => BuiltinScalarFunction::NetworkSubnetEq,
+        ">>" => BuiltinScalarFunction::NetworkSupernet,
+        ">>=" => BuiltinScalarFunction::NetworkSupernetEq,
+        "&&" => BuiltinScalarFunction::NetworkOverlap,
+        _ => return None,
+    };
+    let raw_left_type =
+        infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let raw_right_type =
+        infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
+    let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+    if !is_network_type(left_type) || !is_network_type(right_type) {
+        return None;
+    }
+
+    Some((|| {
+        let left_bound =
+            bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+        let right_bound = bind_expr_with_outer_and_ctes(
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?;
+        Ok(Expr::builtin_func(
+            func,
+            Some(SqlType::new(SqlTypeKind::Bool)),
+            false,
+            vec![
+                coerce_bound_expr(left_bound, raw_left_type, left_type),
+                coerce_bound_expr(right_bound, raw_right_type, right_type),
+            ],
+        ))
+    })())
+}
+
+pub(super) fn bind_maybe_network_arithmetic(
+    op: &'static str,
+    left: &SqlExpr,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Option<Result<Expr, ParseError>> {
+    let raw_left_type =
+        infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let raw_right_type =
+        infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
+    let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+    let left_is_network = is_network_type(left_type);
+    let right_is_network = is_network_type(right_type);
+    let left_is_integer = is_integer_family(left_type);
+    let right_is_integer = is_integer_family(right_type);
+
+    let result_type = match op {
+        "+" if (left_is_network && right_is_integer) || (left_is_integer && right_is_network) => {
+            SqlType::new(SqlTypeKind::Inet)
+        }
+        "-" if left_is_network && right_is_integer => SqlType::new(SqlTypeKind::Inet),
+        "-" if left_is_network && right_is_network => SqlType::new(SqlTypeKind::Int8),
+        _ => return None,
+    };
+    Some((|| {
+        let left_bound =
+            bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+        let right_bound = bind_expr_with_outer_and_ctes(
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?;
+        Ok(Expr::binary_op(
+            if op == "+" {
+                crate::include::nodes::primnodes::OpExprKind::Add
+            } else {
+                crate::include::nodes::primnodes::OpExprKind::Sub
+            },
+            result_type,
+            coerce_bound_expr(left_bound, raw_left_type, left_type),
+            coerce_bound_expr(right_bound, raw_right_type, right_type),
+        ))
+    })())
+}
+
+pub(super) fn bind_maybe_network_bitwise(
+    _op: &'static str,
+    make: crate::include::nodes::primnodes::OpExprKind,
+    left: &SqlExpr,
+    right: &SqlExpr,
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    grouped_outer: Option<&GroupedOuterScope>,
+    ctes: &[BoundCte],
+) -> Option<Result<Expr, ParseError>> {
+    let raw_left_type =
+        infer_sql_expr_type_with_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let raw_right_type =
+        infer_sql_expr_type_with_ctes(right, scope, catalog, outer_scopes, grouped_outer, ctes);
+    let left_type = coerce_unknown_string_literal_type(left, raw_left_type, raw_right_type);
+    let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
+    if !is_network_type(left_type) || !is_network_type(right_type) {
+        return None;
+    }
+    Some((|| {
+        let left_bound =
+            bind_expr_with_outer_and_ctes(left, scope, catalog, outer_scopes, grouped_outer, ctes)?;
+        let right_bound = bind_expr_with_outer_and_ctes(
+            right,
+            scope,
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            ctes,
+        )?;
+        Ok(Expr::binary_op(
+            make,
+            SqlType::new(SqlTypeKind::Inet),
+            coerce_bound_expr(left_bound, raw_left_type, left_type),
+            coerce_bound_expr(right_bound, raw_right_type, right_type),
+        ))
+    })())
+}
+
+fn is_network_type(ty: SqlType) -> bool {
+    !ty.is_array && matches!(ty.kind, SqlTypeKind::Inet | SqlTypeKind::Cidr)
+}
+
 // :HACK: PostgreSQL models array operators via polymorphic catalog operators.
 // pgrust does not bootstrap that polymorphic operator surface yet, so allow the
 // exact same-type array operators that the executor already supports.
@@ -816,6 +964,18 @@ pub(super) fn bind_overloaded_binary_expr(
         return result;
     }
     if let Some(result) = bind_maybe_range_overlap_or_adjacent(
+        op,
+        left,
+        right,
+        scope,
+        catalog,
+        outer_scopes,
+        grouped_outer,
+        ctes,
+    ) {
+        return result;
+    }
+    if let Some(result) = bind_maybe_network_operator(
         op,
         left,
         right,

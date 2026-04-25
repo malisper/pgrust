@@ -32,6 +32,7 @@ pub(super) use self::ops::bind_lowered_comparison_expr;
 use self::ops::bind_order_by_using_direction;
 use self::ops::{
     bind_arithmetic_expr, bind_bitwise_expr, bind_comparison_expr, bind_concat_expr,
+    bind_maybe_network_arithmetic, bind_maybe_network_bitwise, bind_maybe_network_operator,
     bind_overloaded_binary_expr, bind_prefix_operator_expr, bind_shift_expr,
 };
 use self::subquery::{
@@ -1340,6 +1341,26 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 grouped_outer,
                 ctes,
             )?,
+            "<<=" => bind_overloaded_binary_expr(
+                "<<=",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?,
+            ">>=" => bind_overloaded_binary_expr(
+                ">>=",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            )?,
             "-|-" => bind_overloaded_binary_expr(
                 "-|-",
                 left,
@@ -1381,6 +1402,17 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             ) {
                 result?
             } else if let Some(result) = bind_maybe_geometry_arithmetic(
+                "+",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else if let Some(result) = bind_maybe_network_arithmetic(
                 "+",
                 left,
                 right,
@@ -1449,6 +1481,17 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 ctes,
             ) {
                 result?
+            } else if let Some(result) = bind_maybe_network_arithmetic(
+                "-",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
             } else {
                 bind_arithmetic_expr(
                     "-",
@@ -1463,28 +1506,60 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 )?
             }
         }
-        SqlExpr::BitAnd(left, right) => bind_bitwise_expr(
-            "&",
-            OpExprKind::BitAnd,
-            left,
-            right,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?,
-        SqlExpr::BitOr(left, right) => bind_bitwise_expr(
-            "|",
-            OpExprKind::BitOr,
-            left,
-            right,
-            scope,
-            catalog,
-            outer_scopes,
-            grouped_outer,
-            ctes,
-        )?,
+        SqlExpr::BitAnd(left, right) => {
+            if let Some(result) = bind_maybe_network_bitwise(
+                "&",
+                OpExprKind::BitAnd,
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else {
+                bind_bitwise_expr(
+                    "&",
+                    OpExprKind::BitAnd,
+                    left,
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            }
+        }
+        SqlExpr::BitOr(left, right) => {
+            if let Some(result) = bind_maybe_network_bitwise(
+                "|",
+                OpExprKind::BitOr,
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else {
+                bind_bitwise_expr(
+                    "|",
+                    OpExprKind::BitOr,
+                    left,
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?
+            }
+        }
         SqlExpr::BitXor(left, right) => {
             if let Some(result) = bind_maybe_geometry_arithmetic(
                 "#",
@@ -1512,7 +1587,18 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
         }
         SqlExpr::Shl(left, right) => {
-            if let Some(result) = bind_maybe_multirange_shift(
+            if let Some(result) = bind_maybe_network_operator(
+                "<<",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else if let Some(result) = bind_maybe_multirange_shift(
                 "<<",
                 left,
                 right,
@@ -1560,7 +1646,18 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             }
         }
         SqlExpr::Shr(left, right) => {
-            if let Some(result) = bind_maybe_multirange_shift(
+            if let Some(result) = bind_maybe_network_operator(
+                ">>",
+                left,
+                right,
+                scope,
+                catalog,
+                outer_scopes,
+                grouped_outer,
+                ctes,
+            ) {
+                result?
+            } else if let Some(result) = bind_maybe_multirange_shift(
                 ">>",
                 left,
                 right,
@@ -1741,23 +1838,31 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 grouped_outer,
                 ctes,
             );
-            if !is_integer_family(inner_type) && !is_bit_string_type(inner_type) {
+            let is_network = !inner_type.is_array
+                && matches!(inner_type.kind, SqlTypeKind::Inet | SqlTypeKind::Cidr);
+            if !is_integer_family(inner_type) && !is_bit_string_type(inner_type) && !is_network {
                 return Err(ParseError::UndefinedOperator {
                     op: "~",
                     left_type: sql_type_name(inner_type),
                     right_type: "unknown".to_string(),
                 });
             }
-            Expr::op_auto(
+            let result_type = if is_network {
+                SqlType::new(SqlTypeKind::Inet)
+            } else {
+                inner_type
+            };
+            Expr::unary_op(
                 OpExprKind::BitNot,
-                vec![bind_expr_with_outer_and_ctes(
+                result_type,
+                bind_expr_with_outer_and_ctes(
                     inner,
                     scope,
                     catalog,
                     outer_scopes,
                     grouped_outer,
                     ctes,
-                )?],
+                )?,
             )
         }
         SqlExpr::Cast(inner, ty) => {
