@@ -391,6 +391,16 @@ impl Session {
         )
     }
 
+    pub fn escape_string_warning(&self) -> bool {
+        !matches!(
+            self.gucs
+                .get("escape_string_warning")
+                .map(|value| value.trim().to_ascii_lowercase())
+                .as_deref(),
+            Some("off" | "false")
+        )
+    }
+
     pub fn allow_in_place_tablespaces(&self) -> bool {
         matches!(
             self.gucs
@@ -436,6 +446,36 @@ impl Session {
                 actual: trimmed.to_string(),
             })
         })
+    }
+
+    fn apply_alter_table_set(
+        &self,
+        db: &Database,
+        stmt: &crate::backend::parser::AlterTableSetStatement,
+    ) -> Result<StatementResult, ExecError> {
+        for option in &stmt.options {
+            if option.name.eq_ignore_ascii_case("toast_tuple_target") {
+                let target = option.value.parse::<usize>().map_err(|_| {
+                    ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "integer toast_tuple_target",
+                        actual: option.value.clone(),
+                    })
+                })?;
+                let catalog = self.catalog_lookup(db);
+                let relation = catalog
+                    .lookup_any_relation(&stmt.table_name)
+                    .ok_or_else(|| {
+                        ExecError::Parse(ParseError::TableDoesNotExist(stmt.table_name.clone()))
+                    })?;
+                if let Some(toast) = relation.toast {
+                    crate::backend::access::table::toast_helper::set_toast_tuple_target_for_toast_relation(
+                        toast.relation_oid,
+                        target,
+                    );
+                }
+            }
+        }
+        Ok(StatementResult::AffectedRows(0))
     }
 
     pub(crate) fn catalog_txn_ctx(&self) -> Option<(TransactionId, u32)> {
@@ -2079,7 +2119,7 @@ impl Session {
                     Ok(StatementResult::AffectedRows(0))
                 }
             }
-            Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
+            Statement::AlterTableSet(ref alter_stmt) => self.apply_alter_table_set(db, alter_stmt),
             Statement::CommentOnTable(ref comment_stmt) => {
                 if self.active_txn.is_some() {
                     let result = self.execute_in_transaction(db, stmt, statement_lock_scope_id);
@@ -3848,7 +3888,7 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
-            Statement::AlterTableSet(_) => Ok(StatementResult::AffectedRows(0)),
+            Statement::AlterTableSet(ref alter_stmt) => self.apply_alter_table_set(db, alter_stmt),
             Statement::CreateRole(ref create_stmt) => {
                 let txn = self.active_txn.as_mut().unwrap();
                 db.execute_create_role_stmt_in_transaction(

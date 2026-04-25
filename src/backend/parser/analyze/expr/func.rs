@@ -562,7 +562,9 @@ pub(super) fn bind_scalar_function_call(
             ))
         }
         BuiltinScalarFunction::IsFinite => Ok(build_func(false, bound_args)),
-        BuiltinScalarFunction::PgColumnSize => Ok(build_func(false, bound_args)),
+        BuiltinScalarFunction::PgColumnSize | BuiltinScalarFunction::PgRelationSize => {
+            Ok(build_func(false, bound_args))
+        }
         BuiltinScalarFunction::MakeDate | BuiltinScalarFunction::MakeTime => {
             let target_types = if func == BuiltinScalarFunction::MakeDate {
                 [
@@ -758,7 +760,16 @@ pub(super) fn bind_scalar_function_call(
                     actual: format!("{func:?}({})", sql_type_name(arg_type)),
                 });
             }
-            Ok(build_func(func_variadic, vec![bound_args[0].clone()]))
+            let arg = if matches!(arg_type.kind, SqlTypeKind::Char) && !arg_type.is_array {
+                coerce_bound_expr(
+                    bound_args[0].clone(),
+                    arg_type,
+                    SqlType::new(SqlTypeKind::Text),
+                )
+            } else {
+                bound_args[0].clone()
+            };
+            Ok(build_func(func_variadic, vec![arg]))
         }
         BuiltinScalarFunction::Position => {
             let left_type = infer_sql_expr_type_with_ctes(
@@ -1776,7 +1787,15 @@ pub(super) fn bind_scalar_function_call(
                 grouped_outer,
                 ctes,
             );
-            if value_type.kind != SqlTypeKind::Bytea {
+            let target_value_type = if matches!(
+                &args[0],
+                SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+            ) {
+                SqlType::new(SqlTypeKind::Bytea)
+            } else {
+                value_type
+            };
+            if target_value_type.kind != SqlTypeKind::Bytea {
                 return Err(ParseError::UnexpectedToken {
                     expected: "bytea argument",
                     actual: sql_type_name(value_type),
@@ -1785,7 +1804,7 @@ pub(super) fn bind_scalar_function_call(
             Ok(build_func(
                 func_variadic,
                 vec![
-                    bound_args[0].clone(),
+                    coerce_bound_expr(bound_args[0].clone(), value_type, target_value_type),
                     coerce_bound_expr(
                         bound_args[1].clone(),
                         format_type,
