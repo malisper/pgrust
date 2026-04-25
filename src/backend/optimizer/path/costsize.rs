@@ -53,6 +53,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
             },
             Path::Append {
                 pathtarget,
+                relids,
                 source_id,
                 desc,
                 children,
@@ -84,6 +85,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 Path::Append {
                     plan_info: PlanEstimate::new(startup_cost, total_cost, rows, width),
                     pathtarget,
+                    relids,
                     source_id,
                     desc,
                     children,
@@ -320,6 +322,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 pathtarget,
                 input,
                 items,
+                display_items,
                 ..
             } => {
                 let input = optimize_path(*input, catalog);
@@ -335,6 +338,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     pathtarget,
                     input: Box::new(input),
                     items,
+                    display_items,
                 }
             }
             Path::Limit {
@@ -807,6 +811,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
         desc,
         filter,
         order_items,
+        order_display_items,
     ) = match plan {
         Path::SeqScan {
             source_id,
@@ -827,6 +832,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
             relispopulated,
             toast,
             desc,
+            None,
             None,
             None,
         ),
@@ -854,6 +860,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
                 desc,
                 Some(predicate),
                 None,
+                None,
             ),
             other => {
                 return Err(Path::Filter {
@@ -864,7 +871,12 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
                 });
             }
         },
-        Path::OrderBy { input, items, .. } => match *input {
+        Path::OrderBy {
+            input,
+            items,
+            display_items,
+            ..
+        } => match *input {
             Path::SeqScan {
                 source_id,
                 rel,
@@ -886,6 +898,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
                 desc,
                 None,
                 Some(items),
+                Some(display_items),
             ),
             Path::Filter {
                 input, predicate, ..
@@ -911,6 +924,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
                     desc,
                     Some(predicate),
                     Some(items),
+                    Some(display_items),
                 ),
                 other => {
                     let input = Path::Filter {
@@ -924,6 +938,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
                         pathtarget: input.semantic_output_target(),
                         input: Box::new(input),
                         items,
+                        display_items,
                     });
                 }
             },
@@ -933,6 +948,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
                     pathtarget: other.semantic_output_target(),
                     input: Box::new(other),
                     items,
+                    display_items,
                 });
             }
         },
@@ -941,6 +957,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
 
     let filter = filter;
     let order_items = order_items;
+    let order_display_items = order_display_items;
 
     let stats = relation_stats(catalog, relation_oid, &desc);
     let mut best = estimate_seqscan_candidate(
@@ -955,6 +972,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
         &stats,
         filter.clone(),
         order_items.clone(),
+        order_display_items.clone(),
     );
     if relkind != 'r' {
         return Ok(best.plan);
@@ -980,6 +998,7 @@ fn try_optimize_access_subtree(plan: Path, catalog: &dyn CatalogLookup) -> Resul
             &stats,
             spec,
             order_items.clone(),
+            order_display_items.clone(),
             catalog,
         );
         if candidate.total_cost < best.total_cost {
@@ -1082,6 +1101,7 @@ pub(super) fn estimate_seqscan_candidate(
     stats: &RelationStats,
     filter: Option<Expr>,
     order_items: Option<Vec<OrderByEntry>>,
+    order_display_items: Option<Vec<String>>,
 ) -> AccessCandidate {
     let scan_info = seq_scan_estimate(stats);
     let base_pathtarget = slot_output_target(source_id, &desc.columns, |column| column.sql_type);
@@ -1119,17 +1139,14 @@ pub(super) fn estimate_seqscan_candidate(
     }
 
     if let Some(items) = order_items {
-        total_cost += estimate_sort_cost(current_rows, items.len());
+        let sort_cost = estimate_sort_cost(current_rows, items.len());
+        total_cost += sort_cost;
         plan = Path::OrderBy {
-            plan_info: PlanEstimate::new(
-                total_cost - estimate_sort_cost(current_rows, items.len()),
-                total_cost,
-                current_rows,
-                width,
-            ),
+            plan_info: PlanEstimate::new(total_cost - sort_cost, total_cost, current_rows, width),
             pathtarget: plan.semantic_output_target(),
             input: Box::new(plan),
             items,
+            display_items: order_display_items.unwrap_or_default(),
         };
     }
 
@@ -1180,6 +1197,7 @@ fn estimate_brin_bitmap_candidate(
     stats: &RelationStats,
     spec: IndexPathSpec,
     order_items: Option<Vec<OrderByEntry>>,
+    order_display_items: Option<Vec<String>>,
     catalog: &dyn CatalogLookup,
 ) -> AccessCandidate {
     let index_pages = catalog
@@ -1283,6 +1301,7 @@ fn estimate_brin_bitmap_candidate(
             pathtarget: plan.semantic_output_target(),
             input: Box::new(plan),
             items,
+            display_items: order_display_items.unwrap_or_default(),
         };
     }
 
@@ -1299,6 +1318,7 @@ fn estimate_gin_bitmap_candidate(
     stats: &RelationStats,
     spec: IndexPathSpec,
     order_items: Option<Vec<OrderByEntry>>,
+    order_display_items: Option<Vec<String>>,
     catalog: &dyn CatalogLookup,
 ) -> AccessCandidate {
     let index_pages = catalog
@@ -1382,6 +1402,7 @@ fn estimate_gin_bitmap_candidate(
             pathtarget: plan.semantic_output_target(),
             input: Box::new(plan),
             items,
+            display_items: order_display_items.unwrap_or_default(),
         };
     }
 
@@ -1398,6 +1419,7 @@ pub(super) fn estimate_index_candidate(
     stats: &RelationStats,
     spec: IndexPathSpec,
     order_items: Option<Vec<OrderByEntry>>,
+    order_display_items: Option<Vec<String>>,
     catalog: &dyn CatalogLookup,
 ) -> AccessCandidate {
     if spec.index.index_meta.am_oid == BRIN_AM_OID {
@@ -1411,6 +1433,7 @@ pub(super) fn estimate_index_candidate(
             stats,
             spec,
             order_items,
+            order_display_items,
             catalog,
         );
     }
@@ -1425,6 +1448,7 @@ pub(super) fn estimate_index_candidate(
             stats,
             spec,
             order_items,
+            order_display_items,
             catalog,
         );
     }
@@ -1531,6 +1555,7 @@ pub(super) fn estimate_index_candidate(
             pathtarget: plan.semantic_output_target(),
             input: Box::new(plan),
             items,
+            display_items: order_display_items.unwrap_or_default(),
         };
     }
 
@@ -2582,6 +2607,7 @@ fn ensure_path_sorted_for_merge(path: Path, pathkeys: &[PathKey]) -> Path {
                 collation_oid: key.collation_oid,
             })
             .collect(),
+        display_items: Vec::new(),
     }
 }
 

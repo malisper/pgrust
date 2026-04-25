@@ -179,6 +179,7 @@ fn order_by_path(
         pathtarget,
         input: Box::new(input),
         items,
+        display_items: Vec::new(),
     }
 }
 
@@ -905,7 +906,13 @@ fn child_relation_names(plan: &Plan) -> Vec<String> {
 
 fn collect_relation_names(plan: &Plan, names: &mut Vec<String>) {
     match plan {
-        Plan::SeqScan { relation_name, .. } => names.push(relation_name.clone()),
+        Plan::SeqScan { relation_name, .. } => names.push(
+            relation_name
+                .split_once(' ')
+                .map(|(name, _)| name)
+                .unwrap_or(relation_name)
+                .to_string(),
+        ),
         Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
             for child in children {
                 collect_relation_names(child, names);
@@ -1453,7 +1460,7 @@ fn outer_join_preserved_side_where_qual_pushes_to_base_scan() {
                 Plan::Filter { input, .. }
                     if matches!(
                         input.as_ref(),
-                        Plan::SeqScan { relation_name, .. } if relation_name == "people"
+                        Plan::SeqScan { relation_name, .. } if relation_name.starts_with("people")
                     )
             )
         }),

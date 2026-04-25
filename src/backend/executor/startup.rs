@@ -810,9 +810,11 @@ pub fn executor_start(plan: Plan) -> PlanState {
             plan_info,
             input,
             items,
+            display_items,
         } => Box::new(OrderByState {
             input: executor_start(*input),
             items,
+            display_items,
             rows: None,
             next_index: 0,
             current_bindings: Vec::new(),

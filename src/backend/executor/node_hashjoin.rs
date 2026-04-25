@@ -321,11 +321,11 @@ impl PlanNode for HashJoinState {
         }
     }
 
-    fn explain_children(
+    fn explain_details(
         &self,
         indent: usize,
-        analyze: bool,
-        show_costs: bool,
+        _analyze: bool,
+        _show_costs: bool,
         lines: &mut Vec<String>,
     ) {
         let prefix = "  ".repeat(indent + 1);
@@ -358,6 +358,15 @@ impl PlanNode for HashJoinState {
                 render_explain_join_expr(&format_qual_list(&self.qual), left_names, right_names)
             ));
         }
+    }
+
+    fn explain_children(
+        &self,
+        indent: usize,
+        analyze: bool,
+        show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
         format_explain_lines_with_costs(&*self.left, indent + 1, analyze, show_costs, lines);
         format_explain_lines_with_costs(
             self.right.as_ref(),
