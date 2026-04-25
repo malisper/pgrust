@@ -266,6 +266,7 @@ pub enum Plan {
         strategy: AggregateStrategy,
         input: Box<Plan>,
         group_by: Vec<Expr>,
+        passthrough_exprs: Vec<Expr>,
         accumulators: Vec<AggAccum>,
         having: Option<Expr>,
         output_columns: Vec<QueryColumn>,

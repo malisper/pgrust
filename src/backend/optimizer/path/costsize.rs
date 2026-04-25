@@ -431,6 +431,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                 pathtarget,
                 input,
                 group_by,
+                passthrough_exprs,
                 accumulators,
                 having,
                 output_columns,
@@ -462,6 +463,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     pathkeys,
                     input: Box::new(input),
                     group_by,
+                    passthrough_exprs,
                     accumulators,
                     having,
                     output_columns,
@@ -2193,12 +2195,16 @@ fn path_uses_immediate_outer_columns(path: &Path) -> bool {
         Path::Aggregate {
             input,
             group_by,
+            passthrough_exprs,
             accumulators,
             having,
             ..
         } => {
             path_uses_immediate_outer_columns(input)
                 || group_by.iter().any(expr_uses_immediate_outer_columns)
+                || passthrough_exprs
+                    .iter()
+                    .any(expr_uses_immediate_outer_columns)
                 || accumulators.iter().any(|accum| {
                     accum.args.iter().any(expr_uses_immediate_outer_columns)
                         || accum

@@ -566,7 +566,8 @@ fn plan_query_path(
     config: PlannerConfig,
 ) -> (PlannerInfo, Path) {
     let query = super::super::root::prepare_query_for_planning(query, catalog);
-    let mut root = PlannerInfo::new_with_config(query, config);
+    let aggregate_layout = super::super::groupby_rewrite::build_aggregate_layout(&query, catalog);
+    let mut root = PlannerInfo::new_with_config(query, aggregate_layout, config);
     let scanjoin_rel = query_planner(&mut root, catalog);
     let final_rel = grouping_planner(&mut root, scanjoin_rel, catalog);
     let required_pathkeys = required_query_pathkeys_for_rel(&root, &final_rel);
@@ -686,11 +687,11 @@ fn build_cte_scan_path(
 ) -> Path {
     let query = super::super::root::prepare_query_for_planning(query, catalog);
     let (subroot, cte_path) = if let Some(recursive_union) = query.recursive_union.clone() {
+        let planned_query = query.clone();
+        let aggregate_layout =
+            super::super::groupby_rewrite::build_aggregate_layout(&planned_query, catalog);
         (
-            PlannerInfo::new_with_config(
-                super::super::root::prepare_query_for_planning(query.clone(), catalog),
-                config,
-            ),
+            PlannerInfo::new_with_config(planned_query, aggregate_layout, config),
             build_recursive_union_path(*recursive_union, catalog, config),
         )
     } else {
@@ -726,11 +727,11 @@ fn build_subquery_scan_path(
 ) -> Path {
     let query = super::super::root::prepare_query_for_planning(query, catalog);
     let (subroot, input) = if let Some(recursive_union) = query.recursive_union.clone() {
+        let planned_query = query.clone();
+        let aggregate_layout =
+            super::super::groupby_rewrite::build_aggregate_layout(&planned_query, catalog);
         (
-            PlannerInfo::new_with_config(
-                super::super::root::prepare_query_for_planning(query.clone(), catalog),
-                config,
-            ),
+            PlannerInfo::new_with_config(planned_query, aggregate_layout, config),
             build_recursive_union_path(*recursive_union, catalog, config),
         )
     } else {

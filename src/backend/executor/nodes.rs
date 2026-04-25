@@ -3099,28 +3099,35 @@ impl PlanNode for AggregateState {
                     self.key_buffer.push(eval_expr(expr, slot, ctx)?);
                 }
 
-                let group_idx = groups
-                    .iter()
-                    .position(|g| g.key_values == self.key_buffer)
-                    .unwrap_or_else(|| {
-                        let accum_states = runtimes
+                let group_idx = if let Some(index) =
+                    groups.iter().position(|g| g.key_values == self.key_buffer)
+                {
+                    index
+                } else {
+                    let passthrough_values = self
+                        .passthrough_exprs
+                        .iter()
+                        .map(|expr| eval_expr(expr, slot, ctx))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let accum_states = runtimes
+                        .iter()
+                        .zip(self.accumulators.iter())
+                        .map(|(runtime, accum)| runtime.initialize_state(accum))
+                        .collect();
+                    groups.push(AggGroup {
+                        key_values: self.key_buffer.clone(),
+                        passthrough_values,
+                        accum_states,
+                        distinct_inputs: self
+                            .accumulators
                             .iter()
-                            .zip(self.accumulators.iter())
-                            .map(|(runtime, accum)| runtime.initialize_state(accum))
-                            .collect();
-                        groups.push(AggGroup {
-                            key_values: self.key_buffer.clone(),
-                            accum_states,
-                            distinct_inputs: self
-                                .accumulators
-                                .iter()
-                                .map(|accum| accum.distinct.then(HashSet::new))
-                                .collect(),
-                            direct_arg_values: vec![None; self.accumulators.len()],
-                            ordered_inputs: vec![Vec::new(); self.accumulators.len()],
-                        });
-                        groups.len() - 1
+                            .map(|accum| accum.distinct.then(HashSet::new))
+                            .collect(),
+                        direct_arg_values: vec![None; self.accumulators.len()],
+                        ordered_inputs: vec![Vec::new(); self.accumulators.len()],
                     });
+                    groups.len() - 1
+                };
 
                 let group = &mut groups[group_idx];
                 for (i, accum) in self.accumulators.iter().enumerate() {
@@ -3174,6 +3181,7 @@ impl PlanNode for AggregateState {
                     .collect();
                 groups.push(AggGroup {
                     key_values: Vec::new(),
+                    passthrough_values: Vec::new(),
                     accum_states,
                     distinct_inputs: self
                         .accumulators
@@ -3224,6 +3232,7 @@ impl PlanNode for AggregateState {
             for group in &groups {
                 ctx.check_for_interrupts()?;
                 let mut row_values = group.key_values.clone();
+                row_values.extend(group.passthrough_values.iter().cloned());
                 for (i, ((runtime, accum_state), accum)) in runtimes
                     .iter()
                     .zip(group.accum_states.iter())
@@ -3310,6 +3319,30 @@ impl PlanNode for AggregateState {
             crate::include::nodes::plannodes::AggregateStrategy::Plain => "Aggregate".into(),
             crate::include::nodes::plannodes::AggregateStrategy::Sorted => "GroupAggregate".into(),
             crate::include::nodes::plannodes::AggregateStrategy::Hashed => "HashAggregate".into(),
+        }
+    }
+    fn explain_details(
+        &self,
+        indent: usize,
+        _analyze: bool,
+        _show_costs: bool,
+        lines: &mut Vec<String>,
+    ) {
+        let prefix = "  ".repeat(indent + 1);
+        if !self.group_by.is_empty() {
+            let group_key = self
+                .group_by
+                .iter()
+                .map(|expr| render_explain_expr(expr, self.input.column_names()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!("{prefix}Group Key: {group_key}"));
+        }
+        if let Some(having) = &self.having {
+            lines.push(format!(
+                "{prefix}Filter: {}",
+                render_explain_expr(having, self.column_names())
+            ));
         }
     }
     fn explain_children(
