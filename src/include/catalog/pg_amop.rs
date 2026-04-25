@@ -19,10 +19,10 @@ use crate::include::catalog::{
     INT8_TYPE_OID, INT8RANGE_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSONB_CONTAINS_OPERATOR_OID,
     JSONB_EXISTS_ALL_OPERATOR_OID, JSONB_EXISTS_ANY_OPERATOR_OID, JSONB_EXISTS_OPERATOR_OID,
     JSONB_TYPE_OID, NAME_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID, OID_TYPE_OID,
-    POINT_TYPE_OID, SPGIST_AM_OID, SPGIST_BOX_FAMILY_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
-    TIME_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TIMETZ_TYPE_OID, TSRANGE_TYPE_OID,
-    TSTZRANGE_TYPE_OID, UUID_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_TYPE_OID,
-    bootstrap_pg_operator_rows,
+    POINT_TYPE_OID, POLYGON_TYPE_OID, SPGIST_AM_OID, SPGIST_BOX_FAMILY_OID, SPGIST_POLY_FAMILY_OID,
+    TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID,
+    TIMETZ_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID, UUID_TYPE_OID, VARBIT_TYPE_OID,
+    VARCHAR_TYPE_OID, bootstrap_pg_operator_rows,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,6 +188,45 @@ pub fn bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
         amopstrategy: 15,
         amoppurpose: 'o',
         amopopr: operator_oid(&operators, "<->", BOX_TYPE_OID, POINT_TYPE_OID),
+        amopmethod: SPGIST_AM_OID,
+        amopsortfamily: BTREE_FLOAT_FAMILY_OID,
+    });
+    oid = oid.saturating_add(1);
+    for (strategy, name, righttype) in [
+        (1_i16, "<<", POLYGON_TYPE_OID),
+        (2, "&<", POLYGON_TYPE_OID),
+        (3, "&&", POLYGON_TYPE_OID),
+        (4, "&>", POLYGON_TYPE_OID),
+        (5, ">>", POLYGON_TYPE_OID),
+        (6, "~=", POLYGON_TYPE_OID),
+        (7, "@>", POLYGON_TYPE_OID),
+        (8, "<@", POLYGON_TYPE_OID),
+        (9, "&<|", POLYGON_TYPE_OID),
+        (10, "<<|", POLYGON_TYPE_OID),
+        (11, "|>>", POLYGON_TYPE_OID),
+        (12, "|&>", POLYGON_TYPE_OID),
+    ] {
+        rows.push(PgAmopRow {
+            oid,
+            amopfamily: SPGIST_POLY_FAMILY_OID,
+            amoplefttype: POLYGON_TYPE_OID,
+            amoprighttype: righttype,
+            amopstrategy: strategy,
+            amoppurpose: 's',
+            amopopr: operator_oid(&operators, name, POLYGON_TYPE_OID, righttype),
+            amopmethod: SPGIST_AM_OID,
+            amopsortfamily: 0,
+        });
+        oid = oid.saturating_add(1);
+    }
+    rows.push(PgAmopRow {
+        oid,
+        amopfamily: SPGIST_POLY_FAMILY_OID,
+        amoplefttype: POLYGON_TYPE_OID,
+        amoprighttype: POINT_TYPE_OID,
+        amopstrategy: 15,
+        amoppurpose: 'o',
+        amopopr: operator_oid(&operators, "<->", POLYGON_TYPE_OID, POINT_TYPE_OID),
         amopmethod: SPGIST_AM_OID,
         amopsortfamily: BTREE_FLOAT_FAMILY_OID,
     });
