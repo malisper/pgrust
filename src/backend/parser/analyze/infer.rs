@@ -760,8 +760,8 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 | Some(BuiltinScalarFunction::SimilarSubstring)
                 | Some(BuiltinScalarFunction::ToBin)
                 | Some(BuiltinScalarFunction::ToOct)
-                | Some(BuiltinScalarFunction::ToHex)
-                | Some(BuiltinScalarFunction::PgLsn) => SqlType::new(SqlTypeKind::PgLsn),
+                | Some(BuiltinScalarFunction::ToHex) => SqlType::new(SqlTypeKind::Text),
+                Some(BuiltinScalarFunction::PgLsn) => SqlType::new(SqlTypeKind::PgLsn),
                 Some(BuiltinScalarFunction::Decode)
                 | Some(BuiltinScalarFunction::Sha224)
                 | Some(BuiltinScalarFunction::Sha256)
