@@ -1175,8 +1175,8 @@ fn expr_contains_local_semantic_var(expr: &Expr) -> bool {
 
 fn path_single_relid(path: &Path) -> Option<usize> {
     match path {
-        Path::Append { source_id, .. }
-        | Path::SeqScan { source_id, .. }
+        Path::Append { relids, .. } => relids.first().copied().filter(|_| relids.len() == 1),
+        Path::SeqScan { source_id, .. }
         | Path::IndexScan { source_id, .. }
         | Path::BitmapIndexScan { source_id, .. }
         | Path::BitmapHeapScan { source_id, .. } => Some(*source_id),
@@ -3925,6 +3925,7 @@ fn set_order_references(
     plan_info: PlanEstimate,
     input: Box<Path>,
     items: Vec<OrderByEntry>,
+    display_items: Vec<String>,
 ) -> Plan {
     let input_tlist = build_path_tlist(ctx.root, &input);
     let items = items
@@ -3949,6 +3950,7 @@ fn set_order_references(
         plan_info,
         input: input_plan,
         items: lowered_items,
+        display_items,
     }
 }
 
@@ -4582,8 +4584,9 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             plan_info,
             input,
             items,
+            display_items,
             ..
-        } => set_order_references(ctx, plan_info, input, items),
+        } => set_order_references(ctx, plan_info, input, items, display_items),
         Path::Limit {
             plan_info,
             input,

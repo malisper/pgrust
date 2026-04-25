@@ -13,6 +13,7 @@ use crate::include::access::htup::TupleValue;
 use crate::include::access::htup::{AttributeDesc, HeapTuple};
 use crate::include::catalog::{CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE};
 use crate::include::nodes::datetime::{DateADT, TimestampADT};
+use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::primnodes::{OrderByEntry, Var, user_attrno};
 use crate::pgrust::database::{Database, Session};
 use sha2::{Digest, Sha256};
@@ -479,6 +480,7 @@ fn sort_plan(input: Plan, expr: Expr) -> Plan {
             nulls_first: Some(false),
             collation_oid: None,
         }],
+        display_items: Vec::new(),
     }
 }
 
@@ -3460,7 +3462,7 @@ fn explain_mentions_sort_and_limit_nodes() {
                     other => panic!("expected explain text row, got {:?}", other),
                 })
                 .collect::<Vec<_>>();
-            assert!(rendered.iter().any(|line| line.contains("Projection")));
+            assert!(!rendered.iter().any(|line| line.contains("Projection")));
             assert!(rendered.iter().any(|line| line.contains("Limit")));
             assert!(rendered.iter().any(|line| line.contains("Sort")));
         }
@@ -3593,6 +3595,33 @@ fn explain_returns_plan_lines() {
             column_names, rows, ..
         } => {
             assert_eq!(column_names, vec!["QUERY PLAN".to_string()]);
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(!rendered.iter().any(|line| line.contains("Projection")));
+            assert!(rendered.iter().any(|line| line.contains("Seq Scan")));
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn explain_verbose_keeps_simple_projection() {
+    let base = temp_dir("explain_verbose_projection");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "explain (verbose, costs off) select name from people",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
             let rendered = rows
                 .into_iter()
                 .map(|row| match &row[0] {
@@ -4444,16 +4473,316 @@ fn explain_indents_child_plan_nodes() {
                 })
                 .collect::<Vec<_>>();
             assert!(
-                rendered.iter().any(|line| line.starts_with("Projection  ")),
-                "expected top-level projection line, got {rendered:?}"
+                rendered.iter().any(|line| line.starts_with("Sort  ")),
+                "expected top-level sort line, got {rendered:?}"
             );
             assert!(
-                rendered.iter().any(|line| line.starts_with("  Sort")),
-                "expected indented sort child line, got {rendered:?}"
+                rendered
+                    .iter()
+                    .any(|line| line.trim() == "Sort Key: people_indent.name"),
+                "expected stored sort key display, got {rendered:?}"
             );
             assert!(
-                rendered.iter().any(|line| line.starts_with("    Seq Scan")),
-                "expected doubly indented seq scan child line, got {rendered:?}"
+                rendered.iter().any(|line| line.starts_with("  Seq Scan")),
+                "expected indented seq scan child line, got {rendered:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn explain_uses_query_aliases_in_sort_key_and_scan_label() {
+    let base = temp_dir("explain_alias_sort_key");
+    let db = Database::open(&base, 16).unwrap();
+    db.execute(1, "create table people_alias (id int4, name text)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into people_alias values (2, 'bob'), (1, 'alice'), (3, 'carol')",
+    )
+    .unwrap();
+
+    match db
+        .execute(
+            1,
+            "explain (costs off)
+             select t.name
+             from people_alias t
+             order by t.name",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.trim() == "Sort Key: t.name"),
+                "expected sort key to use query alias, got {rendered:?}"
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.contains("Seq Scan on people_alias t")),
+                "expected scan label to keep base relation name and alias, got {rendered:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+const PARTITION_JOIN_FIXTURE_SQL: &[&str] = &[
+    "set enable_partitionwise_join to true",
+    "create table prt1 (a int, b int, c varchar) partition by range(a)",
+    "create table prt1_p1 partition of prt1 for values from (0) to (250)",
+    "create table prt1_p3 partition of prt1 for values from (500) to (600)",
+    "create table prt1_p2 partition of prt1 for values from (250) to (500)",
+    "insert into prt1 select i, i % 25, to_char(i, 'FM0000') from generate_series(0, 599) i where i % 2 = 0",
+    "create index iprt1_p1_a on prt1_p1(a)",
+    "create index iprt1_p2_a on prt1_p2(a)",
+    "create index iprt1_p3_a on prt1_p3(a)",
+    "analyze prt1",
+    "create table prt2 (a int, b int, c varchar) partition by range(b)",
+    "create table prt2_p1 partition of prt2 for values from (0) to (250)",
+    "create table prt2_p2 partition of prt2 for values from (250) to (500)",
+    "create table prt2_p3 partition of prt2 for values from (500) to (600)",
+    "insert into prt2 select i % 25, i, to_char(i, 'FM0000') from generate_series(0, 599) i where i % 3 = 0",
+    "create index iprt2_p1_b on prt2_p1(b)",
+    "create index iprt2_p2_b on prt2_p2(b)",
+    "create index iprt2_p3_b on prt2_p3(b)",
+    "analyze prt2",
+];
+
+fn seed_partition_join_fixture(db: &Database) {
+    for sql in PARTITION_JOIN_FIXTURE_SQL {
+        db.execute(1, sql).unwrap();
+    }
+}
+
+fn seed_partition_join_fixture_in_session(db: &Database, session: &mut Session) {
+    for sql in PARTITION_JOIN_FIXTURE_SQL {
+        session.execute(db, sql).unwrap();
+    }
+}
+
+#[test]
+fn explain_partitionwise_join_preserves_hash_cond_and_aliases() {
+    let base = temp_dir("explain_partitionwise_join");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+    seed_partition_join_fixture_in_session(&db, &mut session);
+
+    let catcache = db.catalog.read().catcache().unwrap();
+    let relcache = crate::backend::utils::cache::relcache::RelCache::from_catcache_in_db(
+        &catcache,
+        db.database_oid,
+    )
+    .unwrap();
+    let catalog = crate::backend::utils::cache::visible_catalog::VisibleCatalog::new(
+        relcache,
+        Some(catcache),
+    );
+    let parsed = crate::backend::parser::parse_select(
+        "select t1.a, t1.c, t2.b, t2.c
+         from prt1 t1, prt2 t2
+         where t1.a = t2.b and t1.b = 0
+         order by t1.a, t2.b",
+    )
+    .unwrap();
+    let (query, _) = crate::backend::parser::analyze_select_query_with_outer(
+        &parsed,
+        &catalog,
+        &[],
+        None,
+        None,
+        &[],
+        &[],
+    )
+    .unwrap();
+    let planned = crate::backend::optimizer::planner_with_config(
+        query,
+        &catalog,
+        PlannerConfig {
+            enable_partitionwise_join: true,
+        },
+    )
+    .unwrap();
+
+    fn collect_hash_clause_counts(plan: &Plan, counts: &mut Vec<usize>) {
+        match plan {
+            Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
+                for child in children {
+                    collect_hash_clause_counts(child, counts);
+                }
+            }
+            Plan::NestedLoopJoin { left, right, .. } => {
+                collect_hash_clause_counts(left, counts);
+                collect_hash_clause_counts(right, counts);
+            }
+            Plan::HashJoin {
+                left,
+                right,
+                hash_clauses,
+                ..
+            } => {
+                counts.push(hash_clauses.len());
+                collect_hash_clause_counts(left, counts);
+                collect_hash_clause_counts(right, counts);
+            }
+            Plan::MergeJoin { left, right, .. } => {
+                collect_hash_clause_counts(left, counts);
+                collect_hash_clause_counts(right, counts);
+            }
+            Plan::Hash { input, .. }
+            | Plan::Filter { input, .. }
+            | Plan::OrderBy { input, .. }
+            | Plan::Projection { input, .. }
+            | Plan::Aggregate { input, .. }
+            | Plan::WindowAgg { input, .. }
+            | Plan::Limit { input, .. }
+            | Plan::LockRows { input, .. }
+            | Plan::SubqueryScan { input, .. }
+            | Plan::ProjectSet { input, .. } => collect_hash_clause_counts(input, counts),
+            Plan::RecursiveUnion {
+                anchor, recursive, ..
+            } => {
+                collect_hash_clause_counts(anchor, counts);
+                collect_hash_clause_counts(recursive, counts);
+            }
+            Plan::Result { .. }
+            | Plan::SeqScan { .. }
+            | Plan::IndexScan { .. }
+            | Plan::BitmapIndexScan { .. }
+            | Plan::BitmapHeapScan { .. }
+            | Plan::CteScan { .. }
+            | Plan::WorkTableScan { .. }
+            | Plan::Values { .. }
+            | Plan::FunctionScan { .. } => {}
+        }
+    }
+
+    let mut hash_clause_counts = Vec::new();
+    collect_hash_clause_counts(&planned.plan_tree, &mut hash_clause_counts);
+    assert!(
+        !hash_clause_counts.is_empty() && hash_clause_counts.iter().all(|count| *count > 0),
+        "expected planned child hash joins to keep hash clauses, got {hash_clause_counts:?}"
+    );
+
+    match session
+        .execute(
+            &db,
+            "explain (costs off)
+             select t1.a, t1.c, t2.b, t2.c
+             from prt1 t1, prt2 t2
+             where t1.a = t2.b and t1.b = 0
+             order by t1.a, t2.b",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered.iter().any(|line| line.trim() == "Sort Key: t1.a"),
+                "expected deduplicated sort key alias, got {rendered:?}"
+            );
+            assert!(
+                rendered.iter().any(|line| line.trim() == "Append"),
+                "expected partitionwise append plan, got {rendered:?}"
+            );
+            assert!(
+                rendered.iter().any(|line| {
+                    line.contains("Hash Cond: (t1.a = t2.b)")
+                        || line.contains("Hash Cond: (t2.b = t1.a)")
+                        || line.contains("Hash Cond: (t2_1.b = t1_1.a)")
+                        || line.contains("Hash Cond: (t1_1.a = t2_1.b)")
+                }),
+                "expected preserved hash join condition, got {rendered:?}"
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.contains("Seq Scan on prt1_p1 t1_1")),
+                "expected left partition alias, got {rendered:?}"
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.contains("Seq Scan on prt2_p1 t2_1")),
+                "expected right partition alias, got {rendered:?}"
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
+fn whole_row_outer_join_disables_partitionwise_join() {
+    let base = temp_dir("whole_row_outer_join_partitionwise_guard");
+    let db = Database::open(&base, 16).unwrap();
+    seed_partition_join_fixture(&db);
+
+    match db
+        .execute(
+            1,
+            "explain (costs off)
+             select t1, t2
+             from prt1 t1 left join prt2 t2 on t1.a = t2.b
+             where t1.b = 0
+             order by t1.a, t2.b",
+        )
+        .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.clone(),
+                    other => panic!("expected text explain line, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            let join_lines = rendered
+                .iter()
+                .filter(|line| {
+                    line.contains("Hash Left Join")
+                        || line.contains("Hash Right Join")
+                        || line.contains("Nested Loop Left Join")
+                        || line.contains("Nested Loop Right Join")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                join_lines.len(),
+                1,
+                "expected a single global outer join, got {rendered:?}"
+            );
+            let hash_cond_lines = rendered
+                .iter()
+                .filter(|line| line.contains("Hash Cond:"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                hash_cond_lines.len(),
+                1,
+                "expected a single outer-join hash condition, got {rendered:?}"
+            );
+            assert!(
+                hash_cond_lines[0].contains("t1.a") && hash_cond_lines[0].contains("t2.b"),
+                "expected whole-row fallback to keep parent aliases, got {rendered:?}"
+            );
+            assert!(
+                !hash_cond_lines[0].contains("_1"),
+                "expected whole-row fallback to avoid child partition join aliases, got {rendered:?}"
             );
         }
         other => panic!("expected query result, got {:?}", other),

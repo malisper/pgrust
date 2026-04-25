@@ -243,6 +243,7 @@ pub enum Plan {
         plan_info: PlanEstimate,
         input: Box<Plan>,
         items: Vec<OrderByEntry>,
+        display_items: Vec<String>,
     },
     Limit {
         plan_info: PlanEstimate,
