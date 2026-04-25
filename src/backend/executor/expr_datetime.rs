@@ -134,7 +134,9 @@ fn rounded_usecs(value: i64, precision: Option<i32>) -> i64 {
     } else if value >= 0 {
         ((value + factor / 2) / factor) * factor
     } else {
-        ((value - factor / 2) / factor) * factor
+        let quotient = value.div_euclid(factor);
+        let remainder = value.rem_euclid(factor);
+        (quotient + i64::from(remainder >= factor / 2)) * factor
     }
 }
 
@@ -255,4 +257,21 @@ pub(crate) fn current_timestamp_value_from_timestamp_with_config(
 
 pub(crate) fn current_timestamp_value(precision: Option<i32>, with_time_zone: bool) -> Value {
     current_timestamp_value_with_config(&DateTimeConfig::default(), precision, with_time_zone)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_time_precision_rounds_timestamps() {
+        assert_eq!(
+            apply_time_precision(Value::Timestamp(TimestampADT(1_999_999)), Some(2)),
+            Value::Timestamp(TimestampADT(2_000_000))
+        );
+        assert_eq!(
+            apply_time_precision(Value::TimestampTz(TimestampTzADT(1_994_999)), Some(2)),
+            Value::TimestampTz(TimestampTzADT(1_990_000))
+        );
+    }
 }

@@ -4,7 +4,7 @@ use crate::include::nodes::datetime::{
     USECS_PER_SEC,
 };
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Offset, TimeZone};
-use chrono_tz::Tz;
+use chrono_tz::{OffsetName, Tz};
 use std::path::Path;
 
 use crate::backend::utils::time::system_time::{SystemTime, UNIX_EPOCH};
@@ -585,7 +585,7 @@ pub fn named_timezone_offset_seconds(name: &str) -> Option<i32> {
         "pst" | "america/los_angeles" => Some(-8 * 3600),
         "pdt" => Some(-7 * 3600),
         "bst" => Some(3600),
-        "mmt" => Some(-(3 * 3600 + 44 * 60 + 51)),
+        "mmt" => Some(6 * 3600 + 30 * 60),
         "ist" => Some(5 * 3600 + 30 * 60),
         _ => None,
     }
@@ -615,6 +615,14 @@ pub fn named_timezone_offset_seconds_at_utc(name: &str, utc_usecs: i64) -> Optio
     let tz = parse_tz_name(name)?;
     let utc = naive_datetime_from_postgres_usecs(utc_usecs)?;
     Some(tz.offset_from_utc_datetime(&utc).fix().local_minus_utc())
+}
+
+pub fn named_timezone_abbreviation_at_utc(name: &str, utc_usecs: i64) -> Option<String> {
+    let tz = parse_tz_name(name)?;
+    let utc = naive_datetime_from_postgres_usecs(utc_usecs)?;
+    tz.offset_from_utc_datetime(&utc)
+        .abbreviation()
+        .map(ToOwned::to_owned)
 }
 
 pub fn named_timezone_offset_seconds_for_local(name: &str, local_usecs: i64) -> Option<i32> {
@@ -660,11 +668,11 @@ pub fn parse_timezone_spec(text: &str) -> Result<Option<TimeZoneSpec>, DateTimeP
     if trimmed.contains('/') && parse_tz_name(trimmed).is_some() {
         return Ok(Some(TimeZoneSpec::Named(normalize_timezone_name(trimmed))));
     }
-    if let Some(offset) = named_timezone_offset_seconds(trimmed) {
-        return Ok(Some(TimeZoneSpec::FixedOffset(offset)));
-    }
     if matches!(trimmed.to_ascii_lowercase().as_str(), "lmt" | "mmt" | "msk") {
         return Ok(Some(TimeZoneSpec::Named(trimmed.to_string())));
+    }
+    if let Some(offset) = named_timezone_offset_seconds(trimmed) {
+        return Ok(Some(TimeZoneSpec::FixedOffset(offset)));
     }
     if let Some(sign_idx) = trimmed
         .char_indices()
