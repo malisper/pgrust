@@ -12,7 +12,9 @@ use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager
 use crate::include::access::htup::TupleValue;
 use crate::include::access::htup::{AttributeDesc, HeapTuple};
 use crate::include::catalog::{CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE};
-use crate::include::nodes::datetime::{DateADT, TimeADT, TimestampADT};
+use crate::include::nodes::datetime::{
+    DateADT, TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimeADT, TimestampADT, TimestampTzADT,
+};
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::primnodes::{OrderByEntry, Var, user_attrno};
 use crate::pgrust::database::{Database, Session};
@@ -7171,6 +7173,24 @@ fn interval_multiply_and_divide_bind_to_float8_scaling() {
             &base,
             &txns,
             INVALID_TRANSACTION_ID,
+            "select interval 'infinity' * 0",
+        )
+        .is_err()
+    );
+    assert!(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select interval '-1073741824 months -1073741824 days -4611686018427387904 us' * 2",
+        )
+        .is_err()
+    );
+    assert!(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
             "select interval 'infinity' / 'infinity'",
         )
         .is_err()
@@ -7240,6 +7260,18 @@ fn interval_infinite_function_edges_match_postgres_errors() {
         &txns,
         INVALID_TRANSACTION_ID,
         "select timezone('infinity'::interval, '1995-08-06 12:12:12'::timestamp)",
+    )
+    .unwrap_err();
+    assert_eq!(
+        format_exec_error(&err),
+        "interval time zone \"infinity\" must be finite"
+    );
+
+    let err = run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select timezone('infinity'::interval, '12:12:12'::timetz)",
     )
     .unwrap_err();
     assert_eq!(

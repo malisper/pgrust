@@ -104,6 +104,38 @@ fn normalize_date_part_field(field: &str) -> &str {
     }
 }
 
+fn timestamp_type_name(with_timezone: bool) -> &'static str {
+    if with_timezone {
+        "timestamp with time zone"
+    } else {
+        "timestamp without time zone"
+    }
+}
+
+fn unsupported_timestamp_part(field: &str, with_timezone: bool) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "unit \"{field}\" not supported for type {}",
+            timestamp_type_name(with_timezone)
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "0A000",
+    }
+}
+
+fn unrecognized_timestamp_part(field: &str, with_timezone: bool) -> ExecError {
+    ExecError::DetailedError {
+        message: format!(
+            "unit \"{field}\" not recognized for type {}",
+            timestamp_type_name(with_timezone)
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "22023",
+    }
+}
+
 fn unsupported_interval_part(field: &str) -> ExecError {
     ExecError::DetailedError {
         message: format!("unit \"{field}\" not supported for type interval"),
@@ -236,10 +268,11 @@ fn eval_interval_part(field: &str, interval: IntervalValue) -> Result<Value, Exe
     };
     match field {
         "microsecond" | "microseconds" | "millisecond" | "milliseconds" | "second" | "seconds"
-        | "minute" | "minutes" | "week" | "weeks" | "month" | "months" | "quarter"
-        | "quarters" => Ok(Value::Null),
-        "hour" | "hours" | "day" | "days" | "year" | "years" | "decade" | "decades"
-        | "century" | "centuries" | "millennium" | "millenniums" | "millennia" | "epoch" => {
+        | "minute" | "minutes" | "week" | "weeks" | "month" | "months" | "quarter" | "quarters" => {
+            Ok(Value::Null)
+        }
+        "hour" | "hours" | "day" | "days" | "year" | "years" | "decade" | "decades" | "century"
+        | "centuries" | "millennium" | "millenniums" | "millennia" | "epoch" => {
             Ok(Value::Float64(sign))
         }
         "timezone" | "timezone_h" | "timezone_m" => Err(unsupported_interval_part(field)),
@@ -295,7 +328,7 @@ fn timezone_function_error(message: impl Into<String>, sqlstate: &'static str) -
     }
 }
 
-fn timezone_target_offset_seconds(
+pub(crate) fn timezone_target_offset_seconds(
     value: &Value,
     config: &DateTimeConfig,
 ) -> Result<i32, ExecError> {
@@ -325,10 +358,8 @@ fn timezone_target_offset_seconds(
                 )),
             }
         }
-        Value::Interval(interval) if interval.months == 0 && interval.days == 0 => {
-            i32::try_from(interval.time_micros / USECS_PER_SEC)
-                .map_err(|_| timezone_function_error("time zone interval out of range", "22008"))
-        }
+        Value::Interval(interval) => i32::try_from(timezone_interval_seconds(*interval)?)
+            .map_err(|_| timezone_function_error("time zone interval out of range", "22008")),
         other => Err(ExecError::TypeMismatch {
             op: "timezone",
             left: other.clone(),
@@ -596,30 +627,6 @@ fn timestamp_infinity_part(field: &str, positive: bool) -> Value {
             })
         }
         _ => Value::Null,
-    }
-}
-
-fn unsupported_timestamp_part(field: &str, with_timezone: bool) -> ExecError {
-    ExecError::DetailedError {
-        message: format!(
-            "unit \"{field}\" not supported for type timestamp {} time zone",
-            if with_timezone { "with" } else { "without" }
-        ),
-        detail: None,
-        hint: None,
-        sqlstate: "0A000",
-    }
-}
-
-fn unrecognized_timestamp_part(field: &str, with_timezone: bool) -> ExecError {
-    ExecError::DetailedError {
-        message: format!(
-            "unit \"{field}\" not recognized for type timestamp {} time zone",
-            if with_timezone { "with" } else { "without" }
-        ),
-        detail: None,
-        hint: None,
-        sqlstate: "22023",
     }
 }
 
@@ -1054,7 +1061,18 @@ fn bin_timestamp_value(timestamp: i64, origin: i64, stride: i64) -> Result<i64, 
     Ok(result)
 }
 
+fn validate_timestamp_usecs_range(value: i64) -> Result<i64, ExecError> {
+    if is_valid_finite_timestamp_usecs(value) {
+        Ok(value)
+    } else {
+        Err(timestamp_out_of_range_error())
+    }
+}
+
 pub(crate) fn eval_date_bin_function(values: &[Value]) -> Result<Value, ExecError> {
+    if values.iter().any(|value| matches!(value, Value::Null)) {
+        return Ok(Value::Null);
+    }
     let [Value::Interval(stride), source, origin] = values else {
         return Err(ExecError::DetailedError {
             message: "malformed date_bin call".into(),
@@ -1074,11 +1092,13 @@ pub(crate) fn eval_date_bin_function(values: &[Value]) -> Result<Value, ExecErro
             Err(datetime_value_out_of_range("origin out of range"))
         }
         (Value::Timestamp(source), Value::Timestamp(origin)) => Ok(Value::Timestamp(TimestampADT(
-            bin_timestamp_value(source.0, origin.0, stride)?,
+            validate_timestamp_usecs_range(bin_timestamp_value(source.0, origin.0, stride)?)?,
         ))),
-        (Value::TimestampTz(source), Value::TimestampTz(origin)) => Ok(Value::TimestampTz(
-            TimestampTzADT(bin_timestamp_value(source.0, origin.0, stride)?),
-        )),
+        (Value::TimestampTz(source), Value::TimestampTz(origin)) => {
+            Ok(Value::TimestampTz(TimestampTzADT(
+                validate_timestamp_usecs_range(bin_timestamp_value(source.0, origin.0, stride)?)?,
+            )))
+        }
         _ => Err(ExecError::TypeMismatch {
             op: "date_bin",
             left: source.clone(),
@@ -1087,7 +1107,7 @@ pub(crate) fn eval_date_bin_function(values: &[Value]) -> Result<Value, ExecErro
     }
 }
 
-fn timezone_interval_seconds(zone: IntervalValue) -> Result<i64, ExecError> {
+pub(crate) fn timezone_interval_seconds(zone: IntervalValue) -> Result<i64, ExecError> {
     let rendered = render_interval_text(zone);
     if !zone.is_finite() {
         return Err(invalid_parameter_value(format!(
@@ -1100,80 +1120,6 @@ fn timezone_interval_seconds(zone: IntervalValue) -> Result<i64, ExecError> {
         )));
     }
     Ok(zone.time_micros / USECS_PER_SEC)
-}
-
-fn timezone_text_seconds(zone: &str) -> Result<i64, ExecError> {
-    match zone.trim().to_ascii_uppercase().as_str() {
-        "GMT" | "UTC" | "UT" | "Z" => Ok(0),
-        _ => Err(invalid_parameter_value(format!(
-            "time zone \"{zone}\" not recognized"
-        ))),
-    }
-}
-
-pub(crate) fn eval_timezone_function(values: &[Value]) -> Result<Value, ExecError> {
-    let [zone, value] = values else {
-        return Err(ExecError::DetailedError {
-            message: "malformed timezone call".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        });
-    };
-    let seconds = match zone {
-        Value::Interval(zone) => timezone_interval_seconds(*zone)?,
-        Value::Text(zone) => timezone_text_seconds(zone.as_str())?,
-        _ => {
-            return Err(ExecError::DetailedError {
-                message: "malformed timezone call".into(),
-                detail: None,
-                hint: None,
-                sqlstate: "XX000",
-            });
-        }
-    };
-    let seconds_i32 = i32::try_from(seconds)
-        .map_err(|_| datetime_value_out_of_range("timestamp out of range"))?;
-    let micros = seconds
-        .checked_mul(USECS_PER_SEC)
-        .ok_or_else(|| datetime_value_out_of_range("timestamp out of range"))?;
-    match value {
-        Value::Timestamp(timestamp) if !timestamp.is_finite() => {
-            Ok(Value::TimestampTz(TimestampTzADT(timestamp.0)))
-        }
-        Value::TimestampTz(timestamp) if !timestamp.is_finite() => {
-            Ok(Value::Timestamp(TimestampADT(timestamp.0)))
-        }
-        Value::Timestamp(timestamp) => Ok(Value::TimestampTz(TimestampTzADT(
-            timestamp
-                .0
-                .checked_sub(micros)
-                .ok_or_else(|| datetime_value_out_of_range("timestamp out of range"))?,
-        ))),
-        Value::TimestampTz(timestamp) => Ok(Value::Timestamp(TimestampADT(
-            timestamp
-                .0
-                .checked_add(micros)
-                .ok_or_else(|| datetime_value_out_of_range("timestamp out of range"))?,
-        ))),
-        Value::Time(time) => Ok(Value::TimeTz(TimeTzADT {
-            time: *time,
-            offset_seconds: -seconds_i32,
-        })),
-        Value::TimeTz(timetz) => Ok(Value::TimeTz(TimeTzADT {
-            time: TimeADT(
-                (i128::from(timetz.time.0)
-                    + i128::from(timetz.offset_seconds + seconds_i32) * i128::from(USECS_PER_SEC))
-                .rem_euclid(i128::from(USECS_PER_DAY)) as i64,
-            ),
-            offset_seconds: -seconds_i32,
-        })),
-        _ => Err(ExecError::TypeMismatch {
-            op: "timezone",
-            left: zone.clone(),
-            right: value.clone(),
-        }),
-    }
 }
 
 fn checked_justify_result(value: IntervalValue) -> Result<IntervalValue, ExecError> {
@@ -1394,7 +1340,7 @@ pub(crate) fn eval_date_trunc_function(
         })?;
     let field = field.trim().to_ascii_lowercase();
     let field = normalize_date_part_field(&field);
-    if field == "ago" {
+    if field == "ago" && !matches!(date_value, Value::Interval(_)) {
         return Err(unrecognized_timestamp_part(
             field,
             matches!(date_value, Value::TimestampTz(_)),
@@ -1518,41 +1464,6 @@ fn timestamp_bin_usecs(stride: i64, source: i64, origin: i64) -> Result<i64, Exe
         }
     }
     Ok(result)
-}
-
-pub(crate) fn eval_date_bin_function(values: &[Value]) -> Result<Value, ExecError> {
-    let [stride, source, origin] = values else {
-        return Err(ExecError::DetailedError {
-            message: "malformed date_bin call".into(),
-            detail: None,
-            hint: None,
-            sqlstate: "XX000",
-        });
-    };
-    if values.iter().any(|value| matches!(value, Value::Null)) {
-        return Ok(Value::Null);
-    }
-    let Value::Interval(interval) = stride else {
-        return Err(ExecError::TypeMismatch {
-            op: "date_bin",
-            left: stride.clone(),
-            right: Value::Interval(IntervalValue::zero()),
-        });
-    };
-    let stride = interval_stride_usecs(*interval)?;
-    match (source, origin) {
-        (Value::Timestamp(source), Value::Timestamp(origin)) => Ok(Value::Timestamp(TimestampADT(
-            timestamp_bin_usecs(stride, source.0, origin.0)?,
-        ))),
-        (Value::TimestampTz(source), Value::TimestampTz(origin)) => Ok(Value::TimestampTz(
-            TimestampTzADT(timestamp_bin_usecs(stride, source.0, origin.0)?),
-        )),
-        _ => Err(ExecError::TypeMismatch {
-            op: "date_bin",
-            left: source.clone(),
-            right: origin.clone(),
-        }),
-    }
 }
 
 fn interval_total_usecs(interval: IntervalValue) -> Result<i64, ExecError> {

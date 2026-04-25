@@ -77,6 +77,7 @@ pub(crate) use expr_casts::parse_text_array_literal_with_op;
 pub use expr_casts::render_internal_char_text;
 pub(crate) use expr_casts::render_interval_text;
 pub(crate) use expr_casts::render_interval_text_with_config;
+pub(crate) use expr_casts::render_pg_lsn_text;
 pub(crate) use expr_casts::{cast_value, cast_value_with_config};
 pub use expr_datetime::{render_datetime_value_text, render_datetime_value_text_with_config};
 pub(crate) use expr_geometry::eval_geometry_function;

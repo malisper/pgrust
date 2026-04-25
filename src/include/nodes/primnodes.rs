@@ -584,7 +584,6 @@ pub enum BuiltinScalarFunction {
     DateAdd,
     DateSubtract,
     Age,
-    Timezone,
     JustifyDays,
     JustifyHours,
     JustifyInterval,

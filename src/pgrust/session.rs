@@ -37,8 +37,9 @@ use crate::backend::utils::misc::guc::{
     is_postgres_guc, normalize_guc_name, plpgsql_guc_default_value,
 };
 use crate::backend::utils::misc::guc_datetime::{
-    DateTimeConfig, default_datestyle, default_intervalstyle, default_timezone, format_datestyle,
-    format_intervalstyle, parse_datestyle, parse_intervalstyle, parse_timezone,
+    DateTimeConfig, default_datestyle, default_datetime_config, default_intervalstyle,
+    default_timezone, format_datestyle, format_intervalstyle, parse_datestyle_with_fallback,
+    parse_intervalstyle, parse_timezone,
 };
 use crate::backend::utils::misc::guc_xml::{
     format_xmlbinary, format_xmloption, parse_xmlbinary, parse_xmloption,

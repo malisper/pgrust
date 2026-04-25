@@ -5,8 +5,8 @@ use super::exec_expr::parse_numeric_text;
 use super::expr_bit::{coerce_bit_string, render_bit_text};
 use super::expr_casts::{
     cast_numeric_value, cast_text_value_with_config, cast_value, cast_value_with_config,
-    parse_text_array_literal_with_options, render_internal_char_text, render_interval_text_with_config,
-    render_pg_lsn_text,
+    parse_text_array_literal_with_options, render_internal_char_text,
+    render_interval_text_with_config, render_pg_lsn_text,
 };
 use super::expr_datetime::{render_datetime_value_text, render_datetime_value_text_with_config};
 use super::expr_geometry::{

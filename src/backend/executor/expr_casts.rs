@@ -43,7 +43,10 @@ use crate::include::catalog::{
     INT2_TYPE_OID, OID_TYPE_OID, TEXT_TYPE_OID, bootstrap_pg_cast_rows, builtin_type_rows,
     multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
 };
-use crate::include::nodes::datetime::{TimeADT, USECS_PER_DAY, USECS_PER_HOUR, USECS_PER_MINUTE};
+use crate::include::nodes::datetime::{
+    DATEVAL_NOBEGIN, DATEVAL_NOEND, DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT,
+    USECS_PER_DAY, USECS_PER_HOUR, USECS_PER_MINUTE, USECS_PER_SEC,
+};
 use crate::include::nodes::datum::ArrayDimension;
 use crate::pgrust::compact_string::CompactString;
 use num_bigint::BigInt;
@@ -5564,6 +5567,9 @@ mod tests {
     use crate::backend::executor::{ExecError, Value};
     use crate::backend::parser::{SqlType, SqlTypeKind};
     use crate::backend::utils::misc::guc_datetime::{DateTimeConfig, IntervalStyle};
+    use crate::include::nodes::datetime::{
+        DateADT, TimeADT, TimeTzADT, TimestampADT, TimestampTzADT, USECS_PER_DAY, USECS_PER_SEC,
+    };
     use crate::include::nodes::datum::{ArrayValue, IntervalValue};
 
     #[test]

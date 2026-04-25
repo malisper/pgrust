@@ -1084,7 +1084,6 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::DatePart | BuiltinScalarFunction::Extract => args.len() == 2,
             BuiltinScalarFunction::DateTrunc => matches!(args.len(), 2 | 3),
             BuiltinScalarFunction::DateBin => args.len() == 3,
-            BuiltinScalarFunction::Timezone => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::DateAdd | BuiltinScalarFunction::DateSubtract => {
                 matches!(args.len(), 2 | 3)
             }
@@ -1662,6 +1661,15 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         BuiltinScalarFunction::MakeInterval => {
             return Some(SqlType::new(SqlTypeKind::Interval));
         }
+        BuiltinScalarFunction::MakeTime => {
+            return Some(SqlType::new(SqlTypeKind::Time));
+        }
+        BuiltinScalarFunction::MakeTimestamp => {
+            return Some(SqlType::new(SqlTypeKind::Timestamp));
+        }
+        BuiltinScalarFunction::Age => {
+            return Some(SqlType::new(SqlTypeKind::Interval));
+        }
         BuiltinScalarFunction::IntervalHash => {
             return Some(SqlType::new(SqlTypeKind::Int4));
         }
@@ -1673,9 +1681,6 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         }
         BuiltinScalarFunction::ParseIdent => {
             return Some(SqlType::array_of(SqlType::new(SqlTypeKind::Text)));
-        }
-        BuiltinScalarFunction::Age => {
-            return Some(SqlType::new(SqlTypeKind::Interval));
         }
         _ => {}
     }

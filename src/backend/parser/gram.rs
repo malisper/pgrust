@@ -14717,24 +14717,6 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                 fold_infix(first, inner)
             }
         }
-        Rule::at_time_zone_expr => {
-            let mut inner = pair.into_inner();
-            let mut expr = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;
-            for suffix in inner {
-                let zone = suffix
-                    .into_inner()
-                    .find(|part| part.as_rule() == Rule::postfix_expr)
-                    .ok_or(ParseError::UnexpectedEof)?;
-                expr = simple_func_call(
-                    "timezone",
-                    vec![
-                        SqlFunctionArg::positional(build_expr(zone)?),
-                        SqlFunctionArg::positional(expr),
-                    ],
-                );
-            }
-            Ok(expr)
-        }
         Rule::postfix_expr => {
             let mut inner = pair.into_inner();
             let mut expr = build_expr(inner.next().ok_or(ParseError::UnexpectedEof)?)?;

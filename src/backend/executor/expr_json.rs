@@ -3172,6 +3172,9 @@ fn render_json_value_text_with_config(
         Value::Interval(v) => {
             serde_json::to_string(&render_interval_text_with_config(*v, datetime_config)).unwrap()
         }
+        Value::Uuid(v) => {
+            serde_json::to_string(&crate::backend::executor::value_io::render_uuid_text(v)).unwrap()
+        }
         Value::Bool(v) => {
             if *v {
                 "true".into()

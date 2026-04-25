@@ -743,7 +743,7 @@ fn cast_is_const_fold_safe(value: &Value, target: SqlType) -> bool {
         return false;
     }
     !matches!(
-        (source, target),
+        (source.kind, target.kind),
         (SqlTypeKind::TimestampTz | SqlTypeKind::TimeTz, _)
             | (_, SqlTypeKind::TimestampTz | SqlTypeKind::TimeTz)
     )

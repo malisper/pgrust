@@ -2466,9 +2466,7 @@ fn render_explain_func_expr(
     }
     if matches!(
         func.implementation,
-        ScalarFunctionImpl::Builtin(
-            BuiltinScalarFunction::Timezone | BuiltinScalarFunction::TimeZone
-        )
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::Timezone)
     ) {
         return render_explain_timezone_function(func, qualifier, column_names);
     }

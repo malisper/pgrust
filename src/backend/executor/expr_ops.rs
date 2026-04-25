@@ -545,6 +545,32 @@ pub(crate) fn sub_values(left: Value, right: Value) -> Result<Value, ExecError> 
     }
 }
 
+fn timestamp_difference_interval(left: i64, right: i64) -> Result<Value, ExecError> {
+    match (left, right) {
+        (TIMESTAMP_NOEND, TIMESTAMP_NOEND) | (TIMESTAMP_NOBEGIN, TIMESTAMP_NOBEGIN) => {
+            Err(interval_out_of_range())
+        }
+        (TIMESTAMP_NOEND, TIMESTAMP_NOBEGIN) => Ok(Value::Interval(IntervalValue::infinity())),
+        (TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND) => Ok(Value::Interval(IntervalValue::neg_infinity())),
+        (TIMESTAMP_NOEND, _) | (_, TIMESTAMP_NOBEGIN) => {
+            Ok(Value::Interval(IntervalValue::infinity()))
+        }
+        (TIMESTAMP_NOBEGIN, _) | (_, TIMESTAMP_NOEND) => {
+            Ok(Value::Interval(IntervalValue::neg_infinity()))
+        }
+        _ => {
+            let diff = left.checked_sub(right).ok_or_else(interval_out_of_range)?;
+            let days = diff / USECS_PER_DAY;
+            let time_micros = diff % USECS_PER_DAY;
+            Ok(Value::Interval(IntervalValue {
+                time_micros,
+                days: i32::try_from(days).map_err(|_| interval_out_of_range())?,
+                months: 0,
+            }))
+        }
+    }
+}
+
 fn timestamp_out_of_range() -> ExecError {
     ExecError::DetailedError {
         message: "timestamp out of range".into(),
@@ -700,6 +726,42 @@ fn timetz_interval_op(
         time: apply_interval_time_component(timetz.time, interval, subtract),
         offset_seconds: timetz.offset_seconds,
     }))
+}
+
+fn multiply_interval_by_i64(value: IntervalValue, factor: i64) -> Result<Value, ExecError> {
+    if !value.is_finite() {
+        if factor == 0 {
+            return Err(interval_out_of_range());
+        }
+        return Ok(Value::Interval(if factor < 0 {
+            value.negate()
+        } else {
+            value
+        }));
+    }
+    let result = IntervalValue {
+        time_micros: value
+            .time_micros
+            .checked_mul(factor)
+            .ok_or_else(interval_out_of_range)?,
+        days: i32::try_from(
+            i64::from(value.days)
+                .checked_mul(factor)
+                .ok_or_else(interval_out_of_range)?,
+        )
+        .map_err(|_| interval_out_of_range())?,
+        months: i32::try_from(
+            i64::from(value.months)
+                .checked_mul(factor)
+                .ok_or_else(interval_out_of_range)?,
+        )
+        .map_err(|_| interval_out_of_range())?,
+    };
+    if result.is_finite() {
+        Ok(Value::Interval(result))
+    } else {
+        Err(interval_out_of_range())
+    }
 }
 
 pub(crate) fn mul_values(left: Value, right: Value) -> Result<Value, ExecError> {
@@ -1302,6 +1364,10 @@ fn compare_ord<T: Ord>(left: T, right: T, op: &'static str) -> bool {
         ">=" => left >= right,
         _ => unreachable!(),
     }
+}
+
+fn timetz_order_key(value: TimeTzADT) -> i64 {
+    value.time.0 - i64::from(value.offset_seconds) * USECS_PER_SEC
 }
 
 fn interval_mul_float(span: IntervalValue, factor: f64) -> Option<IntervalValue> {
