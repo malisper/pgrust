@@ -25,7 +25,9 @@ use crate::backend::storage::lmgr::{TableLockManager, TableLockMode, unlock_rela
 use crate::backend::utils::cache::inval::CatalogInvalidation;
 use crate::backend::utils::cache::lsyscache::LazyCatalogLookup;
 use crate::backend::utils::misc::checkpoint::is_checkpoint_guc;
-use crate::backend::utils::misc::guc::{is_postgres_guc, normalize_guc_name};
+use crate::backend::utils::misc::guc::{
+    is_postgres_guc, normalize_guc_name, plpgsql_guc_default_value,
+};
 use crate::backend::utils::misc::guc_datetime::{
     DateTimeConfig, default_datestyle, default_timezone, format_datestyle, parse_datestyle,
     parse_timezone,
@@ -53,7 +55,7 @@ use crate::pgrust::portal::{
     CursorOptions, CursorViewRow, Portal, PortalFetchDirection, PortalFetchLimit, PortalManager,
     PortalRunResult,
 };
-use crate::pl::plpgsql::execute_do;
+use crate::pl::plpgsql::execute_do_with_gucs;
 use crate::{ClientId, RelFileLocator};
 use parking_lot::RwLock;
 
@@ -162,7 +164,10 @@ pub enum ByteaOutputFormat {
     Escape,
 }
 
-fn default_stats_guc_value(name: &str) -> Option<&'static str> {
+fn default_runtime_guc_value(name: &str) -> Option<&'static str> {
+    if let Some(value) = plpgsql_guc_default_value(name) {
+        return Some(value);
+    }
     match name {
         "default_toast_compression" => Some("pglz"),
         "track_counts" => Some("on"),
@@ -254,6 +259,51 @@ fn parse_default_toast_compression_guc_value(value: &str) -> Result<&'static str
         #[cfg(feature = "lz4")]
         "lz4" => Ok("lz4"),
         _ => Err(invalid_default_toast_compression_value(value)),
+    }
+}
+
+fn parse_plpgsql_extra_checks(value: &str) -> Result<String, ExecError> {
+    let mut saw_all = false;
+    let mut saw_none = false;
+    let mut checks = Vec::new();
+    for raw in value.split(',') {
+        let item = raw.trim().to_ascii_lowercase();
+        if item.is_empty() {
+            return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                value.to_string(),
+            )));
+        }
+        match item.as_str() {
+            "all" => saw_all = true,
+            "none" => saw_none = true,
+            "shadowed_variables" | "strict_multi_assignment" | "too_many_rows" => {
+                if !checks.iter().any(|check| check == &item) {
+                    checks.push(item);
+                }
+            }
+            _ => {
+                return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                    value.to_string(),
+                )));
+            }
+        }
+    }
+    if saw_all && (saw_none || !checks.is_empty()) {
+        return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+            value.to_string(),
+        )));
+    }
+    if saw_none && !checks.is_empty() {
+        return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+            value.to_string(),
+        )));
+    }
+    if saw_all {
+        Ok("all".to_string())
+    } else if saw_none || checks.is_empty() {
+        Ok("none".to_string())
+    } else {
+        Ok(checks.join(","))
     }
 }
 
@@ -502,6 +552,7 @@ impl Session {
             row_locks: Arc::clone(&db.row_locks),
             checkpoint_stats: db.checkpoint_stats_snapshot(),
             datetime_config: self.datetime_config.clone(),
+            gucs: self.gucs.clone(),
             interrupts: self.interrupts(),
             stats: Arc::clone(&db.stats),
             session_stats: Arc::clone(&self.stats_state),
@@ -915,7 +966,7 @@ impl Session {
         }
 
         match stmt {
-            Statement::Do(ref do_stmt) => execute_do(do_stmt),
+            Statement::Do(ref do_stmt) => execute_do_with_gucs(do_stmt, &self.gucs),
             Statement::Show(ref show_stmt) => self.apply_show(db, show_stmt),
             Statement::Set(ref set_stmt) => self.apply_set(db, set_stmt),
             Statement::Reset(ref reset_stmt) => self.apply_reset(db, reset_stmt),
@@ -2306,11 +2357,12 @@ impl Session {
                     result
                 } else {
                     let search_path = self.configured_search_path();
-                    db.execute_statement_with_search_path_and_datetime_config(
+                    db.execute_statement_with_search_path_datetime_config_and_gucs(
                         self.client_id,
                         stmt,
                         search_path.as_deref(),
                         &self.datetime_config,
+                        &self.gucs,
                     )
                 }
             }
@@ -2740,7 +2792,7 @@ impl Session {
         let client_id = self.client_id;
 
         let result = match stmt {
-            Statement::Do(ref do_stmt) => execute_do(do_stmt),
+            Statement::Do(ref do_stmt) => execute_do_with_gucs(do_stmt, &self.gucs),
             Statement::Show(ref show_stmt) => self.apply_show(db, show_stmt),
             Statement::Set(ref set_stmt) => self.apply_set(db, set_stmt),
             Statement::Reset(ref reset_stmt) => self.apply_reset(db, reset_stmt),
@@ -4799,7 +4851,7 @@ impl Session {
                 "timezone" => default_timezone().to_string(),
                 "xmlbinary" => format_xmlbinary(self.datetime_config.xml.binary).to_string(),
                 "xmloption" => format_xmloption(self.datetime_config.xml.option).to_string(),
-                _ => default_stats_guc_value(&name)
+                _ => default_runtime_guc_value(&name)
                     .map(str::to_string)
                     .unwrap_or_else(|| "default".to_string()),
             }
@@ -4980,6 +5032,25 @@ impl Session {
             }
             "default_toast_compression" => {
                 stored_value = parse_default_toast_compression_guc_value(value)?.to_string();
+            }
+            "plpgsql.check_asserts" | "plpgsql.print_strict_params" => {
+                let bool_value = parse_bool_guc(value).ok_or_else(|| {
+                    ExecError::Parse(ParseError::UnrecognizedParameter(value.to_string()))
+                })?;
+                stored_value = if bool_value { "on" } else { "off" }.to_string();
+            }
+            "plpgsql.variable_conflict" => {
+                stored_value = match value.trim().to_ascii_lowercase().as_str() {
+                    "error" | "use_variable" | "use_column" => value.trim().to_ascii_lowercase(),
+                    _ => {
+                        return Err(ExecError::Parse(ParseError::UnrecognizedParameter(
+                            value.to_string(),
+                        )));
+                    }
+                };
+            }
+            "plpgsql.extra_warnings" | "plpgsql.extra_errors" => {
+                stored_value = parse_plpgsql_extra_checks(value)?;
             }
             _ => {}
         }

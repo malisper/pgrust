@@ -92,7 +92,6 @@ use crate::include::catalog::{
 use crate::pgrust::auth::{AuthCatalog, AuthState};
 pub use crate::pgrust::autovacuum::AutovacuumConfig;
 use crate::pgrust::cluster::{Cluster, ClusterShared, SessionActivityEntry, SessionActivityState};
-use crate::pl::plpgsql::execute_do;
 use crate::{BufferPool, ClientId, SmgrStorageBackend};
 use ddl::{
     ensure_can_set_role, ensure_relation_owner, map_catalog_error,

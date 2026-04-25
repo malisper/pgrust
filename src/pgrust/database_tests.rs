@@ -192,6 +192,7 @@ fn analyze_executor_context(
         row_locks: Arc::clone(&db.row_locks),
         checkpoint_stats: db.checkpoint_stats_snapshot(),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        gucs: std::collections::HashMap::new(),
         interrupts: db.interrupt_state(client_id),
         stats: Arc::clone(&db.stats),
         session_stats: db.session_stats_state(client_id),
@@ -18790,6 +18791,69 @@ fn stats_gucs_show_postgres_like_defaults_and_runtime_values() {
 }
 
 #[test]
+fn plpgsql_gucs_show_set_current_setting_and_drive_asserts() {
+    let base = temp_dir("plpgsql_gucs");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show plpgsql.check_asserts"),
+        vec![vec![Value::Text("on".into())]]
+    );
+    assert_eq!(
+        session_query_rows(&mut session, &db, "show plpgsql.extra_warnings"),
+        vec![vec![Value::Text("none".into())]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select current_setting('plpgsql.variable_conflict')",
+        ),
+        vec![vec![Value::Text("error".into())]]
+    );
+
+    session
+        .execute(&db, "set plpgsql.check_asserts = off")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "set plpgsql.extra_warnings = 'shadowed_variables,too_many_rows'",
+        )
+        .unwrap();
+    session
+        .execute(&db, "set plpgsql.variable_conflict = use_column")
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select current_setting('plpgsql.check_asserts'), current_setting('plpgsql.extra_warnings'), current_setting('plpgsql.variable_conflict')",
+        ),
+        vec![vec![
+            Value::Text("off".into()),
+            Value::Text("shadowed_variables,too_many_rows".into()),
+            Value::Text("use_column".into()),
+        ]]
+    );
+    assert_eq!(
+        session
+            .execute(&db, "do $$ begin assert false, 'disabled'; end $$")
+            .unwrap(),
+        StatementResult::AffectedRows(0)
+    );
+
+    match session.execute(&db, "set plpgsql.variable_conflict = bogus") {
+        Err(ExecError::Parse(ParseError::UnrecognizedParameter(value))) => {
+            assert_eq!(value, "bogus");
+        }
+        other => panic!("expected invalid plpgsql.variable_conflict error, got {other:?}"),
+    }
+}
+
+#[test]
 fn stats_snapshot_timestamp_requires_snapshot_mode_and_clear_snapshot_resets_it() {
     let base = temp_dir("stats_snapshot_timestamp");
     let db = Database::open(&base, 16).unwrap();
@@ -23119,6 +23183,34 @@ fn plpgsql_write_inside_autocommit_select_error_aborts_xid() {
 }
 
 #[test]
+fn plpgsql_insert_failure_inside_autocommit_select_has_xid_and_rolls_back() {
+    let base = temp_dir("plpgsql_insert_failure_xid");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table lazy_bad_insert_items (id int4 not null)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function lazy_bad_insert() returns int4 language plpgsql as $$ begin insert into lazy_bad_insert_items values (null); return 0; end $$",
+    )
+    .unwrap();
+
+    let err = db.execute(1, "select lazy_bad_insert()").unwrap_err();
+    let err = match err {
+        ExecError::WithContext { source, .. } => *source,
+        err => err,
+    };
+    assert!(matches!(
+        err,
+        ExecError::NotNullViolation { column, .. } if column == "id"
+    ));
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from lazy_bad_insert_items"),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
 fn plpgsql_write_inside_explicit_transaction_select_allocates_xid() {
     let base = temp_dir("plpgsql_write_inside_explicit_select_xid");
     let db = Database::open(&base, 64).unwrap();
@@ -24579,6 +24671,160 @@ fn create_function_row_returns_work_for_table_and_record() {
 }
 
 #[test]
+fn create_function_nonset_record_composite_and_multi_out_work() {
+    let dir = temp_dir("create_function_nonset_row_returns");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table one_widget (id int4, label text)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function one_widget_row(n int4) returns one_widget language plpgsql as $$ begin return row(n, 'widget'); end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function one_record_row(n int4) returns record language plpgsql as $$ begin return row(n, 'record'); end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create function one_out_row(n int4, out a int4, out b text) language plpgsql as $$ begin a := n; b := 'out'; return; end $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select * from one_widget_row(5)"),
+        vec![vec![Value::Int32(5), Value::Text("widget".into())]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select * from one_record_row(6) as t(a int4, b text)"
+        ),
+        vec![vec![Value::Int32(6), Value::Text("record".into())]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select * from one_out_row(7)"),
+        vec![vec![Value::Int32(7), Value::Text("out".into())]]
+    );
+}
+
+#[test]
+fn plpgsql_refcursor_open_fetch_close_work() {
+    let dir = temp_dir("plpgsql_refcursor_open_fetch_close");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(1, "create table pl_cursor_items (id int4)")
+        .unwrap();
+    db.execute(1, "insert into pl_cursor_items values (1), (2), (3)")
+        .unwrap();
+    db.execute(
+        1,
+        "create function cursor_total() returns int4 language plpgsql as $$
+            declare
+                c cursor for select id from pl_cursor_items order by id;
+                v int4;
+                total int4 := 0;
+            begin
+                open c;
+                fetch c into v;
+                total := total + v;
+                fetch c into v;
+                total := total + v;
+                close c;
+                return total;
+            end
+        $$",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select cursor_total()"),
+        vec![vec![Value::Int32(3)]]
+    );
+}
+
+#[test]
+fn drop_function_ignores_argument_names_and_out_only_modes() {
+    let dir = temp_dir("drop_function_mode_signature");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function drop_mode_sig(in a int4, inout b int4, out c text) language plpgsql as $$ begin b := a + b; c := b::text; return; end $$",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "drop function drop_mode_sig(in a int4, inout b int4, out c text)",
+    )
+    .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from pg_proc where proname = 'drop_mode_sig'"
+        ),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn plpgsql_savepoint_reports_unsupported_transaction_command() {
+    let dir = temp_dir("plpgsql_savepoint_unsupported");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function bad_savepoint() returns void language plpgsql as $$ begin savepoint s; end $$",
+    )
+    .unwrap();
+
+    let err = db.execute(1, "select bad_savepoint()").unwrap_err();
+    let err = match err {
+        ExecError::WithContext { source, context } => {
+            assert!(context.contains("PL/pgSQL function bad_savepoint"));
+            assert!(context.contains("at SQL statement"));
+            *source
+        }
+        other => panic!("expected PL/pgSQL context, got {other:?}"),
+    };
+    assert!(matches!(
+        err,
+        ExecError::DetailedError {
+            message,
+            sqlstate: "0A000",
+            ..
+        } if message == "unsupported transaction command in PL/pgSQL"
+    ));
+}
+
+#[test]
+fn plpgsql_runtime_errors_include_statement_context() {
+    let dir = temp_dir("plpgsql_error_context");
+    let db = Database::open(&dir, 64).unwrap();
+
+    db.execute(
+        1,
+        "create function fail_context() returns int4 language plpgsql as $$ declare z int4 := 0; begin perform 1 / z; return 0; end $$",
+    )
+    .unwrap();
+
+    let err = db.execute(1, "select fail_context()").unwrap_err();
+    match err {
+        ExecError::WithContext { source, context } => {
+            assert!(context.contains("PL/pgSQL function fail_context"));
+            assert!(context.contains("at PERFORM"));
+            assert!(matches!(*source, ExecError::DivisionByZero(_)));
+        }
+        other => panic!("expected PL/pgSQL context, got {other:?}"),
+    }
+}
+
+#[test]
 fn create_function_named_composite_rows_expand_from_relation_rowtype() {
     let dir = temp_dir("create_function_named_composite");
     let db = Database::open(&dir, 64).unwrap();
@@ -25366,6 +25612,13 @@ fn plpgsql_query_for_loop_reports_row_shape_mismatch() {
     .unwrap();
 
     let err = db.execute(1, "select bad_query_loop_shape()").unwrap_err();
+    let err = match err {
+        ExecError::WithContext { source, context } => {
+            assert!(context.contains("PL/pgSQL function bad_query_loop_shape"));
+            *source
+        }
+        err => err,
+    };
     assert!(matches!(
         err,
         ExecError::DetailedError {
@@ -25391,6 +25644,13 @@ fn plpgsql_dynamic_execute_query_for_loop_rejects_null_query_string() {
     .unwrap();
 
     let err = db.execute(1, "select null_dynamic_loop()").unwrap_err();
+    let err = match err {
+        ExecError::WithContext { source, context } => {
+            assert!(context.contains("PL/pgSQL function null_dynamic_loop"));
+            *source
+        }
+        err => err,
+    };
     assert!(matches!(
         err,
         ExecError::DetailedError {

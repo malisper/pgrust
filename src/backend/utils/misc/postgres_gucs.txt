@@ -170,6 +170,11 @@ lc_monetary
 lc_numeric
 lc_time
 listen_addresses
+plpgsql.check_asserts
+plpgsql.extra_errors
+plpgsql.extra_warnings
+plpgsql.print_strict_params
+plpgsql.variable_conflict
 lo_compat_privileges
 local_preload_libraries
 lock_timeout

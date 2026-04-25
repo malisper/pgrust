@@ -705,6 +705,7 @@ fn run_statement(
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
                     pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+                gucs: std::collections::HashMap::new(),
                 interrupts: Arc::clone(&interrupts),
                 stats: Arc::clone(&stats),
                 session_stats: Arc::clone(&session_stats),
@@ -755,6 +756,7 @@ fn run_statement(
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
                     pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+                gucs: std::collections::HashMap::new(),
                 interrupts: Arc::clone(&interrupts),
                 stats: Arc::clone(&stats),
                 session_stats: Arc::clone(&session_stats),
@@ -805,6 +807,7 @@ fn run_statement(
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
                     pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+                gucs: std::collections::HashMap::new(),
                 interrupts: Arc::clone(&interrupts),
                 stats: Arc::clone(&stats),
                 session_stats: Arc::clone(&session_stats),
@@ -855,6 +858,7 @@ fn run_statement(
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
                     pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+                gucs: std::collections::HashMap::new(),
                 interrupts: Arc::clone(&interrupts),
                 stats: Arc::clone(&stats),
                 session_stats: Arc::clone(&session_stats),
@@ -993,6 +997,7 @@ fn run_statement(
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
                     pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+                gucs: std::collections::HashMap::new(),
                 interrupts: Arc::clone(&interrupts),
                 stats: Arc::clone(&stats),
                 session_stats: Arc::clone(&session_stats),
@@ -1043,6 +1048,7 @@ fn run_statement(
                     pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                 datetime_config:
                     pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+                gucs: std::collections::HashMap::new(),
                 interrupts: Arc::clone(&interrupts),
                 stats: Arc::clone(&stats),
                 session_stats: Arc::clone(&session_stats),
@@ -1096,6 +1102,7 @@ fn run_statement(
                         pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                     datetime_config:
                         pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+                    gucs: std::collections::HashMap::new(),
                     interrupts: Arc::clone(&interrupts),
                     stats: Arc::clone(&stats),
                     session_stats: Arc::clone(&session_stats),
@@ -1160,6 +1167,7 @@ fn run_statement(
                         pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                     datetime_config:
                         pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+                    gucs: std::collections::HashMap::new(),
                     interrupts: Arc::clone(&interrupts),
                     stats: Arc::clone(&stats),
                     session_stats: Arc::clone(&session_stats),
@@ -1224,6 +1232,7 @@ fn run_statement(
                         pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
                     datetime_config:
                         pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+                    gucs: std::collections::HashMap::new(),
                     interrupts: Arc::clone(&interrupts),
                     stats: Arc::clone(&stats),
                     session_stats: Arc::clone(&session_stats),

@@ -12,6 +12,17 @@ pub fn normalize_guc_name(name: &str) -> String {
     name.trim().to_ascii_lowercase()
 }
 
+pub fn plpgsql_guc_default_value(name: &str) -> Option<&'static str> {
+    match normalize_guc_name(name).as_str() {
+        "plpgsql.extra_warnings" => Some("none"),
+        "plpgsql.extra_errors" => Some("none"),
+        "plpgsql.print_strict_params" => Some("off"),
+        "plpgsql.check_asserts" => Some("on"),
+        "plpgsql.variable_conflict" => Some("error"),
+        _ => None,
+    }
+}
+
 fn postgres_gucs() -> &'static HashSet<String> {
     POSTGRES_GUCS.get_or_init(load_postgres_gucs)
 }
@@ -38,6 +49,6 @@ mod tests {
 
     #[test]
     fn loads_checked_in_postgres_guc_list() {
-        assert_eq!(postgres_gucs().len(), 403);
+        assert_eq!(postgres_gucs().len(), 408);
     }
 }

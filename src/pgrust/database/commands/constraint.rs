@@ -59,6 +59,7 @@ fn ddl_executor_context(
         row_locks: std::sync::Arc::clone(&db.row_locks),
         checkpoint_stats: db.checkpoint_stats_snapshot(),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        gucs: std::collections::HashMap::new(),
         interrupts,
         stats: std::sync::Arc::clone(&db.stats),
         session_stats: db.session_stats_state(client_id),

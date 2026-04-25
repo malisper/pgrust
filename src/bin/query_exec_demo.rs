@@ -212,6 +212,7 @@ fn main() -> Result<(), ExecError> {
         checkpoint_stats:
             pgrust::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
         datetime_config: pgrust::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        gucs: std::collections::HashMap::new(),
         interrupts,
         stats,
         session_stats,

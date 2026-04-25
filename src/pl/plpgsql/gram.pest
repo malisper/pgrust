@@ -8,8 +8,9 @@ pl_block = { SOI ~ block ~ semi? ~ EOI }
 block = { block_label? ~ declare_section? ~ kw_begin ~ stmt* ~ exception_section? ~ kw_end ~ ident? }
 block_label = { "<<" ~ ident ~ ">>" }
 declare_section = { kw_declare ~ (!kw_begin ~ decl_stmt)* }
-decl_stmt = { alias_decl | var_decl }
+decl_stmt = { alias_decl | cursor_decl | var_decl }
 var_decl = { !kw_begin ~ ident ~ type_name_text ~ default_clause? ~ semi }
+cursor_decl = { !kw_begin ~ ident ~ kw_cursor ~ (!kw_for ~ ANY)* ~ kw_for ~ exec_sql_text ~ semi }
 alias_decl = { !kw_begin ~ ident ~ kw_alias ~ kw_for ~ alias_target ~ semi }
 default_clause = { assign_op ~ expr_until_semi }
 
@@ -19,7 +20,7 @@ exception_condition = { others_condition | sqlstate_condition | ident }
 others_condition = { kw_others }
 sqlstate_condition = { kw_sqlstate ~ sql_string }
 
-stmt = { nested_block_stmt | null_stmt | if_stmt | while_stmt | for_stmt | raise_stmt | assert_stmt | return_query_stmt | return_next_stmt | return_stmt | perform_stmt | dynamic_execute_stmt | assign_stmt | exec_sql_stmt }
+stmt = { nested_block_stmt | null_stmt | if_stmt | while_stmt | for_stmt | raise_stmt | assert_stmt | return_query_stmt | return_next_stmt | return_stmt | perform_stmt | dynamic_execute_stmt | get_diagnostics_stmt | open_cursor_stmt | fetch_cursor_stmt | close_cursor_stmt | assign_stmt | exec_sql_stmt }
 nested_block_stmt = { block ~ semi }
 null_stmt = { kw_null ~ semi }
 assign_stmt = { assign_target ~ assign_op ~ expr_until_semi ~ semi }
@@ -37,6 +38,11 @@ return_next_stmt = { kw_return ~ kw_next ~ expr_until_semi? ~ semi }
 return_query_stmt = { kw_return ~ kw_query ~ return_query_sql ~ semi }
 perform_stmt = { kw_perform ~ exec_sql_text ~ semi }
 dynamic_execute_stmt = { kw_execute ~ exec_sql_text ~ semi }
+get_diagnostics_stmt = { kw_get ~ kw_stacked? ~ kw_diagnostics ~ get_diagnostics_item ~ (comma ~ get_diagnostics_item)* ~ semi }
+get_diagnostics_item = { assign_target ~ assign_op ~ ident }
+open_cursor_stmt = { kw_open ~ exec_sql_text ~ semi }
+fetch_cursor_stmt = { kw_fetch ~ exec_sql_text ~ semi }
+close_cursor_stmt = { kw_close ~ exec_sql_text ~ semi }
 exec_sql_stmt = { !stmt_keyword_start ~ exec_sql_text ~ semi }
 return_query_sql = @{ expr_chunk+ }
 exec_sql_text = @{ expr_chunk+ }
@@ -58,6 +64,10 @@ stmt_keyword_start = _{
     | kw_assert
     | kw_return
     | kw_execute
+    | kw_get
+    | kw_open
+    | kw_fetch
+    | kw_close
     | kw_exception
 }
 
@@ -152,6 +162,13 @@ kw_return = _{ kw_return_atom }
 kw_next = _{ kw_next_atom }
 kw_query = _{ kw_query_atom }
 kw_execute = _{ kw_execute_atom }
+kw_cursor = _{ kw_cursor_atom }
+kw_get = _{ kw_get_atom }
+kw_stacked = _{ kw_stacked_atom }
+kw_diagnostics = _{ kw_diagnostics_atom }
+kw_open = _{ kw_open_atom }
+kw_fetch = _{ kw_fetch_atom }
+kw_close = _{ kw_close_atom }
 kw_using = _{ kw_using_atom }
 kw_into = _{ kw_into_atom }
 kw_when = _{ kw_when_atom }
@@ -187,6 +204,13 @@ kw_return_atom = @{ ^"return" ~ keyword_end }
 kw_next_atom = @{ ^"next" ~ keyword_end }
 kw_query_atom = @{ ^"query" ~ keyword_end }
 kw_execute_atom = @{ ^"execute" ~ keyword_end }
+kw_cursor_atom = @{ ^"cursor" ~ keyword_end }
+kw_get_atom = @{ ^"get" ~ keyword_end }
+kw_stacked_atom = @{ ^"stacked" ~ keyword_end }
+kw_diagnostics_atom = @{ ^"diagnostics" ~ keyword_end }
+kw_open_atom = @{ ^"open" ~ keyword_end }
+kw_fetch_atom = @{ ^"fetch" ~ keyword_end }
+kw_close_atom = @{ ^"close" ~ keyword_end }
 kw_using_atom = @{ ^"using" ~ keyword_end }
 kw_into_atom = @{ ^"into" ~ keyword_end }
 kw_when_atom = @{ ^"when" ~ keyword_end }
