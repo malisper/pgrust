@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run PostgreSQL regression tests against pgrust and report pass/fail statistics.
 #
-# Usage: scripts/run_regression.sh [--port PORT] [--skip-build] [--skip-server] [--timeout SECS] [--jobs N] [--schedule FILE] [--test TESTNAME] [--upstream-setup]
+# Usage: scripts/run_regression.sh [--port PORT] [--skip-build] [--skip-server] [--timeout SECS] [--jobs N] [--schedule FILE] [--test TESTNAME] [--upstream-setup] [--ignore-deps]
 #
 # By default, this script:
 #   1. Builds pgrust_server in release mode, or dev mode for --test
@@ -23,6 +23,7 @@
 #   --results-dir DIR Directory for results (default: unique temp dir)
 #   --data-dir DIR    Directory for the pgrust cluster (default: unique temp dir)
 #   --upstream-setup Use upstream test_setup.sql instead of the pgrust bootstrap (default: use pgrust bootstrap)
+#   --ignore-deps     Don't fail if test dependencies fail to set up (default: fail on dependency errors)
 
 set -euo pipefail
 
@@ -364,6 +365,15 @@ direct_test_dependencies() {
         select_views)
             echo "create_view"
             ;;
+        brin_bloom|brin_multi)
+            echo "brin"
+            ;;
+        create_index_spgist|index_including|index_including_gist)
+            echo "create_index"
+            ;;
+        stats_ext)
+            echo "create_misc create_aggregate"
+            ;;
         *)
             ;;
     esac
@@ -487,6 +497,7 @@ DATA_DIR=""
 DATA_DIR_PROVIDED=false
 SERVER_PID=""
 USE_PGRUST_SETUP=true
+IGNORE_DEPS=false
 REGRESS_USER="${PGRUST_REGRESS_USER:-${PGUSER:-$(id -un)}}"
 REGRESS_TABLESPACE_DIR=""
 STARTUP_WAIT_SECS="${PGRUST_STARTUP_WAIT_SECS:-300}"
@@ -514,6 +525,7 @@ while [[ $# -gt 0 ]]; do
         --data-dir) DATA_DIR="$2"; DATA_DIR_PROVIDED=true; shift 2 ;;
         --pgrust-setup) USE_PGRUST_SETUP=true; shift ;;
         --upstream-setup) USE_PGRUST_SETUP=false; shift ;;
+        --ignore-deps) IGNORE_DEPS=true; shift ;;
         *) echo "Unknown flag: $1"; exit 1 ;;
     esac
 done
@@ -1515,7 +1527,11 @@ run_regression_dependency_setups() {
     echo "Dependency setup for $dependent_name: ${dependencies[*]}"
     for dep in "${dependencies[@]}"; do
         if ! run_regression_dependency_setup "$dep" "$dependent_name"; then
-            return 1
+            if [[ "$IGNORE_DEPS" == "true" ]]; then
+                echo "WARNING: dependency setup failed but continuing due to --ignore-deps" >&2
+            else
+                return 1
+            fi
         fi
     done
 }
