@@ -4311,6 +4311,254 @@ fn partition_tuple_routing_handles_nested_and_default_partitions() {
 }
 
 #[test]
+fn partitioned_table_parent_defaults_not_null_and_checks_are_cataloged_and_inherited() {
+    let base = temp_dir("partition_parent_column_metadata");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table parted_meta (
+                a int4 default 1,
+                b int4 not null default 0,
+                constraint parted_meta_b_nonnegative check (b >= 0)
+            ) partition by list (a)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from pg_attrdef where adrelid = 'parted_meta'::regclass"
+        ),
+        vec![vec![Value::Int64(2)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select conname, contype from pg_constraint \
+             where conrelid = 'parted_meta'::regclass order by conname"
+        ),
+        vec![
+            vec![
+                Value::Text("parted_meta_b_nonnegative".into()),
+                Value::Text("c".into()),
+            ],
+            vec![
+                Value::Text("parted_meta_b_not_null".into()),
+                Value::Text("n".into()),
+            ],
+        ]
+    );
+
+    session
+        .execute(
+            &db,
+            "create table parted_meta_one partition of parted_meta for values in (1)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into parted_meta default values")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select a, b from parted_meta"),
+        vec![vec![Value::Int32(1), Value::Int32(0)]]
+    );
+
+    match session.execute(&db, "insert into parted_meta values (1, null)") {
+        Err(ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint: _,
+            ..
+        }) if relation == "parted_meta_one" && column == "b" => {}
+        other => panic!("expected inherited not-null violation, got {other:?}"),
+    }
+
+    match session.execute(&db, "insert into parted_meta values (1, -1)") {
+        Err(ExecError::CheckViolation {
+            relation,
+            constraint,
+        }) if relation == "parted_meta_one" && constraint == "parted_meta_b_nonnegative" => {}
+        other => panic!("expected inherited check violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn partition_column_options_override_inherited_defaults_and_nullability() {
+    let base = temp_dir("partition_column_options_override");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table parted_opts (
+                a text,
+                b int4 not null default 1,
+                constraint check_a check (length(a) > 0)
+            ) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table part_b partition of parted_opts \
+             (b with options not null default 0, constraint check_a check (length(a) > 0)) \
+             for values in ('b')",
+        )
+        .unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select conname, conislocal, coninhcount \
+             from pg_constraint where conrelid = 'part_b'::regclass \
+             order by coninhcount desc, conname"
+        ),
+        vec![
+            vec![
+                Value::Text("check_a".into()),
+                Value::Bool(false),
+                Value::Int16(1),
+            ],
+            vec![
+                Value::Text("part_b_b_not_null".into()),
+                Value::Bool(true),
+                Value::Int16(1),
+            ],
+        ]
+    );
+
+    session
+        .execute(&db, "insert into part_b (a) values ('b')")
+        .unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select a, b from part_b"),
+        vec![vec![Value::Text("b".into()), Value::Int32(0)]]
+    );
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from pg_attrdef where adrelid = 'part_b'::regclass"
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    match session.execute(&db, "insert into part_b values ('b', null)") {
+        Err(ExecError::NotNullViolation {
+            relation,
+            column,
+            constraint: _,
+            ..
+        }) if relation == "part_b" && column == "b" => {}
+        other => panic!("expected partition-local not-null violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_table_add_check_reconciles_existing_partition_constraint() {
+    let dir = temp_dir("alter_partition_check_reconcile");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table parted (
+                a text default 'a',
+                b int4
+            ) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table part_b partition of parted
+             (constraint check_b check (b >= 0))
+             for values in ('b')",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "alter table parted add constraint check_b check (b >= 0)",
+        )
+        .unwrap();
+
+    let rows = session_query_rows(
+        &mut session,
+        &db,
+        "select c.relname, con.conname, con.conparentid <> 0, con.conislocal, con.coninhcount
+         from pg_constraint con
+         join pg_class c on c.oid = con.conrelid
+         where con.conname = 'check_b'
+         order by c.relname",
+    );
+    assert_eq!(
+        rows,
+        vec![
+            vec![
+                Value::Text("part_b".into()),
+                Value::Text("check_b".into()),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Int16(1),
+            ],
+            vec![
+                Value::Text("parted".into()),
+                Value::Text("check_b".into()),
+                Value::Bool(false),
+                Value::Bool(true),
+                Value::Int16(0),
+            ],
+        ]
+    );
+
+    match session.execute(&db, "insert into parted values ('b', -1)") {
+        Err(ExecError::CheckViolation {
+            relation,
+            constraint,
+        }) if relation == "part_b" && constraint == "check_b" => {}
+        other => panic!("expected reconciled inherited check violation, got {other:?}"),
+    }
+}
+
+#[test]
+fn partitioned_parent_defaults_route_before_child_not_null_checks() {
+    let base = temp_dir("partition_parent_default_routes_before_not_null");
+    let db = Database::open_with_options(&base, DatabaseOpenOptions::new(16)).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table parted_notnull_inh_test \
+             (a int4 default 1, b int4 not null default 0) partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table parted_notnull_inh_test1 \
+             partition of parted_notnull_inh_test \
+             (a not null, b default 1) for values in (1)",
+        )
+        .unwrap();
+
+    match session.execute(&db, "insert into parted_notnull_inh_test (b) values (null)") {
+        Err(ExecError::NotNullViolation {
+            relation, column, ..
+        }) if relation == "parted_notnull_inh_test1" && column == "b" => {}
+        other => panic!("expected child not-null violation after routing, got {other:?}"),
+    }
+}
+
+#[test]
 fn hash_partitioned_tables_route_rows_and_validate_bounds() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
