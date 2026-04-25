@@ -777,7 +777,10 @@ impl AccumState {
                     let variance = if numerator.cmp(&NumericValue::zero()) != Ordering::Greater {
                         NumericValue::zero()
                     } else {
-                        let rscale = numeric_div_display_scale(&numerator, &denominator);
+                        let mut rscale = numeric_div_display_scale(&numerator, &denominator);
+                        if numeric_quotient_decimal_weight(&numerator, &denominator) >= 8 {
+                            rscale = rscale.max(20);
+                        }
                         numerator
                             .div(&denominator, rscale)
                             .unwrap_or_else(NumericValue::zero)
@@ -1539,6 +1542,19 @@ fn numeric_visible_scale(value: &NumericValue) -> u32 {
         .split_once('.')
         .map(|(_, frac)| frac.len() as u32)
         .unwrap_or(0)
+}
+
+fn numeric_quotient_decimal_weight(lhs: &NumericValue, rhs: &NumericValue) -> i32 {
+    fn decimal_weight(value: &NumericValue) -> i32 {
+        match value {
+            NumericValue::Finite { coeff, scale, .. } if !coeff.is_zero() => {
+                coeff.abs().to_str_radix(10).len() as i32 - *scale as i32 - 1
+            }
+            _ => 0,
+        }
+    }
+
+    decimal_weight(lhs) - decimal_weight(rhs)
 }
 
 fn accumulate_integral(
