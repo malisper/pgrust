@@ -6,11 +6,13 @@ use crate::backend::parser::parse_type_name;
 use crate::backend::utils::record::{
     assign_anonymous_record_descriptor, lookup_anonymous_record_descriptor,
 };
-use crate::include::catalog::{ANYOID, range_type_ref_for_sql_type};
+use crate::include::catalog::{
+    ANYOID, multirange_type_ref_for_sql_type, range_type_ref_for_sql_type,
+};
 use crate::include::nodes::primnodes::{
     BoolExprType, CaseExpr as BoundCaseExpr, CaseTestExpr as BoundCaseTestExpr,
     CaseWhen as BoundCaseWhen, ExprArraySubscript, INDEX_VAR, INNER_VAR, OUTER_VAR, OpExprKind,
-    WindowFuncKind, expr_contains_set_returning, expr_sql_type_hint,
+    ScalarFunctionImpl, WindowFuncKind, expr_contains_set_returning, expr_sql_type_hint,
 };
 
 mod func;
@@ -1906,6 +1908,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                     ctes,
                 )?
             };
+            let domain = domain_lookup_for_raw_type_name(ty, catalog);
             let target_type = resolve_raw_type_name(ty, catalog)?;
             if target_type.kind == SqlTypeKind::RegRole
                 && let Some(bound_regrole) = bind_regrole_literal_cast(inner, target_type, catalog)?
@@ -1952,11 +1955,12 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 validate_catalog_backed_explicit_cast(source_type, target_type, catalog)?;
             }
             let coerced = coerce_bound_expr(bound_inner, source_type, target_type);
-            if expr_sql_type_hint(&coerced) == Some(target_type) {
+            let cast_expr = if expr_sql_type_hint(&coerced) == Some(target_type) {
                 coerced
             } else {
                 Expr::Cast(Box::new(coerced), target_type)
-            }
+            };
+            bind_domain_constraint_expr(cast_expr, target_type, domain.as_ref())
         }
         SqlExpr::Collate { expr, collation } => {
             let inner_type = infer_sql_expr_type_with_ctes(
@@ -3279,7 +3283,7 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 resolution_types[0] = common_type;
                 resolution_types[2] = common_type;
             }
-            let resolution_error =
+            let proc_resolution_error =
                 match resolve_function_call(catalog, name, &resolution_types, *func_variadic) {
                     Ok(resolved) => {
                         if resolved.window_impl.is_some() {
@@ -3410,12 +3414,28 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
             let legacy_func = match resolve_scalar_function(name) {
                 Some(func) => func,
                 None => {
-                    return Err(
-                        resolution_error.unwrap_or_else(|| ParseError::UnexpectedToken {
-                            expected: "supported builtin function",
-                            actual: name.clone(),
-                        }),
-                    );
+                    if !catalog.proc_rows_by_name(name).is_empty()
+                        && let Some(err) = proc_resolution_error
+                    {
+                        if matches!(
+                            err,
+                            ParseError::UnexpectedToken {
+                                expected: "supported function",
+                                ..
+                            }
+                        ) {
+                            return Err(function_does_not_exist_error(
+                                name,
+                                &actual_types,
+                                catalog,
+                            ));
+                        }
+                        return Err(err);
+                    }
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "supported builtin function",
+                        actual: name.clone(),
+                    });
                 }
             };
             let lowered_args = lower_named_scalar_function_args(legacy_func, args_list)?;
@@ -4326,6 +4346,37 @@ fn bind_xml_expr(
     )))
 }
 
+fn function_does_not_exist_error(
+    name: &str,
+    actual_types: &[SqlType],
+    catalog: &dyn CatalogLookup,
+) -> ParseError {
+    let signature = actual_types
+        .iter()
+        .map(|ty| function_signature_type_name(*ty, catalog))
+        .collect::<Vec<_>>()
+        .join(", ");
+    ParseError::DetailedError {
+        message: format!("function {name}({signature}) does not exist"),
+        detail: None,
+        hint: Some(
+            "No function matches the given name and argument types. You might need to add explicit type casts."
+                .into(),
+        ),
+        sqlstate: "42883",
+    }
+}
+
+fn function_signature_type_name(ty: SqlType, catalog: &dyn CatalogLookup) -> String {
+    let oid = range_type_ref_for_sql_type(ty)
+        .map(|range_type| range_type.type_oid())
+        .or_else(|| multirange_type_ref_for_sql_type(ty).map(|multirange| multirange.type_oid()));
+    if let Some(row) = oid.and_then(|oid| catalog.type_by_oid(oid)) {
+        return row.typname;
+    }
+    sql_type_name(ty)
+}
+
 fn resolve_regprocedure_signature(
     signature: &str,
     catalog: &dyn CatalogLookup,
@@ -4520,6 +4571,56 @@ fn bind_maybe_array_membership_expr(
             ctes,
         )
     })
+}
+
+fn domain_lookup_for_raw_type_name(
+    raw: &RawTypeName,
+    catalog: &dyn CatalogLookup,
+) -> Option<DomainLookup> {
+    match raw {
+        RawTypeName::Named {
+            name,
+            array_bounds: 0,
+        } => catalog.domain_by_name(name),
+        _ => None,
+    }
+}
+
+fn bind_domain_constraint_expr(
+    expr: Expr,
+    target_type: SqlType,
+    domain: Option<&DomainLookup>,
+) -> Expr {
+    let Some(domain) = domain else {
+        return expr;
+    };
+    let Some(check) = domain.check.as_deref() else {
+        return expr;
+    };
+    let Some(limit) = parse_domain_upper_less_than_check(check) else {
+        return expr;
+    };
+    Expr::func_with_impl(
+        0,
+        Some(target_type),
+        false,
+        ScalarFunctionImpl::Builtin(BuiltinScalarFunction::PgRustDomainCheckUpperLessThan),
+        vec![
+            expr,
+            Expr::Const(Value::Text(domain.name.clone().into())),
+            Expr::Const(Value::Int32(limit)),
+        ],
+    )
+}
+
+fn parse_domain_upper_less_than_check(check: &str) -> Option<i32> {
+    let normalized = check
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let limit = normalized.strip_prefix("upper(value)<")?;
+    limit.parse::<i32>().ok()
 }
 
 fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {

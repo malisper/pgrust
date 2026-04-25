@@ -633,27 +633,45 @@ pub fn normalize_create_table_constraints(
                 referenced_index_oid,
                 self_referential,
                 referenced_columns,
+                constraint_name,
             ) = if constraint
                 .referenced_table
                 .eq_ignore_ascii_case(&stmt.table_name)
             {
+                let constraint_name = constraint.explicit_name.clone().unwrap_or_else(|| {
+                    choose_generated_constraint_name(&constraint.generated_base, &mut used_names)
+                });
                 let referenced_columns = resolve_pending_self_referenced_key(
                     &stmt.table_name,
                     &columns,
                     &column_lookup,
                     &finalized_index_backed,
                     constraint.referenced_columns.as_deref(),
+                    &constraint_name,
+                    &local_columns,
                     &child_types,
                     catalog,
                 )?;
-                (stmt.table_name.clone(), 0, 0, true, referenced_columns)
+                (
+                    stmt.table_name.clone(),
+                    0,
+                    0,
+                    true,
+                    referenced_columns,
+                    constraint_name,
+                )
             } else {
+                let constraint_name = constraint.explicit_name.clone().unwrap_or_else(|| {
+                    choose_generated_constraint_name(&constraint.generated_base, &mut used_names)
+                });
                 let referenced = resolve_referenced_key(
                     &stmt.table_name,
                     None,
                     table_persistence_code(stmt.persistence),
                     &constraint.referenced_table,
                     constraint.referenced_columns.as_deref(),
+                    &constraint_name,
+                    &local_columns,
                     &child_types,
                     catalog,
                 )?;
@@ -667,12 +685,11 @@ pub fn normalize_create_table_constraints(
                     referenced.index_oid,
                     false,
                     referenced.columns,
+                    constraint_name,
                 )
             };
             Ok(ForeignKeyConstraintAction {
-                constraint_name: constraint.explicit_name.unwrap_or_else(|| {
-                    choose_generated_constraint_name(&constraint.generated_base, &mut used_names)
-                }),
+                constraint_name,
                 columns: local_columns,
                 referenced_table,
                 referenced_relation_oid,
@@ -1062,19 +1079,21 @@ pub fn normalize_alter_table_add_constraint(
                     Ok(desc.columns[index].sql_type)
                 })
                 .collect::<Result<Vec<_>, ParseError>>()?;
+            let constraint_name = assign_constraint_name(
+                attributes.name.clone(),
+                format!("{table_name}_{}_fkey", resolved.join("_")),
+                &mut used_names,
+            )?;
             let referenced = resolve_referenced_key(
                 table_name,
                 Some(relation_oid),
                 relpersistence,
                 referenced_table,
                 referenced_columns.as_deref(),
+                &constraint_name,
+                &resolved,
                 &child_types,
                 catalog,
-            )?;
-            let constraint_name = assign_constraint_name(
-                attributes.name.clone(),
-                format!("{table_name}_{}_fkey", resolved.join("_")),
-                &mut used_names,
             )?;
             Ok(NormalizedAlterTableConstraint::ForeignKey(
                 ForeignKeyConstraintAction {
@@ -1494,6 +1513,8 @@ fn resolve_pending_self_referenced_key(
     column_lookup: &BTreeMap<String, usize>,
     index_constraints: &[IndexBackedConstraintAction],
     referenced_columns: Option<&[String]>,
+    constraint_name: &str,
+    child_columns: &[String],
     child_types: &[SqlType],
     catalog: &dyn super::CatalogLookup,
 ) -> Result<Vec<String>, ParseError> {
@@ -1558,8 +1579,13 @@ fn resolve_pending_self_referenced_key(
         })
         .collect::<Result<Vec<_>, _>>()?;
     if !foreign_key_types_compatible(child_types, &parent_types) {
-        return Err(ParseError::FeatureNotSupported(
-            "FOREIGN KEY with cross-type columns".into(),
+        return Err(foreign_key_type_mismatch_error(
+            constraint_name,
+            child_columns,
+            &referenced_columns,
+            child_types,
+            &parent_types,
+            catalog,
         ));
     }
 
@@ -1571,6 +1597,56 @@ fn foreign_key_types_compatible(child_types: &[SqlType], parent_types: &[SqlType
         .iter()
         .zip(parent_types)
         .all(|(&child, &parent)| foreign_key_type_compatible(child, parent))
+}
+
+fn foreign_key_type_mismatch_error(
+    constraint_name: &str,
+    child_columns: &[String],
+    parent_columns: &[String],
+    child_types: &[SqlType],
+    parent_types: &[SqlType],
+    catalog: &dyn super::CatalogLookup,
+) -> ParseError {
+    let child_names = quoted_column_list(child_columns);
+    let parent_names = quoted_column_list(parent_columns);
+    let child_type_names = child_types
+        .iter()
+        .copied()
+        .map(|ty| foreign_key_type_name(ty, catalog))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let parent_type_names = parent_types
+        .iter()
+        .copied()
+        .map(|ty| foreign_key_type_name(ty, catalog))
+        .collect::<Vec<_>>()
+        .join(", ");
+    ParseError::DetailedError {
+        message: format!("foreign key constraint \"{constraint_name}\" cannot be implemented"),
+        detail: Some(format!(
+            "Key columns {child_names} of the referencing table and {parent_names} of the referenced table are of incompatible types: {child_type_names} and {parent_type_names}."
+        )),
+        hint: None,
+        sqlstate: "42804",
+    }
+}
+
+fn quoted_column_list(columns: &[String]) -> String {
+    columns
+        .iter()
+        .map(|column| format!("\"{column}\""))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn foreign_key_type_name(ty: SqlType, catalog: &dyn super::CatalogLookup) -> String {
+    if !ty.is_array
+        && ty.type_oid != 0
+        && let Some(row) = catalog.type_by_oid(ty.type_oid)
+    {
+        return row.typname;
+    }
+    super::coerce::sql_type_name(ty)
 }
 
 fn foreign_key_type_compatible(child: SqlType, parent: SqlType) -> bool {
@@ -1623,6 +1699,8 @@ fn resolve_referenced_key(
     child_persistence: char,
     referenced_table: &str,
     referenced_columns: Option<&[String]>,
+    constraint_name: &str,
+    child_columns: &[String],
     child_types: &[SqlType],
     catalog: &dyn super::CatalogLookup,
 ) -> Result<ResolvedReferencedKey, ParseError> {
@@ -1704,8 +1782,13 @@ fn resolve_referenced_key(
         })
         .collect::<Result<Vec<_>, _>>()?;
     if !foreign_key_types_compatible(child_types, &parent_types) {
-        return Err(ParseError::FeatureNotSupported(
-            "FOREIGN KEY with cross-type columns".into(),
+        return Err(foreign_key_type_mismatch_error(
+            constraint_name,
+            child_columns,
+            &columns,
+            child_types,
+            &parent_types,
+            catalog,
         ));
     }
 

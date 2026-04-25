@@ -26,6 +26,54 @@ struct DropRulePlan {
     rewrite_oid: u32,
 }
 
+fn catalog_entry_from_bound_relation(
+    catcache: &CatCache,
+    relation: &crate::backend::parser::BoundRelation,
+) -> crate::backend::catalog::CatalogEntry {
+    let class = catcache.class_by_oid(relation.relation_oid);
+    let row_type_oid = class.map(|row| row.reltype).unwrap_or(0);
+    let array_type_oid = if row_type_oid == 0 {
+        0
+    } else {
+        catcache
+            .type_by_oid(row_type_oid)
+            .map(|row| row.typarray)
+            .unwrap_or(0)
+    };
+    crate::backend::catalog::CatalogEntry {
+        rel: relation.rel,
+        relation_oid: relation.relation_oid,
+        namespace_oid: relation.namespace_oid,
+        owner_oid: relation.owner_oid,
+        relacl: class.and_then(|row| row.relacl.clone()),
+        row_type_oid,
+        array_type_oid,
+        reltoastrelid: relation.toast.map(|toast| toast.relation_oid).unwrap_or(0),
+        relpersistence: relation.relpersistence,
+        relkind: relation.relkind,
+        am_oid: class
+            .map(|row| row.relam)
+            .unwrap_or_else(|| crate::include::catalog::relam_for_relkind(relation.relkind)),
+        relhassubclass: class.map(|row| row.relhassubclass).unwrap_or(false),
+        relhastriggers: class.map(|row| row.relhastriggers).unwrap_or(false),
+        relispartition: relation.relispartition,
+        relispopulated: relation.relispopulated,
+        relpartbound: relation.relpartbound.clone(),
+        relrowsecurity: class.map(|row| row.relrowsecurity).unwrap_or(false),
+        relforcerowsecurity: class.map(|row| row.relforcerowsecurity).unwrap_or(false),
+        relpages: class.map(|row| row.relpages).unwrap_or(0),
+        reltuples: class.map(|row| row.reltuples).unwrap_or(0.0),
+        relallvisible: class.map(|row| row.relallvisible).unwrap_or(0),
+        relallfrozen: class.map(|row| row.relallfrozen).unwrap_or(0),
+        relfrozenxid: class
+            .map(|row| row.relfrozenxid)
+            .unwrap_or(crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID),
+        desc: relation.desc.clone(),
+        partitioned_table: relation.partitioned_table.clone(),
+        index_meta: None,
+    }
+}
+
 #[derive(Debug, Clone)]
 enum DropTableDependency {
     Relation {
@@ -184,6 +232,26 @@ fn drop_table_display_relation_name(catcache: &CatCache, relation_oid: u32) -> S
     match schema_name.as_str() {
         "public" | "pg_catalog" => class.relname.clone(),
         schema_name if schema_name.starts_with("pg_temp_") => class.relname.clone(),
+        _ => format!("{schema_name}.{}", class.relname),
+    }
+}
+
+fn drop_schema_display_relation_name(
+    catcache: &CatCache,
+    relation_oid: u32,
+    current_role_name: &str,
+) -> String {
+    let Some(class) = catcache.class_by_oid(relation_oid) else {
+        return relation_oid.to_string();
+    };
+    let schema_name = catcache
+        .namespace_by_oid(class.relnamespace)
+        .map(|row| row.nspname.clone())
+        .unwrap_or_else(|| "public".to_string());
+    match schema_name.as_str() {
+        "public" | "pg_catalog" => class.relname.clone(),
+        schema_name if schema_name.starts_with("pg_temp_") => class.relname.clone(),
+        schema_name if schema_name.eq_ignore_ascii_case(current_role_name) => class.relname.clone(),
         _ => format!("{schema_name}.{}", class.relname),
     }
 }
@@ -818,7 +886,7 @@ impl Database {
         let (normalized, _, _) =
             self.normalize_domain_name_for_create(&drop_stmt.domain_name, configured_search_path)?;
         let mut domains = self.domains.write();
-        let Some(domain) = domains.get(&normalized).cloned() else {
+        let Some(domain) = domains.remove(&normalized) else {
             if drop_stmt.if_exists {
                 return Ok(StatementResult::AffectedRows(0));
             }
@@ -826,41 +894,26 @@ impl Database {
                 drop_stmt.domain_name.clone(),
             )));
         };
-
-        let dependent_ranges = self
-            .range_types
-            .read()
-            .iter()
-            .filter(|(_, entry)| {
-                entry.subtype_dependency_oid == Some(domain.oid)
-                    || entry.subtype.type_oid == domain.oid
-            })
-            .map(|(key, entry)| (key.clone(), entry.name.clone()))
-            .collect::<Vec<_>>();
-        if !dependent_ranges.is_empty() && !drop_stmt.cascade {
-            let dependent_name = &dependent_ranges[0].1;
-            return Err(ExecError::DetailedError {
-                message: format!(
-                    "cannot drop type {} because other objects depend on it",
-                    domain.name
-                ),
-                detail: Some(format!(
-                    "type {dependent_name} depends on type {}",
-                    domain.name
-                )),
-                hint: Some("Use DROP ... CASCADE to drop the dependent objects too.".into()),
-                sqlstate: "2BP01",
-            });
-        }
-
-        if !dependent_ranges.is_empty() {
-            let mut range_types = self.range_types.write();
-            for (key, name) in &dependent_ranges {
-                if range_types.remove(key).is_some() {
+        drop(domains);
+        if drop_stmt.cascade {
+            let default_range_name = format!("{}range", domain.name);
+            let dependent_ranges = self
+                .range_types
+                .read()
+                .iter()
+                .filter(|(_, entry)| {
+                    entry.subtype.type_oid == domain.oid
+                        || entry.name.eq_ignore_ascii_case(&default_range_name)
+                })
+                .map(|(key, entry)| (key.clone(), entry.name.clone()))
+                .collect::<Vec<_>>();
+            if !dependent_ranges.is_empty() {
+                let mut range_types = self.range_types.write();
+                for (key, name) in dependent_ranges {
                     push_notice(format!("drop cascades to type {name}"));
+                    range_types.remove(&key);
                 }
             }
-            save_range_type_entries(&self.cluster.base_dir, self.database_oid, &range_types)?;
         }
 
         domains.remove(&normalized);
@@ -887,6 +940,10 @@ impl Database {
         let catcache = self
             .backend_catcache(client_id, Some((xid, cid)))
             .map_err(map_catalog_error)?;
+        let search_path = self.effective_search_path(client_id, configured_search_path);
+        let mut dynamic_type_rows = self.domain_type_rows_for_search_path(&search_path);
+        dynamic_type_rows.extend(self.enum_type_rows_for_search_path(&search_path));
+        dynamic_type_rows.extend(self.range_type_rows_for_search_path(&search_path));
         let mut rels = Vec::new();
         let mut dropped = 0usize;
         let mut explicit_relation_oids = BTreeSet::new();
@@ -1058,7 +1115,11 @@ impl Database {
                     _ => self
                         .catalog
                         .write()
-                        .drop_relation_by_oid_mvcc(*relation_oid, &ctx),
+                        .drop_relation_by_oid_mvcc_with_extra_type_rows(
+                            *relation_oid,
+                            &ctx,
+                            &dynamic_type_rows,
+                        ),
                 }
                 .map_err(map_catalog_error)?;
                 let (dropped_relations, effect) = effect;
@@ -1126,6 +1187,9 @@ impl Database {
     ) -> Result<StatementResult, ExecError> {
         let interrupts = self.interrupt_state(client_id);
         let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let catcache = self
+            .backend_catcache(client_id, Some((xid, cid)))
+            .map_err(map_catalog_error)?;
         let mut requested_oids = BTreeSet::new();
         let mut rels = Vec::new();
         for index_name in &drop_stmt.index_names {
@@ -1227,20 +1291,37 @@ impl Database {
                     waiter: Some(self.txn_waiter.clone()),
                     interrupts: Arc::clone(&interrupts),
                 };
-                let effect = self
-                    .catalog
-                    .write()
-                    .drop_relation_entry_by_oid_mvcc(index_oid, &ctx)
-                    .map_err(|err| match err {
-                        CatalogError::UnknownTable(_) => {
-                            ExecError::Parse(ParseError::TableDoesNotExist(index_oid.to_string()))
-                        }
-                        other => ExecError::Parse(ParseError::UnexpectedToken {
-                            expected: "droppable index",
-                            actual: format!("{other:?}"),
-                        }),
-                    })?
-                    .1;
+                let effect = if let Some(entry) = catalog.relation_by_oid(index_oid) {
+                    let mut catalog_guard = self.catalog.write();
+                    catalog_guard
+                        .drop_relation_entry_mvcc(
+                            catalog_entry_from_bound_relation(&catcache, &entry),
+                            &ctx,
+                        )
+                        .map_err(|err| match err {
+                            CatalogError::UnknownTable(_) => ExecError::Parse(
+                                ParseError::TableDoesNotExist(index_oid.to_string()),
+                            ),
+                            other => ExecError::Parse(ParseError::UnexpectedToken {
+                                expected: "droppable index",
+                                actual: format!("{other:?}"),
+                            }),
+                        })?
+                } else {
+                    self.catalog
+                        .write()
+                        .drop_relation_entry_by_oid_mvcc(index_oid, &ctx)
+                        .map_err(|err| match err {
+                            CatalogError::UnknownTable(_) => ExecError::Parse(
+                                ParseError::TableDoesNotExist(index_oid.to_string()),
+                            ),
+                            other => ExecError::Parse(ParseError::UnexpectedToken {
+                                expected: "droppable index",
+                                actual: format!("{other:?}"),
+                            }),
+                        })?
+                        .1
+                };
                 self.apply_catalog_mutation_effect_immediate(&effect)?;
                 catalog_effects.push(effect);
                 dropped += 1;
@@ -1336,10 +1417,12 @@ impl Database {
                     sqlstate: "42501",
                 });
             }
-            let has_relations = catcache
+            let relation_rows = catcache
                 .class_rows()
                 .into_iter()
-                .any(|row| row.relnamespace == schema.oid);
+                .filter(|row| row.relnamespace == schema.oid)
+                .collect::<Vec<_>>();
+            let has_relations = !relation_rows.is_empty();
             let has_procs = catcache
                 .proc_rows()
                 .into_iter()
@@ -1353,6 +1436,26 @@ impl Database {
                     hint: None,
                     sqlstate: "2BP01",
                 });
+            }
+            if drop_stmt.cascade {
+                let current_role_name = auth_catalog
+                    .role_by_oid(auth.current_user_oid())
+                    .map(|row| row.rolname.as_str())
+                    .unwrap_or("");
+                for relation in relation_rows
+                    .iter()
+                    .filter(|row| matches!(row.relkind, 'r' | 'p' | 'm' | 'S' | 'v'))
+                {
+                    push_notice(format!(
+                        "drop cascades to {} {}",
+                        drop_table_relation_kind_name(relation.relkind),
+                        drop_schema_display_relation_name(
+                            &catcache,
+                            relation.oid,
+                            current_role_name
+                        )
+                    ));
+                }
             }
             if has_relations || has_procs {
                 self.drop_schema_owned_objects_in_transaction(

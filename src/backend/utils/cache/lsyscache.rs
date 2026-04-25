@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use crate::ClientId;
 use crate::backend::access::transam::xact::{CommandId, TransactionId};
 use crate::backend::catalog::pg_constraint::derived_pg_constraint_rows;
-use crate::backend::parser::{BoundRelation, CatalogLookup};
+use crate::backend::parser::{BoundRelation, CatalogLookup, DomainLookup};
 use crate::backend::storage::smgr::{BLCKSZ, ForkNumber, StorageManager};
 use crate::backend::utils::cache::catcache::normalize_catalog_name;
 use crate::backend::utils::cache::relcache::RelCacheEntry;
@@ -28,8 +28,8 @@ use crate::include::access::brin_page::{
 use crate::include::catalog::{
     CONSTRAINT_FOREIGN, PG_CLASS_RELATION_OID, PG_CONSTRAINT_RELATION_OID, PgAggregateRow, PgAmRow,
     PgAmopRow, PgAmprocRow, PgAuthIdRow, PgAuthMembersRow, PgClassRow, PgCollationRow,
-    PgConstraintRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
-    PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticExtDataRow,
+    PgConstraintRow, PgEnumRow, PgIndexRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
+    PgOpclassRow, PgOperatorRow, PgOpfamilyRow, PgProcRow, PgRewriteRow, PgStatisticExtDataRow,
     PgStatisticExtRow, PgStatisticRow, PgTriggerRow, PgTypeRow,
 };
 use crate::include::nodes::datum::Value;
@@ -460,11 +460,33 @@ fn type_row_by_name_namespace(
         })
 }
 
-fn dynamic_type_rows_for_search_path(db: &Database, search_path: &[String]) -> Vec<PgTypeRow> {
+pub(crate) fn dynamic_type_rows_for_search_path(
+    db: &Database,
+    search_path: &[String],
+) -> Vec<PgTypeRow> {
     let mut rows = db.domain_type_rows_for_search_path(search_path);
     rows.extend(db.enum_type_rows_for_search_path(search_path));
     rows.extend(db.range_type_rows_for_search_path(search_path));
     rows
+}
+
+fn visible_domain_by_name(
+    db: &Database,
+    client_id: ClientId,
+    txn_ctx: Option<(TransactionId, CommandId)>,
+    search_path: &[String],
+    name: &str,
+) -> Option<DomainLookup> {
+    let type_row = visible_type_row_by_name(db, client_id, txn_ctx, search_path, name)?;
+    let domains = db.domains.read();
+    let domain = domains.values().find(|domain| domain.oid == type_row.oid)?;
+    Some(DomainLookup {
+        name: domain.name.clone(),
+        sql_type: domain.sql_type,
+        default: domain.default.clone(),
+        check: domain.check.clone(),
+        not_null: domain.not_null,
+    })
 }
 
 fn range_proc_type_rows(db: &Database, search_path: &[String]) -> Vec<PgTypeRow> {
@@ -1015,6 +1037,17 @@ pub fn default_opclass_for_am_and_type(
     input_type_oid: u32,
 ) -> Option<PgOpclassRow> {
     let opclasses = opclass_rows_for_am(db, client_id, txn_ctx, am_oid);
+    if db
+        .enum_rows_for_catalog()
+        .iter()
+        .any(|row| row.enumtypid == input_type_oid)
+    {
+        return opclasses.into_iter().find(|row| {
+            row.opcmethod == am_oid
+                && row.opcdefault
+                && row.opcintype == crate::include::catalog::ANYENUMOID
+        });
+    }
     if let Some(row) = opclasses
         .iter()
         .find(|row| row.opcmethod == am_oid && row.opcdefault && row.opcintype == input_type_oid)
@@ -1052,7 +1085,27 @@ pub fn default_opclass_for_am_and_type(
                 && row.opcintype == crate::include::catalog::ANYARRAYOID
         });
     }
-    None
+    if matches!(
+        input_type.sql_type.kind,
+        crate::backend::parser::SqlTypeKind::Enum
+    ) {
+        return opclasses.into_iter().find(|row| {
+            row.opcmethod == am_oid
+                && row.opcdefault
+                && row.opcintype == crate::include::catalog::ANYENUMOID
+        });
+    }
+    (am_oid == crate::include::catalog::GIST_AM_OID
+        && crate::include::catalog::builtin_range_rows()
+            .iter()
+            .any(|row| row.rngtypid == input_type_oid))
+    .then(|| {
+        opclasses
+            .iter()
+            .find(|row| row.oid == crate::include::catalog::RANGE_GIST_OPCLASS_OID)
+            .cloned()
+    })
+    .flatten()
 }
 
 pub fn opfamily_row_by_oid(
@@ -1724,13 +1777,14 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         )
     }
 
-    fn domain_check_by_type_oid(&self, oid: u32) -> Option<String> {
-        self.db
-            .domains
-            .read()
-            .values()
-            .find(|domain| domain.oid == oid)
-            .and_then(|domain| domain.check.clone())
+    fn domain_by_name(&self, name: &str) -> Option<DomainLookup> {
+        visible_domain_by_name(
+            self.db,
+            self.client_id,
+            self.txn_ctx,
+            &self.search_path,
+            name,
+        )
     }
 
     fn type_oid_for_sql_type(&self, sql_type: SqlType) -> Option<u32> {
@@ -1747,6 +1801,30 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
         let mut rows = crate::include::catalog::builtin_range_rows();
         rows.extend(self.db.range_rows());
         rows
+    }
+
+    fn enum_label_oid(&self, type_oid: u32, label: &str) -> Option<u32> {
+        self.db.enum_label_oid(type_oid, label)
+    }
+
+    fn enum_label(&self, type_oid: u32, label_oid: u32) -> Option<String> {
+        self.db.enum_label(type_oid, label_oid)
+    }
+
+    fn enum_rows(&self) -> Vec<PgEnumRow> {
+        self.db.enum_rows_for_catalog()
+    }
+
+    fn enum_label_is_committed(&self, type_oid: u32, label_oid: u32) -> bool {
+        self.db.enum_label_is_committed(type_oid, label_oid)
+    }
+
+    fn domain_allowed_enum_label_oids(&self, domain_oid: u32) -> Option<Vec<u32>> {
+        self.db.domain_allowed_enum_label_oids(domain_oid)
+    }
+
+    fn domain_check_name(&self, domain_oid: u32) -> Option<String> {
+        self.db.domain_check_name(domain_oid)
     }
 
     fn language_rows(&self) -> Vec<PgLanguageRow> {
@@ -2045,20 +2123,19 @@ impl CatalogLookup for LazyCatalogLookup<'_> {
                 relcache.insert(format!("{}.{}", temp_namespace.name, name), entry.entry);
             }
         }
-        let domain_checks = self
-            .db
-            .domains
-            .read()
-            .values()
-            .filter_map(|domain| domain.check.clone().map(|check| (domain.oid, check)))
-            .collect();
+        let mut dynamic_type_rows = self.db.domain_type_rows_for_search_path(&self.search_path);
+        dynamic_type_rows.extend(self.db.enum_type_rows_for_search_path(&self.search_path));
+        dynamic_type_rows.extend(self.db.range_type_rows_for_search_path(&self.search_path));
         Some(
             VisibleCatalog::with_search_path(
                 relcache.with_search_path(&self.search_path),
                 Some(catcache),
                 self.search_path.clone(),
             )
-            .with_domain_checks(domain_checks),
+            .with_enum_rows(self.db.enum_rows_for_catalog())
+            .with_uncommitted_enum_label_oids(self.db.uncommitted_enum_label_oids())
+            .with_domain_checks(self.db.domain_checks_for_catalog())
+            .with_dynamic_type_rows(dynamic_type_rows),
         )
     }
 }

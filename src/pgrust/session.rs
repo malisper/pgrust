@@ -9,14 +9,15 @@ use std::time::Duration;
 
 use crate::backend::access::transam::xact::{CommandId, INVALID_TRANSACTION_ID, TransactionId};
 use crate::backend::catalog::store::CatalogMutationEffect;
-use crate::backend::commands::copyfrom::parse_text_array_literal;
+use crate::backend::commands::copyfrom::parse_text_array_literal_with_catalog;
 use crate::backend::commands::copyto::{CopyToSink, IoCopyToSink, write_copy_to};
 use crate::backend::commands::tablecmds::{execute_merge, execute_prepared_insert_row};
 use crate::backend::executor::expr_bool::parse_pg_bool_text;
 use crate::backend::executor::jsonpath::canonicalize_jsonpath;
 use crate::backend::executor::{
     DeferredForeignKeyTracker, ExecError, ExecutorContext, ExecutorTransactionState, Expr,
-    RelationDesc, SessionReplicationRole, StatementResult, Value, cast_value, execute_planned_stmt,
+    RelationDesc, SessionReplicationRole, StatementResult, Value, cast_value,
+    cast_value_with_source_type_catalog_and_config, execute_planned_stmt,
     execute_readonly_statement_with_config, parse_bytea_text,
 };
 use crate::backend::libpq::pqformat::FloatFormatOptions;
@@ -54,15 +55,15 @@ use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::pgrust::auth::AuthState;
 use crate::pgrust::autovacuum::is_autovacuum_guc;
 use crate::pgrust::database::{
-    AsyncListenAction, AsyncListenOp, Database, PendingNotification, SequenceMutationEffect,
-    SessionStatsState, StatsFetchConsistency, TempMutationEffect, TrackFunctionsSetting,
-    alter_table_add_constraint_lock_requests, alter_table_validate_constraint_lock_requests,
-    delete_foreign_key_lock_requests, execute_set_constraints, insert_foreign_key_lock_requests,
-    merge_pending_notifications, merge_table_lock_requests,
-    prepared_insert_foreign_key_lock_requests, queue_pending_notification,
-    reject_relation_with_referencing_foreign_keys, relation_foreign_key_lock_requests,
-    update_foreign_key_lock_requests, validate_deferred_constraints,
-    validate_immediate_constraints,
+    AsyncListenAction, AsyncListenOp, Database, DynamicTypeSnapshot, PendingNotification,
+    SequenceMutationEffect, SessionStatsState, StatsFetchConsistency, TempMutationEffect,
+    TrackFunctionsSetting, alter_table_add_constraint_lock_requests,
+    alter_table_validate_constraint_lock_requests, delete_foreign_key_lock_requests,
+    execute_set_constraints, insert_foreign_key_lock_requests, merge_pending_notifications,
+    merge_table_lock_requests, prepared_insert_foreign_key_lock_requests,
+    queue_pending_notification, reject_relation_with_referencing_foreign_keys,
+    relation_foreign_key_lock_requests, update_foreign_key_lock_requests,
+    validate_deferred_constraints, validate_immediate_constraints,
 };
 use crate::pgrust::portal::{
     CursorOptions, CursorViewRow, Portal, PortalFetchDirection, PortalFetchLimit, PortalManager,
@@ -445,6 +446,13 @@ struct ActiveTransaction {
     deferred_foreign_keys: DeferredForeignKeyTracker,
     async_listen_ops: Vec<AsyncListenOp>,
     pending_async_notifications: Vec<PendingNotification>,
+    dynamic_type_snapshot: DynamicTypeSnapshot,
+    savepoints: Vec<SavepointState>,
+}
+
+struct SavepointState {
+    name: String,
+    dynamic_type_snapshot: DynamicTypeSnapshot,
 }
 
 pub struct Session {
@@ -962,6 +970,8 @@ impl Session {
             deferred_foreign_keys: DeferredForeignKeyTracker::default(),
             async_listen_ops: Vec::new(),
             pending_async_notifications: Vec::new(),
+            dynamic_type_snapshot: db.dynamic_type_snapshot(),
+            savepoints: Vec::new(),
         }
     }
 
@@ -1015,6 +1025,8 @@ impl Session {
                 | Statement::Begin
                 | Statement::Commit
                 | Statement::Rollback
+                | Statement::Savepoint(_)
+                | Statement::RollbackTo(_)
         )
     }
 
@@ -1140,6 +1152,7 @@ impl Session {
                         })?;
                         db.txn_waiter.unregister_holder(xid);
                         db.txn_waiter.notify();
+                        db.commit_enum_labels_created_by(xid);
                     } else {
                         debug_assert!(txn.catalog_effects.is_empty());
                         debug_assert!(txn.temp_effects.is_empty());
@@ -1186,6 +1199,7 @@ impl Session {
             debug_assert!(txn.temp_effects.is_empty());
             debug_assert!(txn.sequence_effects.is_empty());
         }
+        db.restore_dynamic_type_snapshot(&txn.dynamic_type_snapshot);
         db.finalize_aborted_local_catalog_invalidations(
             self.client_id,
             &txn.prior_cmd_catalog_invalidations,
@@ -1304,7 +1318,11 @@ impl Session {
         if self.active_txn.is_some()
             && !matches!(
                 stmt,
-                Statement::Begin | Statement::Commit | Statement::Rollback
+                Statement::Begin
+                    | Statement::Commit
+                    | Statement::Rollback
+                    | Statement::Savepoint(_)
+                    | Statement::RollbackTo(_)
             )
         {
             if self.transaction_failed() {
@@ -1479,10 +1497,11 @@ impl Session {
                     result
                 } else {
                     let search_path = self.configured_search_path();
-                    db.execute_create_schema_stmt_with_search_path(
+                    db.execute_create_schema_stmt_with_search_path_and_maintenance_work_mem(
                         self.client_id,
                         create_stmt,
                         search_path.as_deref(),
+                        self.maintenance_work_mem_kb()?,
                     )
                 }
             }
@@ -2708,6 +2727,45 @@ impl Session {
                 self.portals.drop_transaction_portals(false);
                 Ok(StatementResult::AffectedRows(0))
             }
+            Statement::Savepoint(ref name) => {
+                let Some(txn) = self.active_txn.as_mut() else {
+                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "active transaction",
+                        actual: "SAVEPOINT can only be used in transaction blocks".into(),
+                    }));
+                };
+                txn.savepoints.push(SavepointState {
+                    name: name.clone(),
+                    dynamic_type_snapshot: db.dynamic_type_snapshot(),
+                });
+                Ok(StatementResult::AffectedRows(0))
+            }
+            Statement::RollbackTo(ref name) => {
+                let Some(txn) = self.active_txn.as_mut() else {
+                    return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                        expected: "active transaction",
+                        actual: "ROLLBACK TO SAVEPOINT can only be used in transaction blocks"
+                            .into(),
+                    }));
+                };
+                let Some(index) = txn
+                    .savepoints
+                    .iter()
+                    .rposition(|savepoint| savepoint.name.eq_ignore_ascii_case(name))
+                else {
+                    return Err(ExecError::DetailedError {
+                        message: format!("savepoint \"{name}\" does not exist"),
+                        detail: None,
+                        hint: None,
+                        sqlstate: "3B001",
+                    });
+                };
+                let snapshot = txn.savepoints[index].dynamic_type_snapshot.clone();
+                db.restore_dynamic_type_snapshot(&snapshot);
+                txn.savepoints.truncate(index + 1);
+                txn.failed = false;
+                Ok(StatementResult::AffectedRows(0))
+            }
             _ => {
                 if let Some(ref txn) = self.active_txn {
                     if txn.failed {
@@ -2796,6 +2854,7 @@ impl Session {
                 debug_assert!(txn.temp_effects.is_empty());
                 debug_assert!(txn.sequence_effects.is_empty());
             }
+            db.restore_dynamic_type_snapshot(&txn.dynamic_type_snapshot);
             db.finalize_aborted_local_catalog_invalidations(
                 self.client_id,
                 &txn.prior_cmd_catalog_invalidations,
@@ -4812,13 +4871,15 @@ impl Session {
             }
             Statement::CreateSchema(ref create_stmt) => {
                 let search_path = self.configured_search_path();
+                let maintenance_work_mem_kb = self.maintenance_work_mem_kb()?;
                 let txn = self.active_txn.as_mut().unwrap();
-                db.execute_create_schema_stmt_in_transaction_with_search_path(
+                db.execute_create_schema_stmt_in_transaction_with_search_path_and_maintenance_work_mem(
                     client_id,
                     create_stmt,
                     xid,
                     cid,
                     search_path.as_deref(),
+                    maintenance_work_mem_kb,
                     &mut txn.catalog_effects,
                     &mut txn.temp_effects,
                     &mut txn.sequence_effects,
@@ -4874,6 +4935,24 @@ impl Session {
                     cid,
                     search_path.as_deref(),
                     &mut txn.catalog_effects,
+                )
+            }
+            Statement::AlterType(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_alter_type_stmt_in_transaction_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    xid,
+                    cid,
+                    search_path.as_deref(),
+                )
+            }
+            Statement::AlterTypeOwner(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_alter_type_owner_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    search_path.as_deref(),
                 )
             }
             Statement::DropDomain(ref drop_stmt) => {
@@ -5199,7 +5278,11 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
-            Statement::Begin | Statement::Commit | Statement::Rollback => {
+            Statement::Begin
+            | Statement::Commit
+            | Statement::Rollback
+            | Statement::Savepoint(_)
+            | Statement::RollbackTo(_) => {
                 unreachable!("handled in Session::execute")
             }
             Statement::DeclareCursor(_)
@@ -5693,7 +5776,9 @@ impl Session {
                     self.ensure_copy_to_file_allowed(db, path)?;
                 }
                 let (columns, rows) = self.copy_query_rows(db, &copy.relation)?;
-                let data = render_copy_output(&columns, &rows, &copy.options);
+                let catalog = self.catalog_lookup(db);
+                let enum_labels = copy_enum_label_map(&catalog);
+                let data = render_copy_output(&columns, &rows, &copy.options, Some(&enum_labels));
                 if let CopyEndpoint::File(path) = endpoint {
                     let resolved = resolve_copy_output_path(path);
                     if let Some(parent) = std::path::Path::new(&resolved).parent() {
@@ -6243,6 +6328,7 @@ impl Session {
                                 | ScalarType::Timestamp
                                 | ScalarType::TimestampTz
                                 | ScalarType::Interval
+                                | ScalarType::Enum
                                 | ScalarType::Range(_)
                                 | ScalarType::Multirange(_)
                                 | ScalarType::Point
@@ -6254,16 +6340,34 @@ impl Session {
                                 | ScalarType::Circle
                                 | ScalarType::TsVector
                                 | ScalarType::TsQuery => {
-                                    cast_value(Value::Text(raw.clone().into()), column.sql_type)?
+                                    cast_value_with_source_type_catalog_and_config(
+                                        Value::Text(raw.clone().into()),
+                                        None,
+                                        column.sql_type,
+                                        Some(&catalog),
+                                        &self.datetime_config,
+                                    )?
                                 }
                                 ScalarType::BitString => {
-                                    cast_value(Value::Text(raw.clone().into()), column.sql_type)?
+                                    cast_value_with_source_type_catalog_and_config(
+                                        Value::Text(raw.clone().into()),
+                                        None,
+                                        column.sql_type,
+                                        Some(&catalog),
+                                        &self.datetime_config,
+                                    )?
                                 }
                                 ScalarType::Inet
                                 | ScalarType::Cidr
                                 | ScalarType::MacAddr
                                 | ScalarType::MacAddr8 => {
-                                    cast_value(Value::Text(raw.clone().into()), column.sql_type)?
+                                    cast_value_with_source_type_catalog_and_config(
+                                        Value::Text(raw.clone().into()),
+                                        None,
+                                        column.sql_type,
+                                        Some(&catalog),
+                                        &self.datetime_config,
+                                    )?
                                 }
                                 ScalarType::Float32 | ScalarType::Float64 => raw
                                     .parse::<f64>()
@@ -6289,7 +6393,13 @@ impl Session {
                                         .into(),
                                 ),
                                 ScalarType::Xml => {
-                                    cast_value(Value::Text(raw.clone().into()), column.sql_type)?
+                                    cast_value_with_source_type_catalog_and_config(
+                                        Value::Text(raw.clone().into()),
+                                        None,
+                                        column.sql_type,
+                                        Some(&catalog),
+                                        &self.datetime_config,
+                                    )?
                                 }
                                 ScalarType::Bytea => Value::Bytea(parse_bytea_text(raw)?),
                                 ScalarType::Uuid => {
@@ -6305,7 +6415,11 @@ impl Session {
                                 }
                                 ScalarType::Bool => Value::Bool(parse_pg_bool_text(raw)?),
                                 ScalarType::Array(_) => {
-                                    parse_text_array_literal(raw, column.sql_type.element_type())?
+                                    parse_text_array_literal_with_catalog(
+                                        raw,
+                                        column.sql_type.element_type(),
+                                        Some(&catalog),
+                                    )?
                                 }
                             }
                                 };
@@ -7613,6 +7727,7 @@ pub(crate) fn render_copy_output(
     columns: &[crate::backend::executor::QueryColumn],
     rows: &[Vec<Value>],
     options: &CopyOptions,
+    enum_labels: Option<&HashMap<(u32, u32), String>>,
 ) -> Vec<u8> {
     let mut out = Vec::new();
     if !matches!(options.header, CopyHeader::None) {
@@ -7636,7 +7751,9 @@ pub(crate) fn render_copy_output(
         let fields = row
             .iter()
             .zip(columns.iter())
-            .map(|(value, column)| copy_value_to_field(value, column.sql_type, options))
+            .map(|(value, column)| {
+                copy_value_to_field(value, column.sql_type, options, enum_labels)
+            })
             .collect::<Vec<_>>();
         let line = fields.join(match options.format {
             CopyFormat::Text => "\t",
@@ -7652,6 +7769,7 @@ fn copy_value_to_field(
     value: &Value,
     sql_type: crate::backend::parser::SqlType,
     options: &CopyOptions,
+    enum_labels: Option<&HashMap<(u32, u32), String>>,
 ) -> String {
     if matches!(value, Value::Null) {
         return match options.format {
@@ -7678,6 +7796,14 @@ fn copy_value_to_field(
         Value::Numeric(v) => v.render(),
         Value::Text(v) => v.to_string(),
         Value::TextRef(_, _) => value.as_text().unwrap_or("").to_string(),
+        Value::EnumOid(label_oid) => enum_labels
+            .filter(|_| {
+                matches!(sql_type.kind, crate::backend::parser::SqlTypeKind::Enum)
+                    && sql_type.type_oid != 0
+            })
+            .and_then(|labels| labels.get(&(sql_type.type_oid, *label_oid)))
+            .cloned()
+            .unwrap_or_else(|| label_oid.to_string()),
         Value::Bool(true) => "t".into(),
         Value::Bool(false) => "f".into(),
         Value::Point(_)
@@ -7741,6 +7867,19 @@ fn copy_value_to_field(
         CopyFormat::Text => escape_copy_text_field(&raw),
         CopyFormat::Csv => escape_copy_csv_field(&raw, options.quote, options.escape),
     }
+}
+
+fn copy_enum_label_map(catalog: &dyn CatalogLookup) -> HashMap<(u32, u32), String> {
+    catalog
+        .materialize_visible_catalog()
+        .map(|visible| {
+            visible
+                .enum_rows()
+                .into_iter()
+                .map(|row| ((row.enumtypid, row.oid), row.enumlabel))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn escape_copy_text_field(value: &str) -> String {
@@ -8056,6 +8195,12 @@ mod tests {
                 Err(ExecError::Parse(ParseError::UnrecognizedParameter(_)))
             ));
         }
+    }
+
+    #[test]
+    fn parse_bool_guc_accepts_postgres_shorthands() {
+        assert_eq!(parse_bool_guc("t"), Some(true));
+        assert_eq!(parse_bool_guc("f"), Some(false));
     }
 
     #[test]

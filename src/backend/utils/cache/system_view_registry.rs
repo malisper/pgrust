@@ -3,6 +3,8 @@ use crate::include::nodes::primnodes::QueryColumn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyntheticSystemViewKind {
+    PgEnum,
+    PgType,
     PgViews,
     PgMatviews,
     PgIndexes,
@@ -90,6 +92,8 @@ pub fn synthetic_system_views() -> &'static [SyntheticSystemView] {
 }
 
 const PG_VIEW_ALIASES: &[&str] = &["pg_views", "pg_catalog.pg_views"];
+const PG_ENUM_ALIASES: &[&str] = &["pg_enum", "pg_catalog.pg_enum"];
+const PG_TYPE_ALIASES: &[&str] = &["pg_type", "pg_catalog.pg_type"];
 const PG_MATVIEWS_ALIASES: &[&str] = &["pg_matviews", "pg_catalog.pg_matviews"];
 const PG_INDEXES_ALIASES: &[&str] = &["pg_indexes", "pg_catalog.pg_indexes"];
 const PG_POLICIES_ALIASES: &[&str] = &["pg_policies", "pg_catalog.pg_policies"];
@@ -112,6 +116,26 @@ const INFORMATION_SCHEMA_TABLES_ALIASES: &[&str] = &["information_schema.tables"
 const INFORMATION_SCHEMA_VIEWS_ALIASES: &[&str] = &["information_schema.views"];
 const INFORMATION_SCHEMA_COLUMNS_ALIASES: &[&str] = &["information_schema.columns"];
 const INFORMATION_SCHEMA_TRIGGERS_ALIASES: &[&str] = &["information_schema.triggers"];
+
+const PG_ENUM_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::new("oid", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("enumtypid", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("enumsortorder", SqlType::new(SqlTypeKind::Float4)),
+    SyntheticSystemViewColumn::new("enumlabel", SqlType::new(SqlTypeKind::Name)),
+];
+
+const PG_TYPE_COLUMNS: &[SyntheticSystemViewColumn] = &[
+    SyntheticSystemViewColumn::new("oid", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("typname", SqlType::new(SqlTypeKind::Name)),
+    SyntheticSystemViewColumn::new("typnamespace", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("typowner", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("typlen", SqlType::new(SqlTypeKind::Int2)),
+    SyntheticSystemViewColumn::new("typalign", SqlType::new(SqlTypeKind::InternalChar)),
+    SyntheticSystemViewColumn::new("typstorage", SqlType::new(SqlTypeKind::InternalChar)),
+    SyntheticSystemViewColumn::new("typrelid", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("typelem", SqlType::new(SqlTypeKind::Oid)),
+    SyntheticSystemViewColumn::new("typarray", SqlType::new(SqlTypeKind::Oid)),
+];
 
 const PG_VIEWS_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::text("schemaname"),
@@ -388,7 +412,21 @@ const INFORMATION_SCHEMA_COLUMNS_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::text("is_updatable"),
 ];
 
-const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 17] = [
+const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 19] = [
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgEnum,
+        canonical_name: "pg_catalog.pg_enum",
+        aliases: PG_ENUM_ALIASES,
+        columns: PG_ENUM_COLUMNS,
+        view_definition_sql: "",
+    },
+    SyntheticSystemView {
+        kind: SyntheticSystemViewKind::PgType,
+        canonical_name: "pg_catalog.pg_type",
+        aliases: PG_TYPE_ALIASES,
+        columns: PG_TYPE_COLUMNS,
+        view_definition_sql: "",
+    },
     SyntheticSystemView {
         kind: SyntheticSystemViewKind::PgViews,
         canonical_name: "pg_catalog.pg_views",

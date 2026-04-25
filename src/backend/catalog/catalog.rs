@@ -46,6 +46,7 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
         ScalarType::TsVector | ScalarType::TsQuery => (-1, AttributeAlign::Int),
         ScalarType::PgLsn => (8, AttributeAlign::Double),
         ScalarType::Text => (-1, AttributeAlign::Int),
+        ScalarType::Enum => (4, AttributeAlign::Int),
         ScalarType::Record => (-1, AttributeAlign::Double),
         ScalarType::Bool => (1, AttributeAlign::Char),
         ScalarType::Array(_) => (-1, AttributeAlign::Int),
@@ -122,6 +123,7 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         | SqlTypeKind::Trigger
         | SqlTypeKind::FdwHandler
         | SqlTypeKind::AnyElement
+        | SqlTypeKind::AnyEnum
         | SqlTypeKind::AnyRange
         | SqlTypeKind::AnyCompatible
         | SqlTypeKind::Int2Vector
@@ -182,7 +184,8 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         | SqlTypeKind::Circle
         | SqlTypeKind::Float4
         | SqlTypeKind::Float8
-        | SqlTypeKind::Interval => AttributeStorage::Plain,
+        | SqlTypeKind::Interval
+        | SqlTypeKind::Enum => AttributeStorage::Plain,
         SqlTypeKind::Numeric => AttributeStorage::Main,
         SqlTypeKind::Range
         | SqlTypeKind::Int4Range
@@ -230,6 +233,7 @@ pub(crate) fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
             ScalarType::Array(Box::new(ScalarType::Text))
         }
         SqlTypeKind::AnyElement
+        | SqlTypeKind::AnyEnum
         | SqlTypeKind::AnyRange
         | SqlTypeKind::AnyMultirange
         | SqlTypeKind::AnyCompatible
@@ -297,6 +301,7 @@ pub(crate) fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         SqlTypeKind::PgLsn => ScalarType::PgLsn,
         SqlTypeKind::RegConfig | SqlTypeKind::RegDictionary => ScalarType::Int32,
         SqlTypeKind::Record | SqlTypeKind::Composite => ScalarType::Record,
+        SqlTypeKind::Enum => ScalarType::Enum,
         SqlTypeKind::Text
         | SqlTypeKind::Internal
         | SqlTypeKind::PgNodeTree

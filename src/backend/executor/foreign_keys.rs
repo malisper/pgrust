@@ -95,7 +95,7 @@ pub(crate) fn enforce_outbound_foreign_keys(
             detail: Some(format!(
                 "Key ({})=({}) is not present in table \"{}\".",
                 constraint.column_names.join(", "),
-                render_key_values(&key_values),
+                render_key_values(&key_values, ctx),
                 constraint.referenced_relation_name
             )),
         });
@@ -172,6 +172,7 @@ pub(crate) fn enforce_inbound_foreign_key_reference(
             relation_name,
             constraint,
             key_values,
+            ctx,
         ));
     }
     Ok(())
@@ -191,6 +192,7 @@ fn inbound_foreign_key_violation(
     relation_name: &str,
     constraint: &BoundReferencedByForeignKey,
     key_values: &[Value],
+    ctx: &ExecutorContext,
 ) -> ExecError {
     ExecError::ForeignKeyViolation {
         constraint: constraint.constraint_name.clone(),
@@ -201,7 +203,7 @@ fn inbound_foreign_key_violation(
         detail: Some(format!(
             "Key ({})=({}) is still referenced from table \"{}\".",
             constraint.referenced_column_names.join(", "),
-            render_key_values(key_values),
+            render_key_values(key_values, ctx),
             constraint.child_relation_name
         )),
     }
@@ -424,15 +426,15 @@ fn build_equality_scan_keys(key_values: &[Value]) -> Vec<ScanKeyData> {
         .collect()
 }
 
-fn render_key_values(values: &[Value]) -> String {
+fn render_key_values(values: &[Value], ctx: &ExecutorContext) -> String {
     values
         .iter()
-        .map(render_key_value)
+        .map(|value| render_key_value(value, ctx))
         .collect::<Vec<_>>()
         .join(", ")
 }
 
-fn render_key_value(value: &Value) -> String {
+fn render_key_value(value: &Value, ctx: &ExecutorContext) -> String {
     match value {
         Value::Null => "null".into(),
         Value::Int16(v) => v.to_string(),
@@ -446,6 +448,13 @@ fn render_key_value(value: &Value) -> String {
         Value::Uuid(v) => crate::backend::executor::value_io::render_uuid_text(v),
         Value::Bool(v) => v.to_string(),
         Value::InternalChar(v) => v.to_string(),
+        Value::EnumOid(v) => ctx
+            .catalog
+            .as_ref()
+            .and_then(|catalog| {
+                crate::backend::parser::CatalogLookup::enum_label_by_oid(catalog, *v)
+            })
+            .unwrap_or_else(|| v.to_string()),
         Value::TextRef(_, _) | Value::Text(_) | Value::JsonPath(_) => {
             value.as_text().unwrap_or_default().to_string()
         }

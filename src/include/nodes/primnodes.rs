@@ -49,6 +49,7 @@ pub enum ScalarType {
     TsQuery,
     PgLsn,
     Text,
+    Enum,
     Record,
     Bool,
     Array(Box<ScalarType>),
@@ -788,11 +789,15 @@ pub enum BuiltinScalarFunction {
     TsVectorConcat,
     BitcastIntegerToFloat4,
     BitcastBigintToFloat8,
+    EnumFirst,
+    EnumLast,
+    EnumRange,
     PgInputIsValid,
     PgInputErrorMessage,
     PgInputErrorDetail,
     PgInputErrorHint,
     PgInputErrorSqlState,
+    PgRustDomainCheckUpperLessThan,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

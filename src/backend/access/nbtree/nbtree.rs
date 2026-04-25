@@ -107,6 +107,7 @@ fn encode_index_value(
         Value::Null => Ok(Vec::new()),
         Value::Int16(v) => Ok(v.to_le_bytes().to_vec()),
         Value::Int32(v) => Ok(v.to_le_bytes().to_vec()),
+        Value::EnumOid(v) => Ok(v.to_le_bytes().to_vec()),
         Value::Int64(v)
             if matches!(
                 sql_type.kind,

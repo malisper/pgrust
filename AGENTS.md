@@ -1,233 +1,171 @@
-# pgrust — project guide for AI agents
+# pgrust Agent Guide
 
-## Overview
+This file is always loaded. Keep it compact: route agents to the right code and
+prevent common mistakes. Put detailed, task-specific workflows in skills or
+docs, not here.
 
-`pgrust` is a PostgreSQL-style database prototype implemented in Rust. The repo is structured around the same broad layers PostgreSQL uses:
+## Core Rules
 
-- `src/backend/parser`: SQL grammar, parse tree handling, semantic analysis, and logical plan construction.
-- `src/backend/executor`: expression evaluation, plan startup, runtime plan-node execution, tuple/value I/O, and aggregates.
-- `src/backend/catalog`: table/type metadata and catalog mutations.
-- `src/backend/access` and `src/backend/storage`: heap access, page layout, buffer/storage concerns.
-- `src/backend/tcop` and `src/backend/libpq`: protocol entry points, error mapping, and frontend/backend message handling.
-- `src/include/nodes`: shared node/value/plan/runtime data structures.
-- `src/pgrust`: server/session/database orchestration outside the PostgreSQL-style backend tree.
+- Use PostgreSQL in `../postgres` as the behavioral reference for SQL semantics,
+  planner/executor behavior, catalog details, protocol behavior, and regression
+  diffs.
+- Keep parser, logical-plan, executor-runtime, catalog, storage, and server
+  responsibilities separated.
+- Prefer narrow sibling modules over adding broad helper sections to large
+  `mod.rs` files.
+- Do not move logical plan or `Value` definitions into executor modules.
+- Do not put runtime behavior in `src/include/nodes`; keep behavior under
+  `src/backend/*`.
+- Add a nearby `:HACK:` comment for intentional compatibility shims or temporary
+  shortcuts, with the preferred long-term shape.
 
-The current codebase was recently refactored to separate parser, logical plan, and executor-runtime responsibilities more cleanly. Prefer extending those boundaries instead of reintroducing cross-layer dependencies.
+## Task Routing
 
-## Worktrees
+| Task | Start Here | Usually Also Touches |
+| --- | --- | --- |
+| SQL syntax or new statement shape | `src/backend/parser/gram.pest`, `src/backend/parser/gram.rs`, `src/include/nodes/parsenodes.rs` | `src/backend/parser/analyze/*`; skill: `pgrust-sql-language` |
+| Name/type binding, SELECT planning | `src/backend/parser/analyze/mod.rs`, `scope.rs`, `expr.rs`, `infer.rs`, `coerce.rs` | `src/include/nodes/plannodes.rs` |
+| Builtin functions/operators | `src/backend/parser/analyze/functions.rs`, `expr.rs`, `infer.rs` | `src/backend/executor/exec_expr.rs`, `expr_ops.rs`, `expr_casts.rs` |
+| Aggregates or grouping | `src/backend/parser/analyze/agg*.rs` | `src/backend/executor/agg.rs`, `src/backend/executor/nodes.rs` |
+| New SQL type or type I/O | `src/include/nodes/datum.rs`, `src/backend/catalog/catalog.rs` | `src/backend/executor/value_io.rs`, `expr_casts.rs`, protocol files; skill: `pgrust-add-type` |
+| DDL/table metadata | `src/backend/commands/tablecmds.rs` | `src/backend/catalog/catalog.rs`, storage/access modules |
+| COPY | `src/backend/commands/copyfrom.rs` | executor value I/O, regression tests |
+| EXPLAIN | `src/backend/commands/explain.rs` | plan nodes and planner output |
+| Wire protocol/errors | `src/backend/libpq/*`, `src/backend/tcop/postgres.rs` | executor/commands error mapping |
+| Heap/storage/visibility | `src/backend/access/*`, `src/backend/storage/*` | catalog metadata and executor scan nodes |
+| Server/session orchestration | `src/pgrust/server.rs`, `session.rs`, `database.rs` | usually not SQL semantics |
+| Regression diff diagnosis | failing `.diff` file and expected/actual snippets | skill: `diff` |
+| Profiling | benchmark/repro script and profile output | skill: `pgrust-profile` |
 
-Run code changes inside a git worktree instead of the primary checkout. Multiple agents and humans frequently run against this repo in parallel on the same machine; sharing one working copy produces merge races, stale-index bugs, and half-applied edits across unrelated tasks.
+## PostgreSQL Source Map
 
-Use a worktree when:
+Use `../postgres` for behavior checks. Start with the narrowest matching area,
+then follow includes in `../postgres/src/include/*` when structs or macros are
+needed.
 
-- The work will produce at least one commit or PR.
-- The work spans more than one turn of file edits.
-
-Skip the worktree for:
-
-- Pure exploration, reading, or answering questions without file changes.
-- One-off shell/inspection commands.
-
-Conventions:
-
-- Path: `../pgrust-worktrees/<short-descriptive-name>/` (sibling to this repo).
-- Branch: follow the existing `<owner>/<short-description>` pattern where it applies (e.g. `malisper/alter-table-todo`, `jason/isolation-tests-setup`).
-- Base: `perf-optimization`.
-- Create: `git worktree add ../pgrust-worktrees/<name> -b <branch> perf-optimization`.
-- Remove when merged or abandoned: `git worktree remove ../pgrust-worktrees/<name>`.
-
-If you use Conductor (conductor.build), its workspaces live at `~/conductor/pgrust/<city>/` instead — no collision with the path above. Pick `perf-optimization` as the base in the New Workspace dialog, and rename the auto-generated city branch to match our `<owner>/<short-description>` pattern once you know what you're working on.
-
-## Formatting
-
-Rust formatting is pinned: `rust-toolchain.toml` fixes the rustc/rustfmt version and `rustfmt.toml` fixes the style edition. CI fails any PR that is not formatted with that exact rustfmt.
-
-The repo ships a versioned pre-commit hook in `.githooks/pre-commit` that runs `cargo fmt -- --check`. Activate it with one command per clone (and per worktree, since worktrees have their own git config):
-
-```sh
-bash scripts/setup-dev.sh
-```
-
-This sets `core.hooksPath` to `.githooks` for that clone. After it runs, every `git commit` is rejected in <1 second if anything is unformatted. The setup is idempotent and safe to re-run.
-
-- After editing any `*.rs` file, run `cargo fmt` before considering the task done. Running from inside the repo uses the pinned toolchain automatically.
-- Do not reformat files you did not otherwise touch. If you notice unrelated drift, leave it — a separate fmt-only PR is the right cleanup path. Agents mixing stray reformatting into feature PRs is the exact churn this policy exists to prevent.
-- Do not bypass the pre-commit hook with `git commit --no-verify`, and do not disable the `cargo-fmt-check` CI job. If the hook rejects you, run `cargo fmt`, re-stage, and re-commit.
-
-### Optional: agent-side / editor-side auto-format
-
-For an even tighter feedback loop, configure your tool to run `cargo fmt` immediately after every file edit so the pre-commit hook never even has to fire. These configs are per-user, not versioned in the repo:
-
-- **Claude Code** — Add a `PostToolUse` hook in `~/.claude/settings.json`:
-
-  ```json
-  {
-    "hooks": {
-      "PostToolUse": [
-        {
-          "matcher": "Edit|Write|MultiEdit",
-          "hooks": [{ "type": "command", "command": "cargo fmt" }]
-        }
-      ]
-    }
-  }
-  ```
-
-  Docs: https://code.claude.com/docs/en/hooks-guide
-
-- **Codex CLI** — Hooks are still under development as of early 2026 (off by default). Enable with `codex_hooks = true` in the `[features]` section of your Codex config, then add a `PostToolUse` hook in `hooks.json` next to your config. Docs: https://developers.openai.com/codex/hooks
-
-- **Cursor** — Enable VS Code's `editor.formatOnSave` setting and rust-analyzer will run rustfmt on every save. Settings → search "Format On Save" → check the box.
-
-- **Conductor** (parallel agent runner) — Uses Claude Code under the hood, so the Claude Code `PostToolUse` hook above applies automatically.
-
-## PostgreSQL Reference Repo
-
-A sibling PostgreSQL source checkout is available at `../postgres`.
-
-Guidance:
-
-- Refer to the PostgreSQL repo as much as necessary when implementing SQL behavior, planner/executor semantics, catalog behavior, protocol details, or PostgreSQL-compatible errors.
-- Treat the PostgreSQL repo as the primary behavioral reference when pgrust behavior is unclear or when regression results need explanation.
-- Prefer checking the matching PostgreSQL area before introducing new semantics or compatibility shims in pgrust.
+| Need | PostgreSQL Reference |
+| --- | --- |
+| SQL grammar | `../postgres/src/backend/parser/gram.y`, `scan.l` |
+| Raw parse nodes | `../postgres/src/include/nodes/parsenodes.h`, `nodes.h` |
+| Parse analysis / binding | `../postgres/src/backend/parser/analyze.c`, `parse_expr.c`, `parse_clause.c`, `parse_relation.c`, `parse_target.c`, `parse_type.c`, `parse_func.c`, `parse_oper.c` |
+| Type coercion | `../postgres/src/backend/parser/parse_coerce.c`, `parse_type.c` |
+| Function/operator lookup | `../postgres/src/backend/parser/parse_func.c`, `parse_oper.c`; catalogs in `src/include/catalog/pg_proc.dat`, `pg_operator.dat` |
+| Planner entry | `../postgres/src/backend/optimizer/plan/planner.c`, `src/backend/optimizer/prep/*`, `src/backend/optimizer/path/*` |
+| Plan node structs | `../postgres/src/include/nodes/pathnodes.h`, `plannodes.h`, `primnodes.h` |
+| Executor entry | `../postgres/src/backend/executor/execMain.c`, `execProcnode.c`, `execExpr.c` |
+| Executor plan nodes | `../postgres/src/backend/executor/node*.c` |
+| Aggregates | `../postgres/src/backend/executor/nodeAgg.c`, `src/backend/parser/parse_agg.c`, `src/include/catalog/pg_aggregate.dat` |
+| DDL / utility commands | `../postgres/src/backend/tcop/utility.c`, `src/backend/commands/*` |
+| Table DDL | `../postgres/src/backend/commands/tablecmds.c` |
+| COPY | `../postgres/src/backend/commands/copy*.c` |
+| EXPLAIN | `../postgres/src/backend/commands/explain.c` |
+| Catalog metadata | `../postgres/src/backend/catalog/*`, `src/include/catalog/*.h`, `src/include/catalog/*.dat` |
+| Type implementation | `../postgres/src/backend/utils/adt/*`, `src/include/utils/*`, relevant catalog `.dat` files |
+| Heap/index access | `../postgres/src/backend/access/heap/*`, `index/*`, `nbtree/*`, `hash/*`, `gist/*`, `gin/*`, `brin/*` |
+| Transactions / WAL / MVCC | `../postgres/src/backend/access/transam/*`, `src/include/access/*` |
+| Buffers/storage/locks | `../postgres/src/backend/storage/buffer/*`, `storage/smgr/*`, `storage/lmgr/*`, `storage/page/*`, `storage/ipc/*` |
+| Rewriter/rules/views | `../postgres/src/backend/rewrite/*`, `src/include/rewrite/*` |
+| Wire protocol | `../postgres/src/backend/libpq/*`, `src/include/libpq/*`, `src/backend/tcop/postgres.c`, `pquery.c` |
+| Errors/GUC/fmgr/cache | `../postgres/src/backend/utils/error/*`, `misc/guc.c`, `fmgr/*`, `cache/*` |
+| Regression tests | `../postgres/src/test/regress/sql/*`, `expected/*` |
+| Isolation tests | `../postgres/src/test/isolation/specs/*` |
+| PL/pgSQL | `../postgres/src/pl/plpgsql/src/*` |
+| psql/client behavior | `../postgres/src/bin/psql/*`, `src/interfaces/libpq/*` |
 
 ## Shared Node Layers
 
-The canonical shared types live under `src/include/nodes`:
+- `src/include/nodes/parsenodes.rs`: raw SQL AST from parser.
+- `src/include/nodes/datum.rs`: logical scalar values such as `Value`.
+- `src/include/nodes/plannodes.rs`: bound expressions, logical plans, metadata,
+  aggregates, scalar-function ids.
+- `src/include/nodes/execnodes.rs`: executor runtime state structs only.
 
-- [src/include/nodes/parsenodes.rs](/src/include/nodes/parsenodes.rs): raw SQL AST produced by the parser.
-- [src/include/nodes/datum.rs](/src/include/nodes/datum.rs): logical scalar values like `Value` and `NumericValue`.
-- [src/include/nodes/plannodes.rs](/src/include/nodes/plannodes.rs): bound expressions, logical plans, column metadata, aggregates, and scalar-function identifiers.
-- [src/include/nodes/execnodes.rs](/src/include/nodes/execnodes.rs): executor runtime state such as tuple slots and concrete `*State` plan-node structs.
+Parser code may depend on `parsenodes`, `datum`, and `plannodes`, not executor
+implementation modules. Executor code may depend on `datum`, `plannodes`, and
+`execnodes`.
 
-Rules:
+## Token Budget Rules
 
-- Parser code should depend on `parsenodes`, `datum`, and `plannodes`, not executor implementation files.
-- Executor code may depend on `datum`, `plannodes`, and `execnodes`.
-- Runtime behavior should not live in `src/include/nodes`; keep behavior in `src/backend/*`.
+- Start with `rg` and small `sed -n` ranges. Do not dump whole large files.
+- Keep tool output small. Default `max_output_tokens` to `4000` or less unless
+  there is a concrete reason to raise it.
+- For `write_stdin` polling, use `max_output_tokens <= 2000` and wait at least
+  30s unless actively debugging an interactive failure.
+- Do not run broad `rg` over `/tmp/diffs`, `/tmp`, `.`, `~/.cargo/registry`,
+  or `target`. Narrow searches to specific files or subdirectories.
+- Do not run `rg --files /tmp/diffs`; inspect the task-specific result
+  directory and only the relevant `.diff` or `.out` file.
+- Use `git diff --stat` before full `git diff`; inspect only relevant hunks.
+- Save large logs to `/tmp` and summarize the failing lines.
+- For CI logs, save raw logs to `/tmp` when needed and filter summaries with
+  bounded commands such as `rg -m 100 -C 3`.
+- For regression reruns, copy useful `.diff` artifacts to `/tmp/diffs`.
+- After broad exploration, write a short task note in
+  `.codex/task-notes/<task>.md`:
 
-## Parser Structure
+  ```md
+  Goal:
+  Key decisions:
+  Files touched:
+  Tests run:
+  Remaining:
+  ```
 
-Top-level parser entry points are in [src/backend/parser/mod.rs](/src/backend/parser/mod.rs). This module should stay thin: grammar entry points, public parser API, and re-exports.
+- Prefer fresh sessions for unrelated tasks. Resume from the task note instead
+  of replaying long chat history.
+- Restart or hand off after noisy test, CI, or log-debugging loops instead of
+  continuing inside a polluted session.
+- Use subagents only for narrow read-only exploration or disjoint file ownership.
+  Give them explicit output limits and owned files.
 
-Grammar files:
+## Worktrees
 
-- [src/backend/parser/gram.pest](/src/backend/parser/gram.pest)
-- [src/backend/parser/gram.rs](/src/backend/parser/gram.rs)
+Use a separate worktree when work will produce a commit/PR or spans multiple
+turns of edits. Skip this for pure reading or one-off inspection.
 
-Semantic analysis lives in `src/backend/parser/analyze`:
+- Base: `perf-optimization`.
+- Path: `../pgrust-worktrees/<short-name>/`.
+- Branch: follow `<owner>/<short-description>` when practical.
+- Create:
 
-- [src/backend/parser/analyze/mod.rs](/src/backend/parser/analyze/mod.rs): statement-level orchestration, DDL/DML binding entry points, and top-level `SELECT` planning flow.
-- [src/backend/parser/analyze/scope.rs](/src/backend/parser/analyze/scope.rs): relation binding, scope construction, column resolution, outer-scope lookup.
-- [src/backend/parser/analyze/coerce.rs](/src/backend/parser/analyze/coerce.rs): coercion helpers, type-family logic, and common-type selection.
-- [src/backend/parser/analyze/functions.rs](/src/backend/parser/analyze/functions.rs): builtin scalar-function and aggregate lookup plus arity validation.
-- [src/backend/parser/analyze/expr.rs](/src/backend/parser/analyze/expr.rs): normal expression binding.
-- [src/backend/parser/analyze/infer.rs](/src/backend/parser/analyze/infer.rs): SQL expression type inference.
-- [src/backend/parser/analyze/agg.rs](/src/backend/parser/analyze/agg.rs): aggregate discovery and grouped-column validation.
-- [src/backend/parser/analyze/agg_output.rs](/src/backend/parser/analyze/agg_output.rs): binding grouped aggregate output expressions.
-- [src/backend/parser/analyze/agg_output_special.rs](/src/backend/parser/analyze/agg_output_special.rs): grouped subquery/function/array helper paths.
+  ```sh
+  git worktree add ../pgrust-worktrees/<name> -b <branch> perf-optimization
+  ```
 
-Guidance:
+Conductor workspaces live under `~/conductor/pgrust/<city>/`; use
+`perf-optimization` as base there too.
 
-- Add new raw syntax in `gram.pest`/`gram.rs`, then map it into `parsenodes`.
-- Add new semantic binding in the narrowest `analyze/*` module that matches the responsibility.
-- Avoid growing `analyze/mod.rs` back into a catch-all file.
+## Formatting
 
-## Executor Structure
+- Rust formatting is pinned by `rust-toolchain.toml` and `rustfmt.toml`.
+- Run `cargo fmt` after editing any `*.rs` file.
+- Do not reformat unrelated files.
+- Enable hooks per clone/worktree with:
 
-The executor facade is [src/backend/executor/mod.rs](/src/backend/executor/mod.rs). It owns public executor entry points, shared executor error types, and exports, but most production logic should live in submodules.
+  ```sh
+  bash scripts/setup-dev.sh
+  ```
 
-Execution modules:
-
-- [src/backend/executor/startup.rs](/src/backend/executor/startup.rs): plan startup and plan-state construction.
-- [src/backend/executor/driver.rs](/src/backend/executor/driver.rs): top-level execution flow and tuple production.
-- [src/backend/executor/nodes.rs](/src/backend/executor/nodes.rs): runtime behavior for concrete plan-node state structs.
-- [src/backend/executor/agg.rs](/src/backend/executor/agg.rs): aggregate transition and finalize logic.
-
-Expression and value handling:
-
-- [src/backend/executor/exec_expr.rs](/src/backend/executor/exec_expr.rs): high-level expression evaluation entry points.
-- [src/backend/executor/expr_ops.rs](/src/backend/executor/expr_ops.rs): arithmetic, comparison, ordering, and boolean operator helpers.
-- [src/backend/executor/expr_casts.rs](/src/backend/executor/expr_casts.rs): cast and coercion behavior during execution.
-- [src/backend/executor/expr_compile.rs](/src/backend/executor/expr_compile.rs): predicate compilation and fixed-layout fast paths.
-- [src/backend/executor/expr_json.rs](/src/backend/executor/expr_json.rs): JSON operator and builder behavior.
-- [src/backend/executor/value_io.rs](/src/backend/executor/value_io.rs): tuple encoding/decoding and value serialization helpers.
-- [src/backend/executor/exec_tuples.rs](/src/backend/executor/exec_tuples.rs): tuple decoding/deformation helpers.
-- [src/backend/executor/jsonb.rs](/src/backend/executor/jsonb.rs) and [src/backend/executor/jsonpath.rs](/src/backend/executor/jsonpath.rs): JSONB and JSONPath support.
-
-Guidance:
-
-- Do not move logical plan or `Value` definitions back into executor files.
-- Keep type-specific I/O in focused helper modules instead of growing `exec_expr.rs`.
-- Keep runtime node behavior in `nodes.rs`, not `execnodes.rs`.
-
-## Catalog, Access, Storage, and Protocol
-
-- [src/backend/catalog/catalog.rs](/src/backend/catalog/catalog.rs): catalog state and metadata operations.
-- [src/backend/commands/tablecmds.rs](/src/backend/commands/tablecmds.rs): DDL-heavy command handling.
-- [src/backend/commands/copyfrom.rs](/src/backend/commands/copyfrom.rs): `COPY FROM`.
-- [src/backend/commands/explain.rs](/src/backend/commands/explain.rs): `EXPLAIN` formatting and explain-only behavior.
-- `src/backend/access/*`: heap access methods and transaction-visible tuple handling.
-- `src/backend/storage/*`: page layout and storage primitives.
-- [src/backend/libpq/pqcomm.rs](/src/backend/libpq/pqcomm.rs) and [src/backend/libpq/pqformat.rs](/src/backend/libpq/pqformat.rs): wire protocol messaging and error formatting.
-- [src/backend/tcop/postgres.rs](/src/backend/tcop/postgres.rs): SQL execution entry flow and SQLSTATE mapping.
-
-## Server Layer
-
-The PostgreSQL-like backend modules sit under `src/backend`, but process/session orchestration is in `src/pgrust`:
-
-- [src/pgrust/server.rs](/src/pgrust/server.rs): TCP server loop.
-- [src/pgrust/session.rs](/src/pgrust/session.rs): per-client session behavior.
-- [src/pgrust/database.rs](/src/pgrust/database.rs): database-level shared state and temp-object/session interactions.
-
-If a change is about SQL semantics, planning, or execution, it usually belongs under `src/backend`, not `src/pgrust`.
-
-## Working Rules
-
-- Before adding code to a large file, check whether there is already a responsibility-specific sibling module.
-- Prefer moving logic outward into narrow modules rather than adding another broad helper section to `mod.rs`.
-- Keep parser analysis, logical plan construction, and executor runtime concerns separate.
-- Keep tests close to the module they validate when practical. The executor facade still has a large test block; shrinking that is still a good follow-up.
-- Avoid adding new parser dependencies on executor implementation modules.
-- When you introduce a narrow workaround, compatibility shim, or intentionally temporary shortcut, add a nearby `:HACK:` comment explaining what is being worked around and what the preferred long-term shape should be.
+- Do not bypass pre-commit hooks with `git commit --no-verify`.
 
 ## Validation
 
-For structural refactors, the default verification loop is:
+Run focused validation for the files/features changed.
 
-- `cargo check`
-- `cargo test --lib --quiet` (only tests relevant to the changed module, not the full suite)
+- Structural Rust changes: `cargo check`.
+- Module behavior: targeted `cargo test --lib --quiet <test-or-module>`.
+- SQL behavior: relevant regression file, not the full harness unless asked.
+- Do not run the full test suite unless the user asks; CI covers it.
 
-If a change affects SQL behavior more broadly, run the regression harness afterward.
-
-When rerunning an individual regression file, copy the resulting `.diff` artifact into `/tmp/diffs` so it is easy to inspect outside the results directory.
-
-**Testing guidance for agents:** Run only the specialized tests directly related to your change (e.g., tests in the module you modified, integration tests for the feature you're working on). Do not run the full `cargo test` suite unless specifically asked. The full test suite runs in CI, so focus your effort on validating that your specific change works correctly. This keeps iteration fast and avoids redundant testing.
-
-### macOS file descriptor limit
-
-macOS terminal shells may start with a low open-file soft limit (`ulimit -n` can be `256`) even when the kernel cap is much higher. Large parallel Rust test runs can then fail with `Too many open files (os error 24)`, especially catalog/database tests that create many temp relation files.
-
-For local full-suite runs, raise the limit in the same shell before testing:
+On macOS, full local suites may need:
 
 ```sh
 ulimit -n 65536
 cargo test --lib --quiet
 ```
 
-If that fixes the failure, add a guarded `ulimit -n 65536` to your shell startup file. For normal agent validation, still prefer targeted tests or CI's `cargo nextest` merge-queue run instead of full local `cargo test`.
-
 ## Finish
 
-When finishing work in this repo:
-
-- When the user says `Finish`, mark the work as finished in the todo list, commit it, merge it, and then list the next related features to work on as a numbered list.
-- Do not push new code unless the user explicitly asks for a push.
-
-## Profiling Output
-
-When the user asks for a profile or profiling analysis:
-
-- Present the results in a clean, readable format.
-- Include the profile source or file path, a short summary of the main hotspots, and a compact list of the most important syscall or caller chains when relevant.
-- Prefer concise sections such as `Summary`, `Top Hotspots`, and `Key Call Paths` over dumping raw profiler output without interpretation.
+When the user says `Finish`: mark the work finished in the todo list, commit it,
+merge it, and list next related features as a numbered list. Do not push unless
+the user explicitly asks.

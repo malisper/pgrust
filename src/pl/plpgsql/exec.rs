@@ -15,7 +15,10 @@ use crate::backend::parser::{
 use crate::backend::utils::record::{
     assign_anonymous_record_descriptor, lookup_anonymous_record_descriptor,
 };
-use crate::include::catalog::TEXT_TYPE_OID;
+use crate::include::catalog::{
+    ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLEOID,
+    ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID, TEXT_TYPE_OID,
+};
 use crate::include::nodes::datum::{RecordDescriptor, RecordValue};
 use crate::include::nodes::primnodes::QueryColumn;
 use crate::pgrust::session::ByteaOutputFormat;
@@ -121,15 +124,20 @@ pub(crate) fn execute_block_with_gucs(
 
 pub fn execute_user_defined_scalar_function(
     proc_oid: u32,
+    resolved_result_type: Option<SqlType>,
     args: &[Expr],
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let compiled = compiled_function_for_proc(proc_oid, ctx)?;
     let arg_values = args
         .iter()
         .map(|arg| eval_expr(arg, slot, ctx))
         .collect::<Result<Vec<_>, _>>()?;
+    let arg_types = arg_values
+        .iter()
+        .map(Value::sql_type_hint)
+        .collect::<Vec<_>>();
+    let compiled = compiled_function_for_proc(proc_oid, resolved_result_type, &arg_types, ctx)?;
 
     match &compiled.return_contract {
         FunctionReturnContract::Scalar { setof: true, .. }
@@ -205,7 +213,11 @@ pub fn execute_user_defined_scalar_function_values(
     arg_values: &[Value],
     ctx: &mut ExecutorContext,
 ) -> Result<Value, ExecError> {
-    let compiled = compiled_function_for_proc(proc_oid, ctx)?;
+    let arg_types = arg_values
+        .iter()
+        .map(Value::sql_type_hint)
+        .collect::<Vec<_>>();
+    let compiled = compiled_function_for_proc(proc_oid, None, &arg_types, ctx)?;
 
     let FunctionReturnContract::Scalar { setof, ty, .. } = &compiled.return_contract else {
         return Err(function_runtime_error(
@@ -255,11 +267,15 @@ pub fn execute_user_defined_set_returning_function(
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<TupleSlot>, ExecError> {
-    let compiled = compiled_function_for_proc(proc_oid, ctx)?;
     let arg_values = args
         .iter()
         .map(|arg| eval_expr(arg, slot, ctx))
         .collect::<Result<Vec<_>, _>>()?;
+    let arg_types = arg_values
+        .iter()
+        .map(Value::sql_type_hint)
+        .collect::<Vec<_>>();
+    let compiled = compiled_function_for_proc(proc_oid, None, &arg_types, ctx)?;
     let track_stats = ctx.session_stats.read().track_functions.tracks_plpgsql();
     if track_stats {
         ctx.session_stats.write().begin_function_call(proc_oid);
@@ -365,8 +381,15 @@ pub fn execute_user_defined_trigger_function(
 
 fn compiled_function_for_proc(
     proc_oid: u32,
+    resolved_result_type: Option<SqlType>,
+    actual_arg_types: &[Option<SqlType>],
     ctx: &mut ExecutorContext,
 ) -> Result<Arc<CompiledFunction>, ExecError> {
+    if let Some(compiled) =
+        compile_polymorphic_function(proc_oid, resolved_result_type, actual_arg_types, ctx)?
+    {
+        return Ok(compiled);
+    }
     if let Some(compiled) = ctx.compiled_functions.get(&proc_oid) {
         return Ok(Arc::clone(compiled));
     }
@@ -409,6 +432,106 @@ fn compiled_function_for_proc(
     ctx.compiled_functions
         .insert(proc_oid, Arc::clone(&compiled));
     Ok(compiled)
+}
+
+fn compile_polymorphic_function(
+    proc_oid: u32,
+    resolved_result_type: Option<SqlType>,
+    actual_arg_types: &[Option<SqlType>],
+    ctx: &mut ExecutorContext,
+) -> Result<Option<Arc<CompiledFunction>>, ExecError> {
+    let catalog = ctx.catalog.as_ref().ok_or_else(|| {
+        function_runtime_error(
+            "user-defined functions require executor catalog context",
+            None,
+            "0A000",
+        )
+    })?;
+    let row = catalog.proc_row_by_oid(proc_oid).ok_or_else(|| {
+        function_runtime_error(&format!("unknown function oid {proc_oid}"), None, "42883")
+    })?;
+    let language = catalog.language_row_by_oid(row.prolang).ok_or_else(|| {
+        function_runtime_error(
+            &format!("unknown language oid {}", row.prolang),
+            None,
+            "42883",
+        )
+    })?;
+    if !language.lanname.eq_ignore_ascii_case("plpgsql") {
+        return Ok(None);
+    }
+    let mut concrete_row = row.clone();
+    let mut changed = false;
+    if is_polymorphic_type_oid(row.prorettype)
+        && let Some(result_type) = resolved_result_type
+        && let Some(result_oid) = concrete_type_oid(result_type, catalog)
+        && !is_polymorphic_type_oid(result_oid)
+    {
+        concrete_row.prorettype = result_oid;
+        changed = true;
+    }
+    let Some(arg_oids) = parse_proc_argtype_oids(&row.proargtypes) else {
+        return Ok(None);
+    };
+    let concrete_arg_oids = arg_oids
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(idx, oid)| {
+            if is_polymorphic_type_oid(oid)
+                && let Some(Some(actual_type)) = actual_arg_types.get(idx)
+                && let Some(actual_oid) = concrete_type_oid(*actual_type, catalog)
+                && !is_polymorphic_type_oid(actual_oid)
+            {
+                changed = true;
+                actual_oid
+            } else {
+                oid
+            }
+        })
+        .collect::<Vec<_>>();
+    if !changed {
+        return Ok(None);
+    }
+    concrete_row.proargtypes = concrete_arg_oids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    Ok(Some(Arc::new(
+        compile_function_from_proc(&concrete_row, catalog).map_err(ExecError::Parse)?,
+    )))
+}
+
+fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {
+    if argtypes.trim().is_empty() {
+        return Some(Vec::new());
+    }
+    argtypes
+        .split_whitespace()
+        .map(|part| part.parse::<u32>().ok())
+        .collect()
+}
+
+fn concrete_type_oid(ty: SqlType, catalog: &dyn CatalogLookup) -> Option<u32> {
+    catalog
+        .type_oid_for_sql_type(ty)
+        .or_else(|| (ty.type_oid != 0).then_some(ty.type_oid))
+}
+
+fn is_polymorphic_type_oid(oid: u32) -> bool {
+    matches!(
+        oid,
+        ANYOID
+            | ANYELEMENTOID
+            | ANYARRAYOID
+            | ANYRANGEOID
+            | ANYMULTIRANGEOID
+            | ANYCOMPATIBLEOID
+            | ANYCOMPATIBLEARRAYOID
+            | ANYCOMPATIBLERANGEOID
+            | ANYCOMPATIBLEMULTIRANGEOID
+    )
 }
 
 fn execute_compiled_function(
@@ -2008,6 +2131,7 @@ fn render_dynamic_query_param_base_sql(
         Value::InternalChar(byte) => {
             quote_sql_string(&crate::backend::executor::render_internal_char_text(*byte))
         }
+        Value::EnumOid(v) => v.to_string(),
         Value::Date(_)
         | Value::Time(_)
         | Value::TimeTz(_)
@@ -2513,6 +2637,7 @@ fn render_raise_value(value: &Value) -> String {
         Value::Uuid(v) => crate::backend::executor::value_io::render_uuid_text(v),
         Value::Bit(v) => crate::backend::executor::render_bit_text(v),
         Value::InternalChar(v) => char::from(*v).to_string(),
+        Value::EnumOid(v) => v.to_string(),
         Value::Json(text) | Value::JsonPath(text) => text.to_string(),
         Value::Xml(text) => text.to_string(),
         Value::Jsonb(bytes) => String::from_utf8_lossy(bytes).into_owned(),

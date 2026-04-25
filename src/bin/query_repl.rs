@@ -184,6 +184,7 @@ fn render_value(value: &Value) -> String {
         Value::Text(v) => v.to_string(),
         Value::TextRef(_, _) => value.as_text().unwrap().to_string(),
         Value::InternalChar(v) => pgrust::backend::executor::render_internal_char_text(*v),
+        Value::EnumOid(v) => v.to_string(),
         Value::Bool(v) => v.to_string(),
         Value::Array(items) => format!(
             "{{{}}}",
@@ -929,6 +930,8 @@ fn run_statement(
         | Statement::CreateTablespace(_)
         | Statement::CreateDomain(_)
         | Statement::CreateType(_)
+        | Statement::AlterType(_)
+        | Statement::AlterTypeOwner(_)
         | Statement::CreateSequence(_)
         | Statement::DropFunction(_)
         | Statement::DropOperator(_)
@@ -1311,7 +1314,9 @@ fn run_statement(
         | Statement::ClosePortal(_)
         | Statement::Begin
         | Statement::Commit
-        | Statement::Rollback => {
+        | Statement::Rollback
+        | Statement::Savepoint(_)
+        | Statement::RollbackTo(_) => {
             Ok(StatementResult::AffectedRows(0))
         }
     };

@@ -567,6 +567,15 @@ pub(super) fn supports_comparison_operator(
     if !left.is_array
         && !right.is_array
         && left == right
+        && matches!(left.kind, SqlTypeKind::Enum)
+        && left.type_oid != 0
+        && matches!(op, "=" | "<>" | "<" | "<=" | ">" | ">=")
+    {
+        return true;
+    }
+    if !left.is_array
+        && !right.is_array
+        && left == right
         && matches!(
             left.kind,
             SqlTypeKind::TsQuery

@@ -6,15 +6,14 @@ use super::expr_datetime::render_datetime_value_text_with_config;
 use super::expr_multirange::eval_multirange_function;
 use super::expr_ops::compare_order_values;
 use super::node_types::{BuiltinScalarFunction, RangeBound, RangeTypeRef, RangeValue, Value};
-use super::value_io::{format_array_text, format_array_value_text, format_record_text};
+use super::value_io::{format_array_value_text_with_config, format_record_text_with_config};
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
-use crate::backend::utils::time::datetime::days_from_ymd;
 use crate::include::catalog::{
-    DATE_TYPE_OID, DATERANGE_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID,
-    INT8RANGE_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID, RangeCanonicalization,
-    TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID,
-    range_type_ref_for_sql_type,
+    ARRAYRANGE_TYPE_OID, DATE_TYPE_OID, DATERANGE_TYPE_OID, INT4_ARRAY_TYPE_OID, INT4_TYPE_OID,
+    INT4RANGE_TYPE_OID, INT8_TYPE_OID, INT8RANGE_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID,
+    RangeCanonicalization, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TSRANGE_TYPE_OID,
+    TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID, VARBITRANGE_TYPE_OID, range_type_ref_for_sql_type,
 };
 use crate::include::nodes::datetime::DateADT;
 
@@ -123,11 +122,14 @@ pub fn render_range_text(value: &Value) -> Option<String> {
     render_range_text_with_config(value, &DateTimeConfig::default())
 }
 
-pub fn render_range_text_with_config(value: &Value, config: &DateTimeConfig) -> Option<String> {
+pub fn render_range_text_with_config(
+    value: &Value,
+    datetime_config: &DateTimeConfig,
+) -> Option<String> {
     let Value::Range(range) = value else {
         return None;
     };
-    Some(render_range_value_with_config(range, config))
+    Some(render_range_value_with_config(range, datetime_config))
 }
 
 pub(crate) fn render_range_value(range: &RangeValue) -> String {
@@ -136,7 +138,7 @@ pub(crate) fn render_range_value(range: &RangeValue) -> String {
 
 pub(crate) fn render_range_value_with_config(
     range: &RangeValue,
-    config: &DateTimeConfig,
+    datetime_config: &DateTimeConfig,
 ) -> String {
     if range.empty {
         return "empty".to_string();
@@ -150,11 +152,11 @@ pub(crate) fn render_range_value_with_config(
         },
     );
     if let Some(lower) = &range.lower {
-        out.push_str(&render_bound_text_with_config(lower.value.as_ref(), config));
+        out.push_str(&render_bound_text(lower.value.as_ref(), datetime_config));
     }
     out.push(',');
     if let Some(upper) = &range.upper {
-        out.push_str(&render_bound_text_with_config(upper.value.as_ref(), config));
+        out.push_str(&render_bound_text(upper.value.as_ref(), datetime_config));
     }
     out.push(
         if range.upper.as_ref().is_some_and(|bound| bound.inclusive) {
@@ -914,6 +916,19 @@ fn range_type_for_scalar_value(value: &Value) -> Option<RangeTypeRef> {
         Value::TimestampTz(_) => {
             range_type_ref_for_sql_type(SqlType::range(TSTZRANGE_TYPE_OID, TIMESTAMPTZ_TYPE_OID))
         }
+        Value::Bit(_) => {
+            range_type_ref_for_sql_type(SqlType::range(VARBITRANGE_TYPE_OID, VARBIT_TYPE_OID))
+        }
+        Value::PgArray(array)
+            if array.element_type_oid == Some(INT4_TYPE_OID)
+                || array
+                    .elements
+                    .iter()
+                    .find_map(Value::sql_type_hint)
+                    .is_some_and(|ty| ty.element_type().kind == SqlTypeKind::Int4) =>
+        {
+            range_type_ref_for_sql_type(SqlType::range(ARRAYRANGE_TYPE_OID, INT4_ARRAY_TYPE_OID))
+        }
         _ => None,
     }
 }
@@ -1006,7 +1021,7 @@ fn encode_bound_value(range_type: RangeTypeRef, value: &Value) -> Result<Vec<u8>
         },
         value,
     )?;
-    Ok(render_bound_storage_text(value).into_bytes())
+    Ok(render_bound_text(value, &DateTimeConfig::default()).into_bytes())
 }
 
 fn decode_bound_value(range_type: RangeTypeRef, bytes: &[u8]) -> Result<Value, ExecError> {
@@ -1021,12 +1036,27 @@ fn parse_range_bound_text(text: &str, subtype: SqlType) -> Result<Value, ExecErr
     cast_value(Value::Text(text.into()), subtype)
 }
 
-fn render_bound_text(value: &Value) -> String {
-    render_bound_text_with_config(value, &DateTimeConfig::default())
-}
-
-fn render_bound_text_with_config(value: &Value, config: &DateTimeConfig) -> String {
-    let raw = render_bound_storage_text_with_config(value, config);
+fn render_bound_text(value: &Value, datetime_config: &DateTimeConfig) -> String {
+    let raw = match value {
+        Value::Int16(v) => v.to_string(),
+        Value::Int32(v) => v.to_string(),
+        Value::Int64(v) => v.to_string(),
+        Value::Money(v) => v.to_string(),
+        Value::Float64(v) => v.to_string(),
+        Value::Numeric(v) => v.render(),
+        Value::Date(_) | Value::Timestamp(_) | Value::TimestampTz(_) => {
+            render_datetime_value_text_with_config(value, datetime_config).unwrap_or_default()
+        }
+        Value::Bool(v) => v.to_string(),
+        Value::Bit(bits) => bits.render(),
+        Value::PgArray(array) => format_array_value_text_with_config(array, datetime_config),
+        Value::Array(items) => format_array_value_text_with_config(
+            &crate::include::nodes::datum::ArrayValue::from_1d(items.clone()),
+            datetime_config,
+        ),
+        Value::Record(record) => format_record_text_with_config(record, datetime_config),
+        other => other.as_text().unwrap_or_default().to_string(),
+    };
     if needs_range_quotes(&raw) {
         let mut escaped = String::with_capacity(raw.len());
         for ch in raw.chars() {
@@ -1300,7 +1330,8 @@ mod tests {
 
     #[test]
     fn render_bound_text_doubles_quotes_and_backslashes() {
-        let rendered = render_bound_text(&Value::Text(" a \" \\ ".into()));
+        let rendered =
+            render_bound_text(&Value::Text(" a \" \\ ".into()), &DateTimeConfig::default());
         assert_eq!(rendered, "\" a \"\" \\\\ \"");
     }
 

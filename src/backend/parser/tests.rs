@@ -16,8 +16,8 @@ use crate::include::nodes::parsenodes::{
     CommentOnAggregateStatement, CommentOnFunctionStatement, CompositeTypeAttributeDef,
     CreateAggregateStatement, CreateCompositeTypeStatement, CreateTriggerStatement,
     CreateTypeStatement, DropAggregateStatement, DropTriggerStatement, DropTypeStatement,
-    ForeignKeyAction, ForeignKeyMatchType, IndexColumnDef, InsertSource, InsertStatement,
-    JoinTreeNode, PartitionStrategy, PublicationObjectSpec, PublicationOption,
+    ForeignKeyAction, ForeignKeyMatchType, GrantObjectPrivilege, IndexColumnDef, InsertSource,
+    InsertStatement, JoinTreeNode, PartitionStrategy, PublicationObjectSpec, PublicationOption,
     PublicationSchemaName, RangeTblEntryKind, RawPartitionBoundSpec, RawPartitionKey,
     RawPartitionRangeDatum, RawPartitionSpec, RawTypeName, SetSessionAuthorizationStatement,
     SqlCallArgs, TableConstraint, TriggerEvent, TriggerEventSpec, TriggerLevel,
@@ -7435,10 +7435,13 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("create schema if not exists tenant").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: Some(schema_name), auth_role: None, if_not_exists: true, elements }) if schema_name == "tenant" && elements.is_empty())
     );
     assert!(
-        matches!(parse_statement("create schema authorization app_user").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: None, auth_role: Some(auth_role), if_not_exists: false, elements }) if auth_role == "app_user" && elements.is_empty())
+        matches!(parse_statement("create schema authorization app_user").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: None, auth_role: Some(RoleSpec::RoleName(auth_role)), if_not_exists: false, elements }) if auth_role == "app_user" && elements.is_empty())
     );
     assert!(
-        matches!(parse_statement("create schema tenant authorization app_user").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: Some(schema_name), auth_role: Some(auth_role), if_not_exists: false, elements }) if schema_name == "tenant" && auth_role == "app_user" && elements.is_empty())
+        matches!(parse_statement("create schema tenant authorization app_user").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: Some(schema_name), auth_role: Some(RoleSpec::RoleName(auth_role)), if_not_exists: false, elements }) if schema_name == "tenant" && auth_role == "app_user" && elements.is_empty())
+    );
+    assert!(
+        matches!(parse_statement("create schema authorization current_role").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: None, auth_role: Some(RoleSpec::CurrentRole), if_not_exists: false, elements }) if elements.is_empty())
     );
     assert!(
         matches!(
@@ -7447,6 +7450,52 @@ fn parse_insert_update_delete() {
                 if schema_name == "fkpart0" && elements.len() == 2
         )
     );
+    let schema_with_elements = parse_statement(
+        "create schema tenant \
+         create sequence seq \
+         create table tab (id int) \
+         create view v as select id from tab \
+         create index on tab (id) \
+         create trigger trig before insert on tab execute function trig_fn() \
+         grant select on tab to public",
+    )
+    .unwrap();
+    let Statement::CreateSchema(CreateSchemaStatement { elements, .. }) = schema_with_elements
+    else {
+        panic!("expected CREATE SCHEMA");
+    };
+    assert_eq!(elements.len(), 6);
+    assert!(matches!(
+        elements[0].as_ref(),
+        Statement::CreateSequence(CreateSequenceStatement {
+            sequence_name,
+            ..
+        }) if sequence_name == "seq"
+    ));
+    assert!(matches!(
+        elements[1].as_ref(),
+        Statement::CreateTable(CreateTableStatement { table_name, .. }) if table_name == "tab"
+    ));
+    assert!(matches!(
+        elements[2].as_ref(),
+        Statement::CreateView(CreateViewStatement { view_name, .. }) if view_name == "v"
+    ));
+    assert!(matches!(
+        elements[3].as_ref(),
+        Statement::CreateIndex(CreateIndexStatement { table_name, .. }) if table_name == "tab"
+    ));
+    assert!(matches!(
+        elements[4].as_ref(),
+        Statement::CreateTrigger(CreateTriggerStatement { table_name, .. }) if table_name == "tab"
+    ));
+    assert!(matches!(
+        elements[5].as_ref(),
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::SelectOnTable,
+            object_names,
+            ..
+        }) if object_names == &vec!["tab".to_string()]
+    ));
     assert!(
         matches!(parse_statement("drop view if exists item_names, recent_items").unwrap(), Statement::DropView(DropViewStatement { if_exists: true, view_names }) if view_names == vec!["item_names", "recent_items"])
     );
@@ -9948,8 +9997,9 @@ fn lower_create_table_rejects_cross_type_foreign_keys() {
     };
     assert!(matches!(
         lower_create_table(&ct, &catalog_with_text_parent_primary_key()),
-        Err(ParseError::FeatureNotSupported(feature))
-            if feature == "FOREIGN KEY with cross-type columns"
+        Err(ParseError::DetailedError { message, detail: Some(detail), sqlstate: "42804", .. })
+            if message == "foreign key constraint \"pets_owner_id_fkey\" cannot be implemented"
+                && detail.contains("incompatible types")
     ));
 }
 
@@ -9964,6 +10014,26 @@ fn parse_create_drop_and_comment_on_domain_statements() {
         create.ty,
         RawTypeName::Builtin(SqlType::new(SqlTypeKind::Int4))
     );
+    assert_eq!(create.default, None);
+    assert_eq!(create.check, None);
+    assert!(!create.not_null);
+
+    let Statement::CreateDomain(create) = parse_statement(
+        "create domain small_mr as int4multirange default '{}' check (upper(value) < 10) not null",
+    )
+    .unwrap() else {
+        panic!("expected create domain");
+    };
+    assert_eq!(
+        create.ty,
+        RawTypeName::Named {
+            name: "int4multirange".into(),
+            array_bounds: 0,
+        }
+    );
+    assert_eq!(create.default.as_deref(), Some("'{}'"));
+    assert_eq!(create.check.as_deref(), Some("upper(value) < 10"));
+    assert!(create.not_null);
 
     let Statement::CreateDomain(create) =
         parse_statement("create domain restrictedrange as int4range check (upper(value) < 10)")
@@ -9997,6 +10067,18 @@ fn parse_create_drop_and_comment_on_domain_statements() {
     };
     assert_eq!(comment.domain_name, "dom_int");
     assert_eq!(comment.comment.as_deref(), Some("hello"));
+}
+
+#[test]
+fn parse_alter_type_rename_to_statement() {
+    let Statement::AlterType(AlterTypeStatement::RenameType(rename)) =
+        parse_statement("alter type bogus rename to bogon").unwrap()
+    else {
+        panic!("expected alter type rename");
+    };
+    assert_eq!(rename.schema_name, None);
+    assert_eq!(rename.type_name, "bogus");
+    assert_eq!(rename.new_type_name, "bogon");
 }
 
 #[test]
@@ -10190,6 +10272,24 @@ fn parse_create_and_drop_type_statements() {
     assert!(!if_exists);
     assert_eq!(type_names, vec!["complex"]);
     assert!(cascade);
+
+    let Statement::AlterTypeOwner(alter_stmt) =
+        parse_statement("alter type complex owner to app_owner").unwrap()
+    else {
+        panic!("expected alter type owner");
+    };
+    assert_eq!(alter_stmt.type_name, "complex");
+    assert_eq!(alter_stmt.new_owner, "app_owner");
+
+    let Statement::RevokeObject(revoke_stmt) =
+        parse_statement("revoke usage on type complex from public").unwrap()
+    else {
+        panic!("expected revoke type usage");
+    };
+    assert_eq!(revoke_stmt.privilege, GrantObjectPrivilege::UsageOnType);
+    assert_eq!(revoke_stmt.object_names, vec!["complex"]);
+    assert_eq!(revoke_stmt.grantee_names, vec!["public"]);
+    assert!(!revoke_stmt.cascade);
 }
 
 #[test]

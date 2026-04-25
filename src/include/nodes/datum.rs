@@ -734,6 +734,7 @@ pub enum Value {
     TsQuery(TsQuery),
     PgLsn(u64),
     Text(CompactString),
+    EnumOid(u32),
     /// Raw pointer to on-page text bytes. Valid while the buffer page is pinned.
     TextRef(*const u8, u32),
     InternalChar(u8),
@@ -1114,6 +1115,7 @@ impl Value {
                 Value::Text(CompactString::new(s))
             }
             Value::Text(s) => Value::Text(s.clone()),
+            Value::EnumOid(v) => Value::EnumOid(*v),
             Value::InternalChar(v) => Value::InternalChar(*v),
             Value::Bool(v) => Value::Bool(*v),
             Value::Array(values) => {
@@ -1209,6 +1211,7 @@ impl Value {
             Value::TsQuery(_) => Some(SqlType::new(SqlTypeKind::TsQuery)),
             Value::PgLsn(_) => Some(SqlType::new(SqlTypeKind::PgLsn)),
             Value::Text(_) | Value::TextRef(_, _) => Some(SqlType::new(SqlTypeKind::Text)),
+            Value::EnumOid(_) => Some(SqlType::new(SqlTypeKind::Enum)),
             Value::InternalChar(_) => Some(SqlType::new(SqlTypeKind::InternalChar)),
             Value::Bool(_) => Some(SqlType::new(SqlTypeKind::Bool)),
             Value::Array(items) => items
@@ -1318,6 +1321,7 @@ impl PartialEq for Value {
             (Value::TsVector(a), Value::TsVector(b)) => a == b,
             (Value::TsQuery(a), Value::TsQuery(b)) => a == b,
             (Value::PgLsn(a), Value::PgLsn(b)) => a == b,
+            (Value::EnumOid(a), Value::EnumOid(b)) => a == b,
             (Value::InternalChar(a), Value::InternalChar(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Record(a), Value::Record(b)) => a == b,
@@ -1512,6 +1516,10 @@ impl std::hash::Hash for Value {
                     std::str::from_utf8_unchecked(std::slice::from_raw_parts(*ptr, *len as usize))
                 };
                 s.hash(state);
+            }
+            Value::EnumOid(v) => {
+                29u8.hash(state);
+                v.hash(state);
             }
             Value::InternalChar(v) => {
                 12u8.hash(state);

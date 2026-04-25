@@ -13,9 +13,11 @@ use crate::backend::utils::cache::catcache::{CatCache, normalize_catalog_name, s
 use crate::include::access::brin::BrinOptions;
 use crate::include::access::gin::GinOptions;
 use crate::include::access::hash::HashOptions;
+use crate::include::catalog::PgTypeRow;
 use crate::include::catalog::{
-    ANYOID, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY, PG_CATALOG_NAMESPACE_OID,
-    PG_CONSTRAINT_RELATION_OID, PgPartitionedTableRow, bootstrap_catalog_kinds,
+    ANYELEMENTOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID, CONSTRAINT_NOTNULL, CONSTRAINT_PRIMARY,
+    PG_CATALOG_NAMESPACE_OID, PG_CONSTRAINT_RELATION_OID, PgPartitionedTableRow,
+    bootstrap_catalog_kinds, builtin_range_spec_by_multirange_oid, builtin_range_spec_by_oid,
     system_catalog_index_by_oid,
 };
 use crate::include::nodes::primnodes::Expr;
@@ -223,18 +225,20 @@ impl IndexRelCacheEntry {
         fn component_score(entry_type: u32, actual_type: Option<u32>) -> Option<u8> {
             match actual_type {
                 None => Some(0),
-                Some(actual) if entry_type == actual => Some(2),
+                Some(actual) if entry_type == actual => Some(4),
                 Some(_) if entry_type == ANYOID => Some(1),
-                Some(_)
-                    if matches!(
-                        entry_type,
-                        crate::include::catalog::ANYARRAYOID
-                            | crate::include::catalog::ANYRANGEOID
-                            | crate::include::catalog::ANYMULTIRANGEOID
-                    ) =>
+                Some(actual)
+                    if entry_type == ANYRANGEOID && builtin_range_spec_by_oid(actual).is_some() =>
                 {
-                    Some(1)
+                    Some(2)
                 }
+                Some(actual)
+                    if entry_type == ANYMULTIRANGEOID
+                        && builtin_range_spec_by_multirange_oid(actual).is_some() =>
+                {
+                    Some(2)
+                }
+                Some(_) if entry_type == ANYELEMENTOID => Some(1),
                 Some(_) => None,
             }
         }
@@ -422,8 +426,20 @@ impl RelCache {
         catcache: &CatCache,
         current_db_oid: u32,
     ) -> Result<Self, CatalogError> {
+        Self::from_catcache_in_db_with_extra_type_rows(catcache, current_db_oid, &[])
+    }
+
+    pub fn from_catcache_in_db_with_extra_type_rows(
+        catcache: &CatCache,
+        current_db_oid: u32,
+        extra_type_rows: &[PgTypeRow],
+    ) -> Result<Self, CatalogError> {
         let mut cache = Self::default();
         let support_lookup = IndexSupportLookup::from_catcache(catcache);
+        let extra_types_by_oid = extra_type_rows
+            .iter()
+            .map(|row| (row.oid, row.sql_type))
+            .collect::<BTreeMap<_, _>>();
         let index_rows = catcache.index_rows();
         let not_null_constraints = catcache
             .constraint_rows()
@@ -455,9 +471,10 @@ impl RelCache {
             let columns = match attrs
                 .iter()
                 .map(|attr| {
-                    let sql_type = catcache
-                        .type_by_oid(attr.atttypid)
-                        .map(|ty| ty.sql_type)
+                    let sql_type = extra_types_by_oid
+                        .get(&attr.atttypid)
+                        .copied()
+                        .or_else(|| catcache.type_by_oid(attr.atttypid).map(|ty| ty.sql_type))
                         .ok_or(CatalogError::Corrupt("unknown atttypid"))?;
                     let mut desc = column_desc(
                         attr.attname.clone(),

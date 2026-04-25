@@ -78,7 +78,13 @@ pub(crate) fn eval_set_returning_call(
             args,
             output_columns,
             ..
-        } => eval_user_defined_set_returning_function(*proc_oid, args, output_columns, slot, ctx),
+        } => execute_user_defined_set_returning_function_by_language(
+            *proc_oid,
+            args,
+            output_columns,
+            slot,
+            ctx,
+        ),
     }?;
     if call.with_ordinality() {
         for (index, row) in rows.iter_mut().enumerate() {
@@ -89,22 +95,21 @@ pub(crate) fn eval_set_returning_call(
     Ok(rows)
 }
 
-fn eval_user_defined_set_returning_function(
+fn execute_user_defined_set_returning_function_by_language(
     proc_oid: u32,
     args: &[Expr],
     output_columns: &[crate::include::nodes::primnodes::QueryColumn],
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
 ) -> Result<Vec<TupleSlot>, ExecError> {
-    let catalog = ctx
-        .catalog
-        .as_ref()
-        .ok_or_else(|| ExecError::DetailedError {
+    let Some(catalog) = ctx.catalog.as_ref() else {
+        return Err(ExecError::DetailedError {
             message: "user-defined functions require executor catalog context".into(),
             detail: None,
             hint: None,
             sqlstate: "0A000",
-        })?;
+        });
+    };
     let row = catalog
         .proc_row_by_oid(proc_oid)
         .ok_or_else(|| ExecError::DetailedError {
@@ -113,17 +118,10 @@ fn eval_user_defined_set_returning_function(
             hint: None,
             sqlstate: "42883",
         })?;
-    match row.prolang {
-        crate::include::catalog::PG_LANGUAGE_SQL_OID => {
-            execute_user_defined_sql_set_returning_function(
-                &row,
-                args,
-                output_columns.len(),
-                slot,
-                ctx,
-            )
-        }
-        _ => execute_user_defined_set_returning_function(proc_oid, args, output_columns, slot, ctx),
+    if row.prolang == crate::include::catalog::PG_LANGUAGE_SQL_OID {
+        execute_user_defined_sql_set_returning_function(&row, args, output_columns, slot, ctx)
+    } else {
+        execute_user_defined_set_returning_function(proc_oid, args, output_columns, slot, ctx)
     }
 }
 

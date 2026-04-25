@@ -1401,6 +1401,17 @@ impl Database {
                     create_stmt,
                     configured_search_path,
                 ),
+            Statement::AlterType(ref alter_stmt) => self.execute_alter_type_stmt_with_search_path(
+                client_id,
+                alter_stmt,
+                configured_search_path,
+            ),
+            Statement::AlterTypeOwner(ref alter_stmt) => self
+                .execute_alter_type_owner_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    configured_search_path,
+                ),
             Statement::CreateView(ref create_stmt) => self
                 .execute_create_view_stmt_with_search_path(
                     client_id,
@@ -1699,9 +1710,11 @@ impl Database {
                 vacuum_stmt,
                 configured_search_path,
             ),
-            Statement::Begin | Statement::Commit | Statement::Rollback => {
-                Ok(StatementResult::AffectedRows(0))
-            }
+            Statement::Begin
+            | Statement::Commit
+            | Statement::Rollback
+            | Statement::Savepoint(_)
+            | Statement::RollbackTo(_) => Ok(StatementResult::AffectedRows(0)),
             Statement::DeclareCursor(_)
             | Statement::Fetch(_)
             | Statement::Move(_)

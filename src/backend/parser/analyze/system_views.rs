@@ -114,6 +114,36 @@ pub(super) fn bind_builtin_system_view(
         );
     }
     let rows = match view.kind {
+        SyntheticSystemViewKind::PgEnum => catalog
+            .enum_rows()
+            .into_iter()
+            .map(|row| {
+                vec![
+                    Value::Int64(i64::from(row.oid)),
+                    Value::Int64(i64::from(row.enumtypid)),
+                    Value::Float64(row.enumsortorder),
+                    Value::Text(row.enumlabel.into()),
+                ]
+            })
+            .collect(),
+        SyntheticSystemViewKind::PgType => catalog
+            .type_rows()
+            .into_iter()
+            .map(|row| {
+                vec![
+                    Value::Int64(i64::from(row.oid)),
+                    Value::Text(row.typname.into()),
+                    Value::Int64(i64::from(row.typnamespace)),
+                    Value::Int64(i64::from(row.typowner)),
+                    Value::Int16(row.typlen),
+                    Value::InternalChar(row.typalign.as_char() as u8),
+                    Value::InternalChar(row.typstorage.as_char() as u8),
+                    Value::Int64(i64::from(row.typrelid)),
+                    Value::Int64(i64::from(row.typelem)),
+                    Value::Int64(i64::from(row.typarray)),
+                ]
+            })
+            .collect(),
         SyntheticSystemViewKind::PgViews => catalog.pg_views_rows(),
         SyntheticSystemViewKind::PgMatviews => catalog.pg_matviews_rows(),
         SyntheticSystemViewKind::PgIndexes => catalog.pg_indexes_rows(),

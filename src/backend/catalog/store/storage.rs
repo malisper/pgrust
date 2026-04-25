@@ -84,6 +84,10 @@ impl CatalogStore {
         scope_db_oid(self.scope)
     }
 
+    pub fn next_oid(&self) -> u32 {
+        self.catalog.next_oid().max(self.control.next_oid)
+    }
+
     pub fn load(base_dir: impl Into<PathBuf>) -> Result<Self, CatalogError> {
         let base_dir = base_dir.into();
         Self::load_shared(base_dir.clone())?;

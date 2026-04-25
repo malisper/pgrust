@@ -191,6 +191,134 @@ pub(crate) fn format_exec_error_hint(e: &ExecError) -> Option<String> {
     }
 }
 
+fn enum_array_type_oid(
+    sql_type: Option<SqlType>,
+    array: &ArrayValue,
+    enum_labels: Option<&HashMap<(u32, u32), String>>,
+) -> Option<u32> {
+    let labels = enum_labels?;
+    if let Some(sql_type) = sql_type
+        && sql_type.is_array
+        && matches!(sql_type.element_type().kind, SqlTypeKind::Enum)
+        && sql_type.element_type().type_oid != 0
+    {
+        return Some(sql_type.element_type().type_oid);
+    }
+    array.element_type_oid.filter(|type_oid| {
+        labels
+            .keys()
+            .any(|(enum_type_oid, _)| enum_type_oid == type_oid)
+    })
+}
+
+fn format_enum_array_value_text(
+    array: &ArrayValue,
+    enum_type_oid: u32,
+    enum_labels: &HashMap<(u32, u32), String>,
+    datetime_config: &DateTimeConfig,
+) -> String {
+    if array.dimensions.is_empty() {
+        return "{}".into();
+    }
+    let mut out = String::new();
+    if array.dimensions.iter().any(|dim| dim.lower_bound != 1) {
+        for dim in &array.dimensions {
+            let upper = dim.lower_bound + dim.length as i32 - 1;
+            out.push('[');
+            out.push_str(&dim.lower_bound.to_string());
+            out.push(':');
+            out.push_str(&upper.to_string());
+            out.push(']');
+        }
+        out.push('=');
+    }
+    out.push_str(&format_enum_array_values_nested(
+        array,
+        0,
+        &mut 0,
+        enum_type_oid,
+        enum_labels,
+        datetime_config,
+    ));
+    out
+}
+
+fn format_enum_array_values_nested(
+    array: &ArrayValue,
+    depth: usize,
+    offset: &mut usize,
+    enum_type_oid: u32,
+    enum_labels: &HashMap<(u32, u32), String>,
+    datetime_config: &DateTimeConfig,
+) -> String {
+    let mut out = String::from("{");
+    let len = array.dimensions[depth].length;
+    for idx in 0..len {
+        if idx > 0 {
+            out.push(',');
+        }
+        if depth + 1 < array.dimensions.len() {
+            out.push_str(&format_enum_array_values_nested(
+                array,
+                depth + 1,
+                offset,
+                enum_type_oid,
+                enum_labels,
+                datetime_config,
+            ));
+            continue;
+        }
+        let item = &array.elements[*offset];
+        *offset += 1;
+        match item {
+            Value::Null => out.push_str("NULL"),
+            Value::EnumOid(label_oid) => {
+                let rendered = enum_labels
+                    .get(&(enum_type_oid, *label_oid))
+                    .cloned()
+                    .unwrap_or_else(|| label_oid.to_string());
+                push_array_text_element(&mut out, &rendered);
+            }
+            Value::PgArray(nested) => out.push_str(&format_enum_array_value_text(
+                nested,
+                enum_type_oid,
+                enum_labels,
+                datetime_config,
+            )),
+            other => {
+                let rendered =
+                    crate::backend::executor::value_io::format_array_value_text_with_config(
+                        &ArrayValue::from_1d(vec![other.clone()]),
+                        datetime_config,
+                    );
+                out.push_str(rendered.trim_start_matches('{').trim_end_matches('}'));
+            }
+        }
+    }
+    out.push('}');
+    out
+}
+
+fn push_array_text_element(out: &mut String, text: &str) {
+    if text.is_empty()
+        || text.eq_ignore_ascii_case("NULL")
+        || text
+            .chars()
+            .any(|ch| matches!(ch, '"' | '\\' | '{' | '}' | ',' | ' ' | '\t' | '\n' | '\r'))
+    {
+        out.push('"');
+        for ch in text.chars() {
+            if matches!(ch, '"' | '\\') {
+                out.push('\\');
+            }
+            out.push(ch);
+        }
+        out.push('"');
+    } else {
+        out.push_str(text);
+    }
+}
+
 pub(crate) fn infer_command_tag(sql: &str, affected: usize) -> String {
     let mut words = sql
         .split_ascii_whitespace()
@@ -235,6 +363,7 @@ pub(crate) fn send_query_result(
     relation_names: Option<&HashMap<u32, String>>,
     proc_names: Option<&HashMap<u32, String>>,
     namespace_names: Option<&HashMap<u32, String>>,
+    enum_labels: Option<&HashMap<(u32, u32), String>>,
 ) -> io::Result<()> {
     send_row_description(stream, columns)?;
     let mut row_buf = Vec::new();
@@ -250,6 +379,7 @@ pub(crate) fn send_query_result(
             relation_names,
             proc_names,
             namespace_names,
+            enum_labels,
         )?;
     }
     send_command_complete(stream, tag)
@@ -466,6 +596,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::PgLsn => crate::include::catalog::PG_LSN_ARRAY_TYPE_OID as i32,
             SqlTypeKind::Range => col.sql_type.type_oid as i32,
             SqlTypeKind::Multirange => col.sql_type.type_oid as i32,
+            SqlTypeKind::Enum => col.sql_type.type_oid as i32,
             SqlTypeKind::Internal => unreachable!("internal arrays are unsupported"),
             SqlTypeKind::Void => unreachable!("void arrays are unsupported"),
             SqlTypeKind::FdwHandler => unreachable!("fdw_handler arrays are unsupported"),
@@ -535,7 +666,8 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             | SqlTypeKind::AnyCompatible
             | SqlTypeKind::AnyCompatibleArray
             | SqlTypeKind::AnyCompatibleRange
-            | SqlTypeKind::AnyCompatibleMultirange => {
+            | SqlTypeKind::AnyCompatibleMultirange
+            | SqlTypeKind::AnyEnum => {
                 unreachable!("polymorphic pseudo-types are not concrete SQL array types")
             }
             SqlTypeKind::AnyArray => unreachable!("anyarray is not a concrete SQL array type"),
@@ -554,6 +686,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
     }
     match col.sql_type.kind {
         SqlTypeKind::AnyElement => (crate::include::catalog::ANYELEMENTOID as i32, 4, -1),
+        SqlTypeKind::AnyEnum => (crate::include::catalog::ANYENUMOID as i32, 4, -1),
         SqlTypeKind::AnyArray => (2277, -1, -1),
         SqlTypeKind::AnyRange => (crate::include::catalog::ANYRANGEOID as i32, -1, -1),
         SqlTypeKind::AnyMultirange => (crate::include::catalog::ANYMULTIRANGEOID as i32, -1, -1),
@@ -579,6 +712,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Record | SqlTypeKind::Composite => {
             (col.sql_type.type_oid as i32, -1, col.sql_type.typmod)
         }
+        SqlTypeKind::Enum => (col.sql_type.type_oid as i32, 4, col.sql_type.typmod),
         SqlTypeKind::Int2 => (21, 2, -1),
         SqlTypeKind::Int4 => (23, 4, -1),
         SqlTypeKind::Int8 => (20, 8, -1),
@@ -716,6 +850,7 @@ pub(crate) fn send_typed_data_row(
     relation_names: Option<&HashMap<u32, String>>,
     proc_names: Option<&HashMap<u32, String>>,
     namespace_names: Option<&HashMap<u32, String>>,
+    enum_labels: Option<&HashMap<(u32, u32), String>>,
 ) -> io::Result<()> {
     buf.clear();
     buf.extend_from_slice(&(values.len() as i16).to_be_bytes());
@@ -1039,6 +1174,15 @@ pub(crate) fn send_typed_data_row(
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }
+            Value::EnumOid(v) => {
+                let rendered = sql_type
+                    .filter(|ty| matches!(ty.kind, SqlTypeKind::Enum))
+                    .and_then(|ty| enum_labels.and_then(|labels| labels.get(&(ty.type_oid, *v))))
+                    .cloned()
+                    .unwrap_or_else(|| v.to_string());
+                buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
+                buf.extend_from_slice(rendered.as_bytes());
+            }
             Value::Bool(true) => {
                 buf.extend_from_slice(&1_i32.to_be_bytes());
                 buf.push(b't');
@@ -1060,13 +1204,26 @@ pub(crate) fn send_typed_data_row(
             }
             Value::Array(items) => {
                 let rendered = if let Some(sql_type) = sql_type.filter(|ty| ty.is_array) {
-                    let array = builtin_type_oid_for_sql_type(sql_type.element_type()).map(
-                        |element_type_oid| {
-                            ArrayValue::from_1d(items.clone())
-                                .with_element_type_oid(element_type_oid)
-                        },
-                    );
-                    array
+                    if matches!(sql_type.element_type().kind, SqlTypeKind::Enum)
+                        && sql_type.element_type().type_oid != 0
+                        && let Some(enum_labels) = enum_labels
+                    {
+                        let array = ArrayValue::from_1d(items.clone())
+                            .with_element_type_oid(sql_type.element_type().type_oid);
+                        format_enum_array_value_text(
+                            &array,
+                            sql_type.element_type().type_oid,
+                            enum_labels,
+                            &float_format.datetime_config,
+                        )
+                    } else {
+                        let array = builtin_type_oid_for_sql_type(sql_type.element_type()).map(
+                            |element_type_oid| {
+                                ArrayValue::from_1d(items.clone())
+                                    .with_element_type_oid(element_type_oid)
+                            },
+                        );
+                        array
                         .as_ref()
                         .map(|array| {
                             crate::backend::executor::value_io::format_array_value_text_with_config(
@@ -1080,6 +1237,7 @@ pub(crate) fn send_typed_data_row(
                                 &float_format.datetime_config,
                             )
                         })
+                    }
                 } else {
                     crate::backend::executor::value_io::format_array_text_with_config(
                         items,
@@ -1090,11 +1248,21 @@ pub(crate) fn send_typed_data_row(
                 buf.extend_from_slice(rendered.as_bytes());
             }
             Value::PgArray(array) => {
-                let rendered =
-                    crate::backend::executor::value_io::format_array_value_text_with_config(
-                        array,
-                        &float_format.datetime_config,
-                    );
+                let rendered = enum_array_type_oid(sql_type, array, enum_labels)
+                    .map(|enum_type_oid| {
+                        format_enum_array_value_text(
+                            array,
+                            enum_type_oid,
+                            enum_labels.expect("enum labels present"),
+                            &float_format.datetime_config,
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        crate::backend::executor::value_io::format_array_value_text_with_config(
+                            array,
+                            &float_format.datetime_config,
+                        )
+                    });
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }
@@ -1137,6 +1305,7 @@ pub(crate) fn format_text_data_value(
         relation_names,
         proc_names,
         namespace_names,
+        None,
     )
     .map_err(|err| ExecError::DetailedError {
         message: format!("could not format COPY data: {err}"),
@@ -2354,6 +2523,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
 
@@ -2385,6 +2555,7 @@ mod tests {
             None,
             Some(&proc_names),
             None,
+            None,
         )
         .unwrap();
 
@@ -2410,6 +2581,7 @@ mod tests {
             &[],
             &mut row_buf,
             FloatFormatOptions::default(),
+            None,
             None,
             None,
             None,
@@ -2440,6 +2612,7 @@ mod tests {
             FloatFormatOptions::default(),
             None,
             Some(&relation_names),
+            None,
             None,
             None,
         )
@@ -2473,6 +2646,7 @@ mod tests {
             None,
             None,
             Some(&namespace_names),
+            None,
         )
         .unwrap();
 
@@ -2501,6 +2675,7 @@ mod tests {
             &[],
             &mut row_buf,
             FloatFormatOptions::default(),
+            None,
             None,
             None,
             None,
@@ -2560,6 +2735,7 @@ mod tests {
             &[1, 1],
             &mut row_buf,
             FloatFormatOptions::default(),
+            None,
             None,
             None,
             None,

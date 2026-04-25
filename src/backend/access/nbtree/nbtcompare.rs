@@ -17,6 +17,7 @@ pub fn compare_bt_values(left: &Value, right: &Value) -> Ordering {
         (Value::Int16(a), Value::Int64(b)) => i64::from(*a).cmp(b),
         (Value::Int32(a), Value::Int16(b)) => a.cmp(&i32::from(*b)),
         (Value::Int32(a), Value::Int32(b)) => a.cmp(b),
+        (Value::EnumOid(a), Value::EnumOid(b)) => a.cmp(b),
         (Value::Int32(a), Value::Int64(b)) => i64::from(*a).cmp(b),
         (Value::Int64(a), Value::Int16(b)) => a.cmp(&i64::from(*b)),
         (Value::Int64(a), Value::Int32(b)) => a.cmp(&i64::from(*b)),

@@ -26,6 +26,94 @@ struct ResolvedIndexSupportMetadata {
     amproc_entries: Vec<Vec<IndexAmProcEntry>>,
 }
 
+pub(super) fn catalog_entry_from_bound_relation(
+    relation: &crate::backend::parser::BoundRelation,
+) -> crate::backend::catalog::CatalogEntry {
+    crate::backend::catalog::CatalogEntry {
+        rel: relation.rel,
+        relation_oid: relation.relation_oid,
+        namespace_oid: relation.namespace_oid,
+        owner_oid: relation.owner_oid,
+        relacl: None,
+        row_type_oid: 0,
+        array_type_oid: 0,
+        reltoastrelid: relation.toast.map(|toast| toast.relation_oid).unwrap_or(0),
+        relpersistence: relation.relpersistence,
+        relkind: relation.relkind,
+        am_oid: crate::include::catalog::relam_for_relkind(relation.relkind),
+        relhassubclass: false,
+        relhastriggers: false,
+        relispartition: relation.relispartition,
+        relispopulated: relation.relispopulated,
+        relpartbound: relation.relpartbound.clone(),
+        relrowsecurity: false,
+        relforcerowsecurity: false,
+        relpages: 0,
+        reltuples: 0.0,
+        relallvisible: 0,
+        relallfrozen: 0,
+        relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
+        desc: relation.desc.clone(),
+        partitioned_table: relation.partitioned_table.clone(),
+        index_meta: None,
+    }
+}
+
+pub(super) fn catalog_entry_from_bound_index_relation(
+    index: &crate::backend::parser::BoundIndexRelation,
+    namespace_oid: u32,
+    owner_oid: u32,
+    relpersistence: char,
+) -> crate::backend::catalog::CatalogEntry {
+    crate::backend::catalog::CatalogEntry {
+        rel: index.rel,
+        relation_oid: index.relation_oid,
+        namespace_oid,
+        owner_oid,
+        relacl: None,
+        row_type_oid: 0,
+        array_type_oid: 0,
+        reltoastrelid: 0,
+        relpersistence,
+        relkind: 'i',
+        am_oid: index.index_meta.am_oid,
+        relhassubclass: false,
+        relhastriggers: false,
+        relispartition: false,
+        relispopulated: true,
+        relpartbound: None,
+        relrowsecurity: false,
+        relforcerowsecurity: false,
+        relpages: 0,
+        reltuples: 0.0,
+        relallvisible: 0,
+        relallfrozen: 0,
+        relfrozenxid: crate::backend::access::transam::xact::FROZEN_TRANSACTION_ID,
+        desc: index.desc.clone(),
+        partitioned_table: None,
+        index_meta: Some(crate::backend::catalog::CatalogIndexMeta {
+            indrelid: index.index_meta.indrelid,
+            indkey: index.index_meta.indkey.clone(),
+            indisunique: index.index_meta.indisunique,
+            indnullsnotdistinct: index.index_meta.indnullsnotdistinct,
+            indisprimary: index.index_meta.indisprimary,
+            indisexclusion: index.index_meta.indisexclusion,
+            indimmediate: index.index_meta.indimmediate,
+            indisvalid: index.index_meta.indisvalid,
+            indisready: index.index_meta.indisready,
+            indislive: index.index_meta.indislive,
+            indclass: index.index_meta.indclass.clone(),
+            indcollation: index.index_meta.indcollation.clone(),
+            indoption: index.index_meta.indoption.clone(),
+            indexprs: None,
+            indpred: None,
+            brin_options: None,
+            gin_options: None,
+            hash_options: None,
+        }),
+    }
+}
+
 fn type_oid_for_temporal_index_type(
     sql_type: crate::backend::parser::SqlType,
     type_rows: &[crate::include::catalog::PgTypeRow],
@@ -465,6 +553,13 @@ impl Database {
                         .map(|multirange_type| multirange_type.type_oid())
                 })
                 .or_else(|| {
+                    (matches!(
+                        sql_type.element_type().kind,
+                        crate::backend::parser::SqlTypeKind::Enum
+                    ) && sql_type.element_type().type_oid != 0)
+                        .then_some(sql_type.element_type().type_oid)
+                })
+                .or_else(|| {
                     type_rows
                         .iter()
                         .find(|row| row.sql_type == sql_type)
@@ -514,6 +609,33 @@ impl Database {
                     access_method.oid,
                     type_oid,
                 )
+                .or_else(|| {
+                    matches!(
+                        sql_type.element_type().kind,
+                        crate::backend::parser::SqlTypeKind::Enum
+                    )
+                    .then(|| {
+                        let fallback_oid = match access_method.oid {
+                            crate::include::catalog::BTREE_AM_OID => {
+                                crate::include::catalog::OID_BTREE_OPCLASS_OID
+                            }
+                            crate::include::catalog::HASH_AM_OID => {
+                                crate::include::catalog::OID_HASH_OPCLASS_OID
+                            }
+                            _ => 0,
+                        };
+                        opclass_rows
+                            .iter()
+                            .find(|row| {
+                                (row.opcmethod == access_method.oid
+                                    && row.opcdefault
+                                    && row.opcintype == crate::include::catalog::ANYENUMOID)
+                                    || row.oid == fallback_oid
+                            })
+                            .cloned()
+                    })
+                    .flatten()
+                })
             }
             .ok_or_else(|| {
                 ExecError::Parse(ParseError::MissingDefaultOpclass {
@@ -737,9 +859,9 @@ impl Database {
         };
         let table_entry = catalog_entry_from_bound_relation(relation);
         let (index_entry, effect) = catalog_guard
-            .create_index_for_catalog_entry_mvcc_with_options(
+            .create_index_for_entry_mvcc_with_options(
                 index_name.to_string(),
-                &table_entry,
+                table_entry,
                 unique,
                 primary,
                 columns,
@@ -790,7 +912,7 @@ impl Database {
                 interrupts,
             };
             let ready_effect = catalog_guard
-                .set_index_ready_valid_mvcc(index_entry.relation_oid, true, true, &readiness_ctx)
+                .set_index_entry_ready_valid_mvcc(&index_entry, true, true, &readiness_ctx)
                 .map_err(|err| match err {
                     CatalogError::Interrupted(reason) => ExecError::Interrupted(reason),
                     _ => ExecError::Parse(ParseError::UnexpectedToken {
@@ -902,7 +1024,7 @@ impl Database {
             interrupts,
         };
         let ready_effect = catalog_guard
-            .set_index_ready_valid_mvcc(index_entry.relation_oid, true, true, &readiness_ctx)
+            .set_index_entry_ready_valid_mvcc(&index_entry, true, true, &readiness_ctx)
             .map_err(|err| match err {
                 CatalogError::Interrupted(reason) => ExecError::Interrupted(reason),
                 _ => ExecError::Parse(ParseError::UnexpectedToken {

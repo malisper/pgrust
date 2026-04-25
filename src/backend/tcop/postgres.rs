@@ -294,6 +294,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if message.starts_with("column \"") && message.contains("WITHOUT OVERLAPS") {
                 return find_without_overlaps_constraint_position(sql);
             }
+            if let Some(position) = find_function_error_position(sql, message) {
+                return Some(position);
+            }
             if let Some(position) = trigger_when_error_position(sql, message) {
                 return Some(position);
             }
@@ -378,6 +381,11 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if message == "wrong flag in flag array: \"\"" {
                 return None;
             }
+            if message == "range lower bound must be less than or equal to range upper bound"
+                && let Some(position) = find_range_cast_literal_position(sql)
+            {
+                return Some(position);
+            }
             if let Some(position) =
                 publication_where_error_position(sql, message, detail.as_deref())
             {
@@ -385,6 +393,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             }
             if message.starts_with("column \"") && message.contains("WITHOUT OVERLAPS") {
                 return find_without_overlaps_constraint_position(sql);
+            }
+            if let Some(position) = find_function_error_position(sql, message) {
+                return Some(position);
             }
             if let Some(position) = trigger_when_error_position(sql, message) {
                 return Some(position);
@@ -734,6 +745,53 @@ fn find_subscript_expression_position(sql: &str) -> Option<usize> {
     let bracket = bytes.iter().position(|byte| *byte == b'[')?;
     let start = find_subscript_base_start(bytes, bracket)?;
     Some(start + 1)
+}
+
+fn find_function_error_position(sql: &str, message: &str) -> Option<usize> {
+    let signature = message
+        .strip_prefix("function ")?
+        .strip_suffix(" does not exist")?;
+    let name = signature
+        .split_once('(')
+        .map_or(signature, |(name, _)| name);
+    find_case_insensitive_token_position(sql, name)
+}
+
+fn find_range_cast_literal_position(sql: &str) -> Option<usize> {
+    let bytes = sql.as_bytes();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        if bytes[idx] != b'\'' {
+            idx += 1;
+            continue;
+        }
+        let literal_start = idx;
+        idx += 1;
+        while idx < bytes.len() {
+            if bytes[idx] == b'\'' {
+                if bytes.get(idx + 1) == Some(&b'\'') {
+                    idx += 2;
+                    continue;
+                }
+                idx += 1;
+                break;
+            }
+            idx += 1;
+        }
+        let rest = sql[idx..].trim_start();
+        let Some(after_cast) = rest.strip_prefix("::") else {
+            continue;
+        };
+        let type_name = after_cast
+            .trim_start()
+            .split(|ch: char| ch.is_ascii_whitespace() || ch == ';' || ch == ')' || ch == ',')
+            .next()
+            .unwrap_or_default();
+        if type_name.to_ascii_lowercase().contains("range") {
+            return Some(literal_start + 1);
+        }
+    }
+    None
 }
 
 fn find_subscript_base_start(bytes: &[u8], bracket: usize) -> Option<usize> {
@@ -1564,6 +1622,7 @@ fn handle_portal_statement(
                         send_command_complete(stream, &format!("MOVE {}", result.processed))?;
                     } else {
                         let catalog = state.session.catalog_lookup(db);
+                        let enum_labels = enum_label_map(&catalog);
                         annotate_query_columns_with_wire_type_oids(&mut result.columns, &catalog);
                         send_query_result(
                             stream,
@@ -1579,6 +1638,7 @@ fn handle_portal_statement(
                             None,
                             None,
                             None,
+                            Some(&enum_labels),
                         )?;
                     }
                 }
@@ -1701,6 +1761,7 @@ fn try_handle_pg_cursors_query(
             bytea_output: state.session.bytea_output(),
             datetime_config: state.session.datetime_config().clone(),
         },
+        None,
         None,
         None,
         None,
@@ -1851,6 +1912,7 @@ fn execute_query_statement(
             let relation_names = relation_name_map(&catalog);
             let proc_names = proc_name_map(&catalog);
             let namespace_names = namespace_name_map(&catalog);
+            let enum_labels = enum_label_map(&catalog);
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
             flush_pending_backend_messages(stream, db, &state.session)?;
             send_query_result(
@@ -1867,6 +1929,7 @@ fn execute_query_statement(
                 Some(&relation_names),
                 Some(&proc_names),
                 Some(&namespace_names),
+                Some(&enum_labels),
             )?;
             Ok(QueryStatementFlow::Continue)
         }
@@ -1945,6 +2008,7 @@ fn try_handle_nonstandard_backslash_select(
             bytea_output: state.session.bytea_output(),
             datetime_config: state.session.datetime_config().clone(),
         },
+        None,
         None,
         None,
         None,
@@ -2091,6 +2155,7 @@ fn execute_streaming_select_statement(
             let relation_names = relation_name_map(&catalog);
             let proc_names = proc_name_map(&catalog);
             let namespace_names = namespace_name_map(&catalog);
+            let enum_labels = enum_label_map(&catalog);
             annotate_query_columns_with_wire_type_oids(&mut columns, &catalog);
             let mut row_buf = Vec::new();
             let mut row_count = 0usize;
@@ -2121,6 +2186,7 @@ fn execute_streaming_select_statement(
                                     Some(&relation_names),
                                     Some(&proc_names),
                                     Some(&namespace_names),
+                                    Some(&enum_labels),
                                 )?;
                                 row_count += 1;
                             }
@@ -2352,6 +2418,19 @@ fn namespace_name_map(catalog: &dyn CatalogLookup) -> HashMap<u32, String> {
         .unwrap_or_default()
 }
 
+fn enum_label_map(catalog: &dyn CatalogLookup) -> HashMap<(u32, u32), String> {
+    catalog
+        .materialize_visible_catalog()
+        .map(|visible| {
+            visible
+                .enum_rows()
+                .into_iter()
+                .map(|row| ((row.enumtypid, row.oid), row.enumlabel))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn try_handle_psql_describe_query(
     stream: &mut impl Write,
     db: &Database,
@@ -2366,6 +2445,7 @@ fn try_handle_psql_describe_query(
     let relation_names = relation_name_map(&catalog);
     let proc_names = proc_name_map(&catalog);
     let namespace_names = namespace_name_map(&catalog);
+    let enum_labels = enum_label_map(&catalog);
     send_query_result(
         stream,
         &columns,
@@ -2380,6 +2460,7 @@ fn try_handle_psql_describe_query(
         Some(&relation_names),
         Some(&proc_names),
         Some(&namespace_names),
+        Some(&enum_labels),
     )?;
     Ok(true)
 }
@@ -2464,6 +2545,12 @@ fn execute_psql_describe_query(
     {
         return psql_describe_statistics_query(db, session, sql);
     }
+    if lower.contains("from pg_catalog.pg_type")
+        && lower.contains("pg_catalog.pg_enum")
+        && lower.contains("typname")
+    {
+        return Some(psql_describe_types_query(db, session, sql));
+    }
     if lower.contains("from pg_catalog.pg_class c, pg_catalog.pg_inherits i")
         && lower.contains("::pg_catalog.regclass")
     {
@@ -2483,6 +2570,73 @@ fn execute_psql_describe_query(
         ));
     }
     None
+}
+
+fn psql_describe_types_query(
+    db: &Database,
+    session: &Session,
+    sql: &str,
+) -> (Vec<QueryColumn>, Vec<Vec<Value>>) {
+    let lower = sql.to_ascii_lowercase();
+    let filter_textrange1 = lower.contains("textrange1");
+    let auth_catalog = db.auth_catalog(session.client_id, None).ok();
+    let mut rows = Vec::new();
+    for entry in db.range_types.read().values() {
+        if filter_textrange1
+            && !entry.name.contains("textrange1")
+            && !entry.multirange_name.contains("textrange1")
+        {
+            continue;
+        }
+        let owner = auth_catalog
+            .as_ref()
+            .and_then(|catalog| catalog.role_by_oid(entry.owner_oid))
+            .map(|role| role.rolname.clone())
+            .unwrap_or_else(|| entry.owner_oid.to_string());
+        rows.push(vec![
+            Value::Text("public".into()),
+            Value::Text(entry.multirange_name.clone().into()),
+            Value::Text(entry.multirange_name.clone().into()),
+            Value::Text("var".into()),
+            Value::Text(String::new().into()),
+            Value::Text(owner.clone().into()),
+            Value::Text(String::new().into()),
+            Value::Text(entry.comment.clone().unwrap_or_default().into()),
+        ]);
+        let acl = if !entry.public_usage && entry.owner_usage {
+            format!("{owner}=U/{owner}")
+        } else {
+            String::new()
+        };
+        rows.push(vec![
+            Value::Text("public".into()),
+            Value::Text(entry.name.clone().into()),
+            Value::Text(entry.name.clone().into()),
+            Value::Text("var".into()),
+            Value::Text(String::new().into()),
+            Value::Text(owner.into()),
+            Value::Text(acl.into()),
+            Value::Text(entry.comment.clone().unwrap_or_default().into()),
+        ]);
+    }
+    rows.sort_by(|left, right| {
+        let left_name = left.get(1).and_then(Value::as_text).unwrap_or_default();
+        let right_name = right.get(1).and_then(Value::as_text).unwrap_or_default();
+        left_name.cmp(right_name)
+    });
+    (
+        vec![
+            QueryColumn::text("Schema"),
+            QueryColumn::text("Name"),
+            QueryColumn::text("Internal name"),
+            QueryColumn::text("Size"),
+            QueryColumn::text("Elements"),
+            QueryColumn::text("Owner"),
+            QueryColumn::text("Access privileges"),
+            QueryColumn::text("Description"),
+        ],
+        rows,
+    )
 }
 
 fn psql_describe_inherits_query_rows(
@@ -2629,6 +2783,7 @@ fn try_handle_statistics_catalog_query(
     let relation_names = relation_name_map(&catalog);
     let proc_names = proc_name_map(&catalog);
     let namespace_names = namespace_name_map(&catalog);
+    let enum_labels = enum_label_map(&catalog);
     send_query_result(
         stream,
         &columns,
@@ -2643,6 +2798,7 @@ fn try_handle_statistics_catalog_query(
         Some(&relation_names),
         Some(&proc_names),
         Some(&namespace_names),
+        Some(&enum_labels),
     )?;
     Ok(true)
 }
@@ -4568,6 +4724,7 @@ fn handle_execute(
                 let relation_names = relation_name_map(&catalog);
                 let proc_names = proc_name_map(&catalog);
                 let namespace_names = namespace_name_map(&catalog);
+                let enum_labels = enum_label_map(&catalog);
                 let mut row_buf = Vec::new();
                 for row in &result.rows {
                     send_typed_data_row(
@@ -4585,6 +4742,7 @@ fn handle_execute(
                         Some(&relation_names),
                         Some(&proc_names),
                         Some(&namespace_names),
+                        Some(&enum_labels),
                     )?;
                 }
                 if result.completed {

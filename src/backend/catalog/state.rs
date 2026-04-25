@@ -1481,8 +1481,15 @@ impl Catalog {
             if type_oid == 0 {
                 return Err(CatalogError::UnknownType("index column type".into()));
             }
-            let opclass_oid = crate::include::catalog::default_btree_opclass_oid(type_oid)
-                .ok_or_else(|| CatalogError::UnknownType("index column type".into()))?;
+            let opclass_oid = if matches!(
+                column.sql_type.element_type().kind,
+                crate::backend::parser::SqlTypeKind::Enum
+            ) {
+                crate::include::catalog::ENUM_BTREE_OPCLASS_OID
+            } else {
+                crate::include::catalog::default_btree_opclass_oid(type_oid)
+                    .ok_or_else(|| CatalogError::UnknownType("index column type".into()))?
+            };
             indclass.push(opclass_oid);
             indcollation.push(0);
             let mut option = 0i16;
@@ -2509,8 +2516,10 @@ fn format_sql_type_name(sql_type: SqlType) -> String {
             | SqlTypeKind::AnyCompatible
             | SqlTypeKind::AnyCompatibleArray
             | SqlTypeKind::AnyCompatibleRange
-            | SqlTypeKind::AnyCompatibleMultirange => "unsupported array",
+            | SqlTypeKind::AnyCompatibleMultirange
+            | SqlTypeKind::AnyEnum => "unsupported array",
             SqlTypeKind::AnyArray => "anyarray",
+            SqlTypeKind::Enum => "unsupported array",
             SqlTypeKind::Record => "unsupported array",
             SqlTypeKind::Composite => "_record",
             SqlTypeKind::Internal => "unsupported array",
@@ -2607,6 +2616,8 @@ fn format_sql_type_name(sql_type: SqlType) -> String {
         SqlTypeKind::AnyCompatibleArray => "anycompatiblearray",
         SqlTypeKind::AnyCompatibleRange => "anycompatiblerange",
         SqlTypeKind::AnyCompatibleMultirange => "anycompatiblemultirange",
+        SqlTypeKind::AnyEnum => "anyenum",
+        SqlTypeKind::Enum => return sql_type.type_oid.to_string(),
         SqlTypeKind::Record => "record",
         SqlTypeKind::Composite => "record",
         SqlTypeKind::Internal => "internal",

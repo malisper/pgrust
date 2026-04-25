@@ -290,6 +290,8 @@ pub enum Statement {
     CreateAggregate(CreateAggregateStatement),
     CreateTrigger(CreateTriggerStatement),
     CreateType(CreateTypeStatement),
+    AlterType(AlterTypeStatement),
+    AlterTypeOwner(AlterTypeOwnerStatement),
     CreateDatabase(CreateDatabaseStatement),
     CreateSchema(CreateSchemaStatement),
     CreateTablespace(CreateTablespaceStatement),
@@ -415,6 +417,8 @@ pub enum Statement {
     Begin,
     Commit,
     Rollback,
+    Savepoint(String),
+    RollbackTo(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -724,6 +728,43 @@ pub struct CreateEnumTypeStatement {
     pub schema_name: Option<String>,
     pub type_name: String,
     pub labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterTypeStatement {
+    AddEnumValue(AlterTypeAddEnumValueStatement),
+    RenameEnumValue(AlterTypeRenameEnumValueStatement),
+    RenameType(AlterTypeRenameTypeStatement),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterEnumValuePosition {
+    Before(String),
+    After(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTypeAddEnumValueStatement {
+    pub schema_name: Option<String>,
+    pub type_name: String,
+    pub if_not_exists: bool,
+    pub label: String,
+    pub position: Option<AlterEnumValuePosition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTypeRenameEnumValueStatement {
+    pub schema_name: Option<String>,
+    pub type_name: String,
+    pub old_label: String,
+    pub new_label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTypeRenameTypeStatement {
+    pub schema_name: Option<String>,
+    pub type_name: String,
+    pub new_type_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1463,9 +1504,17 @@ pub struct CreateDatabaseStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateSchemaStatement {
     pub schema_name: Option<String>,
-    pub auth_role: Option<String>,
+    pub auth_role: Option<RoleSpec>,
     pub if_not_exists: bool,
     pub elements: Vec<Box<Statement>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoleSpec {
+    RoleName(String),
+    CurrentUser,
+    CurrentRole,
+    SessionUser,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2347,6 +2396,7 @@ pub enum GrantObjectPrivilege {
     SelectOnTable,
     AllPrivilegesOnSchema,
     ExecuteOnFunction,
+    UsageOnType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2363,6 +2413,12 @@ pub struct RevokeObjectStatement {
     pub object_names: Vec<String>,
     pub grantee_names: Vec<String>,
     pub cascade: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTypeOwnerStatement {
+    pub type_name: String,
+    pub new_owner: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2657,7 +2713,16 @@ impl ColumnGeneratedKind {
 pub struct CreateDomainStatement {
     pub domain_name: String,
     pub ty: RawTypeName,
+    pub default: Option<String>,
     pub check: Option<String>,
+    pub not_null: bool,
+    pub enum_check: Option<DomainCheckConstraint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DomainCheckConstraint {
+    pub name: Option<String>,
+    pub allowed_values: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2842,8 +2907,10 @@ pub enum SqlTypeKind {
     AnyCompatibleArray,
     AnyCompatibleRange,
     AnyCompatibleMultirange,
+    AnyEnum,
     Record,
     Composite,
+    Enum,
     Void,
     Trigger,
     FdwHandler,

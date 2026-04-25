@@ -36,17 +36,17 @@ use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
 use crate::include::catalog::{
     BOOTSTRAP_SUPERUSER_OID, PgAggregateRow, PgAuthIdRow, PgAuthMembersRow, PgCastRow, PgClassRow,
-    PgCollationRow, PgConstraintRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow, PgOpclassRow,
-    PgOperatorRow, PgPartitionedTableRow, PgProcRow, PgRangeRow, PgRewriteRow,
+    PgCollationRow, PgConstraintRow, PgEnumRow, PgInheritsRow, PgLanguageRow, PgNamespaceRow,
+    PgOpclassRow, PgOperatorRow, PgPartitionedTableRow, PgProcRow, PgRangeRow, PgRewriteRow,
     PgStatisticExtDataRow, PgStatisticExtRow, PgStatisticRow, PgTsConfigRow, PgTsDictRow,
     PgTypeRow, RECORD_TYPE_OID, bootstrap_pg_aggregate_rows, bootstrap_pg_cast_rows,
-    bootstrap_pg_collation_rows, bootstrap_pg_language_rows, bootstrap_pg_namespace_rows,
-    bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows, bootstrap_pg_proc_rows,
-    bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows, builtin_range_rows, builtin_type_rows,
-    is_synthetic_range_proc_name, multirange_type_ref_for_sql_type,
-    proc_oid_for_builtin_aggregate_function, proc_oid_for_builtin_hypothetical_aggregate_function,
-    range_type_ref_for_sql_type, relkind_is_analyzable, synthetic_range_proc_row_by_oid,
-    synthetic_range_proc_rows_by_name,
+    bootstrap_pg_collation_rows, bootstrap_pg_enum_rows, bootstrap_pg_language_rows,
+    bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows, bootstrap_pg_operator_rows,
+    bootstrap_pg_proc_rows, bootstrap_pg_ts_config_rows, bootstrap_pg_ts_dict_rows,
+    builtin_range_rows, builtin_type_rows, is_synthetic_range_proc_name,
+    multirange_type_ref_for_sql_type, proc_oid_for_builtin_aggregate_function,
+    proc_oid_for_builtin_hypothetical_aggregate_function, range_type_ref_for_sql_type,
+    relkind_is_analyzable, synthetic_range_proc_row_by_oid, synthetic_range_proc_rows_by_name,
 };
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
@@ -777,7 +777,7 @@ pub trait CatalogLookup {
             .find(|row| row.typname.eq_ignore_ascii_case(normalized))
     }
 
-    fn domain_check_by_type_oid(&self, _oid: u32) -> Option<String> {
+    fn domain_by_name(&self, _name: &str) -> Option<DomainLookup> {
         None
     }
 
@@ -789,6 +789,37 @@ pub trait CatalogLookup {
         self.range_rows()
             .into_iter()
             .find(|row| row.rngtypid == oid)
+    }
+
+    fn enum_label_oid(&self, _type_oid: u32, _label: &str) -> Option<u32> {
+        None
+    }
+
+    fn enum_label(&self, _type_oid: u32, _label_oid: u32) -> Option<String> {
+        None
+    }
+
+    fn enum_label_by_oid(&self, label_oid: u32) -> Option<String> {
+        self.enum_rows()
+            .into_iter()
+            .find(|row| row.oid == label_oid)
+            .map(|row| row.enumlabel)
+    }
+
+    fn enum_rows(&self) -> Vec<PgEnumRow> {
+        bootstrap_pg_enum_rows().to_vec()
+    }
+
+    fn enum_label_is_committed(&self, _type_oid: u32, _label_oid: u32) -> bool {
+        true
+    }
+
+    fn domain_allowed_enum_label_oids(&self, _domain_oid: u32) -> Option<Vec<u32>> {
+        None
+    }
+
+    fn domain_check_name(&self, _domain_oid: u32) -> Option<String> {
+        None
     }
 
     fn type_oid_for_sql_type(&self, sql_type: SqlType) -> Option<u32> {
@@ -1172,12 +1203,44 @@ impl CatalogLookup for IndexExpressionCatalogLookup<'_> {
         self.inner.type_by_name(name)
     }
 
+    fn domain_by_name(&self, name: &str) -> Option<DomainLookup> {
+        self.inner.domain_by_name(name)
+    }
+
     fn range_rows(&self) -> Vec<PgRangeRow> {
         self.inner.range_rows()
     }
 
     fn range_row_by_type_oid(&self, oid: u32) -> Option<PgRangeRow> {
         self.inner.range_row_by_type_oid(oid)
+    }
+
+    fn enum_label_oid(&self, type_oid: u32, label: &str) -> Option<u32> {
+        self.inner.enum_label_oid(type_oid, label)
+    }
+
+    fn enum_label(&self, type_oid: u32, label_oid: u32) -> Option<String> {
+        self.inner.enum_label(type_oid, label_oid)
+    }
+
+    fn enum_label_by_oid(&self, label_oid: u32) -> Option<String> {
+        self.inner.enum_label_by_oid(label_oid)
+    }
+
+    fn enum_rows(&self) -> Vec<PgEnumRow> {
+        self.inner.enum_rows()
+    }
+
+    fn enum_label_is_committed(&self, type_oid: u32, label_oid: u32) -> bool {
+        self.inner.enum_label_is_committed(type_oid, label_oid)
+    }
+
+    fn domain_allowed_enum_label_oids(&self, domain_oid: u32) -> Option<Vec<u32>> {
+        self.inner.domain_allowed_enum_label_oids(domain_oid)
+    }
+
+    fn domain_check_name(&self, domain_oid: u32) -> Option<String> {
+        self.inner.domain_check_name(domain_oid)
     }
 
     fn type_oid_for_sql_type(&self, sql_type: SqlType) -> Option<u32> {
@@ -1719,6 +1782,15 @@ fn composite_type_rows_from_relcache(relcache: &RelCache) -> Vec<PgTypeRow> {
 
 #[derive(Default)]
 pub(crate) struct LiteralDefaultCatalog;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DomainLookup {
+    pub name: String,
+    pub sql_type: SqlType,
+    pub default: Option<String>,
+    pub check: Option<String>,
+    pub not_null: bool,
+}
 
 impl CatalogLookup for LiteralDefaultCatalog {
     fn lookup_any_relation(&self, _name: &str) -> Option<BoundRelation> {

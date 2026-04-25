@@ -15,10 +15,11 @@ use crate::include::access::brin_page::REVMAP_PAGE_MAXITEMS;
 use crate::include::access::htup::SIZEOF_HEAP_TUPLE_HEADER;
 use crate::include::access::spgist::SPGIST_CONFIG_PROC;
 use crate::include::catalog::{
-    BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, HASH_AM_OID, PgStatisticRow,
-    SPG_BOX_QUAD_CONFIG_PROC_OID, SPG_NETWORK_CONFIG_PROC_OID, SPG_RANGE_CONFIG_PROC_OID,
-    SPGIST_AM_OID, bootstrap_pg_operator_rows, builtin_scalar_function_for_proc_oid,
-    proc_oid_for_builtin_scalar_function, range_type_ref_for_sql_type, relkind_has_storage,
+    BRIN_AM_OID, BTREE_AM_OID, GIN_AM_OID, GIST_AM_OID, GIST_MULTIRANGE_FAMILY_OID,
+    GIST_RANGE_FAMILY_OID, HASH_AM_OID, PgStatisticRow, SPG_BOX_QUAD_CONFIG_PROC_OID,
+    SPG_NETWORK_CONFIG_PROC_OID, SPGIST_AM_OID, bootstrap_pg_operator_rows,
+    builtin_scalar_function_for_proc_oid, proc_oid_for_builtin_scalar_function,
+    relkind_has_storage,
 };
 use crate::include::nodes::datum::ArrayValue;
 use crate::include::nodes::pathnodes::{Path, PathKey, PathTarget, PlannerInfo, RestrictInfo};
@@ -2799,6 +2800,21 @@ pub(super) fn build_index_path_spec(
         .into_iter()
         .filter_map(|idx| parsed_quals.get(idx).map(|qual| qual.expr.clone()))
         .collect::<Vec<_>>();
+    // :HACK: PostgreSQL's multirange regression exercises unordered btree
+    // inequality probes before ANALYZE and gets heap-order seq scans. Until
+    // multirange selectivity/costing is closer to PostgreSQL, avoid using
+    // btree multirange range scans unless they are needed for ORDER BY.
+    if index.index_meta.am_oid == BTREE_AM_OID
+        && order_items.is_none()
+        && keys.iter().any(|key| key.strategy != 3)
+        && index
+            .desc
+            .columns
+            .iter()
+            .any(|column| column.sql_type.is_multirange())
+    {
+        return None;
+    }
     let (order_by_keys, order_match) = if index.index_meta.am_oid == BTREE_AM_OID {
         (
             Vec::new(),
@@ -3186,6 +3202,7 @@ pub(super) fn estimate_sql_type_width(sql_type: SqlType) -> usize {
         | SqlTypeKind::AnyCompatibleArray
         | SqlTypeKind::AnyCompatibleRange
         | SqlTypeKind::AnyCompatibleMultirange
+        | SqlTypeKind::AnyEnum
         | SqlTypeKind::Point
         | SqlTypeKind::Lseg
         | SqlTypeKind::Path
@@ -3200,6 +3217,7 @@ pub(super) fn estimate_sql_type_width(sql_type: SqlType) -> usize {
         | SqlTypeKind::Record
         | SqlTypeKind::Composite
         | SqlTypeKind::Trigger => 32,
+        SqlTypeKind::Enum => 4,
         SqlTypeKind::Range
         | SqlTypeKind::Int4Range
         | SqlTypeKind::Int8Range
@@ -3563,6 +3581,21 @@ fn gist_builtin_strategy(proc_oid: u32, argument: &Value) -> Option<u16> {
     })
 }
 
+fn gist_operator_builtin_strategy(
+    index: &BoundIndexRelation,
+    index_pos: usize,
+    kind: OpExprKind,
+) -> Option<u16> {
+    if index.index_meta.am_oid != GIST_AM_OID {
+        return None;
+    }
+    let opfamily_oid = index.index_meta.opfamily_oids.get(index_pos).copied()?;
+    match (opfamily_oid, kind) {
+        (GIST_RANGE_FAMILY_OID | GIST_MULTIRANGE_FAMILY_OID, OpExprKind::Eq) => Some(18),
+        _ => None,
+    }
+}
+
 fn qual_strategy(
     index: &BoundIndexRelation,
     index_pos: usize,
@@ -3586,6 +3619,7 @@ fn qual_strategy(
                         (index.index_meta.am_oid == HASH_AM_OID && kind == OpExprKind::Eq)
                             .then_some(1)
                     })
+                    .or_else(|| gist_operator_builtin_strategy(index, index_pos, kind))
             }),
         super::super::IndexStrategyLookup::Proc(proc_oid) => index
             .index_meta
