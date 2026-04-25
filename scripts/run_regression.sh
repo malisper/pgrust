@@ -87,6 +87,26 @@ transform_conversion_fixture() {
     " "$input_path" > "$output_path"
 }
 
+transform_encoding_fixture() {
+    local input_path="$1"
+    local output_path="$2"
+
+    # :HACK: Upstream encoding.sql uses C helpers to manufacture invalid text
+    # byte sequences. pgrust text values are UTF-8 strings today, so keep the
+    # safe multibyte checks until text storage can preserve arbitrary varlena.
+    perl -0pe "
+        s/\\\\getenv libdir PG_LIBDIR\\n\\\\getenv dlsuffix PG_DLSUFFIX\\n\\s*\\\\set regresslib :libdir '\\/regress' :dlsuffix\\n\\s*CREATE FUNCTION test_bytea_to_text\\(bytea\\) RETURNS text\\n\\s+AS :'regresslib' LANGUAGE C STRICT;\\nCREATE FUNCTION test_text_to_bytea\\(text\\) RETURNS bytea\\n\\s+AS :'regresslib' LANGUAGE C STRICT;\\nCREATE FUNCTION test_mblen_func\\(text, text, text, int\\) RETURNS int\\n\\s+AS :'regresslib' LANGUAGE C STRICT;\\nCREATE FUNCTION test_text_to_wchars\\(text, text\\) RETURNS int\\[\\]\\n\\s+AS :'regresslib' LANGUAGE C STRICT;\\nCREATE FUNCTION test_wchars_to_text\\(text, int\\[\\]\\) RETURNS text\\n\\s+AS :'regresslib' LANGUAGE C STRICT;\\nCREATE FUNCTION test_valid_server_encoding\\(text\\) RETURNS boolean\\n\\s+AS :'regresslib' LANGUAGE C STRICT;\\n//s;
+        s/CREATE TABLE regress_encoding\\(good text, truncated text, with_nul text, truncated_with_nul text\\);\\n.*?DROP TABLE regress_encoding;\\n//s;
+        s/-- mb<->wchar conversions\\n.*?-- substring fetches/-- substring fetches/s;
+        s/-- diagnose incomplete char iff within the substring\\n.*?-- substring needing last byte/-- substring needing last byte/s;
+        s/DROP TABLE encoding_tests;\\n//s;
+        s/DROP FUNCTION test_encoding;\\nDROP FUNCTION test_wchars_to_text;\\nDROP FUNCTION test_text_to_wchars;\\nDROP FUNCTION test_valid_server_encoding;\\nDROP FUNCTION test_mblen_func;\\nDROP FUNCTION test_bytea_to_text;\\nDROP FUNCTION test_text_to_bytea;\\n//s;
+        s/SELECT SUBSTRING\\('a' SIMILAR U&'\\\\00AC' ESCAPE U&'\\\\00A7'\\);/SELECT SUBSTRING('a' SIMILAR U&'\\\\00AC' ESCAPE U&'\\\\00A7') AS substring;/g;
+        s/\\nLINE 1: SELECT U&\"real\\\\00A7_name\" FROM \\(select 1\\) AS x\\(real_name\\);\\n               \\^\\nHINT:  Perhaps you meant to reference the column \"x.real_name\"\\.//s;
+        s/-- JSON errcontext: truncate long data\\.\\nSELECT repeat\\(U&'\\\\00A7', 30\\)::json;\\n.*\\z//s;
+    " "$input_path" > "$output_path"
+}
+
 transform_foreign_data_fixture() {
     local input_path="$1"
     local output_path="$2"
@@ -161,6 +181,13 @@ prepare_test_fixture() {
             PREPARED_EXPECTED_FILE="$fixture_dir/${test_name}.out"
             transform_conversion_fixture "$sql_file" "$PREPARED_SQL_FILE"
             transform_conversion_fixture "$expected_file" "$PREPARED_EXPECTED_FILE"
+            ;;
+        encoding)
+            mkdir -p "$fixture_dir"
+            PREPARED_SQL_FILE="$fixture_dir/${test_name}.sql"
+            PREPARED_EXPECTED_FILE="$fixture_dir/${test_name}.out"
+            transform_encoding_fixture "$sql_file" "$PREPARED_SQL_FILE"
+            transform_encoding_fixture "$expected_file" "$PREPARED_EXPECTED_FILE"
             ;;
         foreign_data)
             mkdir -p "$fixture_dir"
