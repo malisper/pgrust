@@ -729,6 +729,7 @@ pub struct CreateEnumTypeStatement {
 pub enum AlterTypeStatement {
     AddEnumValue(AlterTypeAddEnumValueStatement),
     RenameEnumValue(AlterTypeRenameEnumValueStatement),
+    RenameType(AlterTypeRenameTypeStatement),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -752,6 +753,13 @@ pub struct AlterTypeRenameEnumValueStatement {
     pub type_name: String,
     pub old_label: String,
     pub new_label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterTypeRenameTypeStatement {
+    pub schema_name: Option<String>,
+    pub type_name: String,
+    pub new_type_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

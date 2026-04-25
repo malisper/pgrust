@@ -27785,6 +27785,15 @@ fn create_enum_type_exposes_catalog_rows_and_can_back_table_columns() {
             vec![Value::Text("i3".into()), Value::Float64(4.0)],
         ]
     );
+    db.execute(1, "create type rename_me as enum ('one', 'two')")
+        .unwrap();
+    db.execute(1, "alter type rename_me rename to renamed_enum")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select 'one'::renamed_enum::text"),
+        vec![vec![Value::Text("one".into())]]
+    );
+    assert!(db.execute(1, "select 'one'::rename_me").is_err());
 }
 
 #[test]

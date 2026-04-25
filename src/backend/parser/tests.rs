@@ -9827,6 +9827,18 @@ fn parse_create_drop_and_comment_on_domain_statements() {
 }
 
 #[test]
+fn parse_alter_type_rename_to_statement() {
+    let Statement::AlterType(AlterTypeStatement::RenameType(rename)) =
+        parse_statement("alter type bogus rename to bogon").unwrap()
+    else {
+        panic!("expected alter type rename");
+    };
+    assert_eq!(rename.schema_name, None);
+    assert_eq!(rename.type_name, "bogus");
+    assert_eq!(rename.new_type_name, "bogon");
+}
+
+#[test]
 fn parse_create_drop_and_comment_on_conversion_statements() {
     let Statement::CreateConversion(create) = parse_statement(
         "create default conversion public.mydef for 'LATIN1' to 'UTF8' from iso8859_1_to_utf8",

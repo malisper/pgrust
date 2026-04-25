@@ -4,9 +4,9 @@ use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{ColumnDesc, RelationDesc, StatementResult};
 use crate::backend::parser::{
     AlterEnumValuePosition, AlterTypeAddEnumValueStatement, AlterTypeRenameEnumValueStatement,
-    AlterTypeStatement, CatalogLookup, CreateCompositeTypeStatement, CreateEnumTypeStatement,
-    CreateRangeTypeStatement, CreateTypeStatement, DropTypeStatement, ParseError,
-    resolve_raw_type_name,
+    AlterTypeRenameTypeStatement, AlterTypeStatement, CatalogLookup, CreateCompositeTypeStatement,
+    CreateEnumTypeStatement, CreateRangeTypeStatement, CreateTypeStatement, DropTypeStatement,
+    ParseError, resolve_raw_type_name,
 };
 use crate::backend::utils::misc::notices::push_notice;
 use crate::pgrust::database::ddl::{
@@ -314,6 +314,13 @@ impl Database {
                     cid,
                     configured_search_path,
                 ),
+            AlterTypeStatement::RenameType(stmt) => self.execute_alter_type_rename_type_stmt(
+                client_id,
+                stmt,
+                xid,
+                cid,
+                configured_search_path,
+            ),
         }
     }
 
@@ -676,6 +683,59 @@ impl Database {
             });
         }
         entry.labels[label_index].label = stmt.new_label.clone();
+        self.plan_cache.invalidate_all();
+        Ok(StatementResult::AffectedRows(0))
+    }
+
+    fn execute_alter_type_rename_type_stmt(
+        &self,
+        client_id: ClientId,
+        stmt: &AlterTypeRenameTypeStatement,
+        xid: TransactionId,
+        cid: CommandId,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        if stmt.new_type_name.contains('.') {
+            return Err(ExecError::Parse(ParseError::UnsupportedQualifiedName(
+                stmt.new_type_name.clone(),
+            )));
+        }
+        let type_oid = self.resolve_enum_type_oid(
+            client_id,
+            Some((xid, cid)),
+            stmt.schema_name.as_deref(),
+            &stmt.type_name,
+            configured_search_path,
+        )?;
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        let visible_type_rows = catalog.type_rows();
+        let mut enum_types = self.enum_types.write();
+        let old_key = enum_types
+            .iter()
+            .find_map(|(key, entry)| (entry.oid == type_oid).then_some(key.clone()))
+            .ok_or_else(|| type_does_not_exist_error(&stmt.type_name))?;
+        let mut entry = enum_types
+            .remove(&old_key)
+            .ok_or_else(|| type_does_not_exist_error(&stmt.type_name))?;
+        let new_name = stmt.new_type_name.to_ascii_lowercase();
+        let new_key = match stmt.schema_name.as_deref() {
+            Some(schema_name) => format!("{}.{}", schema_name.to_ascii_lowercase(), new_name),
+            None => format!("public.{new_name}"),
+        };
+        if visible_type_rows.into_iter().any(|row| {
+            row.oid != entry.oid
+                && row.typelem == 0
+                && row.typnamespace == entry.namespace_oid
+                && row.typname.eq_ignore_ascii_case(&new_name)
+        }) || enum_types.values().any(|existing| {
+            existing.namespace_oid == entry.namespace_oid
+                && existing.name.eq_ignore_ascii_case(&new_name)
+        }) {
+            enum_types.insert(old_key, entry);
+            return Err(type_already_exists_error(&new_name));
+        }
+        entry.name = new_name;
+        enum_types.insert(new_key, entry);
         self.plan_cache.invalidate_all();
         Ok(StatementResult::AffectedRows(0))
     }

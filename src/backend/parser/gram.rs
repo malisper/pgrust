@@ -6774,6 +6774,28 @@ fn build_alter_type_statement(sql: &str) -> Result<AlterTypeStatement, ParseErro
     }
     if keyword_at_start(rest, "rename") {
         rest = consume_keyword(rest, "rename").trim_start();
+        if keyword_at_start(rest, "to") {
+            let new_name = consume_keyword(rest, "to").trim();
+            if new_name.is_empty() {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "new type name",
+                    actual: rest.into(),
+                });
+            }
+            if new_name.split_whitespace().count() != 1 || new_name.contains('.') {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "unqualified new type name",
+                    actual: new_name.into(),
+                });
+            }
+            return Ok(AlterTypeStatement::RenameType(
+                AlterTypeRenameTypeStatement {
+                    schema_name,
+                    type_name,
+                    new_type_name: new_name.to_string(),
+                },
+            ));
+        }
         if !keyword_at_start(rest, "value") {
             return Err(ParseError::UnexpectedToken {
                 expected: "VALUE",
