@@ -346,6 +346,17 @@ fn finalize_set_returning_call(
             relid: finalize_expr_subqueries(relid, catalog, subplans),
             output_columns,
         },
+        SetReturningCall::PgLockStatus {
+            func_oid,
+            func_variadic,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::PgLockStatus {
+            func_oid,
+            func_variadic,
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::Unnest {
             func_oid,
             func_variadic,
@@ -782,6 +793,17 @@ fn rebase_set_returning_call_subplan_ids(call: SetReturningCall, base: usize) ->
             relid: rebase_expr_subplan_ids(relid, base),
             output_columns,
         },
+        SetReturningCall::PgLockStatus {
+            func_oid,
+            func_variadic,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::PgLockStatus {
+            func_oid,
+            func_variadic,
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::Unnest {
             func_oid,
             func_variadic,
@@ -1165,8 +1187,8 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             right,
             kind,
             merge_clauses,
-            outer_sort_keys,
-            inner_sort_keys,
+            outer_merge_keys,
+            inner_merge_keys,
             join_qual,
             qual,
         } => Plan::MergeJoin {
@@ -1178,11 +1200,11 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
                 .into_iter()
                 .map(|expr| rebase_expr_subplan_ids(expr, base))
                 .collect(),
-            outer_sort_keys: outer_sort_keys
+            outer_merge_keys: outer_merge_keys
                 .into_iter()
                 .map(|expr| rebase_expr_subplan_ids(expr, base))
                 .collect(),
-            inner_sort_keys: inner_sort_keys
+            inner_merge_keys: inner_merge_keys
                 .into_iter()
                 .map(|expr| rebase_expr_subplan_ids(expr, base))
                 .collect(),
@@ -1531,8 +1553,8 @@ pub(super) fn finalize_plan_subqueries(
             right,
             kind,
             merge_clauses,
-            outer_sort_keys,
-            inner_sort_keys,
+            outer_merge_keys,
+            inner_merge_keys,
             join_qual,
             qual,
         } => Plan::MergeJoin {
@@ -1544,11 +1566,11 @@ pub(super) fn finalize_plan_subqueries(
                 .into_iter()
                 .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
                 .collect(),
-            outer_sort_keys: outer_sort_keys
+            outer_merge_keys: outer_merge_keys
                 .into_iter()
                 .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
                 .collect(),
-            inner_sort_keys: inner_sort_keys
+            inner_merge_keys: inner_merge_keys
                 .into_iter()
                 .map(|expr| finalize_expr_subqueries(expr, catalog, subplans))
                 .collect(),

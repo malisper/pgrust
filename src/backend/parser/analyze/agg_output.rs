@@ -285,6 +285,7 @@ fn query_references_local_cte(
                     } => vec![start, stop, step],
                     SetReturningCall::PartitionTree { relid, .. }
                     | SetReturningCall::PartitionAncestors { relid, .. } => vec![relid],
+                    SetReturningCall::PgLockStatus { .. } => Vec::new(),
                     SetReturningCall::Unnest { args, .. }
                     | SetReturningCall::JsonTableFunction { args, .. }
                     | SetReturningCall::JsonRecordFunction { args, .. }

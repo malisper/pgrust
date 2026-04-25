@@ -43,6 +43,7 @@ impl Default for FloatFormatOptions {
 
 pub(crate) fn format_exec_error(e: &ExecError) -> String {
     match e {
+        ExecError::WithContext { source, .. } => format_exec_error(source),
         ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
             expected: "text or bit argument",
             actual,
@@ -151,6 +152,7 @@ pub(crate) fn format_exec_error(e: &ExecError) -> String {
 
 pub(crate) fn format_exec_error_hint(e: &ExecError) -> Option<String> {
     match e {
+        ExecError::WithContext { source, .. } => format_exec_error_hint(source),
         ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
             expected: "text or bit argument",
             actual,

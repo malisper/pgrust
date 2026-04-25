@@ -6,7 +6,9 @@ use crate::backend::utils::cache::system_view_registry::{
 };
 use crate::backend::utils::trigger::format_trigger_definition;
 use crate::include::nodes::parsenodes::{JoinTreeNode, RangeTblEntryKind};
-use crate::include::nodes::primnodes::{attrno_index, is_system_attr, set_returning_call_exprs};
+use crate::include::nodes::primnodes::{
+    SetReturningCall, attrno_index, is_system_attr, set_returning_call_exprs,
+};
 
 const INFO_SCHEMA_NAME: &str = "information_schema";
 const REGRESSION_DATABASE_NAME: &str = "regression";
@@ -76,11 +78,41 @@ fn build_values_view(
     ))
 }
 
+fn build_function_view(
+    name: &str,
+    output_columns: Vec<QueryColumn>,
+    call: SetReturningCall,
+) -> Option<(AnalyzedFrom, BoundScope)> {
+    let desc = RelationDesc {
+        columns: output_columns
+            .iter()
+            .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+            .collect(),
+    };
+    Some((
+        AnalyzedFrom::function(call),
+        scope_for_relation(Some(name), &desc),
+    ))
+}
+
 pub(super) fn bind_builtin_system_view(
     name: &str,
     catalog: &dyn CatalogLookup,
 ) -> Option<(AnalyzedFrom, BoundScope)> {
     let view = synthetic_system_view(name)?;
+    if matches!(view.kind, SyntheticSystemViewKind::PgLocks) {
+        let output_columns = view.output_columns();
+        return build_function_view(
+            name,
+            output_columns.clone(),
+            SetReturningCall::PgLockStatus {
+                func_oid: 1371,
+                func_variadic: false,
+                output_columns,
+                with_ordinality: false,
+            },
+        );
+    }
     let rows = match view.kind {
         SyntheticSystemViewKind::PgViews => catalog.pg_views_rows(),
         SyntheticSystemViewKind::PgMatviews => catalog.pg_matviews_rows(),
@@ -93,7 +125,7 @@ pub(super) fn bind_builtin_system_view(
         SyntheticSystemViewKind::PgStatioUserTables => catalog.pg_statio_user_tables_rows(),
         SyntheticSystemViewKind::PgStatUserFunctions => catalog.pg_stat_user_functions_rows(),
         SyntheticSystemViewKind::PgStatIo => catalog.pg_stat_io_rows(),
-        SyntheticSystemViewKind::PgLocks => catalog.pg_locks_rows(),
+        SyntheticSystemViewKind::PgLocks => unreachable!("pg_locks is bound as pg_lock_status()"),
         SyntheticSystemViewKind::InformationSchemaTables => information_schema_table_rows(catalog),
         SyntheticSystemViewKind::InformationSchemaViews => information_schema_view_rows(catalog),
         SyntheticSystemViewKind::InformationSchemaColumns => {

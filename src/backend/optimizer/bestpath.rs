@@ -149,5 +149,8 @@ fn pathkeys_equivalent(left: &PathKey, right: &PathKey) -> bool {
     } else {
         left.expr == right.expr
     };
-    same_identity && left.descending == right.descending && left.nulls_first == right.nulls_first
+    same_identity
+        && left.descending == right.descending
+        && left.nulls_first.unwrap_or(left.descending)
+            == right.nulls_first.unwrap_or(right.descending)
 }

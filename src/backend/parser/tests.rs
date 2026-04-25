@@ -6584,6 +6584,23 @@ fn build_join_plan_resolves_qualified_columns() {
                             if op.op == crate::include::nodes::primnodes::OpExprKind::Eq
                     ));
                 }
+                Plan::MergeJoin {
+                    kind,
+                    merge_clauses,
+                    join_qual,
+                    qual,
+                    ..
+                } => {
+                    assert_eq!(*kind, JoinType::Inner);
+                    assert_eq!(merge_clauses.len(), 1);
+                    assert!(join_qual.is_empty());
+                    assert!(qual.is_empty());
+                    assert!(matches!(
+                        merge_clauses.first(),
+                        Some(Expr::Op(op))
+                            if op.op == crate::include::nodes::primnodes::OpExprKind::Eq
+                    ));
+                }
                 other => panic!("expected join, got {:?}", other),
             }
         }
@@ -10771,31 +10788,35 @@ fn analyze_json_each_uses_pg_proc_out_metadata_for_output_columns() {
 
 #[test]
 fn analyze_pg_locks_uses_expected_columns_and_types() {
-    let stmt = parse_select("select * from pg_locks").unwrap();
-    let (query, _) =
-        analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
+    let expected = pg_locks_expected_columns_and_types();
+    for sql in ["select * from pg_locks", "select * from pg_lock_status()"] {
+        let stmt = parse_select(sql).unwrap();
+        let (query, _) =
+            analyze_select_query_with_outer(&stmt, &catalog(), &[], None, None, &[], &[]).unwrap();
 
-    assert_eq!(
-        query_column_names_and_types(&query),
-        vec![
-            ("locktype".into(), SqlType::new(SqlTypeKind::Text)),
-            ("database".into(), SqlType::new(SqlTypeKind::Oid)),
-            ("relation".into(), SqlType::new(SqlTypeKind::Oid)),
-            ("page".into(), SqlType::new(SqlTypeKind::Int4)),
-            ("tuple".into(), SqlType::new(SqlTypeKind::Int2)),
-            ("virtualxid".into(), SqlType::new(SqlTypeKind::Text)),
-            ("transactionid".into(), SqlType::new(SqlTypeKind::Xid)),
-            ("classid".into(), SqlType::new(SqlTypeKind::Oid)),
-            ("objid".into(), SqlType::new(SqlTypeKind::Oid)),
-            ("objsubid".into(), SqlType::new(SqlTypeKind::Int2)),
-            ("virtualtransaction".into(), SqlType::new(SqlTypeKind::Text)),
-            ("pid".into(), SqlType::new(SqlTypeKind::Int4)),
-            ("mode".into(), SqlType::new(SqlTypeKind::Text)),
-            ("granted".into(), SqlType::new(SqlTypeKind::Bool)),
-            ("fastpath".into(), SqlType::new(SqlTypeKind::Bool)),
-            ("waitstart".into(), SqlType::new(SqlTypeKind::TimestampTz)),
-        ]
-    );
+        assert_eq!(query_column_names_and_types(&query), expected, "{sql}");
+    }
+}
+
+fn pg_locks_expected_columns_and_types() -> Vec<(String, SqlType)> {
+    vec![
+        ("locktype".into(), SqlType::new(SqlTypeKind::Text)),
+        ("database".into(), SqlType::new(SqlTypeKind::Oid)),
+        ("relation".into(), SqlType::new(SqlTypeKind::Oid)),
+        ("page".into(), SqlType::new(SqlTypeKind::Int4)),
+        ("tuple".into(), SqlType::new(SqlTypeKind::Int2)),
+        ("virtualxid".into(), SqlType::new(SqlTypeKind::Text)),
+        ("transactionid".into(), SqlType::new(SqlTypeKind::Xid)),
+        ("classid".into(), SqlType::new(SqlTypeKind::Oid)),
+        ("objid".into(), SqlType::new(SqlTypeKind::Oid)),
+        ("objsubid".into(), SqlType::new(SqlTypeKind::Int2)),
+        ("virtualtransaction".into(), SqlType::new(SqlTypeKind::Text)),
+        ("pid".into(), SqlType::new(SqlTypeKind::Int4)),
+        ("mode".into(), SqlType::new(SqlTypeKind::Text)),
+        ("granted".into(), SqlType::new(SqlTypeKind::Bool)),
+        ("fastpath".into(), SqlType::new(SqlTypeKind::Bool)),
+        ("waitstart".into(), SqlType::new(SqlTypeKind::TimestampTz)),
+    ]
 }
 
 #[test]

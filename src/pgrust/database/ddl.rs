@@ -815,6 +815,9 @@ pub(crate) fn format_sql_type_name(sql_type: SqlType) -> String {
             .unwrap_or("multirange")
             .to_string();
     }
+    if let Some((precision, scale)) = sql_type.numeric_precision_scale() {
+        return format!("numeric({precision},{scale})");
+    }
     if !sql_type.is_array
         && sql_type.type_oid != 0
         && let Some(name) = builtin_type_name_for_oid(sql_type.type_oid)
@@ -896,6 +899,24 @@ pub(crate) fn format_sql_type_name(sql_type: SqlType) -> String {
         SqlTypeKind::Multirange => unreachable!("multirange handled above"),
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_sql_type_name;
+    use crate::backend::parser::SqlType;
+
+    #[test]
+    fn format_sql_type_name_includes_numeric_typmod() {
+        assert_eq!(
+            format_sql_type_name(SqlType::with_numeric_precision_scale(3, -6)),
+            "numeric(3,-6)"
+        );
+        assert_eq!(
+            format_sql_type_name(SqlType::with_numeric_precision_scale(12, 4)),
+            "numeric(12,4)"
+        );
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

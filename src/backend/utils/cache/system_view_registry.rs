@@ -245,6 +245,8 @@ const PG_LOCKS_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::new("waitstart", SqlType::new(SqlTypeKind::TimestampTz)),
 ];
 
+const PG_LOCKS_DEFINITION_SQL: &str = "SELECT * FROM pg_catalog.pg_lock_status() AS L";
+
 const INFORMATION_SCHEMA_TRIGGERS_COLUMNS: &[SyntheticSystemViewColumn] = &[
     SyntheticSystemViewColumn::text("trigger_catalog"),
     SyntheticSystemViewColumn::text("trigger_schema"),
@@ -452,7 +454,7 @@ const SYNTHETIC_SYSTEM_VIEWS: [SyntheticSystemView; 16] = [
         canonical_name: "pg_catalog.pg_locks",
         aliases: PG_LOCKS_ALIASES,
         columns: PG_LOCKS_COLUMNS,
-        view_definition_sql: "",
+        view_definition_sql: PG_LOCKS_DEFINITION_SQL,
     },
     SyntheticSystemView {
         kind: SyntheticSystemViewKind::InformationSchemaTables,

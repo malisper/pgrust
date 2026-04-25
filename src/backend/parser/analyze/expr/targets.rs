@@ -695,6 +695,33 @@ fn bind_select_list_srf_call(
                         with_ordinality: false,
                     })
                 } else if let Some(resolved) = resolved.as_ref() {
+                    if matches!(resolved.srf_impl, Some(ResolvedSrfImpl::PgLockStatus)) {
+                        if !args.is_empty() {
+                            return Err(ParseError::UnexpectedToken {
+                                expected: "pg_lock_status()",
+                                actual: format!("pg_lock_status with {} arguments", args.len()),
+                            });
+                        }
+                        let output_columns = match &resolved.row_shape {
+                            ResolvedFunctionRowShape::OutParameters(columns)
+                            | ResolvedFunctionRowShape::NamedComposite { columns, .. } => {
+                                columns.clone()
+                            }
+                            ResolvedFunctionRowShape::AnonymousRecord
+                            | ResolvedFunctionRowShape::None => {
+                                return Err(ParseError::UnexpectedToken {
+                                    expected: "pg_lock_status OUT parameter metadata",
+                                    actual: other.to_string(),
+                                });
+                            }
+                        };
+                        return Ok(SetReturningCall::PgLockStatus {
+                            func_oid: resolved.proc_oid,
+                            func_variadic: resolved.func_variadic,
+                            output_columns,
+                            with_ordinality: false,
+                        });
+                    }
                     if let Some(
                         srf_impl @ (ResolvedSrfImpl::PartitionTree
                         | ResolvedSrfImpl::PartitionAncestors),

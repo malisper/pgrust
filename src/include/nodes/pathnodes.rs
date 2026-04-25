@@ -445,10 +445,9 @@ pub enum Path {
         right: Box<Path>,
         kind: JoinType,
         merge_clauses: Vec<RestrictInfo>,
-        outer_sort_keys: Vec<Expr>,
-        inner_sort_keys: Vec<Expr>,
+        outer_merge_keys: Vec<Expr>,
+        inner_merge_keys: Vec<Expr>,
         restrict_clauses: Vec<RestrictInfo>,
-        pathkeys: Vec<PathKey>,
     },
     Projection {
         plan_info: PlanEstimate,
