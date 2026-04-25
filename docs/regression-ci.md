@@ -72,14 +72,23 @@ can be affected by earlier failed setup. That is intentional: PostgreSQL
 regression files are mini-scenarios, and splitting them into independent
 statements would change the coverage.
 
-For cross-file dependencies documented by PostgreSQL's schedule, isolated
-workers replay the prerequisite SQL files in the same worker database before
-running the dependent file. For example, `aggregates.sql` replays
+For explicit named cross-file dependencies documented by PostgreSQL's schedule,
+isolated workers replay the prerequisite SQL files in the same worker database
+before running the dependent file. For example, `aggregates.sql` replays
 `create_aggregate.sql` first in the same isolated worker.
 
 When PostgreSQL adds or changes schedule dependency comments, update
 `direct_test_dependencies` in `scripts/run_regression.sh` so isolated workers
 keep matching the upstream schedule assumptions.
+
+PostgreSQL also documents a broader dependency class: many later tests can
+depend on `create_index.sql` because their output order, `EXPLAIN` output, or
+catalog-visible index objects differ when those indexes are absent. The current
+isolated runner does not replay `create_index.sql` for every later test because
+doing that naively would add a large setup cost to most workers. If those missing
+indexes become a material source of noise, prefer adding a staged base-cluster
+snapshot after `create_index.sql` over replaying the whole file before every
+test.
 
 ## Query Match Rate
 
