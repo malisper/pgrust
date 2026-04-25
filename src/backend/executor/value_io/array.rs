@@ -545,12 +545,15 @@ fn array_element_layout(
         SqlTypeKind::Int2 => (2, AttributeAlign::Short),
         SqlTypeKind::Int4
         | SqlTypeKind::Oid
+        | SqlTypeKind::RegProc
         | SqlTypeKind::RegClass
         | SqlTypeKind::RegType
         | SqlTypeKind::RegRole
         | SqlTypeKind::RegNamespace
+        | SqlTypeKind::RegOper
         | SqlTypeKind::RegOperator
         | SqlTypeKind::RegProcedure
+        | SqlTypeKind::RegCollation
         | SqlTypeKind::Xid
         | SqlTypeKind::RegConfig
         | SqlTypeKind::RegDictionary
@@ -872,12 +875,15 @@ fn decode_array_element_value(
         }
         SqlTypeKind::Int4
         | SqlTypeKind::Oid
+        | SqlTypeKind::RegProc
         | SqlTypeKind::RegClass
         | SqlTypeKind::RegType
         | SqlTypeKind::RegRole
         | SqlTypeKind::RegNamespace
+        | SqlTypeKind::RegOper
         | SqlTypeKind::RegOperator
         | SqlTypeKind::RegProcedure
+        | SqlTypeKind::RegCollation
         | SqlTypeKind::Xid
         | SqlTypeKind::RegConfig
         | SqlTypeKind::RegDictionary => {

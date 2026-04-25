@@ -156,12 +156,15 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         | SqlTypeKind::Int8
         | SqlTypeKind::Money
         | SqlTypeKind::Oid
+        | SqlTypeKind::RegProc
         | SqlTypeKind::RegClass
         | SqlTypeKind::RegType
         | SqlTypeKind::RegRole
         | SqlTypeKind::RegNamespace
+        | SqlTypeKind::RegOper
         | SqlTypeKind::RegOperator
         | SqlTypeKind::RegProcedure
+        | SqlTypeKind::RegCollation
         | SqlTypeKind::Xid
         | SqlTypeKind::RegConfig
         | SqlTypeKind::RegDictionary
@@ -236,12 +239,15 @@ pub(crate) fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         // it gets a dedicated fixed-width runtime representation.
         SqlTypeKind::Name => ScalarType::Text,
         SqlTypeKind::Oid => ScalarType::Int32,
+        SqlTypeKind::RegProc => ScalarType::Int32,
         SqlTypeKind::RegClass => ScalarType::Int32,
         SqlTypeKind::RegType => ScalarType::Int32,
         SqlTypeKind::RegRole => ScalarType::Int32,
         SqlTypeKind::RegNamespace => ScalarType::Int32,
+        SqlTypeKind::RegOper => ScalarType::Int32,
         SqlTypeKind::RegOperator => ScalarType::Int32,
         SqlTypeKind::RegProcedure => ScalarType::Int32,
+        SqlTypeKind::RegCollation => ScalarType::Int32,
         SqlTypeKind::Tid => ScalarType::Text,
         SqlTypeKind::Xid => ScalarType::Int32,
         SqlTypeKind::OidVector => ScalarType::Text,
