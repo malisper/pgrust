@@ -634,10 +634,12 @@ impl Database {
                     unsupported_stmt.feature, unsupported_stmt.sql
                 ))))
             }
-            Statement::CopyFrom(_) => Err(ExecError::Parse(ParseError::UnexpectedToken {
-                expected: "COPY handled by session layer",
-                actual: "COPY".into(),
-            })),
+            Statement::CopyFrom(_) | Statement::CopyTo(_) => {
+                Err(ExecError::Parse(ParseError::UnexpectedToken {
+                    expected: "COPY handled by session layer",
+                    actual: "COPY".into(),
+                }))
+            }
             Statement::CreateFunction(ref create_stmt) => self
                 .execute_create_function_stmt_with_search_path(
                     client_id,
