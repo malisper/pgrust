@@ -204,6 +204,19 @@ When rerunning an individual regression file, copy the resulting `.diff` artifac
 
 **Testing guidance for agents:** Run only the specialized tests directly related to your change (e.g., tests in the module you modified, integration tests for the feature you're working on). Do not run the full `cargo test` suite unless specifically asked. The full test suite runs in CI, so focus your effort on validating that your specific change works correctly. This keeps iteration fast and avoids redundant testing.
 
+### macOS file descriptor limit
+
+macOS terminal shells may start with a low open-file soft limit (`ulimit -n` can be `256`) even when the kernel cap is much higher. Large parallel Rust test runs can then fail with `Too many open files (os error 24)`, especially catalog/database tests that create many temp relation files.
+
+For local full-suite runs, raise the limit in the same shell before testing:
+
+```sh
+ulimit -n 65536
+cargo test --lib --quiet
+```
+
+If that fixes the failure, add a guarded `ulimit -n 65536` to your shell startup file. For normal agent validation, still prefer targeted tests or CI's `cargo nextest` merge-queue run instead of full local `cargo test`.
+
 ## Finish
 
 When finishing work in this repo:
