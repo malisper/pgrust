@@ -768,7 +768,7 @@ impl PlanNode for MergeAppendState {
         _show_costs: bool,
         lines: &mut Vec<String>,
     ) {
-        let prefix = "  ".repeat(indent + 1);
+        let prefix = explain_detail_prefix(indent);
         let sort_keys = self
             .items
             .iter()
@@ -1076,13 +1076,13 @@ impl PlanNode for SeqScanState {
         lines: &mut Vec<String>,
     ) {
         if let Some(qual_expr) = &self.qual_expr {
-            let prefix = "  ".repeat(indent + 1);
+            let prefix = explain_detail_prefix(indent);
             lines.push(format!(
                 "{prefix}Filter: {}",
                 render_explain_expr(qual_expr, &self.column_names)
             ));
         }
-        let prefix = "  ".repeat(indent + 1);
+        let prefix = explain_detail_prefix(indent);
         if analyze && self.stats.rows_removed_by_filter > 0 {
             lines.push(format!(
                 "{prefix}Rows Removed by Filter: {}",
@@ -1381,7 +1381,7 @@ impl PlanNode for IndexOnlyScanState {
         _show_costs: bool,
         lines: &mut Vec<String>,
     ) {
-        let prefix = "  ".repeat(indent + 1);
+        let prefix = explain_detail_prefix(indent);
         if let Some(detail) = render_index_scan_condition(
             &self.keys,
             self.qual_expr.as_ref(),
@@ -1652,7 +1652,7 @@ impl PlanNode for IndexScanState {
         _show_costs: bool,
         lines: &mut Vec<String>,
     ) {
-        let prefix = "  ".repeat(indent + 1);
+        let prefix = explain_detail_prefix(indent);
         if let Some(detail) = render_index_scan_condition(
             &self.keys,
             self.qual_expr.as_ref(),
@@ -1853,7 +1853,7 @@ impl PlanNode for BitmapIndexScanState {
         lines: &mut Vec<String>,
     ) {
         if !self.index_quals.is_empty() {
-            let prefix = "  ".repeat(indent + 1);
+            let prefix = explain_detail_prefix(indent);
             lines.push(format!(
                 "{prefix}Index Cond: {}",
                 render_explain_expr(&format_qual_list(&self.index_quals), &self.column_names)
@@ -1864,7 +1864,7 @@ impl PlanNode for BitmapIndexScanState {
                 || self.stats.buffer_usage.shared_read > 0
                 || self.stats.buffer_usage.shared_written > 0)
         {
-            let prefix = "  ".repeat(indent + 1);
+            let prefix = explain_detail_prefix(indent);
             lines.push(format!(
                 "{prefix}{}",
                 crate::backend::commands::explain::format_buffer_usage(self.stats.buffer_usage)
@@ -2052,13 +2052,13 @@ impl PlanNode for BitmapHeapScanState {
         lines: &mut Vec<String>,
     ) {
         if let Some(recheck_qual) = &self.recheck_qual {
-            let prefix = "  ".repeat(indent + 1);
+            let prefix = explain_detail_prefix(indent);
             lines.push(format!(
                 "{prefix}Recheck Cond: {}",
                 render_explain_expr(recheck_qual, &self.column_names)
             ));
         }
-        let prefix = "  ".repeat(indent + 1);
+        let prefix = explain_detail_prefix(indent);
         if analyze && self.stats.rows_removed_by_filter > 0 {
             lines.push(format!(
                 "{prefix}Rows Removed by Recheck: {}",
@@ -2223,22 +2223,28 @@ fn render_explain_expr_inner_with_qualifier(
         },
         Expr::Bool(bool_expr) => match bool_expr.boolop {
             crate::include::nodes::primnodes::BoolExprType::And => {
-                let rendered = bool_expr
-                    .args
-                    .iter()
-                    .map(|arg| {
-                        render_explain_expr_inner_with_qualifier(arg, qualifier, column_names)
-                    })
+                let mut args = Vec::new();
+                collect_bool_explain_args(
+                    expr,
+                    crate::include::nodes::primnodes::BoolExprType::And,
+                    &mut args,
+                );
+                let rendered = args
+                    .into_iter()
+                    .map(|arg| render_explain_bool_arg(arg, qualifier, column_names))
                     .collect::<Vec<_>>();
                 format!("({})", rendered.join(" AND "))
             }
             crate::include::nodes::primnodes::BoolExprType::Or => {
-                let rendered = bool_expr
-                    .args
-                    .iter()
-                    .map(|arg| {
-                        render_explain_expr_inner_with_qualifier(arg, qualifier, column_names)
-                    })
+                let mut args = Vec::new();
+                collect_bool_explain_args(
+                    expr,
+                    crate::include::nodes::primnodes::BoolExprType::Or,
+                    &mut args,
+                );
+                let rendered = args
+                    .into_iter()
+                    .map(|arg| render_explain_bool_arg(arg, qualifier, column_names))
                     .collect::<Vec<_>>();
                 format!("({})", rendered.join(" OR "))
             }
@@ -2365,6 +2371,38 @@ fn builtin_scalar_function_infix_operator(
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoAbove) => Some("|>>"),
         ScalarFunctionImpl::Builtin(BuiltinScalarFunction::GeoOverAbove) => Some("|&>"),
         _ => None,
+    }
+}
+
+fn collect_bool_explain_args<'a>(
+    expr: &'a Expr,
+    boolop: crate::include::nodes::primnodes::BoolExprType,
+    out: &mut Vec<&'a Expr>,
+) {
+    match expr {
+        Expr::Bool(bool_expr) if bool_expr.boolop == boolop => {
+            for arg in &bool_expr.args {
+                collect_bool_explain_args(arg, boolop, out);
+            }
+        }
+        other => out.push(other),
+    }
+}
+
+fn render_explain_bool_arg(
+    expr: &Expr,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> String {
+    let rendered = render_explain_expr_inner_with_qualifier(expr, qualifier, column_names);
+    rendered
+}
+
+fn explain_detail_prefix(indent: usize) -> String {
+    if indent == 0 {
+        "  ".into()
+    } else {
+        format!("{}        ", "  ".repeat(indent - 1))
     }
 }
 
@@ -2610,7 +2648,8 @@ fn render_explain_const(value: &Value) -> String {
         | Value::Line(_)
         | Value::Box(_)
         | Value::Polygon(_)
-        | Value::Circle(_) => match value.sql_type_hint() {
+        | Value::Circle(_)
+        | Value::Uuid(_) => match value.sql_type_hint() {
             Some(sql_type) => format!(
                 "{}::{}",
                 render_explain_literal(value),
@@ -2696,6 +2735,12 @@ fn render_explain_literal(value: &Value) -> String {
                 .unwrap_or_else(|| format!("{value:?}"));
             format!("'{rendered}'")
         }
+        Value::Uuid(uuid) => {
+            format!(
+                "'{}'",
+                crate::backend::executor::value_io::render_uuid_text(uuid)
+            )
+        }
         Value::Date(date) => {
             format!("'{}'", format_date_text(*date, &DateTimeConfig::default()))
         }
@@ -2739,6 +2784,7 @@ fn render_explain_sql_type_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Polygon => "polygon",
         SqlTypeKind::Circle => "circle",
         SqlTypeKind::Point => "point",
+        SqlTypeKind::Uuid => "uuid",
         _ => "text",
     }
 }
@@ -2803,7 +2849,7 @@ impl PlanNode for FilterState {
         _show_costs: bool,
         lines: &mut Vec<String>,
     ) {
-        let prefix = "  ".repeat(indent + 1);
+        let prefix = explain_detail_prefix(indent);
         lines.push(format!(
             "{prefix}Filter: {}",
             render_explain_expr(&self.predicate, self.column_names())
@@ -3009,7 +3055,7 @@ impl PlanNode for NestedLoopJoinState {
         _show_costs: bool,
         lines: &mut Vec<String>,
     ) {
-        let prefix = "  ".repeat(indent + 1);
+        let prefix = explain_detail_prefix(indent);
         if !self.join_qual.is_empty() {
             let (left_names, right_names) = self.combined_names.split_at(self.left_width);
             lines.push(format!(
@@ -3378,7 +3424,7 @@ impl PlanNode for OrderByState {
         _show_costs: bool,
         lines: &mut Vec<String>,
     ) {
-        let prefix = "  ".repeat(indent + 1);
+        let prefix = explain_detail_prefix(indent);
         let sort_keys = if self.display_items.is_empty() {
             self.items
                 .iter()
@@ -3907,7 +3953,7 @@ impl PlanNode for AggregateState {
         _show_costs: bool,
         lines: &mut Vec<String>,
     ) {
-        let prefix = "  ".repeat(indent + 1);
+        let prefix = explain_detail_prefix(indent);
         if !self.group_by.is_empty() {
             let group_key = self
                 .group_by
@@ -4006,7 +4052,7 @@ impl PlanNode for WindowAggState {
         _show_costs: bool,
         lines: &mut Vec<String>,
     ) {
-        let prefix = "  ".repeat(indent + 1);
+        let prefix = explain_detail_prefix(indent);
         if !self.clause.spec.partition_by.is_empty() {
             let partition_by = self
                 .clause

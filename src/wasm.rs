@@ -113,6 +113,7 @@ fn render_value_json(value: &Value) -> String {
             v,
             ByteaOutputFormat::Hex,
         )),
+        Value::Uuid(v) => json_string(&crate::backend::executor::render_uuid_text(v)),
         Value::Inet(v) => json_string(&v.render_inet()),
         Value::Cidr(v) => json_string(&v.render_cidr()),
         Value::Date(_)

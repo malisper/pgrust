@@ -102,6 +102,7 @@ pub(crate) fn compare_order_values(
         (Value::Interval(a), Value::Interval(b)) => Ok(a.cmp_key().cmp(&b.cmp_key())),
         (Value::Bit(a), Value::Bit(b)) => Ok(compare_bit_strings(a, b)),
         (Value::Bytea(a), Value::Bytea(b)) => Ok(a.cmp(b)),
+        (Value::Uuid(a), Value::Uuid(b)) => Ok(a.cmp(b)),
         (Value::Inet(a), Value::Inet(b)) => {
             Ok(crate::backend::executor::compare_network_values(a, b))
         }
@@ -203,6 +204,7 @@ pub(crate) fn compare_values(
         (Value::TimestampTz(l), Value::TimestampTz(r)) => Ok(Value::Bool(l == r)),
         (Value::Interval(l), Value::Interval(r)) => Ok(Value::Bool(l == r)),
         (Value::Bytea(l), Value::Bytea(r)) => Ok(Value::Bool(l == r)),
+        (Value::Uuid(l), Value::Uuid(r)) => Ok(Value::Bool(l == r)),
         (Value::Inet(l), Value::Inet(r)) => Ok(Value::Bool(l == r)),
         (Value::Cidr(l), Value::Cidr(r)) => Ok(Value::Bool(l == r)),
         (Value::Bit(l), Value::Bit(r)) => Ok(Value::Bool(l == r)),
@@ -333,6 +335,7 @@ pub(crate) fn values_are_distinct(left: &Value, right: &Value) -> bool {
         (Value::TimestampTz(l), Value::TimestampTz(r)) => l != r,
         (Value::Interval(l), Value::Interval(r)) => l != r,
         (Value::Bytea(l), Value::Bytea(r)) => l != r,
+        (Value::Uuid(l), Value::Uuid(r)) => l != r,
         (Value::Bit(l), Value::Bit(r)) => l != r,
         (Value::Float64(l), Value::Float64(r)) => !pg_float_eq(*l, *r),
         (l, r) if parsed_numeric_value(l).is_some() && parsed_numeric_value(r).is_some() => {
@@ -797,6 +800,7 @@ pub(crate) fn order_values(
             }))
         }
         (Value::Bytea(l), Value::Bytea(r)) => Ok(Value::Bool(compare_ord(l, r, op))),
+        (Value::Uuid(l), Value::Uuid(r)) => Ok(Value::Bool(compare_ord(l, r, op))),
         (Value::Inet(l), Value::Inet(r)) | (Value::Cidr(l), Value::Cidr(r)) => {
             let ordering = crate::backend::executor::compare_network_values(l, r);
             Ok(Value::Bool(match op {

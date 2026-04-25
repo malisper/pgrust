@@ -1992,6 +1992,9 @@ fn render_dynamic_query_param_base_sql(
         Value::Bool(v) => v.to_string(),
         Value::Numeric(v) => v.render(),
         Value::Interval(v) => quote_sql_string(&render_interval_text(*v)),
+        Value::Uuid(v) => {
+            quote_sql_string(&crate::backend::executor::value_io::render_uuid_text(v))
+        }
         Value::Text(text) => quote_sql_string(text),
         Value::TextRef(_, _) => quote_sql_string(value.as_text().unwrap_or_default()),
         Value::Json(text) => quote_sql_string(text),
@@ -2505,6 +2508,7 @@ fn render_raise_value(value: &Value) -> String {
         Value::Float64(v) => v.to_string(),
         Value::Numeric(v) => v.render(),
         Value::Interval(v) => render_interval_text(*v),
+        Value::Uuid(v) => crate::backend::executor::value_io::render_uuid_text(v),
         Value::Bit(v) => crate::backend::executor::render_bit_text(v),
         Value::InternalChar(v) => char::from(*v).to_string(),
         Value::Json(text) | Value::JsonPath(text) => text.to_string(),

@@ -28,6 +28,7 @@ pub fn compare_bt_values(left: &Value, right: &Value) -> Ordering {
         (Value::TextRef(_, _), Value::TextRef(_, _)) => Ordering::Equal,
         (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
         (Value::Bytea(a), Value::Bytea(b)) => a.cmp(b),
+        (Value::Uuid(a), Value::Uuid(b)) => a.cmp(b),
         (Value::Bit(a), Value::Bit(b)) => a
             .bytes
             .cmp(&b.bytes)
