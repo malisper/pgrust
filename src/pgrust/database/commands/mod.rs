@@ -9,6 +9,7 @@ mod conversion;
 mod create;
 mod create_statistics;
 mod database_cmds;
+mod dependency_drop;
 mod drop;
 mod drop_column;
 mod execute;
