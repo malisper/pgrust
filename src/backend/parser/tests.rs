@@ -7403,10 +7403,13 @@ fn parse_insert_update_delete() {
         matches!(parse_statement("create schema if not exists tenant").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: Some(schema_name), auth_role: None, if_not_exists: true, elements }) if schema_name == "tenant" && elements.is_empty())
     );
     assert!(
-        matches!(parse_statement("create schema authorization app_user").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: None, auth_role: Some(auth_role), if_not_exists: false, elements }) if auth_role == "app_user" && elements.is_empty())
+        matches!(parse_statement("create schema authorization app_user").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: None, auth_role: Some(RoleSpec::RoleName(auth_role)), if_not_exists: false, elements }) if auth_role == "app_user" && elements.is_empty())
     );
     assert!(
-        matches!(parse_statement("create schema tenant authorization app_user").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: Some(schema_name), auth_role: Some(auth_role), if_not_exists: false, elements }) if schema_name == "tenant" && auth_role == "app_user" && elements.is_empty())
+        matches!(parse_statement("create schema tenant authorization app_user").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: Some(schema_name), auth_role: Some(RoleSpec::RoleName(auth_role)), if_not_exists: false, elements }) if schema_name == "tenant" && auth_role == "app_user" && elements.is_empty())
+    );
+    assert!(
+        matches!(parse_statement("create schema authorization current_role").unwrap(), Statement::CreateSchema(CreateSchemaStatement { schema_name: None, auth_role: Some(RoleSpec::CurrentRole), if_not_exists: false, elements }) if elements.is_empty())
     );
     assert!(
         matches!(
@@ -7415,6 +7418,52 @@ fn parse_insert_update_delete() {
                 if schema_name == "fkpart0" && elements.len() == 2
         )
     );
+    let schema_with_elements = parse_statement(
+        "create schema tenant \
+         create sequence seq \
+         create table tab (id int) \
+         create view v as select id from tab \
+         create index on tab (id) \
+         create trigger trig before insert on tab execute function trig_fn() \
+         grant select on tab to public",
+    )
+    .unwrap();
+    let Statement::CreateSchema(CreateSchemaStatement { elements, .. }) = schema_with_elements
+    else {
+        panic!("expected CREATE SCHEMA");
+    };
+    assert_eq!(elements.len(), 6);
+    assert!(matches!(
+        elements[0].as_ref(),
+        Statement::CreateSequence(CreateSequenceStatement {
+            sequence_name,
+            ..
+        }) if sequence_name == "seq"
+    ));
+    assert!(matches!(
+        elements[1].as_ref(),
+        Statement::CreateTable(CreateTableStatement { table_name, .. }) if table_name == "tab"
+    ));
+    assert!(matches!(
+        elements[2].as_ref(),
+        Statement::CreateView(CreateViewStatement { view_name, .. }) if view_name == "v"
+    ));
+    assert!(matches!(
+        elements[3].as_ref(),
+        Statement::CreateIndex(CreateIndexStatement { table_name, .. }) if table_name == "tab"
+    ));
+    assert!(matches!(
+        elements[4].as_ref(),
+        Statement::CreateTrigger(CreateTriggerStatement { table_name, .. }) if table_name == "tab"
+    ));
+    assert!(matches!(
+        elements[5].as_ref(),
+        Statement::GrantObject(GrantObjectStatement {
+            privilege: GrantObjectPrivilege::SelectOnTable,
+            object_names,
+            ..
+        }) if object_names == &vec!["tab".to_string()]
+    ));
     assert!(
         matches!(parse_statement("drop view if exists item_names, recent_items").unwrap(), Statement::DropView(DropViewStatement { if_exists: true, view_names }) if view_names == vec!["item_names", "recent_items"])
     );
