@@ -5368,6 +5368,9 @@ impl Session {
                                     crate::backend::executor::money_parse_text(raw)
                                         .map(Value::Money)?
                                 }
+                                ScalarType::PgLsn => {
+                                    cast_value(Value::Text(raw.clone().into()), column.sql_type)?
+                                }
                                 ScalarType::Date
                                 | ScalarType::Time
                                 | ScalarType::TimeTz

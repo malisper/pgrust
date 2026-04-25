@@ -86,6 +86,7 @@ fn type_maximum_size(column: &crate::backend::executor::ColumnDesc) -> Option<us
         | crate::backend::parser::SqlTypeKind::RegOperator
         | crate::backend::parser::SqlTypeKind::RegProcedure
         | crate::backend::parser::SqlTypeKind::Xid
+        | crate::backend::parser::SqlTypeKind::PgLsn
         | crate::backend::parser::SqlTypeKind::Point
         | crate::backend::parser::SqlTypeKind::Lseg
         | crate::backend::parser::SqlTypeKind::Line

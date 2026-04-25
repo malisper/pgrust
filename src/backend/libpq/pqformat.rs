@@ -7,7 +7,7 @@ use crate::backend::executor::value_io::builtin_type_oid_for_sql_type;
 use crate::backend::executor::{
     ArrayValue, ExecError, QueryColumn, Value, geometry_input_error_message,
     render_datetime_value_text_with_config, render_geometry_text, render_internal_char_text,
-    render_interval_text, render_range_text,
+    render_interval_text, render_pg_lsn_text, render_range_text,
 };
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::statistics::{
@@ -451,6 +451,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Int2 => 1005,
             SqlTypeKind::Int4 => 1007,
             SqlTypeKind::Int8 => 1016,
+            SqlTypeKind::PgLsn => crate::include::catalog::PG_LSN_ARRAY_TYPE_OID as i32,
             SqlTypeKind::Range => col.sql_type.type_oid as i32,
             SqlTypeKind::Multirange => col.sql_type.type_oid as i32,
             SqlTypeKind::Internal => unreachable!("internal arrays are unsupported"),
@@ -561,6 +562,7 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Int2 => (21, 2, -1),
         SqlTypeKind::Int4 => (23, 4, -1),
         SqlTypeKind::Int8 => (20, 8, -1),
+        SqlTypeKind::PgLsn => (crate::include::catalog::PG_LSN_TYPE_OID as i32, 8, -1),
         SqlTypeKind::Void => (crate::include::catalog::VOID_TYPE_OID as i32, 4, -1),
         SqlTypeKind::Oid => (26, 4, -1),
         SqlTypeKind::RegClass => (crate::include::catalog::REGCLASS_TYPE_OID as i32, 4, -1),
@@ -875,6 +877,11 @@ pub(crate) fn send_typed_data_row(
             }
             Value::Numeric(v) => {
                 let text = v.render();
+                buf.extend_from_slice(&(text.len() as i32).to_be_bytes());
+                buf.extend_from_slice(text.as_bytes());
+            }
+            Value::PgLsn(v) => {
+                let text = render_pg_lsn_text(*v);
                 buf.extend_from_slice(&(text.len() as i32).to_be_bytes());
                 buf.extend_from_slice(text.as_bytes());
             }
