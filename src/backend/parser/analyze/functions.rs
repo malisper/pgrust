@@ -383,10 +383,15 @@ fn match_proc_arg_type(
             .then_some((2, actual_type));
     }
     if declared_oid == ANYENUMOID {
-        return (!actual_type.is_array
-            && (actual_type.kind == SqlTypeKind::Enum
-                || actual_type.kind == SqlTypeKind::AnyEnum))
-            .then_some((2, actual_type));
+        if !actual_type.is_array
+            && (actual_type.kind == SqlTypeKind::Enum || actual_type.kind == SqlTypeKind::AnyEnum)
+        {
+            return Some((2, actual_type));
+        }
+        if is_text_like_type(actual_type) {
+            return Some((4, SqlType::new(SqlTypeKind::AnyEnum)));
+        }
+        return None;
     }
     let declared_type = catalog.type_by_oid(declared_oid)?.sql_type;
     if is_text_like_type(actual_type) && catalog_text_input_cast_exists(catalog, declared_oid) {

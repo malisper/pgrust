@@ -420,6 +420,7 @@ pub(super) fn coerce_unknown_string_literal_type(
             SqlTypeKind::TimestampTz => return SqlType::new(SqlTypeKind::TimestampTz),
             SqlTypeKind::Jsonb => return SqlType::new(SqlTypeKind::Jsonb),
             SqlTypeKind::Uuid => return SqlType::new(SqlTypeKind::Uuid),
+            SqlTypeKind::Enum if peer_type.type_oid != 0 => return peer_type,
             SqlTypeKind::InternalChar => return SqlType::new(SqlTypeKind::Text),
             SqlTypeKind::Name => return SqlType::new(SqlTypeKind::Name),
             SqlTypeKind::TsQuery => return SqlType::new(SqlTypeKind::TsQuery),

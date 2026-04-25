@@ -1030,6 +1030,17 @@ pub fn default_opclass_for_am_and_type(
     input_type_oid: u32,
 ) -> Option<PgOpclassRow> {
     let opclasses = opclass_rows_for_am(db, client_id, txn_ctx, am_oid);
+    if db
+        .enum_rows_for_catalog()
+        .iter()
+        .any(|row| row.enumtypid == input_type_oid)
+    {
+        return opclasses.into_iter().find(|row| {
+            row.opcmethod == am_oid
+                && row.opcdefault
+                && row.opcintype == crate::include::catalog::ANYENUMOID
+        });
+    }
     if let Some(row) = opclasses
         .iter()
         .find(|row| row.opcmethod == am_oid && row.opcdefault && row.opcintype == input_type_oid)
@@ -1049,6 +1060,16 @@ pub fn default_opclass_for_am_and_type(
             row.opcmethod == am_oid
                 && row.opcdefault
                 && row.opcintype == crate::include::catalog::ANYARRAYOID
+        });
+    }
+    if matches!(
+        input_type.sql_type.kind,
+        crate::backend::parser::SqlTypeKind::Enum
+    ) {
+        return opclasses.into_iter().find(|row| {
+            row.opcmethod == am_oid
+                && row.opcdefault
+                && row.opcintype == crate::include::catalog::ANYENUMOID
         });
     }
     (am_oid == crate::include::catalog::GIST_AM_OID

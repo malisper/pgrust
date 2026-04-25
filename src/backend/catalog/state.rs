@@ -1481,8 +1481,15 @@ impl Catalog {
             if type_oid == 0 {
                 return Err(CatalogError::UnknownType("index column type".into()));
             }
-            let opclass_oid = crate::include::catalog::default_btree_opclass_oid(type_oid)
-                .ok_or_else(|| CatalogError::UnknownType("index column type".into()))?;
+            let opclass_oid = if matches!(
+                column.sql_type.element_type().kind,
+                crate::backend::parser::SqlTypeKind::Enum
+            ) {
+                crate::include::catalog::ENUM_BTREE_OPCLASS_OID
+            } else {
+                crate::include::catalog::default_btree_opclass_oid(type_oid)
+                    .ok_or_else(|| CatalogError::UnknownType("index column type".into()))?
+            };
             indclass.push(opclass_oid);
             indcollation.push(0);
             let mut option = 0i16;
