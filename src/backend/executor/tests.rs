@@ -5356,6 +5356,31 @@ fn numeric_regression_remaining_precision_edges_match_pg() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select (i / (10::numeric ^ 131071))::numeric(1,0) \
+         from generate_series(6 * (10::numeric ^ 131071), \
+                              9 * (10::numeric ^ 131071), \
+                              10::numeric ^ 131071) as a(i)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Value::Numeric("6".into())],
+                    vec![Value::Numeric("7".into())],
+                    vec![Value::Numeric("8".into())],
+                    vec![Value::Numeric("9".into())],
+                ]
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
 }
 
 #[test]

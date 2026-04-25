@@ -110,7 +110,7 @@ fn to_char_float_with_max_digits(
 
     let abs_text = format!("{:.0}", adjusted_value.abs());
     let pre_len = abs_text.len();
-    let effective_post = if !adjusted_value.is_finite() && max_digits == f32::DIGITS as usize {
+    let effective_post = if adjusted_value.is_infinite() && max_digits == f32::DIGITS as usize {
         0
     } else if pre_len >= max_digits {
         0
@@ -1637,6 +1637,10 @@ mod tests {
         assert_eq!(
             to_char_float4(f32::NEG_INFINITY as f64, "MI99.99").unwrap(),
             "-##."
+        );
+        assert_eq!(
+            to_char_float4(f32::NAN as f64, "MI99.99").unwrap(),
+            " ##.##"
         );
     }
 
