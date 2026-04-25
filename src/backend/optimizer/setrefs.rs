@@ -4140,10 +4140,12 @@ fn set_function_scan_references(
     ctx: &mut SetRefsContext<'_>,
     plan_info: PlanEstimate,
     call: crate::include::nodes::primnodes::SetReturningCall,
+    table_alias: Option<String>,
 ) -> Plan {
     Plan::FunctionScan {
         plan_info,
         call: lower_set_returning_call(ctx, call, LowerMode::Scalar),
+        table_alias,
     }
 }
 
@@ -4564,8 +4566,11 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             ..
         } => set_values_references(ctx, plan_info, rows, output_columns),
         Path::FunctionScan {
-            plan_info, call, ..
-        } => set_function_scan_references(ctx, plan_info, call),
+            plan_info,
+            call,
+            table_alias,
+            ..
+        } => set_function_scan_references(ctx, plan_info, call, table_alias),
         Path::SubqueryScan {
             plan_info,
             subroot,

@@ -1956,10 +1956,15 @@ fn planner_keeps_function_scan_filter_semantic_until_setrefs() {
                 }
                 other => panic!("expected filter op, got {other:?}"),
             }
-            assert!(matches!(
-                *input,
-                Plan::FunctionScan { .. } | Plan::Projection { .. }
-            ));
+            match *input {
+                Plan::FunctionScan {
+                    call, table_alias, ..
+                } => {
+                    assert_eq!(table_alias.as_deref(), Some("g"));
+                    assert_eq!(call.output_columns()[0].name, "x");
+                }
+                other => panic!("expected function scan input, got {other:?}"),
+            }
         }
         other => panic!("expected top-level filter plan, got {other:?}"),
     }

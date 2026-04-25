@@ -160,16 +160,7 @@ fn explain_passthrough_plan_child(plan: &Plan) -> Option<&Plan> {
 }
 
 fn explain_passthrough_applies_in_verbose(plan: &Plan) -> bool {
-    match plan {
-        Plan::Projection { input, targets, .. } => {
-            matches!(input.as_ref(), Plan::Aggregate { .. })
-                && targets.len() == input.column_names().len()
-                && targets
-                    .iter()
-                    .all(|target| !target.resjunk && matches!(target.expr, Expr::Var(_)))
-        }
-        _ => false,
-    }
+    matches!(plan, Plan::Projection { .. })
 }
 
 fn projection_targets_are_explain_passthrough(input: &Plan, targets: &[TargetEntry]) -> bool {
@@ -291,7 +282,9 @@ fn verbose_plan_label(plan: &Plan) -> Option<String> {
             AggregateStrategy::Sorted => Some("GroupAggregate".into()),
             AggregateStrategy::Hashed => Some("HashAggregate".into()),
         },
-        Plan::FunctionScan { call, .. } => Some(verbose_function_scan_label(call)),
+        Plan::FunctionScan {
+            call, table_alias, ..
+        } => Some(verbose_function_scan_label(call, table_alias.as_deref())),
         _ => None,
     }
 }
@@ -305,12 +298,29 @@ fn nonverbose_plan_label(plan: &Plan) -> Option<String> {
     }
 }
 
-fn verbose_function_scan_label(call: &SetReturningCall) -> String {
+fn verbose_function_scan_label(call: &SetReturningCall, table_alias: Option<&str>) -> String {
     let func = set_returning_call_label(call);
-    match call.output_columns().first() {
-        Some(column) => format!("Function Scan on pg_catalog.{func} {}", column.name),
+    match table_alias.or_else(|| {
+        call.output_columns()
+            .first()
+            .map(|column| column.name.as_str())
+    }) {
+        Some(alias) => format!("Function Scan on pg_catalog.{func} {alias}"),
         None => format!("Function Scan on pg_catalog.{func}"),
     }
+}
+
+fn verbose_function_scan_output_exprs(
+    call: &SetReturningCall,
+    table_alias: Option<&str>,
+) -> Vec<String> {
+    call.output_columns()
+        .iter()
+        .map(|column| match table_alias {
+            Some(alias) => format!("{alias}.{}", column.name),
+            None => format!("{}.{}", column.name, column.name),
+        })
+        .collect()
 }
 
 #[derive(Clone, Default)]
@@ -617,16 +627,7 @@ fn verbose_plan_output_exprs(
             targets
                 .iter()
                 .filter(|target| !target.resjunk)
-                .map(|target| {
-                    if matches!(input.as_ref(), Plan::FunctionScan { .. })
-                        && target.input_resno.is_some()
-                        && matches!(target.expr, Expr::Var(_))
-                    {
-                        format!("{}.{}", target.name, target.name)
-                    } else {
-                        render_verbose_expr(&target.expr, &input_names, ctx)
-                    }
-                })
+                .map(|target| render_verbose_expr(&target.expr, &input_names, ctx))
                 .collect()
         }
         Plan::Aggregate {
@@ -682,11 +683,9 @@ fn verbose_plan_output_exprs(
             output.extend(verbose_plan_output_exprs(right, ctx, for_parent_ref));
             output
         }
-        Plan::FunctionScan { call, .. } => call
-            .output_columns()
-            .iter()
-            .map(|column| format!("{}.{}", column.name, column.name))
-            .collect(),
+        Plan::FunctionScan {
+            call, table_alias, ..
+        } => verbose_function_scan_output_exprs(call, table_alias.as_deref()),
         Plan::ProjectSet { targets, .. } => targets
             .iter()
             .map(|target| match target {
