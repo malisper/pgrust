@@ -5,8 +5,8 @@ use crate::backend::access::heap::heapam::{heap_flush, heap_insert_mvcc, heap_up
 use crate::backend::access::transam::xact::INVALID_TRANSACTION_ID;
 use crate::backend::libpq::pqformat::format_exec_error;
 use crate::backend::parser::{
-    Catalog, CatalogEntry, CatalogLookup, IndexColumnDef, analyze_select_query_with_outer,
-    parse_select,
+    Catalog, CatalogEntry, CatalogLookup, IndexColumnDef, SqlTypeKind,
+    analyze_select_query_with_outer, parse_select,
 };
 use crate::backend::storage::smgr::{ForkNumber, MdStorageManager, StorageManager};
 use crate::include::access::htup::TupleValue;
@@ -7546,6 +7546,27 @@ fn float_text_out_of_range_errors_are_type_aware() {
             value,
         } if value == "10e400"
     ));
+}
+
+#[test]
+fn abs_preserves_float4_result_type() {
+    let base = temp_dir("abs_preserves_float4_result_type");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "select @('1004.30'::float4)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { columns, rows, .. } => {
+            assert_eq!(columns[0].sql_type, SqlType::new(SqlTypeKind::Float4));
+            assert_eq!(rows, vec![vec![Value::Float64(1004.2999877929688)]]);
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
 }
 
 #[test]
