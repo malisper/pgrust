@@ -195,6 +195,75 @@ fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {
         .collect()
 }
 
+fn strip_leading_sql_word(input: &str) -> Option<&str> {
+    let trimmed = input.trim_start();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with('"') {
+        let mut chars = trimmed.char_indices().skip(1);
+        while let Some((idx, ch)) = chars.next() {
+            if ch == '"' {
+                if trimmed[idx + 1..].starts_with('"') {
+                    chars.next();
+                    continue;
+                }
+                return Some(trimmed[idx + 1..].trim_start());
+            }
+        }
+        return None;
+    }
+    let end = trimmed
+        .char_indices()
+        .find(|(_, ch)| ch.is_whitespace())
+        .map(|(idx, _)| idx)
+        .unwrap_or(trimmed.len());
+    Some(trimmed[end..].trim_start())
+}
+
+fn drop_function_arg_type_oid(
+    arg: &str,
+    catalog: &dyn crate::backend::parser::CatalogLookup,
+) -> Result<Option<u32>, ParseError> {
+    let mut text = arg.trim();
+    let lower = text.to_ascii_lowercase();
+    for (mode, callable) in [
+        ("inout", true),
+        ("variadic", true),
+        ("in", true),
+        ("out", false),
+    ] {
+        if lower == mode || lower.starts_with(&format!("{mode} ")) {
+            if !callable {
+                return Ok(None);
+            }
+            text = text[mode.len()..].trim_start();
+            break;
+        }
+    }
+
+    let raw_type = match parse_type_name(text).and_then(|raw_type| {
+        resolve_raw_type_name(&raw_type, catalog).map(|sql_type| (raw_type, sql_type))
+    }) {
+        Ok((raw_type, _)) => raw_type,
+        Err(first_err) => {
+            let Some(rest) = strip_leading_sql_word(text) else {
+                return Err(first_err);
+            };
+            parse_type_name(rest)?
+        }
+    };
+    let sql_type = resolve_raw_type_name(&raw_type, catalog)?;
+    catalog
+        .type_oid_for_sql_type(sql_type)
+        .or_else(|| {
+            matches!(sql_type.kind, crate::backend::parser::SqlTypeKind::Record)
+                .then_some(crate::include::catalog::RECORD_TYPE_OID)
+        })
+        .map(Some)
+        .ok_or_else(|| ParseError::UnsupportedType(arg.to_string()))
+}
+
 fn drop_table_direct_dependencies(
     ctx: &DropTableDependencyContext<'_>,
     relation_oid: u32,
@@ -562,14 +631,9 @@ impl Database {
         let desired_arg_oids = drop_stmt
             .arg_types
             .iter()
-            .map(|arg| {
-                let raw_type = parse_type_name(arg)?;
-                let sql_type = resolve_raw_type_name(&raw_type, &catalog)?;
-                catalog
-                    .type_oid_for_sql_type(sql_type)
-                    .ok_or_else(|| ParseError::UnsupportedType(arg.clone()))
-            })
+            .map(|arg| drop_function_arg_type_oid(arg, &catalog))
             .collect::<Result<Vec<_>, _>>()
+            .map(|oids| oids.into_iter().flatten().collect::<Vec<_>>())
             .map_err(ExecError::Parse)?;
         let schema_oid = match &drop_stmt.schema_name {
             Some(schema_name) => Some(

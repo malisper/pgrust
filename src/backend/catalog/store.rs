@@ -262,6 +262,7 @@ mod tests {
             checkpoint_stats:
                 crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            gucs: std::collections::HashMap::new(),
             interrupts: Arc::new(InterruptState::new()),
             stats: Arc::new(RwLock::new(
                 crate::pgrust::database::DatabaseStatsStore::with_default_io_rows(),

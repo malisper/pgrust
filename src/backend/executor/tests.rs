@@ -702,6 +702,7 @@ fn empty_executor_context(base: &PathBuf) -> ExecutorContext {
         checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(
         ),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        gucs: std::collections::HashMap::new(),
         interrupts: std::sync::Arc::new(
             crate::backend::utils::misc::interrupts::InterruptState::new(),
         ),
@@ -766,6 +767,7 @@ fn run_plan(
         checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(
         ),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        gucs: std::collections::HashMap::new(),
         interrupts: std::sync::Arc::new(
             crate::backend::utils::misc::interrupts::InterruptState::new(),
         ),
@@ -868,6 +870,7 @@ fn run_sql_with_catalog(
             checkpoint_stats:
                 crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            gucs: std::collections::HashMap::new(),
             interrupts: std::sync::Arc::new(
                 crate::backend::utils::misc::interrupts::InterruptState::new(),
             ),
@@ -7928,6 +7931,7 @@ fn prepared_insert_uses_defaults_for_omitted_columns() {
         checkpoint_stats: crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(
         ),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        gucs: std::collections::HashMap::new(),
         interrupts: std::sync::Arc::new(
             crate::backend::utils::misc::interrupts::InterruptState::new(),
         ),
@@ -18372,6 +18376,7 @@ fn large_object_metadata_tracks_create_and_unlink() {
             checkpoint_stats:
                 crate::backend::utils::misc::checkpoint::CheckpointStatsSnapshot::default(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            gucs: std::collections::HashMap::new(),
             interrupts: std::sync::Arc::new(
                 crate::backend::utils::misc::interrupts::InterruptState::new(),
             ),

@@ -1074,21 +1074,6 @@ impl Database {
         match &create_stmt.return_spec {
             CreateFunctionReturnSpec::Type { ty, setof } => {
                 let sql_type = resolve_raw_type_name(ty, &catalog).map_err(ExecError::Parse)?;
-                if matches!(sql_type.kind, SqlTypeKind::Record) && !setof {
-                    return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                        "non-set RETURNS record is not supported yet".into(),
-                    )));
-                }
-                if matches!(sql_type.kind, SqlTypeKind::Composite) && !sql_type.is_array && !setof {
-                    return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                        "non-set RETURNS named composite is not supported yet".into(),
-                    )));
-                }
-                if !output_args.is_empty() {
-                    return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                        "explicit RETURNS with OUT/INOUT arguments is not supported unless RETURNS SETOF record".into(),
-                    )));
-                }
                 proretset = *setof;
                 prorettype = if matches!(sql_type.kind, SqlTypeKind::Record) {
                     RECORD_TYPE_OID
@@ -1097,6 +1082,37 @@ impl Database {
                         ExecError::Parse(ParseError::UnsupportedType(format!("{sql_type:?}")))
                     })?
                 };
+                if !output_args.is_empty() {
+                    let required_rettype = if output_args.len() == 1 {
+                        catalog
+                            .type_oid_for_sql_type(output_args[0].sql_type)
+                            .or_else(|| {
+                                matches!(output_args[0].sql_type.kind, SqlTypeKind::Record)
+                                    .then_some(RECORD_TYPE_OID)
+                            })
+                            .ok_or_else(|| {
+                                ExecError::Parse(ParseError::UnsupportedType(
+                                    output_args[0].name.clone(),
+                                ))
+                            })?
+                    } else {
+                        RECORD_TYPE_OID
+                    };
+                    if prorettype != required_rettype {
+                        return Err(ExecError::DetailedError {
+                            message: "function result type must match OUT arguments".into(),
+                            detail: None,
+                            hint: None,
+                            sqlstate: "42P13",
+                        });
+                    }
+                    proallargtypes = Some(all_arg_oids.clone());
+                    proargmodes = Some(all_arg_modes.clone());
+                    proargnames = all_arg_names
+                        .iter()
+                        .any(|name| !name.is_empty())
+                        .then_some(all_arg_names.clone());
+                }
             }
             CreateFunctionReturnSpec::Table(columns) => {
                 proretset = true;
@@ -1161,15 +1177,17 @@ impl Database {
                 } else if output_args.len() == 1 {
                     prorettype = catalog
                         .type_oid_for_sql_type(output_args[0].sql_type)
+                        .or_else(|| {
+                            matches!(output_args[0].sql_type.kind, SqlTypeKind::Record)
+                                .then_some(RECORD_TYPE_OID)
+                        })
                         .ok_or_else(|| {
                             ExecError::Parse(ParseError::UnsupportedType(
                                 output_args[0].name.clone(),
                             ))
                         })?;
                 } else {
-                    return Err(ExecError::Parse(ParseError::FeatureNotSupported(
-                        "multi-OUT non-set functions are not supported yet".into(),
-                    )));
+                    prorettype = RECORD_TYPE_OID;
                 }
             }
         }
@@ -2207,6 +2225,7 @@ impl Database {
             row_locks: Arc::clone(&self.row_locks),
             checkpoint_stats: self.checkpoint_stats_snapshot(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            gucs: std::collections::HashMap::new(),
             interrupts: Arc::clone(&interrupts),
             stats: Arc::clone(&self.stats),
             session_stats: self.session_stats_state(client_id),
@@ -2369,6 +2388,7 @@ impl Database {
             row_locks: Arc::clone(&self.row_locks),
             checkpoint_stats: self.checkpoint_stats_snapshot(),
             datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+            gucs: std::collections::HashMap::new(),
             interrupts,
             stats: Arc::clone(&self.stats),
             session_stats: self.session_stats_state(client_id),

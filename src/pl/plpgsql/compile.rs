@@ -21,8 +21,8 @@ use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{QueryColumn, TargetEntry, Var, user_attrno};
 
 use super::ast::{
-    AliasTarget, AssignTarget, Block, Decl, ExceptionCondition, ForQuerySource, ForTarget,
-    RaiseLevel, ReturnQueryKind, Stmt, VarDecl,
+    AliasTarget, AssignTarget, Block, CursorDecl, Decl, ExceptionCondition, ForQuerySource,
+    ForTarget, RaiseLevel, ReturnQueryKind, Stmt, VarDecl,
 };
 use super::gram::parse_block;
 
@@ -36,6 +36,7 @@ pub(crate) struct CompiledBlock {
 
 #[derive(Debug, Clone)]
 pub struct CompiledFunction {
+    pub(crate) name: String,
     pub(crate) parameter_slots: Vec<CompiledFunctionSlot>,
     pub(crate) output_slots: Vec<CompiledOutputSlot>,
     pub(crate) body: CompiledBlock,
@@ -232,9 +233,29 @@ pub(crate) enum CompiledStmt {
         into_targets: Vec<CompiledSelectIntoTarget>,
         using_exprs: Vec<CompiledExpr>,
     },
+    GetDiagnostics {
+        stacked: bool,
+        items: Vec<(CompiledSelectIntoTarget, String)>,
+    },
+    OpenCursor {
+        slot: usize,
+        name: String,
+        plan: PlannedStmt,
+    },
+    FetchCursor {
+        slot: usize,
+        targets: Vec<CompiledSelectIntoTarget>,
+    },
+    CloseCursor {
+        slot: usize,
+    },
+    UnsupportedTransactionCommand {
+        command: String,
+    },
     SelectInto {
         plan: PlannedStmt,
         targets: Vec<CompiledSelectIntoTarget>,
+        strict: bool,
     },
     ExecInsertInto {
         stmt: BoundInsertStatement,
@@ -285,6 +306,7 @@ struct CompileEnv {
     relation_scopes: Vec<RelationScopeVar>,
     labeled_scopes: Vec<LabeledScope>,
     local_ctes: Vec<BoundCte>,
+    declared_cursors: HashMap<String, String>,
     parameter_slots: Vec<ScopeVar>,
     positional_parameter_names: Vec<String>,
     next_slot: usize,
@@ -483,6 +505,17 @@ impl CompileEnv {
             .collect()
     }
 
+    fn define_cursor(&mut self, name: &str, query: &str) {
+        self.declared_cursors
+            .insert(name.to_ascii_lowercase(), query.to_string());
+    }
+
+    fn declared_cursor_query(&self, name: &str) -> Option<&str> {
+        self.declared_cursors
+            .get(&name.to_ascii_lowercase())
+            .map(String::as_str)
+    }
+
     fn visible_sql_columns(&self) -> Vec<(String, SqlType)> {
         let mut columns = self.visible_columns();
         columns.extend(
@@ -624,6 +657,7 @@ pub(crate) fn compile_function_from_proc(
     let return_contract = function_return_contract(row, catalog, &output_slots)?;
     let body = compile_block(&block, catalog, &mut env, Some(&return_contract))?;
     Ok(CompiledFunction {
+        name: row.proname.clone(),
         parameter_slots,
         output_slots,
         body,
@@ -656,6 +690,7 @@ pub(crate) fn compile_trigger_function_from_proc(
     let return_contract = FunctionReturnContract::Trigger { bindings };
     let body = compile_block(&block, catalog, &mut env, Some(&return_contract))?;
     Ok(CompiledFunction {
+        name: row.proname.clone(),
         parameter_slots: Vec::new(),
         output_slots: Vec::new(),
         body,
@@ -713,7 +748,7 @@ fn function_return_contract(
             _ => FunctionReturnContract::Scalar {
                 ty: result_type,
                 setof: true,
-                output_slot: None,
+                output_slot: output_slots.first().map(|slot| slot.slot),
             },
         });
     }
@@ -730,9 +765,27 @@ fn function_return_contract(
             setof: false,
             uses_output_vars: true,
         }),
-        SqlTypeKind::Record | SqlTypeKind::Composite => Err(ParseError::FeatureNotSupported(
-            "non-set record/composite returns are not supported yet".into(),
-        )),
+        SqlTypeKind::Record => Ok(FunctionReturnContract::AnonymousRecord { setof: false }),
+        SqlTypeKind::Composite => {
+            let relation = catalog
+                .lookup_relation_by_oid(result_type.typrelid)
+                .ok_or_else(|| ParseError::UnsupportedType(result_type.typrelid.to_string()))?;
+            Ok(FunctionReturnContract::FixedRow {
+                columns: relation
+                    .desc
+                    .columns
+                    .into_iter()
+                    .filter(|column| !column.dropped)
+                    .map(|column| QueryColumn {
+                        name: column.name,
+                        sql_type: column.sql_type,
+                        wire_type_oid: None,
+                    })
+                    .collect(),
+                setof: false,
+                uses_output_vars: false,
+            })
+        }
         _ => Ok(FunctionReturnContract::Scalar {
             ty: result_type,
             setof: false,
@@ -752,6 +805,7 @@ fn compile_block(
     for decl in &block.declarations {
         match decl {
             Decl::Var(decl) => local_slots.push(compile_var_decl(decl, catalog, &mut env)?),
+            Decl::Cursor(decl) => local_slots.push(compile_cursor_decl(decl, catalog, &mut env)?),
             Decl::Alias(decl) => compile_alias_decl(decl, &mut env)?,
         }
     }
@@ -803,6 +857,26 @@ fn compile_var_decl(
         slot,
         ty,
         default_expr,
+    })
+}
+
+fn compile_cursor_decl(
+    decl: &CursorDecl,
+    catalog: &dyn CatalogLookup,
+    env: &mut CompileEnv,
+) -> Result<CompiledVar, ParseError> {
+    let ty = SqlType::new(SqlTypeKind::Text)
+        .with_identity(crate::include::catalog::REFCURSOR_TYPE_OID, 0);
+    let slot = env.define_var(&decl.name, ty);
+    env.define_cursor(&decl.name, &decl.query);
+    Ok(CompiledVar {
+        slot,
+        ty,
+        default_expr: Some(compile_expr_text(
+            &format!("'{}'", decl.name.replace('\'', "''")),
+            catalog,
+            env,
+        )?),
     })
 }
 
@@ -991,6 +1065,37 @@ fn compile_stmt(
             into_targets,
             using_exprs,
         } => compile_dynamic_execute_stmt(sql_expr, into_targets, using_exprs, catalog, env)?,
+        Stmt::GetDiagnostics { stacked, items } => {
+            let items = items
+                .iter()
+                .map(|(target, item)| {
+                    let (slot, ty) = resolve_assign_target(target, env)?;
+                    Ok((CompiledSelectIntoTarget { slot, ty }, item.clone()))
+                })
+                .collect::<Result<Vec<_>, ParseError>>()?;
+            CompiledStmt::GetDiagnostics {
+                stacked: *stacked,
+                items,
+            }
+        }
+        Stmt::OpenCursor { name, sql } => {
+            compile_open_cursor_stmt(name, sql.as_deref(), catalog, env)?
+        }
+        Stmt::FetchCursor { name, targets } => {
+            let (slot, _) = resolve_assign_target(&AssignTarget::Name(name.clone()), env)?;
+            let targets = targets
+                .iter()
+                .map(|target| {
+                    resolve_assign_target(target, env)
+                        .map(|(slot, ty)| CompiledSelectIntoTarget { slot, ty })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            CompiledStmt::FetchCursor { slot, targets }
+        }
+        Stmt::CloseCursor { name } => {
+            let (slot, _) = resolve_assign_target(&AssignTarget::Name(name.clone()), env)?;
+            CompiledStmt::CloseCursor { slot }
+        }
         Stmt::ExecSql { sql } => compile_exec_sql_stmt(sql, catalog, env)?,
     })
 }
@@ -1045,6 +1150,13 @@ fn compile_return_stmt(
         | (FunctionReturnContract::AnonymousRecord { .. }, None) => {
             Ok(CompiledStmt::Return { expr: None })
         }
+        (
+            FunctionReturnContract::FixedRow { setof: false, .. }
+            | FunctionReturnContract::AnonymousRecord { setof: false },
+            Some(expr),
+        ) => Ok(CompiledStmt::Return {
+            expr: Some(compile_expr_text(expr, catalog, env)?),
+        }),
         _ => Err(ParseError::FeatureNotSupported(
             "RETURN expr is only supported for scalar function returns".into(),
         )),
@@ -1071,6 +1183,14 @@ fn compile_return_next_stmt(
                 expr: Some(compile_expr_text(expr, catalog, env)?),
             })
         }
+        (
+            FunctionReturnContract::Scalar {
+                setof: true,
+                output_slot: Some(_),
+                ..
+            },
+            None,
+        ) => Ok(CompiledStmt::ReturnNext { expr: None }),
         (
             FunctionReturnContract::FixedRow {
                 setof: true,
@@ -1191,6 +1311,41 @@ fn compile_dynamic_execute_stmt(
     })
 }
 
+fn compile_open_cursor_stmt(
+    name: &str,
+    sql: Option<&str>,
+    catalog: &dyn CatalogLookup,
+    env: &mut CompileEnv,
+) -> Result<CompiledStmt, ParseError> {
+    let (slot, _) = resolve_assign_target(&AssignTarget::Name(name.to_string()), env)?;
+    let query_sql = match sql {
+        Some(sql) => sql,
+        None => env
+            .declared_cursor_query(name)
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                expected: "declared cursor query or OPEN cursor FOR query",
+                actual: name.to_string(),
+            })?,
+    };
+    let rewritten_sql = rewrite_plpgsql_sql_text(query_sql, env)?;
+    let stmt = parse_statement(&rewritten_sql)?;
+    let plan = match stmt {
+        Statement::Select(stmt) => plan_select_for_env(&stmt, catalog, env)?,
+        Statement::Values(stmt) => plan_values_for_env(&stmt, catalog, env)?,
+        other => {
+            return Err(ParseError::UnexpectedToken {
+                expected: "cursor query",
+                actual: format!("{other:?}"),
+            });
+        }
+    };
+    Ok(CompiledStmt::OpenCursor {
+        slot,
+        name: name.to_string(),
+        plan,
+    })
+}
+
 fn compile_exec_sql_stmt(
     sql: &str,
     catalog: &dyn CatalogLookup,
@@ -1211,17 +1366,18 @@ fn compile_exec_sql_stmt(
         return compile_select_into_stmt(
             &select_sql,
             &[AssignTarget::Name(target_name)],
+            false,
             catalog,
             env,
         );
     }
 
-    if let Some((target_names, select_sql)) = split_select_with_into_targets(sql) {
+    if let Some((target_names, select_sql, strict)) = split_select_with_into_targets(sql) {
         let targets = target_names
             .iter()
             .map(|target| parse_select_into_assign_target(target))
             .collect::<Result<Vec<_>, _>>()?;
-        return compile_select_into_stmt(&select_sql, &targets, catalog, env);
+        return compile_select_into_stmt(&select_sql, &targets, strict, catalog, env);
     }
     if let Some((exec_sql, target_names)) = split_dml_returning_into_targets(sql) {
         let targets = target_names
@@ -1229,6 +1385,12 @@ fn compile_exec_sql_stmt(
             .map(|target| parse_select_into_assign_target(target))
             .collect::<Result<Vec<_>, _>>()?;
         return compile_exec_returning_into_stmt(&exec_sql, &targets, catalog, env);
+    }
+
+    if is_unsupported_plpgsql_transaction_command(sql) {
+        return Ok(CompiledStmt::UnsupportedTransactionCommand {
+            command: transaction_command_name(sql).to_string(),
+        });
     }
 
     let rewritten_sql = rewrite_plpgsql_sql_text(sql, env)?;
@@ -1412,7 +1574,7 @@ fn split_select_into_target(sql: &str) -> Option<(String, String)> {
     Some((target, select_sql))
 }
 
-fn split_select_with_into_targets(sql: &str) -> Option<(Vec<String>, String)> {
+fn split_select_with_into_targets(sql: &str) -> Option<(Vec<String>, String, bool)> {
     let trimmed = sql.trim_start();
     let lower = trimmed.to_ascii_lowercase();
     if !lower.starts_with("select ") || lower.starts_with("select into ") {
@@ -1425,7 +1587,13 @@ fn split_select_with_into_targets(sql: &str) -> Option<(Vec<String>, String)> {
         return None;
     }
 
-    let after_into = trimmed[into_idx + "into".len()..].trim_start();
+    let mut after_into = trimmed[into_idx + "into".len()..].trim_start();
+    let strict = if keyword_at(after_into, 0, "strict") {
+        after_into = after_into["strict".len()..].trim_start();
+        true
+    } else {
+        false
+    };
     let clause_idx = find_next_top_level_keyword(
         after_into,
         &[
@@ -1454,7 +1622,7 @@ fn split_select_with_into_targets(sql: &str) -> Option<(Vec<String>, String)> {
     } else {
         format!("{select_sql} {suffix}")
     };
-    Some((targets, rewritten))
+    Some((targets, rewritten, strict))
 }
 
 fn split_dml_returning_into_targets(sql: &str) -> Option<(String, Vec<String>)> {
@@ -1482,6 +1650,22 @@ fn split_dml_returning_into_targets(sql: &str) -> Option<(String, Vec<String>)> 
         returning_sql,
     );
     Some((rewritten, targets))
+}
+
+fn is_unsupported_plpgsql_transaction_command(sql: &str) -> bool {
+    let trimmed = sql.trim_start();
+    keyword_at(trimmed, 0, "savepoint")
+        || keyword_at(trimmed, 0, "release")
+        || (keyword_at(trimmed, 0, "rollback")
+            && find_next_top_level_keyword(trimmed, &["to"]).is_some())
+}
+
+fn transaction_command_name(sql: &str) -> &str {
+    let trimmed = sql.trim_start();
+    trimmed
+        .split_whitespace()
+        .next()
+        .unwrap_or("transaction command")
 }
 
 fn positional_parameter_var_name(index: usize) -> String {
@@ -1802,6 +1986,7 @@ fn parse_select_into_assign_target(target: &str) -> Result<AssignTarget, ParseEr
 fn compile_select_into_stmt(
     select_sql: &str,
     target_refs: &[AssignTarget],
+    strict: bool,
     catalog: &dyn CatalogLookup,
     env: &mut CompileEnv,
 ) -> Result<CompiledStmt, ParseError> {
@@ -1835,6 +2020,7 @@ fn compile_select_into_stmt(
     Ok(CompiledStmt::SelectInto {
         plan: planned,
         targets,
+        strict,
     })
 }
 

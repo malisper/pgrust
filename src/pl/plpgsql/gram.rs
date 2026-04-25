@@ -9,8 +9,8 @@ use crate::backend::parser::{
 use crate::include::catalog::RECORD_TYPE_OID;
 
 use super::ast::{
-    AliasDecl, AliasTarget, AssignTarget, Block, Decl, ExceptionCondition, ExceptionHandler,
-    ForQuerySource, ForTarget, RaiseLevel, ReturnQueryKind, Stmt, VarDecl,
+    AliasDecl, AliasTarget, AssignTarget, Block, CursorDecl, Decl, ExceptionCondition,
+    ExceptionHandler, ForQuerySource, ForTarget, RaiseLevel, ReturnQueryKind, Stmt, VarDecl,
 };
 
 #[derive(Parser)]
@@ -138,6 +138,7 @@ fn build_decl_stmt(pair: Pair<'_, Rule>) -> Result<Decl, ParseError> {
     let inner = pair.into_inner().next().ok_or(ParseError::UnexpectedEof)?;
     match inner.as_rule() {
         Rule::var_decl => Ok(Decl::Var(build_var_decl(inner)?)),
+        Rule::cursor_decl => Ok(Decl::Cursor(build_cursor_decl(inner)?)),
         Rule::alias_decl => Ok(Decl::Alias(build_alias_decl(inner)?)),
         _ => Err(ParseError::UnexpectedToken {
             expected: "plpgsql declaration",
@@ -150,11 +151,16 @@ fn build_var_decl(pair: Pair<'_, Rule>) -> Result<VarDecl, ParseError> {
     let mut name = None;
     let mut ty = None;
     let mut default_expr = None;
+    let mut strict = false;
     for part in pair.into_inner() {
         match part.as_rule() {
             Rule::ident => name = Some(build_ident(part)),
             Rule::type_name_text => {
-                let type_name = part.as_str().trim();
+                let mut type_name = part.as_str().trim();
+                if let Some(prefix) = strip_trailing_keyword(type_name, "strict") {
+                    type_name = prefix.trim_end();
+                    strict = true;
+                }
                 ty = Some((type_name.to_string(), decl_type_hint(type_name)?));
             }
             Rule::default_clause => {
@@ -174,7 +180,39 @@ fn build_var_decl(pair: Pair<'_, Rule>) -> Result<VarDecl, ParseError> {
             .ok_or(ParseError::UnexpectedEof)?,
         ty: ty.map(|(_, ty)| ty).ok_or(ParseError::UnexpectedEof)?,
         default_expr,
+        strict,
     })
+}
+
+fn build_cursor_decl(pair: Pair<'_, Rule>) -> Result<CursorDecl, ParseError> {
+    let mut name = None;
+    let mut query = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::ident => name = Some(build_ident(part)),
+            Rule::exec_sql_text => query = Some(part.as_str().trim().to_string()),
+            _ => {}
+        }
+    }
+    Ok(CursorDecl {
+        name: name.ok_or(ParseError::UnexpectedEof)?,
+        query: query.ok_or(ParseError::UnexpectedEof)?,
+    })
+}
+
+fn strip_trailing_keyword<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
+    let trimmed = input.trim_end();
+    if trimmed.len() < keyword.len() {
+        return None;
+    }
+    let start = trimmed.len() - keyword.len();
+    if !trimmed[start..].eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    if start > 0 && is_identifier_char(trimmed.as_bytes()[start - 1] as char) {
+        return None;
+    }
+    Some(&trimmed[..start])
 }
 
 fn decl_type_hint(type_name: &str) -> Result<SqlType, ParseError> {
@@ -272,6 +310,10 @@ fn build_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
         Rule::return_query_stmt => build_return_query_stmt(inner),
         Rule::perform_stmt => build_perform_stmt(inner),
         Rule::dynamic_execute_stmt => build_dynamic_execute_stmt(inner),
+        Rule::get_diagnostics_stmt => build_get_diagnostics_stmt(inner),
+        Rule::open_cursor_stmt => build_open_cursor_stmt(inner),
+        Rule::fetch_cursor_stmt => build_fetch_cursor_stmt(inner),
+        Rule::close_cursor_stmt => build_close_cursor_stmt(inner),
         Rule::exec_sql_stmt => build_exec_sql_stmt(inner),
         _ => Err(ParseError::UnexpectedToken {
             expected: "plpgsql statement",
@@ -622,6 +664,133 @@ fn build_exec_sql_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
         .filter(|text| !text.is_empty())
         .ok_or(ParseError::UnexpectedEof)?;
     Ok(Stmt::ExecSql { sql })
+}
+
+fn build_get_diagnostics_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let stacked = pair
+        .as_str()
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("get stacked");
+    let mut items = Vec::new();
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::get_diagnostics_item => {
+                let mut target = None;
+                let mut item = None;
+                for inner in part.into_inner() {
+                    match inner.as_rule() {
+                        Rule::assign_target => target = Some(build_assign_target(inner)?),
+                        Rule::ident => item = Some(build_ident(inner)),
+                        _ => {}
+                    }
+                }
+                items.push((
+                    target.ok_or(ParseError::UnexpectedEof)?,
+                    item.ok_or(ParseError::UnexpectedEof)?,
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(Stmt::GetDiagnostics { stacked, items })
+}
+
+fn build_open_cursor_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let text = pair
+        .into_inner()
+        .find(|inner| inner.as_rule() == Rule::exec_sql_text)
+        .map(|inner| inner.as_str().trim().to_string())
+        .ok_or(ParseError::UnexpectedEof)?;
+    let Some(for_idx) = find_next_top_level_keyword(&text, &["for"]) else {
+        return Ok(Stmt::OpenCursor {
+            name: cursor_name_from_text(&text)?,
+            sql: None,
+        });
+    };
+    let name = cursor_name_from_text(&text[..for_idx])?;
+    let sql = text[for_idx + "for".len()..].trim();
+    if sql.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "OPEN cursor FOR query",
+            actual: text,
+        });
+    }
+    Ok(Stmt::OpenCursor {
+        name,
+        sql: Some(sql.to_string()),
+    })
+}
+
+fn build_fetch_cursor_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let text = pair
+        .into_inner()
+        .find(|inner| inner.as_rule() == Rule::exec_sql_text)
+        .map(|inner| inner.as_str().trim().to_string())
+        .ok_or(ParseError::UnexpectedEof)?;
+    let Some(into_idx) = find_next_top_level_keyword(&text, &["into"]) else {
+        return Err(ParseError::UnexpectedToken {
+            expected: "FETCH cursor INTO target",
+            actual: text,
+        });
+    };
+    let cursor_sql = text[..into_idx].trim();
+    let targets_sql = text[into_idx + "into".len()..].trim();
+    let name = fetch_cursor_name(cursor_sql)?;
+    let targets = split_top_level_csv(targets_sql)
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            expected: "FETCH cursor INTO target [, ...]",
+            actual: text.clone(),
+        })?
+        .iter()
+        .map(|target| parse_dynamic_execute_into_target(target))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Stmt::FetchCursor { name, targets })
+}
+
+fn build_close_cursor_stmt(pair: Pair<'_, Rule>) -> Result<Stmt, ParseError> {
+    let text = pair
+        .into_inner()
+        .find(|inner| inner.as_rule() == Rule::exec_sql_text)
+        .map(|inner| inner.as_str().trim().to_string())
+        .ok_or(ParseError::UnexpectedEof)?;
+    Ok(Stmt::CloseCursor {
+        name: cursor_name_from_text(&text)?,
+    })
+}
+
+fn cursor_name_from_text(text: &str) -> Result<String, ParseError> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "cursor name",
+            actual: text.to_string(),
+        });
+    }
+    parse_dynamic_execute_into_target(trimmed).and_then(|target| match target {
+        AssignTarget::Name(name) => Ok(name),
+        _ => Err(ParseError::UnexpectedToken {
+            expected: "cursor variable name",
+            actual: text.to_string(),
+        }),
+    })
+}
+
+fn fetch_cursor_name(text: &str) -> Result<String, ParseError> {
+    let mut words = text
+        .split_whitespace()
+        .filter(|word| {
+            !matches!(
+                word.to_ascii_lowercase().as_str(),
+                "from" | "next" | "prior" | "first" | "last" | "forward" | "backward"
+            ) && word.parse::<i64>().is_err()
+        })
+        .collect::<Vec<_>>();
+    let name = words.pop().ok_or_else(|| ParseError::UnexpectedToken {
+        expected: "cursor name",
+        actual: text.to_string(),
+    })?;
+    cursor_name_from_text(name)
 }
 
 fn build_ident(pair: Pair<'_, Rule>) -> String {

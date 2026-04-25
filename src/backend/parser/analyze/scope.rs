@@ -1509,6 +1509,38 @@ fn bind_single_row_function_from_item_with_ctes(
     grouped_outer: Option<&GroupedOuterScope>,
     ctes: &[BoundCte],
 ) -> Result<(AnalyzedFrom, BoundScope, bool), ParseError> {
+    if let Some(mut output_columns) = resolved_row_columns {
+        let bound_args = bind_user_defined_table_function_args(
+            args,
+            &empty_scope(),
+            catalog,
+            outer_scopes,
+            grouped_outer,
+            &resolved.declared_arg_types,
+        )?;
+        let mut desc_columns = output_columns
+            .iter()
+            .map(|col| column_desc(col.name.clone(), col.sql_type, true))
+            .collect::<Vec<_>>();
+        maybe_append_function_ordinality(with_ordinality, &mut output_columns, &mut desc_columns);
+        let desc = RelationDesc {
+            columns: desc_columns,
+        };
+        let scope = scope_for_relation(Some(name), &desc);
+        let alias_single_function_output = output_columns.len() == 1;
+        return Ok((
+            AnalyzedFrom::function(SetReturningCall::UserDefined {
+                proc_oid: resolved.proc_oid,
+                func_variadic: resolved.func_variadic,
+                args: bound_args,
+                output_columns,
+                with_ordinality,
+            }),
+            scope,
+            alias_single_function_output,
+        ));
+    }
+
     let function_expr = bind_resolved_scalar_function_call(
         resolved,
         args,

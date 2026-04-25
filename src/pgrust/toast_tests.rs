@@ -127,6 +127,7 @@ fn toast_executor_context(
         row_locks: std::sync::Arc::clone(&db.row_locks),
         checkpoint_stats: db.checkpoint_stats_snapshot(),
         datetime_config: crate::backend::utils::misc::guc_datetime::DateTimeConfig::default(),
+        gucs: std::collections::HashMap::new(),
         interrupts: db.interrupt_state(client_id),
         stats: db.stats.clone(),
         session_stats: db.session_stats_state(client_id),
