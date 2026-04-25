@@ -1,24 +1,28 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use crate::ClientId;
+use crate::backend::access::index::unique::probe_unique_conflict;
 use crate::backend::access::transam::xact::{CommandId, TransactionId};
-use crate::backend::commands::tablecmds::collect_matching_rows_heap;
+use crate::backend::commands::tablecmds::{
+    build_immediate_index_insert_context, collect_matching_rows_heap,
+};
 use crate::backend::executor::{
-    DeferredForeignKeyTracker, ExecError, ExecutorContext, enforce_outbound_foreign_keys,
+    ConstraintTiming, DeferredForeignKeyTracker, ExecError, ExecutorContext, StatementResult,
+    enforce_outbound_foreign_keys,
 };
 use crate::backend::parser::{
     AlterTableAddConstraintStatement, AlterTableValidateConstraintStatement, BoundDeleteStatement,
     BoundInsertStatement, BoundRelation, BoundRelationConstraints, BoundUpdateStatement,
-    CatalogLookup, ParseError, PreparedInsert, bind_relation_constraints,
-    normalize_alter_table_add_constraint,
+    CatalogLookup, ParseError, PreparedInsert, QualifiedNameRef, SetConstraintsStatement,
+    bind_relation_constraints, normalize_alter_table_add_constraint,
 };
 use crate::backend::storage::lmgr::TableLockMode;
 use crate::backend::storage::smgr::RelFileLocator;
 use crate::backend::utils::cache::lsyscache::LazyCatalogLookup;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::interrupts::InterruptState;
-use crate::include::catalog::CONSTRAINT_FOREIGN;
+use crate::include::catalog::{CONSTRAINT_FOREIGN, CONSTRAINT_PRIMARY, CONSTRAINT_UNIQUE};
 
 use super::Database;
 
@@ -189,7 +193,14 @@ pub(crate) fn table_lock_relations(requests: &[TableLockRequest]) -> Vec<RelFile
     requests.iter().map(|(rel, _)| *rel).collect()
 }
 
-pub(crate) fn validate_deferred_foreign_key_constraints(
+#[derive(Debug, Clone)]
+enum ConstraintValidationTarget {
+    ImmediateOnly,
+    All,
+    Selected(BTreeSet<u32>),
+}
+
+fn build_constraint_validation_context(
     db: &Database,
     client_id: ClientId,
     catalog: &LazyCatalogLookup<'_>,
@@ -197,15 +208,9 @@ pub(crate) fn validate_deferred_foreign_key_constraints(
     cid: CommandId,
     interrupts: Arc<InterruptState>,
     datetime_config: &DateTimeConfig,
-    tracker: &DeferredForeignKeyTracker,
-) -> Result<(), ExecError> {
-    let affected_constraint_oids = tracker.affected_constraint_oids();
-    if affected_constraint_oids.is_empty() {
-        return Ok(());
-    }
-
+) -> Result<ExecutorContext, ExecError> {
     let snapshot = db.txns.read().snapshot_for_command(xid, cid)?;
-    let mut ctx = ExecutorContext {
+    Ok(ExecutorContext {
         pool: db.pool.clone(),
         txns: db.txns.clone(),
         txn_waiter: Some(db.txn_waiter.clone()),
@@ -247,9 +252,56 @@ pub(crate) fn validate_deferred_foreign_key_constraints(
         recursive_worktables: std::collections::HashMap::new(),
         deferred_foreign_keys: None,
         trigger_depth: 0,
-    };
+    })
+}
 
-    for constraint_oid in affected_constraint_oids {
+fn should_validate_constraint(
+    catalog: &LazyCatalogLookup<'_>,
+    tracker: &DeferredForeignKeyTracker,
+    constraint_oid: u32,
+    target: &ConstraintValidationTarget,
+) -> bool {
+    match target {
+        ConstraintValidationTarget::All => true,
+        ConstraintValidationTarget::Selected(selected) => selected.contains(&constraint_oid),
+        ConstraintValidationTarget::ImmediateOnly => catalog
+            .constraint_row_by_oid(constraint_oid)
+            .map(|row| {
+                tracker.effective_timing(constraint_oid, row.condeferrable, row.condeferred)
+                    == ConstraintTiming::Immediate
+            })
+            .unwrap_or(false),
+    }
+}
+
+fn collect_constraint_validation_targets(
+    catalog: &LazyCatalogLookup<'_>,
+    tracker: &DeferredForeignKeyTracker,
+    target: &ConstraintValidationTarget,
+) -> (BTreeSet<u32>, BTreeSet<u32>) {
+    let foreign_keys = tracker
+        .affected_constraint_oids()
+        .into_iter()
+        .filter(|constraint_oid| {
+            should_validate_constraint(catalog, tracker, *constraint_oid, target)
+        })
+        .collect::<BTreeSet<_>>();
+    let unique_constraints = tracker
+        .pending_unique_constraint_oids()
+        .into_iter()
+        .filter(|constraint_oid| {
+            should_validate_constraint(catalog, tracker, *constraint_oid, target)
+        })
+        .collect::<BTreeSet<_>>();
+    (foreign_keys, unique_constraints)
+}
+
+fn validate_foreign_key_constraints(
+    catalog: &LazyCatalogLookup<'_>,
+    constraint_oids: &BTreeSet<u32>,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for &constraint_oid in constraint_oids {
         let Some(row) = catalog.constraint_row_by_oid(constraint_oid) else {
             continue;
         };
@@ -269,25 +321,337 @@ pub(crate) fn validate_deferred_foreign_key_constraints(
         else {
             continue;
         };
-        let rows = collect_matching_rows_heap(
-            relation.rel,
-            &relation.desc,
-            relation.toast,
-            None,
-            &mut ctx,
-        )?;
+        let rows =
+            collect_matching_rows_heap(relation.rel, &relation.desc, relation.toast, None, ctx)?;
         for (_, values) in rows {
             enforce_outbound_foreign_keys(
                 &constraint.relation_name,
                 std::slice::from_ref(constraint),
                 None,
                 &values,
-                &mut ctx,
+                ctx,
             )?;
         }
     }
-
     Ok(())
+}
+
+fn validate_unique_constraints(
+    catalog: &LazyCatalogLookup<'_>,
+    tracker: &DeferredForeignKeyTracker,
+    constraint_oids: &BTreeSet<u32>,
+    ctx: &mut ExecutorContext,
+) -> Result<(), ExecError> {
+    for &constraint_oid in constraint_oids {
+        let Some(row) = catalog.constraint_row_by_oid(constraint_oid) else {
+            continue;
+        };
+        if !matches!(row.contype, CONSTRAINT_PRIMARY | CONSTRAINT_UNIQUE) {
+            continue;
+        }
+        let Some(relation) = catalog.lookup_relation_by_oid(row.conrelid) else {
+            continue;
+        };
+        let Some(index) = catalog
+            .index_relations_for_heap(row.conrelid)
+            .into_iter()
+            .find(|index| index.relation_oid == row.conindid)
+        else {
+            continue;
+        };
+        for pending in tracker.pending_unique_checks(constraint_oid) {
+            let insert_ctx = build_immediate_index_insert_context(
+                relation.rel,
+                &relation.desc,
+                &index,
+                pending.key_values.clone(),
+                pending.heap_tid,
+                ctx,
+            );
+            if probe_unique_conflict(&insert_ctx, &pending.key_values)?.is_some() {
+                return Err(ExecError::UniqueViolation {
+                    constraint: row.conname.clone(),
+                    detail: Some(
+                        crate::backend::executor::value_io::format_unique_key_detail(
+                            &insert_ctx.index_desc.columns,
+                            &pending.key_values,
+                        ),
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_constraint_target(
+    db: &Database,
+    client_id: ClientId,
+    catalog: &LazyCatalogLookup<'_>,
+    xid: TransactionId,
+    cid: CommandId,
+    interrupts: Arc<InterruptState>,
+    datetime_config: &DateTimeConfig,
+    tracker: &DeferredForeignKeyTracker,
+    target: ConstraintValidationTarget,
+) -> Result<(), ExecError> {
+    let (foreign_key_oids, unique_oids) =
+        collect_constraint_validation_targets(catalog, tracker, &target);
+    if foreign_key_oids.is_empty() && unique_oids.is_empty() {
+        return Ok(());
+    }
+    let mut ctx = build_constraint_validation_context(
+        db,
+        client_id,
+        catalog,
+        xid,
+        cid,
+        interrupts,
+        datetime_config,
+    )?;
+    validate_foreign_key_constraints(catalog, &foreign_key_oids, &mut ctx)?;
+    validate_unique_constraints(catalog, tracker, &unique_oids, &mut ctx)?;
+    tracker.clear_foreign_key_constraints(&foreign_key_oids);
+    tracker.clear_unique_constraints(&unique_oids);
+    Ok(())
+}
+
+pub(crate) fn validate_immediate_constraints(
+    db: &Database,
+    client_id: ClientId,
+    catalog: &LazyCatalogLookup<'_>,
+    xid: TransactionId,
+    cid: CommandId,
+    interrupts: Arc<InterruptState>,
+    datetime_config: &DateTimeConfig,
+    tracker: &DeferredForeignKeyTracker,
+) -> Result<(), ExecError> {
+    validate_constraint_target(
+        db,
+        client_id,
+        catalog,
+        xid,
+        cid,
+        interrupts,
+        datetime_config,
+        tracker,
+        ConstraintValidationTarget::ImmediateOnly,
+    )
+}
+
+pub(crate) fn validate_deferred_constraints(
+    db: &Database,
+    client_id: ClientId,
+    catalog: &LazyCatalogLookup<'_>,
+    xid: TransactionId,
+    cid: CommandId,
+    interrupts: Arc<InterruptState>,
+    datetime_config: &DateTimeConfig,
+    tracker: &DeferredForeignKeyTracker,
+) -> Result<(), ExecError> {
+    validate_constraint_target(
+        db,
+        client_id,
+        catalog,
+        xid,
+        cid,
+        interrupts,
+        datetime_config,
+        tracker,
+        ConstraintValidationTarget::All,
+    )
+}
+
+pub(crate) fn validate_deferred_foreign_key_constraints(
+    db: &Database,
+    client_id: ClientId,
+    catalog: &LazyCatalogLookup<'_>,
+    xid: TransactionId,
+    cid: CommandId,
+    interrupts: Arc<InterruptState>,
+    datetime_config: &DateTimeConfig,
+    tracker: &DeferredForeignKeyTracker,
+) -> Result<(), ExecError> {
+    validate_deferred_constraints(
+        db,
+        client_id,
+        catalog,
+        xid,
+        cid,
+        interrupts,
+        datetime_config,
+        tracker,
+    )
+}
+
+fn qualified_constraint_name(name: &QualifiedNameRef) -> String {
+    match &name.schema_name {
+        Some(schema_name) => format!("{schema_name}.{}", name.name),
+        None => name.name.clone(),
+    }
+}
+
+fn matched_constraint_roots_for_name(
+    catalog: &LazyCatalogLookup<'_>,
+    all_rows: &[crate::include::catalog::PgConstraintRow],
+    namespace_names: &HashMap<u32, String>,
+    name: &QualifiedNameRef,
+) -> Vec<crate::include::catalog::PgConstraintRow> {
+    let matches_in_schema = |schema_name: &str| {
+        all_rows
+            .iter()
+            .filter(|row| {
+                row.conname.eq_ignore_ascii_case(&name.name)
+                    && namespace_names
+                        .get(&row.connamespace)
+                        .is_some_and(|namespace| namespace.eq_ignore_ascii_case(schema_name))
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    if let Some(schema_name) = &name.schema_name {
+        return matches_in_schema(schema_name);
+    }
+    for schema_name in catalog.search_path() {
+        let matches = matches_in_schema(&schema_name);
+        if !matches.is_empty() {
+            return matches;
+        }
+    }
+    Vec::new()
+}
+
+fn collect_constraint_descendants(
+    by_parent: &HashMap<u32, Vec<crate::include::catalog::PgConstraintRow>>,
+    parent_oid: u32,
+    target: &mut BTreeSet<u32>,
+) {
+    let Some(children) = by_parent.get(&parent_oid) else {
+        return;
+    };
+    for child in children {
+        if target.insert(child.oid) {
+            collect_constraint_descendants(by_parent, child.oid, target);
+        }
+    }
+}
+
+fn resolve_set_constraints_targets(
+    catalog: &LazyCatalogLookup<'_>,
+    constraints: &[QualifiedNameRef],
+) -> Result<BTreeSet<u32>, ExecError> {
+    let all_rows = catalog.constraint_rows();
+    let namespace_names = catalog
+        .namespace_rows()
+        .into_iter()
+        .map(|row| (row.oid, row.nspname))
+        .collect::<HashMap<_, _>>();
+    let mut by_parent = HashMap::<u32, Vec<crate::include::catalog::PgConstraintRow>>::new();
+    for row in &all_rows {
+        if row.conparentid != 0 {
+            by_parent
+                .entry(row.conparentid)
+                .or_default()
+                .push(row.clone());
+        }
+    }
+    let mut target_oids = BTreeSet::new();
+    for name in constraints {
+        let matched_roots =
+            matched_constraint_roots_for_name(catalog, &all_rows, &namespace_names, name);
+        if matched_roots.is_empty() {
+            return Err(ExecError::Parse(ParseError::UnexpectedToken {
+                expected: "existing constraint name",
+                actual: format!(
+                    "constraint \"{}\" does not exist",
+                    qualified_constraint_name(name)
+                ),
+            }));
+        }
+        for row in matched_roots {
+            target_oids.insert(row.oid);
+            collect_constraint_descendants(&by_parent, row.oid, &mut target_oids);
+        }
+    }
+    Ok(target_oids)
+}
+
+pub(crate) fn execute_set_constraints(
+    db: &Database,
+    client_id: ClientId,
+    catalog: &LazyCatalogLookup<'_>,
+    xid: Option<TransactionId>,
+    cid: CommandId,
+    interrupts: Arc<InterruptState>,
+    datetime_config: &DateTimeConfig,
+    tracker: &DeferredForeignKeyTracker,
+    stmt: &SetConstraintsStatement,
+) -> Result<StatementResult, ExecError> {
+    let desired_timing = if stmt.deferred {
+        ConstraintTiming::Deferred
+    } else {
+        ConstraintTiming::Immediate
+    };
+    let target_oids = if let Some(constraints) = &stmt.constraints {
+        let target_oids = resolve_set_constraints_targets(catalog, constraints)?;
+        if stmt.deferred {
+            if let Some(row) = target_oids.iter().find_map(|constraint_oid| {
+                catalog
+                    .constraint_row_by_oid(*constraint_oid)
+                    .filter(|row| !row.condeferrable)
+            }) {
+                return Err(ExecError::DetailedError {
+                    message: format!("constraint \"{}\" is not deferrable", row.conname),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "55000",
+                });
+            }
+        }
+        Some(target_oids)
+    } else {
+        None
+    };
+
+    if desired_timing == ConstraintTiming::Immediate {
+        if let Some(xid) = xid {
+            match &target_oids {
+                Some(target_oids) if !target_oids.is_empty() => validate_constraint_target(
+                    db,
+                    client_id,
+                    catalog,
+                    xid,
+                    cid,
+                    Arc::clone(&interrupts),
+                    datetime_config,
+                    tracker,
+                    ConstraintValidationTarget::Selected(target_oids.clone()),
+                )?,
+                None => validate_deferred_constraints(
+                    db,
+                    client_id,
+                    catalog,
+                    xid,
+                    cid,
+                    Arc::clone(&interrupts),
+                    datetime_config,
+                    tracker,
+                )?,
+                _ => {}
+            }
+        }
+    }
+
+    match target_oids {
+        Some(target_oids) => {
+            for constraint_oid in target_oids {
+                tracker.set_constraint_timing(constraint_oid, desired_timing);
+            }
+        }
+        None => tracker.set_all_timing(desired_timing),
+    }
+
+    Ok(StatementResult::AffectedRows(0))
 }
 
 fn add_relation_foreign_key_partner_locks(

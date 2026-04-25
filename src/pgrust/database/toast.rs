@@ -50,6 +50,10 @@ fn toast_index_relation_from_changes(changes: &ToastCatalogChanges) -> Option<Bo
         },
         index_exprs: Vec::new(),
         index_predicate: None,
+        constraint_oid: None,
+        constraint_name: None,
+        constraint_deferrable: false,
+        constraint_initially_deferred: false,
     })
 }
 

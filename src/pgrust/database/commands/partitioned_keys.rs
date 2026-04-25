@@ -19,6 +19,8 @@ struct PartitionedKeySpec {
     primary: bool,
     nulls_not_distinct: bool,
     without_overlaps: Option<String>,
+    deferrable: bool,
+    initially_deferred: bool,
 }
 
 impl PartitionedKeySpec {
@@ -28,6 +30,8 @@ impl PartitionedKeySpec {
             primary: action.primary,
             nulls_not_distinct: action.nulls_not_distinct,
             without_overlaps: action.without_overlaps.clone(),
+            deferrable: action.deferrable,
+            initially_deferred: action.initially_deferred,
         }
     }
 
@@ -294,7 +298,10 @@ impl<'a> PartitionedKeyInstaller<'a> {
         Ok((
             access_method_oid,
             access_method_handler,
-            build_options,
+            CatalogIndexBuildOptions {
+                indimmediate: !spec.deferrable,
+                ..build_options
+            },
             index_columns,
         ))
     }
@@ -350,6 +357,7 @@ impl<'a> PartitionedKeyInstaller<'a> {
             if class_row.relam != build_options.am_oid
                 || index.index_meta.indisprimary != spec.primary
                 || !index.index_meta.indisunique
+                || index.index_meta.indimmediate != !spec.deferrable
                 || index.index_meta.indisexclusion != spec.without_overlaps.is_some()
                 || index.index_meta.indnullsnotdistinct != spec.nulls_not_distinct
                 || index.index_meta.indkey != expected_attnums
@@ -358,6 +366,8 @@ impl<'a> PartitionedKeyInstaller<'a> {
                 || index.index_meta.indclass != build_options.indclass
                 || index.index_meta.indcollation != build_options.indcollation
                 || index.index_meta.indoption != build_options.indoption
+                || row.condeferrable != spec.deferrable
+                || row.condeferred != spec.initially_deferred
                 || row.conperiod != spec.without_overlaps.is_some()
             {
                 continue;
@@ -640,6 +650,8 @@ impl<'a> PartitionedKeyInstaller<'a> {
                 connoinherit,
                 spec.without_overlaps.is_some(),
                 conexclop,
+                spec.deferrable,
+                spec.initially_deferred,
                 &ctx,
             )
             .map_err(map_catalog_error)?;
@@ -721,6 +733,8 @@ impl<'a> PartitionedKeyInstaller<'a> {
                 .then(|| Self::column_names_for_attnums(&relation.desc, &attnums).ok())
                 .flatten()
                 .and_then(|columns| columns.last().cloned()),
+            deferrable: constraint.condeferrable,
+            initially_deferred: constraint.condeferred,
         })
     }
 
@@ -744,6 +758,8 @@ impl<'a> PartitionedKeyInstaller<'a> {
                     primary: spec.primary,
                     nulls_not_distinct: spec.nulls_not_distinct,
                     without_overlaps: spec.without_overlaps.clone(),
+                    deferrable: spec.deferrable,
+                    initially_deferred: spec.initially_deferred,
                 }],
             )
             .map_err(ExecError::Parse)?;

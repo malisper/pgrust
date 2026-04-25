@@ -501,6 +501,7 @@ impl Database {
                 indoption,
                 indnullsnotdistinct: false,
                 indisexclusion: false,
+                indimmediate: true,
                 brin_options,
                 gin_options,
                 hash_options,
@@ -563,6 +564,7 @@ impl Database {
                 indoption,
                 indnullsnotdistinct: false,
                 indisexclusion: true,
+                indimmediate: true,
                 brin_options: None,
                 gin_options: None,
                 hash_options: None,
@@ -1012,6 +1014,10 @@ impl Database {
                 index_meta: relcache_index_meta.clone(),
                 index_exprs,
                 index_predicate,
+                constraint_oid: None,
+                constraint_name: None,
+                constraint_deferrable: false,
+                constraint_initially_deferred: false,
             };
             let mut index_meta = bound_index.index_meta.clone();
             index_meta.indkey = (1..=index_meta.indkey.len())

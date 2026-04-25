@@ -283,6 +283,7 @@ pub enum Statement {
     Analyze(AnalyzeStatement),
     Checkpoint(CheckpointStatement),
     Set(SetStatement),
+    SetConstraints(SetConstraintsStatement),
     Reset(ResetStatement),
     CreateFunction(CreateFunctionStatement),
     CreateAggregate(CreateAggregateStatement),
@@ -749,6 +750,12 @@ pub struct SetStatement {
     pub name: String,
     pub value: String,
     pub is_local: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetConstraintsStatement {
+    pub constraints: Option<Vec<QualifiedNameRef>>,
+    pub deferred: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
