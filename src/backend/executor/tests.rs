@@ -13869,6 +13869,8 @@ fn aggregate_primary_key_groupby_reduction_preserves_passthrough_columns() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
 fn explain_verbose_lateral_aggregate_renders_pg_style_details() {
     let base = temp_dir("explain_verbose_lateral_agg");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -13897,16 +13899,28 @@ fn explain_verbose_lateral_aggregate_renders_pg_style_details() {
                 })
                 .collect::<Vec<_>>();
             assert!(
-                rendered
-                    .iter()
-                    .any(|line| line.trim() == "Function Scan on pg_catalog.generate_series s1"),
+                rendered.iter().any(|line| line.trim() == "->  Nested Loop"),
                 "{}",
                 rendered.join("\n")
             );
             assert!(
                 rendered
                     .iter()
-                    .any(|line| line.trim() == "Function Scan on pg_catalog.generate_series s2"),
+                    .any(|line| line.trim() == "->  Function Scan on pg_catalog.generate_series s1"),
+                "{}",
+                rendered.join("\n")
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.trim() == "->  HashAggregate"),
+                "{}",
+                rendered.join("\n")
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.trim() == "->  Function Scan on pg_catalog.generate_series s2"),
                 "{}",
                 rendered.join("\n")
             );

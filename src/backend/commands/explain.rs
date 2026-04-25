@@ -69,6 +69,7 @@ pub(crate) fn format_explain_plan_with_subplans(
         indent,
         show_costs,
         false,
+        false,
         &VerboseExplainContext::default(),
         lines,
     );
@@ -87,6 +88,7 @@ pub(crate) fn format_verbose_explain_plan_with_subplans(
         indent,
         show_costs,
         true,
+        false,
         &VerboseExplainContext::default(),
         lines,
     );
@@ -98,11 +100,12 @@ fn format_explain_plan_with_subplans_inner(
     indent: usize,
     show_costs: bool,
     verbose: bool,
+    is_child: bool,
     ctx: &VerboseExplainContext,
     lines: &mut Vec<String>,
 ) {
     if let Some(plan_info) = const_false_filter_result_plan(plan) {
-        let prefix = "  ".repeat(indent);
+        let prefix = explain_node_prefix(indent, is_child);
         push_explain_line(&format!("{prefix}Result"), plan_info, show_costs, lines);
         lines.push(format!("{prefix}  One-Time Filter: false"));
         return;
@@ -112,17 +115,17 @@ fn format_explain_plan_with_subplans_inner(
         && (!verbose || explain_passthrough_applies_in_verbose(plan))
     {
         format_explain_plan_with_subplans_inner(
-            child, subplans, indent, show_costs, verbose, ctx, lines,
+            child, subplans, indent, show_costs, verbose, is_child, ctx, lines,
         );
         return;
     }
 
     let state = executor_start(plan.clone());
     if verbose {
-        push_explain_plan_line(plan, state.as_ref(), indent, show_costs, lines);
+        push_explain_plan_line(plan, state.as_ref(), indent, is_child, show_costs, lines);
         push_verbose_plan_details(plan, indent, ctx, lines);
     } else {
-        push_explain_plan_state_line(plan, state.as_ref(), indent, show_costs, lines);
+        push_explain_plan_state_line(plan, state.as_ref(), indent, is_child, show_costs, lines);
         if !push_nonverbose_plan_details(plan, indent, ctx, lines) {
             state.explain_details(indent, false, show_costs, lines);
         }
@@ -143,6 +146,7 @@ fn format_explain_plan_with_subplans_inner(
                 indent + 2,
                 show_costs,
                 verbose,
+                true,
                 ctx,
                 lines,
             );
@@ -256,10 +260,11 @@ fn push_explain_plan_state_line(
     plan: &Plan,
     state: &dyn PlanNode,
     indent: usize,
+    is_child: bool,
     show_costs: bool,
     lines: &mut Vec<String>,
 ) {
-    let prefix = "  ".repeat(indent);
+    let prefix = explain_node_prefix(indent, is_child);
     let label = nonverbose_plan_label(plan).unwrap_or_else(|| state.node_label());
     push_explain_line(
         &format!("{prefix}{label}"),
@@ -357,10 +362,11 @@ fn push_explain_plan_line(
     plan: &Plan,
     state: &dyn PlanNode,
     indent: usize,
+    is_child: bool,
     show_costs: bool,
     lines: &mut Vec<String>,
 ) {
-    let prefix = "  ".repeat(indent);
+    let prefix = explain_node_prefix(indent, is_child);
     let label = verbose_plan_label(plan).unwrap_or_else(|| state.node_label());
     push_explain_line(
         &format!("{prefix}{label}"),
@@ -645,6 +651,7 @@ fn explain_plan_children_with_context(
                 indent + 1,
                 show_costs,
                 verbose,
+                true,
                 ctx,
                 lines,
             );
@@ -663,6 +670,7 @@ fn explain_plan_children_with_context(
                 indent + 1,
                 show_costs,
                 verbose,
+                true,
                 &right_ctx,
                 lines,
             );
@@ -680,11 +688,20 @@ fn explain_plan_children_with_context(
                     child_indent,
                     show_costs,
                     verbose,
+                    true,
                     ctx,
                     lines,
                 );
             }
         }
+    }
+}
+
+fn explain_node_prefix(indent: usize, is_child: bool) -> String {
+    if is_child {
+        format!("{}->  ", "  ".repeat(indent))
+    } else {
+        "  ".repeat(indent)
     }
 }
 
