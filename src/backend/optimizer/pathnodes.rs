@@ -1095,6 +1095,7 @@ pub(super) fn expr_sql_type(expr: &Expr) -> SqlType {
         Expr::CurrentUser | Expr::SessionUser | Expr::CurrentRole => {
             SqlType::new(SqlTypeKind::Name)
         }
+        Expr::CurrentCatalog | Expr::CurrentSchema => SqlType::new(SqlTypeKind::Text),
         Expr::CurrentTime { .. } => SqlType::new(SqlTypeKind::TimeTz),
         Expr::CurrentTimestamp { .. } => SqlType::new(SqlTypeKind::TimestampTz),
         Expr::LocalTime { .. } => SqlType::new(SqlTypeKind::Time),

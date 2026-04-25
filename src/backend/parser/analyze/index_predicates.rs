@@ -154,6 +154,8 @@ fn single_local_varno(expr: &Expr) -> Option<usize> {
             Expr::Xml(xml) => xml.child_exprs().all(|expr| visit(expr, found)),
             Expr::Random
             | Expr::CurrentDate
+            | Expr::CurrentCatalog
+            | Expr::CurrentSchema
             | Expr::CurrentUser
             | Expr::SessionUser
             | Expr::CurrentRole
@@ -239,6 +241,8 @@ pub(crate) fn expr_uses_ctid(expr: &Expr) -> bool {
         Expr::Xml(xml) => xml.child_exprs().any(expr_uses_ctid),
         Expr::Random
         | Expr::CurrentDate
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
         | Expr::CurrentRole
