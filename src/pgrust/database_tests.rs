@@ -27797,6 +27797,62 @@ fn explicit_text_to_name_cast_works_via_pg_cast() {
 }
 
 #[test]
+fn parse_ident_splits_qualified_identifiers() {
+    let db = Database::open_ephemeral(32).unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select parse_ident('\"SomeSchema\".someTable'), parse_ident('public.fn(int4)', false)",
+        ),
+        vec![vec![
+            Value::Array(vec![
+                Value::Text("SomeSchema".into()),
+                Value::Text("sometable".into()),
+            ]),
+            Value::Array(vec![Value::Text("public".into()), Value::Text("fn".into()),]),
+        ]]
+    );
+}
+
+#[test]
+fn parse_ident_rejects_invalid_identifiers_with_pg_style_detail() {
+    let db = Database::open_ephemeral(32).unwrap();
+
+    match db.execute(1, "select parse_ident('foo.')") {
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            sqlstate,
+            ..
+        }) => {
+            assert_eq!(message, "string is not a valid identifier: \"foo.\"");
+            assert_eq!(detail.as_deref(), Some("No valid identifier after \".\"."));
+            assert_eq!(sqlstate, "22023");
+        }
+        other => panic!("expected parse_ident error, got {:?}", other),
+    }
+
+    match db.execute(1, "select parse_ident('\"\"')") {
+        Err(ExecError::DetailedError {
+            message,
+            detail,
+            sqlstate,
+            ..
+        }) => {
+            assert_eq!(message, "string is not a valid identifier: \"\"\"\"");
+            assert_eq!(
+                detail.as_deref(),
+                Some("Quoted identifier must not be empty.")
+            );
+            assert_eq!(sqlstate, "22023");
+        }
+        other => panic!("expected parse_ident empty-quote error, got {:?}", other),
+    }
+}
+
+#[test]
 fn case_expressions_execute_with_pg_style_null_and_short_circuit_semantics() {
     let db = Database::open_ephemeral(32).expect("open ephemeral database");
     let mut session = Session::new(1);
