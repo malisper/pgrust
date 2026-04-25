@@ -512,9 +512,14 @@ fn try_parse_create_schema_statement(
         .map(|element| {
             let stmt = parse_statement_with_options_inner(element, options)?;
             match stmt {
-                Statement::CreateTable(_) => Ok(Box::new(stmt)),
+                Statement::CreateSequence(_)
+                | Statement::CreateTable(_)
+                | Statement::CreateView(_)
+                | Statement::CreateIndex(_)
+                | Statement::CreateTrigger(_)
+                | Statement::GrantObject(_) => Ok(Box::new(stmt)),
                 _ => Err(ParseError::FeatureNotSupported(
-                    "CREATE SCHEMA elements other than CREATE TABLE".into(),
+                    "CREATE SCHEMA elements other than CREATE SEQUENCE, CREATE TABLE, CREATE VIEW, CREATE INDEX, CREATE TRIGGER, or GRANT".into(),
                 )),
             }
         })
@@ -532,19 +537,18 @@ fn split_create_schema_elements(input: &str) -> Result<Vec<String>, ParseError> 
     let mut starts = Vec::new();
     let mut offset = 0usize;
     while offset < input.len() {
-        let Some(relative) = find_next_top_level_keyword(&input[offset..], &["create"]) else {
+        let Some(relative) = find_next_top_level_keyword(&input[offset..], &["create", "grant"])
+        else {
             break;
         };
         let index = offset + relative;
-        let tail = &input[index..];
-        if consume_keyword(tail, "create")
-            .trim_start()
-            .to_ascii_lowercase()
-            .starts_with("table")
-        {
-            starts.push(index);
-        }
-        offset = index + "create".len();
+        starts.push(index);
+        offset = index
+            + if keyword_at_start(&input[index..], "create") {
+                "create".len()
+            } else {
+                "grant".len()
+            };
     }
     if starts.is_empty() {
         return Err(ParseError::UnexpectedToken {
