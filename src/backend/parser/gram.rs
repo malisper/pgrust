@@ -11317,7 +11317,7 @@ fn select_item_name(expr: &SqlExpr, index: usize) -> String {
         SqlExpr::ArraySubscript { array, .. } => select_item_name(array, index),
         SqlExpr::FieldSelect { field, .. } => field.clone(),
         SqlExpr::Cast(inner, ty) => match inner.as_ref() {
-            SqlExpr::Column(_) => select_item_name(inner, index),
+            SqlExpr::Column(_) | SqlExpr::FuncCall { .. } => select_item_name(inner, index),
             SqlExpr::Cast(grand_inner, _) if matches!(grand_inner.as_ref(), SqlExpr::Column(_)) => {
                 select_item_name(inner, index)
             }
@@ -13322,6 +13322,10 @@ pub(crate) fn build_expr(pair: Pair<'_, Rule>) -> Result<SqlExpr, ParseError> {
                         ">" => SqlExpr::Gt(Box::new(left), Box::new(right)),
                         ">=" => SqlExpr::GtEq(Box::new(left), Box::new(right)),
                         "~" => SqlExpr::RegexMatch(Box::new(left), Box::new(right)),
+                        "!~" => SqlExpr::Not(Box::new(SqlExpr::RegexMatch(
+                            Box::new(left),
+                            Box::new(right),
+                        ))),
                         _ => unreachable!(),
                     })
                 }

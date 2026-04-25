@@ -68,8 +68,8 @@ use super::expr_string::{
     eval_concat_ws_function, eval_convert_from_function, eval_crc32_function, eval_crc32c_function,
     eval_decode_function, eval_encode_function, eval_format_function, eval_get_bit_bytes,
     eval_get_byte, eval_initcap_function, eval_left_function, eval_length_function, eval_like,
-    eval_lower_function, eval_lpad_function, eval_md5_function, eval_pg_rust_test_enc_conversion,
-    eval_pg_rust_test_enc_setup, eval_pg_rust_test_fdw_handler,
+    eval_lower_function, eval_lpad_function, eval_md5_function, eval_parse_ident_function,
+    eval_pg_rust_test_enc_conversion, eval_pg_rust_test_enc_setup, eval_pg_rust_test_fdw_handler,
     eval_pg_rust_test_opclass_options_func, eval_pg_size_bytes_function,
     eval_pg_size_pretty_function, eval_position_function, eval_quote_literal_function,
     eval_repeat_function, eval_replace_function, eval_reverse_function, eval_right_function,
@@ -3607,6 +3607,7 @@ fn eval_plpgsql_builtin_function(
         BuiltinScalarFunction::Translate => eval_translate_function(&values),
         BuiltinScalarFunction::Ascii => eval_ascii_function(&values),
         BuiltinScalarFunction::Chr => eval_chr_function(&values),
+        BuiltinScalarFunction::ParseIdent => eval_parse_ident_function(&values),
         BuiltinScalarFunction::TextToRegClass => eval_text_to_regclass_function(&values, None),
         BuiltinScalarFunction::RegClassToText => eval_regclass_to_text_function(&values, None),
         BuiltinScalarFunction::RegTypeToText => eval_regtype_to_text_function(&values, None),
@@ -4934,6 +4935,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::Translate => eval_translate_function(&values),
         BuiltinScalarFunction::Ascii => eval_ascii_function(&values),
         BuiltinScalarFunction::Chr => eval_chr_function(&values),
+        BuiltinScalarFunction::ParseIdent => eval_parse_ident_function(&values),
         BuiltinScalarFunction::Strpos => eval_strpos_function(&values),
         BuiltinScalarFunction::Position => match values.as_slice() {
             [Value::Bit(needle), Value::Bit(haystack)] => {
