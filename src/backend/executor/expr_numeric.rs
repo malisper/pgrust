@@ -15,6 +15,7 @@ use super::node_types::{NumericValue, Value};
 const NUMERIC_MIN_SIG_DIGITS: i32 = 16;
 const NUMERIC_MIN_DISPLAY_SCALE: i32 = 0;
 const NUMERIC_MAX_DISPLAY_SCALE: i32 = 1000;
+const NUMERIC_DSCALE_MAX: i32 = 16383;
 const NUMERIC_MAX_TRANSCENDENTAL_DISPLAY_SCALE: i32 = 1000;
 const NUMERIC_MAX_TRANSCENDENTAL_RESULT_SCALE: i32 = 2000;
 const NUMERIC_MAX_RESULT_WEIGHT: f64 = 131072.0;
@@ -142,7 +143,7 @@ fn finite_dscale(value: &NumericValue) -> u32 {
 }
 
 fn clamp_display_scale(scale: i32) -> u32 {
-    scale.clamp(NUMERIC_MIN_DISPLAY_SCALE, NUMERIC_MAX_DISPLAY_SCALE) as u32
+    scale.clamp(NUMERIC_MIN_DISPLAY_SCALE, NUMERIC_DSCALE_MAX) as u32
 }
 
 fn numeric_sign(value: &NumericValue) -> i32 {
@@ -811,7 +812,7 @@ fn eval_power_numeric(base: &NumericValue, exp: &NumericValue) -> Result<Numeric
             let ln_num = mul_numeric_clamped(&ln_base, exp, local_rscale);
 
             let mut approx_weight = numeric_to_f64_approx(&ln_num);
-            if approx_weight.abs() > NUMERIC_MAX_DISPLAY_SCALE as f64 * 3.01 {
+            if approx_weight.abs() > NUMERIC_MAX_TRANSCENDENTAL_RESULT_SCALE as f64 * 3.01 {
                 return if approx_weight > 0.0 {
                     Err(numeric_domain_error("value overflows numeric format"))
                 } else {
@@ -1191,6 +1192,14 @@ pub(super) fn eval_trim_scale_function(values: &[Value]) -> Result<Value, ExecEr
         [] | [Value::Null] => Ok(Value::Null),
         [value] => match value_as_numeric(value) {
             Some(NumericValue::Finite { coeff, scale, .. }) => {
+                let (coeff, scale) = if scale > 16_383 {
+                    match NumericValue::finite(coeff.clone(), scale).round_to_scale(16_383) {
+                        Some(NumericValue::Finite { coeff, scale, .. }) => (coeff, scale),
+                        _ => (coeff, scale),
+                    }
+                } else {
+                    (coeff, scale)
+                };
                 if coeff.is_zero() {
                     Ok(Value::Numeric(NumericValue::zero()))
                 } else {
