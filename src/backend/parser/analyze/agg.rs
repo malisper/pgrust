@@ -4,6 +4,7 @@ use crate::include::catalog::multirange_type_ref_for_sql_type;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct CollectedAggregate {
     pub name: String,
+    pub direct_args: Vec<SqlFunctionArg>,
     pub args: SqlCallArgs,
     pub order_by: Vec<OrderByItem>,
     pub distinct: bool,
@@ -15,6 +16,7 @@ impl CollectedAggregate {
     pub(super) fn matches_call(
         &self,
         name: &str,
+        direct_args: &[SqlFunctionArg],
         args: &SqlCallArgs,
         order_by: &[OrderByItem],
         distinct: bool,
@@ -22,6 +24,7 @@ impl CollectedAggregate {
         filter: Option<&SqlExpr>,
     ) -> bool {
         self.name.eq_ignore_ascii_case(name)
+            && self.direct_args == direct_args
             && self.args == *args
             && self.order_by == order_by
             && self.distinct == distinct
@@ -34,7 +37,11 @@ pub(super) fn aggregate_call_matches_catalog(
     catalog: &dyn CatalogLookup,
     name: &str,
     args: &SqlCallArgs,
+    within_group: Option<&[OrderByItem]>,
 ) -> bool {
+    if within_group.is_some() {
+        return resolve_builtin_hypothetical_aggregate(name).is_some();
+    }
     if let Some(func) = resolve_builtin_aggregate(name) {
         return builtin_aggregate_accepts_call(func, args);
     }
@@ -97,6 +104,31 @@ fn builtin_aggregate_accepts_call(func: AggFunc, args: &SqlCallArgs) -> bool {
     }
 }
 
+pub(super) fn hypothetical_aggregate_args(order_by: &[OrderByItem]) -> SqlCallArgs {
+    SqlCallArgs::Args(
+        order_by
+            .iter()
+            .map(|item| SqlFunctionArg::positional(item.expr.clone()))
+            .collect(),
+    )
+}
+
+pub(super) fn normalize_aggregate_call(
+    args: &SqlCallArgs,
+    order_by: &[OrderByItem],
+    within_group: Option<&[OrderByItem]>,
+) -> (Vec<SqlFunctionArg>, SqlCallArgs, Vec<OrderByItem>) {
+    if let Some(within_group) = within_group {
+        (
+            args.args().to_vec(),
+            hypothetical_aggregate_args(within_group),
+            within_group.to_vec(),
+        )
+    } else {
+        (Vec::new(), args.clone(), order_by.to_vec())
+    }
+}
+
 pub(super) fn expr_contains_agg(catalog: &dyn CatalogLookup, expr: &SqlExpr) -> bool {
     match expr {
         SqlExpr::Column(_)
@@ -122,11 +154,13 @@ pub(super) fn expr_contains_agg(catalog: &dyn CatalogLookup, expr: &SqlExpr) -> 
             name,
             args,
             order_by,
+            within_group,
             filter,
             over,
             ..
         } => {
-            over.is_none() && aggregate_call_matches_catalog(catalog, name, args)
+            over.is_none()
+                && aggregate_call_matches_catalog(catalog, name, args, within_group.as_deref())
                 || args
                     .args()
                     .iter()
@@ -134,6 +168,11 @@ pub(super) fn expr_contains_agg(catalog: &dyn CatalogLookup, expr: &SqlExpr) -> 
                 || order_by
                     .iter()
                     .any(|item| expr_contains_agg(catalog, &item.expr))
+                || within_group.as_deref().is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|item| expr_contains_agg(catalog, &item.expr))
+                })
                 || filter
                     .as_deref()
                     .is_some_and(|expr| expr_contains_agg(catalog, expr))
@@ -289,6 +328,7 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
         SqlExpr::FuncCall {
             args,
             order_by,
+            within_group,
             filter,
             ..
         } => {
@@ -298,6 +338,11 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
                 || order_by
                     .iter()
                     .any(|item| expr_references_input_scope(&item.expr))
+                || within_group.as_deref().is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|item| expr_references_input_scope(&item.expr))
+                })
                 || filter.as_deref().is_some_and(expr_references_input_scope)
         }
         SqlExpr::PrefixOperator { expr, .. } | SqlExpr::FieldSelect { expr, .. } => {
@@ -456,17 +501,29 @@ pub(super) fn collect_aggs(
             name,
             args,
             order_by,
+            within_group,
             distinct,
             func_variadic,
             filter,
             over,
         } => {
-            if aggregate_call_matches_catalog(catalog, name, args) {
+            if aggregate_call_matches_catalog(catalog, name, args, within_group.as_deref()) {
                 if over.is_none() {
+                    let (direct_args, agg_args, agg_order_by) =
+                        if let Some(within_group) = within_group.as_deref() {
+                            (
+                                args.args().to_vec(),
+                                hypothetical_aggregate_args(within_group),
+                                within_group.to_vec(),
+                            )
+                        } else {
+                            (Vec::new(), args.clone(), order_by.clone())
+                        };
                     let entry = CollectedAggregate {
                         name: name.clone(),
-                        args: args.clone(),
-                        order_by: order_by.clone(),
+                        direct_args,
+                        args: agg_args,
+                        order_by: agg_order_by,
                         distinct: *distinct,
                         func_variadic: *func_variadic,
                         filter: filter.as_deref().cloned(),
@@ -481,6 +538,11 @@ pub(super) fn collect_aggs(
             }
             for item in order_by {
                 collect_aggs(catalog, &item.expr, aggs);
+            }
+            if let Some(items) = within_group.as_deref() {
+                for item in items {
+                    collect_aggs(catalog, &item.expr, aggs);
+                }
             }
             if let Some(filter) = filter.as_deref() {
                 collect_aggs(catalog, filter, aggs);

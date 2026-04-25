@@ -6,12 +6,12 @@ use crate::backend::executor::ExecError;
 use crate::backend::executor::exec_expr::{expect_float8_arg, float8_regr_accum_state};
 use crate::backend::executor::expr_agg_support::execute_scalar_function_value_call;
 use crate::backend::executor::expr_ops::{
-    bitwise_and_values, bitwise_or_values, bitwise_xor_values,
+    bitwise_and_values, bitwise_or_values, bitwise_xor_values, compare_order_by_keys,
 };
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::include::nodes::datum::{ArrayDimension, ArrayValue, NumericValue, Value};
-use crate::include::nodes::primnodes::{AggAccum, AggFunc};
+use crate::include::nodes::primnodes::{AggAccum, AggFunc, HypotheticalAggFunc};
 use crate::pgrust::compact_string::CompactString;
 use crate::pgrust::session::ByteaOutputFormat;
 
@@ -41,6 +41,9 @@ pub(crate) enum AggregateRuntime {
     Builtin {
         func: AggFunc,
         transition: AggTransitionFn,
+    },
+    Hypothetical {
+        func: HypotheticalAggFunc,
     },
     Custom(CustomAggregateRuntime),
 }
@@ -143,6 +146,7 @@ pub(crate) enum AccumState {
     RangeIntersect {
         current: Option<Value>,
     },
+    Hypothetical,
     Custom {
         value: Value,
     },
@@ -891,6 +895,7 @@ impl AccumState {
                 .map(Value::Multirange)
                 .unwrap_or(Value::Null),
             AccumState::RangeIntersect { current } => current.clone().unwrap_or(Value::Null),
+            AccumState::Hypothetical => Value::Null,
             AccumState::Custom { value } => value.clone(),
         }
     }
@@ -902,6 +907,7 @@ impl AggregateRuntime {
             AggregateRuntime::Builtin { func, .. } => {
                 AccumState::new(*func, accum.distinct, accum.sql_type)
             }
+            AggregateRuntime::Hypothetical { .. } => AccumState::Hypothetical,
             AggregateRuntime::Custom(custom) => {
                 AccumState::custom(custom.init_value.clone().unwrap_or(Value::Null))
             }
@@ -916,6 +922,7 @@ impl AggregateRuntime {
     ) -> Result<(), ExecError> {
         match self {
             AggregateRuntime::Builtin { transition, .. } => transition(state, arg_values),
+            AggregateRuntime::Hypothetical { .. } => Ok(()),
             AggregateRuntime::Custom(custom) => {
                 let mut call_args = Vec::with_capacity(arg_values.len() + 1);
                 let current_state = match state {
@@ -946,11 +953,17 @@ impl AggregateRuntime {
 
     pub(crate) fn finalize(
         &self,
+        accum: &AggAccum,
         state: &AccumState,
+        ordered_inputs: &[OrderedAggInput],
+        direct_arg_values: &[Value],
         ctx: &mut crate::backend::executor::ExecutorContext,
     ) -> Result<Value, ExecError> {
         match self {
             AggregateRuntime::Builtin { .. } => Ok(state.finalize()),
+            AggregateRuntime::Hypothetical { func } => {
+                finalize_hypothetical_aggregate(*func, accum, ordered_inputs, direct_arg_values)
+            }
             AggregateRuntime::Custom(custom) => {
                 let state_value = match state {
                     AccumState::Custom { value } => value.clone(),
@@ -974,6 +987,67 @@ impl AggregateRuntime {
             }
         }
     }
+}
+
+fn finalize_hypothetical_aggregate(
+    func: HypotheticalAggFunc,
+    accum: &AggAccum,
+    ordered_inputs: &[OrderedAggInput],
+    direct_arg_values: &[Value],
+) -> Result<Value, ExecError> {
+    if direct_arg_values.len() != accum.order_by.len() {
+        return Err(ExecError::DetailedError {
+            message: "ordered-set aggregate direct-argument count mismatch".into(),
+            detail: Some(format!(
+                "direct args = {}, order columns = {}",
+                direct_arg_values.len(),
+                accum.order_by.len(),
+            )),
+            hint: None,
+            sqlstate: "XX000",
+        });
+    }
+
+    let mut preceding_rows = 0usize;
+    let mut peer_rows = 0usize;
+    let mut preceding_groups = 0usize;
+    let mut previous_preceding_keys: Option<&[Value]> = None;
+
+    for input in ordered_inputs {
+        match compare_order_by_keys(&accum.order_by, &input.sort_keys, direct_arg_values)? {
+            Ordering::Less => {
+                preceding_rows += 1;
+                let is_new_group = match previous_preceding_keys {
+                    Some(previous) => {
+                        compare_order_by_keys(&accum.order_by, previous, &input.sort_keys)?
+                            != Ordering::Equal
+                    }
+                    None => true,
+                };
+                if is_new_group {
+                    preceding_groups += 1;
+                }
+                previous_preceding_keys = Some(&input.sort_keys);
+            }
+            Ordering::Equal => peer_rows += 1,
+            Ordering::Greater => break,
+        }
+    }
+
+    Ok(match func {
+        HypotheticalAggFunc::Rank => Value::Int64((preceding_rows + 1) as i64),
+        HypotheticalAggFunc::DenseRank => Value::Int64((preceding_groups + 1) as i64),
+        HypotheticalAggFunc::PercentRank => {
+            if ordered_inputs.is_empty() {
+                Value::Float64(0.0)
+            } else {
+                Value::Float64(preceding_rows as f64 / ordered_inputs.len() as f64)
+            }
+        }
+        HypotheticalAggFunc::CumeDist => Value::Float64(
+            (preceding_rows + peer_rows + 1) as f64 / (ordered_inputs.len() + 1) as f64,
+        ),
+    })
 }
 
 fn finalize_regr_stats(
@@ -1546,6 +1620,7 @@ pub(crate) struct AggGroup {
     pub(crate) key_values: Vec<Value>,
     pub(crate) accum_states: Vec<AccumState>,
     pub(crate) distinct_inputs: Vec<Option<HashSet<Vec<Value>>>>,
+    pub(crate) direct_arg_values: Vec<Option<Vec<Value>>>,
     pub(crate) ordered_inputs: Vec<Vec<OrderedAggInput>>,
 }
 

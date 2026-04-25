@@ -10022,12 +10022,70 @@ fn parse_jsonb_agg_with_local_order_by_using_operator() {
 }
 
 #[test]
+fn parse_hypothetical_within_group_call() {
+    let stmt =
+        parse_select("select rank(3) within group (order by x) from (values (1),(2),(3)) v(x)")
+            .unwrap();
+    assert!(matches!(
+        &stmt.targets[0].expr,
+        SqlExpr::FuncCall {
+            name,
+            args,
+            order_by,
+            within_group: Some(within_group),
+            distinct: false,
+            func_variadic: false,
+            filter: None,
+            over: None,
+        } if name == "rank"
+            && args.args().len() == 1
+            && order_by.is_empty()
+            && matches!(args.args()[0].value, SqlExpr::IntegerLiteral(ref value) if value == "3")
+            && within_group.len() == 1
+            && matches!(within_group[0].expr, SqlExpr::Column(ref name) if name == "x")
+    ));
+}
+
+#[test]
 fn parse_select_order_by_using_operator() {
     let stmt = parse_select("select note from people order by note using > nulls last").unwrap();
     assert_eq!(stmt.order_by.len(), 1);
     assert!(stmt.order_by[0].descending);
     assert_eq!(stmt.order_by[0].nulls_first, Some(false));
     assert_eq!(stmt.order_by[0].using_operator.as_deref(), Some(">"));
+}
+
+#[test]
+fn parse_within_group_rejects_invalid_clause_combinations() {
+    let cases = [
+        (
+            "select rank(distinct 3) within group (order by x) from (values (1)) v(x)",
+            "cannot use DISTINCT with WITHIN GROUP",
+            "42601",
+        ),
+        (
+            "select rank(variadic array[3]) within group (order by x) from (values (1)) v(x)",
+            "cannot use VARIADIC with WITHIN GROUP",
+            "42601",
+        ),
+        (
+            "select rank(3 order by y) within group (order by x) from (values (1,2)) v(x,y)",
+            "cannot use multiple ORDER BY clauses with WITHIN GROUP",
+            "42601",
+        ),
+        (
+            "select rank(3) within group (order by x) over () from (values (1)) v(x)",
+            "OVER is not supported for ordered-set aggregate rank",
+            "0A000",
+        ),
+    ];
+    for (sql, expected, sqlstate) in cases {
+        assert!(matches!(
+            parse_select(sql),
+            Err(ParseError::DetailedError { message, sqlstate: actual_sqlstate, .. })
+                if message == expected && actual_sqlstate == sqlstate
+        ));
+    }
 }
 
 #[test]
@@ -12157,6 +12215,7 @@ fn parse_dml_returning_targets() {
                             SqlExpr::Column("name".into()),
                         )]),
                         order_by: vec![],
+                        within_group: None,
                         distinct: false,
                         func_variadic: false,
                         filter: None,
@@ -12187,6 +12246,7 @@ fn parse_dml_returning_targets() {
                             SqlExpr::Column("name".into()),
                         )]),
                         order_by: vec![],
+                        within_group: None,
                         distinct: false,
                         func_variadic: false,
                         filter: None,

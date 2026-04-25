@@ -1981,6 +1981,7 @@ fn build_grouped_target(parse: &Query) -> PathTarget {
             aggtype: accum.sql_type,
             aggvariadic: accum.agg_variadic,
             aggdistinct: accum.distinct,
+            direct_args: accum.direct_args.clone(),
             args: accum.args.clone(),
             aggorder: accum.order_by.clone(),
             aggfilter: accum.filter.clone(),

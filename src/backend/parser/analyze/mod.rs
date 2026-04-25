@@ -43,15 +43,16 @@ use crate::include::catalog::{
     bootstrap_pg_language_rows, bootstrap_pg_namespace_rows, bootstrap_pg_opclass_rows,
     bootstrap_pg_operator_rows, bootstrap_pg_proc_rows, builtin_range_rows, builtin_type_rows,
     is_synthetic_range_proc_name, multirange_type_ref_for_sql_type,
-    proc_oid_for_builtin_aggregate_function, range_type_ref_for_sql_type, relkind_is_analyzable,
-    synthetic_range_proc_row_by_oid, synthetic_range_proc_rows_by_name,
+    proc_oid_for_builtin_aggregate_function, proc_oid_for_builtin_hypothetical_aggregate_function,
+    range_type_ref_for_sql_type, relkind_is_analyzable, synthetic_range_proc_row_by_oid,
+    synthetic_range_proc_rows_by_name,
 };
 use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
-    AggAccum, AggFunc, BuiltinScalarFunction, Expr, JsonTableFunction, OrderByEntry, QueryColumn,
-    RelationDesc, SetReturningCall, SortGroupClause, TargetEntry, ToastRelationRef, Var,
-    expr_contains_set_returning, user_attrno,
+    AggAccum, AggFunc, BuiltinScalarFunction, Expr, HypotheticalAggFunc, JsonTableFunction,
+    OrderByEntry, QueryColumn, RelationDesc, SetReturningCall, SortGroupClause, TargetEntry,
+    ToastRelationRef, Var, expr_contains_set_returning, user_attrno,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -305,6 +306,13 @@ impl ResolvedAggregateCall {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResolvedHypotheticalAggregateCall {
+    proc_oid: u32,
+    result_type: SqlType,
+    builtin_impl: HypotheticalAggFunc,
+}
+
 fn resolve_builtin_aggregate_call(
     catalog: &dyn CatalogLookup,
     func: AggFunc,
@@ -398,6 +406,9 @@ fn resolve_aggregate_call(
     }
 
     let resolved = resolve_function_call(catalog, name, arg_types, func_variadic).ok()?;
+    if resolved.hypothetical_agg_impl.is_some() {
+        return None;
+    }
     (resolved.prokind == 'a').then_some(ResolvedAggregateCall {
         proc_oid: resolved.proc_oid,
         result_type: resolved.result_type,
@@ -431,6 +442,156 @@ fn fallback_builtin_aggregate_declared_arg_types(
     }
 }
 
+fn resolve_hypothetical_aggregate_call(name: &str) -> Option<ResolvedHypotheticalAggregateCall> {
+    let builtin_impl = resolve_builtin_hypothetical_aggregate(name)?;
+    let proc_oid = proc_oid_for_builtin_hypothetical_aggregate_function(builtin_impl)?;
+    Some(ResolvedHypotheticalAggregateCall {
+        proc_oid,
+        result_type: hypothetical_aggregate_sql_type(builtin_impl),
+        builtin_impl,
+    })
+}
+
+fn hypothetical_aggregate_sql_type(func: HypotheticalAggFunc) -> SqlType {
+    match func {
+        HypotheticalAggFunc::Rank | HypotheticalAggFunc::DenseRank => {
+            SqlType::new(SqlTypeKind::Int8)
+        }
+        HypotheticalAggFunc::PercentRank | HypotheticalAggFunc::CumeDist => {
+            SqlType::new(SqlTypeKind::Float8)
+        }
+    }
+}
+
+fn ordered_set_requires_within_group_error(name: &str) -> ParseError {
+    ParseError::DetailedError {
+        message: format!("WITHIN GROUP is required for ordered-set aggregate {name}"),
+        detail: None,
+        hint: None,
+        sqlstate: "42809",
+    }
+}
+
+fn not_ordered_set_aggregate_error(name: &str) -> ParseError {
+    ParseError::DetailedError {
+        message: format!("{name} is not an ordered-set aggregate, so it cannot have WITHIN GROUP"),
+        detail: None,
+        hint: None,
+        sqlstate: "42809",
+    }
+}
+
+fn hypothetical_direct_arg_count_mismatch_error(
+    name: &str,
+    direct_arg_types: &[SqlType],
+    aggregate_arg_types: &[SqlType],
+) -> ParseError {
+    let signature = direct_arg_types
+        .iter()
+        .chain(aggregate_arg_types.iter())
+        .map(|ty| sql_type_name(*ty))
+        .collect::<Vec<_>>()
+        .join(", ");
+    ParseError::DetailedError {
+        message: format!("function {name}({signature}) does not exist"),
+        detail: None,
+        hint: Some(format!(
+            "To use the hypothetical-set aggregate {name}, the number of hypothetical direct arguments (here {}) must match the number of ordering columns (here {}).",
+            direct_arg_types.len(),
+            aggregate_arg_types.len(),
+        )),
+        sqlstate: "42883",
+    }
+}
+
+fn hypothetical_within_group_type_mismatch_error(
+    direct_type: SqlType,
+    aggregate_type: SqlType,
+) -> ParseError {
+    ParseError::DetailedError {
+        message: format!(
+            "WITHIN GROUP types {} and {} cannot be matched",
+            sql_type_name(aggregate_type),
+            sql_type_name(direct_type),
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "42804",
+    }
+}
+
+fn coerce_hypothetical_aggregate_inputs(
+    name: &str,
+    direct_args: &[SqlFunctionArg],
+    direct_arg_types: &[SqlType],
+    bound_direct_args: Vec<Expr>,
+    aggregate_args: &[SqlFunctionArg],
+    aggregate_arg_types: &[SqlType],
+    bound_args: Vec<Expr>,
+    order_by: &[OrderByItem],
+    bound_order_exprs: Vec<Expr>,
+    catalog: &dyn CatalogLookup,
+) -> Result<(Vec<Expr>, Vec<Expr>, Vec<OrderByEntry>), ParseError> {
+    if direct_args.len() != aggregate_args.len() {
+        return Err(hypothetical_direct_arg_count_mismatch_error(
+            name,
+            direct_arg_types,
+            aggregate_arg_types,
+        ));
+    }
+
+    let mut coerced_direct_args = Vec::with_capacity(direct_args.len());
+    let mut coerced_args = Vec::with_capacity(aggregate_args.len());
+    let mut coerced_order_by = Vec::with_capacity(order_by.len());
+
+    for (
+        ((((direct_arg, direct_type), bound_direct_arg), aggregate_arg), aggregate_type),
+        (order_item, (bound_arg, bound_order_expr)),
+    ) in direct_args
+        .iter()
+        .zip(direct_arg_types.iter().copied())
+        .zip(bound_direct_args.into_iter())
+        .zip(aggregate_args.iter())
+        .zip(aggregate_arg_types.iter().copied())
+        .zip(
+            order_by
+                .iter()
+                .zip(bound_args.into_iter().zip(bound_order_exprs.into_iter())),
+        )
+    {
+        let direct_type =
+            coerce_unknown_string_literal_type(&direct_arg.value, direct_type, aggregate_type);
+        let aggregate_type =
+            coerce_unknown_string_literal_type(&aggregate_arg.value, aggregate_type, direct_type);
+        let common_type =
+            resolve_common_scalar_type(direct_type, aggregate_type).ok_or_else(|| {
+                hypothetical_within_group_type_mismatch_error(direct_type, aggregate_type)
+            })?;
+        let (direct_expr, direct_explicit_collation) = strip_explicit_collation(bound_direct_arg);
+        let (arg_expr, _) = strip_explicit_collation(bound_arg);
+        let (order_expr, order_explicit_collation) = strip_explicit_collation(bound_order_expr);
+        let collation_oid = derive_consumer_collation(
+            catalog,
+            CollationConsumer::OrderBy,
+            &[
+                (common_type, direct_explicit_collation),
+                (common_type, order_explicit_collation),
+            ],
+        )?;
+        coerced_direct_args.push(coerce_bound_expr(direct_expr, direct_type, common_type));
+        coerced_args.push(coerce_bound_expr(arg_expr, aggregate_type, common_type));
+        let mut order_by_entry = build_bound_order_by_entry(
+            order_item,
+            coerce_bound_expr(order_expr, aggregate_type, common_type),
+            0,
+            catalog,
+        )?;
+        order_by_entry.collation_oid = collation_oid;
+        coerced_order_by.push(order_by_entry);
+    }
+
+    Ok((coerced_direct_args, coerced_args, coerced_order_by))
+}
 fn validate_distinct_aggregate_order_by(
     arg_values: &[SqlExpr],
     order_by: &[OrderByItem],
@@ -3482,7 +3643,16 @@ fn bind_select_query_with_outer(
                     let accumulators: Vec<AggAccum> = aggs
                         .iter()
                         .map(|agg| {
+                            let hypothetical =
+                                resolve_builtin_hypothetical_aggregate(&agg.name).is_some()
+                                    && !agg.direct_args.is_empty();
                             if aggregate_args_are_named(agg.args.args()) {
+                                return Err(ParseError::UnexpectedToken {
+                                    expected: "aggregate arguments without names",
+                                    actual: agg.name.clone(),
+                                });
+                            }
+                            if hypothetical && aggregate_args_are_named(&agg.direct_args) {
                                 return Err(ParseError::UnexpectedToken {
                                     expected: "aggregate arguments without names",
                                     actual: agg.name.clone(),
@@ -3494,12 +3664,16 @@ fn bind_select_query_with_outer(
                                 .iter()
                                 .map(|arg| arg.value.clone())
                                 .collect();
-                            validate_distinct_aggregate_order_by(
-                                &arg_values,
-                                &agg.order_by,
-                                agg.distinct,
-                            )?;
-                            if let Some(func) = resolve_builtin_aggregate(&agg.name) {
+                            if !hypothetical {
+                                validate_distinct_aggregate_order_by(
+                                    &arg_values,
+                                    &agg.order_by,
+                                    agg.distinct,
+                                )?;
+                            }
+                            if !hypothetical
+                                && let Some(func) = resolve_builtin_aggregate(&agg.name)
+                            {
                                 validate_aggregate_arity(func, &arg_values)?;
                             }
                             let arg_types = arg_values
@@ -3515,18 +3689,22 @@ fn bind_select_query_with_outer(
                                     )
                                 })
                                 .collect::<Vec<_>>();
-                            let resolved = resolve_aggregate_call(
-                                catalog,
-                                &agg.name,
-                                &arg_types,
-                                agg.func_variadic,
-                            )
-                            .ok_or_else(|| {
-                                ParseError::UnexpectedToken {
-                                    expected: "supported aggregate",
-                                    actual: agg.name.clone(),
-                                }
-                            })?;
+                            let resolved = if hypothetical {
+                                None
+                            } else {
+                                Some(
+                                    resolve_aggregate_call(
+                                        catalog,
+                                        &agg.name,
+                                        &arg_types,
+                                        agg.func_variadic,
+                                    )
+                                    .ok_or_else(|| ParseError::UnexpectedToken {
+                                        expected: "supported aggregate",
+                                        actual: agg.name.clone(),
+                                    })?,
+                                )
+                            };
                             let bound_args = arg_values
                                 .iter()
                                 .map(|e| {
@@ -3545,6 +3723,32 @@ fn bind_select_query_with_outer(
                                 if expr_contains_set_returning(arg) {
                                     return Err(ParseError::FeatureNotSupported(
                                         "set-returning functions are not allowed in aggregate arguments"
+                                            .into(),
+                                    ));
+                                }
+                            }
+                            let bound_direct_args = if hypothetical {
+                                agg.direct_args
+                                    .iter()
+                                    .map(|arg| {
+                                        bind_expr_with_outer_and_ctes(
+                                            &arg.value,
+                                            &scope,
+                                            catalog,
+                                            outer_scopes,
+                                            grouped_outer.as_ref(),
+                                            &visible_ctes,
+                                        )
+                                    })
+                                    .collect::<Result<Vec<_>, _>>()?
+                            } else {
+                                Vec::new()
+                            };
+                            for arg in &bound_direct_args {
+                                reject_nested_local_ctes_in_agg_expr(arg)?;
+                                if expr_contains_set_returning(arg) {
+                                    return Err(ParseError::FeatureNotSupported(
+                                        "set-returning functions are not allowed in ordered-set aggregate direct arguments"
                                             .into(),
                                     ));
                                 }
@@ -3572,54 +3776,106 @@ fn bind_select_query_with_outer(
                                     ));
                                 }
                             }
-                            let bound_order_by = agg
+                            let bound_order_exprs = agg
                                 .order_by
                                 .iter()
                                 .map(|item| {
-                                    let bound_expr = bind_expr_with_outer_and_ctes(
+                                    bind_expr_with_outer_and_ctes(
                                         &item.expr,
                                         &scope,
                                         catalog,
                                         outer_scopes,
                                         grouped_outer.as_ref(),
                                         &visible_ctes,
-                                    )?;
-                                    let (expr, collation_oid) =
-                                        finalize_order_by_expr(bound_expr, catalog)?;
-                                    Ok(OrderByEntry {
-                                        expr,
-                                        ressortgroupref: 0,
-                                        descending: item.descending,
-                                        nulls_first: item.nulls_first,
-                                        collation_oid,
-                                    })
+                                    )
                                 })
-                                .collect::<Result<Vec<_>, ParseError>>()?;
-                            for item in &bound_order_by {
-                                reject_nested_local_ctes_in_agg_expr(&item.expr)?;
-                                if expr_contains_set_returning(&item.expr) {
+                                .collect::<Result<Vec<_>, _>>()?;
+                            for item in &bound_order_exprs {
+                                reject_nested_local_ctes_in_agg_expr(item)?;
+                                if expr_contains_set_returning(item) {
                                     return Err(ParseError::FeatureNotSupported(
                                         "set-returning functions are not allowed in aggregate ORDER BY"
                                             .into(),
                                     ));
                                 }
                             }
-                            let coerced_args = bound_args
-                                .into_iter()
-                                .zip(arg_types.iter().copied())
-                                .zip(resolved.declared_arg_types.iter().copied())
-                                .map(|((arg, actual_type), declared_type)| {
-                                    coerce_bound_expr(arg, actual_type, declared_type)
-                                })
-                                .collect();
+                            let (coerced_direct_args, coerced_args, bound_order_by) =
+                                if hypothetical {
+                                    let direct_arg_types = agg
+                                        .direct_args
+                                        .iter()
+                                        .map(|arg| {
+                                            infer_sql_expr_type_with_ctes(
+                                                &arg.value,
+                                                &scope,
+                                                catalog,
+                                                outer_scopes,
+                                                grouped_outer.as_ref(),
+                                                &visible_ctes,
+                                            )
+                                        })
+                                        .collect::<Vec<_>>();
+                                    coerce_hypothetical_aggregate_inputs(
+                                        &agg.name,
+                                        &agg.direct_args,
+                                        &direct_arg_types,
+                                        bound_direct_args,
+                                        agg.args.args(),
+                                        &arg_types,
+                                        bound_args,
+                                        &agg.order_by,
+                                        bound_order_exprs,
+                                        catalog,
+                                    )?
+                                } else {
+                                    let bound_order_by = bound_order_exprs
+                                        .into_iter()
+                                        .zip(agg.order_by.iter())
+                                        .map(|(bound_expr, item)| {
+                                            build_bound_order_by_entry(item, bound_expr, 0, catalog)
+                                        })
+                                        .collect::<Result<Vec<_>, ParseError>>()?;
+                                    let resolved = resolved
+                                        .as_ref()
+                                        .expect("non-hypothetical aggregate resolution should exist");
+                                    let coerced_args = bound_args
+                                        .into_iter()
+                                        .zip(arg_types.iter().copied())
+                                        .zip(resolved.declared_arg_types.iter().copied())
+                                        .map(|((arg, actual_type), declared_type)| {
+                                            coerce_bound_expr(arg, actual_type, declared_type)
+                                        })
+                                        .collect();
+                                    (Vec::new(), coerced_args, bound_order_by)
+                                };
+                            let (aggfnoid, agg_variadic, sql_type) = if hypothetical {
+                                let resolved =
+                                    resolve_hypothetical_aggregate_call(&agg.name).ok_or_else(
+                                        || ParseError::UnexpectedToken {
+                                            expected: "supported aggregate",
+                                            actual: agg.name.clone(),
+                                        },
+                                    )?;
+                                (resolved.proc_oid, false, resolved.result_type)
+                            } else {
+                                let resolved = resolved
+                                    .as_ref()
+                                    .expect("non-hypothetical aggregate resolution should exist");
+                                (
+                                    resolved.proc_oid,
+                                    resolved.func_variadic,
+                                    resolved.result_type,
+                                )
+                            };
                             Ok(AggAccum {
-                                aggfnoid: resolved.proc_oid,
-                                agg_variadic: resolved.func_variadic,
+                                aggfnoid,
+                                agg_variadic,
+                                direct_args: coerced_direct_args,
                                 args: coerced_args,
                                 order_by: bound_order_by,
                                 filter: bound_filter,
                                 distinct: agg.distinct,
-                                sql_type: resolved.result_type,
+                                sql_type,
                             })
                         })
                         .collect::<Result<_, _>>()?;
@@ -3641,6 +3897,9 @@ fn bind_select_query_with_outer(
                         });
                     }
                     for agg in &aggs {
+                        let hypothetical = resolve_builtin_hypothetical_aggregate(&agg.name)
+                            .is_some()
+                            && !agg.direct_args.is_empty();
                         let arg_values: Vec<SqlExpr> = agg
                             .args
                             .args()
@@ -3660,19 +3919,31 @@ fn bind_select_query_with_outer(
                                 )
                             })
                             .collect::<Vec<_>>();
-                        let resolved = resolve_aggregate_call(
-                            catalog,
-                            &agg.name,
-                            &arg_types,
-                            agg.func_variadic,
-                        )
-                        .ok_or_else(|| ParseError::UnexpectedToken {
-                            expected: "supported aggregate",
-                            actual: agg.name.clone(),
-                        })?;
+                        let result_type = if hypothetical {
+                            resolve_hypothetical_aggregate_call(&agg.name)
+                                .map(|resolved| resolved.result_type)
+                                .ok_or_else(|| ParseError::UnexpectedToken {
+                                    expected: "supported aggregate",
+                                    actual: agg.name.clone(),
+                                })?
+                        } else {
+                            resolve_aggregate_call(
+                                catalog,
+                                &agg.name,
+                                &arg_types,
+                                agg.func_variadic,
+                            )
+                            .map(|resolved| resolved.result_type)
+                            .ok_or_else(|| {
+                                ParseError::UnexpectedToken {
+                                    expected: "supported aggregate",
+                                    actual: agg.name.clone(),
+                                }
+                            })?
+                        };
                         output_columns.push(QueryColumn {
                             name: agg.name.clone(),
-                            sql_type: resolved.result_type,
+                            sql_type: result_type,
                             wire_type_oid: None,
                         });
                     }
@@ -3737,6 +4008,7 @@ fn bind_select_query_with_outer(
                                             accum.sql_type,
                                             accum.agg_variadic,
                                             accum.distinct,
+                                            accum.direct_args.clone(),
                                             accum.args.clone(),
                                             accum.order_by.clone(),
                                             accum.filter.clone(),

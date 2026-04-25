@@ -243,6 +243,7 @@ pub(super) fn build_local_aggregate_scope(
 
 pub(super) fn match_visible_aggregate_call(
     name: &str,
+    direct_args: &[SqlFunctionArg],
     args: &SqlCallArgs,
     order_by: &[OrderByItem],
     distinct: bool,
@@ -256,20 +257,28 @@ pub(super) fn match_visible_aggregate_call(
     let owner_scope = &scope.input_scope;
     let owner_outer_scopes = outer_scopes.get(scope.levelsup..).unwrap_or(&[]);
     let index = scope.aggs.iter().position(|agg| {
-        agg.matches_call(name, args, order_by, distinct, func_variadic, filter)
-            || aggregate_calls_match_semantically(
-                agg,
-                name,
-                args,
-                order_by,
-                distinct,
-                func_variadic,
-                filter,
-                owner_scope,
-                catalog,
-                owner_outer_scopes,
-                ctes,
-            )
+        agg.matches_call(
+            name,
+            direct_args,
+            args,
+            order_by,
+            distinct,
+            func_variadic,
+            filter,
+        ) || aggregate_calls_match_semantically(
+            agg,
+            name,
+            direct_args,
+            args,
+            order_by,
+            distinct,
+            func_variadic,
+            filter,
+            owner_scope,
+            catalog,
+            owner_outer_scopes,
+            ctes,
+        )
     })?;
     Some((index, scope))
 }
@@ -332,6 +341,7 @@ fn bind_aggregate_match_order_by(
 fn aggregate_calls_match_semantically(
     collected: &CollectedAggregate,
     name: &str,
+    direct_args: &[SqlFunctionArg],
     args: &SqlCallArgs,
     order_by: &[OrderByItem],
     distinct: bool,
@@ -345,6 +355,7 @@ fn aggregate_calls_match_semantically(
     if !collected.name.eq_ignore_ascii_case(name)
         || collected.distinct != distinct
         || collected.func_variadic != func_variadic
+        || collected.direct_args.len() != direct_args.len()
         || collected.args.is_star() != args.is_star()
         || collected.args.args().len() != args.args().len()
         || collected.order_by.len() != order_by.len()
@@ -352,6 +363,10 @@ fn aggregate_calls_match_semantically(
         return false;
     }
 
+    let bound_collected_direct =
+        bind_aggregate_match_arg_list(&collected.direct_args, scope, catalog, outer_scopes, ctes);
+    let bound_direct =
+        bind_aggregate_match_arg_list(direct_args, scope, catalog, outer_scopes, ctes);
     let bound_collected_args =
         bind_aggregate_match_args(&collected.args, scope, catalog, outer_scopes, ctes);
     let bound_args = bind_aggregate_match_args(args, scope, catalog, outer_scopes, ctes);
@@ -369,6 +384,8 @@ fn aggregate_calls_match_semantically(
 
     matches!(
         (
+            bound_collected_direct,
+            bound_direct,
             bound_collected_args,
             bound_args,
             bound_collected_order,
@@ -377,16 +394,33 @@ fn aggregate_calls_match_semantically(
             bound_filter,
         ),
         (
+            Ok(collected_direct),
+            Ok(direct),
             Ok(collected_args),
             Ok(args),
             Ok(collected_order),
             Ok(order),
             Ok(collected_filter),
             Ok(filter),
-        ) if collected_args == args
+        ) if collected_direct == direct
+            && collected_args == args
             && collected_order == order
             && collected_filter == filter
     )
+}
+
+fn bind_aggregate_match_arg_list(
+    args: &[SqlFunctionArg],
+    scope: &BoundScope,
+    catalog: &dyn CatalogLookup,
+    outer_scopes: &[BoundScope],
+    ctes: &[BoundCte],
+) -> Result<Vec<Expr>, ParseError> {
+    args.iter()
+        .map(|arg| {
+            bind_expr_with_outer_and_ctes(&arg.value, scope, catalog, outer_scopes, None, ctes)
+        })
+        .collect()
 }
 
 pub(super) fn dedupe_local_aggregate_list(
@@ -401,6 +435,7 @@ pub(super) fn dedupe_local_aggregate_list(
         let duplicate = deduped.iter().any(|existing| {
             existing.matches_call(
                 &agg.name,
+                &agg.direct_args,
                 &agg.args,
                 &agg.order_by,
                 agg.distinct,
@@ -409,6 +444,7 @@ pub(super) fn dedupe_local_aggregate_list(
             ) || aggregate_calls_match_semantically(
                 existing,
                 &agg.name,
+                &agg.direct_args,
                 &agg.args,
                 &agg.order_by,
                 agg.distinct,
@@ -691,14 +727,16 @@ fn analyze_expr_internal(
             name,
             args,
             order_by,
+            within_group,
             distinct,
             func_variadic,
             filter,
             over,
         } => {
-            let is_aggregate =
-                over.is_none() && aggregate_call_matches_catalog(catalog, name, args);
+            let is_aggregate = over.is_none()
+                && aggregate_call_matches_catalog(catalog, name, args, within_group.as_deref());
             let aggregate_grouped_outer = if is_aggregate { None } else { grouped_outer };
+            let direct_grouped_outer = grouped_outer;
             for arg in args.args() {
                 info.merge(analyze_expr_internal(
                     &arg.value,
@@ -706,7 +744,11 @@ fn analyze_expr_internal(
                     scope,
                     catalog,
                     outer_scopes,
-                    aggregate_grouped_outer,
+                    if within_group.is_some() {
+                        direct_grouped_outer
+                    } else {
+                        aggregate_grouped_outer
+                    },
                     ctes,
                     expanded_views,
                 )?);
@@ -722,6 +764,20 @@ fn analyze_expr_internal(
                     ctes,
                     expanded_views,
                 )?);
+            }
+            if let Some(items) = within_group.as_deref() {
+                for item in items {
+                    info.merge(analyze_expr_internal(
+                        &item.expr,
+                        AggregateClauseKind::OrderBy,
+                        scope,
+                        catalog,
+                        outer_scopes,
+                        aggregate_grouped_outer,
+                        ctes,
+                        expanded_views,
+                    )?);
+                }
             }
             if let Some(filter) = filter.as_deref() {
                 info.merge(analyze_expr_internal(
@@ -755,8 +811,16 @@ fn analyze_expr_internal(
                 let usage = AggregateRefUsage {
                     agg: CollectedAggregate {
                         name: name.clone(),
-                        args: args.clone(),
-                        order_by: order_by.clone(),
+                        direct_args: if within_group.is_some() {
+                            args.args().to_vec()
+                        } else {
+                            Vec::new()
+                        },
+                        args: within_group
+                            .as_deref()
+                            .map(hypothetical_aggregate_args)
+                            .unwrap_or_else(|| args.clone()),
+                        order_by: within_group.clone().unwrap_or_else(|| order_by.clone()),
                         distinct: *distinct,
                         func_variadic: *func_variadic,
                         filter: filter.as_deref().cloned(),
