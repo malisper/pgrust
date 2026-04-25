@@ -2760,8 +2760,12 @@ fn explain_shows_initplan_for_rewritten_minmax_aggregate() {
     );
 
     assert!(lines.iter().any(|line| line == "  InitPlan 1"));
-    assert!(lines.iter().any(|line| line.trim() == "Limit"));
-    assert!(lines.iter().any(|line| line.trim() == "Result"));
+    assert!(lines.iter().any(|line| line.trim() == "->  Limit"));
+    assert!(
+        lines
+            .iter()
+            .any(|line| matches!(line.trim(), "Result" | "->  Result"))
+    );
     assert!(
         lines
             .iter()
@@ -2786,7 +2790,7 @@ fn explain_formats_distinct_minmax_with_unique_and_index_only_scan() {
     );
 
     assert!(lines.iter().any(|line| line.trim() == "Unique"));
-    assert!(lines.iter().any(|line| line.trim() == "Result"));
+    assert!(lines.iter().any(|line| line.trim() == "->  Result"));
     assert!(lines.iter().any(|line| line.contains("Index Only Scan")));
 }
 

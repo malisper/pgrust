@@ -3703,7 +3703,7 @@ fn explain_rewritten_min_aggregate_uses_index_only_scan() {
                 })
                 .collect::<Vec<_>>();
             assert!(rendered.iter().any(|line| line.as_str() == "  InitPlan 1"));
-            assert!(rendered.iter().any(|line| line.trim() == "Limit"));
+            assert!(rendered.iter().any(|line| line.trim() == "->  Limit"));
             assert!(
                 rendered
                     .iter()
@@ -4703,7 +4703,7 @@ fn explain_partitionwise_join_preserves_hash_cond_and_aliases() {
                 "expected deduplicated sort key alias, got {rendered:?}"
             );
             assert!(
-                rendered.iter().any(|line| line.trim() == "Append"),
+                rendered.iter().any(|line| line.trim() == "->  Append"),
                 "expected partitionwise append plan, got {rendered:?}"
             );
             assert!(
@@ -13890,6 +13890,8 @@ fn aggregate_primary_key_groupby_reduction_preserves_passthrough_columns() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
+
+#[test]
 fn explain_verbose_lateral_aggregate_renders_pg_style_details() {
     let base = temp_dir("explain_verbose_lateral_agg");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -13918,16 +13920,28 @@ fn explain_verbose_lateral_aggregate_renders_pg_style_details() {
                 })
                 .collect::<Vec<_>>();
             assert!(
-                rendered
-                    .iter()
-                    .any(|line| line.trim() == "Function Scan on pg_catalog.generate_series s1"),
+                rendered.iter().any(|line| line.trim() == "->  Nested Loop"),
                 "{}",
                 rendered.join("\n")
             );
             assert!(
                 rendered
                     .iter()
-                    .any(|line| line.trim() == "Function Scan on pg_catalog.generate_series s2"),
+                    .any(|line| line.trim() == "->  Function Scan on pg_catalog.generate_series s1"),
+                "{}",
+                rendered.join("\n")
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.trim() == "->  HashAggregate"),
+                "{}",
+                rendered.join("\n")
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.trim() == "->  Function Scan on pg_catalog.generate_series s2"),
                 "{}",
                 rendered.join("\n")
             );
