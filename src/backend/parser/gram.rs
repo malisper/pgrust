@@ -151,6 +151,9 @@ fn parse_statement_with_options_inner(
     if let Some(stmt) = try_parse_view_statement(&sql)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_copy_statement(&sql, options)? {
+        return Ok(stmt);
+    }
     if let Some(stmt) = try_parse_unsupported_statement(&sql) {
         if matches!(
             stmt,
@@ -227,6 +230,202 @@ fn try_parse_create_tablespace_statement(sql: &str) -> Result<Option<Statement>,
     Ok(Some(Statement::CreateTablespace(
         build_create_tablespace_statement(trimmed)?,
     )))
+}
+
+fn try_parse_copy_statement(
+    sql: &str,
+    options: ParseOptions,
+) -> Result<Option<Statement>, ParseError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    if !keyword_at_start(trimmed, "copy") {
+        return Ok(None);
+    }
+
+    let rest = consume_keyword(trimmed, "copy").trim_start();
+    if rest.starts_with('(') {
+        return build_copy_to_statement(rest, options).map(Some);
+    }
+    build_copy_from_statement(rest).map(Some)
+}
+
+fn build_copy_to_statement(rest: &str, options: ParseOptions) -> Result<Statement, ParseError> {
+    let (query_sql, rest) = take_parenthesized_segment(rest)?;
+    let mut rest = rest.trim_start();
+    if !keyword_at_start(rest, "to") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "TO",
+            actual: rest.into(),
+        });
+    }
+    rest = consume_keyword(rest, "to").trim_start();
+    let (path, rest) = parse_copy_file_literal(rest)?;
+    let copy_options = parse_copy_options(rest)?;
+    let query = match parse_statement_with_options_inner(query_sql, options)? {
+        Statement::Select(select) => select,
+        _ => {
+            return Err(ParseError::FeatureNotSupported(
+                "COPY TO query other than SELECT".into(),
+            ));
+        }
+    };
+    Ok(Statement::CopyTo(CopyToStatement {
+        query,
+        target: CopyTarget::File(path),
+        options: copy_options,
+    }))
+}
+
+fn build_copy_from_statement(rest: &str) -> Result<Statement, ParseError> {
+    let from_idx = find_top_level_keyword(rest, "from").ok_or(ParseError::UnexpectedToken {
+        expected: "FROM",
+        actual: rest.into(),
+    })?;
+    let target = rest[..from_idx].trim();
+    let mut rest = rest[from_idx + "from".len()..].trim_start();
+    let (path, next) = parse_copy_file_literal(rest)?;
+    rest = next.trim_start();
+    let options = parse_copy_options(rest)?;
+
+    let (table_name, columns) = if let Some(open_paren) = target.find('(') {
+        let close_paren = target.rfind(')').ok_or(ParseError::UnexpectedEof)?;
+        if close_paren < open_paren || !target[close_paren + 1..].trim().is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "COPY target column list",
+                actual: target.into(),
+            });
+        }
+        let table_name = target[..open_paren].trim();
+        let columns = target[open_paren + 1..close_paren]
+            .split(',')
+            .map(|part| part.trim())
+            .filter(|part| !part.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if table_name.is_empty() || columns.is_empty() {
+            return Err(ParseError::UnexpectedToken {
+                expected: "COPY table and columns",
+                actual: target.into(),
+            });
+        }
+        (table_name.to_string(), Some(columns))
+    } else if target.is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "COPY table",
+            actual: target.into(),
+        });
+    } else {
+        (target.to_string(), None)
+    };
+
+    Ok(Statement::CopyFrom(CopyFromStatement {
+        table_name,
+        columns,
+        source: CopySource::File(path),
+        options,
+    }))
+}
+
+fn parse_copy_file_literal(input: &str) -> Result<(String, &str), ParseError> {
+    let token_len = scan_string_literal_token_len(input).ok_or(ParseError::UnexpectedToken {
+        expected: "COPY file string literal",
+        actual: input.into(),
+    })?;
+    Ok((
+        decode_string_literal(&input[..token_len])?,
+        &input[token_len..],
+    ))
+}
+
+fn parse_copy_options(input: &str) -> Result<CopyOptions, ParseError> {
+    let rest = input.trim_start();
+    if rest.is_empty() {
+        return Ok(CopyOptions::default());
+    }
+    if !keyword_at_start(rest, "with") {
+        return Err(ParseError::UnexpectedToken {
+            expected: "WITH",
+            actual: rest.into(),
+        });
+    }
+    let rest = consume_keyword(rest, "with").trim_start();
+    let (segment, rest) = take_parenthesized_segment(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(ParseError::UnexpectedToken {
+            expected: "end of COPY",
+            actual: rest.trim().into(),
+        });
+    }
+
+    let mut options = CopyOptions::default();
+    for item in split_top_level_items(&segment, ',')? {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        let mut parts = item.splitn(2, char::is_whitespace);
+        let name = parts.next().unwrap_or_default();
+        let value = parts.next().unwrap_or_default().trim();
+        match name.to_ascii_lowercase().as_str() {
+            "format" if value.eq_ignore_ascii_case("csv") => options.format = CopyFormat::Csv,
+            "format" if value.eq_ignore_ascii_case("text") => options.format = CopyFormat::Text,
+            "format" => {
+                return Err(ParseError::FeatureNotSupported(format!(
+                    "COPY FORMAT {value}"
+                )));
+            }
+            "encoding" => {
+                let token_len =
+                    scan_string_literal_token_len(value).ok_or(ParseError::UnexpectedToken {
+                        expected: "COPY ENCODING string literal",
+                        actual: value.into(),
+                    })?;
+                let trailing = value[token_len..].trim();
+                if !trailing.is_empty() {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "end of COPY ENCODING option",
+                        actual: trailing.into(),
+                    });
+                }
+                options.encoding = Some(decode_string_literal(&value[..token_len])?);
+            }
+            _ => {
+                return Err(ParseError::FeatureNotSupported(format!(
+                    "COPY option {name}"
+                )));
+            }
+        }
+    }
+    Ok(options)
+}
+
+fn find_top_level_keyword(input: &str, keyword: &str) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => {
+                i = parse_delimited_token_end(bytes, i, b'\'');
+                continue;
+            }
+            b'"' => {
+                i = parse_delimited_token_end(bytes, i, b'"');
+                continue;
+            }
+            b'$' => {
+                if let Some(end) = scan_dollar_string_token_end(input, i) {
+                    i = end;
+                    continue;
+                }
+            }
+            b'(' => depth += 1,
+            b')' => depth = depth.saturating_sub(1),
+            _ if depth == 0 && keyword_at_boundary(input, i, keyword) => return Some(i),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 fn try_parse_policy_statement(sql: &str) -> Result<Option<Statement>, ParseError> {
@@ -14147,6 +14346,7 @@ fn build_copy_from(pair: Pair<'_, Rule>) -> Result<CopyFromStatement, ParseError
         table_name: table_name.ok_or(ParseError::UnexpectedEof)?,
         columns,
         source: source.ok_or(ParseError::UnexpectedEof)?,
+        options: CopyOptions::default(),
     })
 }
 
