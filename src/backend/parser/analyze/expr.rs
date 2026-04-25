@@ -29,6 +29,7 @@ use self::json::{
 };
 pub(crate) use self::ops::bind_concat_operands;
 pub(super) use self::ops::bind_lowered_comparison_expr;
+use self::ops::bind_order_by_using_direction;
 use self::ops::{
     bind_arithmetic_expr, bind_bitwise_expr, bind_comparison_expr, bind_concat_expr,
     bind_overloaded_binary_expr, bind_prefix_operator_expr, bind_shift_expr,
@@ -81,6 +82,27 @@ fn set_returning_not_allowed_error(context: &'static str) -> ParseError {
     ParseError::FeatureNotSupported(format!(
         "set-returning functions are not allowed in {context}"
     ))
+}
+
+pub(super) fn build_bound_order_by_entry(
+    item: &OrderByItem,
+    bound_expr: Expr,
+    ressortgroupref: usize,
+    catalog: &dyn CatalogLookup,
+) -> Result<OrderByEntry, ParseError> {
+    let expr_type = expr_sql_type_hint(&bound_expr).unwrap_or(SqlType::new(SqlTypeKind::Text));
+    let descending = match item.using_operator.as_deref() {
+        Some(operator) => bind_order_by_using_direction(catalog, operator, expr_type)?,
+        None => item.descending,
+    };
+    let (expr, collation_oid) = finalize_order_by_expr(bound_expr, catalog)?;
+    Ok(OrderByEntry {
+        expr,
+        ressortgroupref,
+        descending,
+        nulls_first: item.nulls_first,
+        collation_oid,
+    })
 }
 
 fn reject_typed_srf(expr: &TypedExpr, context: &'static str) -> Result<(), ParseError> {
@@ -803,14 +825,7 @@ fn bind_window_agg_call(
                 grouped_outer,
                 ctes,
             )?;
-            let (expr, collation_oid) = finalize_order_by_expr(bound_expr, catalog)?;
-            Ok(OrderByEntry {
-                expr,
-                ressortgroupref: 0,
-                descending: item.descending,
-                nulls_first: item.nulls_first,
-                collation_oid,
-            })
+            build_bound_order_by_entry(item, bound_expr, 0, catalog)
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
     for item in &bound_order_by {
@@ -961,14 +976,7 @@ fn bind_visible_outer_aggregate_call(
                 None,
                 ctes,
             )?;
-            let (expr, collation_oid) = finalize_order_by_expr(bound_expr, catalog)?;
-            Ok(OrderByEntry {
-                expr,
-                ressortgroupref: 0,
-                descending: item.descending,
-                nulls_first: item.nulls_first,
-                collation_oid,
-            })
+            build_bound_order_by_entry(item, bound_expr, 0, catalog)
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
     for item in &bound_order_by {
