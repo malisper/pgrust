@@ -796,6 +796,13 @@ echo "Regression results dir: $RESULTS_DIR"
 echo "Regression data dir: $DATA_DIR"
 echo "Regression user: $REGRESS_USER"
 
+export PGPASSWORD="x"
+export PG_ABS_SRCDIR="$PG_REGRESS_ABS"
+export PG_ABS_BUILDDIR="$RESULTS_DIR"
+export PGRUST_REGRESS_TABLESPACE_DIR="$REGRESS_TABLESPACE_DIR"
+export PGTZ="America/Los_Angeles"
+export PGDATESTYLE="Postgres, MDY"
+
 # Start pgrust server. Parallel managed runs start one isolated server per
 # concurrent test instead, so a crash or timeout cannot contaminate siblings.
 if [[ "$SKIP_SERVER" == false && "$ISOLATED_PARALLEL" == false ]]; then
@@ -810,12 +817,6 @@ if [[ "$SKIP_SERVER" == false && "$ISOLATED_PARALLEL" == false ]]; then
     fi
 fi
 
-export PGPASSWORD="x"
-export PG_ABS_SRCDIR="$PG_REGRESS_ABS"
-export PG_ABS_BUILDDIR="$RESULTS_DIR"
-export PGRUST_REGRESS_TABLESPACE_DIR="$REGRESS_TABLESPACE_DIR"
-export PGTZ="America/Los_Angeles"
-export PGDATESTYLE="Postgres, MDY"
 setup_pg_regress_env
 export PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c statement_timeout=${STATEMENT_TIMEOUT}s"
 # PG18 psql adds a verbose \d+ Compression column by default. Keep the
