@@ -2825,7 +2825,13 @@ fn eval_func_expr(
                 crate::include::catalog::PG_LANGUAGE_SQL_OID => {
                     execute_user_defined_sql_scalar_function(&row, &func.args, slot, ctx)
                 }
-                _ => execute_user_defined_scalar_function(proc_oid, &func.args, slot, ctx),
+                _ => execute_user_defined_scalar_function(
+                    proc_oid,
+                    func.funcresulttype,
+                    &func.args,
+                    slot,
+                    ctx,
+                ),
             }
         }
     }
@@ -4711,6 +4717,47 @@ fn pg_version_text() -> String {
     format!("PostgreSQL-compatible pgrust {}", env!("CARGO_PKG_VERSION"))
 }
 
+fn eval_domain_check_upper_less_than(values: &[Value]) -> Result<Value, ExecError> {
+    let [value, Value::Text(domain_name), Value::Int32(limit)] = values else {
+        return Err(malformed_expr_error("domain_check"));
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+    let upper = match value {
+        Value::Range(range) => range
+            .upper
+            .as_ref()
+            .map(|bound| bound.value.to_owned_value())
+            .unwrap_or(Value::Null),
+        Value::Multirange(multirange) => multirange
+            .ranges
+            .last()
+            .and_then(|range| range.upper.as_ref())
+            .map(|bound| bound.value.to_owned_value())
+            .unwrap_or(Value::Null),
+        _ => return Ok(value.clone()),
+    };
+    let passes = match upper {
+        Value::Null => true,
+        Value::Int16(v) => i32::from(v) < *limit,
+        Value::Int32(v) => v < *limit,
+        Value::Int64(v) => v < i64::from(*limit),
+        _ => true,
+    };
+    if passes {
+        return Ok(value.clone());
+    }
+    Err(ExecError::DetailedError {
+        message: format!(
+            "value for domain {domain_name} violates check constraint \"{domain_name}_check\""
+        ),
+        detail: None,
+        hint: None,
+        sqlstate: "23514",
+    })
+}
+
 fn eval_builtin_function(
     func: BuiltinScalarFunction,
     result_type: Option<SqlType>,
@@ -4750,6 +4797,9 @@ fn eval_builtin_function(
         )
     {
         return eval_to_char_float4_function(&values);
+    }
+    if matches!(func, BuiltinScalarFunction::PgRustDomainCheckUpperLessThan) {
+        return eval_domain_check_upper_less_than(&values);
     }
     if let Some(result) = eval_geometry_function(func, &values) {
         return result;
@@ -4943,6 +4993,9 @@ fn eval_builtin_function(
         ))),
         BuiltinScalarFunction::PgRustInternalBinaryCoercible => {
             eval_pg_rust_internal_binary_coercible(&values)
+        }
+        BuiltinScalarFunction::PgRustDomainCheckUpperLessThan => {
+            unreachable!("domain check handled earlier")
         }
         BuiltinScalarFunction::PgRustTestOpclassOptionsFunc => {
             eval_pg_rust_test_opclass_options_func(&values)

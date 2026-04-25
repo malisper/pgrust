@@ -15,9 +15,11 @@ use super::expr_mac::{
 use super::expr_money::{
     money_format_text, money_from_float, money_numeric_text, money_parse_text,
 };
-use super::expr_multirange::{multirange_from_range, parse_multirange_text};
+use super::expr_multirange::{
+    multirange_from_range, parse_multirange_text, render_multirange_text_with_config,
+};
 use super::expr_network::{parse_cidr_text, parse_inet_text};
-use super::expr_range::{parse_range_text, render_range_text};
+use super::expr_range::{parse_range_text, render_range_text_with_config};
 use super::expr_reg;
 use super::expr_txid::{cast_text_to_txid_snapshot, is_txid_snapshot_type_oid};
 use super::node_types::*;
@@ -2512,7 +2514,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     Ok(Value::Range(range))
                 } else {
                     cast_text_value_with_config(
-                        &render_range_text(&Value::Range(range.clone())).unwrap_or_default(),
+                        &render_range_text_with_config(&Value::Range(range.clone()), config)
+                            .unwrap_or_default(),
                         ty,
                         true,
                         config,
@@ -2526,10 +2529,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     Ok(Value::Multirange(singleton))
                 } else {
                     cast_text_value_with_config(
-                        &crate::backend::executor::render_multirange_text(&Value::Multirange(
-                            singleton,
-                        ))
-                        .unwrap_or_default(),
+                        &render_multirange_text_with_config(&Value::Multirange(singleton), config)
+                            .unwrap_or_default(),
                         ty,
                         true,
                         config,
@@ -2544,7 +2545,8 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::Json
                     | SqlTypeKind::Jsonb
                     | SqlTypeKind::JsonPath => cast_text_value_with_config(
-                        &render_range_text(&Value::Range(range.clone())).unwrap_or_default(),
+                        &render_range_text_with_config(&Value::Range(range.clone()), config)
+                            .unwrap_or_default(),
                         ty,
                         true,
                         config,
@@ -2569,9 +2571,10 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::Json
                     | SqlTypeKind::Jsonb
                     | SqlTypeKind::JsonPath => cast_text_value_with_config(
-                        &crate::backend::executor::render_multirange_text(&Value::Multirange(
-                            multirange.clone(),
-                        ))
+                        &render_multirange_text_with_config(
+                            &Value::Multirange(multirange.clone()),
+                            config,
+                        )
                         .unwrap_or_default(),
                         ty,
                         true,

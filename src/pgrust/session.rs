@@ -4879,6 +4879,14 @@ impl Session {
                     &mut txn.catalog_effects,
                 )
             }
+            Statement::AlterTypeOwner(ref alter_stmt) => {
+                let search_path = self.configured_search_path();
+                db.execute_alter_type_owner_stmt_with_search_path(
+                    client_id,
+                    alter_stmt,
+                    search_path.as_deref(),
+                )
+            }
             Statement::DropDomain(ref drop_stmt) => {
                 let search_path = self.configured_search_path();
                 db.execute_drop_domain_stmt_with_search_path(
@@ -7003,8 +7011,8 @@ fn parse_statement_timeout(value: &str) -> Result<Option<Duration>, ExecError> {
 
 fn parse_bool_guc(value: &str) -> Option<bool> {
     match normalize_guc_name(value).as_str() {
-        "on" | "true" | "yes" | "1" => Some(true),
-        "off" | "false" | "no" | "0" => Some(false),
+        "on" | "true" | "yes" | "1" | "t" => Some(true),
+        "off" | "false" | "no" | "0" | "f" => Some(false),
         _ => None,
     }
 }
@@ -8010,7 +8018,7 @@ fn unquote_identifier(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        Session, parse_default_toast_compression_guc_value, parse_max_stack_depth,
+        Session, parse_bool_guc, parse_default_toast_compression_guc_value, parse_max_stack_depth,
         parse_startup_options, parse_statement_timeout, validate_max_stack_depth,
     };
     use crate::backend::executor::ExecError;
@@ -8053,6 +8061,12 @@ mod tests {
                 Err(ExecError::Parse(ParseError::UnrecognizedParameter(_)))
             ));
         }
+    }
+
+    #[test]
+    fn parse_bool_guc_accepts_postgres_shorthands() {
+        assert_eq!(parse_bool_guc("t"), Some(true));
+        assert_eq!(parse_bool_guc("f"), Some(false));
     }
 
     #[test]

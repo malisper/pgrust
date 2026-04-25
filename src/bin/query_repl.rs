@@ -929,6 +929,7 @@ fn run_statement(
         | Statement::CreateTablespace(_)
         | Statement::CreateDomain(_)
         | Statement::CreateType(_)
+        | Statement::AlterTypeOwner(_)
         | Statement::CreateSequence(_)
         | Statement::DropFunction(_)
         | Statement::DropOperator(_)

@@ -7,8 +7,8 @@ use crate::backend::executor::value_io::builtin_type_oid_for_sql_type;
 use crate::backend::executor::{
     ArrayValue, ExecError, QueryColumn, Value, geometry_input_error_message,
     render_datetime_value_text_with_config, render_geometry_text, render_internal_char_text,
-    render_interval_text, render_macaddr_text, render_macaddr8_text, render_pg_lsn_text,
-    render_range_text,
+    render_interval_text, render_macaddr_text, render_macaddr8_text,
+    render_multirange_text_with_config, render_pg_lsn_text, render_range_text_with_config,
 };
 use crate::backend::parser::{SqlType, SqlTypeKind};
 use crate::backend::statistics::{
@@ -955,13 +955,15 @@ pub(crate) fn send_typed_data_row(
                 buf.extend_from_slice(rendered.as_bytes());
             }
             Value::Range(_) => {
-                let rendered = render_range_text(val).unwrap_or_default();
+                let rendered = render_range_text_with_config(val, &float_format.datetime_config)
+                    .unwrap_or_default();
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }
             Value::Multirange(_) => {
                 let rendered =
-                    crate::backend::executor::render_multirange_text(val).unwrap_or_default();
+                    render_multirange_text_with_config(val, &float_format.datetime_config)
+                        .unwrap_or_default();
                 buf.extend_from_slice(&(rendered.len() as i32).to_be_bytes());
                 buf.extend_from_slice(rendered.as_bytes());
             }

@@ -2,6 +2,7 @@ use super::exec_expr::eval_expr;
 use super::node_types::*;
 use super::pg_regex::{compile_pg_regex_predicate, pg_regex_is_match};
 use super::{ExecError, ExecutorContext};
+use crate::include::nodes::parsenodes::SqlTypeKind;
 use crate::include::nodes::primnodes::{
     BoolExprType, OpExprKind, Var, attrno_index, is_special_varno,
 };
@@ -239,12 +240,14 @@ pub(crate) fn compile_predicate(expr: &Expr) -> CompiledPredicate {
             });
         }
         Expr::Op(op) if op.op == OpExprKind::RegexMatch => {
-            if let [Expr::Var(var), Expr::Const(Value::Text(pat))] = op.args.as_slice() {
+            if let [Expr::Var(var), pattern] = op.args.as_slice() {
                 let col = match local_var_index(var) {
                     Some(col) => col,
                     None => return compile_fallback(expr),
                 };
-                if let Ok(regex) = compile_pg_regex_predicate(pat.as_str()) {
+                if let Some(pattern) = const_text_pattern(pattern)
+                    && let Ok(regex) = compile_pg_regex_predicate(pattern)
+                {
                     let regex = std::sync::Arc::new(regex);
                     return Box::new(move |slot, _ctx| {
                         let val = slot.get_attr(col)?;
@@ -276,6 +279,17 @@ fn compile_fallback(expr: &Expr) -> CompiledPredicate {
         Value::Bool(false) | Value::Null => Ok(false),
         other => Err(ExecError::NonBoolQual(other)),
     })
+}
+
+fn const_text_pattern(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Const(value) => value.as_text(),
+        Expr::Cast(inner, ty) if ty.kind == SqlTypeKind::Text && !ty.is_array => {
+            const_text_pattern(inner)
+        }
+        Expr::Collate { expr, .. } => const_text_pattern(expr),
+        _ => None,
+    }
 }
 
 fn flatten_and(expr: &Expr) -> Vec<CompiledPredicate> {

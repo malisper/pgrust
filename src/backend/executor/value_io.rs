@@ -15,9 +15,11 @@ use super::expr_geometry::{
 use super::expr_mac::{
     parse_macaddr_bytes, parse_macaddr8_bytes, render_macaddr_text, render_macaddr8_text,
 };
-use super::expr_multirange::render_multirange;
+use super::expr_multirange::{render_multirange, render_multirange_text_with_config};
 use super::expr_network::{encode_network_bytes, parse_cidr_bytes, parse_inet_bytes};
-use super::expr_range::{decode_range_bytes, encode_range_bytes, render_range_text};
+use super::expr_range::{
+    decode_range_bytes, encode_range_bytes, render_range_text, render_range_text_with_config,
+};
 use super::node_types::*;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::expr_json::{canonicalize_jsonpath_text, validate_json_text};
@@ -130,7 +132,8 @@ pub(crate) fn format_record_text_with_options(
             Value::Array(values) => {
                 format_array_text_with_config(values, &float_format.datetime_config)
             }
-            Value::Range(_) => render_range_text(value).unwrap_or_default(),
+            Value::Range(_) => render_range_text_with_config(value, &float_format.datetime_config)
+                .unwrap_or_default(),
             Value::InternalChar(byte) => render_internal_char_text(*byte),
             Value::Jsonb(bytes) => render_jsonb_bytes(bytes).unwrap_or_default(),
             other => {
@@ -310,9 +313,11 @@ fn format_failing_row_value(value: &Value, datetime_config: &DateTimeConfig) -> 
         | Value::TimestampTz(_) => {
             render_datetime_value_text_with_config(value, datetime_config).unwrap_or_default()
         }
-        Value::Range(_) => render_range_text(value).unwrap_or_default(),
+        Value::Range(_) => {
+            render_range_text_with_config(value, datetime_config).unwrap_or_default()
+        }
         Value::Multirange(_) => {
-            crate::backend::executor::render_multirange_text(value).unwrap_or_default()
+            render_multirange_text_with_config(value, datetime_config).unwrap_or_default()
         }
         Value::Bit(bits) => render_bit_text(bits),
         Value::Jsonb(bytes) => render_jsonb_bytes(bytes).unwrap_or_default(),
