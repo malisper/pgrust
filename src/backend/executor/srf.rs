@@ -1,4 +1,5 @@
 use super::exec_expr::eval_string_to_table_rows;
+use super::expr_date::add_interval_to_local_timestamp;
 use super::expr_json::{eval_json_record_set_returning_function, eval_json_table_function};
 use super::pg_regex::{eval_regexp_matches_rows, eval_regexp_split_to_table_rows};
 use super::sqlfunc::execute_user_defined_sql_set_returning_function;
@@ -8,8 +9,9 @@ use crate::backend::parser::CatalogLookup;
 use crate::backend::parser::SqlTypeKind;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::backend::utils::time::datetime::{
-    days_from_ymd, days_in_month, timestamp_parts_from_usecs, ymd_from_days,
+    current_timezone_name, days_from_ymd, days_in_month, timestamp_parts_from_usecs, ymd_from_days,
 };
+use crate::backend::utils::time::timestamp::{timestamp_at_time_zone, timestamptz_at_time_zone};
 use crate::include::nodes::datetime::{
     TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND, TimestampADT, TimestampTzADT, USECS_PER_DAY,
 };
@@ -28,12 +30,14 @@ pub(crate) fn eval_set_returning_call(
             start,
             stop,
             step,
+            timezone,
             output_columns,
             ..
         } => eval_generate_series(
             start,
             stop,
             step,
+            timezone.as_ref(),
             output_columns[0].sql_type.kind,
             slot,
             ctx,
@@ -342,6 +346,7 @@ fn eval_generate_series(
     start: &Expr,
     stop: &Expr,
     step: &Expr,
+    timezone: Option<&Expr>,
     output_kind: SqlTypeKind,
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,
@@ -350,11 +355,13 @@ fn eval_generate_series(
     let stop_val = eval_expr(stop, slot, ctx)?;
     let step_val = eval_expr(step, slot, ctx)?;
 
-    if matches!(
-        output_kind,
-        SqlTypeKind::Timestamp | SqlTypeKind::TimestampTz
-    ) {
+    if matches!(output_kind, SqlTypeKind::Timestamp) {
         return eval_timestamp_generate_series(start_val, stop_val, step_val, output_kind, ctx);
+    }
+    if matches!(output_kind, SqlTypeKind::TimestampTz) {
+        return eval_timestamptz_generate_series(
+            start_val, stop_val, step_val, timezone, slot, ctx,
+        );
     }
 
     if matches!(output_kind, SqlTypeKind::Numeric) {
@@ -480,6 +487,106 @@ fn interval_sign(step: IntervalValue) -> i32 {
     } else {
         0
     }
+}
+
+fn generate_series_timestamptz_arg(
+    value: Value,
+    label: &'static str,
+) -> Result<TimestampTzADT, ExecError> {
+    match value {
+        Value::TimestampTz(value) => Ok(value),
+        other => Err(ExecError::TypeMismatch {
+            op: label,
+            left: other,
+            right: Value::Null,
+        }),
+    }
+}
+
+fn generate_series_interval_arg(value: Value) -> Result<IntervalValue, ExecError> {
+    match value {
+        Value::Interval(value) => Ok(value),
+        other => Err(ExecError::TypeMismatch {
+            op: "generate_series step",
+            left: other,
+            right: Value::Null,
+        }),
+    }
+}
+
+fn step_timestamptz_series(
+    current: TimestampTzADT,
+    step: IntervalValue,
+    zone: &str,
+) -> Result<TimestampTzADT, ExecError> {
+    let local =
+        timestamptz_at_time_zone(current, zone).map_err(|err| ExecError::InvalidStorageValue {
+            column: "time zone".into(),
+            details: super::expr_casts::datetime_parse_error_details("time zone", zone, err),
+        })?;
+    let local = add_interval_to_local_timestamp(local, step, false)?;
+    timestamp_at_time_zone(local, zone).map_err(|err| ExecError::InvalidStorageValue {
+        column: "time zone".into(),
+        details: super::expr_casts::datetime_parse_error_details("time zone", zone, err),
+    })
+}
+
+fn eval_timestamptz_generate_series(
+    start_val: Value,
+    stop_val: Value,
+    step_val: Value,
+    timezone: Option<&Expr>,
+    slot: &mut TupleSlot,
+    ctx: &mut ExecutorContext,
+) -> Result<Vec<TupleSlot>, ExecError> {
+    let mut current = generate_series_timestamptz_arg(start_val, "generate_series start")?;
+    let stop = generate_series_timestamptz_arg(stop_val, "generate_series stop")?;
+    let step = generate_series_interval_arg(step_val)?;
+    if step.is_infinity() || step.is_neg_infinity() {
+        return Err(ExecError::GenerateSeriesInvalidArg("step size", "infinity"));
+    }
+    let step_cmp = step.cmp_key().cmp(&0);
+    if step_cmp.is_eq() {
+        return Err(ExecError::GenerateSeriesZeroStep);
+    }
+    let zone_value = if let Some(timezone) = timezone {
+        let value = eval_expr(timezone, slot, ctx)?;
+        Some(
+            value
+                .as_text()
+                .ok_or_else(|| ExecError::TypeMismatch {
+                    op: "generate_series timezone",
+                    left: value.clone(),
+                    right: Value::Text("".into()),
+                })?
+                .to_string(),
+        )
+    } else {
+        None
+    };
+    let zone = zone_value
+        .as_deref()
+        .unwrap_or_else(|| current_timezone_name(&ctx.datetime_config));
+    let mut rows = Vec::new();
+    loop {
+        ctx.check_for_interrupts()?;
+        let done = if step_cmp.is_gt() {
+            current > stop
+        } else {
+            current < stop
+        };
+        if done {
+            break;
+        }
+        rows.push(TupleSlot::virtual_row(vec![Value::TimestampTz(current)]));
+        if matches!(stop.0, TIMESTAMP_NOEND | TIMESTAMP_NOBEGIN)
+            && rows.len() >= MAX_UNBOUNDED_TIMESTAMP_SERIES_ROWS
+        {
+            break;
+        }
+        current = step_timestamptz_series(current, step, zone)?;
+    }
+    Ok(rows)
 }
 
 fn eval_timestamp_generate_series(

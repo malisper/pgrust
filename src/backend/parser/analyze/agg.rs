@@ -223,6 +223,9 @@ pub(super) fn expr_contains_agg(catalog: &dyn CatalogLookup, expr: &SqlExpr) -> 
         SqlExpr::Cast(inner, _) | SqlExpr::Collate { expr: inner, .. } => {
             expr_contains_agg(catalog, inner)
         }
+        SqlExpr::AtTimeZone { expr, zone } => {
+            expr_contains_agg(catalog, expr) || expr_contains_agg(catalog, zone)
+        }
         SqlExpr::Add(l, r)
         | SqlExpr::Sub(l, r)
         | SqlExpr::BitAnd(l, r)
@@ -462,6 +465,9 @@ pub(super) fn expr_references_input_scope(expr: &SqlExpr) -> bool {
         | SqlExpr::IsNotNull(inner)
         | SqlExpr::GeometryUnaryOp { expr: inner, .. }
         | SqlExpr::Subscript { expr: inner, .. } => expr_references_input_scope(inner),
+        SqlExpr::AtTimeZone { expr, zone } => {
+            expr_references_input_scope(expr) || expr_references_input_scope(zone)
+        }
         SqlExpr::GeometryBinaryOp { left, right, .. } => {
             expr_references_input_scope(left) || expr_references_input_scope(right)
         }
@@ -592,6 +598,10 @@ pub(super) fn collect_aggs(
         }
         SqlExpr::Cast(inner, _) | SqlExpr::Collate { expr: inner, .. } => {
             collect_aggs(catalog, inner, aggs)
+        }
+        SqlExpr::AtTimeZone { expr, zone } => {
+            collect_aggs(catalog, expr, aggs);
+            collect_aggs(catalog, zone, aggs);
         }
         SqlExpr::Add(l, r)
         | SqlExpr::Sub(l, r)

@@ -51,6 +51,7 @@ pub const FLOAT4_BTREE_OPCLASS_OID: u32 = 1970;
 pub const FLOAT8_BTREE_OPCLASS_OID: u32 = 1971;
 pub const NUMERIC_BTREE_OPCLASS_OID: u32 = 1988;
 pub const TIMESTAMP_BTREE_OPCLASS_OID: u32 = 3129;
+pub const TIMESTAMPTZ_BTREE_OPCLASS_OID: u32 = 3130;
 pub const BYTEA_BTREE_OPCLASS_OID: u32 = 10003;
 pub const UUID_BTREE_OPCLASS_OID: u32 = 2969;
 pub const BIT_BTREE_OPCLASS_OID: u32 = 10004;
@@ -271,6 +272,12 @@ pub fn bootstrap_pg_opclass_rows() -> Vec<PgOpclassRow> {
             "timestamp_ops",
             BTREE_DATETIME_FAMILY_OID,
             TIMESTAMP_TYPE_OID,
+        ),
+        row(
+            TIMESTAMPTZ_BTREE_OPCLASS_OID,
+            "timestamptz_ops",
+            BTREE_DATETIME_FAMILY_OID,
+            TIMESTAMPTZ_TYPE_OID,
         ),
         row(
             BYTEA_BTREE_OPCLASS_OID,
@@ -777,6 +784,7 @@ pub fn default_btree_opclass_oid(type_oid: u32) -> Option<u32> {
         FLOAT8_TYPE_OID => FLOAT8_BTREE_OPCLASS_OID,
         NUMERIC_TYPE_OID => NUMERIC_BTREE_OPCLASS_OID,
         TIMESTAMP_TYPE_OID => TIMESTAMP_BTREE_OPCLASS_OID,
+        TIMESTAMPTZ_TYPE_OID => TIMESTAMPTZ_BTREE_OPCLASS_OID,
         BYTEA_TYPE_OID => BYTEA_BTREE_OPCLASS_OID,
         UUID_TYPE_OID => UUID_BTREE_OPCLASS_OID,
         CIDR_TYPE_OID => CIDR_BTREE_OPCLASS_OID,

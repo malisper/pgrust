@@ -213,9 +213,11 @@ pub(super) fn expr_contains_window(expr: &SqlExpr) -> bool {
         | SqlExpr::And(left, right)
         | SqlExpr::Or(left, right)
         | SqlExpr::IsDistinctFrom(left, right)
-        | SqlExpr::IsNotDistinctFrom(left, right) => {
-            expr_contains_window(left) || expr_contains_window(right)
-        }
+        | SqlExpr::IsNotDistinctFrom(left, right)
+        | SqlExpr::AtTimeZone {
+            expr: left,
+            zone: right,
+        } => expr_contains_window(left) || expr_contains_window(right),
         SqlExpr::Like {
             expr,
             pattern,
