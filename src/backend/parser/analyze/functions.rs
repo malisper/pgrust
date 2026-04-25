@@ -1261,7 +1261,7 @@ fn scalar_functions_by_name() -> &'static BTreeMap<String, BuiltinScalarFunction
             }
         }
         for (name, func) in legacy_scalar_function_entries() {
-            by_name.entry((*name).into()).or_insert(*func);
+            by_name.insert((*name).into(), *func);
         }
         by_name
     })
@@ -2988,6 +2988,10 @@ mod tests {
         assert_eq!(
             resolve_scalar_function("float8_accum"),
             Some(BuiltinScalarFunction::Float8Accum)
+        );
+        assert_eq!(
+            resolve_scalar_function("trunc"),
+            Some(BuiltinScalarFunction::Trunc)
         );
         assert_eq!(resolve_scalar_function("count"), None);
         assert_eq!(resolve_scalar_function("json_array_elements"), None);
