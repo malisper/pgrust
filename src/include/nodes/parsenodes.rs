@@ -892,6 +892,7 @@ pub enum CopySource {
 pub enum CopyFormat {
     Text,
     Csv,
+    Binary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -918,15 +919,63 @@ pub struct CopyFromStatement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CopyTarget {
+pub enum CopyForceQuote {
+    None,
+    All,
+    Columns(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopyToOptions {
+    pub format: CopyFormat,
+    pub encoding: Option<String>,
+    pub delimiter: String,
+    pub null: String,
+    pub header: bool,
+    pub quote: String,
+    pub escape: String,
+    pub force_quote: CopyForceQuote,
+}
+
+impl Default for CopyToOptions {
+    fn default() -> Self {
+        Self {
+            format: CopyFormat::Text,
+            encoding: None,
+            delimiter: "\t".into(),
+            null: "\\N".into(),
+            header: false,
+            quote: "\"".into(),
+            escape: "\"".into(),
+            force_quote: CopyForceQuote::None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CopyToSource {
+    Relation {
+        table_name: String,
+        columns: Option<Vec<String>>,
+    },
+    Query {
+        statement: Box<Statement>,
+        sql: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CopyToDestination {
+    Stdout,
     File(String),
+    Program(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyToStatement {
-    pub query: SelectStatement,
-    pub target: CopyTarget,
-    pub options: CopyOptions,
+    pub source: CopyToSource,
+    pub destination: CopyToDestination,
+    pub options: CopyToOptions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

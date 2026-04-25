@@ -280,7 +280,7 @@ rule_action_list = { "(" ~ rule_action_list_chunk* ~ ")" }
 rule_action_list_chunk = { rule_action_list_group | !")" ~ ANY }
 rule_action_list_group = { "(" ~ rule_action_list_chunk* ~ ")" }
 rule_action_stmt = { insert_stmt | update_stmt | delete_stmt | rule_unsupported_action_stmt }
-rule_unsupported_action_stmt = { cte_clause? ~ (select_stmt | values_stmt) }
+rule_unsupported_action_stmt = { cte_clause? ~ (select_stmt | values_stmt) | notify_stmt }
 commit_stmt = { ((kw_commit | kw_end) ~ kw_transaction?) }
 rollback_stmt = { kw_rollback }
 
@@ -445,7 +445,7 @@ collate_suffix = { kw_collate ~ collation_name }
 at_time_zone_suffix = { kw_at ~ (kw_local | kw_time ~ kw_zone ~ concat_expr) }
 positive_expr = { "+" ~ unary_expr }
 negated_expr = { ("!!" | "@-@" | "@@" | "?|" | "?-" | "||/" | "|/" | "#" | "-" | "~" | "@") ~ unary_expr }
-primary_expr = { kw_default | kw_null | kw_true | kw_false | kw_current_date | kw_current_user | kw_session_user | kw_current_role | kw_current_time | kw_current_timestamp | kw_localtime | kw_localtimestamp | exists_expr | scalar_subquery_expr | array_subquery_expr | case_expr | array_expr | row_expr | implicit_row_expr | cast_expr | typed_string_literal | extract_expr | position_expr | substring_expr | overlay_expr | trim_expr | xml_element_expr | xml_forest_expr | xml_parse_expr | xml_pi_expr | xml_root_expr | xml_serialize_expr | func_call | qualified_star | bit_string_literal | quoted_string_literal | identifier | numeric_literal | integer | "(" ~ expr ~ ")" }
+primary_expr = { kw_default | kw_null | kw_true | kw_false | kw_current_date | kw_current_user | kw_session_user | kw_current_role | kw_current_time | kw_current_timestamp | kw_localtime | kw_localtimestamp | exists_expr | scalar_subquery_expr | array_subquery_expr | case_expr | array_expr | row_expr | implicit_row_expr | cast_expr | typed_string_literal | extract_expr | position_expr | substring_expr | overlay_expr | trim_expr | xml_element_expr | xml_forest_expr | xml_parse_expr | xml_pi_expr | xml_root_expr | xml_serialize_expr | func_call | qualified_star | bit_string_literal | quoted_string_literal | identifier | numeric_literal | hex_integer | integer | "(" ~ expr ~ ")" }
 case_expr = { kw_case ~ (searched_case_body | simple_case_body) ~ kw_end }
 searched_case_body = { when_clause+ ~ else_clause? }
 simple_case_body = { expr ~ when_clause+ ~ else_clause? }
@@ -536,6 +536,7 @@ numeric_literal = @{
     | (ASCII_DIGIT+ ~ exponent)
 }
 integer = @{ ASCII_DIGIT+ }
+hex_integer = @{ "0x" ~ ASCII_HEX_DIGIT+ }
 signed_integer = @{ ("+" | "-")? ~ ASCII_DIGIT+ }
 exponent = _{ ("e" | "E") ~ ("+" | "-")? ~ ASCII_DIGIT+ }
 quoted_string_literal = _{ unicode_string_literal | escape_string_literal | dollar_string_literal | string_literal }

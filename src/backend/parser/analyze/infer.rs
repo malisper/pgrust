@@ -888,6 +888,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 | Some(BuiltinScalarFunction::MinScale)
                 | Some(BuiltinScalarFunction::WidthBucket)
                 | Some(BuiltinScalarFunction::GetByte) => SqlType::new(SqlTypeKind::Int4),
+                Some(BuiltinScalarFunction::PgRelationSize) => SqlType::new(SqlTypeKind::Int8),
                 Some(BuiltinScalarFunction::Crc32)
                 | Some(BuiltinScalarFunction::Crc32c)
                 | Some(BuiltinScalarFunction::BitCount) => SqlType::new(SqlTypeKind::Int8),

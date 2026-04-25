@@ -1208,13 +1208,11 @@ pub(super) fn eval_split_part_function(values: &[Value]) -> Result<Value, ExecEr
             "field position must not be zero".into(),
         ));
     }
-    let parts: Vec<&str> = if delim.is_empty() {
-        text.char_indices()
-            .map(|(idx, ch)| &text[idx..idx + ch.len_utf8()])
-            .collect()
-    } else {
-        text.split(delim).collect()
-    };
+    if delim.is_empty() {
+        let result = if field == 1 || field == -1 { text } else { "" };
+        return Ok(Value::Text(CompactString::from(result)));
+    }
+    let parts: Vec<&str> = text.split(delim).collect();
     let result = if field > 0 {
         parts.get((field - 1) as usize).copied().unwrap_or("")
     } else {
@@ -1494,7 +1492,7 @@ pub(super) fn eval_like(
             let escape = match escape {
                 Some(Value::Null) => return Ok(Value::Null),
                 Some(Value::Bytea(bytes)) => Some(bytes.as_slice()),
-                None => Some(br"\\".as_slice()),
+                None => Some(b"\\".as_slice()),
                 Some(other) => {
                     return Err(ExecError::TypeMismatch {
                         op: "like",
@@ -1779,7 +1777,7 @@ pub(super) fn eval_encode_function(values: &[Value]) -> Result<Value, ExecError>
     let rendered = match format.as_str() {
         "hex" => encode_hex_bytes(bytes),
         "escape" => format_bytea_text(bytes, ByteaOutputFormat::Escape),
-        "base64" => base64::engine::general_purpose::STANDARD.encode(bytes),
+        "base64" => wrap_base64_text(&base64::engine::general_purpose::STANDARD.encode(bytes)),
         _ => {
             return Err(ExecError::RaiseException(format!(
                 "unrecognized encoding: \"{format}\""
@@ -1787,6 +1785,21 @@ pub(super) fn eval_encode_function(values: &[Value]) -> Result<Value, ExecError>
         }
     };
     Ok(Value::Text(CompactString::from_owned(rendered)))
+}
+
+fn wrap_base64_text(text: &str) -> String {
+    const BASE64_LINE_LEN: usize = 76;
+    if text.len() <= BASE64_LINE_LEN {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len() + text.len() / BASE64_LINE_LEN);
+    for (idx, chunk) in text.as_bytes().chunks(BASE64_LINE_LEN).enumerate() {
+        if idx > 0 {
+            out.push('\n');
+        }
+        out.push_str(std::str::from_utf8(chunk).expect("base64 output is ASCII"));
+    }
+    out
 }
 
 pub(super) fn eval_decode_function(values: &[Value]) -> Result<Value, ExecError> {
@@ -1803,10 +1816,16 @@ pub(super) fn eval_decode_function(values: &[Value]) -> Result<Value, ExecError>
     let format = expect_text_arg("decode", format_value, text_value)?.to_ascii_lowercase();
     let bytes = match format.as_str() {
         "hex" => decode_hex_blob(text)?,
-        "escape" => parse_bytea_text(text)?,
-        "base64" => base64::engine::general_purpose::STANDARD
-            .decode(text)
-            .map_err(|_| ExecError::RaiseException("invalid base64 end sequence".into()))?,
+        "escape" => decode_escape_bytes(text)?,
+        "base64" => {
+            let compact = text
+                .bytes()
+                .filter(|byte| !byte.is_ascii_whitespace())
+                .collect::<Vec<_>>();
+            base64::engine::general_purpose::STANDARD
+                .decode(compact)
+                .map_err(|_| ExecError::RaiseException("invalid base64 end sequence".into()))?
+        }
         _ => {
             return Err(ExecError::RaiseException(format!(
                 "unrecognized encoding: \"{format}\""
@@ -1814,6 +1833,62 @@ pub(super) fn eval_decode_function(values: &[Value]) -> Result<Value, ExecError>
         }
     };
     Ok(Value::Bytea(bytes))
+}
+
+fn decode_escape_bytes(text: &str) -> Result<Vec<u8>, ExecError> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        if bytes[idx] != b'\\' {
+            out.push(bytes[idx]);
+            idx += 1;
+            continue;
+        }
+        idx += 1;
+        if idx >= bytes.len() {
+            return Err(ExecError::InvalidByteaInput {
+                value: text.to_string(),
+            });
+        }
+        if bytes[idx] == b'\\' {
+            out.push(b'\\');
+            idx += 1;
+        } else if bytes[idx] == b'x' && idx + 2 < bytes.len() {
+            let hi = hex_nibble(bytes[idx + 1]);
+            let lo = hex_nibble(bytes[idx + 2]);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi << 4) | lo);
+                idx += 3;
+            } else {
+                out.push(bytes[idx]);
+                idx += 1;
+            }
+        } else if idx + 2 < bytes.len()
+            && (b'0'..=b'7').contains(&bytes[idx])
+            && (b'0'..=b'7').contains(&bytes[idx + 1])
+            && (b'0'..=b'7').contains(&bytes[idx + 2])
+        {
+            let value = u16::from(bytes[idx] - b'0') * 64
+                + u16::from(bytes[idx + 1] - b'0') * 8
+                + u16::from(bytes[idx + 2] - b'0');
+            out.push(value as u8);
+            idx += 3;
+        } else {
+            out.push(bytes[idx]);
+            idx += 1;
+        }
+    }
+    Ok(out)
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 pub(super) fn eval_sha224_function(values: &[Value]) -> Result<Value, ExecError> {
@@ -2086,7 +2161,7 @@ pub(super) fn eval_get_bit_bytes(values: &[Value]) -> Result<Value, ExecError> {
     let index = expect_i32_arg("get_bit", index_value, bytes_value)?;
     validate_bytea_bit_index(bytes, index)?;
     let byte = bytes[(index / 8) as usize];
-    let shift = 7 - (index % 8) as u8;
+    let shift = (index % 8) as u8;
     Ok(Value::Int32(((byte >> shift) & 1) as i32))
 }
 
@@ -2110,7 +2185,7 @@ pub(super) fn eval_set_bit_bytes(values: &[Value]) -> Result<Value, ExecError> {
     let index = expect_i32_arg("set_bit", index_value, bytes_value)?;
     let bit = expect_i32_arg("set_bit", new_value, bytes_value)?;
     validate_bytea_bit_index(&bytes, index)?;
-    let mask = 1u8 << (7 - (index % 8) as u8);
+    let mask = 1u8 << (index % 8) as u8;
     if bit == 0 {
         bytes[(index / 8) as usize] &= !mask;
     } else {
@@ -2790,10 +2865,10 @@ fn expect_i32_arg(op: &'static str, value: &Value, left: &Value) -> Result<i32, 
     }
 }
 
-fn validate_bytea_index(bytes: &[u8], index: i32, op: &'static str) -> Result<(), ExecError> {
+fn validate_bytea_index(bytes: &[u8], index: i32, _op: &'static str) -> Result<(), ExecError> {
     if !(0..bytes.len() as i32).contains(&index) {
         return Err(ExecError::RaiseException(format!(
-            "{op} index {index} out of valid range, 0..{}",
+            "index {index} out of valid range, 0..{}",
             bytes.len().saturating_sub(1)
         )));
     }
@@ -2803,7 +2878,9 @@ fn validate_bytea_index(bytes: &[u8], index: i32, op: &'static str) -> Result<()
 fn validate_bytea_bit_index(bytes: &[u8], index: i32) -> Result<(), ExecError> {
     let max_index = (bytes.len() as i32).saturating_mul(8).saturating_sub(1);
     if index < 0 || index > max_index {
-        return Err(ExecError::BitIndexOutOfRange { index, max_index });
+        return Err(ExecError::RaiseException(format!(
+            "index {index} out of valid range, 0..{max_index}"
+        )));
     }
     Ok(())
 }
