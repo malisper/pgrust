@@ -2385,6 +2385,75 @@ fn copy_from_file_loads_tsvector_rows() {
 }
 
 #[test]
+fn copy_to_file_writes_selected_rows() {
+    let dir = temp_dir("copy_to_file");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (id int, name text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into items values (1, 'alice'), (2, null)")
+        .unwrap();
+
+    let copy_path = dir.join("items.tsv");
+    let sql = format!("copy items (id, name) to '{}'", copy_path.display());
+    match session.execute(&db, &sql).unwrap() {
+        StatementResult::AffectedRows(count) => assert_eq!(count, 2),
+        other => panic!("expected affected rows, got {other:?}"),
+    }
+    assert_eq!(fs::read_to_string(copy_path).unwrap(), "1\talice\n2\t\\N\n");
+}
+
+#[test]
+fn copy_to_dml_without_returning_has_no_side_effects() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (id int)")
+        .expect("create table");
+    let err = session
+        .execute(&db, "copy (insert into items values (1)) to stdout")
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::FeatureNotSupportedMessage(message))
+            if message == "COPY query must have a RETURNING clause"
+    ));
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from items"),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
+fn copy_to_relative_file_rejects_before_query_execution() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items (id int)")
+        .expect("create table");
+    let err = session
+        .execute(
+            &db,
+            "copy (insert into items values (1) returning id) to 'relative.out'",
+        )
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        ExecError::Parse(ParseError::DetailedError { message, .. })
+            if message == "relative path not allowed for COPY to file"
+    ));
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from items"),
+        vec![vec![Value::Int64(0)]]
+    );
+}
+
+#[test]
 fn text_search_catalogs_are_bootstrapped() {
     let dir = temp_dir("text_search_catalogs");
     let db = Database::open(&dir, 64).unwrap();
@@ -6567,6 +6636,39 @@ fn create_view_selects_and_persists_rewrite_rule() {
             Value::Text("_RETURN".into()),
             Value::Text("select id, name from items".into()),
         ]]
+    );
+}
+
+#[test]
+fn set_operation_inputs_expand_views() {
+    let dir = temp_dir("set_operation_view_inputs");
+    let db = Database::open(&dir, 128).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create table items(id int4, name text)")
+        .unwrap();
+    session
+        .execute(&db, "insert into items values (1, 'alpha'), (2, 'beta')")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create view item_names as select 'v_' || name as name from items",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select name from items where id = 1 union select * from item_names order by 1",
+        ),
+        vec![
+            vec![Value::Text("alpha".into())],
+            vec![Value::Text("v_alpha".into())],
+            vec![Value::Text("v_beta".into())],
+        ]
     );
 }
 

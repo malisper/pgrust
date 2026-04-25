@@ -124,6 +124,29 @@ fn rewrite_query(
                 ))
             })
             .transpose()?,
+        set_operation: query
+            .set_operation
+            .map(|set_operation| {
+                Ok(Box::new(
+                    crate::include::nodes::parsenodes::SetOperationQuery {
+                        output_desc: set_operation.output_desc,
+                        op: set_operation.op,
+                        inputs: set_operation
+                            .inputs
+                            .into_iter()
+                            .map(|input| {
+                                rewrite_query(
+                                    input,
+                                    catalog,
+                                    expanded_views,
+                                    active_policy_relations,
+                                )
+                            })
+                            .collect::<Result<Vec<_>, _>>()?,
+                    },
+                ))
+            })
+            .transpose()?,
         ..query
     };
     apply_query_row_security_with_active_relations(
