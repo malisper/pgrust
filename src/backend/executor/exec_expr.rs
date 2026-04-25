@@ -31,8 +31,9 @@ use super::expr_date::{
     eval_age_function, eval_date_bin_function, eval_date_part_function_with_config,
     eval_date_trunc_function, eval_datetime_add_function, eval_extract_function_with_config,
     eval_isfinite_function, eval_make_date_function, eval_make_time_function,
-    eval_make_timestamp_function, eval_make_timestamptz_function, eval_timezone_function,
-    eval_to_date_function, eval_to_timestamp_function,
+    eval_make_timestamp_function, eval_make_timestamptz_function,
+    eval_timezone_function as eval_timetz_timezone_function, eval_to_date_function,
+    eval_to_timestamp_function,
 };
 use super::expr_datetime::{
     current_date_value, current_date_value_from_timestamp_with_config, current_time_value,
@@ -4384,6 +4385,14 @@ fn eval_timezone_function(
         return Ok(Value::Null);
     }
     match value {
+        Value::TimeTz(_) => {
+            let mut timetz_args = Vec::new();
+            if values.len() == 2 {
+                timetz_args.push(Value::Text(zone.into()));
+            }
+            timetz_args.push(value.clone());
+            eval_timetz_timezone_function(&timetz_args, config)
+        }
         Value::Timestamp(timestamp) => timestamp_at_time_zone(*timestamp, zone)
             .map(Value::TimestampTz)
             .map_err(|err| ExecError::InvalidStorageValue {
@@ -5165,7 +5174,9 @@ fn eval_builtin_function(
         }
         BuiltinScalarFunction::DateTrunc => eval_date_trunc_function(&values, &ctx.datetime_config),
         BuiltinScalarFunction::DateBin => eval_date_bin_function(&values),
-        BuiltinScalarFunction::TimeZone => eval_timezone_function(&values, &ctx.datetime_config),
+        BuiltinScalarFunction::TimeZone => {
+            eval_timetz_timezone_function(&values, &ctx.datetime_config)
+        }
         BuiltinScalarFunction::DateAdd => eval_datetime_add_function(&values, false),
         BuiltinScalarFunction::DateSubtract => eval_datetime_add_function(&values, true),
         BuiltinScalarFunction::Age => eval_age_function(&values, &ctx.datetime_config),
@@ -5176,7 +5187,6 @@ fn eval_builtin_function(
         BuiltinScalarFunction::MakeTimestampTz => {
             eval_make_timestamptz_function(&values, &ctx.datetime_config)
         }
-        BuiltinScalarFunction::Age => eval_age_function(&values, &ctx.datetime_config),
         BuiltinScalarFunction::ToTimestamp => eval_to_timestamp_function(&values),
         BuiltinScalarFunction::GetDatabaseEncoding => Ok(Value::Text("UTF8".into())),
         BuiltinScalarFunction::PgMyTempSchema => Ok(Value::Int64(i64::from(
@@ -5708,7 +5718,6 @@ fn eval_builtin_function(
         BuiltinScalarFunction::ToChar => eval_to_char_function(&values, &ctx.datetime_config),
         BuiltinScalarFunction::ToDate => eval_to_date_function(&values),
         BuiltinScalarFunction::ToNumber => eval_to_number_function(&values),
-        BuiltinScalarFunction::ToTimestamp => eval_to_timestamp_function(&values),
         _ => unreachable!("json builtins handled by expr_json"),
     }
 }

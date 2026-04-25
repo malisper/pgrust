@@ -30,12 +30,14 @@ pub(crate) fn eval_set_returning_call(
             start,
             stop,
             step,
+            timezone,
             output_columns,
             ..
         } => eval_generate_series(
             start,
             stop,
             step,
+            timezone.as_ref(),
             output_columns[0].sql_type.kind,
             slot,
             ctx,
@@ -344,6 +346,7 @@ fn eval_generate_series(
     start: &Expr,
     stop: &Expr,
     step: &Expr,
+    timezone: Option<&Expr>,
     output_kind: SqlTypeKind,
     slot: &mut TupleSlot,
     ctx: &mut ExecutorContext,

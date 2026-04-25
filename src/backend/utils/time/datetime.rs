@@ -26,7 +26,6 @@ pub enum DateTimeParseError {
     FieldOutOfRange,
     TimeZoneDisplacementOutOfRange,
     TimestampOutOfRange,
-    TimeZoneDisplacementOutOfRange,
     UnknownTimeZone(String),
 }
 

@@ -585,7 +585,6 @@ pub enum BuiltinScalarFunction {
     MakeTime,
     MakeTimestamp,
     MakeTimestampTz,
-    Age,
     ToTimestamp,
     Abs,
     Log,

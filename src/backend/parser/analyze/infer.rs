@@ -772,6 +772,10 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                             kind: SqlTypeKind::TimestampTz,
                             ..
                         }) => SqlType::new(SqlTypeKind::Timestamp),
+                        Some(SqlType {
+                            kind: SqlTypeKind::TimeTz,
+                            ..
+                        }) => SqlType::new(SqlTypeKind::TimeTz),
                         Some(_) => SqlType::new(SqlTypeKind::TimestampTz),
                         None => SqlType::new(SqlTypeKind::TimestampTz),
                     }
@@ -779,7 +783,6 @@ pub(super) fn infer_sql_expr_type_with_ctes(
                 Some(BuiltinScalarFunction::DatePart) => SqlType::new(SqlTypeKind::Float8),
                 Some(BuiltinScalarFunction::Extract) => SqlType::new(SqlTypeKind::Numeric),
                 Some(BuiltinScalarFunction::TimeZone) => SqlType::new(SqlTypeKind::TimeTz),
-                Some(BuiltinScalarFunction::Extract) => SqlType::new(SqlTypeKind::Numeric),
                 Some(BuiltinScalarFunction::DateTrunc) => match args.args().get(1).map(|arg| {
                     infer_sql_expr_type_with_ctes(
                         &arg.value,

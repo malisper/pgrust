@@ -1092,7 +1092,6 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::MakeDate | BuiltinScalarFunction::MakeTime => args.len() == 3,
             BuiltinScalarFunction::MakeTimestamp => args.len() == 6,
             BuiltinScalarFunction::MakeTimestampTz => matches!(args.len(), 6 | 7),
-            BuiltinScalarFunction::Age => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::ToTimestamp => args.len() == 1,
             BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
             BuiltinScalarFunction::PgMyTempSchema => args.is_empty(),
@@ -1982,8 +1981,6 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("extract", BuiltinScalarFunction::Extract),
         ("date_trunc", BuiltinScalarFunction::DateTrunc),
         ("date_bin", BuiltinScalarFunction::DateBin),
-        ("timezone", BuiltinScalarFunction::TimeZone),
-        ("date_bin", BuiltinScalarFunction::DateBin),
         ("date_add", BuiltinScalarFunction::DateAdd),
         ("date_subtract", BuiltinScalarFunction::DateSubtract),
         ("age", BuiltinScalarFunction::Age),
@@ -1992,7 +1989,6 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("make_time", BuiltinScalarFunction::MakeTime),
         ("make_timestamp", BuiltinScalarFunction::MakeTimestamp),
         ("make_timestamptz", BuiltinScalarFunction::MakeTimestampTz),
-        ("age", BuiltinScalarFunction::Age),
         (
             "getdatabaseencoding",
             BuiltinScalarFunction::GetDatabaseEncoding,
@@ -3223,6 +3219,7 @@ fn supports_exact_proc_arity(func: BuiltinScalarFunction) -> bool {
             | BuiltinScalarFunction::ConcatWs
             | BuiltinScalarFunction::Format
             | BuiltinScalarFunction::Log
+            | BuiltinScalarFunction::DateTrunc
             | BuiltinScalarFunction::Trunc
             | BuiltinScalarFunction::Round
             | BuiltinScalarFunction::Substring

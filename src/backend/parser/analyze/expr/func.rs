@@ -652,17 +652,23 @@ pub(super) fn bind_scalar_function_call(
         BuiltinScalarFunction::Timezone => {
             let source_index = if arg_types.len() == 1 { 0 } else { 1 };
             let source_type = arg_types[source_index];
-            let source_is_timestamptz = matches!(source_type.kind, SqlTypeKind::TimestampTz)
-                || matches!(
-                    &args[source_index],
-                    SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
-                );
-            let result_type = if source_is_timestamptz {
+            let source_is_timetz = matches!(source_type.kind, SqlTypeKind::TimeTz);
+            let source_is_timestamptz = !source_is_timetz
+                && (matches!(source_type.kind, SqlTypeKind::TimestampTz)
+                    || matches!(
+                        &args[source_index],
+                        SqlExpr::Const(Value::Text(_)) | SqlExpr::Const(Value::TextRef(_, _))
+                    ));
+            let result_type = if source_is_timetz {
+                SqlType::new(SqlTypeKind::TimeTz)
+            } else if source_is_timestamptz {
                 SqlType::new(SqlTypeKind::Timestamp)
             } else {
                 SqlType::new(SqlTypeKind::TimestampTz)
             };
-            let source_target = if source_is_timestamptz {
+            let source_target = if source_is_timetz {
+                SqlType::new(SqlTypeKind::TimeTz)
+            } else if source_is_timestamptz {
                 SqlType::new(SqlTypeKind::TimestampTz)
             } else {
                 SqlType::new(SqlTypeKind::Timestamp)
@@ -686,24 +692,6 @@ pub(super) fn bind_scalar_function_call(
                 Some(result_type),
                 false,
                 rewritten_args,
-            ))
-        }
-        BuiltinScalarFunction::DateBin => {
-            let target_type = match arg_types[1].kind {
-                SqlTypeKind::TimestampTz => SqlType::new(SqlTypeKind::TimestampTz),
-                _ => SqlType::new(SqlTypeKind::Timestamp),
-            };
-            Ok(build_func(
-                false,
-                vec![
-                    coerce_bound_expr(
-                        bound_args[0].clone(),
-                        arg_types[0],
-                        SqlType::new(SqlTypeKind::Interval),
-                    ),
-                    coerce_bound_expr(bound_args[1].clone(), arg_types[1], target_type),
-                    coerce_bound_expr(bound_args[2].clone(), arg_types[2], target_type),
-                ],
             ))
         }
         BuiltinScalarFunction::IsFinite => Ok(build_func(false, bound_args)),
