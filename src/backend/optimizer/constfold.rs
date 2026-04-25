@@ -5,14 +5,16 @@ use crate::backend::executor::expr_ops::{
 };
 use crate::backend::executor::{ExecError, Value, cast_value};
 use crate::backend::parser::ParseError;
+use crate::include::catalog::pg_proc::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::parsenodes::{
     JoinTreeNode, Query, RangeTblEntry, RangeTblEntryKind, RecursiveUnionQuery, SetOperationQuery,
     SqlType, SqlTypeKind,
 };
 use crate::include::nodes::primnodes::{
-    AggAccum, Aggref, BoolExpr, BoolExprType, CaseExpr, CaseWhen, Expr, ExprArraySubscript, OpExpr,
-    OpExprKind, OrderByEntry, SetReturningCall, SortGroupClause, TargetEntry, WindowClause,
-    WindowFrame, WindowFrameBound, WindowFuncExpr, WindowFuncKind, XmlExpr,
+    AggAccum, AggFunc, Aggref, BoolExpr, BoolExprType, CaseExpr, CaseWhen, Expr,
+    ExprArraySubscript, OpExpr, OpExprKind, OrderByEntry, SetReturningCall, SortGroupClause,
+    TargetEntry, WindowClause, WindowFrame, WindowFrameBound, WindowFuncExpr, WindowFuncKind,
+    XmlExpr,
 };
 
 pub(crate) fn fold_query_constants(query: Query) -> Result<Query, ParseError> {
@@ -355,8 +357,9 @@ fn simplify_set_returning_call(call: SetReturningCall) -> Result<SetReturningCal
 }
 
 fn simplify_agg_accum(accum: AggAccum) -> Result<AggAccum, ParseError> {
+    let args = simplify_exprs(accum.args)?;
     Ok(AggAccum {
-        args: simplify_exprs(accum.args)?,
+        args: canonicalize_aggregate_args(accum.aggfnoid, accum.distinct, args),
         order_by: accum
             .order_by
             .into_iter()
@@ -371,8 +374,9 @@ fn simplify_agg_accum(accum: AggAccum) -> Result<AggAccum, ParseError> {
 }
 
 fn simplify_aggref(aggref: Aggref) -> Result<Aggref, ParseError> {
+    let args = simplify_exprs(aggref.args)?;
     Ok(Aggref {
-        args: simplify_exprs(aggref.args)?,
+        args: canonicalize_aggregate_args(aggref.aggfnoid, aggref.aggdistinct, args),
         aggorder: aggref
             .aggorder
             .into_iter()
@@ -384,6 +388,26 @@ fn simplify_aggref(aggref: Aggref) -> Result<Aggref, ParseError> {
             .transpose()?,
         ..aggref
     })
+}
+
+fn canonicalize_aggregate_args(aggfnoid: u32, distinct: bool, args: Vec<Expr>) -> Vec<Expr> {
+    if distinct
+        || builtin_aggregate_function_for_proc_oid(aggfnoid) != Some(AggFunc::Count)
+        || args.len() != 1
+        || !expr_is_known_nonnull(&args[0])
+    {
+        return args;
+    }
+    Vec::new()
+}
+
+fn expr_is_known_nonnull(expr: &Expr) -> bool {
+    match expr {
+        Expr::Const(Value::Null) => false,
+        Expr::Const(_) => true,
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => expr_is_known_nonnull(inner),
+        _ => false,
+    }
 }
 
 fn simplify_window_clause(clause: WindowClause) -> Result<WindowClause, ParseError> {
