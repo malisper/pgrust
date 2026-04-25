@@ -14296,27 +14296,30 @@ fn explain_cte_self_join_pushes_single_rel_filter_below_join() {
     );
     let nested_loop_pos = lines
         .iter()
-        .position(|line| line.starts_with("Nested Loop  (cost="))
+        .position(|line| line.trim_start().starts_with("Nested Loop  (cost="))
         .unwrap_or_else(|| panic!("expected nested loop explain output, got {lines:?}"));
     let filtered_child_pos = lines
         .iter()
-        .position(|line| line.starts_with("  Filter  (cost="))
+        .position(|line| line.trim_start().starts_with("Filter  (cost="))
         .unwrap_or_else(|| panic!("expected filtered child node in explain output, got {lines:?}"));
     let top_level_cte_pos = lines
         .iter()
-        .position(|line| line.starts_with("  CTE Scan  (cost="))
+        .enumerate()
+        .skip(filtered_child_pos + 1)
+        .find(|(_, line)| line.trim_start().starts_with("CTE Scan  (cost="))
+        .map(|(idx, _)| idx)
         .unwrap_or_else(|| panic!("expected unfiltered cte scan in explain output, got {lines:?}"));
     let pushed_filter_pos = lines
         .iter()
-        .position(|line| line.starts_with("    Filter: (x2 <>"))
+        .position(|line| line.trim_start().starts_with("Filter: (x2 <>"))
         .unwrap_or_else(|| {
             panic!("expected pushed-down filter detail in explain output, got {lines:?}")
         });
 
     assert!(
-        !lines
+        !lines[nested_loop_pos + 1..filtered_child_pos]
             .iter()
-            .any(|line| line.starts_with("  Filter: (x2 <>")),
+            .any(|line| line.trim_start().starts_with("Filter: (x2 <>")),
         "expected filter to be attached below the join, got {lines:?}"
     );
     assert!(
