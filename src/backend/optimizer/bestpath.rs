@@ -84,12 +84,6 @@ fn cheaper_than(candidate: &Path, current: Option<&Path>, cost: CostSelector) ->
     {
         return candidate_left_relids > current_left_relids;
     }
-    if let (Some(candidate_pathkeys), Some(current_pathkeys)) =
-        (join_pathkey_count(candidate), join_pathkey_count(current))
-        && candidate_pathkeys != current_pathkeys
-    {
-        return candidate_pathkeys > current_pathkeys;
-    }
     let cmp = compare_path_costs(candidate, current, cost);
     cmp == Ordering::Less
         || (cmp == Ordering::Equal && better_pathkeys(&candidate.pathkeys(), &current.pathkeys()))
@@ -107,20 +101,6 @@ fn cross_join_left_relid_count(path: &Path) -> Option<usize> {
         | Path::OrderBy { input, .. }
         | Path::Limit { input, .. }
         | Path::LockRows { input, .. } => cross_join_left_relid_count(input),
-        _ => None,
-    }
-}
-
-fn join_pathkey_count(path: &Path) -> Option<usize> {
-    match path {
-        Path::NestedLoopJoin { .. } | Path::HashJoin { .. } | Path::MergeJoin { .. } => {
-            Some(path.pathkeys().len())
-        }
-        Path::Filter { input, .. }
-        | Path::Projection { input, .. }
-        | Path::OrderBy { input, .. }
-        | Path::Limit { input, .. }
-        | Path::LockRows { input, .. } => join_pathkey_count(input),
         _ => None,
     }
 }

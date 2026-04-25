@@ -955,17 +955,6 @@ fn build_join_restrict_clauses(
     clauses
 }
 
-fn has_inter_relation_join_clause(
-    clauses: &[RestrictInfo],
-    left_relids: &[usize],
-    right_relids: &[usize],
-) -> bool {
-    clauses.iter().any(|clause| {
-        relids_overlap(&clause.required_relids, left_relids)
-            && relids_overlap(&clause.required_relids, right_relids)
-    })
-}
-
 #[derive(Clone, Copy)]
 enum LevelRelRef {
     Base(usize),
@@ -1026,6 +1015,36 @@ fn join_reltarget(
         sortgrouprefs.extend(right_rel.reltarget.sortgrouprefs.clone());
     }
     PathTarget::with_sortgrouprefs(exprs, sortgrouprefs)
+}
+
+fn exact_cross_join_relids(root: &PlannerInfo, target_relids: &[usize]) -> bool {
+    fn walk(node: &JoinTreeNode, target_relids: &[usize]) -> bool {
+        match node {
+            JoinTreeNode::RangeTblRef(_) => false,
+            JoinTreeNode::JoinExpr {
+                left, right, kind, ..
+            } => {
+                let relids = relids_union(&jointree_relids(left), &jointree_relids(right));
+                (matches!(kind, JoinType::Cross) && relids == target_relids)
+                    || walk(left, target_relids)
+                    || walk(right, target_relids)
+            }
+        }
+    }
+
+    root.parse
+        .jointree
+        .as_ref()
+        .is_some_and(|jointree| walk(jointree, target_relids))
+}
+
+fn jointree_relids(node: &JoinTreeNode) -> Vec<usize> {
+    match node {
+        JoinTreeNode::RangeTblRef(rtindex) => vec![*rtindex],
+        JoinTreeNode::JoinExpr { left, right, .. } => {
+            relids_union(&jointree_relids(left), &jointree_relids(right))
+        }
+    }
 }
 
 fn join_spec_for_special_join(sjinfo: &SpecialJoinInfo, reversed: bool) -> JoinBuildSpec {
@@ -1243,16 +1262,12 @@ fn make_join_rel(
             &logical_right_rel.relids,
             &root.inner_join_clauses,
         );
-        let path_kind = if matches!(logical_kind, JoinType::Inner)
-            && !has_inter_relation_join_clause(
-                &join_restrict_clauses,
-                &logical_left_rel.relids,
-                &logical_right_rel.relids,
-            ) {
-            JoinType::Cross
-        } else {
-            logical_kind
-        };
+        let path_kind =
+            if matches!(logical_kind, JoinType::Inner) && exact_cross_join_relids(root, &relids) {
+                JoinType::Cross
+            } else {
+                logical_kind
+            };
         let mut join_restrict_clauses_for_rel = join_restrict_clauses.clone();
         let mut candidate_paths = collect_join_candidate_paths(
             root,
