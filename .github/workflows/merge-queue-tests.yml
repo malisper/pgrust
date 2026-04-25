@@ -118,7 +118,7 @@ jobs:
           retention-days: 1
 
   cargo-test-run:
-    name: cargo-test-run (${{ matrix.partition }}/4)
+    name: cargo-test-run (${{ matrix.partition }}/2)
     needs:
       - changes
       - cargo-fmt-check
@@ -129,7 +129,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        partition: [1, 2, 3, 4]
+        partition: [1, 2]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -154,7 +154,7 @@ jobs:
             --archive-file target/nextest/archive/pgrust-tests.tar.zst \
             --profile ci \
             --config-file .config/nextest.toml \
-            --partition count:${{ matrix.partition }}/4
+            --partition count:${{ matrix.partition }}/2
 
       - name: Upload JUnit timing report
         if: always()
