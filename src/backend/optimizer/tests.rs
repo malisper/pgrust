@@ -941,11 +941,11 @@ fn planned_window_frame_offsets_from_join_input_are_lowered() {
                 && is_special_user_var(&clause.spec.order_by[0].expr, OUTER_VAR, 0)
                 && matches!(
                     &clause.spec.frame.start_bound,
-                    WindowFrameBound::OffsetPreceding(expr) if is_special_user_var(expr, OUTER_VAR, 1)
+                    WindowFrameBound::OffsetPreceding(offset) if is_special_user_var(&offset.expr, OUTER_VAR, 1)
                 )
                 && matches!(
                     &clause.spec.frame.end_bound,
-                    WindowFrameBound::OffsetFollowing(expr) if is_special_user_var(expr, OUTER_VAR, 1)
+                    WindowFrameBound::OffsetFollowing(offset) if is_special_user_var(&offset.expr, OUTER_VAR, 1)
                 )
         }
         _ => false,

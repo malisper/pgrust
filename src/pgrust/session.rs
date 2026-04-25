@@ -5292,6 +5292,7 @@ impl Session {
                                 | ScalarType::TimeTz
                                 | ScalarType::Timestamp
                                 | ScalarType::TimestampTz
+                                | ScalarType::Interval
                                 | ScalarType::Range(_)
                                 | ScalarType::Multirange(_)
                                 | ScalarType::Point

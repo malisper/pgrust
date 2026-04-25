@@ -70,6 +70,7 @@ pub(crate) use expr_casts::cast_value;
 pub(crate) use expr_casts::parse_bytea_text;
 pub(crate) use expr_casts::parse_text_array_literal_with_op;
 pub use expr_casts::render_internal_char_text;
+pub(crate) use expr_casts::render_interval_text;
 pub use expr_datetime::{render_datetime_value_text, render_datetime_value_text_with_config};
 pub(crate) use expr_geometry::eval_geometry_function;
 pub(crate) use expr_geometry::geometry_input_error_message;
