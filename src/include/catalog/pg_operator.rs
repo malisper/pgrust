@@ -15,7 +15,12 @@ use crate::include::catalog::{
     JSONB_CMP_EQ_PROC_OID, JSONB_CMP_GE_PROC_OID, JSONB_CMP_GT_PROC_OID, JSONB_CMP_LE_PROC_OID,
     JSONB_CMP_LT_PROC_OID, JSONB_CMP_NE_PROC_OID, JSONB_CONTAINED_PROC_OID,
     JSONB_CONTAINS_PROC_OID, JSONB_EXISTS_ALL_PROC_OID, JSONB_EXISTS_ANY_PROC_OID,
-    JSONB_EXISTS_PROC_OID, JSONB_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID, NAME_CMP_EQ_PROC_OID,
+    JSONB_EXISTS_PROC_OID, JSONB_TYPE_OID, LINE_TYPE_OID, LSEG_TYPE_OID, MACADDR_AND_PROC_OID,
+    MACADDR_EQ_PROC_OID, MACADDR_GE_PROC_OID, MACADDR_GT_PROC_OID, MACADDR_LE_PROC_OID,
+    MACADDR_LT_PROC_OID, MACADDR_NE_PROC_OID, MACADDR_NOT_PROC_OID, MACADDR_OR_PROC_OID,
+    MACADDR_TYPE_OID, MACADDR8_AND_PROC_OID, MACADDR8_EQ_PROC_OID, MACADDR8_GE_PROC_OID,
+    MACADDR8_GT_PROC_OID, MACADDR8_LE_PROC_OID, MACADDR8_LT_PROC_OID, MACADDR8_NE_PROC_OID,
+    MACADDR8_NOT_PROC_OID, MACADDR8_OR_PROC_OID, MACADDR8_TYPE_OID, NAME_CMP_EQ_PROC_OID,
     NAME_TYPE_OID, NUMERIC_CMP_EQ_PROC_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID, OID_TYPE_OID,
     PATH_TYPE_OID, PG_CATALOG_NAMESPACE_OID, POINT_TYPE_OID, POLYGON_TYPE_OID, TEXT_ARRAY_TYPE_OID,
     TEXT_CMP_EQ_PROC_OID, TEXT_CMP_GE_PROC_OID, TEXT_CMP_GT_PROC_OID, TEXT_CMP_LE_PROC_OID,
@@ -799,6 +804,7 @@ pub fn bootstrap_pg_operator_rows() -> Vec<PgOperatorRow> {
             true,
         ),
     ];
+    rows.extend(macaddr_operator_rows());
     rows.extend(geometry_operator_rows());
     rows.extend(range_operator_rows());
     rows.extend(multirange_operator_rows());
@@ -832,6 +838,119 @@ fn operator_row(
         oprcanmerge,
         oprcanhash,
     )
+}
+
+fn macaddr_operator_rows() -> Vec<PgOperatorRow> {
+    let mut rows = Vec::new();
+    rows.extend(macaddr_comparison_operator_rows(
+        MACADDR_TYPE_OID,
+        [
+            (1220, "=", 1220, 1221, MACADDR_EQ_PROC_OID, true, true),
+            (1221, "<>", 1221, 1220, MACADDR_NE_PROC_OID, false, false),
+            (1222, "<", 1224, 1225, MACADDR_LT_PROC_OID, false, false),
+            (1223, "<=", 1225, 1224, MACADDR_LE_PROC_OID, false, false),
+            (1224, ">", 1222, 1223, MACADDR_GT_PROC_OID, false, false),
+            (1225, ">=", 1223, 1222, MACADDR_GE_PROC_OID, false, false),
+        ],
+    ));
+    rows.extend(macaddr_bitwise_operator_rows(
+        MACADDR_TYPE_OID,
+        MACADDR_NOT_PROC_OID,
+        MACADDR_AND_PROC_OID,
+        MACADDR_OR_PROC_OID,
+        3147,
+        3148,
+        3149,
+    ));
+    rows.extend(macaddr_comparison_operator_rows(
+        MACADDR8_TYPE_OID,
+        [
+            (3362, "=", 3362, 3363, MACADDR8_EQ_PROC_OID, true, true),
+            (3363, "<>", 3363, 3362, MACADDR8_NE_PROC_OID, false, false),
+            (3364, "<", 3366, 3367, MACADDR8_LT_PROC_OID, false, false),
+            (3365, "<=", 3367, 3366, MACADDR8_LE_PROC_OID, false, false),
+            (3366, ">", 3364, 3365, MACADDR8_GT_PROC_OID, false, false),
+            (3367, ">=", 3365, 3364, MACADDR8_GE_PROC_OID, false, false),
+        ],
+    ));
+    rows.extend(macaddr_bitwise_operator_rows(
+        MACADDR8_TYPE_OID,
+        MACADDR8_NOT_PROC_OID,
+        MACADDR8_AND_PROC_OID,
+        MACADDR8_OR_PROC_OID,
+        3368,
+        3369,
+        3370,
+    ));
+    rows
+}
+
+fn macaddr_comparison_operator_rows<const N: usize>(
+    type_oid: u32,
+    specs: [(u32, &str, u32, u32, u32, bool, bool); N],
+) -> Vec<PgOperatorRow> {
+    specs
+        .into_iter()
+        .map(
+            |(oid, name, commutator, negator, proc_oid, canmerge, canhash)| {
+                operator_row(
+                    oid, name, type_oid, type_oid, commutator, negator, proc_oid, canmerge, canhash,
+                )
+            },
+        )
+        .collect()
+}
+
+fn macaddr_bitwise_operator_rows(
+    type_oid: u32,
+    not_proc_oid: u32,
+    and_proc_oid: u32,
+    or_proc_oid: u32,
+    not_operator_oid: u32,
+    and_operator_oid: u32,
+    or_operator_oid: u32,
+) -> Vec<PgOperatorRow> {
+    vec![
+        operator_row_full(
+            not_operator_oid,
+            "~",
+            'l',
+            0,
+            type_oid,
+            type_oid,
+            0,
+            0,
+            not_proc_oid,
+            false,
+            false,
+        ),
+        operator_row_full(
+            and_operator_oid,
+            "&",
+            'b',
+            type_oid,
+            type_oid,
+            type_oid,
+            and_operator_oid,
+            0,
+            and_proc_oid,
+            false,
+            false,
+        ),
+        operator_row_full(
+            or_operator_oid,
+            "|",
+            'b',
+            type_oid,
+            type_oid,
+            type_oid,
+            or_operator_oid,
+            0,
+            or_proc_oid,
+            false,
+            false,
+        ),
+    ]
 }
 
 fn geometry_operator_rows() -> Vec<PgOperatorRow> {
@@ -3454,5 +3573,38 @@ mod tests {
                 "oprjoin",
             ]
         );
+    }
+
+    #[test]
+    fn bootstrap_rows_include_macaddr_operators() {
+        let rows = bootstrap_pg_operator_rows();
+        let eq = rows
+            .iter()
+            .find(|row| row.oid == 1220)
+            .expect("macaddr equality operator");
+        assert_eq!(eq.oprname, "=");
+        assert_eq!(eq.oprleft, MACADDR_TYPE_OID);
+        assert_eq!(eq.oprright, MACADDR_TYPE_OID);
+        assert_eq!(eq.oprcode, MACADDR_EQ_PROC_OID);
+        assert!(eq.oprcanhash);
+
+        let not = rows
+            .iter()
+            .find(|row| row.oid == 3147)
+            .expect("macaddr bitwise not operator");
+        assert_eq!(not.oprname, "~");
+        assert_eq!(not.oprkind, 'l');
+        assert_eq!(not.oprleft, 0);
+        assert_eq!(not.oprright, MACADDR_TYPE_OID);
+        assert_eq!(not.oprresult, MACADDR_TYPE_OID);
+
+        let mac8_or = rows
+            .iter()
+            .find(|row| row.oid == 3370)
+            .expect("macaddr8 bitwise or operator");
+        assert_eq!(mac8_or.oprname, "|");
+        assert_eq!(mac8_or.oprleft, MACADDR8_TYPE_OID);
+        assert_eq!(mac8_or.oprright, MACADDR8_TYPE_OID);
+        assert_eq!(mac8_or.oprcode, MACADDR8_OR_PROC_OID);
     }
 }

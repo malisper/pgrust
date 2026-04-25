@@ -187,6 +187,26 @@ fn drop_table_display_relation_name(catcache: &CatCache, relation_oid: u32) -> S
     }
 }
 
+fn drop_schema_display_relation_name(
+    catcache: &CatCache,
+    relation_oid: u32,
+    current_role_name: &str,
+) -> String {
+    let Some(class) = catcache.class_by_oid(relation_oid) else {
+        return relation_oid.to_string();
+    };
+    let schema_name = catcache
+        .namespace_by_oid(class.relnamespace)
+        .map(|row| row.nspname.clone())
+        .unwrap_or_else(|| "public".to_string());
+    match schema_name.as_str() {
+        "public" | "pg_catalog" => class.relname.clone(),
+        schema_name if schema_name.starts_with("pg_temp_") => class.relname.clone(),
+        schema_name if schema_name.eq_ignore_ascii_case(current_role_name) => class.relname.clone(),
+        _ => format!("{schema_name}.{}", class.relname),
+    }
+}
+
 fn parse_proc_argtype_oids(argtypes: &str) -> Option<Vec<u32>> {
     if argtypes.trim().is_empty() {
         return Some(Vec::new());
@@ -1322,10 +1342,12 @@ impl Database {
                     sqlstate: "42501",
                 });
             }
-            let has_relations = catcache
+            let relation_rows = catcache
                 .class_rows()
                 .into_iter()
-                .any(|row| row.relnamespace == schema.oid);
+                .filter(|row| row.relnamespace == schema.oid)
+                .collect::<Vec<_>>();
+            let has_relations = !relation_rows.is_empty();
             let has_procs = catcache
                 .proc_rows()
                 .into_iter()
@@ -1339,6 +1361,26 @@ impl Database {
                     hint: None,
                     sqlstate: "2BP01",
                 });
+            }
+            if drop_stmt.cascade {
+                let current_role_name = auth_catalog
+                    .role_by_oid(auth.current_user_oid())
+                    .map(|row| row.rolname.as_str())
+                    .unwrap_or("");
+                for relation in relation_rows
+                    .iter()
+                    .filter(|row| matches!(row.relkind, 'r' | 'p' | 'm' | 'S' | 'v'))
+                {
+                    push_notice(format!(
+                        "drop cascades to {} {}",
+                        drop_table_relation_kind_name(relation.relkind),
+                        drop_schema_display_relation_name(
+                            &catcache,
+                            relation.oid,
+                            current_role_name
+                        )
+                    ));
+                }
             }
             if has_relations || has_procs {
                 self.drop_schema_owned_objects_in_transaction(

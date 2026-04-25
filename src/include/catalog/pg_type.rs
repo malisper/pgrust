@@ -20,12 +20,13 @@ use crate::include::catalog::{
     INTERNAL_CHAR_ARRAY_TYPE_OID, INTERNAL_CHAR_TYPE_OID, INTERNAL_TYPE_OID,
     INTERVAL_ARRAY_TYPE_OID, INTERVAL_TYPE_OID, JSON_ARRAY_TYPE_OID, JSON_TYPE_OID,
     JSONB_ARRAY_TYPE_OID, JSONB_TYPE_OID, JSONPATH_ARRAY_TYPE_OID, JSONPATH_TYPE_OID,
-    LINE_TYPE_OID, LSEG_TYPE_OID, MONEY_ARRAY_TYPE_OID, MONEY_TYPE_OID, NAME_ARRAY_TYPE_OID,
-    NAME_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID, NUMMULTIRANGE_ARRAY_TYPE_OID,
-    NUMMULTIRANGE_TYPE_OID, NUMRANGE_ARRAY_TYPE_OID, NUMRANGE_TYPE_OID, OID_ARRAY_TYPE_OID,
-    OID_TYPE_OID, OIDVECTOR_TYPE_OID, PATH_TYPE_OID, PG_ATTRIBUTE_RELATION_OID,
-    PG_ATTRIBUTE_ROWTYPE_OID, PG_CATALOG_NAMESPACE_OID, PG_CLASS_RELATION_OID,
-    PG_CLASS_ROWTYPE_OID, PG_DATABASE_RELATION_OID, PG_DATABASE_ROWTYPE_OID,
+    LINE_TYPE_OID, LSEG_TYPE_OID, MACADDR_ARRAY_TYPE_OID, MACADDR_TYPE_OID,
+    MACADDR8_ARRAY_TYPE_OID, MACADDR8_TYPE_OID, MONEY_ARRAY_TYPE_OID, MONEY_TYPE_OID,
+    NAME_ARRAY_TYPE_OID, NAME_TYPE_OID, NUMERIC_ARRAY_TYPE_OID, NUMERIC_TYPE_OID,
+    NUMMULTIRANGE_ARRAY_TYPE_OID, NUMMULTIRANGE_TYPE_OID, NUMRANGE_ARRAY_TYPE_OID,
+    NUMRANGE_TYPE_OID, OID_ARRAY_TYPE_OID, OID_TYPE_OID, OIDVECTOR_TYPE_OID, PATH_TYPE_OID,
+    PG_ATTRIBUTE_RELATION_OID, PG_ATTRIBUTE_ROWTYPE_OID, PG_CATALOG_NAMESPACE_OID,
+    PG_CLASS_RELATION_OID, PG_CLASS_ROWTYPE_OID, PG_DATABASE_RELATION_OID, PG_DATABASE_ROWTYPE_OID,
     PG_DEPENDENCIES_TYPE_OID, PG_LSN_ARRAY_TYPE_OID, PG_LSN_TYPE_OID, PG_MCV_LIST_TYPE_OID,
     PG_NAMESPACE_RELATION_OID, PG_NAMESPACE_ROWTYPE_OID, PG_NDISTINCT_TYPE_OID,
     PG_NODE_TREE_TYPE_OID, PG_PROC_RELATION_OID, PG_PROC_ROWTYPE_OID, PG_STATISTIC_ARRAY_TYPE_OID,
@@ -386,6 +387,30 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             "_cidr",
             CIDR_ARRAY_TYPE_OID,
             SqlType::array_of(SqlType::new(SqlTypeKind::Cidr)),
+        ),
+        fixed_builtin_type_row(
+            "macaddr",
+            MACADDR_TYPE_OID,
+            SqlType::new(SqlTypeKind::MacAddr),
+            6,
+            AttributeAlign::Int,
+        ),
+        builtin_type_row(
+            "_macaddr",
+            MACADDR_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::MacAddr)),
+        ),
+        fixed_builtin_type_row(
+            "macaddr8",
+            MACADDR8_TYPE_OID,
+            SqlType::new(SqlTypeKind::MacAddr8),
+            8,
+            AttributeAlign::Int,
+        ),
+        builtin_type_row(
+            "_macaddr8",
+            MACADDR8_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::MacAddr8)),
         ),
         builtin_type_row("inet", INET_TYPE_OID, SqlType::new(SqlTypeKind::Inet)),
         builtin_type_row(
@@ -1052,7 +1077,11 @@ fn annotate_array_type_links(rows: &mut [PgTypeRow]) {
     let snapshot = rows.to_vec();
     for row in rows.iter_mut() {
         if row.sql_type.is_array {
-            row.typelem = row.sql_type.type_oid;
+            row.typelem = snapshot
+                .iter()
+                .find(|type_row| type_row.sql_type == row.sql_type.element_type())
+                .map(|type_row| type_row.oid)
+                .unwrap_or(row.sql_type.type_oid);
         } else if let Some(array_oid) = snapshot
             .iter()
             .find(|array_row| array_row.sql_type == SqlType::array_of(row.sql_type))
@@ -1104,6 +1133,43 @@ mod tests {
             row.oid == PG_NODE_TREE_TYPE_OID
                 && row.typname == "pg_node_tree"
                 && row.sql_type == SqlType::new(SqlTypeKind::PgNodeTree)
+        }));
+    }
+
+    #[test]
+    fn builtin_types_include_postgres_macaddr_oids() {
+        let rows = builtin_type_rows();
+        let macaddr = rows
+            .iter()
+            .find(|row| row.typname == "macaddr")
+            .expect("macaddr type row");
+        assert_eq!(macaddr.oid, MACADDR_TYPE_OID);
+        assert_eq!(macaddr.typlen, 6);
+        assert_eq!(macaddr.typalign, AttributeAlign::Int);
+        assert_eq!(macaddr.typstorage, AttributeStorage::Plain);
+        assert_eq!(macaddr.typarray, MACADDR_ARRAY_TYPE_OID);
+        assert_eq!(macaddr.sql_type, SqlType::new(SqlTypeKind::MacAddr));
+
+        let macaddr8 = rows
+            .iter()
+            .find(|row| row.typname == "macaddr8")
+            .expect("macaddr8 type row");
+        assert_eq!(macaddr8.oid, MACADDR8_TYPE_OID);
+        assert_eq!(macaddr8.typlen, 8);
+        assert_eq!(macaddr8.typalign, AttributeAlign::Int);
+        assert_eq!(macaddr8.typstorage, AttributeStorage::Plain);
+        assert_eq!(macaddr8.typarray, MACADDR8_ARRAY_TYPE_OID);
+        assert_eq!(macaddr8.sql_type, SqlType::new(SqlTypeKind::MacAddr8));
+
+        assert!(rows.iter().any(|row| {
+            row.oid == MACADDR_ARRAY_TYPE_OID
+                && row.typname == "_macaddr"
+                && row.typelem == MACADDR_TYPE_OID
+        }));
+        assert!(rows.iter().any(|row| {
+            row.oid == MACADDR8_ARRAY_TYPE_OID
+                && row.typname == "_macaddr8"
+                && row.typelem == MACADDR8_TYPE_OID
         }));
     }
 

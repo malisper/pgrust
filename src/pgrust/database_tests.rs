@@ -8061,6 +8061,16 @@ fn create_index_and_alter_table_set_are_noops() {
                         Value::Text("text".into()),
                         Value::Text("text".into()),
                     ],
+                    vec![
+                        Value::Text("macaddr".into()),
+                        Value::Text("macaddr8".into()),
+                        Value::Text("macaddr8".into()),
+                    ],
+                    vec![
+                        Value::Text("macaddr8".into()),
+                        Value::Text("macaddr".into()),
+                        Value::Text("macaddr".into()),
+                    ],
                 ]
             );
         }
@@ -8523,6 +8533,108 @@ fn create_schema_executes_embedded_create_table_elements() {
 }
 
 #[test]
+fn create_schema_validates_embedded_element_schema_names() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let cases = [
+        (
+            "create schema s_seq create sequence other.seq",
+            "CREATE specifies a schema (other) different from the one being created (s_seq)",
+        ),
+        (
+            "create schema s_tab create table other.tab (id int4)",
+            "CREATE specifies a schema (other) different from the one being created (s_tab)",
+        ),
+        (
+            "create schema s_view create view other.view as select 1",
+            "CREATE specifies a schema (other) different from the one being created (s_view)",
+        ),
+        (
+            "create schema s_idx create index on other.tab (id)",
+            "CREATE specifies a schema (other) different from the one being created (s_idx)",
+        ),
+        (
+            "create schema s_trig create trigger trig before insert on other.tab execute function trig_fn()",
+            "CREATE specifies a schema (other) different from the one being created (s_trig)",
+        ),
+    ];
+
+    for (sql, expected_message) in cases {
+        match db.execute(1, sql) {
+            Err(ExecError::DetailedError {
+                message, sqlstate, ..
+            }) => {
+                assert_eq!(sqlstate, "42P15");
+                assert_eq!(message, expected_message);
+            }
+            other => panic!("expected schema mismatch error for {sql}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn create_schema_executes_supported_embedded_elements_in_order() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role app_reader login")
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create schema tenant
+               create sequence seq
+               create table items (id int4)
+               create view item_view as select id from items
+               create index on items (id)
+               grant select on items to app_reader",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select c.relname, c.relkind::text
+               from pg_class c
+               join pg_namespace n on n.oid = c.relnamespace
+              where n.nspname = 'tenant'
+                and c.relname in ('seq', 'items', 'item_view', 'items_id_idx')
+              order by c.relname",
+        ),
+        vec![
+            vec![Value::Text("item_view".into()), Value::Text("v".into())],
+            vec![Value::Text("items".into()), Value::Text("r".into())],
+            vec![Value::Text("items_id_idx".into()), Value::Text("i".into())],
+            vec![Value::Text("seq".into()), Value::Text("S".into())],
+        ]
+    );
+
+    session
+        .execute(&db, "insert into tenant.items values (7)")
+        .unwrap();
+    session.execute(&db, "set search_path to tenant").unwrap();
+    assert_eq!(
+        session_query_rows(&mut session, &db, "select id from item_view"),
+        vec![vec![Value::Int32(7)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select unnest(pg_get_acl('pg_class'::regclass, c.oid, 0))
+               from pg_class c
+               join pg_namespace n on n.oid = c.relnamespace
+              where n.nspname = 'tenant' and c.relname = 'items'",
+        ),
+        vec![
+            vec![Value::Text("postgres=arwdDxtm/postgres".into())],
+            vec![Value::Text("app_reader=r/postgres".into())],
+        ]
+    );
+}
+
+#[test]
 fn create_schema_supports_authorization_and_if_not_exists() {
     let db = Database::open_ephemeral(16).unwrap();
 
@@ -8549,6 +8661,81 @@ fn create_schema_supports_authorization_and_if_not_exists() {
         }
         other => panic!("expected query result, got {:?}", other),
     }
+}
+
+#[test]
+fn create_schema_authorization_current_role_uses_active_role() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create role schema_owner superuser")
+        .unwrap();
+    session.execute(&db, "set role schema_owner").unwrap();
+    session
+        .execute(
+            &db,
+            "create schema authorization current_role
+               create table schema_owner.tab (id int4)",
+        )
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select n.nspname, a.rolname
+               from pg_namespace n
+               join pg_authid a on a.oid = n.nspowner
+              where n.nspname = 'schema_owner'",
+        ),
+        vec![vec![
+            Value::Text("schema_owner".into()),
+            Value::Text("schema_owner".into()),
+        ]]
+    );
+}
+
+#[test]
+fn drop_schema_cascade_reports_schema_owned_relation_notices() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create schema tenant_notice
+               create table tenant_notice.tab (id int4)",
+        )
+        .unwrap();
+    take_backend_notice_messages();
+    session
+        .execute(&db, "drop schema tenant_notice cascade")
+        .unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![String::from("drop cascades to table tenant_notice.tab")]
+    );
+
+    session
+        .execute(&db, "create role schema_owner superuser")
+        .unwrap();
+    session.execute(&db, "set role schema_owner").unwrap();
+    session
+        .execute(
+            &db,
+            "create schema authorization current_role
+               create table schema_owner.tab (id int4)",
+        )
+        .unwrap();
+    take_backend_notice_messages();
+    session
+        .execute(&db, "drop schema schema_owner cascade")
+        .unwrap();
+    assert_eq!(
+        take_backend_notice_messages(),
+        vec![String::from("drop cascades to table tab")]
+    );
 }
 
 #[test]

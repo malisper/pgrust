@@ -483,7 +483,7 @@ fn try_parse_create_schema_statement(
     let mut auth_role = None;
     if keyword_at_start(rest, "authorization") {
         rest = consume_keyword(rest, "authorization").trim_start();
-        let (role, next) = parse_sql_identifier(rest)?;
+        let (role, next) = parse_role_spec(rest)?;
         auth_role = Some(role);
         rest = next.trim_start();
     } else {
@@ -492,7 +492,7 @@ fn try_parse_create_schema_statement(
         rest = next.trim_start();
         if keyword_at_start(rest, "authorization") {
             rest = consume_keyword(rest, "authorization").trim_start();
-            let (role, next) = parse_sql_identifier(rest)?;
+            let (role, next) = parse_role_spec(rest)?;
             auth_role = Some(role);
             rest = next.trim_start();
         }
@@ -512,9 +512,14 @@ fn try_parse_create_schema_statement(
         .map(|element| {
             let stmt = parse_statement_with_options_inner(element, options)?;
             match stmt {
-                Statement::CreateTable(_) => Ok(Box::new(stmt)),
+                Statement::CreateSequence(_)
+                | Statement::CreateTable(_)
+                | Statement::CreateView(_)
+                | Statement::CreateIndex(_)
+                | Statement::CreateTrigger(_)
+                | Statement::GrantObject(_) => Ok(Box::new(stmt)),
                 _ => Err(ParseError::FeatureNotSupported(
-                    "CREATE SCHEMA elements other than CREATE TABLE".into(),
+                    "CREATE SCHEMA elements other than CREATE SEQUENCE, CREATE TABLE, CREATE VIEW, CREATE INDEX, CREATE TRIGGER, or GRANT".into(),
                 )),
             }
         })
@@ -528,23 +533,52 @@ fn try_parse_create_schema_statement(
     })))
 }
 
+fn parse_role_spec(input: &str) -> Result<(RoleSpec, &str), ParseError> {
+    let rest = input.trim_start();
+    if keyword_at_start(rest, "current_user") {
+        return Ok((RoleSpec::CurrentUser, consume_keyword(rest, "current_user")));
+    }
+    if keyword_at_start(rest, "current_role") {
+        return Ok((RoleSpec::CurrentRole, consume_keyword(rest, "current_role")));
+    }
+    if keyword_at_start(rest, "session_user") {
+        return Ok((RoleSpec::SessionUser, consume_keyword(rest, "session_user")));
+    }
+    let (role_name, rest) = parse_sql_identifier(rest)?;
+    Ok((RoleSpec::RoleName(role_name), rest))
+}
+
+fn build_role_spec(pair: Pair<'_, Rule>) -> RoleSpec {
+    if pair.as_rule() == Rule::identifier
+        && let Some(inner) = pair.clone().into_inner().next()
+        && inner.as_rule() == Rule::unquoted_identifier
+    {
+        match inner.as_str().to_ascii_lowercase().as_str() {
+            "current_user" => return RoleSpec::CurrentUser,
+            "current_role" => return RoleSpec::CurrentRole,
+            "session_user" => return RoleSpec::SessionUser,
+            _ => {}
+        }
+    }
+    RoleSpec::RoleName(build_identifier(pair))
+}
+
 fn split_create_schema_elements(input: &str) -> Result<Vec<String>, ParseError> {
     let mut starts = Vec::new();
     let mut offset = 0usize;
     while offset < input.len() {
-        let Some(relative) = find_next_top_level_keyword(&input[offset..], &["create"]) else {
+        let Some(relative) = find_next_top_level_keyword(&input[offset..], &["create", "grant"])
+        else {
             break;
         };
         let index = offset + relative;
-        let tail = &input[index..];
-        if consume_keyword(tail, "create")
-            .trim_start()
-            .to_ascii_lowercase()
-            .starts_with("table")
-        {
-            starts.push(index);
-        }
-        offset = index + "create".len();
+        starts.push(index);
+        offset = index
+            + if keyword_at_start(&input[index..], "create") {
+                "create".len()
+            } else {
+                "grant".len()
+            };
     }
     if starts.is_empty() {
         return Err(ParseError::UnexpectedToken {
@@ -2230,6 +2264,18 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
         "cidr" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Cidr))),
         "uuid" | "pg_catalog.uuid" => {
             return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Uuid)));
+        }
+        "macaddr" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::MacAddr))),
+        "macaddr8" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::MacAddr8))),
+        "_macaddr" => {
+            return Ok(RawTypeName::Builtin(SqlType::array_of(SqlType::new(
+                SqlTypeKind::MacAddr,
+            ))));
+        }
+        "_macaddr8" => {
+            return Ok(RawTypeName::Builtin(SqlType::array_of(SqlType::new(
+                SqlTypeKind::MacAddr8,
+            ))));
         }
         "bpchar" | "pg_catalog.bpchar" => {
             return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Char)));
@@ -10548,7 +10594,7 @@ fn build_create_schema(pair: Pair<'_, Rule>) -> Result<CreateSchemaStatement, Pa
                 let role = part
                     .into_inner()
                     .find(|inner| inner.as_rule() == Rule::identifier)
-                    .map(build_identifier)
+                    .map(build_role_spec)
                     .ok_or(ParseError::UnexpectedEof)?;
                 auth_role = Some(role);
             }
@@ -10556,7 +10602,7 @@ fn build_create_schema(pair: Pair<'_, Rule>) -> Result<CreateSchemaStatement, Pa
                 let role = part
                     .into_inner()
                     .find(|inner| inner.as_rule() == Rule::identifier)
-                    .map(build_identifier)
+                    .map(build_role_spec)
                     .ok_or(ParseError::UnexpectedEof)?;
                 auth_role = Some(role);
             }
@@ -12556,6 +12602,8 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Xml => "xml",
         SqlTypeKind::Inet => "inet",
         SqlTypeKind::Cidr => "cidr",
+        SqlTypeKind::MacAddr => "macaddr",
+        SqlTypeKind::MacAddr8 => "macaddr8",
         SqlTypeKind::Date => "date",
         SqlTypeKind::DateRange => "daterange",
         SqlTypeKind::Time => "time",
@@ -13816,6 +13864,8 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
                 "uuid" => SqlType::new(SqlTypeKind::Uuid),
                 "inet" => SqlType::new(SqlTypeKind::Inet),
                 "cidr" => SqlType::new(SqlTypeKind::Cidr),
+                "macaddr" => SqlType::new(SqlTypeKind::MacAddr),
+                "macaddr8" => SqlType::new(SqlTypeKind::MacAddr8),
                 "money" => SqlType::new(SqlTypeKind::Money),
                 "float4" | "real" => SqlType::new(SqlTypeKind::Float4),
                 "float8" => SqlType::new(SqlTypeKind::Float8),
@@ -13864,6 +13914,8 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
         Rule::kw_uuid => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Uuid)),
         Rule::kw_inet => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Inet)),
         Rule::kw_cidr => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Cidr)),
+        Rule::kw_macaddr => RawTypeName::Builtin(SqlType::new(SqlTypeKind::MacAddr)),
+        Rule::kw_macaddr8 => RawTypeName::Builtin(SqlType::new(SqlTypeKind::MacAddr8)),
         Rule::kw_money => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Money)),
         Rule::kw_float4 | Rule::kw_real => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Float4)),
         Rule::kw_float8 | Rule::double_precision_type => {

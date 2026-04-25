@@ -1463,9 +1463,17 @@ pub struct CreateDatabaseStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateSchemaStatement {
     pub schema_name: Option<String>,
-    pub auth_role: Option<String>,
+    pub auth_role: Option<RoleSpec>,
     pub if_not_exists: bool,
     pub elements: Vec<Box<Statement>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoleSpec {
+    RoleName(String),
+    CurrentUser,
+    CurrentRole,
+    SessionUser,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2868,6 +2876,8 @@ pub enum SqlTypeKind {
     Uuid,
     Inet,
     Cidr,
+    MacAddr,
+    MacAddr8,
     Float4,
     Float8,
     Money,

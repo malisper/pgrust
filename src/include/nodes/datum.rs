@@ -713,6 +713,8 @@ pub enum Value {
     Uuid([u8; 16]),
     Inet(InetValue),
     Cidr(InetValue),
+    MacAddr([u8; 6]),
+    MacAddr8([u8; 8]),
     Point(GeoPoint),
     Lseg(GeoLseg),
     Path(GeoPath),
@@ -1085,6 +1087,8 @@ impl Value {
             Value::Uuid(v) => Value::Uuid(*v),
             Value::Inet(v) => Value::Inet(v.clone()),
             Value::Cidr(v) => Value::Cidr(v.clone()),
+            Value::MacAddr(v) => Value::MacAddr(*v),
+            Value::MacAddr8(v) => Value::MacAddr8(*v),
             Value::Point(v) => Value::Point(v.clone()),
             Value::Lseg(v) => Value::Lseg(v.clone()),
             Value::Path(v) => Value::Path(v.clone()),
@@ -1184,6 +1188,8 @@ impl Value {
             Value::Uuid(_) => Some(SqlType::new(SqlTypeKind::Uuid)),
             Value::Inet(_) => Some(SqlType::new(SqlTypeKind::Inet)),
             Value::Cidr(_) => Some(SqlType::new(SqlTypeKind::Cidr)),
+            Value::MacAddr(_) => Some(SqlType::new(SqlTypeKind::MacAddr)),
+            Value::MacAddr8(_) => Some(SqlType::new(SqlTypeKind::MacAddr8)),
             Value::Point(_) => Some(SqlType::new(SqlTypeKind::Point)),
             Value::Lseg(_) => Some(SqlType::new(SqlTypeKind::Lseg)),
             Value::Path(_) => Some(SqlType::new(SqlTypeKind::Path)),
@@ -1255,6 +1261,8 @@ impl PartialEq for Value {
             (Value::Uuid(a), Value::Uuid(b)) => a == b,
             (Value::Inet(a), Value::Inet(b)) => a == b,
             (Value::Cidr(a), Value::Cidr(b)) => a == b,
+            (Value::MacAddr(a), Value::MacAddr(b)) => a == b,
+            (Value::MacAddr8(a), Value::MacAddr8(b)) => a == b,
             (Value::Point(a), Value::Point(b)) => {
                 a.x.to_bits() == b.x.to_bits() && a.y.to_bits() == b.y.to_bits()
             }
@@ -1390,6 +1398,14 @@ impl std::hash::Hash for Value {
             }
             Value::Cidr(v) => {
                 27u8.hash(state);
+                v.hash(state);
+            }
+            Value::MacAddr(v) => {
+                29u8.hash(state);
+                v.hash(state);
+            }
+            Value::MacAddr8(v) => {
+                30u8.hash(state);
                 v.hash(state);
             }
             Value::Point(v) => {
