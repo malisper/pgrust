@@ -810,8 +810,9 @@ fn set_base_rel_pathlist(root: &mut PlannerInfo, rtindex: usize, catalog: &dyn C
                     pathtarget: slot_output_target(rtindex, call.output_columns(), |column| {
                         column.sql_type
                     }),
-                    slot_id: rte_slot_id(rtindex),
+                    slot_id: rtindex,
                     call,
+                    table_alias: rte.alias.clone(),
                 },
                 catalog,
             );

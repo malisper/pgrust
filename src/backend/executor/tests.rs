@@ -12664,6 +12664,56 @@ fn explain_shows_aggregate_node() {
 }
 
 #[test]
+fn explain_verbose_function_scan_uses_table_alias() {
+    let base = temp_dir("explain_verbose_function_scan_alias");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+    match run_sql(
+        &base,
+        &txns,
+        INVALID_TRANSACTION_ID,
+        "explain (verbose, costs off)
+         select * from generate_series(1, 3) as g(x)",
+    )
+    .unwrap()
+    {
+        StatementResult::Query { rows, .. } => {
+            let rendered = rows
+                .into_iter()
+                .map(|row| match &row[0] {
+                    Value::Text(text) => text.to_string(),
+                    other => panic!("expected text, got {:?}", other),
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.trim() == "Function Scan on pg_catalog.generate_series g"),
+                "{}",
+                rendered.join("\n")
+            );
+            assert!(
+                rendered.iter().any(|line| line.trim() == "Output: g.x"),
+                "{}",
+                rendered.join("\n")
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.trim() == "Function Call: generate_series(1, 3)"),
+                "{}",
+                rendered.join("\n")
+            );
+            assert!(
+                !rendered.iter().any(|line| line.trim() == "Projection"),
+                "{}",
+                rendered.join("\n")
+            );
+        }
+        other => panic!("expected query result, got {:?}", other),
+    }
+}
+
+#[test]
 fn explain_primary_key_groupby_reduction_hides_trim_projection() {
     let base = temp_dir("explain_groupby_pk_reduction");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -12750,8 +12800,6 @@ fn aggregate_primary_key_groupby_reduction_preserves_passthrough_columns() {
         other => panic!("expected query result, got {:?}", other),
     }
 }
-
-#[test]
 fn explain_verbose_lateral_aggregate_renders_pg_style_details() {
     let base = temp_dir("explain_verbose_lateral_agg");
     let txns = TransactionManager::new_durable(&base).unwrap();
@@ -12780,24 +12828,54 @@ fn explain_verbose_lateral_aggregate_renders_pg_style_details() {
                 })
                 .collect::<Vec<_>>();
             assert!(
-                rendered.iter().any(|line| {
-                    line.trim()
-                        == "Output: generate_series.generate_series, sum((generate_series.generate_series + generate_series.generate_series))"
-                }),
+                rendered
+                    .iter()
+                    .any(|line| line.trim() == "Function Scan on pg_catalog.generate_series s1"),
                 "{}",
                 rendered.join("\n")
             );
             assert!(
                 rendered
                     .iter()
-                    .any(|line| line.trim() == "Group Key: generate_series.generate_series"),
+                    .any(|line| line.trim() == "Function Scan on pg_catalog.generate_series s2"),
                 "{}",
                 rendered.join("\n")
             );
             assert!(
                 rendered
                     .iter()
-                    .any(|line| { line.trim() == "Function Call: generate_series(1, 3)" }),
+                    .any(|line| line.trim() == "Output: s1.s1, s2.s2, (sum((s1.s1 + s2.s2)))"),
+                "{}",
+                rendered.join("\n")
+            );
+            assert!(
+                rendered.iter().any(|line| line.trim() == "Output: s1.s1"),
+                "{}",
+                rendered.join("\n")
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.trim() == "Output: s2.s2, sum((s1.s1 + s2.s2))"),
+                "{}",
+                rendered.join("\n")
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.trim() == "Group Key: s2.s2"),
+                "{}",
+                rendered.join("\n")
+            );
+            assert!(
+                rendered
+                    .iter()
+                    .any(|line| line.trim() == "Function Call: generate_series(1, 3)"),
+                "{}",
+                rendered.join("\n")
+            );
+            assert!(
+                !rendered.iter().any(|line| line.trim() == "Projection"),
                 "{}",
                 rendered.join("\n")
             );

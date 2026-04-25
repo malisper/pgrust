@@ -1325,9 +1325,14 @@ fn rebase_plan_subplan_ids(plan: Plan, base: usize) -> Plan {
             clause: rebase_window_clause_subplan_ids(clause, base),
             output_columns,
         },
-        Plan::FunctionScan { plan_info, call } => Plan::FunctionScan {
+        Plan::FunctionScan {
+            plan_info,
+            call,
+            table_alias,
+        } => Plan::FunctionScan {
             plan_info,
             call: rebase_set_returning_call_subplan_ids(call, base),
+            table_alias,
         },
         Plan::SubqueryScan {
             plan_info,
@@ -1771,9 +1776,14 @@ pub(super) fn finalize_plan_subqueries(
                 output_columns,
             }
         }
-        Plan::FunctionScan { plan_info, call } => Plan::FunctionScan {
+        Plan::FunctionScan {
+            plan_info,
+            call,
+            table_alias,
+        } => Plan::FunctionScan {
             plan_info,
             call: finalize_set_returning_call(call, catalog, subplans),
+            table_alias,
         },
         Plan::SubqueryScan {
             plan_info,
