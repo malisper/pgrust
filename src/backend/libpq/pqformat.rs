@@ -1415,6 +1415,10 @@ pub fn format_bytea_text(bytes: &[u8], output: ByteaOutputFormat) -> String {
                 match byte {
                     b'\\' => out.push_str("\\\\"),
                     0x20..=0x7e => out.push(byte as char),
+                    0x01..=0x1f | 0x7f => {
+                        use std::fmt::Write as _;
+                        let _ = write!(&mut out, "\\x{byte:02x}");
+                    }
                     _ => {
                         use std::fmt::Write as _;
                         let _ = write!(&mut out, "\\{:03o}", byte);
@@ -1643,6 +1647,45 @@ pub(crate) fn send_notice_with_severity(
     if let Some(detail) = detail {
         body.push(b'D');
         body.extend_from_slice(detail.as_bytes());
+        body.push(0);
+    }
+    if let Some(position) = position {
+        body.push(b'P');
+        body.extend_from_slice(position.to_string().as_bytes());
+        body.push(0);
+    }
+    body.push(0);
+
+    w.write_all(&[b'N'])?;
+    w.write_all(&((body.len() + 4) as i32).to_be_bytes())?;
+    w.write_all(&body)?;
+    Ok(())
+}
+
+pub(crate) fn send_notice_with_hint(
+    w: &mut impl Write,
+    severity: &str,
+    sqlstate: &str,
+    message: &str,
+    hint: Option<&str>,
+    position: Option<usize>,
+) -> io::Result<()> {
+    let mut body = Vec::new();
+    body.push(b'S');
+    body.extend_from_slice(severity.as_bytes());
+    body.push(0);
+    body.push(b'V');
+    body.extend_from_slice(severity.as_bytes());
+    body.push(0);
+    body.push(b'C');
+    body.extend_from_slice(sqlstate.as_bytes());
+    body.push(0);
+    body.push(b'M');
+    body.extend_from_slice(message.as_bytes());
+    body.push(0);
+    if let Some(hint) = hint {
+        body.push(b'H');
+        body.extend_from_slice(hint.as_bytes());
         body.push(0);
     }
     if let Some(position) = position {

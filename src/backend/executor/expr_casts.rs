@@ -1930,11 +1930,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             SqlType {
                 kind: SqlTypeKind::Bytea,
                 ..
-            } => Err(ExecError::TypeMismatch {
-                op: "::bytea",
-                left: Value::Int16(v),
-                right: Value::Bytea(Vec::new()),
-            }),
+            } => Ok(Value::Bytea(v.to_be_bytes().to_vec())),
             SqlType {
                 kind:
                     SqlTypeKind::AnyElement
@@ -2074,11 +2070,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             SqlType {
                 kind: SqlTypeKind::Bytea,
                 ..
-            } => Err(ExecError::TypeMismatch {
-                op: "::bytea",
-                left: Value::Int32(v),
-                right: Value::Bytea(Vec::new()),
-            }),
+            } => Ok(Value::Bytea(v.to_be_bytes().to_vec())),
             SqlType {
                 kind:
                     SqlTypeKind::AnyElement
@@ -2569,14 +2561,21 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 right: Value::Null,
             }),
         },
-        Value::Bytea(bytes) => match ty.kind {
-            SqlTypeKind::Bytea => Ok(Value::Bytea(bytes)),
-            _ => Err(ExecError::TypeMismatch {
-                op: "::bytea",
-                left: Value::Bytea(bytes),
-                right: Value::Null,
-            }),
-        },
+        Value::Bytea(bytes) => {
+            match ty.kind {
+                SqlTypeKind::Bytea => Ok(Value::Bytea(bytes)),
+                SqlTypeKind::Int2 => bytea_to_signed_int(&bytes, 2, "smallint")
+                    .map(|value| Value::Int16(value as i16)),
+                SqlTypeKind::Int4 => bytea_to_signed_int(&bytes, 4, "integer")
+                    .map(|value| Value::Int32(value as i32)),
+                SqlTypeKind::Int8 => bytea_to_signed_int(&bytes, 8, "bigint").map(Value::Int64),
+                _ => Err(ExecError::TypeMismatch {
+                    op: "::bytea",
+                    left: Value::Bytea(bytes),
+                    right: Value::Null,
+                }),
+            }
+        }
         Value::Uuid(value) => match ty.kind {
             SqlTypeKind::Uuid => Ok(Value::Uuid(value)),
             SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar => {
@@ -2745,11 +2744,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             SqlType {
                 kind: SqlTypeKind::Bytea,
                 ..
-            } => Err(ExecError::TypeMismatch {
-                op: "::bytea",
-                left: Value::Int64(v),
-                right: Value::Bytea(Vec::new()),
-            }),
+            } => Ok(Value::Bytea(v.to_be_bytes().to_vec())),
             SqlType {
                 kind:
                     SqlTypeKind::AnyElement
@@ -3001,6 +2996,33 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             }
             _ => Ok(Value::Record(record)),
         },
+    }
+}
+
+fn bytea_to_signed_int(bytes: &[u8], width: usize, ty: &'static str) -> Result<i64, ExecError> {
+    if bytes.len() > width {
+        return Err(match ty {
+            "smallint" => ExecError::Int2OutOfRange,
+            "integer" => ExecError::Int4OutOfRange,
+            "bigint" => ExecError::Int8OutOfRange,
+            _ => unreachable!("validated integer byte width"),
+        });
+    }
+
+    let sign = bytes
+        .first()
+        .is_some_and(|byte| byte & 0x80 != 0)
+        .then_some(0xff)
+        .unwrap_or(0x00);
+    let mut buf = [sign; 8];
+    let offset = 8 - bytes.len();
+    buf[offset..].copy_from_slice(bytes);
+    let value = i64::from_be_bytes(buf);
+    match ty {
+        "smallint" => Ok(i16::try_from(value).map_err(|_| ExecError::Int2OutOfRange)? as i64),
+        "integer" => Ok(i32::try_from(value).map_err(|_| ExecError::Int4OutOfRange)? as i64),
+        "bigint" => Ok(value),
+        _ => unreachable!("validated integer byte width"),
     }
 }
 
