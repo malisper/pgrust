@@ -11,17 +11,18 @@ use crate::include::catalog::{
     BTREE_FLOAT_FAMILY_OID, BTREE_INTEGER_FAMILY_OID, BTREE_TEXT_FAMILY_OID,
     BTREE_VARBIT_FAMILY_OID, BYTEA_TYPE_OID, DATE_TYPE_OID, DATERANGE_TYPE_OID, FLOAT4_TYPE_OID,
     FLOAT8_TYPE_OID, GIN_AM_OID, GIN_JSONB_FAMILY_OID, GIST_AM_OID, GIST_BOX_FAMILY_OID,
-    GIST_RANGE_FAMILY_OID, HASH_AM_OID, HASH_BOOL_FAMILY_OID, HASH_BPCHAR_FAMILY_OID,
-    HASH_BYTEA_FAMILY_OID, HASH_CHAR_FAMILY_OID, HASH_DATE_FAMILY_OID, HASH_FLOAT_FAMILY_OID,
-    HASH_INTEGER_FAMILY_OID, HASH_NUMERIC_FAMILY_OID, HASH_OID_FAMILY_OID, HASH_TEXT_FAMILY_OID,
-    HASH_TIME_FAMILY_OID, HASH_TIMESTAMP_FAMILY_OID, HASH_TIMESTAMPTZ_FAMILY_OID,
-    HASH_TIMETZ_FAMILY_OID, INT2_TYPE_OID, INT4_TYPE_OID, INT4RANGE_TYPE_OID, INT8_TYPE_OID,
-    INT8RANGE_TYPE_OID, INTERNAL_CHAR_TYPE_OID, JSONB_CONTAINS_OPERATOR_OID,
-    JSONB_EXISTS_ALL_OPERATOR_OID, JSONB_EXISTS_ANY_OPERATOR_OID, JSONB_EXISTS_OPERATOR_OID,
-    JSONB_TYPE_OID, NAME_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID, OID_TYPE_OID,
-    POINT_TYPE_OID, SPGIST_AM_OID, SPGIST_BOX_FAMILY_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
-    TIME_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TIMETZ_TYPE_OID, TSRANGE_TYPE_OID,
-    TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_TYPE_OID, bootstrap_pg_operator_rows,
+    GIST_POINT_FAMILY_OID, GIST_RANGE_FAMILY_OID, HASH_AM_OID, HASH_BOOL_FAMILY_OID,
+    HASH_BPCHAR_FAMILY_OID, HASH_BYTEA_FAMILY_OID, HASH_CHAR_FAMILY_OID, HASH_DATE_FAMILY_OID,
+    HASH_FLOAT_FAMILY_OID, HASH_INTEGER_FAMILY_OID, HASH_NUMERIC_FAMILY_OID, HASH_OID_FAMILY_OID,
+    HASH_TEXT_FAMILY_OID, HASH_TIME_FAMILY_OID, HASH_TIMESTAMP_FAMILY_OID,
+    HASH_TIMESTAMPTZ_FAMILY_OID, HASH_TIMETZ_FAMILY_OID, INT2_TYPE_OID, INT4_TYPE_OID,
+    INT4RANGE_TYPE_OID, INT8_TYPE_OID, INT8RANGE_TYPE_OID, INTERNAL_CHAR_TYPE_OID,
+    JSONB_CONTAINS_OPERATOR_OID, JSONB_EXISTS_ALL_OPERATOR_OID, JSONB_EXISTS_ANY_OPERATOR_OID,
+    JSONB_EXISTS_OPERATOR_OID, JSONB_TYPE_OID, NAME_TYPE_OID, NUMERIC_TYPE_OID, NUMRANGE_TYPE_OID,
+    OID_TYPE_OID, POINT_TYPE_OID, SPGIST_AM_OID, SPGIST_BOX_FAMILY_OID, TEXT_ARRAY_TYPE_OID,
+    TEXT_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TIMETZ_TYPE_OID,
+    TSRANGE_TYPE_OID, TSTZRANGE_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_TYPE_OID,
+    bootstrap_pg_operator_rows,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +148,46 @@ pub fn bootstrap_pg_amop_rows() -> Vec<PgAmopRow> {
         amopsortfamily: 0,
     });
     oid = oid.saturating_add(1);
+    for (strategy, name, righttype) in [
+        (1_i16, "<<", POINT_TYPE_OID),
+        (5, ">>", POINT_TYPE_OID),
+        (6, "~=", POINT_TYPE_OID),
+        (10, "<<|", POINT_TYPE_OID),
+        (11, "|>>", POINT_TYPE_OID),
+        (28, "<@", BOX_TYPE_OID),
+        (29, "<^", POINT_TYPE_OID),
+        (30, ">^", POINT_TYPE_OID),
+    ] {
+        rows.push(PgAmopRow {
+            oid,
+            amopfamily: GIST_POINT_FAMILY_OID,
+            amoplefttype: POINT_TYPE_OID,
+            amoprighttype: righttype,
+            amopstrategy: strategy,
+            amoppurpose: 's',
+            amopopr: operator_oid(&operators, name, POINT_TYPE_OID, righttype),
+            amopmethod: GIST_AM_OID,
+            amopsortfamily: 0,
+        });
+        oid = oid.saturating_add(1);
+    }
+    for (strategy, righttype) in [
+        (48_i16, crate::include::catalog::POLYGON_TYPE_OID),
+        (68, crate::include::catalog::CIRCLE_TYPE_OID),
+    ] {
+        rows.push(PgAmopRow {
+            oid,
+            amopfamily: GIST_POINT_FAMILY_OID,
+            amoplefttype: POINT_TYPE_OID,
+            amoprighttype: righttype,
+            amopstrategy: strategy,
+            amoppurpose: 's',
+            amopopr: operator_oid(&operators, "<@", POINT_TYPE_OID, righttype),
+            amopmethod: GIST_AM_OID,
+            amopsortfamily: 0,
+        });
+        oid = oid.saturating_add(1);
+    }
     for (strategy, name, righttype) in [
         (1_i16, "<<", BOX_TYPE_OID),
         (2, "&<", BOX_TYPE_OID),

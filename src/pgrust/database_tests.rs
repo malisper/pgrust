@@ -1339,6 +1339,33 @@ fn query_rows(db: &Database, client_id: u32, sql: &str) -> Vec<Vec<Value>> {
     }
 }
 
+#[test]
+fn filtered_cross_join_preserves_left_outer_row_order() {
+    let base = temp_dir("filtered_cross_join_left_order");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table cross_join_order (v int4 not null)")
+        .unwrap();
+    db.execute(1, "insert into cross_join_order values (1), (2), (3)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select l.v, r.v from cross_join_order l, cross_join_order r where l.v <> r.v",
+        ),
+        vec![
+            vec![Value::Int32(1), Value::Int32(2)],
+            vec![Value::Int32(1), Value::Int32(3)],
+            vec![Value::Int32(2), Value::Int32(1)],
+            vec![Value::Int32(2), Value::Int32(3)],
+            vec![Value::Int32(3), Value::Int32(1)],
+            vec![Value::Int32(3), Value::Int32(2)],
+        ]
+    );
+}
+
 fn insert_items_sql(range: std::ops::Range<i32>, note_prefix: &str) -> String {
     let values = range
         .map(|id| format!("({id}, '{note_prefix}{id}')"))
@@ -12502,6 +12529,85 @@ fn create_gist_box_index_explain_and_query_use_it() {
             "select id from boxes where b && '(6,6),(7,7)'::box order by id",
         ),
         vec![vec![Value::Int32(2)], vec![Value::Int32(4)]]
+    );
+}
+
+#[test]
+fn create_gist_point_index_explain_and_query_use_it() {
+    let base = temp_dir("gist_point_index_scan_explain");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table points (id int4 not null, p point)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into points values \
+         (1, '(1,1)'::point), \
+         (2, '(5,5)'::point), \
+         (3, '(9,9)'::point)",
+    )
+    .unwrap();
+    db.execute(1, "create index points_p_gist on points using gist (p)")
+        .unwrap();
+
+    assert_explain_uses_index(
+        &db,
+        1,
+        "select id from points where p <@ '(4,4),(6,6)'::box",
+        "points_p_gist",
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id from points where p <@ '(4,4),(6,6)'::box order by id",
+        ),
+        vec![vec![Value::Int32(2)]]
+    );
+
+    db.execute(1, "insert into points values (4, '(5.5,5.5)'::point)")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select id from points where p <@ '(4,4),(6,6)'::box order by id",
+        ),
+        vec![vec![Value::Int32(2)], vec![Value::Int32(4)]]
+    );
+
+    db.execute(1, "create table fuzzy_points (p point)")
+        .unwrap();
+    db.execute(
+        1,
+        "insert into fuzzy_points select '(0,0)'::point from generate_series(0,1000)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "create index fuzzy_points_p_gist on fuzzy_points using gist (p)",
+    )
+    .unwrap();
+    db.execute(
+        1,
+        "insert into fuzzy_points values ('(0.0000009,0.0000009)'::point)",
+    )
+    .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from fuzzy_points where p ~= '(0.0000009,0.0000009)'::point",
+        ),
+        vec![vec![Value::Int64(1002)]]
+    );
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select count(*) from fuzzy_points where p ~= '(0.0000018,0.0000018)'::point",
+        ),
+        vec![vec![Value::Int64(1)]]
     );
 }
 

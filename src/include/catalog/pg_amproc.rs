@@ -16,6 +16,8 @@ use crate::include::catalog::{
     GIN_JSONB_FAMILY_OID, GIN_TRICONSISTENT_JSONB_PROC_OID, GIST_BOX_CONSISTENT_PROC_OID,
     GIST_BOX_DISTANCE_PROC_OID, GIST_BOX_FAMILY_OID, GIST_BOX_PENALTY_PROC_OID,
     GIST_BOX_PICKSPLIT_PROC_OID, GIST_BOX_SAME_PROC_OID, GIST_BOX_UNION_PROC_OID,
+    GIST_POINT_CONSISTENT_PROC_OID, GIST_POINT_FAMILY_OID, GIST_POINT_PENALTY_PROC_OID,
+    GIST_POINT_PICKSPLIT_PROC_OID, GIST_POINT_SAME_PROC_OID, GIST_POINT_UNION_PROC_OID,
     GIST_RANGE_FAMILY_OID, GIST_TRANSLATE_CMPTYPE_COMMON_PROC_OID, HASH_BOOL_FAMILY_OID,
     HASH_BOOL_PROC_OID, HASH_BPCHAR_FAMILY_OID, HASH_BPCHAR_PROC_OID, HASH_BYTEA_FAMILY_OID,
     HASH_BYTEA_PROC_OID, HASH_CHAR_FAMILY_OID, HASH_CHAR_PROC_OID, HASH_DATE_FAMILY_OID,
@@ -121,6 +123,23 @@ pub fn bootstrap_pg_amproc_rows() -> Vec<PgAmprocRow> {
         amproc: GIST_TRANSLATE_CMPTYPE_COMMON_PROC_OID,
     });
     oid = oid.saturating_add(1);
+    for (procnum, proc_oid) in [
+        (1_i16, GIST_POINT_CONSISTENT_PROC_OID),
+        (2, GIST_POINT_UNION_PROC_OID),
+        (5, GIST_POINT_PENALTY_PROC_OID),
+        (6, GIST_POINT_PICKSPLIT_PROC_OID),
+        (7, GIST_POINT_SAME_PROC_OID),
+    ] {
+        rows.push(PgAmprocRow {
+            oid,
+            amprocfamily: GIST_POINT_FAMILY_OID,
+            amproclefttype: crate::include::catalog::POINT_TYPE_OID,
+            amprocrighttype: crate::include::catalog::POINT_TYPE_OID,
+            amprocnum: procnum,
+            amproc: proc_oid,
+        });
+        oid = oid.saturating_add(1);
+    }
     for (procnum, proc_oid) in [
         (1_i16, SPG_BOX_QUAD_CONFIG_PROC_OID),
         (2, SPG_BOX_QUAD_CHOOSE_PROC_OID),
