@@ -338,14 +338,7 @@ pub(super) fn bind_window_spec(
                 return Err(nested_window_error());
             }
             let bound_expr = bind_expr(&item.expr)?;
-            let (expr, collation_oid) = finalize_order_by_expr(bound_expr, catalog)?;
-            Ok(OrderByEntry {
-                expr,
-                ressortgroupref: 0,
-                descending: item.descending,
-                nulls_first: item.nulls_first,
-                collation_oid,
-            })
+            build_bound_order_by_entry(item, bound_expr, 0, catalog)
         })
         .collect::<Result<Vec<_>, ParseError>>()?;
 

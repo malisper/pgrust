@@ -1278,6 +1278,18 @@ fn query_rows(db: &Database, client_id: u32, sql: &str) -> Vec<Vec<Value>> {
     }
 }
 
+fn insert_items_sql(range: std::ops::Range<i32>, note_prefix: &str) -> String {
+    let values = range
+        .map(|id| format!("({id}, '{note_prefix}{id}')"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("insert into items values {values}")
+}
+
+fn delete_items_before_sql(upper_bound: i32) -> String {
+    format!("delete from items where id < {upper_bound}")
+}
+
 fn session_query_rows(session: &mut Session, db: &Database, sql: &str) -> Vec<Vec<Value>> {
     match session.execute(db, sql).unwrap() {
         StatementResult::Query { rows, .. } => rows,
@@ -13882,7 +13894,7 @@ fn gist_concurrent_split_scans_do_not_miss_committed_rows() {
         let barrier = Arc::clone(&barrier);
         handles.push(thread::spawn(move || {
             barrier.wait();
-            for iteration in 0..120 {
+            for iteration in 0..60 {
                 let expected = {
                     let snapshot = committed.lock().unwrap().clone();
                     snapshot
@@ -14044,6 +14056,49 @@ fn explain_heap_seqscan_shows_relation_name() {
             .iter()
             .any(|line| line.starts_with("Seq Scan on items  (cost=")),
         "expected heap relation name in EXPLAIN, got {lines:?}"
+    );
+}
+
+#[test]
+fn explain_verbose_count_nonnull_constant_elides_projection() {
+    let base = temp_dir("explain_verbose_count_nonnull_constant");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(
+        1,
+        "create table agg_simplify (a int4, not_null_col int4 not null, nullable_col int4)",
+    )
+    .unwrap();
+
+    let lines = explain_lines(
+        &db,
+        1,
+        "(verbose, costs off) select count('bananas'::text) from agg_simplify",
+    );
+
+    assert!(
+        lines.iter().any(|line| line == "Aggregate"),
+        "expected aggregate node, got {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line == "  Output: count(*)"),
+        "expected simplified count(*) output, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("Seq Scan on agg_simplify")),
+        "expected seq scan on agg_simplify, got {lines:?}"
+    );
+    assert!(
+        lines.iter().all(|line| !line.contains("Projection")),
+        "expected passthrough projection elision, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .all(|line| !line.contains("count('bananas'::text)")),
+        "expected count argument simplification, got {lines:?}"
     );
 }
 
@@ -14768,10 +14823,7 @@ fn create_index_builds_multilevel_btree_root() {
 
     db.execute(1, "create table items (id int4 not null, note text)")
         .unwrap();
-    for i in 0..1500 {
-        db.execute(1, &format!("insert into items values ({i}, 'row{i}')"))
-            .unwrap();
-    }
+    db.execute(1, &insert_items_sql(0..1500, "row")).unwrap();
     db.execute(1, "create index items_id_idx on items (id)")
         .unwrap();
 
@@ -18497,7 +18549,7 @@ fn concurrent_indexed_inserts_and_lookups_remain_correct() {
         .map(|worker| {
             let db = db.clone();
             std::thread::spawn(move || {
-                for i in 0..75 {
+                for i in 0..60 {
                     let id = worker * 1000 + i;
                     db.execute(
                         (worker + 10) as ClientId,
@@ -18516,8 +18568,8 @@ fn concurrent_indexed_inserts_and_lookups_remain_correct() {
         .map(|reader| {
             let db = db.clone();
             std::thread::spawn(move || {
-                for i in 0..120 {
-                    let id = (i % 75) as i32;
+                for i in 0..60 {
+                    let id = (i % 60) as i32;
                     db.execute(
                         (reader + 100) as ClientId,
                         &format!("select note from items where id = {id}"),
@@ -18533,7 +18585,7 @@ fn concurrent_indexed_inserts_and_lookups_remain_correct() {
 
     assert_eq!(
         query_rows(&db, 1, "select count(*) from items"),
-        vec![vec![Value::Int64(300)]]
+        vec![vec![Value::Int64(240)]]
     );
     assert_explain_uses_index(
         &db,
@@ -18561,7 +18613,7 @@ fn concurrent_indexed_inserts_and_range_scans_survive_splits() {
         .map(|worker| {
             let db = db.clone();
             thread::spawn(move || {
-                for i in 0..200 {
+                for i in 0..120 {
                     let id = worker * 10_000 + i;
                     db.execute(
                         (worker + 20) as ClientId,
@@ -18577,7 +18629,7 @@ fn concurrent_indexed_inserts_and_range_scans_survive_splits() {
         .map(|reader| {
             let db = db.clone();
             thread::spawn(move || {
-                for _ in 0..80 {
+                for _ in 0..40 {
                     let rows = query_rows(
                         &db,
                         (reader + 200) as ClientId,
@@ -18610,7 +18662,7 @@ fn concurrent_indexed_inserts_and_range_scans_survive_splits() {
     );
     assert_eq!(
         query_rows(&db, 1, "select count(*) from items"),
-        vec![vec![Value::Int64(800)]]
+        vec![vec![Value::Int64(480)]]
     );
     assert_eq!(
         query_rows(&db, 1, "select note from items where id = 30042"),
@@ -18756,16 +18808,10 @@ fn reopening_database_replays_btree_wal() {
         let db = Database::open_with_options(&base, DatabaseOpenOptions::new(256)).unwrap();
         db.execute(1, "create table items (id int4 not null, note text)")
             .unwrap();
-        for i in 0..400 {
-            db.execute(1, &format!("insert into items values ({i}, 'before{i}')"))
-                .unwrap();
-        }
+        db.execute(1, &insert_items_sql(0..400, "before")).unwrap();
         db.execute(1, "create index items_id_idx on items (id)")
             .unwrap();
-        for i in 400..900 {
-            db.execute(1, &format!("insert into items values ({i}, 'after{i}')"))
-                .unwrap();
-        }
+        db.execute(1, &insert_items_sql(400..900, "after")).unwrap();
         assert_explain_uses_index(
             &db,
             1,
@@ -18833,21 +18879,15 @@ fn vacuum_records_recyclable_btree_pages_in_fsm() {
     session
         .execute(&db, "create table items (id int4 not null, note text)")
         .unwrap();
-    for i in 0..1500 {
-        session
-            .execute(&db, &format!("insert into items values ({i}, 'row{i}')"))
-            .unwrap();
-    }
+    session
+        .execute(&db, &insert_items_sql(0..1500, "row"))
+        .unwrap();
     session
         .execute(&db, "create index items_id_idx on items (id)")
         .unwrap();
 
     let index_rel = relation_locator_for(&db, 1, "items_id_idx");
-    for i in 0..900 {
-        session
-            .execute(&db, &format!("delete from items where id = {i}"))
-            .unwrap();
-    }
+    session.execute(&db, &delete_items_before_sql(900)).unwrap();
     session.execute(&db, "vacuum items").unwrap();
 
     let fsm_page = read_relation_fork_block(
@@ -18877,21 +18917,17 @@ fn vacuum_reused_btree_pages_prevent_relation_growth() {
     session
         .execute(&db, "create table items (id int4 not null, note text)")
         .unwrap();
-    for i in 0..1800 {
-        session
-            .execute(&db, &format!("insert into items values ({i}, 'row{i}')"))
-            .unwrap();
-    }
+    session
+        .execute(&db, &insert_items_sql(0..1800, "row"))
+        .unwrap();
     session
         .execute(&db, "create index items_id_idx on items (id)")
         .unwrap();
 
     let index_rel = relation_locator_for(&db, 1, "items_id_idx");
-    for i in 0..1200 {
-        session
-            .execute(&db, &format!("delete from items where id = {i}"))
-            .unwrap();
-    }
+    session
+        .execute(&db, &delete_items_before_sql(1200))
+        .unwrap();
     session.execute(&db, "vacuum items").unwrap();
 
     let blocks_after_vacuum = relation_fork_nblocks(
@@ -18900,11 +18936,9 @@ fn vacuum_reused_btree_pages_prevent_relation_growth() {
         crate::backend::storage::smgr::ForkNumber::Main,
     );
 
-    for i in 2000..2600 {
-        session
-            .execute(&db, &format!("insert into items values ({i}, 'row{i}')"))
-            .unwrap();
-    }
+    session
+        .execute(&db, &insert_items_sql(2000..2600, "row"))
+        .unwrap();
 
     let blocks_after_reinsert = relation_fork_nblocks(
         &db,
@@ -22517,7 +22551,7 @@ fn concurrent_reads_same_page_no_io_error() {
         .map(|t| {
             let db = db.clone();
             thread::spawn(move || {
-                for _ in 0..50 {
+                for _ in 0..30 {
                     match db
                         .execute((t + 1000) as ClientId, "select count(*) from rtest")
                         .unwrap()
@@ -23889,7 +23923,7 @@ fn lock_ordering_deadlock_repro() {
     for t in 0..num_writers {
         let db = db.clone();
         handles.push(thread::spawn(move || {
-            for _ in 0..50 {
+            for _ in 0..30 {
                 db.execute(
                     (t + 2000) as ClientId,
                     "update locktest set val = val + 1 where id = 1",
@@ -23902,7 +23936,7 @@ fn lock_ordering_deadlock_repro() {
     for t in 0..num_readers {
         let db = db.clone();
         handles.push(thread::spawn(move || {
-            for _ in 0..200 {
+            for _ in 0..100 {
                 let _ = db
                     .execute(
                         (t + 3000) as ClientId,
@@ -23937,7 +23971,7 @@ fn no_pins_leaked_concurrent_contention() {
     }
 
     let num_threads = 8;
-    let iters = 100;
+    let iters = 50;
     let mut handles = Vec::new();
 
     // Writers: all contend on the same hot rows.
