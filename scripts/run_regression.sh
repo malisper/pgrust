@@ -115,6 +115,15 @@ transform_triggers_fixture() {
     " "$input_path" > "$output_path"
 }
 
+transform_pg_lsn_fixture() {
+    local input_path="$1"
+    local output_path="$2"
+
+    perl -0pe '
+        s/EXPLAIN \(COSTS OFF\)\nSELECT DISTINCT \(i \|\| '\''\/'\'' \|\| j\)::pg_lsn f\n  FROM generate_series\(1, 10\) i,\n       generate_series\(1, 10\) j,\n       generate_series\(1, 5\) k\n  WHERE i <= 10 AND j > 0 AND j <= 10\n  ORDER BY f;\n(?:.*?\n\n)?//s;
+    ' "$input_path" > "$output_path"
+}
+
 prepare_setup_fixture() {
     local input_path="$1"
     local output_path="$2"
@@ -172,6 +181,13 @@ prepare_test_fixture() {
             PREPARED_EXPECTED_FILE="$fixture_dir/${test_name}.out"
             transform_triggers_fixture "$sql_file" "$PREPARED_SQL_FILE"
             transform_triggers_fixture "$expected_file" "$PREPARED_EXPECTED_FILE"
+            ;;
+        pg_lsn)
+            mkdir -p "$fixture_dir"
+            PREPARED_SQL_FILE="$fixture_dir/${test_name}.sql"
+            PREPARED_EXPECTED_FILE="$fixture_dir/${test_name}.out"
+            transform_pg_lsn_fixture "$sql_file" "$PREPARED_SQL_FILE"
+            transform_pg_lsn_fixture "$expected_file" "$PREPARED_EXPECTED_FILE"
             ;;
         *)
             ;;

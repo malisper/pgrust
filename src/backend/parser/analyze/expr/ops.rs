@@ -21,6 +21,81 @@ pub(super) fn bind_arithmetic_expr(
     let right_type = coerce_unknown_string_literal_type(right, raw_right_type, left_type);
     if !left_type.is_array
         && !right_type.is_array
+        && matches!(left_type.kind, SqlTypeKind::PgLsn)
+        && (matches!(right_type.kind, SqlTypeKind::PgLsn) || is_numeric_family(right_type))
+        && matches!(op, "+" | "-")
+    {
+        let result_type = if matches!(right_type.kind, SqlTypeKind::PgLsn) {
+            SqlType::new(SqlTypeKind::Numeric)
+        } else {
+            SqlType::new(SqlTypeKind::PgLsn)
+        };
+        return Ok(Expr::binary_op(
+            make,
+            result_type,
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    left,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_left_type,
+                left_type,
+            ),
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_right_type,
+                right_type,
+            ),
+        ));
+    }
+    if !left_type.is_array
+        && !right_type.is_array
+        && op == "+"
+        && is_numeric_family(left_type)
+        && matches!(right_type.kind, SqlTypeKind::PgLsn)
+    {
+        return Ok(Expr::binary_op(
+            make,
+            SqlType::new(SqlTypeKind::PgLsn),
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    left,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_left_type,
+                left_type,
+            ),
+            coerce_bound_expr(
+                bind_expr_with_outer_and_ctes(
+                    right,
+                    scope,
+                    catalog,
+                    outer_scopes,
+                    grouped_outer,
+                    ctes,
+                )?,
+                raw_right_type,
+                right_type,
+            ),
+        ));
+    }
+    if !left_type.is_array
+        && !right_type.is_array
         && op == "+"
         && matches!(left_type.kind, SqlTypeKind::Time)
         && matches!(right_type.kind, SqlTypeKind::Time)
@@ -400,7 +475,11 @@ fn supports_comparison_operator(
         && left == right
         && matches!(
             left.kind,
-            SqlTypeKind::TsQuery | SqlTypeKind::TsVector | SqlTypeKind::Inet | SqlTypeKind::Cidr
+            SqlTypeKind::TsQuery
+                | SqlTypeKind::TsVector
+                | SqlTypeKind::Inet
+                | SqlTypeKind::Cidr
+                | SqlTypeKind::PgLsn
         )
         && matches!(op, "=" | "<>" | "<" | "<=" | ">" | ">=")
     {

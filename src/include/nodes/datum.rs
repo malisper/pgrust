@@ -663,6 +663,7 @@ pub enum Value {
     Xml(CompactString),
     TsVector(TsVector),
     TsQuery(TsQuery),
+    PgLsn(u64),
     Text(CompactString),
     /// Raw pointer to on-page text bytes. Valid while the buffer page is pinned.
     TextRef(*const u8, u32),
@@ -1033,6 +1034,7 @@ impl Value {
             Value::Xml(s) => Value::Xml(s.clone()),
             Value::TsVector(v) => Value::TsVector(v.clone()),
             Value::TsQuery(q) => Value::TsQuery(q.clone()),
+            Value::PgLsn(v) => Value::PgLsn(*v),
             Value::TextRef(ptr, len) => {
                 let s = unsafe {
                     std::str::from_utf8_unchecked(std::slice::from_raw_parts(*ptr, *len as usize))
@@ -1130,6 +1132,7 @@ impl Value {
             Value::Xml(_) => Some(SqlType::new(SqlTypeKind::Xml)),
             Value::TsVector(_) => Some(SqlType::new(SqlTypeKind::TsVector)),
             Value::TsQuery(_) => Some(SqlType::new(SqlTypeKind::TsQuery)),
+            Value::PgLsn(_) => Some(SqlType::new(SqlTypeKind::PgLsn)),
             Value::Text(_) | Value::TextRef(_, _) => Some(SqlType::new(SqlTypeKind::Text)),
             Value::InternalChar(_) => Some(SqlType::new(SqlTypeKind::InternalChar)),
             Value::Bool(_) => Some(SqlType::new(SqlTypeKind::Bool)),
@@ -1236,6 +1239,7 @@ impl PartialEq for Value {
             (Value::Xml(a), Value::Xml(b)) => a == b,
             (Value::TsVector(a), Value::TsVector(b)) => a == b,
             (Value::TsQuery(a), Value::TsQuery(b)) => a == b,
+            (Value::PgLsn(a), Value::PgLsn(b)) => a == b,
             (Value::InternalChar(a), Value::InternalChar(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Record(a), Value::Record(b)) => a == b,
@@ -1403,6 +1407,10 @@ impl std::hash::Hash for Value {
             Value::TsQuery(q) => {
                 16u8.hash(state);
                 q.hash(state);
+            }
+            Value::PgLsn(v) => {
+                29u8.hash(state);
+                v.hash(state);
             }
             Value::Text(s) => {
                 5u8.hash(state);

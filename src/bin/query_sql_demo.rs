@@ -65,6 +65,7 @@ fn render_value(value: &Value) -> String {
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
+        Value::PgLsn(v) => format!("{:X}/{:X}", v >> 32, v & 0xFFFF_FFFF),
         Value::Money(v) => pgrust::backend::executor::money_format_text(*v),
         Value::Date(_)
         | Value::Time(_)

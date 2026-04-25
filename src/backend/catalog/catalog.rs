@@ -41,6 +41,7 @@ pub fn column_desc(name: impl Into<String>, sql_type: SqlType, nullable: bool) -
             (-1, AttributeAlign::Int)
         }
         ScalarType::TsVector | ScalarType::TsQuery => (-1, AttributeAlign::Int),
+        ScalarType::PgLsn => (8, AttributeAlign::Double),
         ScalarType::Text => (-1, AttributeAlign::Int),
         ScalarType::Record => (-1, AttributeAlign::Double),
         ScalarType::Bool => (1, AttributeAlign::Char),
@@ -129,6 +130,7 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         | SqlTypeKind::Timestamp
         | SqlTypeKind::TimestampTz
         | SqlTypeKind::InternalChar
+        | SqlTypeKind::PgLsn
         | SqlTypeKind::PgNodeTree => AttributeStorage::Plain,
         SqlTypeKind::Bit
         | SqlTypeKind::VarBit
@@ -277,6 +279,7 @@ pub(crate) fn scalar_type_for_sql_type(sql_type: SqlType) -> ScalarType {
         SqlTypeKind::Interval => ScalarType::Interval,
         SqlTypeKind::TsVector => ScalarType::TsVector,
         SqlTypeKind::TsQuery => ScalarType::TsQuery,
+        SqlTypeKind::PgLsn => ScalarType::PgLsn,
         SqlTypeKind::RegConfig | SqlTypeKind::RegDictionary => ScalarType::Int32,
         SqlTypeKind::Record | SqlTypeKind::Composite => ScalarType::Record,
         SqlTypeKind::Text
