@@ -5,10 +5,13 @@ use crate::backend::access::heap::heapam::{
     heap_fetch_visible_with_txns, heap_scan_begin_visible, heap_scan_end,
     heap_scan_page_next_tuple, heap_scan_prepare_next_page,
 };
+use crate::backend::access::heap::visibilitymap::visibilitymap_get_status;
 use crate::backend::access::index::indexam;
+use crate::backend::access::nbtree::nbtree::decode_key_payload;
 use crate::backend::commands::explain::format_explain_lines_with_costs;
 use crate::backend::executor::exec_expr::{compare_order_by_keys, eval_expr};
 use crate::backend::executor::expr_geometry::render_geometry_text;
+use crate::backend::executor::expr_ops::compare_order_values;
 use crate::backend::executor::pg_regex::explain_similar_pattern;
 use crate::backend::executor::srf::{
     eval_project_set_returning_call, eval_set_returning_call, set_returning_call_label,
@@ -26,15 +29,16 @@ use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::time::date::format_date_text;
 use crate::backend::utils::time::instant::Instant;
 use crate::include::access::scankey::ScanKeyData;
+use crate::include::access::visibilitymapdefs::VISIBILITYMAP_ALL_VISIBLE;
 use crate::include::catalog::PG_LARGEOBJECT_METADATA_RELATION_OID;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
     AggregateState, AppendState, BitmapHeapScanState, BitmapIndexScanState, CteScanState,
     FilterState, FunctionScanState, IndexScanState, LimitState, LockRowsState, MaterializedRow,
-    NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, PlanState, ProjectSetState,
-    ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SetOpState, SlotKind,
-    SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot, ValuesState, WindowAggState,
-    WorkTableScanState,
+    MergeJoinState, NestedLoopJoinState, NodeExecStats, OrderByState, PlanNode, PlanState,
+    ProjectSetState, ProjectionState, RecursiveUnionState, ResultState, SeqScanState, SetOpState,
+    SlotKind, SubqueryScanState, SystemVarBinding, ToastRelationRef, TupleSlot, ValuesState,
+    WindowAggState, WorkTableScanState,
 };
 use crate::include::nodes::plannodes::{IndexScanKey, IndexScanKeyArgument};
 use crate::include::nodes::primnodes::{
@@ -859,6 +863,7 @@ impl PlanNode for IndexScanState {
         } else {
             None
         };
+        let mut visibility_map = None;
         if self.scan_exhausted {
             finish_eof(&mut self.stats, start, ctx);
             return Ok(None);
@@ -882,7 +887,7 @@ impl PlanNode for IndexScanState {
                 key_data,
                 order_by_data,
                 direction: self.direction,
-                want_itup: false,
+                want_itup: self.index_only,
             };
             self.scan = Some(
                 indexam::index_beginscan(&begin, self.am_oid).map_err(|err| {
@@ -931,6 +936,70 @@ impl PlanNode for IndexScanState {
                 let mut session_stats = ctx.session_stats.write();
                 session_stats.note_relation_tuple_returned(self.index_meta.indexrelid);
                 session_stats.note_relation_block_fetched(self.index_meta.indexrelid);
+            }
+            if self.index_only {
+                let vm_bits = visibilitymap_get_status(
+                    &ctx.pool,
+                    ctx.client_id,
+                    self.rel,
+                    tid.block_number,
+                    &mut visibility_map,
+                )
+                .map_err(|err| {
+                    internal_exec_error(format!("visibility map status failed: {err:?}"))
+                })?;
+                if vm_bits & VISIBILITYMAP_ALL_VISIBLE != 0 {
+                    let index_tuple = self
+                        .scan
+                        .as_ref()
+                        .and_then(|scan| scan.xs_itup.clone())
+                        .ok_or_else(|| {
+                            internal_exec_error(
+                                "index-only scan requested tuple payload but AM returned none",
+                            )
+                        })?;
+                    let index_values = decode_key_payload(&self.index_desc, &index_tuple.payload)?;
+                    let mut values = vec![Value::Null; self.desc.columns.len()];
+                    for (index_attno, value) in index_values.into_iter().enumerate() {
+                        let heap_attno = usize::try_from(
+                            *self.index_meta.indkey.get(index_attno).ok_or_else(|| {
+                                internal_exec_error(format!(
+                                    "missing indkey entry for index column {}",
+                                    index_attno + 1
+                                ))
+                            })?,
+                        )
+                        .map_err(|_| {
+                            internal_exec_error(format!(
+                                "invalid heap attno for index column {}",
+                                index_attno + 1
+                            ))
+                        })?;
+                        let heap_index = heap_attno.checked_sub(1).ok_or_else(|| {
+                            internal_exec_error(format!(
+                                "non-column indkey entry not supported for index-only scan: {}",
+                                heap_attno
+                            ))
+                        })?;
+                        let slot_value = values.get_mut(heap_index).ok_or_else(|| {
+                            internal_exec_error(format!(
+                                "heap attno {} out of bounds for relation {}",
+                                heap_attno, self.relation_name
+                            ))
+                        })?;
+                        *slot_value = value;
+                    }
+                    self.slot
+                        .store_virtual_row(values, Some(tid), Some(self.relation_oid));
+                    self.current_bindings = vec![SystemVarBinding {
+                        varno: self.source_id,
+                        table_oid: self.relation_oid,
+                        tid: Some(tid),
+                    }];
+                    set_active_system_bindings(ctx, &self.current_bindings);
+                    finish_row(&mut self.stats, start);
+                    return Ok(Some(&mut self.slot));
+                }
             }
             let visible = heap_fetch_visible_with_txns(
                 &ctx.pool,
@@ -990,8 +1059,17 @@ impl PlanNode for IndexScanState {
         self.plan_info
     }
     fn node_label(&self) -> String {
+        let scan_name = if self.index_only {
+            "Index Only Scan"
+        } else {
+            "Index Scan"
+        };
+        let direction = match self.direction {
+            crate::include::access::relscan::ScanDirection::Forward => "",
+            crate::include::access::relscan::ScanDirection::Backward => " Backward",
+        };
         format!(
-            "Index Scan using {} on {}",
+            "{scan_name}{direction} using {} on {}",
             self.index_name, self.relation_name
         )
     }
@@ -1041,6 +1119,9 @@ fn render_index_scan_key(
         .ok()?
         .checked_sub(1)?;
     let column_name = desc.columns.get(heap_attno)?.name.clone();
+    if key.strategy == 1 && matches!(&key.argument, IndexScanKeyArgument::Const(Value::Null)) {
+        return Some(format!("{column_name} IS NOT NULL"));
+    }
     let right_type_oid = match &key.argument {
         IndexScanKeyArgument::Const(value) => value
             .sql_type_hint()
@@ -2173,7 +2254,7 @@ impl PlanNode for NestedLoopJoinState {
         if self.right_plan.is_some() {
             return exec_lateral_join(self, ctx, start);
         }
-        if matches!(self.kind, JoinType::Cross) && self.cross_right_outer {
+        if self.cross_right_outer {
             return exec_cross_join(self, ctx, start);
         }
 

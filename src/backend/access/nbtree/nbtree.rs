@@ -1000,17 +1000,43 @@ fn choose_child_slot(
 
 fn scan_positioning_prefix(keys: &[ScanKeyData], direction: ScanDirection) -> Vec<Value> {
     let mut prefix = Vec::new();
-    for key in preprocess_scan_keys(keys) {
+    let preprocessed = preprocess_scan_keys(keys);
+    let mut index = 0usize;
+    while index < preprocessed.len() {
+        let key = &preprocessed[index];
         if key.strategy == 3 {
-            prefix.push(key.argument);
+            prefix.push(key.argument.clone());
+            index += 1;
             continue;
         }
-        let use_bound = match direction {
-            ScanDirection::Forward => matches!(key.strategy, 4 | 5),
-            ScanDirection::Backward => matches!(key.strategy, 1 | 2),
-        };
-        if use_bound {
-            prefix.push(key.argument);
+        let attribute_number = key.attribute_number;
+        let mut chosen: Option<Value> = None;
+        let mut cursor = index;
+        while cursor < preprocessed.len()
+            && preprocessed[cursor].attribute_number == attribute_number
+        {
+            let candidate = &preprocessed[cursor];
+            match direction {
+                ScanDirection::Forward if matches!(candidate.strategy, 4 | 5) => {
+                    if chosen.as_ref().is_none_or(|current| {
+                        compare_bt_values(current, &candidate.argument) == Ordering::Less
+                    }) {
+                        chosen = Some(candidate.argument.clone());
+                    }
+                }
+                ScanDirection::Backward if matches!(candidate.strategy, 1 | 2) => {
+                    if chosen.as_ref().is_none_or(|current| {
+                        compare_bt_values(current, &candidate.argument) == Ordering::Greater
+                    }) {
+                        chosen = Some(candidate.argument.clone());
+                    }
+                }
+                _ => {}
+            }
+            cursor += 1;
+        }
+        if let Some(bound) = chosen {
+            prefix.push(bound);
         }
         break;
     }

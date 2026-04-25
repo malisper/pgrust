@@ -4621,6 +4621,34 @@ fn create_index_on_partitioned_table_reuses_only_child_without_recursing() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
 
+    fn relation_oid(db: &Database, name: &str) -> u32 {
+        db.lazy_catalog_lookup(1, None, None)
+            .lookup_any_relation(name)
+            .unwrap_or_else(|| panic!("expected relation {name}"))
+            .relation_oid
+    }
+
+    fn index_summary(db: &Database, index_name: &str) -> (u32, Option<u32>, bool) {
+        let catalog = db.lazy_catalog_lookup(1, None, None);
+        let index_relation = catalog
+            .lookup_any_relation(index_name)
+            .unwrap_or_else(|| panic!("expected index {index_name}"));
+        let index = crate::backend::utils::cache::lsyscache::describe_relation_by_oid(
+            db,
+            1,
+            None,
+            index_relation.relation_oid,
+        )
+        .unwrap_or_else(|| panic!("expected relcache entry for {index_name}"))
+        .index
+        .unwrap_or_else(|| panic!("expected index metadata for {index_name}"));
+        let parent_oid = catalog
+            .inheritance_parents(index_relation.relation_oid)
+            .first()
+            .map(|row| row.inhparent);
+        (index.indrelid, parent_oid, index.indisvalid)
+    }
+
     session
         .execute(&db, "create table idxpart (a int4) partition by range (a)")
         .unwrap();
@@ -4657,44 +4685,28 @@ fn create_index_on_partitioned_table_reuses_only_child_without_recursing() {
     session.execute(&db, "create index on idxpart(a)").unwrap();
 
     assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select idxcls.relname, heap.relname, coalesce(parent.relname, ''), idx.indisvalid \
-               from pg_index idx \
-               join pg_class idxcls on idxcls.oid = idx.indexrelid \
-               join pg_class heap on heap.oid = idx.indrelid \
-               left join pg_inherits inh on inh.inhrelid = idx.indexrelid \
-               left join pg_class parent on parent.oid = inh.inhparent \
-              where idxcls.relname like 'idxpart%' \
-              order by idxcls.relname",
-        ),
-        vec![
-            vec![
-                Value::Text("idxpart1_a_idx".into()),
-                Value::Text("idxpart1".into()),
-                Value::Text("idxpart_a_idx".into()),
-                Value::Bool(true),
-            ],
-            vec![
-                Value::Text("idxpart22_a_idx".into()),
-                Value::Text("idxpart22".into()),
-                Value::Text("".into()),
-                Value::Bool(true),
-            ],
-            vec![
-                Value::Text("idxpart2_a_idx".into()),
-                Value::Text("idxpart2".into()),
-                Value::Text("idxpart_a_idx".into()),
-                Value::Bool(false),
-            ],
-            vec![
-                Value::Text("idxpart_a_idx".into()),
-                Value::Text("idxpart".into()),
-                Value::Text("".into()),
-                Value::Bool(false),
-            ],
-        ]
+        index_summary(&db, "idxpart1_a_idx"),
+        (
+            relation_oid(&db, "idxpart1"),
+            Some(relation_oid(&db, "idxpart_a_idx")),
+            true,
+        )
+    );
+    assert_eq!(
+        index_summary(&db, "idxpart22_a_idx"),
+        (relation_oid(&db, "idxpart22"), None, true)
+    );
+    assert_eq!(
+        index_summary(&db, "idxpart2_a_idx"),
+        (
+            relation_oid(&db, "idxpart2"),
+            Some(relation_oid(&db, "idxpart_a_idx")),
+            false,
+        )
+    );
+    assert_eq!(
+        index_summary(&db, "idxpart_a_idx"),
+        (relation_oid(&db, "idxpart"), None, false)
     );
     assert!(
         query_rows(
@@ -4717,20 +4729,8 @@ fn create_index_on_partitioned_table_reuses_only_child_without_recursing() {
             "alter index idxpart2_a_idx attach partition idxpart22_a_idx",
         )
         .unwrap();
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select relname, indisvalid \
-               from pg_class join pg_index on indexrelid = oid \
-              where relname in ('idxpart2_a_idx', 'idxpart_a_idx') \
-              order by relname",
-        ),
-        vec![
-            vec![Value::Text("idxpart2_a_idx".into()), Value::Bool(false)],
-            vec![Value::Text("idxpart_a_idx".into()), Value::Bool(false)],
-        ]
-    );
+    assert!(!index_summary(&db, "idxpart2_a_idx").2);
+    assert!(!index_summary(&db, "idxpart_a_idx").2);
 
     session
         .execute(&db, "create index on idxpart21(a)")
@@ -4741,22 +4741,10 @@ fn create_index_on_partitioned_table_reuses_only_child_without_recursing() {
             "alter index idxpart2_a_idx attach partition idxpart21_a_idx",
         )
         .unwrap();
-    assert_eq!(
-        query_rows(
-            &db,
-            1,
-            "select relname, indisvalid \
-               from pg_class join pg_index on indexrelid = oid \
-              where relname in ('idxpart21_a_idx', 'idxpart22_a_idx', 'idxpart2_a_idx', 'idxpart_a_idx') \
-              order by relname",
-        ),
-        vec![
-            vec![Value::Text("idxpart21_a_idx".into()), Value::Bool(true)],
-            vec![Value::Text("idxpart22_a_idx".into()), Value::Bool(true)],
-            vec![Value::Text("idxpart2_a_idx".into()), Value::Bool(true)],
-            vec![Value::Text("idxpart_a_idx".into()), Value::Bool(true)],
-        ]
-    );
+    assert!(index_summary(&db, "idxpart21_a_idx").2);
+    assert!(index_summary(&db, "idxpart22_a_idx").2);
+    assert!(index_summary(&db, "idxpart2_a_idx").2);
+    assert!(index_summary(&db, "idxpart_a_idx").2);
 }
 
 #[test]
@@ -7088,8 +7076,9 @@ fn assert_explain_uses_index(db: &Database, client_id: u32, sql: &str, index_nam
     let lines = explain_lines(db, client_id, sql);
     assert!(
         lines.iter().any(|line| {
-            line.contains(&format!("Index Scan using rel {relfilenode} "))
-                || line.contains(&format!("Index Scan using {index_name} "))
+            (line.contains("Index Scan") || line.contains("Index Only Scan"))
+                && (line.contains(&format!("using rel {relfilenode} "))
+                    || line.contains(&format!("using {index_name} ")))
         }),
         "expected EXPLAIN to use index {index_name} (relfilenode {relfilenode}), got {lines:?}"
     );
@@ -7104,7 +7093,9 @@ fn assert_explain_uses_seqscan(db: &Database, client_id: u32, sql: &str, heap_na
         "expected EXPLAIN to use seq scan on {heap_name}, got {lines:?}"
     );
     assert!(
-        !lines.iter().any(|line| line.contains("Index Scan")),
+        !lines
+            .iter()
+            .any(|line| line.contains("Index Scan") || line.contains("Index Only Scan")),
         "expected no index scan, got {lines:?}"
     );
 }
@@ -20283,8 +20274,9 @@ fn index_matrix_projection_over_ordered_index_keeps_order_without_sort() {
     let relfilenode = relfilenode_for(&db, 1, "items_a_idx");
     assert!(
         lines.iter().any(|line| {
-            line.contains(&format!("Index Scan using rel {relfilenode} "))
-                || line.contains("Index Scan using items_a_idx ")
+            (line.contains("Index Scan") || line.contains("Index Only Scan"))
+                && (line.contains(&format!("using rel {relfilenode} "))
+                    || line.contains("using items_a_idx "))
         }),
         "expected ordered index scan, got {lines:?}"
     );
