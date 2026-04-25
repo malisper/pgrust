@@ -101,6 +101,17 @@ def parse_args() -> argparse.Namespace:
         help="Write a standalone HTML dashboard when used with --report-history.",
     )
     parser.add_argument(
+        "--check-history-regressions",
+        type=Path,
+        help="Check latest local history run for pgrust/PostgreSQL ratio regressions and exit.",
+    )
+    parser.add_argument(
+        "--regression-threshold-percent",
+        type=float,
+        default=5.0,
+        help="Percent change needed to flag a history regression. Default: 5.0.",
+    )
+    parser.add_argument(
         "--no-report",
         action="store_true",
         help="Do not print the compact report after a benchmark run.",
@@ -1040,6 +1051,18 @@ def load_history_index(index_path: Path) -> dict[str, Any]:
     return index
 
 
+def load_history_runs(history_dir: Path) -> list[dict[str, Any]]:
+    index_path = history_dir / "index.json"
+    if not index_path.exists():
+        raise SystemExit(f"benchmark history index not found: {index_path}")
+
+    index = load_history_index(index_path)
+    runs = index.get("runs", [])
+    if not isinstance(runs, list):
+        raise SystemExit(f"benchmark history index runs must be a list: {index_path}")
+    return sorted(runs, key=lambda run: run.get("created_at") or "")
+
+
 def build_history_entry(
     summary: dict[str, Any], relative_run_path: str, recorded_at: str, label: str | None
 ) -> dict[str, Any]:
@@ -1087,19 +1110,13 @@ def summarize_history_comparisons(
 
 
 def print_history_report(history_dir: Path, limit: int) -> None:
-    index_path = history_dir / "index.json"
-    if not index_path.exists():
-        raise SystemExit(f"benchmark history index not found: {index_path}")
-
-    index = load_history_index(index_path)
-    runs = index.get("runs", [])
+    runs = load_history_runs(history_dir)
     if not runs:
         print("Benchmark History")
         print(f"  dir:  {history_dir}")
         print("  runs: 0")
         return
 
-    runs = sorted(runs, key=lambda run: run.get("created_at") or "")
     recent = runs[-max(limit, 1) :]
 
     print("Benchmark History")
@@ -1135,11 +1152,7 @@ def print_history_run_table(runs: list[dict[str, Any]]) -> None:
 def print_history_comparison_table(
     latest: dict[str, Any], previous_runs: list[dict[str, Any]]
 ) -> None:
-    previous_by_key = {}
-    for run in reversed(previous_runs):
-        for item in run.get("comparisons", []):
-            previous_by_key.setdefault(comparison_key(item), item)
-
+    previous_by_key = latest_previous_comparisons(previous_runs)
     rows = []
     for item in latest.get("comparisons", []):
         previous_item = previous_by_key.get(comparison_key(item))
@@ -1204,13 +1217,125 @@ def format_percent_delta(current: Any, previous: Any) -> str:
     return f"{((current / previous) - 1.0) * 100.0:+.1f}%"
 
 
-def write_history_dashboard(history_dir: Path, output_path: Path) -> None:
-    index_path = history_dir / "index.json"
-    if not index_path.exists():
-        raise SystemExit(f"benchmark history index not found: {index_path}")
+def print_history_regression_check(history_dir: Path, threshold_percent: float) -> int:
+    if threshold_percent <= 0:
+        raise SystemExit("--regression-threshold-percent must be greater than 0")
 
-    index = load_history_index(index_path)
-    runs = sorted(index.get("runs", []), key=lambda run: run.get("created_at") or "")
+    runs = load_history_runs(history_dir)
+    if not runs:
+        print("Benchmark Regression Check")
+        print(f"  dir:       {history_dir}")
+        print("  status:    no history")
+        return 0
+
+    latest = runs[-1]
+    previous_runs = runs[:-1]
+    rows, regression_count = build_regression_rows(
+        latest, previous_runs, threshold_percent
+    )
+
+    print("Benchmark Regression Check")
+    print(f"  dir:       {history_dir}")
+    print(f"  latest:    {short_time(latest.get('created_at'))}")
+    print(f"  commit:    {short_commit(latest.get('git_commit'))}")
+    print(f"  threshold: {threshold_percent:.1f}%")
+    print(f"  status:    {'fail' if regression_count else 'pass'}")
+
+    if not rows:
+        print()
+        print("No comparable prior pgrust/PostgreSQL ratio data.")
+        return 0
+
+    print()
+    print_table(
+        ["workload", "metric", "current", "previous", "delta", "status"],
+        rows,
+    )
+    return 1 if regression_count else 0
+
+
+def build_regression_rows(
+    latest: dict[str, Any],
+    previous_runs: list[dict[str, Any]],
+    threshold_percent: float,
+) -> tuple[list[list[str]], int]:
+    previous_by_key = latest_previous_comparisons(previous_runs)
+    rows = []
+    regression_count = 0
+    for item in latest.get("comparisons", []):
+        previous_item = previous_by_key.get(comparison_key(item))
+        if previous_item is None:
+            continue
+
+        workload = comparison_label(item)
+        throughput_row = regression_row(
+            workload,
+            "tps ratio",
+            item.get("throughput_ratio"),
+            previous_item.get("throughput_ratio"),
+            threshold_percent,
+            worse_when="lower",
+        )
+        latency_row = regression_row(
+            workload,
+            "lat ratio",
+            item.get("latency_ratio"),
+            previous_item.get("latency_ratio"),
+            threshold_percent,
+            worse_when="higher",
+        )
+        for row, is_regression in [throughput_row, latency_row]:
+            if row is None:
+                continue
+            rows.append(row)
+            regression_count += 1 if is_regression else 0
+
+    return rows, regression_count
+
+
+def latest_previous_comparisons(
+    previous_runs: list[dict[str, Any]]
+) -> dict[tuple[str | None, str | None], dict[str, Any]]:
+    previous_by_key = {}
+    for run in reversed(previous_runs):
+        for item in run.get("comparisons", []):
+            previous_by_key.setdefault(comparison_key(item), item)
+    return previous_by_key
+
+
+def regression_row(
+    workload: str,
+    metric: str,
+    current: Any,
+    previous: Any,
+    threshold_percent: float,
+    *,
+    worse_when: str,
+) -> tuple[list[str] | None, bool]:
+    if not is_number(current) or not is_number(previous) or previous == 0:
+        return None, False
+
+    delta_percent = ((current / previous) - 1.0) * 100.0
+    is_regression = (
+        delta_percent <= -threshold_percent
+        if worse_when == "lower"
+        else delta_percent >= threshold_percent
+    )
+    return (
+        [
+            workload,
+            metric,
+            format_ratio(current),
+            format_ratio(previous),
+            f"{delta_percent:+.1f}%",
+            "regression" if is_regression else "ok",
+        ],
+        is_regression,
+    )
+
+
+def write_history_dashboard(history_dir: Path, output_path: Path) -> None:
+    runs = load_history_runs(history_dir)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(build_history_dashboard_html(history_dir, runs))
 
@@ -1667,6 +1792,12 @@ if __name__ == "__main__":
             print()
             print(f"History dashboard: {args.history_dashboard}")
         sys.exit(0)
+    if args.check_history_regressions:
+        sys.exit(
+            print_history_regression_check(
+                args.check_history_regressions, args.regression_threshold_percent
+            )
+        )
     if args.history_dashboard:
         raise SystemExit("--history-dashboard requires --report-history")
 
