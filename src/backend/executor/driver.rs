@@ -173,6 +173,7 @@ fn execute_statement_with_source(
         Statement::Show(_)
         | Statement::Checkpoint(_)
         | Statement::Set(_)
+        | Statement::SetConstraints(_)
         | Statement::Reset(_)
         | Statement::SetRole(_)
         | Statement::ResetRole(_)

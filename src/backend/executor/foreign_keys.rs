@@ -16,7 +16,7 @@ use crate::include::access::scankey::ScanKeyData;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{SlotKind, ToastRelationRef, TupleSlot};
 
-use super::{ExecError, ExecutorContext, compare_order_values};
+use super::{ConstraintTiming, ExecError, ExecutorContext, compare_order_values};
 
 fn maybe_defer_constraint(
     ctx: &ExecutorContext,
@@ -24,7 +24,9 @@ fn maybe_defer_constraint(
     deferrable: bool,
     initially_deferred: bool,
 ) -> bool {
-    if !deferrable || !initially_deferred {
+    if ctx.constraint_timing(constraint_oid, deferrable, initially_deferred)
+        != ConstraintTiming::Deferred
+    {
         return false;
     }
     let Some(tracker) = ctx.deferred_foreign_keys.as_ref() else {
