@@ -3358,6 +3358,24 @@ fn select_all_preserves_duplicates() {
 }
 
 #[test]
+fn inherited_table_marker_parses_as_default_relation_scan() {
+    let base = temp_dir("inherited_table_marker_relation_scan");
+    let db = Database::open(&base, 16).unwrap();
+
+    db.execute(1, "create table t0(c0 bool)").unwrap();
+    db.execute(1, "create table t1(c0 bool)").unwrap();
+    db.execute(1, "insert into t0 values (true)").unwrap();
+    db.execute(1, "insert into t1 values (true), (false)")
+        .unwrap();
+
+    assert_query_rows(
+        db.execute(1, "select count(*) from t0* full outer join t1* on true")
+            .unwrap(),
+        vec![vec![Value::Int64(2)]],
+    );
+}
+
+#[test]
 fn setop_join_branch_executes_with_child_local_vars() {
     let base = temp_dir("setop_join_branch_child_roots");
     let txns = TransactionManager::new_durable(&base).unwrap();
