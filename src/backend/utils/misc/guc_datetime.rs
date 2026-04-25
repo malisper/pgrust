@@ -119,7 +119,19 @@ pub fn parse_timezone(value: &str) -> Option<String> {
         if !hours.is_finite() {
             return None;
         }
-        return Some(format_offset((hours * 3600.0).round() as i32));
+        return Some(format_offset(-(hours * 3600.0).round() as i32));
+    }
+
+    if matches!(trimmed.as_bytes().first(), Some(b'+') | Some(b'-')) {
+        if let Some(offset) = parse_offset_seconds(trimmed) {
+            return Some(format_offset(-offset));
+        }
+    }
+
+    if trimmed.contains(':') {
+        if let Some(offset) = parse_offset_seconds(&format!("+{trimmed}")) {
+            return Some(format_offset(-offset));
+        }
     }
 
     Some(trimmed.to_string())
@@ -131,10 +143,12 @@ mod tests {
 
     #[test]
     fn parses_numeric_timezones_as_fixed_offsets() {
-        assert_eq!(parse_timezone("10.5"), Some("+10:30".into()));
-        assert_eq!(parse_timezone("-8"), Some("-08".into()));
-        assert_eq!(parse_timezone("+9.75"), Some("+09:45".into()));
+        assert_eq!(parse_timezone("10.5"), Some("-10:30".into()));
+        assert_eq!(parse_timezone("-8"), Some("+08".into()));
+        assert_eq!(parse_timezone("+9.75"), Some("-09:45".into()));
+        assert_eq!(parse_timezone("+02:00"), Some("-02".into()));
+        assert_eq!(parse_timezone("04:30"), Some("-04:30".into()));
     }
 }
 use crate::backend::utils::misc::guc_xml::XmlConfig;
-use crate::backend::utils::time::datetime::format_offset;
+use crate::backend::utils::time::datetime::{format_offset, parse_offset_seconds};
