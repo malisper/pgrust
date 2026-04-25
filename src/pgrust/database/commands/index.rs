@@ -104,7 +104,7 @@ impl Database {
             indnullsnotdistinct: meta.indnullsnotdistinct,
             indisprimary: meta.indisprimary,
             indisexclusion: meta.indisexclusion,
-            indimmediate: false,
+            indimmediate: meta.indimmediate,
             indisclustered: false,
             indisvalid: meta.indisvalid,
             indcheckxmin: false,

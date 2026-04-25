@@ -21861,6 +21861,38 @@ fn create_index_supports_temp_tables_when_temp_is_first_visible() {
 }
 
 #[test]
+fn temp_constraint_backed_indexes_preserve_indimmediate() {
+    let base = temp_dir("temp_constraint_backed_indexes_indimmediate");
+    let db = Database::open(&base, 16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(&db, "create temp table items (id int4 primary key)")
+        .unwrap();
+    let immediate_index = db.temp_entry(1, "items_pkey").unwrap();
+    assert!(
+        immediate_index
+            .index
+            .as_ref()
+            .is_some_and(|index| index.indimmediate)
+    );
+
+    session
+        .execute(
+            &db,
+            "create temp table deferred_items (id int4 unique deferrable initially deferred)",
+        )
+        .unwrap();
+    let deferred_index = db.temp_entry(1, "deferred_items_id_key").unwrap();
+    assert!(
+        deferred_index
+            .index
+            .as_ref()
+            .is_some_and(|index| !index.indimmediate)
+    );
+}
+
+#[test]
 fn temp_table_on_commit_actions_apply_at_commit() {
     let base = temp_dir("temp_table_on_commit");
     let db = Database::open(&base, 16).unwrap();
