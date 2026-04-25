@@ -33,20 +33,21 @@ use crate::include::catalog::{
     PG_STATISTIC_EXT_RELATION_OID, PG_STATISTIC_EXT_ROWTYPE_OID, PG_STATISTIC_RELATION_OID,
     PG_STATISTIC_ROWTYPE_OID, PG_TYPE_RELATION_OID, PG_TYPE_ROWTYPE_OID, POINT_TYPE_OID,
     POLYGON_TYPE_OID, RECORD_ARRAY_TYPE_OID, RECORD_TYPE_OID, REFCURSOR_ARRAY_TYPE_OID,
-    REFCURSOR_TYPE_OID, REGCLASS_ARRAY_TYPE_OID, REGCLASS_TYPE_OID, REGCONFIG_ARRAY_TYPE_OID,
-    REGCONFIG_TYPE_OID, REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID,
-    REGNAMESPACE_ARRAY_TYPE_OID, REGNAMESPACE_TYPE_OID, REGOPERATOR_ARRAY_TYPE_OID,
-    REGOPERATOR_TYPE_OID, REGPROCEDURE_ARRAY_TYPE_OID, REGPROCEDURE_TYPE_OID, REGROLE_TYPE_OID,
-    REGTYPE_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID, TID_ARRAY_TYPE_OID, TID_TYPE_OID,
-    TIME_ARRAY_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID, TIMESTAMP_TYPE_OID,
-    TIMESTAMPTZ_ARRAY_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TIMETZ_ARRAY_TYPE_OID, TIMETZ_TYPE_OID,
-    TRIGGER_TYPE_OID, TSMULTIRANGE_ARRAY_TYPE_OID, TSMULTIRANGE_TYPE_OID, TSQUERY_ARRAY_TYPE_OID,
-    TSQUERY_TYPE_OID, TSRANGE_ARRAY_TYPE_OID, TSRANGE_TYPE_OID, TSTZMULTIRANGE_ARRAY_TYPE_OID,
-    TSTZMULTIRANGE_TYPE_OID, TSTZRANGE_ARRAY_TYPE_OID, TSTZRANGE_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID,
-    TSVECTOR_TYPE_OID, TXID_SNAPSHOT_ARRAY_TYPE_OID, TXID_SNAPSHOT_TYPE_OID, UUID_ARRAY_TYPE_OID,
-    UUID_TYPE_OID, VARBIT_ARRAY_TYPE_OID, VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID,
-    VARCHAR_TYPE_OID, VOID_TYPE_OID, XID_ARRAY_TYPE_OID, XID_TYPE_OID, XML_ARRAY_TYPE_OID,
-    XML_TYPE_OID,
+    REFCURSOR_TYPE_OID, REGCLASS_ARRAY_TYPE_OID, REGCLASS_TYPE_OID, REGCOLLATION_ARRAY_TYPE_OID,
+    REGCOLLATION_TYPE_OID, REGCONFIG_ARRAY_TYPE_OID, REGCONFIG_TYPE_OID,
+    REGDICTIONARY_ARRAY_TYPE_OID, REGDICTIONARY_TYPE_OID, REGNAMESPACE_ARRAY_TYPE_OID,
+    REGNAMESPACE_TYPE_OID, REGOPER_ARRAY_TYPE_OID, REGOPER_TYPE_OID, REGOPERATOR_ARRAY_TYPE_OID,
+    REGOPERATOR_TYPE_OID, REGPROC_ARRAY_TYPE_OID, REGPROC_TYPE_OID, REGPROCEDURE_ARRAY_TYPE_OID,
+    REGPROCEDURE_TYPE_OID, REGROLE_TYPE_OID, REGTYPE_TYPE_OID, TEXT_ARRAY_TYPE_OID, TEXT_TYPE_OID,
+    TID_ARRAY_TYPE_OID, TID_TYPE_OID, TIME_ARRAY_TYPE_OID, TIME_TYPE_OID, TIMESTAMP_ARRAY_TYPE_OID,
+    TIMESTAMP_TYPE_OID, TIMESTAMPTZ_ARRAY_TYPE_OID, TIMESTAMPTZ_TYPE_OID, TIMETZ_ARRAY_TYPE_OID,
+    TIMETZ_TYPE_OID, TRIGGER_TYPE_OID, TSMULTIRANGE_ARRAY_TYPE_OID, TSMULTIRANGE_TYPE_OID,
+    TSQUERY_ARRAY_TYPE_OID, TSQUERY_TYPE_OID, TSRANGE_ARRAY_TYPE_OID, TSRANGE_TYPE_OID,
+    TSTZMULTIRANGE_ARRAY_TYPE_OID, TSTZMULTIRANGE_TYPE_OID, TSTZRANGE_ARRAY_TYPE_OID,
+    TSTZRANGE_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, TXID_SNAPSHOT_ARRAY_TYPE_OID,
+    TXID_SNAPSHOT_TYPE_OID, UUID_ARRAY_TYPE_OID, UUID_TYPE_OID, VARBIT_ARRAY_TYPE_OID,
+    VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, VOID_TYPE_OID, XID_ARRAY_TYPE_OID,
+    XID_TYPE_OID, XML_ARRAY_TYPE_OID, XML_TYPE_OID,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,6 +233,11 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
         ),
         builtin_type_row("oid", OID_TYPE_OID, SqlType::new(SqlTypeKind::Oid)),
         builtin_type_row(
+            "regproc",
+            REGPROC_TYPE_OID,
+            SqlType::new(SqlTypeKind::RegProc),
+        ),
+        builtin_type_row(
             "regclass",
             REGCLASS_TYPE_OID,
             SqlType::new(SqlTypeKind::RegClass),
@@ -252,6 +258,11 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             SqlType::new(SqlTypeKind::RegNamespace),
         ),
         builtin_type_row(
+            "regoper",
+            REGOPER_TYPE_OID,
+            SqlType::new(SqlTypeKind::RegOper),
+        ),
+        builtin_type_row(
             "regprocedure",
             REGPROCEDURE_TYPE_OID,
             SqlType::new(SqlTypeKind::RegProcedure),
@@ -260,6 +271,11 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             "regoperator",
             REGOPERATOR_TYPE_OID,
             SqlType::new(SqlTypeKind::RegOperator),
+        ),
+        builtin_type_row(
+            "regcollation",
+            REGCOLLATION_TYPE_OID,
+            SqlType::new(SqlTypeKind::RegCollation),
         ),
         builtin_type_row("tid", TID_TYPE_OID, SqlType::new(SqlTypeKind::Tid)),
         builtin_type_row(
@@ -302,9 +318,19 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             SqlType::array_of(SqlType::new(SqlTypeKind::RegClass)),
         ),
         builtin_type_row(
+            "_regproc",
+            REGPROC_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::RegProc)),
+        ),
+        builtin_type_row(
             "_regnamespace",
             REGNAMESPACE_ARRAY_TYPE_OID,
             SqlType::array_of(SqlType::new(SqlTypeKind::RegNamespace)),
+        ),
+        builtin_type_row(
+            "_regoper",
+            REGOPER_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::RegOper)),
         ),
         builtin_type_row(
             "_regprocedure",
@@ -315,6 +341,11 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             "_regoperator",
             REGOPERATOR_ARRAY_TYPE_OID,
             SqlType::array_of(SqlType::new(SqlTypeKind::RegOperator)),
+        ),
+        builtin_type_row(
+            "_regcollation",
+            REGCOLLATION_ARRAY_TYPE_OID,
+            SqlType::array_of(SqlType::new(SqlTypeKind::RegCollation)),
         ),
         builtin_type_row("float4", FLOAT4_TYPE_OID, SqlType::new(SqlTypeKind::Float4)),
         builtin_type_row(
