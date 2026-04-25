@@ -143,7 +143,6 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         | SqlTypeKind::Composite
         | SqlTypeKind::Varchar
         | SqlTypeKind::Char
-        | SqlTypeKind::Numeric
         | SqlTypeKind::Path
         | SqlTypeKind::Polygon
         | SqlTypeKind::Json
@@ -180,6 +179,7 @@ fn default_attribute_storage(sql_type: SqlType, attlen: i16) -> AttributeStorage
         | SqlTypeKind::Float4
         | SqlTypeKind::Float8
         | SqlTypeKind::Interval => AttributeStorage::Plain,
+        SqlTypeKind::Numeric => AttributeStorage::Main,
         SqlTypeKind::Range
         | SqlTypeKind::Int4Range
         | SqlTypeKind::Int8Range

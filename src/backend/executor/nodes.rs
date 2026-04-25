@@ -9,6 +9,7 @@ use crate::backend::access::index::indexam;
 use crate::backend::access::nbtree::nbtree::decode_key_payload;
 use crate::backend::commands::explain::format_explain_lines_with_costs;
 use crate::backend::executor::exec_expr::{compare_order_by_keys, eval_expr};
+use crate::backend::executor::expr_casts::cast_value;
 use crate::backend::executor::expr_geometry::render_geometry_text;
 use crate::backend::executor::expr_ops::compare_order_values;
 use crate::backend::executor::pg_regex::explain_similar_pattern;
@@ -18,7 +19,8 @@ use crate::backend::executor::srf::{
 use crate::backend::executor::value_io::{decode_value_with_toast, missing_column_value};
 use crate::backend::executor::window::execute_window_clause;
 use crate::backend::libpq::pqformat::FloatFormatOptions;
-use crate::backend::parser::{SqlType, SqlTypeKind};
+use crate::backend::libpq::pqformat::format_float8_text;
+use crate::backend::parser::{SqlType, SqlTypeKind, SubqueryComparisonOp};
 use crate::backend::storage::lmgr::RowLockMode;
 use crate::backend::storage::page::bufpage::{
     ItemIdFlags, page_get_item_id_unchecked, page_get_item_unchecked, page_get_max_offset_number,
@@ -31,7 +33,7 @@ use crate::include::access::scankey::ScanKeyData;
 use crate::include::access::visibilitymap::visibilitymap_get_status;
 use crate::include::access::visibilitymapdefs::VISIBILITYMAP_ALL_VISIBLE;
 use crate::include::catalog::{
-    BTREE_AM_OID, GIST_AM_OID, PG_LARGEOBJECT_METADATA_RELATION_OID, SPGIST_AM_OID,
+    BTREE_AM_OID, GIST_AM_OID, HASH_AM_OID, PG_LARGEOBJECT_METADATA_RELATION_OID, SPGIST_AM_OID,
 };
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::execnodes::{
@@ -263,14 +265,23 @@ fn render_order_by_key(item: &OrderByEntry, column_names: &[String]) -> String {
     rendered
 }
 
-fn render_index_scan_condition(
+pub(crate) fn render_index_scan_condition(
     keys: &[IndexScanKey],
     desc: &RelationDesc,
     index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
 ) -> Option<String> {
+    render_index_scan_condition_with_key_names(keys, desc, index_meta, None)
+}
+
+pub(crate) fn render_index_scan_condition_with_key_names(
+    keys: &[IndexScanKey],
+    desc: &RelationDesc,
+    index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    key_column_names: Option<&[String]>,
+) -> Option<String> {
     let rendered = keys
         .iter()
-        .filter_map(|key| render_index_scan_key(key, desc, index_meta, 's'))
+        .filter_map(|key| render_index_scan_key(key, desc, index_meta, 's', key_column_names))
         .collect::<Vec<_>>();
     match rendered.len() {
         0 => None,
@@ -292,7 +303,7 @@ pub(crate) fn render_index_order_by(
 ) -> Option<String> {
     let rendered = keys
         .iter()
-        .filter_map(|key| render_index_scan_key(key, desc, index_meta, 'o'))
+        .filter_map(|key| render_index_scan_key(key, desc, index_meta, 'o', None))
         .collect::<Vec<_>>();
     match rendered.len() {
         0 => None,
@@ -1725,19 +1736,33 @@ fn render_index_scan_key(
     desc: &RelationDesc,
     index_meta: &crate::backend::utils::cache::relcache::IndexRelCacheEntry,
     purpose: char,
+    key_column_names: Option<&[String]>,
 ) -> Option<String> {
     let index_attno = usize::try_from(key.attribute_number.checked_sub(1)?).ok()?;
     let heap_attno = usize::try_from(*index_meta.indkey.get(index_attno)?)
         .ok()?
         .checked_sub(1)?;
-    let column_name = desc.columns.get(heap_attno)?.name.clone();
+    let column = desc.columns.get(heap_attno)?;
+    let column_name = key_column_names
+        .and_then(|names| names.get(heap_attno))
+        .cloned()
+        .unwrap_or_else(|| column.name.clone());
     if purpose == 's'
         && key.strategy == 1
         && matches!(&key.argument, IndexScanKeyArgument::Const(Value::Null))
     {
         return Some(format!("{column_name} IS NOT NULL"));
     }
-    let right_type_oid = match &key.argument {
+    let display_type = index_key_argument_display_type(&key.argument, column.sql_type);
+    let right_type_oid = display_type.map(crate::backend::utils::cache::catcache::sql_type_oid);
+    let left_sql = if matches!(display_type.map(|ty| ty.kind), Some(SqlTypeKind::Char))
+        && column.sql_type.kind == SqlTypeKind::Char
+    {
+        format!("({column_name})::bpchar")
+    } else {
+        column_name
+    };
+    let right_type_oid = right_type_oid.or_else(|| match &key.argument {
         IndexScanKeyArgument::Const(value) => value
             .sql_type_hint()
             .map(crate::backend::utils::cache::catcache::sql_type_oid),
@@ -1745,41 +1770,43 @@ fn render_index_scan_key(
             crate::include::nodes::primnodes::expr_sql_type_hint(expr)
                 .map(crate::backend::utils::cache::catcache::sql_type_oid)
         }
-    };
-    let operator = index_meta
+    });
+    let operator_name = index_meta
         .amop_entries
         .get(index_attno)
-        .into_iter()
-        .flat_map(|entries| entries.iter())
-        .filter(|entry| {
-            entry.purpose == purpose && u16::try_from(entry.strategy).ok() == Some(key.strategy)
+        .and_then(|entries| {
+            entries
+                .iter()
+                .filter(|entry| {
+                    entry.purpose == purpose
+                        && u16::try_from(entry.strategy).ok() == Some(key.strategy)
+                })
+                .filter(|entry| {
+                    right_type_oid.is_none()
+                        || Some(entry.righttype) == right_type_oid
+                        || entry.righttype == crate::include::catalog::ANYOID
+                })
+                .max_by_key(|entry| {
+                    if Some(entry.righttype) == right_type_oid {
+                        2
+                    } else if entry.righttype == crate::include::catalog::ANYOID {
+                        1
+                    } else {
+                        0
+                    }
+                })
         })
-        .filter(|entry| {
-            right_type_oid.is_none()
-                || Some(entry.righttype) == right_type_oid
-                || entry.righttype == crate::include::catalog::ANYOID
-        })
-        .max_by_key(|entry| {
-            if Some(entry.righttype) == right_type_oid {
-                2
-            } else if entry.righttype == crate::include::catalog::ANYOID {
-                1
-            } else {
-                0
-            }
-        });
-    let operator_name = operator
         .and_then(|operator| {
             crate::include::catalog::bootstrap_pg_operator_rows()
                 .into_iter()
                 .find(|row| row.oid == operator.operator_oid)
                 .map(|row| row.oprname)
         })
-        .or_else(|| fallback_index_scan_operator(index_meta.am_oid, key.strategy));
+        .or_else(|| fallback_index_scan_operator(index_meta.am_oid, key.strategy))?;
     let value_sql = match &key.argument {
         IndexScanKeyArgument::Const(value) => match right_type_oid {
             Some(_type_oid) => {
-                let sql_type = value.sql_type_hint()?;
+                let sql_type = display_type.or_else(|| value.sql_type_hint())?;
                 format!(
                     "{}::{}",
                     render_explain_literal(value),
@@ -1790,7 +1817,7 @@ fn render_index_scan_key(
         },
         IndexScanKeyArgument::Runtime(expr) => render_explain_expr(expr, &[]),
     };
-    Some(format!("{column_name} {} {value_sql}", operator_name?))
+    Some(format!("{left_sql} {operator_name} {value_sql}"))
 }
 
 fn fallback_index_scan_operator(am_oid: u32, strategy: u16) -> Option<String> {
@@ -1802,6 +1829,13 @@ fn fallback_index_scan_operator(am_oid: u32, strategy: u16) -> Option<String> {
                 3 => "=",
                 4 => ">=",
                 5 => ">",
+                _ => return None,
+            }
+            .into(),
+        ),
+        HASH_AM_OID => Some(
+            match strategy {
+                1 => "=",
                 _ => return None,
             }
             .into(),
@@ -1819,6 +1853,23 @@ fn fallback_index_scan_operator(am_oid: u32, strategy: u16) -> Option<String> {
             .into(),
         ),
         _ => None,
+    }
+}
+
+fn index_key_argument_display_type(
+    argument: &IndexScanKeyArgument,
+    column_type: SqlType,
+) -> Option<SqlType> {
+    match argument {
+        IndexScanKeyArgument::Const(Value::Text(_) | Value::TextRef(_, _))
+            if column_type.kind == SqlTypeKind::Char =>
+        {
+            Some(SqlType::new(SqlTypeKind::Char))
+        }
+        IndexScanKeyArgument::Const(value) => value.sql_type_hint(),
+        IndexScanKeyArgument::Runtime(expr) => {
+            crate::include::nodes::primnodes::expr_sql_type_hint(expr)
+        }
     }
 }
 
@@ -2345,6 +2396,11 @@ fn render_explain_expr_inner_with_qualifier(
             )
         }
         Expr::Func(func) => render_explain_func_expr(func, qualifier, column_names),
+        Expr::ScalarArrayOp(saop) => render_explain_scalar_array_op(saop, qualifier, column_names),
+        Expr::ArrayLiteral {
+            elements,
+            array_type,
+        } => render_explain_array_literal(elements, *array_type, qualifier, column_names),
         Expr::SubPlan(subplan) => {
             if subplan.par_param.is_empty() {
                 format!("(InitPlan {}).col1", subplan.plan_id + 1)
@@ -2357,6 +2413,7 @@ fn render_explain_expr_inner_with_qualifier(
         Expr::CurrentUser => "CURRENT_USER".into(),
         Expr::CurrentRole => "CURRENT_ROLE".into(),
         Expr::SessionUser => "SESSION_USER".into(),
+        Expr::Random => "random()".into(),
         Expr::Similar {
             expr,
             pattern,
@@ -2406,6 +2463,28 @@ fn render_explain_func_expr(
         .collect::<Vec<_>>()
         .join(", ");
     format!("{name}({args})")
+}
+
+fn render_explain_scalar_array_op(
+    saop: &crate::include::nodes::primnodes::ScalarArrayOpExpr,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> String {
+    let op = match saop.op {
+        SubqueryComparisonOp::Eq => "=",
+        SubqueryComparisonOp::NotEq => "<>",
+        SubqueryComparisonOp::Lt => "<",
+        SubqueryComparisonOp::LtEq => "<=",
+        SubqueryComparisonOp::Gt => ">",
+        SubqueryComparisonOp::GtEq => ">=",
+        _ => return format!("{saop:?}"),
+    };
+    let quantifier = if saop.use_or { "ANY" } else { "ALL" };
+    format!(
+        "{} {op} {quantifier} ({})",
+        render_explain_infix_operand(&saop.left, qualifier, column_names),
+        render_explain_expr_inner_with_qualifier(&saop.right, qualifier, column_names)
+    )
 }
 
 fn builtin_scalar_function_name(func: BuiltinScalarFunction) -> String {
@@ -2748,6 +2827,8 @@ fn render_explain_const(value: &Value) -> String {
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
+        Value::Float64(v) => format_float8_text(*v, FloatFormatOptions::default()),
+        Value::Numeric(v) => v.render(),
         Value::Bool(v) => {
             if *v {
                 "true".to_string()
@@ -2833,6 +2914,8 @@ fn render_explain_literal(value: &Value) -> String {
         Value::Int16(v) => v.to_string(),
         Value::Int32(v) => v.to_string(),
         Value::Int64(v) => v.to_string(),
+        Value::Float64(v) => format_float8_text(*v, FloatFormatOptions::default()),
+        Value::Numeric(v) => v.render(),
         Value::Bool(v) => {
             if *v {
                 "true".to_string()
@@ -2845,35 +2928,103 @@ fn render_explain_literal(value: &Value) -> String {
     }
 }
 
-fn render_explain_sql_type_name(ty: SqlType) -> &'static str {
-    if ty.is_array {
-        return "array";
+fn render_explain_array_literal(
+    elements: &[Expr],
+    array_type: SqlType,
+    qualifier: Option<&str>,
+    column_names: &[String],
+) -> String {
+    let element_type = array_type.element_type();
+    let const_elements = elements
+        .iter()
+        .map(|expr| render_explain_array_literal_const(expr, element_type))
+        .collect::<Option<Vec<_>>>();
+    if let Some(elements) = const_elements {
+        return format!(
+            "'{{{}}}'::{}",
+            elements.join(","),
+            render_explain_sql_type_name(array_type)
+        );
     }
-    match ty.kind {
-        SqlTypeKind::Bool => "boolean",
-        SqlTypeKind::Int2 => "smallint",
-        SqlTypeKind::Int4 => "integer",
-        SqlTypeKind::Int8 => "bigint",
-        SqlTypeKind::Float4 => "real",
-        SqlTypeKind::Float8 => "double precision",
-        SqlTypeKind::Numeric => "numeric",
-        SqlTypeKind::Text => "text",
-        SqlTypeKind::Name => "name",
-        SqlTypeKind::Oid => "oid",
-        SqlTypeKind::Inet => "inet",
-        SqlTypeKind::Cidr => "cidr",
-        SqlTypeKind::Date => "date",
-        SqlTypeKind::Json => "json",
-        SqlTypeKind::Jsonb => "jsonb",
-        SqlTypeKind::Line => "line",
-        SqlTypeKind::Lseg => "lseg",
-        SqlTypeKind::Path => "path",
-        SqlTypeKind::Box => "box",
-        SqlTypeKind::Polygon => "polygon",
-        SqlTypeKind::Circle => "circle",
-        SqlTypeKind::Point => "point",
-        SqlTypeKind::Uuid => "uuid",
-        _ => "text",
+
+    let elements = elements
+        .iter()
+        .map(|expr| render_explain_expr_inner_with_qualifier(expr, qualifier, column_names))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "ARRAY[{elements}]::{}",
+        render_explain_sql_type_name(array_type)
+    )
+}
+
+fn render_explain_array_literal_const(expr: &Expr, element_type: SqlType) -> Option<String> {
+    match expr {
+        Expr::Const(value) => Some(render_explain_array_literal_value(value, element_type)),
+        Expr::Cast(inner, _) => render_explain_array_literal_const(inner, element_type),
+        _ => None,
+    }
+}
+
+fn render_explain_array_literal_value(value: &Value, element_type: SqlType) -> String {
+    let value = cast_value(value.clone(), element_type).unwrap_or_else(|_| value.clone());
+    match &value {
+        Value::Text(_) | Value::TextRef(_, _) => value
+            .as_text()
+            .unwrap_or_default()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace(',', "\\,"),
+        Value::Float64(v) => format_float8_text(*v, FloatFormatOptions::default()),
+        Value::Numeric(v) => v.render(),
+        Value::Null => "NULL".into(),
+        _ => render_explain_literal(&value),
+    }
+}
+
+fn render_explain_sql_type_name(ty: SqlType) -> String {
+    let element = ty.element_type();
+    let base = match element.kind {
+        SqlTypeKind::Bool => "boolean".into(),
+        SqlTypeKind::Int2 => "smallint".into(),
+        SqlTypeKind::Int4 => "integer".into(),
+        SqlTypeKind::Int8 => "bigint".into(),
+        SqlTypeKind::Float4 => "real".into(),
+        SqlTypeKind::Float8 => "double precision".into(),
+        SqlTypeKind::Numeric => element
+            .numeric_precision_scale()
+            .map(|(precision, scale)| format!("numeric({precision},{scale})"))
+            .unwrap_or_else(|| "numeric".into()),
+        SqlTypeKind::Text => "text".into(),
+        SqlTypeKind::Name => "name".into(),
+        SqlTypeKind::Oid => "oid".into(),
+        SqlTypeKind::Inet => "inet".into(),
+        SqlTypeKind::Cidr => "cidr".into(),
+        SqlTypeKind::Date => "date".into(),
+        SqlTypeKind::Char => element
+            .char_len()
+            .map(|len| format!("character({len})"))
+            .unwrap_or_else(|| "bpchar".into()),
+        SqlTypeKind::Varchar => element
+            .char_len()
+            .map(|len| format!("character varying({len})"))
+            .unwrap_or_else(|| "character varying".into()),
+        SqlTypeKind::Json => "json".into(),
+        SqlTypeKind::Jsonb => "jsonb".into(),
+        SqlTypeKind::Line => "line".into(),
+        SqlTypeKind::Lseg => "lseg".into(),
+        SqlTypeKind::Path => "path".into(),
+        SqlTypeKind::Box => "box".into(),
+        SqlTypeKind::Polygon => "polygon".into(),
+        SqlTypeKind::Circle => "circle".into(),
+        SqlTypeKind::Point => "point".into(),
+        SqlTypeKind::Uuid => "uuid".into(),
+        _ => "text".into(),
+    };
+    if ty.is_array {
+        format!("{base}[]")
+    } else {
+        base
     }
 }
 

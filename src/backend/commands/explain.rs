@@ -1,7 +1,8 @@
 use std::collections::BTreeSet;
 
 use crate::backend::executor::{
-    executor_start, render_explain_expr, render_index_order_by, set_returning_call_label,
+    executor_start, render_explain_expr, render_index_order_by,
+    render_index_scan_condition_with_key_names, set_returning_call_label,
 };
 use crate::include::catalog::builtin_aggregate_function_for_proc_oid;
 use crate::include::nodes::datum::Value;
@@ -122,6 +123,14 @@ fn format_explain_plan_with_subplans_inner(
         return;
     }
 
+    if verbose
+        && push_verbose_projected_scan_plan(
+            plan, subplans, indent, show_costs, is_child, ctx, lines,
+        )
+    {
+        return;
+    }
+
     let state = executor_start(plan.clone());
     if verbose {
         push_explain_plan_line(plan, state.as_ref(), indent, is_child, show_costs, lines);
@@ -133,6 +142,20 @@ fn format_explain_plan_with_subplans_inner(
         }
     }
 
+    push_direct_plan_subplans(plan, subplans, indent, show_costs, verbose, ctx, lines);
+
+    explain_plan_children_with_context(plan, subplans, indent, show_costs, verbose, ctx, lines);
+}
+
+fn push_direct_plan_subplans(
+    plan: &Plan,
+    subplans: &[Plan],
+    indent: usize,
+    show_costs: bool,
+    verbose: bool,
+    ctx: &VerboseExplainContext,
+    lines: &mut Vec<String>,
+) {
     for subplan in direct_plan_subplans(plan) {
         let prefix = "  ".repeat(indent + 1);
         let label = if subplan.par_param.is_empty() {
@@ -154,8 +177,6 @@ fn format_explain_plan_with_subplans_inner(
             );
         }
     }
-
-    explain_plan_children_with_context(plan, subplans, indent, show_costs, verbose, ctx, lines);
 }
 
 fn explain_passthrough_plan_child(plan: &Plan) -> Option<&Plan> {
@@ -551,6 +572,9 @@ fn verbose_plan_label(plan: &Plan) -> Option<String> {
             AggregateStrategy::Sorted => Some("GroupAggregate".into()),
             AggregateStrategy::Hashed => Some("HashAggregate".into()),
         },
+        Plan::Projection { input, .. } if matches!(input.as_ref(), Plan::Result { .. }) => {
+            Some("Result".into())
+        }
         Plan::FunctionScan {
             call, table_alias, ..
         } => Some(verbose_function_scan_label(call, table_alias.as_deref())),
@@ -590,6 +614,176 @@ fn verbose_function_scan_output_exprs(
             None => format!("{}.{}", column.name, column.name),
         })
         .collect()
+}
+
+fn push_verbose_projected_scan_plan(
+    plan: &Plan,
+    subplans: &[Plan],
+    indent: usize,
+    show_costs: bool,
+    is_child: bool,
+    ctx: &VerboseExplainContext,
+    lines: &mut Vec<String>,
+) -> bool {
+    let Plan::Projection { input, targets, .. } = plan else {
+        return false;
+    };
+    if !projection_targets_are_verbose_scan_projection(input, targets) {
+        return false;
+    }
+
+    let state = executor_start((**input).clone());
+    let prefix = explain_node_prefix(indent, is_child);
+    let label = verbose_scan_plan_label(input).unwrap_or_else(|| state.node_label());
+    push_explain_line(
+        &format!("{prefix}{label}"),
+        state.plan_info(),
+        show_costs,
+        lines,
+    );
+
+    let detail_prefix = explain_detail_prefix(indent);
+    let input_names = verbose_scan_projection_input_names(input);
+    let output = targets
+        .iter()
+        .filter(|target| !target.resjunk)
+        .map(|target| render_verbose_expr(&target.expr, &input_names, ctx))
+        .collect::<Vec<_>>();
+    if !output.is_empty() {
+        lines.push(format!("{detail_prefix}Output: {}", output.join(", ")));
+    }
+    push_verbose_scan_details(input, indent, &input_names, lines);
+    push_direct_plan_subplans(plan, subplans, indent, show_costs, true, ctx, lines);
+    true
+}
+
+fn projection_targets_are_verbose_scan_projection(input: &Plan, targets: &[TargetEntry]) -> bool {
+    matches!(
+        input,
+        Plan::SeqScan { .. } | Plan::IndexOnlyScan { .. } | Plan::IndexScan { .. }
+    ) && targets.len() > input.column_names().len()
+        && targets.iter().all(|target| !target.resjunk)
+}
+
+fn verbose_scan_projection_input_names(input: &Plan) -> Vec<String> {
+    match input {
+        Plan::SeqScan {
+            relation_name,
+            desc,
+            ..
+        }
+        | Plan::IndexOnlyScan {
+            relation_name,
+            desc,
+            ..
+        }
+        | Plan::IndexScan {
+            relation_name,
+            desc,
+            ..
+        } => qualified_base_scan_output_exprs(relation_name, desc),
+        _ => Vec::new(),
+    }
+}
+
+fn push_verbose_scan_details(
+    input: &Plan,
+    indent: usize,
+    key_column_names: &[String],
+    lines: &mut Vec<String>,
+) {
+    let prefix = explain_detail_prefix(indent);
+    match input {
+        Plan::IndexOnlyScan {
+            keys,
+            order_by_keys,
+            desc,
+            index_meta,
+            ..
+        }
+        | Plan::IndexScan {
+            keys,
+            order_by_keys,
+            desc,
+            index_meta,
+            ..
+        } => {
+            if let Some(detail) = render_index_scan_condition_with_key_names(
+                keys,
+                desc,
+                index_meta,
+                Some(key_column_names),
+            ) {
+                lines.push(format!("{prefix}Index Cond: ({detail})"));
+            }
+            if let Some(detail) = render_index_order_by(order_by_keys, desc, index_meta) {
+                lines.push(format!("{prefix}Order By: ({detail})"));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn verbose_scan_plan_label(input: &Plan) -> Option<String> {
+    match input {
+        Plan::SeqScan { relation_name, .. } => Some(format!(
+            "Seq Scan on {}",
+            verbose_relation_name(relation_name)
+        )),
+        Plan::IndexOnlyScan {
+            relation_name,
+            index_name,
+            direction,
+            ..
+        } => {
+            let direction = if matches!(
+                direction,
+                crate::include::access::relscan::ScanDirection::Backward
+            ) {
+                " Backward"
+            } else {
+                ""
+            };
+            Some(format!(
+                "Index Only Scan{direction} using {index_name} on {}",
+                verbose_relation_name(relation_name)
+            ))
+        }
+        Plan::IndexScan {
+            relation_name,
+            index_name,
+            direction,
+            index_only,
+            ..
+        } => {
+            let scan_name = if *index_only {
+                "Index Only Scan"
+            } else {
+                "Index Scan"
+            };
+            let direction = if matches!(
+                direction,
+                crate::include::access::relscan::ScanDirection::Backward
+            ) {
+                " Backward"
+            } else {
+                ""
+            };
+            Some(format!(
+                "{scan_name}{direction} using {index_name} on {}",
+                verbose_relation_name(relation_name)
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn verbose_relation_name(relation_name: &str) -> String {
+    if relation_name.contains('.') || relation_name.contains(' ') {
+        relation_name.to_string()
+    } else {
+        format!("public.{relation_name}")
+    }
 }
 
 #[derive(Clone, Default)]
@@ -887,6 +1081,27 @@ fn qualified_scan_output_exprs(
             Some(alias) => format!("{alias}.{}", column.name),
             None => column.name.clone(),
         })
+        .collect()
+}
+
+fn qualified_base_scan_output_exprs(
+    relation_name: &str,
+    desc: &crate::include::nodes::primnodes::RelationDesc,
+) -> Vec<String> {
+    let qualifier = relation_name
+        .split_once(' ')
+        .map(|(_, alias)| alias.trim().to_string())
+        .filter(|alias| !alias.is_empty())
+        .unwrap_or_else(|| {
+            relation_name
+                .rsplit_once('.')
+                .map(|(_, name)| name)
+                .unwrap_or(relation_name)
+                .to_string()
+        });
+    desc.columns
+        .iter()
+        .map(|column| format!("{qualifier}.{}", column.name))
         .collect()
 }
 
@@ -1476,6 +1691,7 @@ fn render_verbose_expr(
             }
         },
         Expr::Aggref(aggref) => render_verbose_aggref(aggref, column_names, ctx),
+        Expr::ScalarArrayOp(_) => render_explain_expr(expr, column_names),
         _ => strip_outer_parens(&render_explain_expr(expr, column_names)),
     }
 }
@@ -1513,20 +1729,36 @@ fn strip_outer_parens(text: &str) -> String {
         .to_string()
 }
 
-fn render_type_name(ty: crate::backend::parser::SqlType) -> &'static str {
+fn render_type_name(ty: crate::backend::parser::SqlType) -> String {
     use crate::backend::parser::SqlTypeKind::*;
-    match ty.kind {
-        Int2 => "smallint",
-        Int4 => "integer",
-        Int8 => "bigint",
-        Text => "text",
-        Varchar => "character varying",
-        Bool => "boolean",
-        Float4 => "real",
-        Float8 => "double precision",
-        Numeric => "numeric",
-        Uuid => "uuid",
-        _ => "unknown",
+    let element = ty.element_type();
+    let base = match element.kind {
+        Int2 => "smallint".into(),
+        Int4 => "integer".into(),
+        Int8 => "bigint".into(),
+        Text => "text".into(),
+        Varchar => element
+            .char_len()
+            .map(|len| format!("character varying({len})"))
+            .unwrap_or_else(|| "character varying".into()),
+        Char => element
+            .char_len()
+            .map(|len| format!("character({len})"))
+            .unwrap_or_else(|| "bpchar".into()),
+        Bool => "boolean".into(),
+        Float4 => "real".into(),
+        Float8 => "double precision".into(),
+        Numeric => element
+            .numeric_precision_scale()
+            .map(|(precision, scale)| format!("numeric({precision},{scale})"))
+            .unwrap_or_else(|| "numeric".into()),
+        Uuid => "uuid".into(),
+        _ => "unknown".into(),
+    };
+    if ty.is_array {
+        format!("{base}[]")
+    } else {
+        base
     }
 }
 

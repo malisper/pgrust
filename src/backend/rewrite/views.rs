@@ -318,7 +318,7 @@ fn render_expr(expr: &Expr, query: &Query, catalog: &dyn CatalogLookup) -> Strin
         Expr::Var(var) => var_name(var, query).unwrap_or_else(|| format!("var{}", var.varattno)),
         Expr::Const(value) => render_literal(value),
         Expr::Cast(inner, ty) => {
-            if matches!(**inner, Expr::Const(_)) {
+            if matches!(**inner, Expr::Const(_) | Expr::Var(_)) {
                 format!(
                     "{}::{}",
                     render_expr(inner, query, catalog),
@@ -531,9 +531,12 @@ fn render_literal(value: &Value) -> String {
     }
 }
 
-fn render_sql_type(ty: SqlType) -> &'static str {
+fn render_sql_type(ty: SqlType) -> String {
     if ty.is_array {
-        return "array";
+        return "array".into();
+    }
+    if let Some((precision, scale)) = ty.numeric_precision_scale() {
+        return format!("numeric({precision},{scale})");
     }
     match ty.kind {
         SqlTypeKind::Bool => "boolean",
@@ -550,8 +553,21 @@ fn render_sql_type(ty: SqlType) -> &'static str {
         SqlTypeKind::Interval => "interval",
         SqlTypeKind::Json => "json",
         SqlTypeKind::Jsonb => "jsonb",
+        SqlTypeKind::Char => {
+            return ty
+                .char_len()
+                .map(|len| format!("character({len})"))
+                .unwrap_or_else(|| "bpchar".into());
+        }
+        SqlTypeKind::Varchar => {
+            return ty
+                .char_len()
+                .map(|len| format!("character varying({len})"))
+                .unwrap_or_else(|| "character varying".into());
+        }
         _ => "text",
     }
+    .into()
 }
 
 fn var_name(var: &Var, query: &Query) -> Option<String> {

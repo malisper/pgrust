@@ -34,6 +34,7 @@ use self::ops::{
     bind_arithmetic_expr, bind_bitwise_expr, bind_comparison_expr, bind_concat_expr,
     bind_maybe_network_arithmetic, bind_maybe_network_bitwise, bind_maybe_network_operator,
     bind_overloaded_binary_expr, bind_prefix_operator_expr, bind_shift_expr,
+    supports_comparison_operator,
 };
 use self::subquery::{
     bind_array_subquery_expr, bind_exists_subquery_expr, bind_in_subquery_expr,
