@@ -670,6 +670,7 @@ pub(super) fn validate_scalar_function_arity(
             BuiltinScalarFunction::PgTriggerDepth => args.is_empty(),
             BuiltinScalarFunction::PgPartitionRoot => args.len() == 1,
             BuiltinScalarFunction::DatePart | BuiltinScalarFunction::DateTrunc => args.len() == 2,
+            BuiltinScalarFunction::TimeZone => matches!(args.len(), 1 | 2),
             BuiltinScalarFunction::IsFinite => args.len() == 1,
             BuiltinScalarFunction::MakeDate => args.len() == 3,
             BuiltinScalarFunction::GetDatabaseEncoding => args.is_empty(),
@@ -1175,6 +1176,9 @@ pub(super) fn fixed_scalar_return_type(func: BuiltinScalarFunction) -> Option<Sq
         BuiltinScalarFunction::CurrentSetting => {
             return Some(SqlType::new(SqlTypeKind::Text));
         }
+        BuiltinScalarFunction::TimeZone => {
+            return Some(SqlType::new(SqlTypeKind::TimeTz));
+        }
         BuiltinScalarFunction::TxidCurrent | BuiltinScalarFunction::TxidCurrentIfAssigned => {
             return Some(SqlType::new(SqlTypeKind::Int8));
         }
@@ -1501,6 +1505,7 @@ fn legacy_scalar_function_entries() -> &'static [(&'static str, BuiltinScalarFun
         ("timeofday", BuiltinScalarFunction::TimeOfDay),
         ("date_part", BuiltinScalarFunction::DatePart),
         ("date_trunc", BuiltinScalarFunction::DateTrunc),
+        ("timezone", BuiltinScalarFunction::TimeZone),
         ("isfinite", BuiltinScalarFunction::IsFinite),
         ("make_date", BuiltinScalarFunction::MakeDate),
         (

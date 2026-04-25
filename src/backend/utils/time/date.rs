@@ -1,9 +1,9 @@
 use crate::backend::utils::misc::guc_datetime::{DateOrder, DateStyleFormat, DateTimeConfig};
 use crate::backend::utils::time::datetime::{
     DateTimeKeyword, DateTimeParseError, TimeZoneSpec, days_from_ymd, format_offset,
-    format_time_usecs, month_number, parse_date_token_with_config, parse_fraction_to_usecs,
-    parse_keyword, parse_offset_seconds, parse_time_components, parse_timezone_spec,
-    split_time_and_offset, time_usecs_from_hms, timezone_offset_seconds, today_pg_days,
+    format_time_usecs, month_number, named_timezone_offset_seconds_for_date,
+    parse_date_token_with_config, parse_fraction_to_usecs, parse_keyword, parse_time_components,
+    parse_timezone_spec, split_time_and_offset, timezone_offset_seconds, today_pg_days,
     ymd_from_days,
 };
 use crate::include::nodes::datetime::{
@@ -493,6 +493,23 @@ fn standalone_meridiem(token: &str) -> bool {
     token.eq_ignore_ascii_case("am") || token.eq_ignore_ascii_case("pm")
 }
 
+fn timezone_spec_offset_seconds(
+    zone: Option<TimeZoneSpec>,
+    date: Option<i32>,
+    config: &DateTimeConfig,
+) -> Result<i32, DateTimeParseError> {
+    match zone {
+        Some(TimeZoneSpec::FixedOffset(offset)) => Ok(offset),
+        Some(TimeZoneSpec::Named(name)) => {
+            let date = date.ok_or(DateTimeParseError::Invalid)?;
+            named_timezone_offset_seconds_for_date(&name, date).ok_or(
+                DateTimeParseError::UnknownTimeZone(name.to_ascii_lowercase()),
+            )
+        }
+        None => Ok(timezone_offset_seconds(config)),
+    }
+}
+
 fn parse_time_token(text: &str) -> Result<Option<(i64, Option<TimeZoneSpec>)>, DateTimeParseError> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -558,6 +575,14 @@ fn parse_time_token(text: &str) -> Result<Option<(i64, Option<TimeZoneSpec>)>, D
 }
 
 pub fn parse_time_text(text: &str, config: &DateTimeConfig) -> Result<TimeADT, DateTimeParseError> {
+    let (time_usecs, _, _) = parse_time_input(text, config)?;
+    Ok(TimeADT(time_usecs))
+}
+
+fn parse_time_input(
+    text: &str,
+    config: &DateTimeConfig,
+) -> Result<(i64, Option<TimeZoneSpec>, Option<i32>), DateTimeParseError> {
     let mut tokens = tokenize_time_input(text, config);
     if tokens.is_empty() {
         return Err(DateTimeParseError::Invalid);
@@ -621,51 +646,33 @@ pub fn parse_time_text(text: &str, config: &DateTimeConfig) -> Result<TimeADT, D
         remaining.push(*token);
     }
 
-    let has_date = if remaining.is_empty() {
-        false
+    let date = if remaining.is_empty() {
+        None
     } else if remaining.len() == 1 {
-        parse_date_token_with_config(remaining[0], config)?
-            .map(|_| true)
-            .ok_or(DateTimeParseError::Invalid)?
+        let (year, month, day) = parse_date_token_with_config(remaining[0], config)?
+            .ok_or(DateTimeParseError::Invalid)?;
+        Some(days_from_ymd(year, month, day).ok_or(DateTimeParseError::FieldOutOfRange)?)
     } else {
-        parse_date_token_with_config(&remaining.join("-"), config)?
-            .map(|_| true)
-            .ok_or(DateTimeParseError::Invalid)?
+        let (year, month, day) = parse_date_token_with_config(&remaining.join("-"), config)?
+            .ok_or(DateTimeParseError::Invalid)?;
+        Some(days_from_ymd(year, month, day).ok_or(DateTimeParseError::FieldOutOfRange)?)
     };
 
-    if (matches!(zone, Some(TimeZoneSpec::Named(_))) || zone_requires_date) && !has_date {
+    if (matches!(zone, Some(TimeZoneSpec::Named(_))) || zone_requires_date) && date.is_none() {
         return Err(DateTimeParseError::Invalid);
     }
 
-    Ok(TimeADT(time_usecs))
+    Ok((time_usecs, zone, date))
 }
 
-pub fn parse_timetz_text(text: &str, config: &DateTimeConfig) -> Option<TimeTzADT> {
-    let trimmed = text.trim();
-    let (time_text, offset_seconds) = match split_time_and_offset(trimmed) {
-        (time_text, Some(offset_text)) => (time_text, parse_offset_seconds(offset_text)?),
-        _ => {
-            let zone_split = trimmed
-                .char_indices()
-                .rev()
-                .find_map(|(idx, ch)| ch.is_whitespace().then_some(idx));
-            if let Some(idx) = zone_split {
-                let time_text = trimmed[..idx].trim();
-                let zone_text = trimmed[idx..].trim();
-                let offset = match parse_timezone_spec(zone_text).ok()? {
-                    Some(TimeZoneSpec::FixedOffset(offset)) => offset,
-                    _ => return None,
-                };
-                (time_text, offset)
-            } else {
-                (trimmed, timezone_offset_seconds(config))
-            }
-        }
-    };
-    let (hour, minute, second, micros) = parse_time_components(time_text)?;
-    let time = TimeADT(time_usecs_from_hms(hour, minute, second, micros)?);
-    Some(TimeTzADT {
-        time,
+pub fn parse_timetz_text(
+    text: &str,
+    config: &DateTimeConfig,
+) -> Result<TimeTzADT, DateTimeParseError> {
+    let (time_usecs, zone, date) = parse_time_input(text, config)?;
+    let offset_seconds = timezone_spec_offset_seconds(zone, date, config)?;
+    Ok(TimeTzADT {
+        time: TimeADT(time_usecs),
         offset_seconds,
     })
 }
@@ -1178,10 +1185,33 @@ mod tests {
         let config = DateTimeConfig::default();
         assert_eq!(
             parse_timetz_text("10:00 BST", &config),
-            Some(TimeTzADT {
+            Ok(TimeTzADT {
                 time: TimeADT(10 * 60 * 60 * 1_000_000),
                 offset_seconds: 60 * 60,
             })
+        );
+    }
+
+    #[test]
+    fn parse_timetz_text_accepts_date_dependent_named_timezones() {
+        let config = DateTimeConfig::default();
+        assert_eq!(
+            parse_timetz_text("2003-03-07 15:36:39 America/New_York", &config),
+            Ok(TimeTzADT {
+                time: TimeADT(15 * 60 * 60 * 1_000_000 + 36 * 60 * 1_000_000 + 39 * 1_000_000),
+                offset_seconds: -5 * 60 * 60,
+            })
+        );
+        assert_eq!(
+            parse_timetz_text("2003-07-07 15:36:39 America/New_York", &config),
+            Ok(TimeTzADT {
+                time: TimeADT(15 * 60 * 60 * 1_000_000 + 36 * 60 * 1_000_000 + 39 * 1_000_000),
+                offset_seconds: -4 * 60 * 60,
+            })
+        );
+        assert_eq!(
+            parse_timetz_text("15:36:39 America/New_York", &config),
+            Err(DateTimeParseError::Invalid)
         );
     }
 }
