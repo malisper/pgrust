@@ -11430,7 +11430,13 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
 
 fn raw_type_output_name(ty: &RawTypeName) -> &str {
     match ty {
-        RawTypeName::Builtin(sql_type) => sql_type_output_name(*sql_type),
+        RawTypeName::Builtin(sql_type) => match sql_type.kind {
+            SqlTypeKind::Time => "time",
+            SqlTypeKind::TimeTz => "timetz",
+            SqlTypeKind::Timestamp => "timestamp",
+            SqlTypeKind::TimestampTz => "timestamptz",
+            _ => sql_type_output_name(*sql_type),
+        },
         RawTypeName::Serial(SerialKind::Small) => "smallserial",
         RawTypeName::Serial(SerialKind::Regular) => "serial",
         RawTypeName::Serial(SerialKind::Big) => "bigserial",
