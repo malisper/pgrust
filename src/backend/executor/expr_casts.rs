@@ -5257,14 +5257,20 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                 ..
             } => cast_text_value(if v { "true" } else { "false" }, ty, true),
             SqlType {
-                kind: SqlTypeKind::Int4,
+                kind: SqlTypeKind::Int2 | SqlTypeKind::Int4 | SqlTypeKind::Int8,
                 ..
-            } => Ok(Value::Int32(if v { 1 } else { 0 })),
+            } => {
+                let value = if v { 1 } else { 0 };
+                match ty.kind {
+                    SqlTypeKind::Int2 => Ok(Value::Int16(value)),
+                    SqlTypeKind::Int4 => Ok(Value::Int32(i32::from(value))),
+                    SqlTypeKind::Int8 => Ok(Value::Int64(i64::from(value))),
+                    _ => unreachable!("bool-to-integer cast target checked above"),
+                }
+            }
             SqlType {
                 kind:
-                    SqlTypeKind::Int2
-                    | SqlTypeKind::Int8
-                    | SqlTypeKind::Oid
+                    SqlTypeKind::Oid
                     | SqlTypeKind::RegProc
                     | SqlTypeKind::RegClass
                     | SqlTypeKind::RegType

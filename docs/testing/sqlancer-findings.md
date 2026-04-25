@@ -42,9 +42,9 @@ existing blocker. Add one finding row per distinct blocker.
 | ID | Class | Signal | Notes |
 |---|---|---|---|
 | SQLANCER-001 | fixed-in-branch | schema introspection | pgrust now exposes base-table metadata through `information_schema.tables` and `information_schema.columns`, including the `table_schema`, `table_type`, and `data_type` columns SQLancer needs for schema loading. |
-| SQLANCER-002 | common-unsupported | scalar compatibility | Current seed-1 blocker after SQLANCER-001: generated expressions use bool-to-integer casts that PostgreSQL accepts, e.g. `CAST((-980570755) NOT IN (-582498801) AS INT)`. Artifact: `/tmp/pgrust-sqlancer-triage-sqlancer001/seed-1`. |
-| SQLANCER-003 | wrong-result / binder edge | `IN` semantics | All-NULL `IN` lists exposed a binding/type edge case. |
-| SQLANCER-004 | common-unsupported | SELECT syntax | SQLancer emits `SELECT ALL`, which is standard PostgreSQL-compatible syntax. |
+| SQLANCER-002 | fixed-in-branch | scalar compatibility | pgrust now accepts bool-to-integer casts that PostgreSQL accepts, e.g. `CAST((-980570755) NOT IN (-582498801) AS INT)`. Original artifact: `/tmp/pgrust-sqlancer-triage-sqlancer001/seed-1`. |
+| SQLANCER-003 | fixed-in-branch | `IN` semantics | All-NULL `IN` lists now bind against the left-hand expression type, so SQLancer's `IN (NULL)` cases no longer fail as ambiguous `ARRAY[]`. Confirmation artifact: `/tmp/pgrust-sqlancer-triage-sqlancer003/seed-1`. |
+| SQLANCER-004 | common-unsupported | SELECT syntax | Current seed-1 blocker after SQLANCER-002/003: SQLancer emits `SELECT ALL`, which is standard PostgreSQL-compatible syntax. Artifact: `/tmp/pgrust-sqlancer-triage-sqlancer003/seed-1`. |
 | SQLANCER-005 | common-unsupported | FROM syntax | SQLancer can emit legacy `FROM table*` inheritance syntax. |
 | SQLANCER-006 | common-unsupported | scalar function | Generated expressions use `upper(text)`. |
 | SQLANCER-007 | robustness | numeric expression | Huge negative numeric exponent generated an arithmetic overflow path. |
