@@ -25,6 +25,7 @@ mod expr_numeric;
 pub(crate) mod expr_ops;
 pub(crate) mod expr_range;
 mod expr_string;
+mod expr_txid;
 mod expr_xml;
 mod foreign_keys;
 pub(crate) mod hashjoin;
@@ -93,6 +94,9 @@ pub use expr_range::render_range_text;
 pub(crate) use expr_range::{
     compare_range_values, decode_range_bytes, encode_range_bytes, eval_range_function,
     parse_range_text,
+};
+pub(crate) use expr_txid::{
+    cast_text_to_txid_snapshot, eval_txid_builtin_function, is_txid_snapshot_type_oid,
 };
 pub(crate) use expr_xml::validate_xml_input;
 pub(crate) use nodes::{
