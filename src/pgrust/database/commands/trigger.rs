@@ -1537,6 +1537,8 @@ fn rewrite_trigger_system_column_refs(expr: &mut SqlExpr) {
         | SqlExpr::Exists(_)
         | SqlExpr::Random
         | SqlExpr::CurrentDate
+        | SqlExpr::CurrentCatalog
+        | SqlExpr::CurrentSchema
         | SqlExpr::CurrentUser
         | SqlExpr::SessionUser
         | SqlExpr::CurrentRole

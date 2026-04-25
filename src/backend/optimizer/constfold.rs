@@ -519,6 +519,8 @@ fn simplify_expr(expr: Expr, case_test_value: Option<&Value>) -> Result<Expr, Pa
         | Expr::CurrentUser
         | Expr::SessionUser
         | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
         | Expr::CurrentDate
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }

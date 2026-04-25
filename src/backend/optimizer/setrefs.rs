@@ -2500,6 +2500,8 @@ fn expr_uses_only_index_keys(
         | Expr::CaseTest(_)
         | Expr::Random
         | Expr::CurrentDate
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
         | Expr::CurrentRole
@@ -2724,6 +2726,8 @@ fn validate_executable_expr(expr: &Expr, plan_node: &str, field: &str) {
         | Expr::CurrentUser
         | Expr::SessionUser
         | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
         | Expr::CurrentDate
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }
@@ -3126,6 +3130,8 @@ fn validate_planner_expr(expr: &Expr, path_node: &str, field: &str) {
         | Expr::CurrentUser
         | Expr::SessionUser
         | Expr::CurrentRole
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
         | Expr::CurrentDate
         | Expr::CurrentTime { .. }
         | Expr::CurrentTimestamp { .. }

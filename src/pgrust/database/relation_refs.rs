@@ -86,6 +86,8 @@ pub(super) fn collect_rels_from_expr(expr: &Expr, rels: &mut BTreeSet<RelFileLoc
         | Expr::Const(_)
         | Expr::Random
         | Expr::CurrentDate
+        | Expr::CurrentCatalog
+        | Expr::CurrentSchema
         | Expr::CurrentUser
         | Expr::SessionUser
         | Expr::CurrentRole
@@ -723,6 +725,8 @@ fn collect_direct_relation_oids_from_sql_expr(
         | SqlExpr::NumericLiteral(_)
         | SqlExpr::Random
         | SqlExpr::CurrentDate
+        | SqlExpr::CurrentCatalog
+        | SqlExpr::CurrentSchema
         | SqlExpr::CurrentUser
         | SqlExpr::SessionUser
         | SqlExpr::CurrentRole

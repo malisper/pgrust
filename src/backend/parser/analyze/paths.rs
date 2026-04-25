@@ -58,7 +58,17 @@ fn simple_column_index(expr: &Expr) -> Option<usize> {
 
 fn strip_casts(expr: &Expr) -> &Expr {
     match expr {
-        Expr::Cast(inner, _) => strip_casts(inner),
+        Expr::Func(func)
+            if matches!(
+                func.implementation,
+                crate::include::nodes::primnodes::ScalarFunctionImpl::Builtin(
+                    BuiltinScalarFunction::BpcharToText
+                )
+            ) && func.args.len() == 1 =>
+        {
+            strip_casts(&func.args[0])
+        }
+        Expr::Cast(inner, _) | Expr::Collate { expr: inner, .. } => strip_casts(inner),
         other => other,
     }
 }
