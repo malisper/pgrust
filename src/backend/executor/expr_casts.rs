@@ -2584,7 +2584,7 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             SqlTypeKind::Inet => Ok(Value::Inet(value)),
             SqlTypeKind::Cidr => parse_cidr_text(&value.render_cidr()).map(Value::Cidr),
             SqlTypeKind::Text | SqlTypeKind::Name | SqlTypeKind::Char | SqlTypeKind::Varchar => {
-                Ok(Value::Text(CompactString::from_owned(value.render_inet())))
+                Ok(Value::Text(CompactString::from_owned(value.render_cidr())))
             }
             _ => Err(ExecError::TypeMismatch {
                 op: "::inet",
