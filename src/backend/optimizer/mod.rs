@@ -204,8 +204,11 @@ fn path_relids(path: &Path) -> Vec<usize> {
     match path {
         Path::Result { .. } => Vec::new(),
         Path::Append { relids, .. } => relids.clone(),
+        Path::MergeAppend { source_id, .. } => vec![*source_id],
         Path::SetOp { slot_id, .. } => vec![*slot_id],
+        Path::Unique { input, .. } => path_relids(input),
         Path::SeqScan { source_id, .. }
+        | Path::IndexOnlyScan { source_id, .. }
         | Path::IndexScan { source_id, .. }
         | Path::BitmapIndexScan { source_id, .. }
         | Path::BitmapHeapScan { source_id, .. } => vec![*source_id],

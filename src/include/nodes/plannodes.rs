@@ -146,6 +146,17 @@ pub enum Plan {
         desc: RelationDesc,
         children: Vec<Plan>,
     },
+    MergeAppend {
+        plan_info: PlanEstimate,
+        source_id: usize,
+        desc: RelationDesc,
+        items: Vec<OrderByEntry>,
+        children: Vec<Plan>,
+    },
+    Unique {
+        plan_info: PlanEstimate,
+        input: Box<Plan>,
+    },
     SeqScan {
         plan_info: PlanEstimate,
         source_id: usize,
@@ -156,6 +167,23 @@ pub enum Plan {
         relispopulated: bool,
         toast: Option<ToastRelationRef>,
         desc: RelationDesc,
+    },
+    IndexOnlyScan {
+        plan_info: PlanEstimate,
+        source_id: usize,
+        rel: RelFileLocator,
+        relation_name: String,
+        relation_oid: u32,
+        index_rel: RelFileLocator,
+        index_name: String,
+        am_oid: u32,
+        toast: Option<ToastRelationRef>,
+        desc: RelationDesc,
+        index_desc: RelationDesc,
+        index_meta: IndexRelCacheEntry,
+        keys: Vec<IndexScanKey>,
+        order_by_keys: Vec<IndexScanKey>,
+        direction: ScanDirection,
     },
     IndexScan {
         plan_info: PlanEstimate,
@@ -330,7 +358,10 @@ impl Plan {
         match self {
             Plan::Result { plan_info }
             | Plan::Append { plan_info, .. }
+            | Plan::MergeAppend { plan_info, .. }
+            | Plan::Unique { plan_info, .. }
             | Plan::SeqScan { plan_info, .. }
+            | Plan::IndexOnlyScan { plan_info, .. }
             | Plan::IndexScan { plan_info, .. }
             | Plan::BitmapIndexScan { plan_info, .. }
             | Plan::BitmapHeapScan { plan_info, .. }
@@ -360,7 +391,10 @@ impl Plan {
         match self {
             Plan::Result { plan_info }
             | Plan::Append { plan_info, .. }
+            | Plan::MergeAppend { plan_info, .. }
+            | Plan::Unique { plan_info, .. }
             | Plan::SeqScan { plan_info, .. }
+            | Plan::IndexOnlyScan { plan_info, .. }
             | Plan::IndexScan { plan_info, .. }
             | Plan::BitmapIndexScan { plan_info, .. }
             | Plan::BitmapHeapScan { plan_info, .. }
@@ -389,7 +423,7 @@ impl Plan {
     pub fn columns(&self) -> Vec<QueryColumn> {
         match self {
             Plan::Result { .. } => vec![],
-            Plan::Append { desc, .. } => desc
+            Plan::Append { desc, .. } | Plan::MergeAppend { desc, .. } => desc
                 .columns
                 .iter()
                 .map(|c| QueryColumn {
@@ -398,7 +432,8 @@ impl Plan {
                     wire_type_oid: None,
                 })
                 .collect(),
-            Plan::SeqScan { desc, .. } => desc
+            Plan::Unique { input, .. } => input.columns(),
+            Plan::SeqScan { desc, .. } | Plan::IndexOnlyScan { desc, .. } => desc
                 .columns
                 .iter()
                 .map(|c| QueryColumn {

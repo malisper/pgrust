@@ -4617,7 +4617,9 @@ fn explain_partitionwise_join_preserves_hash_cond_and_aliases() {
 
     fn collect_hash_clause_counts(plan: &Plan, counts: &mut Vec<usize>) {
         match plan {
-            Plan::Append { children, .. } | Plan::SetOp { children, .. } => {
+            Plan::Append { children, .. }
+            | Plan::MergeAppend { children, .. }
+            | Plan::SetOp { children, .. } => {
                 for child in children {
                     collect_hash_clause_counts(child, counts);
                 }
@@ -4641,6 +4643,7 @@ fn explain_partitionwise_join_preserves_hash_cond_and_aliases() {
                 collect_hash_clause_counts(right, counts);
             }
             Plan::Hash { input, .. }
+            | Plan::Unique { input, .. }
             | Plan::Filter { input, .. }
             | Plan::OrderBy { input, .. }
             | Plan::Projection { input, .. }
@@ -4658,6 +4661,7 @@ fn explain_partitionwise_join_preserves_hash_cond_and_aliases() {
             }
             Plan::Result { .. }
             | Plan::SeqScan { .. }
+            | Plan::IndexOnlyScan { .. }
             | Plan::IndexScan { .. }
             | Plan::BitmapIndexScan { .. }
             | Plan::BitmapHeapScan { .. }

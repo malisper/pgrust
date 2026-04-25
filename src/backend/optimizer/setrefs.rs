@@ -594,7 +594,8 @@ fn build_path_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
             targets,
             ..
         } => build_projection_tlist(root, *slot_id, input, targets),
-        Path::Filter { input, .. }
+        Path::Unique { input, .. }
+        | Path::Filter { input, .. }
         | Path::OrderBy { input, .. }
         | Path::Limit { input, .. }
         | Path::LockRows { input, .. } => build_path_tlist(root, input),
@@ -1176,11 +1177,14 @@ fn expr_contains_local_semantic_var(expr: &Expr) -> bool {
 fn path_single_relid(path: &Path) -> Option<usize> {
     match path {
         Path::Append { relids, .. } => relids.first().copied().filter(|_| relids.len() == 1),
-        Path::SeqScan { source_id, .. }
+        Path::MergeAppend { source_id, .. }
+        | Path::SeqScan { source_id, .. }
+        | Path::IndexOnlyScan { source_id, .. }
         | Path::IndexScan { source_id, .. }
         | Path::BitmapIndexScan { source_id, .. }
         | Path::BitmapHeapScan { source_id, .. } => Some(*source_id),
-        Path::Filter { input, .. }
+        Path::Unique { input, .. }
+        | Path::Filter { input, .. }
         | Path::Projection { input, .. }
         | Path::OrderBy { input, .. }
         | Path::Limit { input, .. }
@@ -2774,6 +2778,25 @@ fn validate_executable_plan(plan: &Plan) {
                 validate_executable_plan(child);
             }
         }
+        Plan::MergeAppend {
+            children, items, ..
+        } => {
+            for item in items {
+                validate_executable_expr(&item.expr, "MergeAppend", "items");
+            }
+            for child in children {
+                validate_executable_plan(child);
+            }
+        }
+        Plan::Unique { input, .. } => validate_executable_plan(input),
+        Plan::IndexOnlyScan {
+            keys,
+            order_by_keys,
+            ..
+        } => {
+            validate_executable_index_scan_keys(keys, "IndexOnlyScan", "keys");
+            validate_executable_index_scan_keys(order_by_keys, "IndexOnlyScan", "order_by_keys");
+        }
         Plan::IndexScan {
             keys,
             order_by_keys,
@@ -3167,6 +3190,14 @@ fn validate_planner_index_scan_keys(keys: &[IndexScanKey], path_node: &str, fiel
 fn validate_planner_path(path: &Path) {
     match path {
         Path::Result { .. } | Path::SeqScan { .. } => {}
+        Path::IndexOnlyScan {
+            keys,
+            order_by_keys,
+            ..
+        } => {
+            validate_planner_index_scan_keys(keys, "IndexOnlyScan", "keys");
+            validate_planner_index_scan_keys(order_by_keys, "IndexOnlyScan", "order_by_keys");
+        }
         Path::IndexScan {
             keys,
             order_by_keys,
@@ -3183,6 +3214,17 @@ fn validate_planner_path(path: &Path) {
                 validate_planner_path(child);
             }
         }
+        Path::MergeAppend {
+            children, items, ..
+        } => {
+            for item in items {
+                validate_planner_expr(&item.expr, "MergeAppend", "items");
+            }
+            for child in children {
+                validate_planner_path(child);
+            }
+        }
+        Path::Unique { input, .. } => validate_planner_path(input),
         Path::BitmapHeapScan {
             bitmapqual,
             recheck_qual,
@@ -3401,6 +3443,95 @@ fn set_append_references(
             .into_iter()
             .map(|child| set_plan_refs(ctx, child))
             .collect(),
+    }
+}
+
+fn set_merge_append_references(
+    ctx: &mut SetRefsContext<'_>,
+    plan_info: PlanEstimate,
+    source_id: usize,
+    desc: crate::include::nodes::primnodes::RelationDesc,
+    items: Vec<OrderByEntry>,
+    children: Vec<Path>,
+) -> Plan {
+    let lowered_items = if let Some(first_child) = children.first() {
+        let input_tlist = build_path_tlist(ctx.root, first_child);
+        let mut lowered_items = Vec::with_capacity(items.len());
+        for item in items {
+            let item = lower_order_by_expr_for_input(ctx.root, item, first_child, &input_tlist);
+            lowered_items.push(lower_order_by_entry(
+                ctx,
+                item,
+                LowerMode::Input {
+                    path: Some(first_child),
+                    tlist: &input_tlist,
+                },
+            ));
+        }
+        lowered_items
+    } else {
+        Vec::new()
+    };
+    Plan::MergeAppend {
+        plan_info,
+        source_id,
+        desc,
+        items: lowered_items,
+        children: children
+            .into_iter()
+            .map(|child| set_plan_refs(ctx, child))
+            .collect(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn set_index_only_scan_references(
+    ctx: &mut SetRefsContext<'_>,
+    plan_info: PlanEstimate,
+    source_id: usize,
+    rel: crate::RelFileLocator,
+    relation_name: String,
+    relation_oid: u32,
+    index_rel: crate::RelFileLocator,
+    index_name: String,
+    am_oid: u32,
+    toast: Option<crate::include::nodes::primnodes::ToastRelationRef>,
+    desc: crate::include::nodes::primnodes::RelationDesc,
+    index_desc: crate::include::nodes::primnodes::RelationDesc,
+    index_meta: crate::backend::utils::cache::relcache::IndexRelCacheEntry,
+    keys: Vec<IndexScanKey>,
+    order_by_keys: Vec<IndexScanKey>,
+    direction: crate::include::access::relscan::ScanDirection,
+) -> Plan {
+    let keys = lower_index_scan_keys(ctx, keys, LowerMode::Scalar);
+    let order_by_keys = lower_index_scan_keys(ctx, order_by_keys, LowerMode::Scalar);
+    Plan::IndexOnlyScan {
+        plan_info,
+        source_id,
+        rel,
+        relation_name,
+        relation_oid,
+        index_rel,
+        index_name,
+        am_oid,
+        toast,
+        desc,
+        index_desc,
+        index_meta,
+        keys,
+        order_by_keys,
+        direction,
+    }
+}
+
+fn set_unique_references(
+    ctx: &mut SetRefsContext<'_>,
+    plan_info: PlanEstimate,
+    input: Box<Path>,
+) -> Plan {
+    Plan::Unique {
+        plan_info,
+        input: Box::new(set_plan_refs(ctx, *input)),
     }
 }
 
@@ -4402,6 +4533,17 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             children,
             ..
         } => set_append_references(ctx, plan_info, source_id, desc, children),
+        Path::MergeAppend {
+            plan_info,
+            source_id,
+            desc,
+            items,
+            children,
+            ..
+        } => set_merge_append_references(ctx, plan_info, source_id, desc, items, children),
+        Path::Unique {
+            plan_info, input, ..
+        } => set_unique_references(ctx, plan_info, input),
         Path::SetOp {
             plan_info,
             op,
@@ -4431,6 +4573,42 @@ fn set_plan_refs(ctx: &mut SetRefsContext<'_>, path: Path) -> Plan {
             relispopulated,
             toast,
             desc,
+        ),
+        Path::IndexOnlyScan {
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            index_rel,
+            index_name,
+            am_oid,
+            toast,
+            desc,
+            index_desc,
+            index_meta,
+            keys,
+            order_by_keys,
+            direction,
+            pathkeys: _,
+            ..
+        } => set_index_only_scan_references(
+            ctx,
+            plan_info,
+            source_id,
+            rel,
+            relation_name,
+            relation_oid,
+            index_rel,
+            index_name,
+            am_oid,
+            toast,
+            desc,
+            index_desc,
+            index_meta,
+            keys,
+            order_by_keys,
+            direction,
         ),
         Path::IndexScan {
             plan_info,
