@@ -4,8 +4,8 @@ use crate::backend::parser::{
     AggregateArgType, AggregateSignatureKind, CreateAggregateStatement, CreateFunctionReturnSpec,
     CreateFunctionStatement, CreateProcedureStatement, FunctionArgMode, FunctionParallel,
     FunctionVolatility, OwnedSequenceSpec, PartitionBoundSpec, RawTypeName, SequenceOptionsSpec,
-    SqlType, SqlTypeKind, pg_partitioned_table_row, resolve_raw_type_name,
-    serialize_partition_bound,
+    SqlType, SqlTypeKind, Statement, parse_statement, pg_partitioned_table_row,
+    resolve_raw_type_name, serialize_partition_bound,
 };
 use crate::include::catalog::{
     ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLERANGEOID, ANYMULTIRANGEOID, ANYOID, ANYRANGEOID,
@@ -24,6 +24,176 @@ use crate::pgrust::database::{
 pub(super) struct CreatedOwnedSequence {
     pub(super) column_index: usize,
     pub(super) sequence_oid: u32,
+}
+
+fn validate_sql_procedure_body(
+    create_stmt: &CreateProcedureStatement,
+    catalog: &dyn CatalogLookup,
+) -> Result<(), ExecError> {
+    if !create_stmt.language.eq_ignore_ascii_case("sql") {
+        return Ok(());
+    }
+    if create_stmt.sql_standard_body && sql_body_contains_create_table(&create_stmt.body) {
+        return Err(ExecError::DetailedError {
+            message: "CREATE TABLE is not yet supported in unquoted SQL function body".into(),
+            detail: None,
+            hint: None,
+            sqlstate: "0A000",
+        });
+    }
+    for stmt_sql in split_sql_body_statements(&create_stmt.body)? {
+        let Ok(Statement::Call(call_stmt)) = parse_statement(&stmt_sql) else {
+            continue;
+        };
+        if call_targets_procedure_with_output_args(&call_stmt, catalog) {
+            return Err(ExecError::WithContext {
+                source: Box::new(ExecError::DetailedError {
+                    message:
+                        "calling procedures with output arguments is not supported in SQL functions"
+                            .into(),
+                    detail: None,
+                    hint: None,
+                    sqlstate: "0A000",
+                }),
+                context: format!("SQL function \"{}\"", create_stmt.procedure_name),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn sql_body_contains_create_table(body: &str) -> bool {
+    split_sql_body_statements(body).is_ok_and(|statements| {
+        statements.into_iter().any(|stmt| {
+            stmt.split_whitespace()
+                .map(str::to_ascii_lowercase)
+                .collect::<Vec<_>>()
+                .windows(2)
+                .any(|words| words == ["create", "table"])
+        })
+    })
+}
+
+fn call_targets_procedure_with_output_args(
+    call_stmt: &crate::backend::parser::CallStatement,
+    catalog: &dyn CatalogLookup,
+) -> bool {
+    let actual_count = call_stmt.raw_arg_sql.len();
+    catalog
+        .proc_rows_by_name(&call_stmt.procedure_name)
+        .into_iter()
+        .filter(|row| row.prokind == 'p')
+        .filter(|row| {
+            call_stmt.schema_name.as_deref().is_none_or(|schema_name| {
+                catalog
+                    .namespace_row_by_oid(row.pronamespace)
+                    .is_some_and(|namespace| namespace.nspname.eq_ignore_ascii_case(schema_name))
+            })
+        })
+        .filter(|row| procedure_accepts_arg_count(row, actual_count))
+        .any(|row| procedure_has_output_args(&row))
+}
+
+fn procedure_accepts_arg_count(row: &PgProcRow, actual: usize) -> bool {
+    let input_count = row.pronargs.max(0) as usize;
+    let all_count = row
+        .proallargtypes
+        .as_ref()
+        .map(Vec::len)
+        .unwrap_or(input_count);
+    actual == input_count || actual == all_count
+}
+
+fn procedure_has_output_args(row: &PgProcRow) -> bool {
+    row.proargmodes
+        .as_deref()
+        .is_some_and(|modes| modes.iter().any(|mode| matches!(*mode, b'o' | b'b')))
+}
+
+fn split_sql_body_statements(body: &str) -> Result<Vec<String>, ExecError> {
+    let body = sql_standard_body_inner(body).unwrap_or(body);
+    let mut statements = Vec::new();
+    let mut start = 0usize;
+    let bytes = body.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' => i = scan_sql_delimited_end(bytes, i, b'\'')?,
+            b'"' => i = scan_sql_delimited_end(bytes, i, b'"')?,
+            b'$' => {
+                if let Some(end) = scan_sql_dollar_string_end(body, i) {
+                    i = end;
+                }
+            }
+            b';' => {
+                let statement = body[start..i].trim();
+                if !statement.is_empty() {
+                    statements.push(statement.to_string());
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let statement = body[start..].trim();
+    if !statement.is_empty() && !statement.eq_ignore_ascii_case("end") {
+        statements.push(statement.to_string());
+    }
+    Ok(statements)
+}
+
+fn sql_standard_body_inner(body: &str) -> Option<&str> {
+    let trimmed = body.trim();
+    let lowered = trimmed.to_ascii_lowercase();
+    if !lowered.starts_with("begin atomic") {
+        return None;
+    }
+    let without_trailing_semicolon = trimmed.trim_end_matches(';').trim_end();
+    let lowered_without_semicolon = without_trailing_semicolon.to_ascii_lowercase();
+    let end = if lowered_without_semicolon.ends_with("end") {
+        without_trailing_semicolon.len().saturating_sub("end".len())
+    } else {
+        trimmed.len()
+    };
+    trimmed.get("begin atomic".len()..end).map(str::trim)
+}
+
+fn scan_sql_delimited_end(bytes: &[u8], start: usize, delimiter: u8) -> Result<usize, ExecError> {
+    let mut i = start + 1;
+    while i < bytes.len() {
+        if bytes[i] == delimiter {
+            if i + 1 < bytes.len() && bytes[i + 1] == delimiter {
+                i += 2;
+                continue;
+            }
+            return Ok(i + 1);
+        }
+        i += 1;
+    }
+    Err(ExecError::Parse(ParseError::UnexpectedEof))
+}
+
+fn scan_sql_dollar_string_end(input: &str, start: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut tag_end = start + 1;
+    while tag_end < bytes.len() {
+        let byte = bytes[tag_end];
+        if byte == b'$' {
+            break;
+        }
+        if !(byte.is_ascii_alphanumeric() || byte == b'_') {
+            return None;
+        }
+        tag_end += 1;
+    }
+    if bytes.get(tag_end) != Some(&b'$') {
+        return None;
+    }
+    let tag = &input[start..=tag_end];
+    input[tag_end + 1..]
+        .find(tag)
+        .map(|offset| tag_end + 1 + offset + tag.len())
 }
 
 fn relation_exists_in_namespace(
@@ -1168,6 +1338,8 @@ impl Database {
         configured_search_path: Option<&[String]>,
         catalog_effects: &mut Vec<CatalogMutationEffect>,
     ) -> Result<StatementResult, ExecError> {
+        let catalog = self.lazy_catalog_lookup(client_id, Some((xid, cid)), configured_search_path);
+        validate_sql_procedure_body(create_stmt, &catalog)?;
         let function_stmt = CreateFunctionStatement {
             schema_name: create_stmt.schema_name.clone(),
             function_name: create_stmt.procedure_name.clone(),
