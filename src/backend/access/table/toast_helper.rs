@@ -14,7 +14,30 @@ use crate::include::varatt::{
     VARHDRSZ, compressed_inline_compression_method, compressed_inline_extsize,
     is_compressed_inline_datum, is_ondisk_toast_pointer,
 };
+use parking_lot::Mutex;
 use std::cmp::Reverse;
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
+const TOAST_TUPLE_TARGET: usize = 2_040;
+
+static TOAST_TUPLE_TARGETS: OnceLock<Mutex<HashMap<u32, usize>>> = OnceLock::new();
+
+fn toast_tuple_targets() -> &'static Mutex<HashMap<u32, usize>> {
+    TOAST_TUPLE_TARGETS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(crate) fn set_toast_tuple_target_for_toast_relation(toast_oid: u32, target: usize) {
+    toast_tuple_targets().lock().insert(toast_oid, target);
+}
+
+fn toast_tuple_target(toast_oid: u32) -> usize {
+    toast_tuple_targets()
+        .lock()
+        .get(&toast_oid)
+        .copied()
+        .unwrap_or(TOAST_TUPLE_TARGET)
+}
 
 fn build_tuple(desc: &RelationDesc, values: &[TupleValue]) -> Result<HeapTuple, ExecError> {
     HeapTuple::from_values(&desc.attribute_descs(), values).map_err(ExecError::from)
@@ -129,7 +152,8 @@ pub(crate) fn toast_tuple_values_for_write(
     };
     let mut stored = Vec::new();
     let mut tuple = build_tuple(desc, values)?;
-    if tuple.serialized_len() <= MAX_HEAP_TUPLE_SIZE {
+    let target = toast_tuple_target(toast.relation_oid);
+    if tuple.serialized_len() <= target {
         return Ok(stored);
     }
 
@@ -137,13 +161,13 @@ pub(crate) fn toast_tuple_values_for_write(
         let changed = maybe_compress_column(desc, values, index, ctx, &mut ttc)?;
         if changed {
             tuple = build_tuple(desc, values)?;
-            if tuple.serialized_len() <= MAX_HEAP_TUPLE_SIZE {
+            if tuple.serialized_len() <= target {
                 return Ok(stored);
             }
         }
     }
 
-    while tuple.serialized_len() > MAX_HEAP_TUPLE_SIZE {
+    while tuple.serialized_len() > target {
         let Some(toasted) = externalize_largest_column(
             desc,
             values,
@@ -159,6 +183,10 @@ pub(crate) fn toast_tuple_values_for_write(
         };
         stored.push(toasted);
         tuple = build_tuple(desc, values)?;
+    }
+
+    if tuple.serialized_len() <= MAX_HEAP_TUPLE_SIZE {
+        return Ok(stored);
     }
 
     while tuple.serialized_len() > MAX_HEAP_TUPLE_SIZE {

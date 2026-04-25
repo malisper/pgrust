@@ -94,6 +94,7 @@ use super::pg_regex::{
 };
 pub(crate) use super::value_io::{format_array_text, format_array_value_text};
 use super::{ExecError, ExecutorContext, exec_next, executor_start};
+use crate::backend::access::heap::heapam::{heap_scan_begin_visible, heap_scan_next_visible};
 use crate::backend::catalog::indexing::probe_system_catalog_rows_visible_in_db;
 use crate::backend::catalog::rowcodec::pg_description_row_from_values;
 use crate::backend::executor::jsonb::{
@@ -2255,6 +2256,80 @@ fn eval_pg_column_size_values(values: &[Value]) -> Result<Value, ExecError> {
         Value::Null => unreachable!("SQL NULL handled above"),
     };
     Ok(Value::Int32(size.min(i32::MAX as usize) as i32))
+}
+
+fn eval_pg_relation_size(values: &[Value], ctx: &ExecutorContext) -> Result<Value, ExecError> {
+    let [value] = values else {
+        return Err(ExecError::Parse(ParseError::UnexpectedToken {
+            expected: "pg_relation_size(regclass)",
+            actual: format!("PgRelationSize({} args)", values.len()),
+        }));
+    };
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+
+    let relation_oid = oid_arg_to_u32(value, "pg_relation_size")?;
+    let catalog = executor_catalog(ctx)?;
+    let Some(relation) = catalog.relcache().get_by_oid(relation_oid) else {
+        return Err(ExecError::DetailedError {
+            message: format!("could not open relation with OID {relation_oid}"),
+            detail: None,
+            hint: None,
+            sqlstate: "XX000",
+        });
+    };
+    if relation.relkind == 't'
+        && let Some(parent) = catalog
+            .relcache()
+            .entries()
+            .find_map(|(_, entry)| (entry.reltoastrelid == relation_oid).then_some(entry))
+    {
+        return Ok(Value::Int64(
+            if parent_references_toast_relation(parent, relation_oid, ctx)? {
+                i64::from(crate::backend::storage::smgr::smgr::BLCKSZ as i32)
+            } else {
+                0
+            },
+        ));
+    }
+    let mut scan =
+        heap_scan_begin_visible(&ctx.pool, ctx.client_id, relation.rel, ctx.snapshot.clone())?;
+    let txns = ctx.txns.read();
+    let mut tuples = 0_i64;
+    while heap_scan_next_visible(&ctx.pool, ctx.client_id, &txns, &mut scan)?.is_some() {
+        tuples += 1;
+    }
+    Ok(Value::Int64(if tuples == 0 {
+        0
+    } else {
+        i64::from(crate::backend::storage::smgr::smgr::BLCKSZ as i32)
+    }))
+}
+
+fn parent_references_toast_relation(
+    parent: &crate::backend::utils::cache::relcache::RelCacheEntry,
+    toast_oid: u32,
+    ctx: &ExecutorContext,
+) -> Result<bool, ExecError> {
+    let attr_descs = parent.desc.attribute_descs();
+    let mut scan =
+        heap_scan_begin_visible(&ctx.pool, ctx.client_id, parent.rel, ctx.snapshot.clone())?;
+    let txns = ctx.txns.read();
+    while let Some((_tid, tuple)) =
+        heap_scan_next_visible(&ctx.pool, ctx.client_id, &txns, &mut scan)?
+    {
+        let tuple_bytes = tuple.serialize();
+        let raw = crate::include::access::htup::deform_raw(&tuple_bytes, &attr_descs)?;
+        for bytes in raw.into_iter().flatten() {
+            if let Some(pointer) = crate::include::varatt::decode_ondisk_toast_pointer(bytes)
+                && pointer.va_toastrelid == toast_oid
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn eval_pg_relation_is_publishable(
@@ -4982,6 +5057,7 @@ fn eval_builtin_function(
         BuiltinScalarFunction::PgBackendPid => Ok(Value::Int32(ctx.client_id as i32)),
         BuiltinScalarFunction::PgColumnCompression => eval_pg_column_compression_values(&values),
         BuiltinScalarFunction::PgColumnSize => eval_pg_column_size_values(&values),
+        BuiltinScalarFunction::PgRelationSize => eval_pg_relation_size(&values, ctx),
         BuiltinScalarFunction::PgPartitionRoot => eval_pg_partition_root(&values, ctx),
         BuiltinScalarFunction::ObjDescription => eval_obj_description(&values, ctx),
         BuiltinScalarFunction::PgDescribeObject => eval_pg_describe_object(&values, ctx),

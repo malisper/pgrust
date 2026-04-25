@@ -1,5 +1,6 @@
 pub mod analyze;
 pub mod copyfrom;
+pub mod copyto;
 pub mod explain;
 pub(crate) mod partition;
 pub mod rolecmds;

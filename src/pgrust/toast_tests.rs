@@ -382,6 +382,40 @@ fn alter_column_compression_can_keep_large_values_inline() {
 }
 
 #[test]
+fn pg_relation_size_reports_empty_and_nonempty_toast_relations() {
+    let base = temp_dir("pg_relation_size_toast");
+    let db = Database::open(&base, 64).unwrap();
+
+    db.execute(1, "create table docs (payload text)").unwrap();
+    db.execute(
+        1,
+        "alter table docs alter column payload set storage external",
+    )
+    .unwrap();
+    db.execute(1, "insert into docs values (repeat('1234567890', 10000))")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_relation_size(reltoastrelid) = 0 from pg_class where relname = 'docs'",
+        ),
+        vec![vec![Value::Bool(false)]]
+    );
+
+    db.execute(1, "truncate table docs").unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select pg_relation_size(reltoastrelid) = 0 from pg_class where relname = 'docs'",
+        ),
+        vec![vec![Value::Bool(true)]]
+    );
+}
+
+#[test]
 fn storage_external_disables_compression_even_when_requested() {
     let base = temp_dir("external_without_compression");
     let db = Database::open(&base, 64).unwrap();
