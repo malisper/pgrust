@@ -2760,8 +2760,12 @@ fn explain_shows_initplan_for_rewritten_minmax_aggregate() {
     );
 
     assert!(lines.iter().any(|line| line == "  InitPlan 1"));
-    assert!(lines.iter().any(|line| line.trim() == "Limit"));
-    assert!(lines.iter().any(|line| line.trim() == "Result"));
+    assert!(lines.iter().any(|line| line.trim() == "->  Limit"));
+    assert!(
+        lines
+            .iter()
+            .any(|line| matches!(line.trim(), "Result" | "->  Result"))
+    );
     assert!(
         lines
             .iter()

@@ -3703,7 +3703,7 @@ fn explain_rewritten_min_aggregate_uses_index_only_scan() {
                 })
                 .collect::<Vec<_>>();
             assert!(rendered.iter().any(|line| line.as_str() == "  InitPlan 1"));
-            assert!(rendered.iter().any(|line| line.trim() == "Limit"));
+            assert!(rendered.iter().any(|line| line.trim() == "->  Limit"));
             assert!(
                 rendered
                     .iter()
