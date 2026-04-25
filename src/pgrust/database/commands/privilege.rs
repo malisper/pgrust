@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::backend::catalog::roles::find_role_by_name;
 use crate::backend::commands::rolecmds::{membership_row, role_management_error};
 use crate::backend::parser::{
     CatalogLookup, GrantObjectPrivilege, GrantObjectStatement, GrantRoleMembershipStatement,
@@ -265,6 +266,7 @@ impl Database {
                 )?;
                 Ok(StatementResult::AffectedRows(0))
             }
+            GrantObjectPrivilege::UsageOnType => Ok(StatementResult::AffectedRows(0)),
         }
     }
 
@@ -319,6 +321,7 @@ impl Database {
                 )?;
                 Ok(StatementResult::AffectedRows(0))
             }
+            GrantObjectPrivilege::UsageOnType => Ok(StatementResult::AffectedRows(0)),
         }
     }
 
@@ -367,7 +370,55 @@ impl Database {
                 )?;
                 Ok(StatementResult::AffectedRows(0))
             }
+            GrantObjectPrivilege::UsageOnType => {
+                self.execute_revoke_type_usage_stmt(client_id, stmt, configured_search_path)
+            }
         }
+    }
+
+    fn execute_revoke_type_usage_stmt(
+        &self,
+        client_id: ClientId,
+        stmt: &RevokeObjectStatement,
+        configured_search_path: Option<&[String]>,
+    ) -> Result<StatementResult, ExecError> {
+        let type_name = single_object_name(&stmt.object_names, "single type name")?;
+        let search_path = self.effective_search_path(client_id, configured_search_path);
+        let auth_catalog = self
+            .auth_catalog(client_id, None)
+            .map_err(map_catalog_error)?;
+        let mut range_types = self.range_types.write();
+        if let Some(entry) = range_types.values().find(|entry| {
+            entry.multirange_name.eq_ignore_ascii_case(type_name)
+                && type_namespace_visible(entry.namespace_oid, &search_path)
+        }) {
+            return Err(cannot_set_multirange_privileges_error(&entry.name));
+        }
+        let Some((range_key, _)) = range_types.iter().find(|(_, entry)| {
+            entry.name.eq_ignore_ascii_case(type_name)
+                && type_namespace_visible(entry.namespace_oid, &search_path)
+        }) else {
+            return Err(ExecError::Parse(ParseError::UnsupportedType(
+                type_name.to_string(),
+            )));
+        };
+        let range_key = range_key.clone();
+        let entry = range_types
+            .get_mut(&range_key)
+            .expect("range key found in snapshot");
+        for grantee_name in &stmt.grantee_names {
+            if grantee_name.eq_ignore_ascii_case("public") {
+                entry.public_usage = false;
+                continue;
+            }
+            let grantee = find_role_by_name(auth_catalog.roles(), grantee_name)
+                .ok_or_else(|| role_does_not_exist_error(grantee_name))?;
+            if grantee.oid == entry.owner_oid {
+                entry.owner_usage = false;
+            }
+        }
+        self.plan_cache.invalidate_all();
+        Ok(StatementResult::AffectedRows(0))
     }
 
     fn execute_grant_table_acl_stmt_with_search_path(
@@ -1484,6 +1535,32 @@ fn role_name(_db: &Database, auth_catalog: &AuthCatalog, role_oid: u32) -> Strin
 
 fn member_name(db: &Database, auth_catalog: &AuthCatalog, member_oid: u32) -> String {
     role_name(db, auth_catalog, member_oid)
+}
+
+fn type_namespace_visible(namespace_oid: u32, search_path: &[String]) -> bool {
+    search_path.iter().any(|schema| {
+        (schema == "public" && namespace_oid == crate::include::catalog::PUBLIC_NAMESPACE_OID)
+            || (schema == "pg_catalog"
+                && namespace_oid == crate::include::catalog::PG_CATALOG_NAMESPACE_OID)
+    })
+}
+
+fn cannot_set_multirange_privileges_error(_range_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: "cannot set privileges of multirange types".into(),
+        detail: None,
+        hint: Some("Set the privileges of the range type instead.".into()),
+        sqlstate: "42809",
+    }
+}
+
+fn role_does_not_exist_error(role_name: &str) -> ExecError {
+    ExecError::DetailedError {
+        message: format!("role \"{role_name}\" does not exist"),
+        detail: None,
+        hint: None,
+        sqlstate: "42704",
+    }
 }
 
 #[cfg(test)]

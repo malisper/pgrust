@@ -30,6 +30,7 @@ pub const GIST_POLY_FAMILY_OID: u32 = 2594;
 pub const GIST_CIRCLE_FAMILY_OID: u32 = 2595;
 pub const GIST_RANGE_FAMILY_OID: u32 = 3919;
 pub const GIST_NETWORK_FAMILY_OID: u32 = 76112;
+pub const GIST_MULTIRANGE_FAMILY_OID: u32 = 6158;
 pub const GIN_JSONB_FAMILY_OID: u32 = 4036;
 pub const SPGIST_BOX_FAMILY_OID: u32 = 4001;
 pub const SPGIST_POLY_FAMILY_OID: u32 = 4002;
@@ -67,6 +68,7 @@ pub const HASH_TIMESTAMP_FAMILY_OID: u32 = 2040;
 pub const HASH_BOOL_FAMILY_OID: u32 = 2222;
 pub const HASH_BYTEA_FAMILY_OID: u32 = 2223;
 pub const HASH_UUID_FAMILY_OID: u32 = 2969;
+pub const HASH_MULTIRANGE_FAMILY_OID: u32 = 4225;
 pub const HASH_MACADDR_FAMILY_OID: u32 = 76230;
 pub const HASH_MACADDR8_FAMILY_OID: u32 = 76231;
 
@@ -262,6 +264,13 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
             opfowner: BOOTSTRAP_SUPERUSER_OID,
         },
         PgOpfamilyRow {
+            oid: GIST_MULTIRANGE_FAMILY_OID,
+            opfmethod: GIST_AM_OID,
+            opfname: "multirange_ops".into(),
+            opfnamespace: PG_CATALOG_NAMESPACE_OID,
+            opfowner: BOOTSTRAP_SUPERUSER_OID,
+        },
+        PgOpfamilyRow {
             oid: SPGIST_BOX_FAMILY_OID,
             opfmethod: SPGIST_AM_OID,
             opfname: "box_ops".into(),
@@ -330,6 +339,7 @@ pub fn bootstrap_pg_opfamily_rows() -> Vec<PgOpfamilyRow> {
         hash_row(HASH_BOOL_FAMILY_OID, "bool_ops"),
         hash_row(HASH_BYTEA_FAMILY_OID, "bytea_ops"),
         hash_row(HASH_UUID_FAMILY_OID, "uuid_ops"),
+        hash_row(HASH_MULTIRANGE_FAMILY_OID, "multirange_ops"),
         hash_row(HASH_MACADDR_FAMILY_OID, "macaddr_ops"),
         hash_row(HASH_MACADDR8_FAMILY_OID, "macaddr8_ops"),
     ]

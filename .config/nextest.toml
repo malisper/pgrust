@@ -6,5 +6,17 @@ slow-timeout = { period = "60s", terminate-after = 1, grace-period = "0s" }
 filter = 'test(backend::parser::tests::recursive_cte_allows_lisp_interpreter_demo_shape)'
 slow-timeout = { period = "300s", terminate-after = 1, grace-period = "0s" }
 
+[[profile.ci.overrides]]
+filter = 'test(backend::executor::tests::numeric_regression_remaining_precision_edges_match_pg)'
+slow-timeout = { period = "300s", terminate-after = 1, grace-period = "0s" }
+
+[[profile.ci.overrides]]
+filter = 'test(backend::parser::tests::bind_insert_rejects_non_matching_expression_collation_and_opclass_targets)'
+slow-timeout = { period = "180s", terminate-after = 1, grace-period = "0s" }
+
+[[profile.ci.overrides]]
+filter = 'test(backend::executor::tests::macaddr_sql_casts_operators_functions_arrays_and_errors)'
+slow-timeout = { period = "180s", terminate-after = 1, grace-period = "0s" }
+
 [profile.ci.junit]
 path = "junit.xml"

@@ -5,13 +5,14 @@ use crate::backend::parser::SqlTypeKind;
 use crate::include::access::htup::{AttributeAlign, AttributeStorage};
 use crate::include::catalog::{
     ANYARRAYOID, ANYCOMPATIBLEARRAYOID, ANYCOMPATIBLEMULTIRANGEOID, ANYCOMPATIBLEOID,
-    ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYMULTIRANGEOID, ANYRANGEOID, BIT_ARRAY_TYPE_OID,
-    BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID, BOOTSTRAP_SUPERUSER_OID, BOX_TYPE_OID,
-    BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID, BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID,
-    CIDR_ARRAY_TYPE_OID, CIDR_TYPE_OID, CIRCLE_TYPE_OID, DATE_ARRAY_TYPE_OID, DATE_TYPE_OID,
-    DATEMULTIRANGE_ARRAY_TYPE_OID, DATEMULTIRANGE_TYPE_OID, DATERANGE_ARRAY_TYPE_OID,
-    DATERANGE_TYPE_OID, FDW_HANDLER_TYPE_OID, FLOAT4_ARRAY_TYPE_OID, FLOAT4_TYPE_OID,
-    FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INET_ARRAY_TYPE_OID, INET_TYPE_OID,
+    ANYCOMPATIBLERANGEOID, ANYELEMENTOID, ANYMULTIRANGEOID, ANYRANGEOID,
+    ARRAYMULTIRANGE_ARRAY_TYPE_OID, ARRAYMULTIRANGE_TYPE_OID, ARRAYRANGE_ARRAY_TYPE_OID,
+    ARRAYRANGE_TYPE_OID, BIT_ARRAY_TYPE_OID, BIT_TYPE_OID, BOOL_ARRAY_TYPE_OID, BOOL_TYPE_OID,
+    BOOTSTRAP_SUPERUSER_OID, BOX_TYPE_OID, BPCHAR_ARRAY_TYPE_OID, BPCHAR_TYPE_OID,
+    BYTEA_ARRAY_TYPE_OID, BYTEA_TYPE_OID, CIDR_ARRAY_TYPE_OID, CIDR_TYPE_OID, CIRCLE_TYPE_OID,
+    DATE_ARRAY_TYPE_OID, DATE_TYPE_OID, DATEMULTIRANGE_ARRAY_TYPE_OID, DATEMULTIRANGE_TYPE_OID,
+    DATERANGE_ARRAY_TYPE_OID, DATERANGE_TYPE_OID, FDW_HANDLER_TYPE_OID, FLOAT4_ARRAY_TYPE_OID,
+    FLOAT4_TYPE_OID, FLOAT8_ARRAY_TYPE_OID, FLOAT8_TYPE_OID, INET_ARRAY_TYPE_OID, INET_TYPE_OID,
     INT2_ARRAY_TYPE_OID, INT2_TYPE_OID, INT2VECTOR_TYPE_OID, INT4_ARRAY_TYPE_OID, INT4_TYPE_OID,
     INT4MULTIRANGE_ARRAY_TYPE_OID, INT4MULTIRANGE_TYPE_OID, INT4RANGE_ARRAY_TYPE_OID,
     INT4RANGE_TYPE_OID, INT8_ARRAY_TYPE_OID, INT8_TYPE_OID, INT8MULTIRANGE_ARRAY_TYPE_OID,
@@ -47,8 +48,9 @@ use crate::include::catalog::{
     TSTZMULTIRANGE_ARRAY_TYPE_OID, TSTZMULTIRANGE_TYPE_OID, TSTZRANGE_ARRAY_TYPE_OID,
     TSTZRANGE_TYPE_OID, TSVECTOR_ARRAY_TYPE_OID, TSVECTOR_TYPE_OID, TXID_SNAPSHOT_ARRAY_TYPE_OID,
     TXID_SNAPSHOT_TYPE_OID, UUID_ARRAY_TYPE_OID, UUID_TYPE_OID, VARBIT_ARRAY_TYPE_OID,
-    VARBIT_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID, VOID_TYPE_OID, XID_ARRAY_TYPE_OID,
-    XID_TYPE_OID, XML_ARRAY_TYPE_OID, XML_TYPE_OID,
+    VARBIT_TYPE_OID, VARBITMULTIRANGE_ARRAY_TYPE_OID, VARBITMULTIRANGE_TYPE_OID,
+    VARBITRANGE_ARRAY_TYPE_OID, VARBITRANGE_TYPE_OID, VARCHAR_ARRAY_TYPE_OID, VARCHAR_TYPE_OID,
+    VOID_TYPE_OID, XID_ARRAY_TYPE_OID, XID_TYPE_OID, XML_ARRAY_TYPE_OID, XML_TYPE_OID,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,6 +138,20 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             SqlType::array_of(SqlType::new(SqlTypeKind::Bit)),
         ),
         builtin_type_row("varbit", VARBIT_TYPE_OID, SqlType::new(SqlTypeKind::VarBit)),
+        builtin_range_type_row(
+            "varbitrange",
+            VARBITRANGE_TYPE_OID,
+            VARBIT_TYPE_OID,
+            VARBITMULTIRANGE_TYPE_OID,
+            false,
+        ),
+        builtin_multirange_type_row(
+            "varbitmultirange",
+            VARBITMULTIRANGE_TYPE_OID,
+            VARBITRANGE_TYPE_OID,
+            VARBIT_TYPE_OID,
+            false,
+        ),
         builtin_type_row(
             "_varbit",
             VARBIT_ARRAY_TYPE_OID,
@@ -571,6 +587,20 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
             INT8_TYPE_OID,
             true,
         ),
+        builtin_range_type_row(
+            "arrayrange",
+            ARRAYRANGE_TYPE_OID,
+            INT4_ARRAY_TYPE_OID,
+            ARRAYMULTIRANGE_TYPE_OID,
+            false,
+        ),
+        builtin_multirange_type_row(
+            "arraymultirange",
+            ARRAYMULTIRANGE_TYPE_OID,
+            ARRAYRANGE_TYPE_OID,
+            INT4_ARRAY_TYPE_OID,
+            false,
+        ),
         builtin_type_row("json", JSON_TYPE_OID, SqlType::new(SqlTypeKind::Json)),
         builtin_type_row(
             "_json",
@@ -785,6 +815,46 @@ pub fn builtin_type_rows() -> Vec<PgTypeRow> {
                 SqlType::multirange(INT8MULTIRANGE_TYPE_OID, INT8RANGE_TYPE_OID)
                     .with_range_metadata(INT8_TYPE_OID, INT8MULTIRANGE_TYPE_OID, true)
                     .with_multirange_range_oid(INT8RANGE_TYPE_OID),
+            ),
+        ),
+        builtin_type_row(
+            "_arrayrange",
+            ARRAYRANGE_ARRAY_TYPE_OID,
+            SqlType::array_of(
+                SqlType::range(ARRAYRANGE_TYPE_OID, INT4_ARRAY_TYPE_OID).with_range_metadata(
+                    INT4_ARRAY_TYPE_OID,
+                    ARRAYMULTIRANGE_TYPE_OID,
+                    false,
+                ),
+            ),
+        ),
+        builtin_type_row(
+            "_arraymultirange",
+            ARRAYMULTIRANGE_ARRAY_TYPE_OID,
+            SqlType::array_of(
+                SqlType::multirange(ARRAYMULTIRANGE_TYPE_OID, ARRAYRANGE_TYPE_OID)
+                    .with_range_metadata(INT4_ARRAY_TYPE_OID, ARRAYMULTIRANGE_TYPE_OID, false)
+                    .with_multirange_range_oid(ARRAYRANGE_TYPE_OID),
+            ),
+        ),
+        builtin_type_row(
+            "_varbitrange",
+            VARBITRANGE_ARRAY_TYPE_OID,
+            SqlType::array_of(
+                SqlType::range(VARBITRANGE_TYPE_OID, VARBIT_TYPE_OID).with_range_metadata(
+                    VARBIT_TYPE_OID,
+                    VARBITMULTIRANGE_TYPE_OID,
+                    false,
+                ),
+            ),
+        ),
+        builtin_type_row(
+            "_varbitmultirange",
+            VARBITMULTIRANGE_ARRAY_TYPE_OID,
+            SqlType::array_of(
+                SqlType::multirange(VARBITMULTIRANGE_TYPE_OID, VARBITRANGE_TYPE_OID)
+                    .with_range_metadata(VARBIT_TYPE_OID, VARBITMULTIRANGE_TYPE_OID, false)
+                    .with_multirange_range_oid(VARBITRANGE_TYPE_OID),
             ),
         ),
     ]);

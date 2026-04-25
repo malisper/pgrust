@@ -1,5 +1,5 @@
 use crate::include::catalog::BPCHAR_HASH_OPCLASS_OID;
-use crate::include::nodes::datum::Value;
+use crate::include::nodes::datum::{MultirangeValue, RangeBound, RangeValue, Value};
 
 pub const HASH_PARTITION_SEED: u64 = 0x7A5B_2236_7996_DCFD;
 const HASH_INITIAL_VALUE: u32 = 0x9e37_79b9 + 3_923_095;
@@ -163,6 +163,7 @@ pub(crate) fn hash_value_extended(
         Value::Numeric(value) => hash_bytes_extended(value.render().as_bytes(), seed),
         Value::Bytea(value) => hash_bytes_extended(value, seed),
         Value::Uuid(value) => hash_bytes_extended(value, seed),
+        Value::Multirange(value) => hash_multirange_value(value, seed)?,
         Value::MacAddr(value) => hash_bytes_extended(value, seed),
         Value::MacAddr8(value) => hash_bytes_extended(value, seed),
         value if value.as_text().is_some() => {
@@ -175,6 +176,46 @@ pub(crate) fn hash_value_extended(
         other => return Err(format!("unsupported hash key value {other:?}")),
     };
     Ok(Some(hash))
+}
+
+fn hash_multirange_value(value: &MultirangeValue, seed: u64) -> Result<u64, String> {
+    let mut hash = hash_uint32_extended(value.ranges.len() as u32, seed);
+    for range in &value.ranges {
+        hash = hash_combine64(hash, hash_range_value(range, seed)?);
+    }
+    Ok(hash)
+}
+
+fn hash_range_value(value: &RangeValue, seed: u64) -> Result<u64, String> {
+    if value.empty {
+        return Ok(hash_uint32_extended(1, seed));
+    }
+    let mut flags = 0_u32;
+    if value.lower.is_some() {
+        flags |= 1 << 0;
+    }
+    if value.upper.is_some() {
+        flags |= 1 << 1;
+    }
+    if value.lower.as_ref().is_some_and(|bound| bound.inclusive) {
+        flags |= 1 << 2;
+    }
+    if value.upper.as_ref().is_some_and(|bound| bound.inclusive) {
+        flags |= 1 << 3;
+    }
+
+    let mut hash = hash_uint32_extended(flags, seed);
+    hash = hash_combine64(hash, hash_range_bound(value.lower.as_ref(), seed)?);
+    hash = hash_combine64(hash, hash_range_bound(value.upper.as_ref(), seed)?);
+    Ok(hash)
+}
+
+fn hash_range_bound(bound: Option<&RangeBound>, seed: u64) -> Result<u64, String> {
+    match bound {
+        Some(bound) => hash_value_extended(bound.value.as_ref(), None, seed)?
+            .ok_or_else(|| "unsupported null range bound".to_string()),
+        None => Ok(hash_uint32_extended(0, seed)),
+    }
 }
 
 pub(crate) fn hash_index_value(value: &Value, opclass: Option<u32>) -> Result<Option<u32>, String> {
