@@ -109,10 +109,21 @@ Generate a standalone local dashboard:
 python scripts/run_bench.py --report-history .bench-history --history-dashboard .bench-history/dashboard.html
 ```
 
+Check the latest run for local regressions:
+
+```bash
+python scripts/run_bench.py --check-history-regressions .bench-history --regression-threshold-percent 5
+```
+
 The history report shows recent runs plus the latest pgrust/PostgreSQL ratios
 and the delta from the most recent earlier recorded run with the same workload.
 This is intentionally lightweight tracking; dashboard publishing and regression
 alerting are separate later phases.
+
+The regression check uses the same ratio history. A throughput-ratio drop larger
+than the threshold is a regression, and a latency-ratio increase larger than the
+threshold is a regression. It exits non-zero only when a regression is detected,
+so it can be used manually now and wired into automation later.
 
 By default it also builds benchmark binaries into a worktree-local
 `.bench-target/` directory instead of the repo's shared `/tmp/pgrust-target`.
