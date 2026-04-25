@@ -3376,6 +3376,28 @@ fn inherited_table_marker_parses_as_default_relation_scan() {
 }
 
 #[test]
+fn between_symmetric_matches_postgres_rewrite() {
+    let base = temp_dir("between_symmetric");
+    let txns = TransactionManager::new_durable(&base).unwrap();
+
+    assert_query_rows(
+        run_sql(
+            &base,
+            &txns,
+            INVALID_TRANSACTION_ID,
+            "select 2 between symmetric 3 and 1, 2 not between symmetric 3 and 1, 4 between symmetric 3 and 1, null::int between symmetric 3 and 1",
+        )
+        .unwrap(),
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(false),
+            Value::Null,
+        ]],
+    );
+}
+
+#[test]
 fn setop_join_branch_executes_with_child_local_vars() {
     let base = temp_dir("setop_join_branch_child_roots");
     let txns = TransactionManager::new_durable(&base).unwrap();
