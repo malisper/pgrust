@@ -457,15 +457,20 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
             SqlTypeKind::Void => unreachable!("void arrays are unsupported"),
             SqlTypeKind::FdwHandler => unreachable!("fdw_handler arrays are unsupported"),
             SqlTypeKind::Oid => 1028,
+            SqlTypeKind::RegProc => crate::include::catalog::REGPROC_ARRAY_TYPE_OID as i32,
             SqlTypeKind::RegClass => crate::include::catalog::REGCLASS_ARRAY_TYPE_OID as i32,
             SqlTypeKind::RegType => unreachable!("regtype arrays are unsupported"),
             SqlTypeKind::RegRole => unreachable!("regrole arrays are unsupported"),
             SqlTypeKind::RegNamespace => {
                 crate::include::catalog::REGNAMESPACE_ARRAY_TYPE_OID as i32
             }
+            SqlTypeKind::RegOper => crate::include::catalog::REGOPER_ARRAY_TYPE_OID as i32,
             SqlTypeKind::RegOperator => crate::include::catalog::REGOPERATOR_ARRAY_TYPE_OID as i32,
             SqlTypeKind::RegProcedure => {
                 crate::include::catalog::REGPROCEDURE_ARRAY_TYPE_OID as i32
+            }
+            SqlTypeKind::RegCollation => {
+                crate::include::catalog::REGCOLLATION_ARRAY_TYPE_OID as i32
             }
             SqlTypeKind::Tid => 1010,
             SqlTypeKind::Xid => 1011,
@@ -563,12 +568,15 @@ fn wire_type_info(col: &QueryColumn) -> (i32, i16, i32) {
         SqlTypeKind::Int8 => (20, 8, -1),
         SqlTypeKind::Void => (crate::include::catalog::VOID_TYPE_OID as i32, 4, -1),
         SqlTypeKind::Oid => (26, 4, -1),
+        SqlTypeKind::RegProc => (crate::include::catalog::REGPROC_TYPE_OID as i32, 4, -1),
         SqlTypeKind::RegClass => (crate::include::catalog::REGCLASS_TYPE_OID as i32, 4, -1),
         SqlTypeKind::RegType => (crate::include::catalog::REGTYPE_TYPE_OID as i32, 4, -1),
         SqlTypeKind::RegRole => (crate::include::catalog::REGROLE_TYPE_OID as i32, 4, -1),
         SqlTypeKind::RegNamespace => (crate::include::catalog::REGNAMESPACE_TYPE_OID as i32, 4, -1),
+        SqlTypeKind::RegOper => (crate::include::catalog::REGOPER_TYPE_OID as i32, 4, -1),
         SqlTypeKind::RegOperator => (crate::include::catalog::REGOPERATOR_TYPE_OID as i32, 4, -1),
         SqlTypeKind::RegProcedure => (crate::include::catalog::REGPROCEDURE_TYPE_OID as i32, 4, -1),
+        SqlTypeKind::RegCollation => (crate::include::catalog::REGCOLLATION_TYPE_OID as i32, 4, -1),
         SqlTypeKind::Tid => (27, 6, -1),
         SqlTypeKind::Xid => (28, 4, -1),
         SqlTypeKind::Bit => (1560, -1, col.sql_type.typmod),
@@ -634,6 +642,49 @@ fn format_catalog_oid_text(
         .unwrap_or_else(|| oid.to_string())
 }
 
+fn format_typed_oid_text(
+    kind: Option<SqlTypeKind>,
+    oid: u32,
+    role_names: Option<&HashMap<u32, String>>,
+    relation_names: Option<&HashMap<u32, String>>,
+    proc_names: Option<&HashMap<u32, String>>,
+    namespace_names: Option<&HashMap<u32, String>>,
+) -> Option<String> {
+    match kind? {
+        SqlTypeKind::RegRole => Some(format_catalog_oid_text(oid, role_names, true)),
+        SqlTypeKind::RegClass => Some(format_catalog_oid_text(oid, relation_names, true)),
+        SqlTypeKind::RegNamespace => Some(format_catalog_oid_text(oid, namespace_names, true)),
+        SqlTypeKind::RegProc => Some(
+            crate::backend::executor::expr_reg::format_regproc_oid_optional(oid, None)
+                .unwrap_or_else(|| format_catalog_oid_text(oid, proc_names, true)),
+        ),
+        SqlTypeKind::RegProcedure => Some(
+            crate::backend::executor::expr_reg::format_regprocedure_oid_optional(oid, None)
+                .or_else(|| proc_names.and_then(|names| names.get(&oid).cloned()))
+                .unwrap_or_else(|| format_catalog_oid_text(oid, None, true)),
+        ),
+        SqlTypeKind::RegOper => Some(
+            crate::backend::executor::expr_reg::format_regoper_oid_optional(oid, None)
+                .unwrap_or_else(|| format_catalog_oid_text(oid, None, true)),
+        ),
+        SqlTypeKind::RegOperator => Some(
+            crate::backend::executor::expr_reg::format_regoperator_oid_optional(oid, None)
+                .unwrap_or_else(|| format_catalog_oid_text(oid, None, true)),
+        ),
+        SqlTypeKind::RegType => {
+            match crate::backend::executor::expr_reg::format_type_optional(Some(oid), None, None) {
+                Value::Text(text) => Some(text.to_string()),
+                _ => Some(oid.to_string()),
+            }
+        }
+        SqlTypeKind::RegCollation => Some(
+            crate::backend::executor::expr_reg::format_regcollation_oid_optional(oid, None)
+                .unwrap_or_else(|| format_catalog_oid_text(oid, None, true)),
+        ),
+        _ => None,
+    }
+}
+
 pub(crate) fn send_typed_data_row(
     w: &mut impl Write,
     values: &[Value],
@@ -683,7 +734,18 @@ pub(crate) fn send_typed_data_row(
             Value::Int32(v) => {
                 let start = buf.len();
                 buf.extend_from_slice(&0_i32.to_be_bytes());
-                if matches!(sql_type.map(|ty| ty.kind), Some(SqlTypeKind::RegRole)) {
+                if let Ok(oid) = u32::try_from(*v)
+                    && let Some(text) = format_typed_oid_text(
+                        sql_type.map(|ty| ty.kind),
+                        oid,
+                        role_names,
+                        relation_names,
+                        proc_names,
+                        namespace_names,
+                    )
+                {
+                    buf.extend_from_slice(text.as_bytes());
+                } else if matches!(sql_type.map(|ty| ty.kind), Some(SqlTypeKind::RegRole)) {
                     if let Ok(role_oid) = u32::try_from(*v) {
                         if let Some(role_name) = role_names.and_then(|names| names.get(&role_oid)) {
                             buf.extend_from_slice(role_name.as_bytes());
@@ -747,7 +809,18 @@ pub(crate) fn send_typed_data_row(
             Value::Int64(v) => {
                 let start = buf.len();
                 buf.extend_from_slice(&0_i32.to_be_bytes());
-                if matches!(sql_type.map(|ty| ty.kind), Some(SqlTypeKind::RegRole)) {
+                if let Ok(oid) = u32::try_from(*v)
+                    && let Some(text) = format_typed_oid_text(
+                        sql_type.map(|ty| ty.kind),
+                        oid,
+                        role_names,
+                        relation_names,
+                        proc_names,
+                        namespace_names,
+                    )
+                {
+                    buf.extend_from_slice(text.as_bytes());
+                } else if matches!(sql_type.map(|ty| ty.kind), Some(SqlTypeKind::RegRole)) {
                     if let Ok(role_oid) = u32::try_from(*v) {
                         if let Some(role_name) = role_names.and_then(|names| names.get(&role_oid)) {
                             buf.extend_from_slice(role_name.as_bytes());
@@ -1016,12 +1089,15 @@ fn encode_binary_data_row_value(value: &Value, sql_type: SqlType) -> Result<Vec<
             if matches!(
                 sql_type.kind,
                 SqlTypeKind::Oid
+                    | SqlTypeKind::RegProc
                     | SqlTypeKind::RegClass
                     | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
                     | SqlTypeKind::RegNamespace
+                    | SqlTypeKind::RegOper
                     | SqlTypeKind::RegOperator
                     | SqlTypeKind::RegProcedure
+                    | SqlTypeKind::RegCollation
                     | SqlTypeKind::Xid
                     | SqlTypeKind::RegConfig
                     | SqlTypeKind::RegDictionary

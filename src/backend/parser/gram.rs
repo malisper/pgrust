@@ -2064,18 +2064,20 @@ pub fn parse_type_name(sql: &str) -> Result<RawTypeName, ParseError> {
         "void" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::Void))),
         "fdw_handler" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::FdwHandler))),
         "regrole" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegRole))),
-        "regproc" => {
-            return Ok(RawTypeName::Builtin(SqlType::new(
-                SqlTypeKind::RegProcedure,
-            )));
-        }
+        "regproc" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegProc))),
         "regprocedure" => {
             return Ok(RawTypeName::Builtin(SqlType::new(
                 SqlTypeKind::RegProcedure,
             )));
         }
+        "regoper" => return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegOper))),
         "regoperator" => {
             return Ok(RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegOperator)));
+        }
+        "regcollation" => {
+            return Ok(RawTypeName::Builtin(SqlType::new(
+                SqlTypeKind::RegCollation,
+            )));
         }
         _ => {}
     }
@@ -11373,12 +11375,15 @@ fn sql_type_output_name(ty: SqlType) -> &'static str {
         SqlTypeKind::Int8Range => "int8range",
         SqlTypeKind::Name => "name",
         SqlTypeKind::Oid => "oid",
+        SqlTypeKind::RegProc => "regproc",
         SqlTypeKind::RegClass => "regclass",
         SqlTypeKind::RegType => "regtype",
         SqlTypeKind::RegRole => "regrole",
         SqlTypeKind::RegNamespace => "regnamespace",
+        SqlTypeKind::RegOper => "regoper",
         SqlTypeKind::RegOperator => "regoperator",
         SqlTypeKind::RegProcedure => "regprocedure",
+        SqlTypeKind::RegCollation => "regcollation",
         SqlTypeKind::Tid => "tid",
         SqlTypeKind::Xid => "xid",
         SqlTypeKind::OidVector => "oidvector",
@@ -12733,11 +12738,14 @@ fn build_type_name(pair: Pair<'_, Rule>) -> RawTypeName {
         Rule::kw_xml => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Xml)),
         Rule::kw_tsvector => RawTypeName::Builtin(SqlType::new(SqlTypeKind::TsVector)),
         Rule::kw_tsquery => RawTypeName::Builtin(SqlType::new(SqlTypeKind::TsQuery)),
+        Rule::kw_regproc => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegProc)),
         Rule::kw_regclass => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegClass)),
         Rule::kw_regconfig => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegConfig)),
         Rule::kw_regdictionary => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegDictionary)),
+        Rule::kw_regoper => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegOper)),
         Rule::kw_regoperator => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegOperator)),
         Rule::kw_regprocedure => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegProcedure)),
+        Rule::kw_regcollation => RawTypeName::Builtin(SqlType::new(SqlTypeKind::RegCollation)),
         Rule::kw_bool | Rule::kw_boolean => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Bool)),
         Rule::date_type | Rule::kw_date => RawTypeName::Builtin(SqlType::new(SqlTypeKind::Date)),
         Rule::time_type

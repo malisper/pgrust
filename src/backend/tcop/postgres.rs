@@ -179,7 +179,12 @@ fn exec_error_context(e: &ExecError) -> Option<String> {
 }
 
 fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
-    if let ExecError::WithContext { source, .. } = e {
+    if let ExecError::WithContext { source, context } = e {
+        if context.starts_with("invalid type name ")
+            && let Some(position) = find_case_insensitive_token_position(sql, "pg_input_error_info")
+        {
+            return Some(position);
+        }
         return exec_error_position(sql, source);
     }
     if matches!(e, ExecError::InvalidBooleanInput { .. })
@@ -334,6 +339,11 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             if let Some(target) = extract_subscripted_assignment_target(message) {
                 return find_subscripted_assignment_position(sql, target);
             }
+            if is_reg_object_direct_input_error(message)
+                && let Some(position) = find_reg_object_literal_position(sql)
+            {
+                return Some(position);
+            }
             if let Some(value) = extract_quoted_error_value(message) {
                 value
             } else {
@@ -351,6 +361,57 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         _ => return None,
     };
     find_error_value_position(sql, value)
+}
+
+fn is_reg_object_direct_input_error(message: &str) -> bool {
+    message == "invalid name syntax"
+        || message.starts_with("operator does not exist: ")
+        || message.starts_with("function \"")
+        || message.starts_with("relation \"")
+        || message.starts_with("type \"")
+        || message.starts_with("role \"")
+        || message.starts_with("schema \"")
+        || message.starts_with("collation \"")
+}
+
+fn find_reg_object_literal_position(sql: &str) -> Option<usize> {
+    const REG_FUNCS: [&str; 9] = [
+        "regoperator",
+        "regprocedure",
+        "regnamespace",
+        "regcollation",
+        "regoper",
+        "regproc",
+        "regclass",
+        "regtype",
+        "regrole",
+    ];
+    REG_FUNCS
+        .iter()
+        .filter_map(|func| find_function_argument_position(sql, func))
+        .min()
+}
+
+fn find_function_argument_position(sql: &str, func: &str) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let mut search_start = 0usize;
+    loop {
+        let relative = lower[search_start..].find(func)?;
+        let func_start = search_start + relative;
+        let mut idx = func_start + func.len();
+        while idx < sql.len() && sql.as_bytes()[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if sql.as_bytes().get(idx) != Some(&b'(') {
+            search_start = idx;
+            continue;
+        }
+        idx += 1;
+        while idx < sql.len() && sql.as_bytes()[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        return Some(idx + 1);
+    }
 }
 
 fn publication_where_error_position(

@@ -14,6 +14,7 @@ use super::expr_money::{
 use super::expr_multirange::{multirange_from_range, parse_multirange_text};
 use super::expr_network::{parse_cidr_text, parse_inet_text};
 use super::expr_range::{parse_range_text, render_range_text};
+use super::expr_reg;
 use super::expr_txid::{cast_text_to_txid_snapshot, is_txid_snapshot_type_oid};
 use super::node_types::*;
 use crate::backend::executor::jsonb::{
@@ -1557,6 +1558,15 @@ pub(crate) fn soft_input_error_info_with_config(
     type_name: &str,
     config: &DateTimeConfig,
 ) -> Result<Option<InputErrorInfo>, ExecError> {
+    soft_input_error_info_with_catalog_and_config(text, type_name, None, config)
+}
+
+pub(crate) fn soft_input_error_info_with_catalog_and_config(
+    text: &str,
+    type_name: &str,
+    catalog: Option<&dyn CatalogLookup>,
+    config: &DateTimeConfig,
+) -> Result<Option<InputErrorInfo>, ExecError> {
     if type_name.trim().eq_ignore_ascii_case("int2vector") {
         for item in text.split_ascii_whitespace() {
             match cast_text_to_int2(item) {
@@ -1576,6 +1586,33 @@ pub(crate) fn soft_input_error_info_with_config(
         column: type_name.to_string(),
         details: format!("unsupported type: {type_name}"),
     })?;
+    if !ty.is_array
+        && matches!(
+            ty.kind,
+            SqlTypeKind::RegProc
+                | SqlTypeKind::RegProcedure
+                | SqlTypeKind::RegOper
+                | SqlTypeKind::RegOperator
+                | SqlTypeKind::RegClass
+                | SqlTypeKind::RegType
+                | SqlTypeKind::RegRole
+                | SqlTypeKind::RegNamespace
+                | SqlTypeKind::RegCollation
+                | SqlTypeKind::RegConfig
+                | SqlTypeKind::RegDictionary
+        )
+    {
+        return match expr_reg::resolve_reg_object_oid(text, ty.kind, catalog) {
+            Ok(_) => Ok(None),
+            Err(err)
+                if ty.kind == SqlTypeKind::RegType
+                    && expr_reg::is_hard_regtype_input_error(&err) =>
+            {
+                Err(err)
+            }
+            Err(err) => Ok(Some(input_error_info(err, text))),
+        };
+    }
     if !ty.is_array && matches!(ty.kind, SqlTypeKind::Json | SqlTypeKind::Jsonb) {
         match parse_json_text_input(text) {
             Ok(_) => {
@@ -1707,14 +1744,23 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
         };
     }
 
-    if matches!(ty.kind, SqlTypeKind::RegClass) && !ty.is_array {
+    if matches!(
+        ty.kind,
+        SqlTypeKind::RegProc
+            | SqlTypeKind::RegProcedure
+            | SqlTypeKind::RegOper
+            | SqlTypeKind::RegOperator
+            | SqlTypeKind::RegClass
+            | SqlTypeKind::RegType
+            | SqlTypeKind::RegRole
+            | SqlTypeKind::RegNamespace
+            | SqlTypeKind::RegCollation
+            | SqlTypeKind::RegConfig
+            | SqlTypeKind::RegDictionary
+    ) && !ty.is_array
+    {
         if let Some(text) = regclass_text_input(&value, source_type) {
-            return cast_text_to_regclass(text, catalog);
-        }
-    }
-    if matches!(ty.kind, SqlTypeKind::RegNamespace) && !ty.is_array {
-        if let Some(text) = regclass_text_input(&value, source_type) {
-            return cast_text_to_regnamespace(text, catalog);
+            return expr_reg::cast_text_to_reg_object(text, ty.kind, catalog);
         }
     }
     if matches!(ty.kind, SqlTypeKind::Text)
@@ -1750,12 +1796,15 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             SqlType {
                 kind:
                     SqlTypeKind::Oid
+                    | SqlTypeKind::RegProc
                     | SqlTypeKind::RegClass
                     | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
                     | SqlTypeKind::RegNamespace
+                    | SqlTypeKind::RegOper
                     | SqlTypeKind::RegOperator
                     | SqlTypeKind::RegProcedure
+                    | SqlTypeKind::RegCollation
                     | SqlTypeKind::Xid,
                 ..
             } => {
@@ -1889,12 +1938,15 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             SqlType {
                 kind:
                     SqlTypeKind::Oid
+                    | SqlTypeKind::RegProc
                     | SqlTypeKind::RegClass
                     | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
                     | SqlTypeKind::RegNamespace
+                    | SqlTypeKind::RegOper
                     | SqlTypeKind::RegOperator
                     | SqlTypeKind::RegProcedure
+                    | SqlTypeKind::RegCollation
                     | SqlTypeKind::Xid,
                 ..
             } => {
@@ -2062,12 +2114,15 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
                     | SqlTypeKind::Int4
                     | SqlTypeKind::Int8
                     | SqlTypeKind::Oid
+                    | SqlTypeKind::RegProc
                     | SqlTypeKind::RegClass
                     | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
                     | SqlTypeKind::RegNamespace
+                    | SqlTypeKind::RegOper
                     | SqlTypeKind::RegOperator
                     | SqlTypeKind::RegProcedure
+                    | SqlTypeKind::RegCollation
                     | SqlTypeKind::Xid
                     | SqlTypeKind::Bytea
                     | SqlTypeKind::Float4
@@ -2518,12 +2573,15 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             SqlType {
                 kind:
                     SqlTypeKind::Oid
+                    | SqlTypeKind::RegProc
                     | SqlTypeKind::RegClass
                     | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
                     | SqlTypeKind::RegNamespace
+                    | SqlTypeKind::RegOper
                     | SqlTypeKind::RegOperator
                     | SqlTypeKind::RegProcedure
+                    | SqlTypeKind::RegCollation
                     | SqlTypeKind::Xid,
                 ..
             } => {
@@ -2724,12 +2782,15 @@ pub(crate) fn cast_value_with_source_type_catalog_and_config(
             SqlType {
                 kind:
                     SqlTypeKind::Oid
+                    | SqlTypeKind::RegProc
                     | SqlTypeKind::RegClass
                     | SqlTypeKind::RegType
                     | SqlTypeKind::RegRole
                     | SqlTypeKind::RegNamespace
+                    | SqlTypeKind::RegOper
                     | SqlTypeKind::RegOperator
                     | SqlTypeKind::RegProcedure
+                    | SqlTypeKind::RegCollation
                     | SqlTypeKind::Xid,
                 ..
             } => cast_float_to_int(v, ty),
@@ -3010,12 +3071,15 @@ pub(crate) fn cast_text_value_with_config(
             left: Value::Text(CompactString::new(text)),
             right: Value::Null,
         }),
-        SqlTypeKind::RegClass
+        SqlTypeKind::RegProc
+        | SqlTypeKind::RegClass
         | SqlTypeKind::RegRole
         | SqlTypeKind::RegNamespace
+        | SqlTypeKind::RegOper
         | SqlTypeKind::RegOperator
         | SqlTypeKind::RegType
         | SqlTypeKind::RegProcedure
+        | SqlTypeKind::RegCollation
         | SqlTypeKind::RegConfig
         | SqlTypeKind::RegDictionary => cast_text_to_oid(text),
         SqlTypeKind::Tid => Ok(Value::Text(CompactString::from_owned(
@@ -3187,12 +3251,15 @@ pub(super) fn cast_numeric_value(
                 .ok_or(ExecError::Int8OutOfRange),
         },
         SqlTypeKind::Oid
+        | SqlTypeKind::RegProc
         | SqlTypeKind::RegClass
         | SqlTypeKind::RegType
         | SqlTypeKind::RegRole
         | SqlTypeKind::RegNamespace
+        | SqlTypeKind::RegOper
         | SqlTypeKind::RegOperator
         | SqlTypeKind::RegProcedure
+        | SqlTypeKind::RegCollation
         | SqlTypeKind::Xid => value
             .round_to_scale(0)
             .and_then(|rounded| rounded.render().parse::<u32>().ok())
@@ -3789,5 +3856,28 @@ mod tests {
         assert_eq!(info.message, "invalid XML content");
         assert_eq!(info.sqlstate, "2200N");
         assert!(info.detail.is_some());
+    }
+
+    #[test]
+    fn pg_input_error_info_reports_reg_object_cases() {
+        let info = soft_input_error_info("-", "regoper")
+            .unwrap()
+            .expect("ambiguous operator should be soft");
+        assert_eq!(info.message, "more than one operator named -");
+        assert_eq!(info.sqlstate, "42725");
+
+        let info = soft_input_error_info("-", "regoperator")
+            .unwrap()
+            .expect("missing operator signature should be soft");
+        assert_eq!(info.message, "expected a left parenthesis");
+        assert_eq!(info.sqlstate, "22P02");
+
+        let info = soft_input_error_info("no_such_type", "regtype")
+            .unwrap()
+            .expect("missing type should be soft");
+        assert_eq!(info.message, "type \"no_such_type\" does not exist");
+        assert_eq!(info.sqlstate, "42704");
+
+        assert!(soft_input_error_info("numeric(1,2,3)", "regtype").is_err());
     }
 }
