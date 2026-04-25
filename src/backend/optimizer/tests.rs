@@ -710,7 +710,10 @@ fn append_with_join_children(plan: &Plan) -> Option<&[Plan]> {
     match plan {
         Plan::Append { children, .. }
             if children.iter().all(|child| {
-                matches!(child, Plan::NestedLoopJoin { .. } | Plan::HashJoin { .. })
+                matches!(
+                    child,
+                    Plan::NestedLoopJoin { .. } | Plan::HashJoin { .. } | Plan::MergeJoin { .. }
+                )
             }) =>
         {
             Some(children)
@@ -736,6 +739,7 @@ fn append_with_join_children(plan: &Plan) -> Option<&[Plan]> {
         } => append_with_join_children(input),
         Plan::NestedLoopJoin { left, right, .. }
         | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. }
         | Plan::RecursiveUnion {
             anchor: left,
             recursive: right,
@@ -783,6 +787,7 @@ fn collect_relation_names(plan: &Plan, names: &mut Vec<String>) {
         } => collect_relation_names(input, names),
         Plan::NestedLoopJoin { left, right, .. }
         | Plan::HashJoin { left, right, .. }
+        | Plan::MergeJoin { left, right, .. }
         | Plan::RecursiveUnion {
             anchor: left,
             recursive: right,
