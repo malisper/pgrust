@@ -1,4 +1,5 @@
 use crate::RelFileLocator;
+use crate::backend::parser::{PartitionBoundSpec, PartitionStrategy};
 use crate::backend::utils::cache::relcache::IndexRelCacheEntry;
 use crate::include::access::relscan::ScanDirection;
 use crate::include::nodes::parsenodes::SetOperator;
@@ -24,6 +25,11 @@ pub struct AppendRelInfo {
     pub parent_relid: usize,
     pub child_relid: usize,
     pub translated_vars: Vec<Expr>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PlannerConfig {
+    pub enable_partitionwise_join: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,6 +210,8 @@ pub struct RelOptInfo {
     pub baserestrictinfo: Vec<RestrictInfo>,
     pub joininfo: Vec<RestrictInfo>,
     pub rows: f64,
+    pub partition_info: Option<PartitionInfo>,
+    pub consider_partitionwise_join: bool,
 }
 
 impl RelOptInfo {
@@ -218,6 +226,8 @@ impl RelOptInfo {
             baserestrictinfo: Vec::new(),
             joininfo: Vec::new(),
             rows: 0.0,
+            partition_info: None,
+            consider_partitionwise_join: false,
         }
     }
 
@@ -242,6 +252,22 @@ impl RelOptInfo {
             PathTarget::from_rte(rtindex, rte),
         )
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionInfo {
+    pub strategy: PartitionStrategy,
+    pub partattrs: Vec<i16>,
+    pub partclass: Vec<u32>,
+    pub partcollation: Vec<u32>,
+    pub key_exprs: Vec<Expr>,
+    pub members: Vec<PartitionMember>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartitionMember {
+    pub relids: Vec<usize>,
+    pub bound: Option<PartitionBoundSpec>,
 }
 
 #[derive(Debug, Clone)]
@@ -282,6 +308,7 @@ pub struct UpperRelEntry {
 
 #[derive(Debug, Clone)]
 pub struct PlannerInfo {
+    pub config: PlannerConfig,
     pub parse: Query,
     pub simple_rel_array: Vec<Option<RelOptInfo>>,
     pub append_rel_infos: Vec<Option<AppendRelInfo>>,

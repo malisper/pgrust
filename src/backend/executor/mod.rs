@@ -60,8 +60,8 @@ pub use crate::include::nodes::execnodes::*;
 pub use crate::include::nodes::plannodes::*;
 pub(crate) use agg::{AccumState, AggGroup, AggTransitionFn, AggregateRuntime, OrderedAggInput};
 pub use driver::{
-    exec_next, execute_plan, execute_planned_stmt, execute_readonly_statement, execute_sql,
-    execute_statement,
+    exec_next, execute_plan, execute_planned_stmt, execute_readonly_statement,
+    execute_readonly_statement_with_config, execute_sql, execute_statement,
 };
 pub use exec_expr::{eval_expr, eval_plpgsql_expr};
 pub(crate) use expr_agg_support::build_aggregate_runtime;

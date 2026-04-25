@@ -30,7 +30,7 @@ pub(crate) use self::scope::{ScopeColumn, ScopeRelation};
 use crate::RelFileLocator;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{Value, cast_value};
-use crate::backend::optimizer::planner;
+use crate::backend::optimizer::planner_with_config;
 use crate::backend::rewrite::pg_rewrite_query;
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
@@ -46,6 +46,7 @@ use crate::include::catalog::{
     proc_oid_for_builtin_aggregate_function, range_type_ref_for_sql_type, relkind_is_analyzable,
     synthetic_range_proc_row_by_oid, synthetic_range_proc_rows_by_name,
 };
+use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
     AggAccum, AggFunc, BuiltinScalarFunction, Expr, JsonTableFunction, OrderByEntry, QueryColumn,
@@ -2921,7 +2922,15 @@ pub fn pg_plan_query(
     stmt: &SelectStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<PlannedStmt, ParseError> {
-    build_plan_with_outer(stmt, catalog, &[], None, &[], &[])
+    pg_plan_query_with_config(stmt, catalog, PlannerConfig::default())
+}
+
+pub fn pg_plan_query_with_config(
+    stmt: &SelectStatement,
+    catalog: &dyn CatalogLookup,
+    config: PlannerConfig,
+) -> Result<PlannedStmt, ParseError> {
+    build_plan_with_outer(stmt, catalog, &[], None, &[], &[], config)
 }
 
 pub fn pg_plan_query_with_outer(
@@ -2936,7 +2945,15 @@ pub fn pg_plan_query_with_outer(
             .collect(),
     };
     let outer_scope = scope_for_relation(None, &desc);
-    build_plan_with_outer(stmt, catalog, &[outer_scope], None, &[], &[])
+    build_plan_with_outer(
+        stmt,
+        catalog,
+        &[outer_scope],
+        None,
+        &[],
+        &[],
+        PlannerConfig::default(),
+    )
 }
 
 pub(crate) fn pg_plan_query_with_outer_scopes(
@@ -2944,7 +2961,15 @@ pub(crate) fn pg_plan_query_with_outer_scopes(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
 ) -> Result<PlannedStmt, ParseError> {
-    build_plan_with_outer(stmt, catalog, outer_scopes, None, &[], &[])
+    build_plan_with_outer(
+        stmt,
+        catalog,
+        outer_scopes,
+        None,
+        &[],
+        &[],
+        PlannerConfig::default(),
+    )
 }
 
 pub(crate) fn pg_plan_query_with_outer_scopes_and_ctes(
@@ -2953,7 +2978,15 @@ pub(crate) fn pg_plan_query_with_outer_scopes_and_ctes(
     outer_scopes: &[BoundScope],
     outer_ctes: &[BoundCte],
 ) -> Result<PlannedStmt, ParseError> {
-    build_plan_with_outer(stmt, catalog, outer_scopes, None, outer_ctes, &[])
+    build_plan_with_outer(
+        stmt,
+        catalog,
+        outer_scopes,
+        None,
+        outer_ctes,
+        &[],
+        PlannerConfig::default(),
+    )
 }
 
 pub fn build_plan(stmt: &SelectStatement, catalog: &dyn CatalogLookup) -> Result<Plan, ParseError> {
@@ -2964,7 +2997,15 @@ pub fn pg_plan_values_query(
     stmt: &ValuesStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<PlannedStmt, ParseError> {
-    build_values_plan_with_outer(stmt, catalog, &[], None, &[], &[])
+    pg_plan_values_query_with_config(stmt, catalog, PlannerConfig::default())
+}
+
+pub fn pg_plan_values_query_with_config(
+    stmt: &ValuesStatement,
+    catalog: &dyn CatalogLookup,
+    config: PlannerConfig,
+) -> Result<PlannedStmt, ParseError> {
+    build_values_plan_with_outer(stmt, catalog, &[], None, &[], &[], config)
 }
 
 pub fn pg_plan_values_query_with_outer(
@@ -2979,7 +3020,15 @@ pub fn pg_plan_values_query_with_outer(
             .collect(),
     };
     let outer_scope = scope_for_relation(None, &desc);
-    build_values_plan_with_outer(stmt, catalog, &[outer_scope], None, &[], &[])
+    build_values_plan_with_outer(
+        stmt,
+        catalog,
+        &[outer_scope],
+        None,
+        &[],
+        &[],
+        PlannerConfig::default(),
+    )
 }
 
 pub(crate) fn pg_plan_values_query_with_outer_scopes(
@@ -2987,7 +3036,15 @@ pub(crate) fn pg_plan_values_query_with_outer_scopes(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
 ) -> Result<PlannedStmt, ParseError> {
-    build_values_plan_with_outer(stmt, catalog, outer_scopes, None, &[], &[])
+    build_values_plan_with_outer(
+        stmt,
+        catalog,
+        outer_scopes,
+        None,
+        &[],
+        &[],
+        PlannerConfig::default(),
+    )
 }
 
 pub(crate) fn pg_plan_values_query_with_outer_scopes_and_ctes(
@@ -2996,7 +3053,15 @@ pub(crate) fn pg_plan_values_query_with_outer_scopes_and_ctes(
     outer_scopes: &[BoundScope],
     outer_ctes: &[BoundCte],
 ) -> Result<PlannedStmt, ParseError> {
-    build_values_plan_with_outer(stmt, catalog, outer_scopes, None, outer_ctes, &[])
+    build_values_plan_with_outer(
+        stmt,
+        catalog,
+        outer_scopes,
+        None,
+        outer_ctes,
+        &[],
+        PlannerConfig::default(),
+    )
 }
 
 pub(crate) fn bound_cte_from_materialized_rows(
@@ -3157,6 +3222,7 @@ fn build_values_plan_with_outer(
     grouped_outer: Option<GroupedOuterScope>,
     outer_ctes: &[BoundCte],
     expanded_views: &[u32],
+    config: PlannerConfig,
 ) -> Result<PlannedStmt, ParseError> {
     let (query, _) = analyze_values_query_with_outer(
         stmt,
@@ -3170,7 +3236,7 @@ fn build_values_plan_with_outer(
         .try_into()
         .expect("values rewrite should return a single query");
     Ok(crate::backend::optimizer::fold_query_constants(query)
-        .map(|query| planner(query, catalog))??)
+        .map(|query| planner_with_config(query, catalog, config))??)
 }
 
 fn bind_select_query_with_outer(
@@ -4017,6 +4083,7 @@ fn build_plan_with_outer(
     grouped_outer: Option<GroupedOuterScope>,
     outer_ctes: &[BoundCte],
     expanded_views: &[u32],
+    config: PlannerConfig,
 ) -> Result<PlannedStmt, ParseError> {
     let (query, _) = analyze_select_query_with_outer(
         stmt,
@@ -4031,5 +4098,5 @@ fn build_plan_with_outer(
         .try_into()
         .expect("select rewrite should return a single query");
     Ok(crate::backend::optimizer::fold_query_constants(query)
-        .map(|query| planner(query, catalog))??)
+        .map(|query| planner_with_config(query, catalog, config))??)
 }

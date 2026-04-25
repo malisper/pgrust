@@ -59,6 +59,7 @@ use crate::include::nodes::datum::{
 };
 use crate::include::nodes::execnodes::TupleSlot;
 use crate::include::nodes::execnodes::*;
+use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::primnodes::{QueryColumn, TargetEntry};
 
 fn finalize_bound_insert(
@@ -317,6 +318,7 @@ pub(crate) fn execute_explain(
     stmt: ExplainStatement,
     catalog: &dyn CatalogLookup,
     ctx: &mut ExecutorContext,
+    planner_config: PlannerConfig,
 ) -> Result<StatementResult, ExecError> {
     let ExplainStatement {
         analyze,
@@ -352,7 +354,11 @@ pub(crate) fn execute_explain(
     let (query_desc, merge_target_name) = match explain_target {
         EitherExplainTarget::Select(select) => (
             create_query_desc(
-                crate::backend::parser::pg_plan_query(&select, catalog)?,
+                crate::backend::parser::pg_plan_query_with_config(
+                    &select,
+                    catalog,
+                    planner_config,
+                )?,
                 None,
             ),
             None,

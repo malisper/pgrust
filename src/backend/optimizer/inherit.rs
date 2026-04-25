@@ -1,15 +1,26 @@
+use std::cmp::Ordering;
+
+use crate::backend::executor::compare_order_values;
 use crate::backend::parser::CatalogLookup;
+use crate::backend::parser::{
+    PartitionBoundSpec, PartitionRangeDatumValue, PartitionStrategy, deserialize_partition_bound,
+    partition_value_to_value, relation_partition_spec,
+};
+use crate::include::catalog::PgInheritsRow;
 use crate::include::nodes::datum::Value;
 use crate::include::nodes::parsenodes::{RangeTblEntry, RangeTblEntryKind};
-use crate::include::nodes::pathnodes::{AppendRelInfo, PlannerInfo, RelOptInfo, RelOptKind};
+use crate::include::nodes::pathnodes::{
+    AppendRelInfo, PartitionInfo, PartitionMember, PlannerInfo, RelOptInfo, RelOptKind,
+};
 use crate::include::nodes::primnodes::{Expr, ExprArraySubscript, RelationDesc, Var, user_attrno};
 
 use super::joininfo;
 
 pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn CatalogLookup) {
-    let original_len = root.parse.rtable.len();
-    for parent_rtindex in 1..=original_len {
+    let mut parent_rtindex = 1;
+    while parent_rtindex <= root.parse.rtable.len() {
         let Some(parent_rte) = root.parse.rtable.get(parent_rtindex - 1).cloned() else {
+            parent_rtindex += 1;
             continue;
         };
         let RangeTblEntryKind::Relation {
@@ -18,14 +29,31 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
             ..
         } = parent_rte.kind
         else {
+            parent_rtindex += 1;
             continue;
         };
         if !parent_rte.inh || !matches!(relkind, 'r' | 'p') {
+            parent_rtindex += 1;
             continue;
         }
 
-        let inheritors = catalog.find_all_inheritors(relation_oid);
-        if inheritors.len() <= 1 {
+        let child_rows = if relkind == 'p' {
+            ordered_partition_children(catalog, relation_oid)
+        } else {
+            catalog
+                .find_all_inheritors(relation_oid)
+                .into_iter()
+                .filter(|oid| *oid != relation_oid)
+                .map(|oid| PgInheritsRow {
+                    inhrelid: oid,
+                    inhparent: relation_oid,
+                    inhseqno: 1,
+                    inhdetachpending: false,
+                })
+                .collect()
+        };
+        if child_rows.is_empty() {
+            parent_rtindex += 1;
             continue;
         }
         let parent_restrictinfo = root
@@ -34,12 +62,14 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
             .and_then(Option::as_ref)
             .map(|rel| rel.baserestrictinfo.clone())
             .unwrap_or_default();
+        let mut partition_members = Vec::new();
 
-        for child_oid in inheritors.into_iter().filter(|oid| *oid != relation_oid) {
+        for child_row in child_rows {
+            let child_oid = child_row.inhrelid;
             let Some(child) = catalog.relation_by_oid(child_oid) else {
                 continue;
             };
-            if relkind == 'p' && child.relkind != 'r' {
+            if relkind == 'p' && !matches!(child.relkind, 'r' | 'p') {
                 continue;
             }
             let child_rtindex = root.parse.rtable.len() + 1;
@@ -61,6 +91,8 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
                     toast: child.toast,
                 },
             };
+            let mut child_rte = child_rte;
+            child_rte.inh = relkind == 'p' && child.relkind == 'p';
             root.parse.rtable.push(child_rte.clone());
             root.simple_rel_array
                 .push(Some(RelOptInfo::from_rte(child_rtindex, &child_rte)));
@@ -92,8 +124,227 @@ pub(super) fn expand_inherited_rtentries(root: &mut PlannerInfo, catalog: &dyn C
                     })
                     .collect();
             }
+            if relkind == 'p' {
+                partition_members.push(PartitionMember {
+                    relids: vec![child_rtindex],
+                    bound: child
+                        .relpartbound
+                        .as_deref()
+                        .and_then(|text| deserialize_partition_bound(text).ok()),
+                });
+            }
+        }
+        if relkind == 'p'
+            && let Some(partition_info) = partition_info_for_parent(
+                catalog,
+                relation_oid,
+                parent_rtindex,
+                &parent_rte,
+                partition_members,
+            )
+            && let Some(parent_rel) = root
+                .simple_rel_array
+                .get_mut(parent_rtindex)
+                .and_then(Option::as_mut)
+        {
+            parent_rel.consider_partitionwise_join = root.config.enable_partitionwise_join;
+            parent_rel.partition_info = Some(partition_info);
+        }
+        parent_rtindex += 1;
+    }
+}
+
+fn ordered_partition_children(catalog: &dyn CatalogLookup, parent_oid: u32) -> Vec<PgInheritsRow> {
+    let parent = catalog.relation_by_oid(parent_oid);
+    let strategy = parent
+        .as_ref()
+        .and_then(|parent| relation_partition_spec(parent).ok())
+        .map(|spec| spec.strategy);
+    let mut children = catalog
+        .inheritance_children(parent_oid)
+        .into_iter()
+        .filter(|row| !row.inhdetachpending)
+        .collect::<Vec<_>>();
+    children.sort_by(|left, right| {
+        compare_partition_children(catalog, strategy, left, right)
+            .then_with(|| left.inhseqno.cmp(&right.inhseqno))
+            .then_with(|| left.inhrelid.cmp(&right.inhrelid))
+    });
+    children
+}
+
+fn compare_partition_children(
+    catalog: &dyn CatalogLookup,
+    strategy: Option<PartitionStrategy>,
+    left: &PgInheritsRow,
+    right: &PgInheritsRow,
+) -> Ordering {
+    let left_bound = catalog
+        .relation_by_oid(left.inhrelid)
+        .and_then(|rel| rel.relpartbound)
+        .and_then(|text| deserialize_partition_bound(&text).ok());
+    let right_bound = catalog
+        .relation_by_oid(right.inhrelid)
+        .and_then(|rel| rel.relpartbound)
+        .and_then(|text| deserialize_partition_bound(&text).ok());
+    match (strategy, left_bound.as_ref(), right_bound.as_ref()) {
+        (_, Some(left), Some(right)) if left.is_default() || right.is_default() => {
+            left.is_default().cmp(&right.is_default())
+        }
+        (Some(PartitionStrategy::List), Some(left), Some(right)) => {
+            compare_list_bounds(left, right)
+        }
+        (Some(PartitionStrategy::Range), Some(left), Some(right)) => {
+            compare_range_bounds(left, right)
+        }
+        (Some(PartitionStrategy::Hash), Some(left), Some(right)) => {
+            compare_hash_bounds(left, right)
+        }
+        (_, Some(_), None) => Ordering::Less,
+        (_, None, Some(_)) => Ordering::Greater,
+        _ => Ordering::Equal,
+    }
+}
+
+fn compare_list_bounds(left: &PartitionBoundSpec, right: &PartitionBoundSpec) -> Ordering {
+    let (
+        PartitionBoundSpec::List {
+            values: left_values,
+            ..
+        },
+        PartitionBoundSpec::List {
+            values: right_values,
+            ..
+        },
+    ) = (left, right)
+    else {
+        return Ordering::Equal;
+    };
+    left_values
+        .iter()
+        .zip(right_values.iter())
+        .map(|(left, right)| {
+            compare_order_values(
+                &partition_value_to_value(left),
+                &partition_value_to_value(right),
+                None,
+                Some(true),
+                false,
+            )
+            .unwrap_or(Ordering::Equal)
+        })
+        .find(|ordering| *ordering != Ordering::Equal)
+        .unwrap_or_else(|| left_values.len().cmp(&right_values.len()))
+}
+
+fn compare_range_bounds(left: &PartitionBoundSpec, right: &PartitionBoundSpec) -> Ordering {
+    let (
+        PartitionBoundSpec::Range {
+            from: left_from,
+            to: left_to,
+            ..
+        },
+        PartitionBoundSpec::Range {
+            from: right_from,
+            to: right_to,
+            ..
+        },
+    ) = (left, right)
+    else {
+        return Ordering::Equal;
+    };
+    compare_range_datums(left_from, right_from)
+        .then_with(|| compare_range_datums(left_to, right_to))
+}
+
+fn compare_range_datums(
+    left: &[PartitionRangeDatumValue],
+    right: &[PartitionRangeDatumValue],
+) -> Ordering {
+    left.iter()
+        .zip(right.iter())
+        .map(compare_range_datum)
+        .find(|ordering| *ordering != Ordering::Equal)
+        .unwrap_or_else(|| left.len().cmp(&right.len()))
+}
+
+fn compare_range_datum(left: (&PartitionRangeDatumValue, &PartitionRangeDatumValue)) -> Ordering {
+    match left {
+        (PartitionRangeDatumValue::MinValue, PartitionRangeDatumValue::MinValue)
+        | (PartitionRangeDatumValue::MaxValue, PartitionRangeDatumValue::MaxValue) => {
+            Ordering::Equal
+        }
+        (PartitionRangeDatumValue::MinValue, _) | (_, PartitionRangeDatumValue::MaxValue) => {
+            Ordering::Less
+        }
+        (PartitionRangeDatumValue::MaxValue, _) | (_, PartitionRangeDatumValue::MinValue) => {
+            Ordering::Greater
+        }
+        (PartitionRangeDatumValue::Value(left), PartitionRangeDatumValue::Value(right)) => {
+            compare_order_values(
+                &partition_value_to_value(left),
+                &partition_value_to_value(right),
+                None,
+                Some(true),
+                false,
+            )
+            .unwrap_or(Ordering::Equal)
         }
     }
+}
+
+fn compare_hash_bounds(left: &PartitionBoundSpec, right: &PartitionBoundSpec) -> Ordering {
+    match (left, right) {
+        (
+            PartitionBoundSpec::Hash {
+                modulus: left_modulus,
+                remainder: left_remainder,
+            },
+            PartitionBoundSpec::Hash {
+                modulus: right_modulus,
+                remainder: right_remainder,
+            },
+        ) => left_modulus
+            .cmp(right_modulus)
+            .then_with(|| left_remainder.cmp(right_remainder)),
+        _ => Ordering::Equal,
+    }
+}
+
+fn partition_info_for_parent(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    parent_rtindex: usize,
+    parent_rte: &RangeTblEntry,
+    members: Vec<PartitionMember>,
+) -> Option<PartitionInfo> {
+    let parent = catalog.relation_by_oid(relation_oid)?;
+    let spec = relation_partition_spec(&parent).ok()?;
+    let key_exprs = spec
+        .partattrs
+        .iter()
+        .filter_map(|attno| {
+            let index = usize::try_from(*attno).ok()?.checked_sub(1)?;
+            let column = parent_rte.desc.columns.get(index)?;
+            Some(Expr::Var(Var {
+                varno: parent_rtindex,
+                varattno: i32::from(*attno),
+                varlevelsup: 0,
+                vartype: column.sql_type,
+            }))
+        })
+        .collect::<Vec<_>>();
+    if key_exprs.len() != spec.partattrs.len() || members.is_empty() {
+        return None;
+    }
+    Some(PartitionInfo {
+        strategy: spec.strategy,
+        partattrs: spec.partattrs,
+        partclass: spec.partclass,
+        partcollation: spec.partcollation,
+        key_exprs,
+        members,
+    })
 }
 
 pub(super) fn translate_append_rel_expr(expr: Expr, info: &AppendRelInfo) -> Expr {
