@@ -184,6 +184,7 @@ fn analyze_executor_context(
         pool: Arc::clone(&db.pool),
         txns: db.txns.clone(),
         txn_waiter: Some(db.txn_waiter.clone()),
+        lock_status_provider: Some(Arc::new(db.clone())),
         sequences: Some(db.sequences.clone()),
         large_objects: Some(db.large_objects.clone()),
         async_notify_runtime: Some(db.async_notify_runtime.clone()),
@@ -2672,6 +2673,67 @@ fn advisory_session_and_transaction_locks_cleanup_and_encode_keys() {
 }
 
 #[test]
+fn pg_locks_pg_lock_status_return_same_advisory_rows() {
+    let dir = temp_dir("pg_locks_pg_lock_status_advisory_rows");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "select pg_advisory_lock(4294967298), pg_advisory_lock_shared(7, 8)",
+        )
+        .unwrap();
+
+    let select_list = "classid, objid, objsubid, pid, mode, granted, fastpath, waitstart is null";
+    let order_by = "order by objsubid, classid, objid";
+    let from_view = session_query_rows(
+        &mut session,
+        &db,
+        &format!("select {select_list} from pg_locks where locktype = 'advisory' {order_by}"),
+    );
+    let from_catalog_view = session_query_rows(
+        &mut session,
+        &db,
+        &format!(
+            "select {select_list} from pg_catalog.pg_locks \
+             where locktype = 'advisory' {order_by}"
+        ),
+    );
+    let from_srf = session_query_rows(
+        &mut session,
+        &db,
+        &format!(
+            "select {select_list} from pg_catalog.pg_lock_status() \
+             where locktype = 'advisory' {order_by}"
+        ),
+    );
+
+    assert_eq!(from_view, from_catalog_view);
+    assert_eq!(from_view, from_srf);
+
+    session
+        .execute(&db, "select pg_advisory_unlock_all()")
+        .unwrap();
+}
+
+#[test]
+fn pg_locks_pg_lock_status_virtualxid_includes_current_backend() {
+    let dir = temp_dir("pg_locks_pg_lock_status_virtualxid");
+    let db = Database::open(&dir, 64).unwrap();
+
+    assert_eq!(
+        query_rows(
+            &db,
+            7,
+            "select count(*) from pg_lock_status() \
+             where locktype = 'virtualxid' and pid = pg_backend_pid()"
+        ),
+        vec![vec![Value::Int64(1)]]
+    );
+}
+
+#[test]
 fn advisory_try_lock_shared_and_reentrant_counts_match_postgres() {
     let dir = temp_dir("advisory_try_lock_shared_reentrant");
     let db = Database::open(&dir, 64).unwrap();
@@ -3153,6 +3215,18 @@ fn pg_locks_shows_granted_and_waiting_relation_locks() {
         Value::Bool(false),
         Value::Bool(true),
     ]));
+    assert_eq!(
+        relation_rows,
+        query_rows(
+            &db,
+            3,
+            &format!(
+                "select pid, mode, granted, waitstart is not null \
+                 from pg_lock_status() where locktype = 'relation' and relation = {relation_oid} \
+                 order by pid, granted desc"
+            ),
+        )
+    );
 
     holder.execute(&db, "rollback").unwrap();
     match done_rx.recv_timeout(TEST_TIMEOUT).unwrap().unwrap() {
@@ -3162,6 +3236,177 @@ fn pg_locks_shows_granted_and_waiting_relation_locks() {
         other => panic!("expected query result, got {other:?}"),
     }
     worker.join().unwrap();
+}
+
+#[test]
+fn pg_locks_reports_tuple_granted_and_waiting_rows() {
+    use std::sync::mpsc;
+
+    let dir = temp_dir("pg_locks_tuple_rows");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut holder = Session::new(1);
+    let mut waiter = Session::new(2);
+
+    holder
+        .execute(
+            &db,
+            "create table tuple_lock_items (id int4 not null primary key)",
+        )
+        .unwrap();
+    holder
+        .execute(&db, "insert into tuple_lock_items values (1)")
+        .unwrap();
+    let relation_oid = relation_oid_for(&db, 1, "tuple_lock_items");
+
+    holder.execute(&db, "begin").unwrap();
+    assert_eq!(
+        session_query_rows(
+            &mut holder,
+            &db,
+            "select id from tuple_lock_items where id = 1 for update"
+        ),
+        vec![vec![Value::Int32(1)]]
+    );
+
+    db.install_interrupt_state(2, waiter.interrupts());
+    let db2 = db.clone();
+    let (done_tx, done_rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        done_tx
+            .send(waiter.execute(
+                &db2,
+                "select id from tuple_lock_items where id = 1 for share",
+            ))
+            .unwrap();
+    });
+
+    let waiting_row = wait_for_pg_lock_row(&db, TEST_TIMEOUT, |row| {
+        matches!(row.first(), Some(Value::Text(locktype)) if locktype.as_str() == "tuple")
+            && row.get(2) == Some(&Value::Int64(relation_oid))
+            && row.get(11) == Some(&Value::Int32(2))
+            && row.get(13) == Some(&Value::Bool(false))
+    });
+    assert_eq!(waiting_row[12], Value::Text("RowShareLock".into()));
+    assert!(!matches!(waiting_row[15], Value::Null));
+
+    let tuple_rows = query_rows(
+        &db,
+        3,
+        &format!(
+            "select pid, mode, granted, waitstart is not null \
+             from pg_lock_status() where locktype = 'tuple' and relation = {relation_oid} \
+             order by pid, granted desc"
+        ),
+    );
+    assert!(tuple_rows.contains(&vec![
+        Value::Int32(1),
+        Value::Text("AccessExclusiveLock".into()),
+        Value::Bool(true),
+        Value::Bool(false),
+    ]));
+    assert!(tuple_rows.contains(&vec![
+        Value::Int32(2),
+        Value::Text("RowShareLock".into()),
+        Value::Bool(false),
+        Value::Bool(true),
+    ]));
+
+    holder.execute(&db, "rollback").unwrap();
+    match done_rx.recv_timeout(TEST_TIMEOUT).unwrap().unwrap() {
+        StatementResult::Query { rows, .. } => {
+            assert_eq!(rows, vec![vec![Value::Int32(1)]]);
+        }
+        other => panic!("expected query result, got {other:?}"),
+    }
+    worker.join().unwrap();
+    assert!(
+        query_rows(
+            &db,
+            3,
+            "select locktype from pg_lock_status() where locktype = 'tuple'"
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn pg_locks_reports_transactionid_holders_waiters_and_cleanup() {
+    use std::sync::mpsc;
+
+    let dir = temp_dir("pg_locks_transactionid_rows");
+    let db = Database::open(&dir, 64).unwrap();
+    let mut holder = Session::new(1);
+    let mut waiter = Session::new(2);
+
+    holder
+        .execute(
+            &db,
+            "create table transaction_lock_items (id int4 not null primary key)",
+        )
+        .unwrap();
+    holder
+        .execute(&db, "insert into transaction_lock_items values (1)")
+        .unwrap();
+
+    holder.execute(&db, "begin").unwrap();
+    holder
+        .execute(&db, "update transaction_lock_items set id = 2 where id = 1")
+        .unwrap();
+
+    db.install_interrupt_state(2, waiter.interrupts());
+    let db2 = db.clone();
+    let (done_tx, done_rx) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        done_tx
+            .send(waiter.execute(
+                &db2,
+                "update transaction_lock_items set id = 3 where id = 1",
+            ))
+            .unwrap();
+    });
+
+    let waiting_row = wait_for_pg_lock_row(&db, TEST_TIMEOUT, |row| {
+        matches!(row.first(), Some(Value::Text(locktype)) if locktype.as_str() == "transactionid")
+            && row.get(11) == Some(&Value::Int32(2))
+            && row.get(13) == Some(&Value::Bool(false))
+    });
+    assert_eq!(waiting_row[12], Value::Text("ShareLock".into()));
+    assert!(!matches!(waiting_row[15], Value::Null));
+
+    let transaction_rows = query_rows(
+        &db,
+        3,
+        "select pid, mode, granted, waitstart is not null \
+         from pg_lock_status() where locktype = 'transactionid' order by pid, granted desc",
+    );
+    assert!(transaction_rows.contains(&vec![
+        Value::Int32(1),
+        Value::Text("ExclusiveLock".into()),
+        Value::Bool(true),
+        Value::Bool(false),
+    ]));
+    assert!(transaction_rows.contains(&vec![
+        Value::Int32(2),
+        Value::Text("ShareLock".into()),
+        Value::Bool(false),
+        Value::Bool(true),
+    ]));
+
+    holder.execute(&db, "rollback").unwrap();
+    match done_rx.recv_timeout(TEST_TIMEOUT).unwrap().unwrap() {
+        StatementResult::AffectedRows(1) => {}
+        other => panic!("expected update result, got {other:?}"),
+    }
+    worker.join().unwrap();
+    assert!(
+        query_rows(
+            &db,
+            3,
+            "select locktype from pg_lock_status() where locktype = 'transactionid' \
+             and pid in (1, 2)"
+        )
+        .is_empty()
+    );
 }
 
 #[test]

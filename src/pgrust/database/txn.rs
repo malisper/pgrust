@@ -189,6 +189,7 @@ impl Database {
                     .unlock_all_transaction(client_id, u64::from(xid));
                 self.row_locks
                     .unlock_all_transaction(client_id, u64::from(xid));
+                self.txn_waiter.unregister_holder(xid);
                 self.txn_waiter.notify();
                 Ok(r)
             }
@@ -207,6 +208,7 @@ impl Database {
                     .unlock_all_transaction(client_id, u64::from(xid));
                 self.row_locks
                     .unlock_all_transaction(client_id, u64::from(xid));
+                self.txn_waiter.unregister_holder(xid);
                 self.txn_waiter.notify();
                 Err(e)
             }
@@ -235,6 +237,16 @@ impl<'a> AutoCommitGuard<'a> {
         }
     }
 
+    pub(super) fn new_for_client(
+        txns: &'a Arc<RwLock<TransactionManager>>,
+        txn_waiter: &'a TransactionWaiter,
+        xid: TransactionId,
+        client_id: crate::ClientId,
+    ) -> Self {
+        txn_waiter.register_holder(xid, client_id);
+        Self::new(txns, txn_waiter, xid)
+    }
+
     pub(super) fn disarm(mut self) {
         self.committed = true;
     }
@@ -244,6 +256,7 @@ impl Drop for AutoCommitGuard<'_> {
     fn drop(&mut self) {
         if !self.committed {
             let _ = self.txns.write().abort(self.xid);
+            self.txn_waiter.unregister_holder(self.xid);
             self.txn_waiter.notify();
         }
     }

@@ -421,6 +421,17 @@ fn prepare_set_returning_call_for_locking(
             relid: prepare_expr_for_locking(relid)?,
             output_columns,
         },
+        SetReturningCall::PgLockStatus {
+            func_oid,
+            func_variadic,
+            output_columns,
+            with_ordinality,
+        } => SetReturningCall::PgLockStatus {
+            func_oid,
+            func_variadic,
+            output_columns,
+            with_ordinality,
+        },
         SetReturningCall::Unnest {
             func_oid,
             func_variadic,
@@ -2235,6 +2246,7 @@ fn collect_set_returning_call_outer_refs(
         | SetReturningCall::PartitionAncestors { relid, .. } => {
             collect_query_outer_refs_expr(relid, levelsup, exprs);
         }
+        SetReturningCall::PgLockStatus { .. } => {}
         SetReturningCall::Unnest { args, .. }
         | SetReturningCall::JsonTableFunction { args, .. }
         | SetReturningCall::JsonRecordFunction { args, .. }
