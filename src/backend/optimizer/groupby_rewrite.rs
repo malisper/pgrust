@@ -1,0 +1,545 @@
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::backend::parser::CatalogLookup;
+use crate::include::nodes::parsenodes::{JoinTreeNode, Query, RangeTblEntryKind};
+use crate::include::nodes::pathnodes::AggregateLayout;
+use crate::include::nodes::primnodes::{
+    AttrNumber, Expr, JoinType, OpExprKind, Var, WindowClause, WindowFrameBound, WindowFuncExpr,
+    WindowFuncKind, set_returning_call_exprs,
+};
+
+use super::joininfo::flatten_join_alias_vars_query;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct VarKey {
+    varno: usize,
+    varattno: AttrNumber,
+    varlevelsup: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GroupVarInfo {
+    relid: usize,
+    attno: i16,
+}
+
+pub(super) fn build_aggregate_layout(
+    query: &Query,
+    catalog: &dyn CatalogLookup,
+) -> AggregateLayout {
+    let original_group_by = query.group_by.clone();
+    if original_group_by.len() < 2 || query_has_outer_joins(query) {
+        return AggregateLayout {
+            group_by: original_group_by,
+            passthrough_exprs: Vec::new(),
+        };
+    }
+
+    let per_relation_reduced = remove_redundant_relation_group_keys(query, catalog);
+    let reduced_group_by = collapse_duplicate_group_keys(query, per_relation_reduced);
+    if reduced_group_by == query.group_by {
+        return AggregateLayout {
+            group_by: query.group_by.clone(),
+            passthrough_exprs: Vec::new(),
+        };
+    }
+
+    let passthrough_exprs = collect_passthrough_exprs(query, &reduced_group_by);
+
+    AggregateLayout {
+        group_by: reduced_group_by,
+        passthrough_exprs,
+    }
+}
+
+fn collect_passthrough_exprs(query: &Query, reduced_group_by: &[Expr]) -> Vec<Expr> {
+    query
+        .group_by
+        .iter()
+        .filter(|expr| {
+            !reduced_group_by.contains(expr) && query_references_group_output_expr(query, expr)
+        })
+        .cloned()
+        .collect()
+}
+
+fn query_references_group_output_expr(query: &Query, target: &Expr) -> bool {
+    query
+        .target_list
+        .iter()
+        .any(|entry| expr_references_group_output(&entry.expr, target))
+        || query
+            .having_qual
+            .as_ref()
+            .is_some_and(|expr| expr_references_group_output(expr, target))
+        || query
+            .sort_clause
+            .iter()
+            .any(|item| expr_references_group_output(&item.expr, target))
+        || query
+            .window_clauses
+            .iter()
+            .any(|clause| window_clause_references_group_output(clause, target))
+}
+
+fn window_clause_references_group_output(clause: &WindowClause, target: &Expr) -> bool {
+    clause
+        .functions
+        .iter()
+        .any(|func| window_func_references_group_output(func, target))
+        || clause
+            .spec
+            .partition_by
+            .iter()
+            .any(|expr| expr_references_group_output(expr, target))
+        || clause
+            .spec
+            .order_by
+            .iter()
+            .any(|item| expr_references_group_output(&item.expr, target))
+        || window_frame_bound_references_group_output(&clause.spec.frame.start_bound, target)
+        || window_frame_bound_references_group_output(&clause.spec.frame.end_bound, target)
+}
+
+fn window_func_references_group_output(func: &WindowFuncExpr, target: &Expr) -> bool {
+    func.args
+        .iter()
+        .any(|expr| expr_references_group_output(expr, target))
+        || match &func.kind {
+            WindowFuncKind::Aggregate(aggref) => {
+                aggref
+                    .args
+                    .iter()
+                    .any(|expr| expr_references_group_output(expr, target))
+                    || aggref
+                        .aggorder
+                        .iter()
+                        .any(|item| expr_references_group_output(&item.expr, target))
+                    || aggref
+                        .aggfilter
+                        .as_ref()
+                        .is_some_and(|expr| expr_references_group_output(expr, target))
+            }
+            WindowFuncKind::Builtin(_) => false,
+        }
+}
+
+fn window_frame_bound_references_group_output(bound: &WindowFrameBound, target: &Expr) -> bool {
+    match bound {
+        WindowFrameBound::OffsetPreceding(offset) | WindowFrameBound::OffsetFollowing(offset) => {
+            expr_references_group_output(&offset.expr, target)
+        }
+        WindowFrameBound::UnboundedPreceding
+        | WindowFrameBound::CurrentRow
+        | WindowFrameBound::UnboundedFollowing => false,
+    }
+}
+
+fn expr_references_group_output(expr: &Expr, target: &Expr) -> bool {
+    if expr == target {
+        return true;
+    }
+
+    match expr {
+        // Aggregate inputs are evaluated below the aggregate node, so they do not
+        // need extra passthrough slots in the grouped output.
+        Expr::Aggref(_) => false,
+        Expr::Var(_)
+        | Expr::Param(_)
+        | Expr::Const(_)
+        | Expr::CaseTest(_)
+        | Expr::Random
+        | Expr::CurrentUser
+        | Expr::SessionUser
+        | Expr::CurrentRole
+        | Expr::CurrentDate
+        | Expr::CurrentTime { .. }
+        | Expr::CurrentTimestamp { .. }
+        | Expr::LocalTime { .. }
+        | Expr::LocalTimestamp { .. } => false,
+        Expr::WindowFunc(window_func) => window_func_references_group_output(window_func, target),
+        Expr::Op(op) => op
+            .args
+            .iter()
+            .any(|arg| expr_references_group_output(arg, target)),
+        Expr::Bool(bool_expr) => bool_expr
+            .args
+            .iter()
+            .any(|arg| expr_references_group_output(arg, target)),
+        Expr::Case(case_expr) => {
+            case_expr
+                .arg
+                .as_deref()
+                .is_some_and(|arg| expr_references_group_output(arg, target))
+                || case_expr.args.iter().any(|arm| {
+                    expr_references_group_output(&arm.expr, target)
+                        || expr_references_group_output(&arm.result, target)
+                })
+                || expr_references_group_output(&case_expr.defresult, target)
+        }
+        Expr::Func(func) => func
+            .args
+            .iter()
+            .any(|arg| expr_references_group_output(arg, target)),
+        Expr::SetReturning(srf) => set_returning_call_exprs(&srf.call)
+            .into_iter()
+            .any(|arg| expr_references_group_output(arg, target)),
+        Expr::SubLink(sublink) => sublink
+            .testexpr
+            .as_deref()
+            .is_some_and(|expr| expr_references_group_output(expr, target)),
+        Expr::SubPlan(subplan) => {
+            subplan
+                .testexpr
+                .as_deref()
+                .is_some_and(|expr| expr_references_group_output(expr, target))
+                || subplan
+                    .args
+                    .iter()
+                    .any(|arg| expr_references_group_output(arg, target))
+        }
+        Expr::ScalarArrayOp(op) => {
+            expr_references_group_output(&op.left, target)
+                || expr_references_group_output(&op.right, target)
+        }
+        Expr::Xml(xml) => xml
+            .child_exprs()
+            .any(|child| expr_references_group_output(child, target)),
+        Expr::Cast(inner, _)
+        | Expr::Collate { expr: inner, .. }
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner) => expr_references_group_output(inner, target),
+        Expr::Like {
+            expr,
+            pattern,
+            escape,
+            ..
+        }
+        | Expr::Similar {
+            expr,
+            pattern,
+            escape,
+            ..
+        } => {
+            expr_references_group_output(expr, target)
+                || expr_references_group_output(pattern, target)
+                || escape
+                    .as_deref()
+                    .is_some_and(|expr| expr_references_group_output(expr, target))
+        }
+        Expr::IsDistinctFrom(left, right)
+        | Expr::IsNotDistinctFrom(left, right)
+        | Expr::Coalesce(left, right) => {
+            expr_references_group_output(left, target)
+                || expr_references_group_output(right, target)
+        }
+        Expr::ArrayLiteral { elements, .. } => elements
+            .iter()
+            .any(|expr| expr_references_group_output(expr, target)),
+        Expr::Row { fields, .. } => fields
+            .iter()
+            .any(|(_, expr)| expr_references_group_output(expr, target)),
+        Expr::FieldSelect { expr, .. } => expr_references_group_output(expr, target),
+        Expr::ArraySubscript { array, subscripts } => {
+            expr_references_group_output(array, target)
+                || subscripts.iter().any(|subscript| {
+                    subscript
+                        .lower
+                        .as_ref()
+                        .is_some_and(|expr| expr_references_group_output(expr, target))
+                        || subscript
+                            .upper
+                            .as_ref()
+                            .is_some_and(|expr| expr_references_group_output(expr, target))
+                })
+        }
+    }
+}
+
+fn remove_redundant_relation_group_keys(query: &Query, catalog: &dyn CatalogLookup) -> Vec<Expr> {
+    let group_vars = query
+        .group_by
+        .iter()
+        .map(|expr| analyze_group_var(query, expr))
+        .collect::<Vec<_>>();
+
+    let mut grouped_attnos = BTreeMap::<usize, BTreeSet<i16>>::new();
+    for info in group_vars.iter().flatten() {
+        grouped_attnos
+            .entry(info.relid)
+            .or_default()
+            .insert(info.attno);
+    }
+
+    let mut surplus_attnos = BTreeMap::<usize, BTreeSet<i16>>::new();
+    for (&relid, attnos) in &grouped_attnos {
+        if attnos.len() < 2 {
+            continue;
+        }
+        let Some(rte) = query.rtable.get(relid.saturating_sub(1)) else {
+            continue;
+        };
+        let RangeTblEntryKind::Relation {
+            relation_oid,
+            relkind,
+            ..
+        } = &rte.kind
+        else {
+            continue;
+        };
+        if *relkind != 'r' {
+            continue;
+        }
+        if rte.inh && catalog.find_all_inheritors(*relation_oid).len() > 1 {
+            continue;
+        }
+
+        let Some(best_key) = best_unique_group_subset(catalog, *relation_oid, &rte.desc, attnos)
+        else {
+            continue;
+        };
+        if best_key.len() >= attnos.len() {
+            continue;
+        }
+        let removable = attnos
+            .iter()
+            .copied()
+            .filter(|attno| !best_key.contains(attno))
+            .collect::<BTreeSet<_>>();
+        if !removable.is_empty() {
+            surplus_attnos.insert(relid, removable);
+        }
+    }
+
+    query
+        .group_by
+        .iter()
+        .cloned()
+        .zip(group_vars)
+        .filter_map(|(expr, info)| match info {
+            Some(info)
+                if surplus_attnos
+                    .get(&info.relid)
+                    .is_some_and(|attnos| attnos.contains(&info.attno)) =>
+            {
+                None
+            }
+            _ => Some(expr),
+        })
+        .collect()
+}
+
+fn best_unique_group_subset(
+    catalog: &dyn CatalogLookup,
+    relation_oid: u32,
+    desc: &crate::include::nodes::primnodes::RelationDesc,
+    grouped_attnos: &BTreeSet<i16>,
+) -> Option<BTreeSet<i16>> {
+    let mut best_key: Option<BTreeSet<i16>> = None;
+    for index in catalog.index_relations_for_heap(relation_oid) {
+        let meta = &index.index_meta;
+        if !meta.indisunique || !meta.indisvalid || !meta.indisready || !meta.indimmediate {
+            continue;
+        }
+        if !index.index_exprs.is_empty() || index.index_predicate.is_some() {
+            continue;
+        }
+        let key_attnos = meta
+            .indkey
+            .iter()
+            .take(meta.indnkeyatts as usize)
+            .copied()
+            .collect::<Vec<_>>();
+        if key_attnos.is_empty() || key_attnos.iter().any(|attno| *attno <= 0) {
+            continue;
+        }
+        if !meta.indnullsnotdistinct
+            && key_attnos
+                .iter()
+                .any(|attno| desc.columns[(attno - 1) as usize].storage.nullable)
+        {
+            continue;
+        }
+
+        let key_attnos = key_attnos.into_iter().collect::<BTreeSet<_>>();
+        if key_attnos.len() >= grouped_attnos.len() || !key_attnos.is_subset(grouped_attnos) {
+            continue;
+        }
+        match &best_key {
+            Some(existing) if existing.len() <= key_attnos.len() => {}
+            _ => best_key = Some(key_attnos),
+        }
+    }
+    best_key
+}
+
+fn collapse_duplicate_group_keys(query: &Query, group_by: Vec<Expr>) -> Vec<Expr> {
+    if group_by.len() < 2 {
+        return group_by;
+    }
+
+    let mut group_keys = Vec::with_capacity(group_by.len());
+    let mut positions_by_key = BTreeMap::<VarKey, Vec<usize>>::new();
+    for (index, expr) in group_by.iter().enumerate() {
+        let flattened = flatten_join_alias_vars_query(query, expr.clone());
+        let key = flattened_var_key(&flattened);
+        if let Some(key) = key {
+            positions_by_key.entry(key).or_default().push(index);
+        }
+        group_keys.push(key);
+    }
+
+    let mut parent = (0..group_by.len()).collect::<Vec<_>>();
+    for (left_key, right_key) in collect_inner_join_equality_pairs(query) {
+        let Some(left_positions) = positions_by_key.get(&left_key) else {
+            continue;
+        };
+        let Some(right_positions) = positions_by_key.get(&right_key) else {
+            continue;
+        };
+        for &left in left_positions {
+            for &right in right_positions {
+                union_roots(&mut parent, left, right);
+            }
+        }
+    }
+
+    let mut seen_roots = BTreeSet::new();
+    group_by
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, expr)| {
+            let root = find_root(&mut parent, index);
+            seen_roots.insert(root).then_some(expr)
+        })
+        .collect()
+}
+
+fn collect_inner_join_equality_pairs(query: &Query) -> Vec<(VarKey, VarKey)> {
+    let mut pairs = Vec::new();
+    if let Some(jointree) = query.jointree.as_ref() {
+        collect_inner_join_pairs_from_tree(query, jointree, &mut pairs);
+    }
+    pairs
+}
+
+fn collect_inner_join_pairs_from_tree(
+    query: &Query,
+    node: &JoinTreeNode,
+    pairs: &mut Vec<(VarKey, VarKey)>,
+) {
+    match node {
+        JoinTreeNode::RangeTblRef(_) => {}
+        JoinTreeNode::JoinExpr {
+            left,
+            right,
+            kind,
+            quals,
+            ..
+        } => {
+            collect_inner_join_pairs_from_tree(query, left, pairs);
+            collect_inner_join_pairs_from_tree(query, right, pairs);
+            if matches!(kind, JoinType::Inner | JoinType::Cross) {
+                collect_pairs_from_qual(query, quals, pairs);
+            }
+        }
+    }
+}
+
+fn collect_pairs_from_qual(query: &Query, expr: &Expr, pairs: &mut Vec<(VarKey, VarKey)>) {
+    match expr {
+        Expr::Bool(bool_expr)
+            if matches!(
+                bool_expr.boolop,
+                crate::include::nodes::primnodes::BoolExprType::And
+            ) =>
+        {
+            for arg in &bool_expr.args {
+                collect_pairs_from_qual(query, arg, pairs);
+            }
+        }
+        Expr::Op(op) if op.op == OpExprKind::Eq && op.args.len() == 2 => {
+            let left = flatten_join_alias_vars_query(query, op.args[0].clone());
+            let right = flatten_join_alias_vars_query(query, op.args[1].clone());
+            let (Some(left), Some(right)) = (flattened_var_key(&left), flattened_var_key(&right))
+            else {
+                return;
+            };
+            if left.varno != right.varno {
+                pairs.push((left, right));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn analyze_group_var(query: &Query, expr: &Expr) -> Option<GroupVarInfo> {
+    let Expr::Var(var) = expr else {
+        return None;
+    };
+    if var.varlevelsup != 0 || var.varattno <= 0 {
+        return None;
+    }
+    let attno = i16::try_from(var.varattno).ok()?;
+    let rte = query.rtable.get(var.varno.saturating_sub(1))?;
+    matches!(rte.kind, RangeTblEntryKind::Relation { .. }).then_some(GroupVarInfo {
+        relid: var.varno,
+        attno,
+    })
+}
+
+fn flattened_var_key(expr: &Expr) -> Option<VarKey> {
+    let Expr::Var(Var {
+        varno,
+        varattno,
+        varlevelsup,
+        ..
+    }) = expr
+    else {
+        return None;
+    };
+    (*varattno > 0).then_some(VarKey {
+        varno: *varno,
+        varattno: *varattno,
+        varlevelsup: *varlevelsup,
+    })
+}
+
+fn query_has_outer_joins(query: &Query) -> bool {
+    fn jointree_has_outer_join(node: &JoinTreeNode) -> bool {
+        match node {
+            JoinTreeNode::RangeTblRef(_) => false,
+            JoinTreeNode::JoinExpr {
+                left, right, kind, ..
+            } => {
+                !matches!(kind, JoinType::Inner | JoinType::Cross)
+                    || jointree_has_outer_join(left)
+                    || jointree_has_outer_join(right)
+            }
+        }
+    }
+
+    query.jointree.as_ref().is_some_and(jointree_has_outer_join)
+}
+
+fn find_root(parent: &mut [usize], index: usize) -> usize {
+    if parent[index] == index {
+        return index;
+    }
+    let root = find_root(parent, parent[index]);
+    parent[index] = root;
+    root
+}
+
+fn union_roots(parent: &mut [usize], left: usize, right: usize) {
+    let left_root = find_root(parent, left);
+    let right_root = find_root(parent, right);
+    if left_root == right_root {
+        return;
+    }
+    if left_root < right_root {
+        parent[right_root] = left_root;
+    } else {
+        parent[left_root] = right_root;
+    }
+}
