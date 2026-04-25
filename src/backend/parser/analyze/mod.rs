@@ -30,7 +30,7 @@ pub(crate) use self::scope::{ScopeColumn, ScopeRelation};
 use crate::RelFileLocator;
 use crate::backend::catalog::catalog::column_desc;
 use crate::backend::executor::{Value, cast_value};
-use crate::backend::optimizer::planner;
+use crate::backend::optimizer::planner_with_config;
 use crate::backend::rewrite::pg_rewrite_query;
 use crate::backend::utils::cache::catcache::CatCache;
 use crate::backend::utils::cache::visible_catalog::VisibleCatalog;
@@ -46,6 +46,7 @@ use crate::include::catalog::{
     proc_oid_for_builtin_aggregate_function, range_type_ref_for_sql_type, relkind_is_analyzable,
     synthetic_range_proc_row_by_oid, synthetic_range_proc_rows_by_name,
 };
+use crate::include::nodes::pathnodes::PlannerConfig;
 use crate::include::nodes::plannodes::{Plan, PlannedStmt};
 use crate::include::nodes::primnodes::{
     AggAccum, AggFunc, BuiltinScalarFunction, Expr, JsonTableFunction, OrderByEntry, QueryColumn,
@@ -344,18 +345,6 @@ fn resolve_builtin_aggregate_call(
             | AggFunc::VarSamp
             | AggFunc::StddevPop
             | AggFunc::StddevSamp
-            | AggFunc::RegrCount
-            | AggFunc::RegrSxx
-            | AggFunc::RegrSyy
-            | AggFunc::RegrSxy
-            | AggFunc::RegrAvgX
-            | AggFunc::RegrAvgY
-            | AggFunc::RegrR2
-            | AggFunc::RegrSlope
-            | AggFunc::RegrIntercept
-            | AggFunc::CovarPop
-            | AggFunc::CovarSamp
-            | AggFunc::Corr
             | AggFunc::BoolAnd
             | AggFunc::BoolOr
     ) {
@@ -389,11 +378,6 @@ fn resolve_aggregate_call(
 ) -> Option<ResolvedAggregateCall> {
     if let Some(func) = resolve_builtin_aggregate(name) {
         let resolved = resolve_builtin_aggregate_call(catalog, func, arg_types, func_variadic);
-        let declared_arg_types = resolved
-            .as_ref()
-            .map(|call| call.declared_arg_types.clone())
-            .or_else(|| builtin_aggregate_declared_arg_types(func, arg_types.len()))
-            .unwrap_or_else(|| arg_types.to_vec());
         return Some(ResolvedAggregateCall {
             proc_oid: resolved
                 .as_ref()
@@ -401,7 +385,10 @@ fn resolve_aggregate_call(
                 .or_else(|| proc_oid_for_builtin_aggregate_function(func))
                 .unwrap_or(0),
             result_type: aggregate_sql_type(func, arg_types.first().copied()),
-            declared_arg_types,
+            declared_arg_types: resolved
+                .as_ref()
+                .map(|call| call.declared_arg_types.clone())
+                .unwrap_or_else(|| fallback_builtin_aggregate_declared_arg_types(func, arg_types)),
             func_variadic: resolved
                 .as_ref()
                 .map(|call| call.func_variadic)
@@ -420,27 +407,27 @@ fn resolve_aggregate_call(
     })
 }
 
-fn builtin_aggregate_declared_arg_types(func: AggFunc, arg_count: usize) -> Option<Vec<SqlType>> {
-    match (func, arg_count) {
-        (
-            AggFunc::RegrCount
-            | AggFunc::RegrSxx
-            | AggFunc::RegrSyy
-            | AggFunc::RegrSxy
-            | AggFunc::RegrAvgX
-            | AggFunc::RegrAvgY
-            | AggFunc::RegrR2
-            | AggFunc::RegrSlope
-            | AggFunc::RegrIntercept
-            | AggFunc::CovarPop
-            | AggFunc::CovarSamp
-            | AggFunc::Corr,
-            2,
-        ) => Some(vec![
-            SqlType::new(SqlTypeKind::Float8),
-            SqlType::new(SqlTypeKind::Float8),
-        ]),
-        _ => None,
+fn fallback_builtin_aggregate_declared_arg_types(
+    func: AggFunc,
+    arg_types: &[SqlType],
+) -> Vec<SqlType> {
+    match func {
+        AggFunc::RegrCount
+        | AggFunc::RegrSxx
+        | AggFunc::RegrSyy
+        | AggFunc::RegrSxy
+        | AggFunc::RegrAvgX
+        | AggFunc::RegrAvgY
+        | AggFunc::RegrR2
+        | AggFunc::RegrSlope
+        | AggFunc::RegrIntercept
+        | AggFunc::CovarPop
+        | AggFunc::CovarSamp
+        | AggFunc::Corr => vec![SqlType::new(SqlTypeKind::Float8); arg_types.len()],
+        AggFunc::BoolAnd | AggFunc::BoolOr => {
+            vec![SqlType::new(SqlTypeKind::Bool); arg_types.len()]
+        }
+        _ => arg_types.to_vec(),
     }
 }
 
@@ -2978,7 +2965,15 @@ pub fn pg_plan_query(
     stmt: &SelectStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<PlannedStmt, ParseError> {
-    build_plan_with_outer(stmt, catalog, &[], None, &[], &[])
+    pg_plan_query_with_config(stmt, catalog, PlannerConfig::default())
+}
+
+pub fn pg_plan_query_with_config(
+    stmt: &SelectStatement,
+    catalog: &dyn CatalogLookup,
+    config: PlannerConfig,
+) -> Result<PlannedStmt, ParseError> {
+    build_plan_with_outer(stmt, catalog, &[], None, &[], &[], config)
 }
 
 pub fn pg_plan_query_with_outer(
@@ -2993,7 +2988,15 @@ pub fn pg_plan_query_with_outer(
             .collect(),
     };
     let outer_scope = scope_for_relation(None, &desc);
-    build_plan_with_outer(stmt, catalog, &[outer_scope], None, &[], &[])
+    build_plan_with_outer(
+        stmt,
+        catalog,
+        &[outer_scope],
+        None,
+        &[],
+        &[],
+        PlannerConfig::default(),
+    )
 }
 
 pub(crate) fn pg_plan_query_with_outer_scopes(
@@ -3001,7 +3004,15 @@ pub(crate) fn pg_plan_query_with_outer_scopes(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
 ) -> Result<PlannedStmt, ParseError> {
-    build_plan_with_outer(stmt, catalog, outer_scopes, None, &[], &[])
+    build_plan_with_outer(
+        stmt,
+        catalog,
+        outer_scopes,
+        None,
+        &[],
+        &[],
+        PlannerConfig::default(),
+    )
 }
 
 pub(crate) fn pg_plan_query_with_outer_scopes_and_ctes(
@@ -3010,7 +3021,15 @@ pub(crate) fn pg_plan_query_with_outer_scopes_and_ctes(
     outer_scopes: &[BoundScope],
     outer_ctes: &[BoundCte],
 ) -> Result<PlannedStmt, ParseError> {
-    build_plan_with_outer(stmt, catalog, outer_scopes, None, outer_ctes, &[])
+    build_plan_with_outer(
+        stmt,
+        catalog,
+        outer_scopes,
+        None,
+        outer_ctes,
+        &[],
+        PlannerConfig::default(),
+    )
 }
 
 pub fn build_plan(stmt: &SelectStatement, catalog: &dyn CatalogLookup) -> Result<Plan, ParseError> {
@@ -3021,7 +3040,15 @@ pub fn pg_plan_values_query(
     stmt: &ValuesStatement,
     catalog: &dyn CatalogLookup,
 ) -> Result<PlannedStmt, ParseError> {
-    build_values_plan_with_outer(stmt, catalog, &[], None, &[], &[])
+    pg_plan_values_query_with_config(stmt, catalog, PlannerConfig::default())
+}
+
+pub fn pg_plan_values_query_with_config(
+    stmt: &ValuesStatement,
+    catalog: &dyn CatalogLookup,
+    config: PlannerConfig,
+) -> Result<PlannedStmt, ParseError> {
+    build_values_plan_with_outer(stmt, catalog, &[], None, &[], &[], config)
 }
 
 pub fn pg_plan_values_query_with_outer(
@@ -3036,7 +3063,15 @@ pub fn pg_plan_values_query_with_outer(
             .collect(),
     };
     let outer_scope = scope_for_relation(None, &desc);
-    build_values_plan_with_outer(stmt, catalog, &[outer_scope], None, &[], &[])
+    build_values_plan_with_outer(
+        stmt,
+        catalog,
+        &[outer_scope],
+        None,
+        &[],
+        &[],
+        PlannerConfig::default(),
+    )
 }
 
 pub(crate) fn pg_plan_values_query_with_outer_scopes(
@@ -3044,7 +3079,15 @@ pub(crate) fn pg_plan_values_query_with_outer_scopes(
     catalog: &dyn CatalogLookup,
     outer_scopes: &[BoundScope],
 ) -> Result<PlannedStmt, ParseError> {
-    build_values_plan_with_outer(stmt, catalog, outer_scopes, None, &[], &[])
+    build_values_plan_with_outer(
+        stmt,
+        catalog,
+        outer_scopes,
+        None,
+        &[],
+        &[],
+        PlannerConfig::default(),
+    )
 }
 
 pub(crate) fn pg_plan_values_query_with_outer_scopes_and_ctes(
@@ -3053,7 +3096,15 @@ pub(crate) fn pg_plan_values_query_with_outer_scopes_and_ctes(
     outer_scopes: &[BoundScope],
     outer_ctes: &[BoundCte],
 ) -> Result<PlannedStmt, ParseError> {
-    build_values_plan_with_outer(stmt, catalog, outer_scopes, None, outer_ctes, &[])
+    build_values_plan_with_outer(
+        stmt,
+        catalog,
+        outer_scopes,
+        None,
+        outer_ctes,
+        &[],
+        PlannerConfig::default(),
+    )
 }
 
 pub(crate) fn bound_cte_from_materialized_rows(
@@ -3214,6 +3265,7 @@ fn build_values_plan_with_outer(
     grouped_outer: Option<GroupedOuterScope>,
     outer_ctes: &[BoundCte],
     expanded_views: &[u32],
+    config: PlannerConfig,
 ) -> Result<PlannedStmt, ParseError> {
     let (query, _) = analyze_values_query_with_outer(
         stmt,
@@ -3227,7 +3279,7 @@ fn build_values_plan_with_outer(
         .try_into()
         .expect("values rewrite should return a single query");
     Ok(crate::backend::optimizer::fold_query_constants(query)
-        .map(|query| planner(query, catalog))??)
+        .map(|query| planner_with_config(query, catalog, config))??)
 }
 
 fn bind_select_query_with_outer(
@@ -4074,6 +4126,7 @@ fn build_plan_with_outer(
     grouped_outer: Option<GroupedOuterScope>,
     outer_ctes: &[BoundCte],
     expanded_views: &[u32],
+    config: PlannerConfig,
 ) -> Result<PlannedStmt, ParseError> {
     let (query, _) = analyze_select_query_with_outer(
         stmt,
@@ -4088,5 +4141,5 @@ fn build_plan_with_outer(
         .try_into()
         .expect("select rewrite should return a single query");
     Ok(crate::backend::optimizer::fold_query_constants(query)
-        .map(|query| planner(query, catalog))??)
+        .map(|query| planner_with_config(query, catalog, config))??)
 }

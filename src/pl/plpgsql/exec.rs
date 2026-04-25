@@ -5,7 +5,7 @@ use crate::backend::commands::tablecmds::{execute_delete, execute_insert, execut
 use crate::backend::executor::{
     ArrayDimension, ArrayValue, ExecError, ExecutorContext, Expr, RelationDesc, StatementResult,
     TupleSlot, Value, cast_value, compare_order_values, eval_expr, eval_plpgsql_expr,
-    execute_planned_stmt, execute_readonly_statement,
+    execute_planned_stmt, execute_readonly_statement, render_interval_text,
 };
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{
@@ -1990,6 +1990,7 @@ fn render_dynamic_query_param_base_sql(
         Value::Bit(bits) => quote_sql_string(&crate::backend::executor::render_bit_text(bits)),
         Value::Bool(v) => v.to_string(),
         Value::Numeric(v) => v.render(),
+        Value::Interval(v) => quote_sql_string(&render_interval_text(*v)),
         Value::Text(text) => quote_sql_string(text),
         Value::TextRef(_, _) => quote_sql_string(value.as_text().unwrap_or_default()),
         Value::Json(text) => quote_sql_string(text),
@@ -2501,6 +2502,7 @@ fn render_raise_value(value: &Value) -> String {
         Value::Money(v) => crate::backend::executor::money_format_text(*v),
         Value::Float64(v) => v.to_string(),
         Value::Numeric(v) => v.render(),
+        Value::Interval(v) => render_interval_text(*v),
         Value::Bit(v) => crate::backend::executor::render_bit_text(v),
         Value::InternalChar(v) => char::from(*v).to_string(),
         Value::Json(text) | Value::JsonPath(text) => text.to_string(),

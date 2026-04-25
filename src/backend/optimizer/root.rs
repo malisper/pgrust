@@ -4,7 +4,7 @@ use crate::include::executor::execdesc::CommandType;
 use crate::include::nodes::parsenodes::{
     JoinTreeNode, Query, QueryRowMark, RangeTblEntry, RangeTblEntryKind, SelectLockingClause,
 };
-use crate::include::nodes::pathnodes::{PathTarget, PlannerInfo, RelOptInfo};
+use crate::include::nodes::pathnodes::{PathTarget, PlannerConfig, PlannerInfo, RelOptInfo};
 use crate::include::nodes::primnodes::{
     AggAccum, AggFunc, Aggref, Expr, SetReturningCall, SortGroupClause, SubLink, SubLinkType,
     TargetEntry, Var, expr_contains_set_returning, is_system_attr, set_returning_call_exprs,
@@ -326,12 +326,14 @@ fn prepare_window_frame_for_locking(
     use crate::include::nodes::primnodes::WindowFrameBound;
 
     let prepare_bound = |bound| match bound {
-        WindowFrameBound::OffsetPreceding(expr) => Ok(WindowFrameBound::OffsetPreceding(
-            prepare_expr_for_locking(expr)?,
-        )),
-        WindowFrameBound::OffsetFollowing(expr) => Ok(WindowFrameBound::OffsetFollowing(
-            prepare_expr_for_locking(expr)?,
-        )),
+        WindowFrameBound::OffsetPreceding(offset) => {
+            let expr = prepare_expr_for_locking(offset.expr.clone())?;
+            Ok(WindowFrameBound::OffsetPreceding(offset.with_expr(expr)))
+        }
+        WindowFrameBound::OffsetFollowing(offset) => {
+            let expr = prepare_expr_for_locking(offset.expr.clone())?;
+            Ok(WindowFrameBound::OffsetFollowing(offset.with_expr(expr)))
+        }
         other => Ok(other),
     };
     Ok(crate::include::nodes::primnodes::WindowFrame {
@@ -792,6 +794,10 @@ fn prepare_expr_for_locking(expr: Expr) -> Result<Expr, ParseError> {
 
 impl PlannerInfo {
     pub fn new(parse: Query) -> Self {
+        Self::new_with_config(parse, PlannerConfig::default())
+    }
+
+    pub fn new_with_config(parse: Query, config: PlannerConfig) -> Self {
         let processed_tlist = make_processed_tlist(&parse);
         let final_target = PathTarget::from_target_list(&parse.target_list);
         let query_pathkeys = PathTarget::from_sort_clause(&parse.sort_clause, &processed_tlist);
@@ -821,6 +827,7 @@ impl PlannerInfo {
         let simple_rel_array = build_simple_rel_array(&parse.rtable);
         let join_info_list = build_special_join_info(&parse);
         Self {
+            config,
             processed_tlist,
             scanjoin_target,
             group_input_target,
@@ -1727,18 +1734,18 @@ fn make_window_input_target(
             collect_window_input_exprs(&item.expr, has_grouping(parse), &mut input_target);
         }
         match &clause.spec.frame.start_bound {
-            crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(expr)
-            | crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(expr) => {
-                collect_window_input_exprs(expr, has_grouping(parse), &mut input_target);
+            crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(offset)
+            | crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(offset) => {
+                collect_window_input_exprs(&offset.expr, has_grouping(parse), &mut input_target);
             }
             crate::include::nodes::primnodes::WindowFrameBound::UnboundedPreceding
             | crate::include::nodes::primnodes::WindowFrameBound::CurrentRow
             | crate::include::nodes::primnodes::WindowFrameBound::UnboundedFollowing => {}
         }
         match &clause.spec.frame.end_bound {
-            crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(expr)
-            | crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(expr) => {
-                collect_window_input_exprs(expr, has_grouping(parse), &mut input_target);
+            crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(offset)
+            | crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(offset) => {
+                collect_window_input_exprs(&offset.expr, has_grouping(parse), &mut input_target);
             }
             crate::include::nodes::primnodes::WindowFrameBound::UnboundedPreceding
             | crate::include::nodes::primnodes::WindowFrameBound::CurrentRow

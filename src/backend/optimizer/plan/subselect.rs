@@ -1012,14 +1012,16 @@ fn rebase_window_frame_bound_subplan_ids(
     base: usize,
 ) -> crate::include::nodes::primnodes::WindowFrameBound {
     match bound {
-        crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(expr) => {
+        crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(offset) => {
+            let expr = rebase_expr_subplan_ids(offset.expr.clone(), base);
             crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(
-                rebase_expr_subplan_ids(expr, base),
+                offset.with_expr(expr),
             )
         }
-        crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(expr) => {
+        crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(offset) => {
+            let expr = rebase_expr_subplan_ids(offset.expr.clone(), base);
             crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(
-                rebase_expr_subplan_ids(expr, base),
+                offset.with_expr(expr),
             )
         }
         other => other,
@@ -1853,14 +1855,16 @@ fn finalize_window_frame_bound_subqueries(
     subplans: &mut Vec<Plan>,
 ) -> crate::include::nodes::primnodes::WindowFrameBound {
     match bound {
-        crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(expr) => {
+        crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(offset) => {
+            let expr = finalize_expr_subqueries(offset.expr.clone(), catalog, subplans);
             crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(
-                finalize_expr_subqueries(expr, catalog, subplans),
+                offset.with_expr(expr),
             )
         }
-        crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(expr) => {
+        crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(offset) => {
+            let expr = finalize_expr_subqueries(offset.expr.clone(), catalog, subplans);
             crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(
-                finalize_expr_subqueries(expr, catalog, subplans),
+                offset.with_expr(expr),
             )
         }
         other => other,

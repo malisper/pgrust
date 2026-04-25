@@ -3,7 +3,8 @@ use std::cmp::Ordering;
 use crate::backend::parser::CatalogLookup;
 use crate::include::nodes::parsenodes::Query;
 use crate::include::nodes::pathnodes::{
-    Path, PathKey, PathTarget, PlannerGlobal, PlannerInfo, RelOptInfo, RelOptKind, UpperRelKind,
+    Path, PathKey, PathTarget, PlannerConfig, PlannerGlobal, PlannerInfo, RelOptInfo, RelOptKind,
+    UpperRelKind,
 };
 use crate::include::nodes::plannodes::{PlanEstimate, PlannedStmt};
 use crate::include::nodes::primnodes::{
@@ -162,14 +163,16 @@ fn has_windowing(root: &PlannerInfo) -> bool {
 fn expand_window_clause(root: &PlannerInfo, clause: &WindowClause) -> WindowClause {
     let expand_frame_bound = |bound: crate::include::nodes::primnodes::WindowFrameBound| match bound
     {
-        crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(expr) => {
+        crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(offset) => {
+            let expr = expand_join_rte_vars(root, offset.expr.clone());
             crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(
-                expand_join_rte_vars(root, expr),
+                offset.with_expr(expr),
             )
         }
-        crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(expr) => {
+        crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(offset) => {
+            let expr = expand_join_rte_vars(root, offset.expr.clone());
             crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(
-                expand_join_rte_vars(root, expr),
+                offset.with_expr(expr),
             )
         }
         other => other,
@@ -1013,11 +1016,12 @@ fn standard_planner_with_param_base(
     query: Query,
     catalog: &dyn CatalogLookup,
     next_param_id: usize,
+    config: PlannerConfig,
 ) -> Result<(PlannedStmt, usize), crate::backend::parser::ParseError> {
     let mut glob = PlannerGlobal::new();
     let query = root::prepare_query_for_planning(root::prepare_query_for_locking(query)?);
     let query = pull_up_sublinks(query);
-    let mut root = PlannerInfo::new(query);
+    let mut root = PlannerInfo::new_with_config(query, config);
     let command_type = root.parse.command_type;
     let scanjoin_rel = query_planner(&mut root, catalog);
     let final_rel = grouping_planner(&mut root, scanjoin_rel, catalog);
@@ -1045,15 +1049,24 @@ fn standard_planner_with_param_base(
 fn standard_planner(
     query: Query,
     catalog: &dyn CatalogLookup,
+    config: PlannerConfig,
 ) -> Result<PlannedStmt, crate::backend::parser::ParseError> {
-    Ok(standard_planner_with_param_base(query, catalog, 0)?.0)
+    Ok(standard_planner_with_param_base(query, catalog, 0, config)?.0)
 }
 
 pub(crate) fn planner(
     query: Query,
     catalog: &dyn CatalogLookup,
 ) -> Result<PlannedStmt, crate::backend::parser::ParseError> {
-    standard_planner(query, catalog)
+    standard_planner(query, catalog, PlannerConfig::default())
+}
+
+pub(crate) fn planner_with_config(
+    query: Query,
+    catalog: &dyn CatalogLookup,
+    config: PlannerConfig,
+) -> Result<PlannedStmt, crate::backend::parser::ParseError> {
+    standard_planner(query, catalog, config)
 }
 
 pub(crate) fn planner_with_param_base(
@@ -1061,5 +1074,14 @@ pub(crate) fn planner_with_param_base(
     catalog: &dyn CatalogLookup,
     next_param_id: usize,
 ) -> Result<(PlannedStmt, usize), crate::backend::parser::ParseError> {
-    standard_planner_with_param_base(query, catalog, next_param_id)
+    standard_planner_with_param_base(query, catalog, next_param_id, PlannerConfig::default())
+}
+
+pub(crate) fn planner_with_param_base_and_config(
+    query: Query,
+    catalog: &dyn CatalogLookup,
+    next_param_id: usize,
+    config: PlannerConfig,
+) -> Result<(PlannedStmt, usize), crate::backend::parser::ParseError> {
+    standard_planner_with_param_base(query, catalog, next_param_id, config)
 }

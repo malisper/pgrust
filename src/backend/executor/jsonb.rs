@@ -9,6 +9,7 @@ use crate::backend::executor::exec_expr::format_array_text;
 use crate::backend::executor::expr_datetime::render_json_datetime_value_text_with_config;
 use crate::backend::executor::render_bit_text;
 use crate::backend::executor::render_datetime_value_text;
+use crate::backend::executor::render_interval_text;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::misc::stack_depth::stack_depth_limit_error;
@@ -771,6 +772,7 @@ pub(crate) fn jsonb_from_value(
             validate_jsonb_numeric_value(v)?;
             JsonbValue::Numeric(v.clone())
         }
+        Value::Interval(v) => JsonbValue::String(render_interval_text(*v)),
         Value::Bool(v) => JsonbValue::Bool(*v),
         Value::Bit(v) => JsonbValue::String(render_bit_text(v)),
         Value::JsonPath(text) => JsonbValue::String(text.to_string()),
@@ -1057,6 +1059,7 @@ pub(crate) fn jsonb_builder_key(value: &Value) -> Result<String, ExecError> {
         Value::Money(v) => Ok(crate::backend::executor::money_format_text(*v)),
         Value::Float64(v) => Ok(v.to_string()),
         Value::Numeric(v) => Ok(v.render()),
+        Value::Interval(v) => Ok(render_interval_text(*v)),
         Value::Bool(v) => Ok(if *v { "true".into() } else { "false".into() }),
         Value::Bit(v) => Ok(render_bit_text(v)),
         Value::Text(text) => Ok(text.to_string()),

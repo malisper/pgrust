@@ -4,7 +4,7 @@ use super::pathnodes::{
     slot_output_target,
 };
 use super::plan::append_planned_subquery;
-use super::{expand_join_rte_vars, flatten_join_alias_vars, planner_with_param_base};
+use super::{expand_join_rte_vars, flatten_join_alias_vars, planner_with_param_base_and_config};
 use crate::backend::parser::CatalogLookup;
 use crate::include::nodes::parsenodes::{Query, QueryRowMark, RangeTblEntryKind};
 use crate::include::nodes::pathnodes::{Path, PlannerInfo, PlannerSubroot, RestrictInfo};
@@ -173,6 +173,18 @@ fn build_simple_tlist(root: Option<&PlannerInfo>, path: &Path) -> IndexedTlist {
     let append_info = root
         .and_then(|root| path_single_relid(path).and_then(|relid| append_translation(root, relid)));
     let mut tlist = build_simple_tlist_from_exprs(&output_vars);
+    let semantic_target = path.semantic_output_target();
+    for (index, entry) in tlist.entries.iter_mut().enumerate() {
+        if let Some(semantic_expr) = semantic_target.exprs.get(index) {
+            entry.match_exprs.push(semantic_expr.clone());
+            if let Some(root) = root {
+                entry
+                    .match_exprs
+                    .push(flatten_join_alias_vars(root, semantic_expr.clone()));
+            }
+            entry.match_exprs = dedup_match_exprs(std::mem::take(&mut entry.match_exprs));
+        }
+    }
     if let Some(info) = append_info {
         for (index, entry) in tlist.entries.iter_mut().enumerate() {
             if info
@@ -2116,8 +2128,9 @@ fn lower_sublink(
         .target_list
         .first()
         .map(|target| target.sql_type);
+    let config = ctx.root.map(|root| root.config).unwrap_or_default();
     let (planned_stmt, next_param_id) =
-        planner_with_param_base(*sublink.subselect, catalog, ctx.next_param_id)
+        planner_with_param_base_and_config(*sublink.subselect, catalog, ctx.next_param_id, config)
             .expect("locking validation should complete before setrefs subplan lowering");
     ctx.next_param_id = next_param_id;
     let par_param = planned_stmt
@@ -3884,27 +3897,31 @@ fn lower_window_clause_for_input(
             frame: crate::include::nodes::primnodes::WindowFrame {
                 mode: clause.spec.frame.mode,
                 start_bound: match clause.spec.frame.start_bound {
-                    crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(expr) => {
+                    crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(offset) => {
+                        let expr = lower_expr_for_input(ctx, offset.expr.clone());
                         crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(
-                            lower_expr_for_input(ctx, expr),
+                            offset.with_expr(expr),
                         )
                     }
-                    crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(expr) => {
+                    crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(offset) => {
+                        let expr = lower_expr_for_input(ctx, offset.expr.clone());
                         crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(
-                            lower_expr_for_input(ctx, expr),
+                            offset.with_expr(expr),
                         )
                     }
                     other => other,
                 },
                 end_bound: match clause.spec.frame.end_bound {
-                    crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(expr) => {
+                    crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(offset) => {
+                        let expr = lower_expr_for_input(ctx, offset.expr.clone());
                         crate::include::nodes::primnodes::WindowFrameBound::OffsetPreceding(
-                            lower_expr_for_input(ctx, expr),
+                            offset.with_expr(expr),
                         )
                     }
-                    crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(expr) => {
+                    crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(offset) => {
+                        let expr = lower_expr_for_input(ctx, offset.expr.clone());
                         crate::include::nodes::primnodes::WindowFrameBound::OffsetFollowing(
-                            lower_expr_for_input(ctx, expr),
+                            offset.with_expr(expr),
                         )
                     }
                     other => other,

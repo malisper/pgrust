@@ -177,6 +177,7 @@ pub(super) fn infer_sql_expr_type_with_ctes(
         SqlExpr::Const(Value::TimeTz(_)) => SqlType::new(SqlTypeKind::TimeTz),
         SqlExpr::Const(Value::Timestamp(_)) => SqlType::new(SqlTypeKind::Timestamp),
         SqlExpr::Const(Value::TimestampTz(_)) => SqlType::new(SqlTypeKind::TimestampTz),
+        SqlExpr::Const(Value::Interval(_)) => SqlType::new(SqlTypeKind::Interval),
         SqlExpr::Const(Value::Range(range)) => range.range_type.sql_type,
         SqlExpr::Const(Value::Multirange(multirange)) => multirange.multirange_type.sql_type,
         SqlExpr::Const(Value::Bit(v)) => SqlType::with_bit_len(SqlTypeKind::VarBit, v.bit_len),

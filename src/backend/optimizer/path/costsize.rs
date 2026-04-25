@@ -739,7 +739,7 @@ pub(super) fn optimize_path(plan: Path, catalog: &dyn CatalogLookup) -> Path {
                     .iter()
                     .map(|col| estimate_sql_type_width(col.sql_type))
                     .sum();
-                let row_count = rows.len().max(1) as f64;
+                let row_count = rows.len() as f64;
                 Path::Values {
                     plan_info: PlanEstimate::new(0.0, row_count * CPU_TUPLE_COST, row_count, width),
                     pathtarget,
