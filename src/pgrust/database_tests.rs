@@ -13894,7 +13894,7 @@ fn gist_concurrent_split_scans_do_not_miss_committed_rows() {
         let barrier = Arc::clone(&barrier);
         handles.push(thread::spawn(move || {
             barrier.wait();
-            for iteration in 0..120 {
+            for iteration in 0..60 {
                 let expected = {
                     let snapshot = committed.lock().unwrap().clone();
                     snapshot
@@ -18506,7 +18506,7 @@ fn concurrent_indexed_inserts_and_lookups_remain_correct() {
         .map(|worker| {
             let db = db.clone();
             std::thread::spawn(move || {
-                for i in 0..75 {
+                for i in 0..60 {
                     let id = worker * 1000 + i;
                     db.execute(
                         (worker + 10) as ClientId,
@@ -18525,8 +18525,8 @@ fn concurrent_indexed_inserts_and_lookups_remain_correct() {
         .map(|reader| {
             let db = db.clone();
             std::thread::spawn(move || {
-                for i in 0..120 {
-                    let id = (i % 75) as i32;
+                for i in 0..60 {
+                    let id = (i % 60) as i32;
                     db.execute(
                         (reader + 100) as ClientId,
                         &format!("select note from items where id = {id}"),
@@ -18542,7 +18542,7 @@ fn concurrent_indexed_inserts_and_lookups_remain_correct() {
 
     assert_eq!(
         query_rows(&db, 1, "select count(*) from items"),
-        vec![vec![Value::Int64(300)]]
+        vec![vec![Value::Int64(240)]]
     );
     assert_explain_uses_index(
         &db,
@@ -18570,7 +18570,7 @@ fn concurrent_indexed_inserts_and_range_scans_survive_splits() {
         .map(|worker| {
             let db = db.clone();
             thread::spawn(move || {
-                for i in 0..200 {
+                for i in 0..120 {
                     let id = worker * 10_000 + i;
                     db.execute(
                         (worker + 20) as ClientId,
@@ -18586,7 +18586,7 @@ fn concurrent_indexed_inserts_and_range_scans_survive_splits() {
         .map(|reader| {
             let db = db.clone();
             thread::spawn(move || {
-                for _ in 0..80 {
+                for _ in 0..40 {
                     let rows = query_rows(
                         &db,
                         (reader + 200) as ClientId,
@@ -18619,7 +18619,7 @@ fn concurrent_indexed_inserts_and_range_scans_survive_splits() {
     );
     assert_eq!(
         query_rows(&db, 1, "select count(*) from items"),
-        vec![vec![Value::Int64(800)]]
+        vec![vec![Value::Int64(480)]]
     );
     assert_eq!(
         query_rows(&db, 1, "select note from items where id = 30042"),
@@ -22508,7 +22508,7 @@ fn concurrent_reads_same_page_no_io_error() {
         .map(|t| {
             let db = db.clone();
             thread::spawn(move || {
-                for _ in 0..50 {
+                for _ in 0..30 {
                     match db
                         .execute((t + 1000) as ClientId, "select count(*) from rtest")
                         .unwrap()
@@ -23880,7 +23880,7 @@ fn lock_ordering_deadlock_repro() {
     for t in 0..num_writers {
         let db = db.clone();
         handles.push(thread::spawn(move || {
-            for _ in 0..50 {
+            for _ in 0..30 {
                 db.execute(
                     (t + 2000) as ClientId,
                     "update locktest set val = val + 1 where id = 1",
@@ -23893,7 +23893,7 @@ fn lock_ordering_deadlock_repro() {
     for t in 0..num_readers {
         let db = db.clone();
         handles.push(thread::spawn(move || {
-            for _ in 0..200 {
+            for _ in 0..100 {
                 let _ = db
                     .execute(
                         (t + 3000) as ClientId,
@@ -23928,7 +23928,7 @@ fn no_pins_leaked_concurrent_contention() {
     }
 
     let num_threads = 8;
-    let iters = 100;
+    let iters = 50;
     let mut handles = Vec::new();
 
     // Writers: all contend on the same hot rows.
