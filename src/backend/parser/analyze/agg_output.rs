@@ -1414,6 +1414,7 @@ pub(super) fn bind_agg_output_expr_in_clause(
                 bind_grouped_func_call(
                     name,
                     args.args(),
+                    *func_variadic,
                     group_by_exprs,
                     group_key_exprs,
                     input_scope,

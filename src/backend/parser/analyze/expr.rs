@@ -6,7 +6,7 @@ use crate::backend::parser::parse_type_name;
 use crate::backend::utils::record::{
     assign_anonymous_record_descriptor, lookup_anonymous_record_descriptor,
 };
-use crate::include::catalog::range_type_ref_for_sql_type;
+use crate::include::catalog::{ANYOID, range_type_ref_for_sql_type};
 use crate::include::nodes::primnodes::{
     BoolExprType, CaseExpr as BoundCaseExpr, CaseTestExpr as BoundCaseTestExpr,
     CaseWhen as BoundCaseWhen, ExprArraySubscript, INDEX_VAR, INNER_VAR, OUTER_VAR, OpExprKind,
@@ -3321,6 +3321,21 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 } else {
                     None
                 };
+            let legacy_vatype_oid = if *func_variadic
+                && matches!(
+                    legacy_func,
+                    BuiltinScalarFunction::Concat
+                        | BuiltinScalarFunction::ConcatWs
+                        | BuiltinScalarFunction::Format
+                        | BuiltinScalarFunction::JsonBuildArray
+                        | BuiltinScalarFunction::JsonBuildObject
+                        | BuiltinScalarFunction::JsonbBuildArray
+                        | BuiltinScalarFunction::JsonbBuildObject
+                ) {
+                ANYOID
+            } else {
+                0
+            };
             let legacy_declared_arg_types = if let Some(range_type) =
                 legacy_result_type.and_then(range_type_ref_for_sql_type)
             {
@@ -3336,9 +3351,9 @@ pub(crate) fn bind_expr_with_outer_and_ctes(
                 legacy_func,
                 0,
                 legacy_result_type,
-                false,
+                *func_variadic,
                 0,
-                0,
+                legacy_vatype_oid,
                 &legacy_declared_arg_types,
                 &lowered_args,
                 scope,

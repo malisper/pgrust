@@ -4,7 +4,7 @@ use super::expr_casts::{
     cast_value, numeric_input_would_overflow, parse_bytea_text, render_internal_char_text,
     render_interval_text,
 };
-use super::expr_datetime::render_datetime_value_text;
+use super::expr_datetime::{render_datetime_value_text, render_datetime_value_text_with_config};
 use super::expr_format::{to_char_float, to_char_int, to_char_numeric, to_number_numeric};
 use super::expr_ops::ensure_builtin_collation_supported;
 use super::expr_range::render_range_text;
@@ -13,6 +13,7 @@ use super::value_io::format_array_text;
 use crate::backend::executor::jsonb::render_jsonb_bytes;
 use crate::backend::libpq::pqformat::format_bytea_text;
 use crate::backend::parser::{ParseError, SqlType, SqlTypeKind};
+use crate::backend::utils::misc::guc_datetime::DateTimeConfig;
 use crate::backend::utils::record::assign_anonymous_record_descriptor;
 use crate::include::nodes::datum::NumericValue;
 use crate::pgrust::compact_string::CompactString;
@@ -423,7 +424,10 @@ pub(super) fn eval_to_hex_function(values: &[Value]) -> Result<Value, ExecError>
     })
 }
 
-fn value_output_text(value: &Value) -> Result<String, ExecError> {
+fn value_output_text_with_config(
+    value: &Value,
+    datetime_config: &DateTimeConfig,
+) -> Result<String, ExecError> {
     Ok(match value {
         Value::Null => String::new(),
         Value::Int16(v) => v.to_string(),
@@ -468,9 +472,8 @@ fn value_output_text(value: &Value) -> Result<String, ExecError> {
         | Value::Time(_)
         | Value::TimeTz(_)
         | Value::Timestamp(_)
-        | Value::TimestampTz(_) => {
-            render_datetime_value_text(value).expect("datetime values render")
-        }
+        | Value::TimestampTz(_) => render_datetime_value_text_with_config(value, datetime_config)
+            .expect("datetime values render"),
         Value::TsVector(vector) => crate::backend::executor::render_tsvector_text(vector),
         Value::TsQuery(query) => crate::backend::executor::render_tsquery_text(query),
         Value::Array(values) => format_array_text(values),
@@ -487,6 +490,10 @@ fn value_output_text(value: &Value) -> Result<String, ExecError> {
         .unwrap_or_default()
         .to_string(),
     })
+}
+
+fn value_output_text(value: &Value) -> Result<String, ExecError> {
+    value_output_text_with_config(value, &DateTimeConfig::default())
 }
 
 fn quote_identifier(identifier: &str) -> String {
@@ -530,13 +537,17 @@ fn pad_formatted(mut value: String, width: i32, left_align: bool) -> String {
     }
 }
 
-fn format_arg_text(kind: char, value: &Value) -> Result<String, ExecError> {
+fn format_arg_text(
+    kind: char,
+    value: &Value,
+    datetime_config: &DateTimeConfig,
+) -> Result<String, ExecError> {
     match kind {
         's' => {
             if matches!(value, Value::Null) {
                 Ok(String::new())
             } else {
-                value_output_text(value)
+                value_output_text_with_config(value, datetime_config)
             }
         }
         'I' => {
@@ -545,14 +556,20 @@ fn format_arg_text(kind: char, value: &Value) -> Result<String, ExecError> {
                     "null values cannot be formatted as an SQL identifier".into(),
                 ))
             } else {
-                Ok(quote_identifier(&value_output_text(value)?))
+                Ok(quote_identifier(&value_output_text_with_config(
+                    value,
+                    datetime_config,
+                )?))
             }
         }
         'L' => {
             if matches!(value, Value::Null) {
                 Ok("NULL".into())
             } else {
-                Ok(quote_literal_text(&value_output_text(value)?))
+                Ok(quote_literal_text(&value_output_text_with_config(
+                    value,
+                    datetime_config,
+                )?))
             }
         }
         other => Err(ExecError::RaiseException(format!(
@@ -582,18 +599,87 @@ fn format_width_arg(values: &[Value], index: usize) -> Result<i32, ExecError> {
     })
 }
 
-pub(super) fn eval_concat_function(values: &[Value]) -> Result<Value, ExecError> {
+fn variadic_string_args(
+    values: &[Value],
+    func_variadic: bool,
+    fixed_prefix: usize,
+    null_as_empty: bool,
+    op: &'static str,
+) -> Result<Option<Vec<Value>>, ExecError> {
+    fn flatten_variadic_items(value: &Value, out: &mut Vec<Value>) {
+        match value {
+            Value::Array(items) => {
+                for item in items {
+                    flatten_variadic_items(item, out);
+                }
+            }
+            Value::PgArray(array) => {
+                for item in array.to_nested_values() {
+                    flatten_variadic_items(&item, out);
+                }
+            }
+            other => out.push(other.clone()),
+        }
+    }
+
+    if !func_variadic {
+        return Ok(Some(values.to_vec()));
+    }
+    let Some(variadic_value) = values.get(fixed_prefix) else {
+        return Ok(Some(values.to_vec()));
+    };
+    match variadic_value {
+        Value::Null if null_as_empty => Ok(Some(values[..fixed_prefix].to_vec())),
+        Value::Null => Ok(None),
+        Value::Array(items) => {
+            let mut out = values[..fixed_prefix].to_vec();
+            for item in items {
+                flatten_variadic_items(item, &mut out);
+            }
+            Ok(Some(out))
+        }
+        Value::PgArray(array) => {
+            let mut out = values[..fixed_prefix].to_vec();
+            for item in array.to_nested_values() {
+                flatten_variadic_items(&item, &mut out);
+            }
+            Ok(Some(out))
+        }
+        _ => {
+            let _ = op;
+            Err(ExecError::RaiseException(
+                "VARIADIC argument must be an array".into(),
+            ))
+        }
+    }
+}
+
+pub(super) fn eval_concat_function(
+    values: &[Value],
+    func_variadic: bool,
+    datetime_config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
+    let Some(values) = variadic_string_args(values, func_variadic, 0, false, "concat")? else {
+        return Ok(Value::Null);
+    };
     let mut out = String::new();
-    for value in values {
+    for value in &values {
         if matches!(value, Value::Null) {
             continue;
         }
-        out.push_str(&value_output_text(value)?);
+        out.push_str(&value_output_text_with_config(value, datetime_config)?);
     }
     Ok(Value::Text(CompactString::from_owned(out)))
 }
 
-pub(super) fn eval_concat_ws_function(values: &[Value]) -> Result<Value, ExecError> {
+pub(super) fn eval_concat_ws_function(
+    values: &[Value],
+    func_variadic: bool,
+    datetime_config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
+    let Some(values) = variadic_string_args(values, func_variadic, 1, false, "concat_ws")? else {
+        return Ok(Value::Null);
+    };
     let Some(separator_value) = values.first() else {
         return Ok(Value::Null);
     };
@@ -617,12 +703,19 @@ pub(super) fn eval_concat_ws_function(values: &[Value]) -> Result<Value, ExecErr
             out.push_str(separator);
         }
         first = false;
-        out.push_str(&value_output_text(value)?);
+        out.push_str(&value_output_text_with_config(value, datetime_config)?);
     }
     Ok(Value::Text(CompactString::from_owned(out)))
 }
 
-pub(super) fn eval_format_function(values: &[Value]) -> Result<Value, ExecError> {
+pub(super) fn eval_format_function(
+    values: &[Value],
+    func_variadic: bool,
+    datetime_config: &DateTimeConfig,
+) -> Result<Value, ExecError> {
+    let Some(values) = variadic_string_args(values, func_variadic, 1, true, "format")? else {
+        return Ok(Value::Null);
+    };
     let Some(format_value) = values.first() else {
         return Ok(Value::Null);
     };
@@ -746,7 +839,7 @@ pub(super) fn eval_format_function(values: &[Value]) -> Result<Value, ExecError>
                 "too few arguments for format()".into(),
             ));
         };
-        let rendered = format_arg_text(kind, value)?;
+        let rendered = format_arg_text(kind, value, datetime_config)?;
         out.push_str(&pad_formatted(rendered, width.unwrap_or(0), left_align));
     }
     Ok(Value::Text(CompactString::from_owned(out)))

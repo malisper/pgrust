@@ -229,6 +229,10 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
         ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
             expected: "text or bit argument",
             actual,
+        })
+        | ExecError::Parse(crate::backend::parser::ParseError::UnexpectedToken {
+            expected: "text, bytea, bit, or tsvector argument",
+            actual,
         }) if actual.starts_with("Length(") => {
             return sql
                 .to_ascii_lowercase()
@@ -335,6 +339,9 @@ fn exec_error_position(sql: &str, e: &ExecError) -> Option<usize> {
             } else {
                 return None;
             }
+        }
+        ExecError::RaiseException(message) if message == "VARIADIC argument must be an array" => {
+            return find_case_insensitive_token_position(sql, "VARIADIC");
         }
         ExecError::JsonInput { raw_input, .. } => {
             return find_json_literal_position(sql, raw_input)
@@ -7616,6 +7623,14 @@ mod tests {
         .unwrap();
 
         assert_eq!(first_error_response_position(&output), Some(22));
+    }
+
+    #[test]
+    fn exec_error_position_points_at_variadic_keyword() {
+        let sql = "select concat_ws(',', variadic 10)";
+        let err = ExecError::RaiseException("VARIADIC argument must be an array".into());
+
+        assert_eq!(exec_error_position(sql, &err), Some(23));
     }
 
     #[test]
