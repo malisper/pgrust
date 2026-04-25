@@ -8494,6 +8494,12 @@ fn create_schema_executes_embedded_create_table_elements() {
     let mut session = Session::new(1);
 
     session
+        .execute(&db, "set datestyle to 'Postgres, MDY'")
+        .unwrap();
+    session
+        .execute(&db, "set timezone = 'America/Los_Angeles'")
+        .unwrap();
+    session
         .execute(
             &db,
             "create schema tenant
@@ -20507,6 +20513,42 @@ fn now_and_date_keywords_are_transaction_stable() {
 }
 
 #[test]
+fn timestamp_tz_now_literal_applies_declared_precision() {
+    let db = Database::open_ephemeral(16).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table timestamptz_tbl (d1 timestamp(2) with time zone)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into timestamptz_tbl values ('now')")
+        .unwrap();
+    session.execute(&db, "select pg_sleep(0.1)").unwrap();
+    session.execute(&db, "begin").unwrap();
+    session
+        .execute(&db, "insert into timestamptz_tbl values ('now')")
+        .unwrap();
+    session.execute(&db, "select pg_sleep(0.1)").unwrap();
+    session
+        .execute(&db, "insert into timestamptz_tbl values ('now')")
+        .unwrap();
+    session.execute(&db, "select pg_sleep(0.1)").unwrap();
+
+    assert_eq!(
+        session_query_rows(
+            &mut session,
+            &db,
+            "select count(*) from timestamptz_tbl where d1 = timestamp(2) with time zone 'now'",
+        ),
+        vec![vec![Value::Int64(2)]]
+    );
+    session.execute(&db, "rollback").unwrap();
+}
+
+#[test]
 fn at_time_zone_uses_named_timezone_rules() {
     let db = Database::open_ephemeral(16).unwrap();
     let mut session = Session::new(1);
@@ -20554,7 +20596,7 @@ fn timestamp_at_local_and_timezone_function_use_session_timezone() {
             &db,
             "select (cast('1978-07-07 19:38 America/New_York' as timestamptz) at local)::text",
         ),
-        vec![vec![Value::Text("1978-07-08 02:38:00".into())]]
+        vec![vec![Value::Text("1978-07-08 01:38:00".into())]]
     );
     assert_eq!(
         session_query_rows(
@@ -20697,9 +20739,9 @@ fn timestamp_input_accepts_timezone_before_year() {
                     ('1000000312 23:58:48 IST'::timestamptz at time zone 'UTC')::text",
         ),
         vec![vec![
-            Value::Text("10000-03-12 18:28:48".into()),
-            Value::Text("10000-03-12 18:28:48".into()),
-            Value::Text("100000-03-12 18:28:48".into()),
+            Value::Text("10000-03-12 21:58:48".into()),
+            Value::Text("10000-03-12 21:58:48".into()),
+            Value::Text("100000-03-12 21:58:48".into()),
         ]]
     );
 }

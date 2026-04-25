@@ -831,7 +831,6 @@ kw_sysid = _{ kw_sysid_atom }
 kw_enable = _{ kw_enable_atom }
 kw_disable = _{ kw_disable_atom }
 kw_force = _{ kw_force_atom }
-kw_at = { kw_at_atom }
 
 kw_int4 = { kw_int4_atom }
 kw_int2 = { kw_int2_atom }
@@ -1102,7 +1101,6 @@ kw_when_atom = @{ ^"when" ~ keyword_end }
 kw_then_atom = @{ ^"then" ~ keyword_end }
 kw_else_atom = @{ ^"else" ~ keyword_end }
 kw_array_atom = @{ ^"array" ~ keyword_end }
-kw_at_atom = @{ ^"at" ~ keyword_end }
 kw_to_atom = @{ ^"to" ~ keyword_end }
 kw_admin_atom = @{ ^"admin" ~ keyword_end }
 kw_using_atom = @{ ^"using" ~ keyword_end }
