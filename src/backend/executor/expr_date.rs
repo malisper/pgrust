@@ -679,7 +679,7 @@ mod tests {
                 &DateTimeConfig::default()
             )
             .unwrap(),
-            Value::Timestamp(TimestampADT(
+            Value::TimestampTz(TimestampTzADT(
                 i64::from(days_from_ymd(-99, 1, 1).unwrap()) * USECS_PER_DAY,
             ))
         );
@@ -692,7 +692,7 @@ mod tests {
                 &DateTimeConfig::default()
             )
             .unwrap(),
-            Value::Timestamp(TimestampADT(
+            Value::TimestampTz(TimestampTzADT(
                 i64::from(days_from_ymd(0, 1, 1).unwrap()) * USECS_PER_DAY,
             ))
         );
