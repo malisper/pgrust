@@ -59,6 +59,7 @@ pub struct ColumnDesc {
     pub attstattarget: i16,
     pub attinhcount: i16,
     pub attislocal: bool,
+    pub collation_oid: u32,
     pub not_null_constraint_oid: Option<u32>,
     pub not_null_constraint_name: Option<String>,
     pub not_null_constraint_validated: bool,

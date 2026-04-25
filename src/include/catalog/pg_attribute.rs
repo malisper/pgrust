@@ -61,6 +61,7 @@ pub struct PgAttributeRow {
     pub attislocal: bool,
     pub attidentity: char,
     pub attgenerated: char,
+    pub attcollation: u32,
     pub sql_type: SqlType,
 }
 
@@ -95,6 +96,7 @@ pub fn pg_attribute_desc() -> RelationDesc {
                 SqlType::new(SqlTypeKind::InternalChar),
                 false,
             ),
+            column_desc("attcollation", SqlType::new(SqlTypeKind::Oid), false),
         ],
     }
 }
@@ -252,6 +254,7 @@ fn attribute_rows_for_desc(relid: u32, desc: &RelationDesc) -> Vec<PgAttributeRo
                 .generated
                 .map(|kind| kind.catalog_char())
                 .unwrap_or('\0'),
+            attcollation: column.collation_oid,
             sql_type: column.sql_type,
         })
         .collect()

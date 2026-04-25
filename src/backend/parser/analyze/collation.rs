@@ -4,7 +4,7 @@ use crate::include::catalog::DEFAULT_COLLATION_OID;
 use crate::include::nodes::primnodes::expr_sql_type_hint;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum CollationConsumer {
+pub(crate) enum CollationConsumer {
     OrderBy,
     StringComparison,
     Like,
@@ -12,7 +12,7 @@ pub(super) enum CollationConsumer {
     Similar,
 }
 
-pub(super) fn consumer_for_subquery_comparison_op(
+pub(crate) fn consumer_for_subquery_comparison_op(
     op: SubqueryComparisonOp,
 ) -> Option<CollationConsumer> {
     Some(match op {
@@ -31,7 +31,7 @@ pub(super) fn consumer_for_subquery_comparison_op(
     })
 }
 
-pub(super) fn resolve_collation_oid(
+pub(crate) fn resolve_collation_oid(
     name: &str,
     catalog: &dyn CatalogLookup,
 ) -> Result<u32, ParseError> {
@@ -47,15 +47,15 @@ pub(super) fn resolve_collation_oid(
         })
 }
 
-pub(super) fn is_collatable_type(ty: SqlType) -> bool {
+pub(crate) fn is_collatable_type(ty: SqlType) -> bool {
     !ty.is_array && is_text_like_type(ty)
 }
 
-pub(super) fn default_collation_oid_for_type(ty: SqlType) -> Option<u32> {
+pub(crate) fn default_collation_oid_for_type(ty: SqlType) -> Option<u32> {
     is_collatable_type(ty).then_some(DEFAULT_COLLATION_OID)
 }
 
-pub(super) fn bind_explicit_collation(
+pub(crate) fn bind_explicit_collation(
     expr: Expr,
     sql_type: SqlType,
     collation: &str,
@@ -78,7 +78,7 @@ pub(super) fn bind_explicit_collation(
     })
 }
 
-pub(super) fn strip_explicit_collation(expr: Expr) -> (Expr, Option<u32>) {
+pub(crate) fn strip_explicit_collation(expr: Expr) -> (Expr, Option<u32>) {
     match expr {
         Expr::Collate {
             expr,
@@ -88,7 +88,7 @@ pub(super) fn strip_explicit_collation(expr: Expr) -> (Expr, Option<u32>) {
     }
 }
 
-pub(super) fn derive_consumer_collation(
+pub(crate) fn derive_consumer_collation(
     catalog: &dyn CatalogLookup,
     consumer: CollationConsumer,
     inputs: &[(SqlType, Option<u32>)],
@@ -158,7 +158,7 @@ pub(super) fn derive_consumer_collation(
     })
 }
 
-pub(super) fn finalize_order_by_expr(
+pub(crate) fn finalize_order_by_expr(
     expr: Expr,
     catalog: &dyn CatalogLookup,
 ) -> Result<(Expr, Option<u32>), ParseError> {

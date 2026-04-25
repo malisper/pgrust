@@ -4180,6 +4180,150 @@ fn hash_partitioned_tables_route_rows_and_validate_bounds() {
 }
 
 #[test]
+fn partition_keys_accept_collations_opclasses_and_expressions() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create table coll_pruning (a text collate \"C\") partition by list (a)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table coll_pruning_a partition of coll_pruning for values in ('a')",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into coll_pruning values ('a')")
+        .unwrap();
+    assert_eq!(
+        query_rows(
+            &db,
+            1,
+            "select attcollation from pg_attribute where attrelid = 'coll_pruning'::regclass and attname = 'a'",
+        ),
+        vec![vec![Value::Int64(i64::from(
+            crate::include::catalog::C_COLLATION_OID
+        ))]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create table rlp3 (b varchar, a int) partition by list (b varchar_ops)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table rlp3_a partition of rlp3 for values in ('a')",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into rlp3 values ('a', 1)")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from rlp3_a"),
+        vec![vec![Value::Int64(1)]]
+    );
+
+    session
+        .execute(
+            &db,
+            "create table mc3p (a int, b int, c int) partition by range (a, abs(b), c)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table mc3p0 partition of mc3p for values from (minvalue, minvalue, minvalue) to (1, 1, 1)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table mc3p1 partition of mc3p for values from (1, 1, 1) to (2, 2, 2)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table mc3p2 partition of mc3p for values from (2, 2, 2) to (maxvalue, maxvalue, maxvalue)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into mc3p values (1, -1, 1)")
+        .unwrap();
+    assert_eq!(
+        query_rows(&db, 1, "select count(*) from mc3p1"),
+        vec![vec![Value::Int64(1)]]
+    );
+    let lines = explain_lines(&db, 1, "select * from mc3p where a = 1 and abs(b) < 1");
+    assert!(
+        lines.iter().any(|line| line.contains("Seq Scan on mc3p0")),
+        "expected multi-key expression pruning to keep mc3p0, got {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .all(|line| !line.contains("Seq Scan on mc3p1") && !line.contains("Seq Scan on mc3p2")),
+        "expected multi-key expression pruning to remove mc3p1/mc3p2, got {lines:?}"
+    );
+}
+
+#[test]
+fn hash_partitioning_uses_custom_opclass_support_proc() {
+    let db = Database::open_ephemeral(32).unwrap();
+    let mut session = Session::new(1);
+
+    session
+        .execute(
+            &db,
+            "create function part_hashint4_noop(value int4, seed int8) returns int8 as $$ select value + seed; $$ language sql strict immutable parallel safe",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create operator class part_test_int4_ops for type int4 using hash as operator 1 =, function 2 part_hashint4_noop(int4, int8)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table hp_custom (a int4) partition by hash (a part_test_int4_ops)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table hp_custom_0 partition of hp_custom for values with (modulus 2, remainder 0)",
+        )
+        .unwrap();
+    session
+        .execute(
+            &db,
+            "create table hp_custom_1 partition of hp_custom for values with (modulus 2, remainder 1)",
+        )
+        .unwrap();
+    session
+        .execute(&db, "insert into hp_custom values (2), (3)")
+        .unwrap();
+
+    assert_eq!(
+        query_rows(&db, 1, "select a from hp_custom_0 order by a"),
+        vec![vec![Value::Int32(2)]]
+    );
+    assert_eq!(
+        query_rows(&db, 1, "select a from hp_custom_1 order by a"),
+        vec![vec![Value::Int32(3)]]
+    );
+}
+
+#[test]
 fn partitioned_primary_keys_support_rename_flow_and_index_tree_metadata() {
     let db = Database::open_ephemeral(32).unwrap();
     let mut session = Session::new(1);
